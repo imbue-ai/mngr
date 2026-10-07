@@ -3,13 +3,17 @@ from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from tenacity import Retrying
 from tenacity import retry
 from tenacity import retry_if_exception_type
 from tenacity import stop_after_attempt
+from tenacity import stop_after_delay
 from tenacity import wait_exponential
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import MngrError
+from imbue.modal_proxy.direct import DEPLOY_ATTEMPT_TIMEOUT_SECONDS
+from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import ModalInterface
@@ -22,6 +26,27 @@ _SOURCE_MARKER_FUNCTION_PREFIX: Final[str] = "deployed_source_"
 # Enough digest to make a collision between two versions of one script
 # implausible, while keeping the deployed function name readable.
 _SOURCE_MARKER_DIGEST_LENGTH: Final[int] = 16
+
+# Modal locks an app for the duration of a mutation, so concurrent deploys of
+# one app name race and the losers are refused. The lock clears as soon as the
+# winner finishes, so retry, bounded by elapsed time rather than by attempts:
+# contention is a queue, and CI fans dozens of creates out against one shared
+# app name while several CI runs do the same, so the lock can stay held for
+# minutes while the queue drains. A deploy that is merely queued must keep
+# waiting rather than fail.
+DEPLOY_LOCK_RETRY_BUDGET_SECONDS: Final[float] = 300.0
+# A deploy takes several seconds, so retrying sooner than this just wastes
+# attempts -- and each wasted attempt holds the lock against the rest of the
+# queue.
+DEPLOY_LOCK_MIN_BACKOFF_SECONDS: Final[float] = 2.0
+DEPLOY_LOCK_MAX_BACKOFF_SECONDS: Final[float] = 15.0
+# Upper bound on how long ensure_function_deployed can block. The budget only
+# gates whether another attempt starts, so the last attempt can begin just
+# under it (after a full backoff) and still run to the deploy subprocess's own
+# timeout.
+DEPLOY_MAX_DURATION_SECONDS: Final[float] = (
+    DEPLOY_LOCK_RETRY_BUDGET_SECONDS + DEPLOY_LOCK_MAX_BACKOFF_SECONDS + DEPLOY_ATTEMPT_TIMEOUT_SECONDS
+)
 
 
 def get_route_script_path(function: str) -> Path:
@@ -39,11 +64,42 @@ def get_source_marker_function_name(function: str) -> str:
     return f"{_SOURCE_MARKER_FUNCTION_PREFIX}{digest[:_SOURCE_MARKER_DIGEST_LENGTH]}"
 
 
+def _url_if_app_already_carries_source(
+    function: str,
+    app_name: str,
+    environment_name: str | None,
+    modal_interface: ModalInterface,
+) -> str | None:
+    """The function's URL if the app already carries this exact source, else None.
+
+    Every way of failing to establish that the app already carries this source
+    answers None, an outright lookup failure included: deploying is what the
+    caller would otherwise do unconditionally, so being unable to read the
+    answer must cost no more than having no answer to read. No URL is returned
+    that a lookup has not just confirmed.
+    """
+    marker_function = get_source_marker_function_name(function)
+    try:
+        if not modal_interface.is_function_deployed(
+            marker_function, app_name=app_name, environment_name=environment_name
+        ):
+            return None
+        url = get_function_url(function, app_name, environment_name, modal_interface)
+    except (ModalProxyError, MngrError) as e:
+        logger.debug("Could not tell whether app {} already carries {} ({}) -- deploying", app_name, function, e)
+        return None
+    logger.trace("App {} already carries the current {} function", app_name, function)
+    return url
+
+
 def ensure_function_deployed(
     function: str,
     app_name: str,
     environment_name: str | None,
     modal_interface: ModalInterface,
+    *,
+    lock_retry_budget_seconds: float = DEPLOY_LOCK_RETRY_BUDGET_SECONDS,
+    max_backoff_seconds: float = DEPLOY_LOCK_MAX_BACKOFF_SECONDS,
 ) -> str:
     """Make sure an app publishes the current version of a route function, and return its URL.
 
@@ -53,20 +109,48 @@ def ensure_function_deployed(
     their deploy, and a lookup racing someone else's deploy finds no function
     at all.
 
-    Every way of failing to establish that the app already carries this exact
-    source deploys, an outright lookup failure included: deploying is what the
-    caller would otherwise do unconditionally, so being unable to read the
-    answer must cost no more than having no answer to read. No URL is returned
-    that a lookup has not just confirmed.
+    The source check is therefore re-run on every attempt, not just the first.
+    On an app carrying no deploy yet -- a fresh CI run's app, say -- every
+    concurrent caller finds the marker missing and deploys, and Modal refuses
+    all but one. A refused caller's next attempt finds the winner's marker and
+    adopts its endpoint, rather than taking the lock again to publish the same
+    source and making every caller still queued behind it wait for that too.
     """
-    marker_function = get_source_marker_function_name(function)
+    retrying = Retrying(
+        retry=retry_if_exception_type(ModalProxyAppLockedError),
+        stop=stop_after_delay(lock_retry_budget_seconds),
+        wait=wait_exponential(
+            multiplier=1,
+            min=min(DEPLOY_LOCK_MIN_BACKOFF_SECONDS, max_backoff_seconds),
+            max=max_backoff_seconds,
+        ),
+        reraise=True,
+    )
     try:
-        if modal_interface.is_function_deployed(marker_function, app_name=app_name, environment_name=environment_name):
-            url = get_function_url(function, app_name, environment_name, modal_interface)
-            logger.trace("App {} already carries the current {} function", app_name, function)
-            return url
-    except (ModalProxyError, MngrError) as e:
-        logger.debug("Could not tell whether app {} already carries {} ({}) -- deploying", app_name, function, e)
+        return retrying(
+            _deploy_unless_a_concurrent_deploy_got_there_first,
+            function,
+            app_name,
+            environment_name,
+            modal_interface,
+        )
+    except ModalProxyAppLockedError as e:
+        raise MngrError(
+            f"Failed to deploy {function} function: app {app_name!r} stayed locked by concurrent "
+            f"deploys for {lock_retry_budget_seconds}s"
+        ) from e
+
+
+def _deploy_unless_a_concurrent_deploy_got_there_first(
+    function: str,
+    app_name: str,
+    environment_name: str | None,
+    modal_interface: ModalInterface,
+) -> str:
+    """One attempt at ``ensure_function_deployed``: adopt this source if present, else deploy it."""
+    url = _url_if_app_already_carries_source(function, app_name, environment_name, modal_interface)
+    if url is not None:
+        return url
     return deploy_function(function, app_name, environment_name, modal_interface)
 
 
@@ -78,7 +162,10 @@ def deploy_function(
 ) -> str:
     """Deploy a Function to Modal with the given app name and return the URL.
 
-    Raises MngrError if deployment fails.
+    Raises MngrError if deployment fails, except when the deploy was refused
+    because another deploy of the same app held Modal's lock: that propagates
+    as ``ModalProxyAppLockedError`` so ``ensure_function_deployed``'s retry can
+    see it.
     """
     script_path = get_route_script_path(function)
 
@@ -90,6 +177,11 @@ def deploy_function(
                 environment_name=environment_name,
                 extra_env={"MNGR_MODAL_SOURCE_MARKER_NAME": get_source_marker_function_name(function)},
             )
+        except ModalProxyAppLockedError:
+            # Propagate unwrapped: ensure_function_deployed's retry needs to
+            # see it, so it can re-check whether the deploy that beat us to the
+            # lock published this very source.
+            raise
         except ModalProxyError as e:
             raise MngrError(f"Failed to deploy {function} function: {e}") from e
 

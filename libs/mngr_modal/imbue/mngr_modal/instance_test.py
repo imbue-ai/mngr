@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import Future
 from datetime import datetime
 from datetime import timezone
 from io import StringIO
@@ -29,9 +30,11 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import UserId
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.errors import ModalMngrError
+from imbue.mngr_modal.errors import ModalSnapshotEndpointTimeoutMngrError
 from imbue.mngr_modal.instance import HOST_VOLUME_INFIX
 from imbue.mngr_modal.instance import HostRecord
 from imbue.mngr_modal.instance import MODAL_VOLUME_NAME_MAX_LENGTH
@@ -44,6 +47,7 @@ from imbue.mngr_modal.instance import TAG_USER_PREFIX
 from imbue.mngr_modal.instance import _build_modal_secrets_from_env
 from imbue.mngr_modal.instance import _parse_volume_spec
 from imbue.mngr_modal.instance import _substitute_dockerfile_build_args
+from imbue.mngr_modal.instance import await_snapshot_endpoint_url
 from imbue.mngr_modal.instance import build_sandbox_tags
 from imbue.mngr_modal.instance import check_host_name_is_unique
 from imbue.mngr_modal.instance import parse_sandbox_tags
@@ -1992,3 +1996,106 @@ def test_discover_agent_refs_falls_back_to_volume_when_live_read_fails(
 
     assert len(refs) == 1
     assert isinstance(refs[0], DiscoveredAgent)
+
+
+def test_awaiting_the_snapshot_endpoint_is_silent_when_the_deploy_already_finished() -> None:
+    """The common case -- an app that already carries the endpoint -- says nothing."""
+    future: Future[str] = Future()
+    future.set_result("https://example.com/snapshot")
+
+    with capture_loguru(level="INFO") as log_output:
+        url = await_snapshot_endpoint_url(future, "my-app")
+
+    assert url == "https://example.com/snapshot"
+    assert log_output.getvalue() == ""
+
+
+class _FutureThatIsStillQueuedOnTheFirstWait(Future[str]):
+    """A future that reports a timeout on its first wait, then resolves.
+
+    Stands in for a snapshot endpoint whose deploy is still queued behind
+    another create's deploy of the same app when bring-up first asks for it.
+    """
+
+    def __init__(self, url: str) -> None:
+        super().__init__()
+        self._url = url
+        self.wait_count = 0
+
+    def result(self, timeout: float | None = None) -> str:
+        self.wait_count += 1
+        if self.wait_count == 1:
+            raise TimeoutError()
+        return self._url
+
+
+def test_awaiting_the_snapshot_endpoint_names_the_wait_rather_than_looking_like_an_sshd_stall() -> None:
+    """A create queued behind another create's deploy of the same app must say so.
+
+    Said nothing, this wait reads as the step before it -- the sshd readiness
+    probe, which has already finished by the time it starts.
+    """
+    future = _FutureThatIsStillQueuedOnTheFirstWait("https://example.com/snapshot")
+
+    with capture_loguru(level="INFO") as log_output:
+        url = await_snapshot_endpoint_url(future, "my-app")
+
+    assert url == "https://example.com/snapshot"
+    logged = log_output.getvalue()
+    assert "my-app" in logged
+    assert "snapshot endpoint" in logged
+    assert "sshd" not in logged
+
+
+def test_awaiting_the_snapshot_endpoint_warns_once_the_wait_is_abnormal() -> None:
+    """Degradation is reported before it becomes an outright failure."""
+    future = _FutureThatIsStillQueuedOnTheFirstWait("https://example.com/snapshot")
+
+    with capture_loguru(level="WARNING") as log_output:
+        await_snapshot_endpoint_url(future, "my-app", slow_wait_seconds=60.0, timeout_seconds=495.0)
+
+    warned = log_output.getvalue()
+    assert "my-app" in warned
+    assert "60s" in warned, "the warning must name how long the wait has already taken"
+    assert "495.0s" in warned, "the warning must name the budget the wait is spending"
+
+
+def test_awaiting_the_snapshot_endpoint_times_out_naming_the_app_and_the_budget() -> None:
+    """Spending the whole budget must name the app and the budget it spent."""
+    future: Future[str] = Future()
+
+    with pytest.raises(ModalSnapshotEndpointTimeoutMngrError) as exc_info:
+        await_snapshot_endpoint_url(future, "my-app", slow_wait_seconds=0.05, timeout_seconds=0.2)
+
+    message = str(exc_info.value)
+    assert "my-app" in message
+    assert "0.2" in message
+    assert isinstance(exc_info.value, ModalMngrError)
+
+
+class _FutureRecordingTheWaitsItWasAsked(Future[str]):
+    """A future that never resolves and records every timeout it was waited on."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested_waits: list[float | None] = []
+
+    def result(self, timeout: float | None = None) -> str:
+        self.requested_waits.append(timeout)
+        raise TimeoutError()
+
+
+def test_awaiting_the_snapshot_endpoint_never_waits_longer_than_the_budget_it_reports() -> None:
+    """The reporting threshold is carved out of the budget, not added to it.
+
+    Otherwise a budget below the threshold would make the wait outlast the
+    number its own error names.
+    """
+    future = _FutureRecordingTheWaitsItWasAsked()
+
+    with pytest.raises(ModalSnapshotEndpointTimeoutMngrError):
+        await_snapshot_endpoint_url(future, "my-app", slow_wait_seconds=60.0, timeout_seconds=10.0)
+
+    waits = [w for w in future.requested_waits if w is not None]
+    assert max(waits) <= 10.0, f"a single wait outlasted the whole budget: {waits}"
+    assert sum(waits) == pytest.approx(10.0)

@@ -439,20 +439,23 @@ def _write_fake_modal(bin_dir: Path, counter_file: Path, *, fail_times: int, err
     script.chmod(0o755)
 
 
-def test_deploy_retries_on_locked_app_then_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_deploy_reports_a_locked_app_as_contention_after_one_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whether to retry contention belongs to the caller, so this layer only classifies it."""
     bin_dir = tmp_path / "bin"
     counter = tmp_path / "count"
     _write_fake_modal(bin_dir, counter, fail_times=1, error_message=_LOCKED_APP_MESSAGE)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
-    # Should ride through the transient lock and return normally.
-    DirectModalInterface().deploy(tmp_path / "snapshot.py", app_name="my-app")
+    with pytest.raises(ModalProxyAppLockedError):
+        DirectModalInterface().deploy(tmp_path / "snapshot.py", app_name="my-app")
 
-    assert counter.read_text().strip() == "2", "expected one failed attempt followed by a successful retry"
+    assert counter.read_text().strip() == "1", "deploy makes one attempt and leaves retrying to its caller"
 
 
-def test_deploy_retries_on_vanished_function_then_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The function-vanished flavor of the concurrent-deploy race must retry like the app lock."""
+def test_deploy_reports_a_vanished_function_as_contention(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The function-vanished flavor of the concurrent-deploy race classifies like the app lock."""
     bin_dir = tmp_path / "bin"
     counter = tmp_path / "count"
     _write_fake_modal(
@@ -460,12 +463,14 @@ def test_deploy_retries_on_vanished_function_then_succeeds(tmp_path: Path, monke
     )
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
-    DirectModalInterface().deploy(tmp_path / "snapshot.py", app_name="my-app")
+    with pytest.raises(ModalProxyAppLockedError):
+        DirectModalInterface().deploy(tmp_path / "snapshot.py", app_name="my-app")
 
-    assert counter.read_text().strip() == "2", "expected one failed attempt followed by a successful retry"
+    assert counter.read_text().strip() == "1"
 
 
-def test_deploy_does_not_retry_on_non_lock_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_deploy_reports_any_other_failure_as_a_plain_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure that is not contention must not be classified as retryable."""
     bin_dir = tmp_path / "bin"
     counter = tmp_path / "count"
     _write_fake_modal(bin_dir, counter, fail_times=10, error_message="Error: image build failed")
@@ -475,7 +480,7 @@ def test_deploy_does_not_retry_on_non_lock_error(tmp_path: Path, monkeypatch: py
         DirectModalInterface().deploy(tmp_path / "snapshot.py", app_name="my-app")
 
     assert not isinstance(exc_info.value, ModalProxyAppLockedError)
-    assert counter.read_text().strip() == "1", "non-lock failures must not be retried"
+    assert counter.read_text().strip() == "1"
 
 
 class _FakeFunction:

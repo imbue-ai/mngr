@@ -6,6 +6,7 @@ import shlex
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -118,7 +119,9 @@ from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import ModalSandboxDiedMngrError
 from imbue.mngr_modal.errors import ModalSandboxTimeoutMngrError
+from imbue.mngr_modal.errors import ModalSnapshotEndpointTimeoutMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
+from imbue.mngr_modal.routes.deployment import DEPLOY_MAX_DURATION_SECONDS
 from imbue.mngr_modal.routes.deployment import ensure_function_deployed
 from imbue.mngr_modal.routes.deployment import get_function_url
 from imbue.mngr_modal.ssh_utils import add_host_to_known_hosts
@@ -131,7 +134,6 @@ from imbue.mngr_modal.ssh_utils import resolve_per_host_host_keypair
 from imbue.mngr_modal.ssh_utils import wait_for_sshd_with_retry
 from imbue.mngr_modal.volume import ModalVolume
 from imbue.modal_proxy.data_types import StreamType
-from imbue.modal_proxy.direct import DEPLOY_MAX_DURATION_SECONDS
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyImageBuildError
@@ -171,6 +173,12 @@ DEFAULT_BASE_IMAGE: Final[str] = "python:3.12-slim-trixie"
 DEFAULT_SANDBOX_TIMEOUT: Final[int] = 2 * 60
 # Seconds to wait for sshd to be ready
 SSH_CONNECT_TIMEOUT: Final[int] = 60
+
+# Seconds a create may wait for its app's snapshot endpoint before the wait is
+# worth saying out loud. An app's own cold deploy starts well before this wait
+# does and normally resolves it instantly, so waiting this long means queueing
+# behind other creates' deploys of the same app -- the thing worth reporting.
+SNAPSHOT_ENDPOINT_SLOW_WAIT_SECONDS: Final[float] = 60.0
 
 # SSH user mngr connects as inside sandboxes. The client key is authorized for
 # exactly this user by _start_sshd_in_sandbox, so every SSH connection
@@ -1372,9 +1380,7 @@ class ModalProviderInstance(BaseProviderInstance):
 
             with log_span("Waiting for deploy to finish and creating shutdown script"):
                 if snapshot_url_future is not None:
-                    # The deploy may legitimately sit behind Modal's app lock
-                    # for minutes; the future resolves as soon as it finishes.
-                    snapshot_url = snapshot_url_future.result(DEPLOY_MAX_DURATION_SECONDS)
+                    snapshot_url = await_snapshot_endpoint_url(snapshot_url_future, self.app_name)
                     self._create_shutdown_script(host, sandbox, host_id, snapshot_url)
 
             # Start the activity watcher. We have to start it here because we only created the shutdown script (with the hardcoded sandbox id)
@@ -3769,3 +3775,43 @@ def _set_result(future: Future, func: Callable[[], str]) -> None:
         future.set_exception(e)
     else:
         future.set_result(result)
+
+
+def await_snapshot_endpoint_url(
+    snapshot_url_future: Future[str],
+    app_name: str,
+    *,
+    slow_wait_seconds: float = SNAPSHOT_ENDPOINT_SLOW_WAIT_SECONDS,
+    timeout_seconds: float = DEPLOY_MAX_DURATION_SECONDS,
+) -> str:
+    """The snapshot endpoint's URL, reporting the wait once it stops being instant.
+
+    The endpoint is deployed once per Modal app, not once per host, so a create
+    can wait here for minutes for a reason that has nothing to do with the host
+    it is building: on an app that carries no deploy yet, every concurrent
+    create deploys at once and they queue behind Modal's per-app deploy lock.
+
+    Past ``slow_wait_seconds`` it is named at info level, so a queued create
+    cannot be mistaken for a stalled sshd probe -- the step before it, and the
+    only other one that speaks.
+    """
+    # Carved out of the budget rather than added to it, so that a budget below
+    # the reporting threshold cannot make this outlast what it says it spends.
+    quiet_wait_seconds = min(slow_wait_seconds, timeout_seconds)
+    try:
+        return snapshot_url_future.result(quiet_wait_seconds)
+    except TimeoutError:
+        pass
+    logger.info("Waiting for app {}'s Modal snapshot endpoint to finish deploying ...", app_name)
+    started_waiting_at = time.monotonic()
+    try:
+        snapshot_url = snapshot_url_future.result(timeout_seconds - quiet_wait_seconds)
+    except TimeoutError as e:
+        raise ModalSnapshotEndpointTimeoutMngrError(app_name, timeout_seconds) from e
+    logger.warning(
+        "Waited {:.0f}s of a {}s budget for app {}'s Modal snapshot endpoint to deploy",
+        quiet_wait_seconds + time.monotonic() - started_waiting_at,
+        timeout_seconds,
+        app_name,
+    )
+    return snapshot_url

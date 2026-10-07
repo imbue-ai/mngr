@@ -253,29 +253,10 @@ _retry_transient = retry(
 )
 
 
-# Modal locks an app for the duration of a mutation, so two deploys targeting
-# the same app name concurrently (e.g. parallel `mngr create` against the same
-# persistent provider app) race and one fails with "The selected app is
-# locked". The lock clears as soon as the other deploy finishes, so retry with
-# backoff. min=2 because a deploy takes several seconds, so retrying sooner just
-# wastes attempts. The window is bounded by elapsed time rather than attempts
-# because contention is a queue: CI fans dozens of creates out against one
-# shared app name, and several CI runs can do so at once, so the lock can stay
-# held for minutes while the deploys behind it drain one by one. A deploy that
-# is merely queued must keep waiting rather than fail.
-_DEPLOY_LOCK_RETRY = retry_if_exception_type(ModalProxyAppLockedError)
-_DEPLOY_LOCK_RETRY_BUDGET_SECONDS = 300
-_DEPLOY_LOCK_MAX_BACKOFF_SECONDS = 15
-_DEPLOY_ATTEMPT_TIMEOUT_SECONDS = 180
-_DEPLOY_LOCK_STOP = stop_after_delay(_DEPLOY_LOCK_RETRY_BUDGET_SECONDS)
-_DEPLOY_LOCK_WAIT = wait_exponential(multiplier=1, min=2, max=_DEPLOY_LOCK_MAX_BACKOFF_SECONDS)
-# Upper bound on how long deploy() can block. The budget only gates whether
-# another attempt starts, so the last attempt can begin just under it (after a
-# full backoff) and still run to its own subprocess timeout. Callers that wait
-# on deploy() from another thread size their deadline from this.
-DEPLOY_MAX_DURATION_SECONDS = (
-    _DEPLOY_LOCK_RETRY_BUDGET_SECONDS + _DEPLOY_LOCK_MAX_BACKOFF_SECONDS + _DEPLOY_ATTEMPT_TIMEOUT_SECONDS
-)
+# How long one `modal deploy` subprocess may run before it is considered hung.
+# Contention for an app's lock is reported as ModalProxyAppLockedError and left
+# at that; `mngr_modal.routes.deployment` owns the retry, and states why there.
+DEPLOY_ATTEMPT_TIMEOUT_SECONDS: Final[int] = 180
 
 
 # Looking up a function immediately after deploying it can lose a
@@ -755,7 +736,6 @@ class DirectModalInterface(ModalInterface):
 
     # CLI
 
-    @retry(retry=_DEPLOY_LOCK_RETRY, stop=_DEPLOY_LOCK_STOP, wait=_DEPLOY_LOCK_WAIT, reraise=True)
     def deploy(
         self,
         script_path: Path,
@@ -773,7 +753,7 @@ class DirectModalInterface(ModalInterface):
             try:
                 result = subprocess.run(
                     cmd,
-                    timeout=_DEPLOY_ATTEMPT_TIMEOUT_SECONDS,
+                    timeout=DEPLOY_ATTEMPT_TIMEOUT_SECONDS,
                     check=False,
                     capture_output=True,
                     text=True,
@@ -789,10 +769,10 @@ class DirectModalInterface(ModalInterface):
         if result.returncode != 0:
             output = (result.stdout + "\n" + result.stderr).strip()
             # A concurrent modification to the same app is transient: the lock
-            # clears once the other operation finishes, so raise the retryable
-            # error type the deploy retry decorator rides through. The race has
-            # two wire shapes -- the app lock, and the losing deploy's fresh
-            # function id vanishing when the winner finalizes a new version.
+            # clears once the other operation finishes, so raise the type the
+            # caller's retry rides through. The race has two wire shapes -- the
+            # app lock, and the losing deploy's fresh function id vanishing
+            # when the winner finalizes a new version.
             if is_app_locked_error(output) or is_deploy_function_vanished_error(output):
                 raise ModalProxyAppLockedError(f"Failed to deploy {script_path} (concurrent modification): {output}")
             raise ModalProxyError(f"Failed to deploy {script_path}: {output}")
