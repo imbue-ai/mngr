@@ -108,6 +108,7 @@ from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
+from imbue.modal_proxy.errors import ModalProxySandboxGoneError
 from imbue.modal_proxy.errors import ModalProxyServiceError
 from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.interface import AppInterface
@@ -3239,6 +3240,29 @@ class _DeadOnArrivalSandbox(FakeSandbox):
         return _MODAL_SIGKILL_EXIT_CODE
 
 
+class _RefusedOnArrivalSandbox(FakeSandbox):
+    """A sandbox Modal ended and then stopped answering for, before mngr reached it.
+
+    Once Modal's control plane has dropped the task there is nothing left to queue a
+    command against, so the exec call is refused rather than answered with an exit
+    code. The message is Modal's own, verbatim.
+    """
+
+    def exec(
+        self,
+        *args: str,
+        stdout: StreamType = StreamType.PIPE,
+        stderr: StreamType = StreamType.PIPE,
+    ) -> ExecProcess:
+        raise ModalProxySandboxGoneError(
+            f"Modal Sandbox with container ID ta-{self.sandbox_id} not found. "
+            "This means this Sandbox has already shut down. (Error code: 36KN0A1X)"
+        )
+
+    def poll(self) -> int | None:
+        return _MODAL_SIGKILL_EXIT_CODE
+
+
 # Unique marker so an assertion on this output cannot pass on some other command's stdout.
 _COMMAND_FAILURE_OUTPUT: Final[str] = "bring-up-output-38471"
 
@@ -3272,8 +3296,9 @@ class _DeadOnArrivalFakeModalInterface(FakeModalInterface):
     """A Modal whose first ``dead_on_arrival_count`` sandboxes die before running anything."""
 
     dead_on_arrival_count: int = Field(description="How many of the first sandboxes to hand back dead")
+    dead_sandbox_type: type[FakeSandbox] = Field(description="Which way those sandboxes present as dead")
 
-    _dead_sandboxes: list[_DeadOnArrivalSandbox] = PrivateAttr(default_factory=list)
+    _dead_sandboxes: list[FakeSandbox] = PrivateAttr(default_factory=list)
 
     def sandbox_create(
         self,
@@ -3291,7 +3316,7 @@ class _DeadOnArrivalFakeModalInterface(FakeModalInterface):
         experimental_options: Mapping[str, bool] | None = None,
     ) -> SandboxInterface:
         if len(self._dead_sandboxes) < self.dead_on_arrival_count:
-            dead_sandbox = _DeadOnArrivalSandbox(sandbox_id=f"sb-dead-{uuid4().hex}")
+            dead_sandbox = self.dead_sandbox_type(sandbox_id=f"sb-dead-{uuid4().hex}")
             self._dead_sandboxes.append(dead_sandbox)
             return dead_sandbox
         return super().sandbox_create(
@@ -3315,16 +3340,28 @@ def _provider_whose_first_sandboxes_die(
     tmp_path: Path,
     cg: ConcurrencyGroup,
     dead_on_arrival_count: int,
+    dead_sandbox_type: type[FakeSandbox],
 ) -> Generator[tuple[ModalProviderInstance, _DeadOnArrivalFakeModalInterface], None, None]:
     root = tmp_path / f"modal_testing_{uuid4().hex}"
     root.mkdir(parents=True, exist_ok=True)
     modal_interface = _DeadOnArrivalFakeModalInterface(
-        root_dir=root, concurrency_group=cg, dead_on_arrival_count=dead_on_arrival_count
+        root_dir=root,
+        concurrency_group=cg,
+        dead_on_arrival_count=dead_on_arrival_count,
+        dead_sandbox_type=dead_sandbox_type,
     )
     try:
         yield make_testing_provider(mngr_ctx, modal_interface), modal_interface
     finally:
         modal_interface.cleanup()
+
+
+# Creating a host must replace a sandbox Modal lost on the way up however Modal's
+# answer for it presents.
+_DEAD_ON_ARRIVAL_SANDBOX_TYPES: Final[tuple[type[FakeSandbox], ...]] = (
+    _DeadOnArrivalSandbox,
+    _RefusedOnArrivalSandbox,
+)
 
 
 def _request_running_sandbox(provider: ModalProviderInstance) -> SandboxInterface:
@@ -3336,11 +3373,14 @@ def _request_running_sandbox(provider: ModalProviderInstance) -> SandboxInterfac
     )
 
 
+@pytest.mark.parametrize("dead_sandbox_type", _DEAD_ON_ARRIVAL_SANDBOX_TYPES)
 def test_create_running_sandbox_replaces_a_sandbox_that_died_before_running_a_command(
-    temp_mngr_ctx: MngrContext, tmp_path: Path, cg: ConcurrencyGroup
+    temp_mngr_ctx: MngrContext, tmp_path: Path, cg: ConcurrencyGroup, dead_sandbox_type: type[FakeSandbox]
 ) -> None:
     """A sandbox Modal killed on the way up is discarded and replaced, not handed to bring-up."""
-    with _provider_whose_first_sandboxes_die(temp_mngr_ctx, tmp_path, cg, dead_on_arrival_count=1) as (
+    with _provider_whose_first_sandboxes_die(
+        temp_mngr_ctx, tmp_path, cg, dead_on_arrival_count=1, dead_sandbox_type=dead_sandbox_type
+    ) as (
         provider,
         modal_interface,
     ):
@@ -3352,11 +3392,14 @@ def test_create_running_sandbox_replaces_a_sandbox_that_died_before_running_a_co
         assert dead_sandbox._is_terminated, "the discarded sandbox must be terminated so it does not linger"
 
 
+@pytest.mark.parametrize("dead_sandbox_type", _DEAD_ON_ARRIVAL_SANDBOX_TYPES)
 def test_create_running_sandbox_raises_a_dead_sandbox_error_when_every_attempt_dies(
-    temp_mngr_ctx: MngrContext, tmp_path: Path, cg: ConcurrencyGroup
+    temp_mngr_ctx: MngrContext, tmp_path: Path, cg: ConcurrencyGroup, dead_sandbox_type: type[FakeSandbox]
 ) -> None:
     """When no sandbox ever runs a command, the error names that -- not some bring-up step."""
-    with _provider_whose_first_sandboxes_die(temp_mngr_ctx, tmp_path, cg, dead_on_arrival_count=100) as (
+    with _provider_whose_first_sandboxes_die(
+        temp_mngr_ctx, tmp_path, cg, dead_on_arrival_count=100, dead_sandbox_type=dead_sandbox_type
+    ) as (
         provider,
         modal_interface,
     ):
@@ -3379,6 +3422,19 @@ def test_check_and_install_packages_blames_the_dead_sandbox_rather_than_the_pack
     assert dead_sandbox.get_object_id() in str(exc_info.value)
     assert str(_MODAL_SIGKILL_EXIT_CODE) in str(exc_info.value)
     assert "install required packages" in str(exc_info.value)
+
+
+def test_bring_up_command_blames_the_dead_sandbox_when_modal_refuses_the_command(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    """A command Modal refuses to run never ran, so the refusal must not be reported as the command failing."""
+    gone_sandbox = _RefusedOnArrivalSandbox(sandbox_id=f"sb-gone-{uuid4().hex}")
+
+    with pytest.raises(ModalSandboxDiedMngrError) as exc_info:
+        testing_provider._run_bring_up_command(gone_sandbox, "does-not-matter", "do the thing")
+
+    assert gone_sandbox.get_object_id() in str(exc_info.value)
+    assert "do the thing" in str(exc_info.value)
 
 
 def test_bring_up_command_still_blames_the_command_when_the_sandbox_is_alive(

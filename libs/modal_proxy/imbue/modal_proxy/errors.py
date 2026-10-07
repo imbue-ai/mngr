@@ -38,6 +38,25 @@ def is_deploy_function_vanished_error(message: str) -> bool:
     return _DEPLOY_FUNCTION_VANISHED_RE.search(message) is not None
 
 
+# Modal ends a sandbox's task of its own accord -- a worker lost on the way up,
+# an idle or lifetime limit reached -- and then answers every call against it under
+# whichever gRPC status its teardown has got to. Those statuses carry genuinely
+# missing resources and genuinely bad arguments too, so only the wording tells this
+# condition from one of those.
+_SANDBOX_GONE_RE = re.compile(r"Sandbox (?:is shutting down|has already shut down)", re.IGNORECASE)
+
+
+def is_sandbox_gone_error(message: str) -> bool:
+    """Check whether a Modal error message says the sandbox it was about will not run commands.
+
+    A standing bet on Modal's prose, settled by
+    ``test_modal_refuses_a_command_for_a_sandbox_it_has_ended``: if Modal rewords
+    the refusal, that test fails and names this regex rather than the condition
+    going silently unrecognized.
+    """
+    return _SANDBOX_GONE_RE.search(message) is not None
+
+
 class ModalProxyError(Exception):
     """Base error for modal_proxy operations."""
 
@@ -56,6 +75,14 @@ class ModalProxyNotFoundError(ModalProxyError):
 
 class ModalProxyInvalidError(ModalProxyError):
     """Raised when an invalid argument is passed to Modal."""
+
+
+class ModalProxySandboxGoneError(ModalProxyNotFoundError):
+    """Raised when Modal answers that the sandbox a call was about will not run commands.
+
+    Not transient: Modal is answering definitively, so re-issuing the same call
+    gets the same answer. The sandbox has to be replaced, not waited on.
+    """
 
 
 class ModalProxyTransientError(ModalProxyError):

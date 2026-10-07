@@ -28,6 +28,7 @@ from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType
 from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.direct import DirectApp
+from imbue.modal_proxy.direct import DirectExecProcess
 from imbue.modal_proxy.direct import DirectFunction
 from imbue.modal_proxy.direct import DirectImage
 from imbue.modal_proxy.direct import DirectModalInterface
@@ -58,11 +59,13 @@ from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
+from imbue.modal_proxy.errors import ModalProxySandboxGoneError
 from imbue.modal_proxy.errors import ModalProxyServiceError
 from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
 from imbue.modal_proxy.errors import is_deploy_function_vanished_error
+from imbue.modal_proxy.errors import is_sandbox_gone_error
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ImageInterface
 from imbue.modal_proxy.interface import SecretInterface
@@ -269,6 +272,26 @@ def test_translate_modal_cli_not_found_reraises_for_other() -> None:
             ModalProxyConnectionError,
             id="connection",
         ),
+        pytest.param(
+            modal.exception.NotFoundError(
+                "Modal Sandbox with container ID ta-01M4A0RGC9WY1BPH7DJHYHPAVV not found. "
+                "This means this Sandbox has already shut down. (Error code: XVXGVQN4)"
+            ),
+            ModalProxySandboxGoneError,
+            id="sandbox_gone_not_found",
+        ),
+        pytest.param(
+            modal.exception.InvalidError("Modal Sandbox is shutting down."),
+            ModalProxySandboxGoneError,
+            id="sandbox_gone_shutting_down",
+        ),
+        # Modal failing the request rather than answering it stays retryable,
+        # whatever wording it carries.
+        pytest.param(
+            modal.exception.ServiceError("Modal Sandbox is shutting down."),
+            ModalProxyServiceError,
+            id="sandbox_gone_wording_under_a_transient_status",
+        ),
         # A bare modal.exception.Error that matches none of the specific branches
         # must fall through to the generic ModalProxyError.
         pytest.param(modal.exception.Error("generic"), ModalProxyError, id="fallback_generic"),
@@ -408,6 +431,27 @@ def test_is_app_locked_error(message: str, expected: bool) -> None:
 )
 def test_is_deploy_function_vanished_error(message: str, expected: bool) -> None:
     assert is_deploy_function_vanished_error(message) is expected
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        pytest.param(
+            "Modal Sandbox with container ID ta-01M4A0RGC9WY1BPH7DJHYHPAVV not found. "
+            "This means this Sandbox has already shut down. (Error code: XVXGVQN4)",
+            True,
+            id="real_modal_not_found_message",
+        ),
+        pytest.param("Modal Sandbox is shutting down.", True, id="real_modal_shutting_down_message"),
+        pytest.param("MODAL SANDBOX IS SHUTTING DOWN.", True, id="case_insensitive"),
+        # A sandbox that never existed is a different answer from one that has ended.
+        pytest.param("Sandbox 'sb-nope' not found", False, id="sandbox_id_not_found"),
+        pytest.param("Volume 'mngr-vol-abc' not found", False, id="unrelated_not_found"),
+        pytest.param("", False, id="empty"),
+    ],
+)
+def test_is_sandbox_gone_error(message: str, expected: bool) -> None:
+    assert is_sandbox_gone_error(message) is expected
 
 
 # The real Modal message; deploy must classify this as retryable.
@@ -573,6 +617,62 @@ class _FakeModalSandbox:
     def get_tags(self) -> dict[str, str]:
         self._fail_while_due()
         return self._tags
+
+
+# Verbatim from Modal.
+_VANISHED_SANDBOX_MESSAGE: Final[str] = (
+    "Modal Sandbox with container ID ta-01M4A0SXM3EV955NX4NP1YXA7V not found. "
+    "This means this Sandbox has already shut down. (Error code: OLK03GN0)"
+)
+
+
+class _FakeModalContainerProcess:
+    """Stand-in for modal's ContainerProcess whose calls fail the way a vanished sandbox's do."""
+
+    def __init__(self, error: modal.exception.Error) -> None:
+        self._error = error
+
+    @property
+    def stdout(self) -> "_FakeModalStdoutStream":
+        return _FakeModalStdoutStream(self._error)
+
+    def wait(self) -> int:
+        raise self._error
+
+
+class _FakeModalStdoutStream:
+    """Stand-in for a ContainerProcess's stdout stream whose read fails the way a vanished sandbox's does."""
+
+    def __init__(self, error: modal.exception.Error) -> None:
+        self._error = error
+
+    def read(self) -> str:
+        raise self._error
+
+
+def test_exec_process_wait_reports_a_sandbox_modal_ended_mid_command_in_our_vocabulary() -> None:
+    """Collecting a command's exit code goes over the wire, so it must translate what Modal answers.
+
+    Modal can end the task between starting a command and reporting its exit, in
+    which case the exit never arrives and the wait fails instead. An untranslated
+    modal.exception here reaches callers that only catch ModalProxy* errors.
+    """
+    process = DirectExecProcess.model_construct(
+        process=_FakeModalContainerProcess(modal.exception.NotFoundError(_VANISHED_SANDBOX_MESSAGE))
+    )
+
+    with pytest.raises(ModalProxySandboxGoneError):
+        process.wait()
+
+
+def test_exec_output_read_reports_a_sandbox_modal_ended_mid_command_in_our_vocabulary() -> None:
+    """Reading a command's output streams from the sandbox's task, so it fails once Modal ends that task."""
+    process = DirectExecProcess.model_construct(
+        process=_FakeModalContainerProcess(modal.exception.NotFoundError(_VANISHED_SANDBOX_MESSAGE))
+    )
+
+    with pytest.raises(ModalProxySandboxGoneError):
+        process.get_stdout().read()
 
 
 def test_direct_sandbox_poll_returns_none_while_running() -> None:

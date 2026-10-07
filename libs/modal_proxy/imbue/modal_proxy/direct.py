@@ -59,11 +59,13 @@ from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
+from imbue.modal_proxy.errors import ModalProxySandboxGoneError
 from imbue.modal_proxy.errors import ModalProxyServiceError
 from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
 from imbue.modal_proxy.errors import is_deploy_function_vanished_error
+from imbue.modal_proxy.errors import is_sandbox_gone_error
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecOutput
 from imbue.modal_proxy.interface import ExecProcess
@@ -88,6 +90,10 @@ def _translate_modal_error(e: modal.exception.Error) -> ModalProxyError:
     """Convert a modal exception to the corresponding ModalProxy exception."""
     if isinstance(e, modal.exception.AuthError):
         return ModalProxyAuthError(str(e))
+    # A transient status means Modal failed the request rather than answering it, and
+    # no wording it carries makes that a verdict.
+    if isinstance(e, (modal.exception.NotFoundError, modal.exception.InvalidError)) and is_sandbox_gone_error(str(e)):
+        return ModalProxySandboxGoneError(str(e))
     if isinstance(e, modal.exception.NotFoundError):
         return ModalProxyNotFoundError(str(e))
     if isinstance(e, modal.exception.InvalidError):
@@ -317,6 +323,7 @@ class DirectExecOutput(ExecOutput):
 
     stream: Any = Field(description="The modal stdout stream object", repr=False)
 
+    @_translate_exceptions
     def read(self) -> str:
         return self.stream.read()
 
@@ -331,6 +338,7 @@ class DirectExecProcess(ExecProcess):
     def get_stdout(self) -> ExecOutput:
         return DirectExecOutput.model_construct(stream=self.process.stdout)
 
+    @_translate_exceptions
     def wait(self) -> int:
         return self.process.wait()
 

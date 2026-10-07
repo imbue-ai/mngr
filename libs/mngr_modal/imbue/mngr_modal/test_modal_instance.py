@@ -19,10 +19,15 @@ from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.instance import ModalProviderInstance
+from imbue.mngr_modal.instance import SandboxConfig
+from imbue.mngr_modal.instance import _SANDBOX_LIVENESS_PROBE_COMMAND
 from imbue.mngr_modal.volume import ModalVolume
 from imbue.mngr_recursive.provisioning import _upload_deploy_files
 from imbue.modal_proxy.direct import BUILD_TERMINATION_MARKER
+from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyImageBuildError
+from imbue.modal_proxy.errors import ModalProxySandboxGoneError
+from imbue.modal_proxy.interface import SandboxInterface
 
 pytestmark = [pytest.mark.modal]
 
@@ -58,6 +63,47 @@ def test_modal_still_reports_a_failed_build_terminating(real_modal_provider: Mod
         f"fetch_build_logs can no longer tell a finished build log from a half-written one. "
         f"Update BUILD_TERMINATION_MARKER in modal_proxy/direct.py to whatever Modal now "
         f"writes at the end of this log:\n{build_log}"
+    )
+
+
+def _probe_sandbox(sandbox: SandboxInterface) -> ModalProxyError | int:
+    """Run mngr's liveness probe at a sandbox and return Modal's answer, however it answers.
+
+    An exit code is as much an answer as a refusal, so returning either lets the
+    caller name what actually came back.
+    """
+    try:
+        return sandbox.exec("sh", "-c", _SANDBOX_LIVENESS_PROBE_COMMAND).wait()
+    except ModalProxyError as e:
+        return e
+
+
+@pytest.mark.acceptance
+@pytest.mark.timeout(300)
+def test_modal_refuses_a_command_for_a_sandbox_it_has_ended(real_modal_provider: ModalProviderInstance) -> None:
+    """Modal still refuses a command for an ended sandbox in the words mngr reads as "gone".
+
+    Creating a host discards and replaces a sandbox Modal lost on the way up, and
+    a refusal is one of the answers it recognizes such a sandbox by. Modal sends
+    that refusal as a plain NOT_FOUND, so only its wording tells it from a resource
+    that genuinely never existed -- a standing bet on an upstream string, and this
+    test is where that bet is settled.
+    """
+    sandbox = real_modal_provider._create_running_sandbox(
+        image=real_modal_provider._modal_interface.image_from_registry("debian:bookworm-slim"),
+        app=real_modal_provider._get_modal_app(),
+        config=SandboxConfig(),
+        volumes={},
+    )
+    sandbox.terminate()
+
+    probe_answer = _probe_sandbox(sandbox)
+
+    assert isinstance(probe_answer, ModalProxySandboxGoneError), (
+        f"Modal no longer refuses an ended sandbox's commands in words is_sandbox_gone_error "
+        f"recognizes, so creating a host will fail outright on a sandbox it should have replaced. "
+        f"Update _SANDBOX_GONE_RE in modal_proxy/errors.py to match what Modal now says. "
+        f"The probe came back with: {probe_answer!r}"
     )
 
 

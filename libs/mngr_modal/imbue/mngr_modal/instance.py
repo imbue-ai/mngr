@@ -140,6 +140,7 @@ from imbue.modal_proxy.errors import ModalProxyImageBuildError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
+from imbue.modal_proxy.errors import ModalProxySandboxGoneError
 from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecProcess
@@ -234,6 +235,31 @@ def _is_sandbox_timeout(exc: BaseException) -> bool:
             return True
         current = current.__cause__
     return False
+
+
+def _run_command_in_sandbox(sandbox: SandboxInterface, command: str) -> tuple[str, int]:
+    """Run one command in a sandbox and return its stdout and exit code.
+
+    Every step of this talks to the sandbox's task, so Modal ending that task
+    part-way through fails the call instead of yielding an exit code.
+    """
+    process = sandbox.exec("sh", "-c", command)
+    return process.get_stdout().read(), process.wait()
+
+
+def _is_sandbox_running_commands(sandbox: SandboxInterface) -> bool:
+    """Ask a freshly created sandbox to run a command, and report whether it did.
+
+    Modal loses a fraction of sandboxes on the way up, and answers for one of those
+    in whichever way its teardown has reached -- a SIGKILLed command while the
+    container is still addressable, a refused call once its task is gone. No such
+    answer is a verdict on the command, only on the sandbox.
+    """
+    try:
+        return sandbox.exec("sh", "-c", _SANDBOX_LIVENESS_PROBE_COMMAND).wait() == 0
+    except ModalProxySandboxGoneError as e:
+        logger.debug("Modal refused a command for sandbox {}: {}", sandbox.get_object_id(), e)
+        return False
 
 
 def _parse_volume_spec(spec: str) -> tuple[str, str]:
@@ -620,10 +646,9 @@ class ModalProviderInstance(BaseProviderInstance):
 
         ``sandbox_create`` returns as soon as Modal accepts the sandbox, and ``tunnels()``
         resolves from the allocated tunnel rather than from a running container, so
-        neither tells us the container started. Modal kills a fraction of sandboxes on
-        the way up, and every command queued against one of those comes back SIGKILLed
-        (exit 137), which the caller would otherwise read as a failure of whichever
-        bring-up command happened to be first.
+        neither tells us the container started. Modal loses a fraction of sandboxes on
+        the way up, and a caller handed one of those reads its failure as a failure of
+        whichever bring-up command happened to be first.
 
         Raises ModalSandboxDiedMngrError when every attempt dies before running a command.
         """
@@ -655,7 +680,7 @@ class ModalProviderInstance(BaseProviderInstance):
             )
         logger.trace("Created Modal sandbox", sandbox_id=sandbox.get_object_id())
 
-        if sandbox.exec("sh", "-c", _SANDBOX_LIVENESS_PROBE_COMMAND).wait() == 0:
+        if _is_sandbox_running_commands(sandbox):
             return sandbox
         # Terminating the dud keeps it from lingering and billing, but it is already
         # unusable, so a failure to terminate must not mask why we are discarding it.
@@ -670,14 +695,18 @@ class ModalProviderInstance(BaseProviderInstance):
 
         Modal reports exit 137 (SIGKILL) for every command queued against a sandbox
         that has died, so a non-zero exit says nothing about the command itself until
-        the sandbox's own liveness has been checked. ``poll()`` is that check.
+        the sandbox's own liveness has been checked. ``poll()`` is that check, and a
+        command Modal refuses outright never reaches it.
 
         Raises ModalSandboxDiedMngrError if the sandbox died, MngrError if the command
         failed on a live sandbox.
         """
-        process = sandbox.exec("sh", "-c", command)
-        stdout = process.get_stdout().read()
-        exit_code = process.wait()
+        try:
+            stdout, exit_code = _run_command_in_sandbox(sandbox, command)
+        except ModalProxySandboxGoneError as e:
+            raise ModalSandboxDiedMngrError(
+                f"Modal sandbox {sandbox.get_object_id()} was gone while mngr was trying to {description}"
+            ) from e
         if exit_code == 0:
             return stdout
         sandbox_exit_code = sandbox.poll()
