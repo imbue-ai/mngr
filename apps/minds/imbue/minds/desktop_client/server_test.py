@@ -20,11 +20,19 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.mock_provider_relay_test import RecordingSignInCallbackForwarder
+from imbue.minds.desktop_client.provider_relay import ProviderSignInRelay
+from imbue.minds.desktop_client.provider_relay import RelayArmResult
+from imbue.minds.desktop_client.provider_relay import SignInCallback
+from imbue.minds.desktop_client.provider_relay import SignInCallbackResult
+from imbue.minds.desktop_client.provider_relay import SignInOutcome
 from imbue.minds.desktop_client.server import _shutdown_desktop_client
 from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ws_gateway import create_websocket_aware_wsgi_server
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.utils.testing import find_free_port
 
 
 def test_runtime_creates_http_client_on_entry_and_closes_it_with_shutdown_flag(tmp_path: Path) -> None:
@@ -88,6 +96,29 @@ def test_shutdown_triggers_root_concurrency_group_so_watcher_strands_exit(tmp_pa
     # and the teardown must complete far below the group's 5s exit timeout.
     assert is_strand_finished.is_set()
     assert teardown_elapsed_seconds < 4.0
+
+
+def test_shutdown_gives_up_every_armed_sign_in_relays_port(tmp_path: Path) -> None:
+    state = DesktopClientState(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=MngrCliBackendResolver(),
+    )
+    relay = ProviderSignInRelay(
+        workspace_id=AgentId("agent-" + "5b" * 16),
+        flow_id="7c1e0f4a9d2b4e6f8a3c5d7e9f1a2b3c",
+        callback=SignInCallback(port=find_free_port(), path="/callback", state="state-2d9e"),
+        forwarder=RecordingSignInCallbackForwarder(
+            result=SignInCallbackResult(outcome=SignInOutcome.SIGNED_IN, provider_name="Anthropic")
+        ),
+        on_callback_handled=lambda: None,
+        no_callback_timeout_seconds=30.0,
+        after_callback_seconds=30.0,
+    )
+    assert state.provider_relay_registry.arm(relay) is RelayArmResult.ARMED
+
+    _shutdown_desktop_client(state, is_externally_managed_client=True)
+
+    assert relay.is_stopped()
 
 
 def test_runtime_leaves_externally_managed_http_client_untouched(tmp_path: Path) -> None:

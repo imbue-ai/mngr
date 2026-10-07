@@ -104,6 +104,8 @@ from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
+from imbue.minds.desktop_client.sign_in_browser import InstalledSignInBrowsers
+from imbue.minds.desktop_client.sign_in_browser import SignInBrowsersInterface
 from imbue.minds.desktop_client.skill_chat import SkillChatLaunchOutcome
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
 from imbue.minds.desktop_client.skill_chat import launch_skill_chat
@@ -214,7 +216,6 @@ def _get_mngr_forward_origin() -> str:
     return f"https://localhost:{port}"
 
 
-# Auth helpers
 def _required_one_time_code() -> OneTimeCode:
     """Parse the required ``one_time_code`` query param, aborting 422 when absent.
 
@@ -244,7 +245,6 @@ def _is_request_authenticated() -> bool:
     )
 
 
-# Route handlers (module-level; deps read from get_state())
 def _handle_forward_bridge() -> Response:
     """Bounce an authenticated browser into a forward-plugin session.
 
@@ -1342,8 +1342,6 @@ def _build_requests_payload(
     return {"count": len(request_ids), "request_ids": request_ids, "workspace_agent_ids": sorted(workspace_ids)}
 
 
-# System-interface health probing
-#
 # The probe loop's own timeout is all that lives here. The recovery page's route
 # is registered with the rest of the SPA routes further down, and its data calls
 # are served elsewhere: the recovery actions by the versioned surface (POST
@@ -1357,7 +1355,6 @@ def _build_requests_payload(
 _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 
 
-# Account management routes
 def _handle_account_trim_backups(user_id: str) -> Response:
     """Start the over-quota backup trim flow for one account (idempotent while running)."""
     if not _is_request_authenticated():
@@ -1684,7 +1681,6 @@ def _dispatch_request_action(
     return make_json_error_response(f"Unsupported action '{action}'", status_code=500)
 
 
-# /ui channel publisher wiring
 def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspaceEntry:
     """Convert one ``_build_workspace_list`` row into the typed channel entry.
 
@@ -2233,7 +2229,6 @@ def _ui_health_message(tracker: SystemInterfaceHealthTracker, agent_id: str, sta
     )
 
 
-# App factory
 def create_desktop_client(
     auth_store: AuthStoreInterface,
     backend_resolver: BackendResolverInterface,
@@ -2265,6 +2260,7 @@ def create_desktop_client(
     sync_scheduler: WorkspaceSyncScheduler | None = None,
     connectivity_detector: ConnectivityDetector | None = None,
     host_probe: HostProbeInterface | None = None,
+    sign_in_browsers: SignInBrowsersInterface | None = None,
     sleep_tracker: SleepTracker | None = None,
     folder_sync_manager: FolderSyncManager | None = None,
     device_id: str = "",
@@ -2474,6 +2470,7 @@ def create_desktop_client(
             else SubprocessHostProbe(concurrency_group=root_concurrency_group)
         ),
         mngr_caller=mngr_caller,
+        sign_in_browsers=sign_in_browsers if sign_in_browsers is not None else InstalledSignInBrowsers(),
         sync_scheduler=sync_scheduler,
         folder_sync_manager=folder_sync_manager,
         ui_channel_broadcaster=ui_channel_broadcaster,

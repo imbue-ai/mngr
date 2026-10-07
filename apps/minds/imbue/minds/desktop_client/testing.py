@@ -918,6 +918,69 @@ def scripted_workspace_probe_server(
         server.server_close()
 
 
+class RecordedCallbackRequest(FrozenModel):
+    """One request the chat-app callback stand-in received."""
+
+    path: str = Field(description="The request path")
+    host: str = Field(description="The Host header")
+    cookie: str = Field(description="The Cookie header")
+    body: str = Field(description="The request body")
+
+
+class _ScriptedChatCallbackHandler(BaseHTTPRequestHandler):
+    """Stands in for a workspace chat app's sign-in callback route, behind the forward plugin."""
+
+    answer_status: int = 200
+    answer_body: bytes = b""
+    recorded: list[RecordedCallbackRequest] = []
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        type(self).recorded.append(
+            RecordedCallbackRequest(
+                path=self.path,
+                host=self.headers.get("Host", ""),
+                cookie=self.headers.get("Cookie", ""),
+                body=self.rfile.read(length).decode("utf-8"),
+            )
+        )
+        self.send_response(type(self).answer_status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(type(self).answer_body)))
+        self.end_headers()
+        self.wfile.write(type(self).answer_body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+@contextmanager
+def scripted_chat_callback_server(
+    answer_status: int, answer_body: bytes
+) -> Iterator[tuple[int, list[RecordedCallbackRequest]]]:
+    """Serve a TLS stand-in for the forward plugin fronting a chat app's callback route.
+
+    Every POST is recorded and answered with ``answer_status`` and ``answer_body``. Yields the
+    port and the live list of recorded requests.
+    """
+    recorded: list[RecordedCallbackRequest] = []
+    handler_cls = type(
+        "_ScopedChatCallbackHandler",
+        (_ScriptedChatCallbackHandler,),
+        {"answer_status": answer_status, "answer_body": answer_body, "recorded": recorded},
+    )
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    ca = make_in_memory_test_ca()
+    chain_pem, key_pem = generate_server_credentials(ca)
+    server.socket = build_server_ssl_context(chain_pem, key_pem, ca).wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server.server_address[1], recorded
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def exec_json_envelope(
     remote_stdout: str, *, success: bool = True, stderr: str = "", results_key: str = "results"
 ) -> str:
