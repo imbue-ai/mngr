@@ -5,7 +5,11 @@ from imbue.mngr_robinhood._agent_sdk.pricing import resolve_model_pricing
 
 def test_resolve_model_pricing_matches_family_for_dated_and_alias_ids() -> None:
     assert resolve_model_pricing("claude-haiku-4-5-20251001") is resolve_model_pricing("haiku")
+    assert resolve_model_pricing("claude-haiku-5-5") is resolve_model_pricing("haiku-5-5")
+    assert resolve_model_pricing("claude-haiku-5-5") is not resolve_model_pricing("haiku")
     assert resolve_model_pricing("claude-sonnet-4-6") is resolve_model_pricing("sonnet")
+    assert resolve_model_pricing("claude-sonnet-5-5[1m]") is resolve_model_pricing("sonnet-5")
+    assert resolve_model_pricing("claude-sonnet-5") is not resolve_model_pricing("sonnet")
     assert resolve_model_pricing("claude-opus-4-8") is resolve_model_pricing("opus")
     assert resolve_model_pricing("claude-opus-5-5") is resolve_model_pricing("opus-5-5")
     assert resolve_model_pricing("claude-opus-5-5") is not resolve_model_pricing("opus")

@@ -76,6 +76,12 @@ output_cost_per_token = 7.5e-05
 cache_read_input_token_cost = 1.5e-06
 cache_creation_input_token_cost = 1.875e-05
 
+["anthropic/claude-sonnet-5-5"]
+input_cost_per_token = 2e-06
+output_cost_per_token = 1e-05
+cache_read_input_token_cost = 1e-07
+cache_creation_input_token_cost = 2.5e-06
+
 ["anthropic/claude-sonnet-4-6"]
 input_cost_per_token = 3e-06
 output_cost_per_token = 1.5e-05
@@ -94,6 +100,12 @@ output_cost_per_token = 1.5e-05
 cache_read_input_token_cost = 3e-07
 cache_creation_input_token_cost = 3.75e-06
 
+["anthropic/claude-haiku-5-5"]
+input_cost_per_token = 1e-07
+output_cost_per_token = 5e-07
+cache_read_input_token_cost = 1e-08
+cache_creation_input_token_cost = 1.25e-07
+
 ["anthropic/claude-haiku-4-5"]
 input_cost_per_token = 1e-06
 output_cost_per_token = 5e-06
@@ -109,6 +121,12 @@ cache_creation_input_token_cost = 1.25e-06
 # OpenAI caching is automatic and normally carries no cache-write surcharge --
 # only reads are discounted -- so cache_creation is 0 unless a model bills one.
 # Codex reports tokens rather than dollars, so these drive its estimated cost.
+["openai/gpt-6.1-sol"]
+input_cost_per_token = 2e-06
+output_cost_per_token = 1e-05
+cache_read_input_token_cost = 1e-07
+cache_creation_input_token_cost = 2.5e-06
+
 ["openai/gpt-6-astra"]
 input_cost_per_token = 1e-05
 output_cost_per_token = 5e-05

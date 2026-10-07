@@ -41,11 +41,24 @@ _HAIKU_PRICING: Final[ModelPricing] = ModelPricing(
     cache_write_usd_per_million=Decimal("1.25"),
     cache_read_usd_per_million=Decimal("0.10"),
 )
+_HAIKU_5_5_PRICING: Final[ModelPricing] = ModelPricing(
+    input_usd_per_million=Decimal("0.10"),
+    output_usd_per_million=Decimal("0.50"),
+    cache_write_usd_per_million=Decimal("0.125"),
+    cache_read_usd_per_million=Decimal("0.01"),
+)
 _SONNET_PRICING: Final[ModelPricing] = ModelPricing(
     input_usd_per_million=Decimal("3.00"),
     output_usd_per_million=Decimal("15.00"),
     cache_write_usd_per_million=Decimal("3.75"),
     cache_read_usd_per_million=Decimal("0.30"),
+)
+# The Sonnet 5 generation (Sonnet 5 and Sonnet 5.5) undercuts the Sonnet 4 rates above.
+_SONNET_5_PRICING: Final[ModelPricing] = ModelPricing(
+    input_usd_per_million=Decimal("2.00"),
+    output_usd_per_million=Decimal("10.00"),
+    cache_write_usd_per_million=Decimal("2.50"),
+    cache_read_usd_per_million=Decimal("0.20"),
 )
 _OPUS_PRICING: Final[ModelPricing] = ModelPricing(
     input_usd_per_million=Decimal("5.00"),
@@ -78,9 +91,11 @@ _FABLE_5_1_PRICING: Final[ModelPricing] = ModelPricing(
 # ``claude-haiku-4-5-20251001`` / ``claude-sonnet-4-6`` / ``claude-opus-4-8``, so a family
 # substring match resolves both bare aliases and dated full ids.
 _PRICING_BY_FAMILY_SUBSTRING: Final[Sequence[tuple[str, ModelPricing]]] = (
+    # A newer generation or point release goes before the family substring that would otherwise claim it.
+    ("haiku-5-5", _HAIKU_5_5_PRICING),
     ("haiku", _HAIKU_PRICING),
+    ("sonnet-5", _SONNET_5_PRICING),
     ("sonnet", _SONNET_PRICING),
-    # A point release goes before the family substring that would otherwise claim it.
     ("opus-5-5", _OPUS_5_5_PRICING),
     ("opus", _OPUS_PRICING),
     ("fable-5-1", _FABLE_5_1_PRICING),
