@@ -180,7 +180,7 @@ def test_the_package_carries_the_bundled_forwarding_extension(tmp_path: Path) ->
     shipped = (root / "usr/lib/mngr-latchkey/extensions" / REMOTE_GATEWAY_EXTENSION_FILENAME).read_text()
 
     assert shipped == bundled_gateway_extension_content(REMOTE_GATEWAY_EXTENSION_FILENAME)
-    assert "X-Latchkey-Desktop" in shipped
+    assert "X-Latchkey-Device" in shipped
 
 
 def test_every_script_is_well_formed_posix_shell(tmp_path: Path) -> None:

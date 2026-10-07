@@ -51,6 +51,7 @@ from imbue.mngr_latchkey.core import custom_service_registration_entries
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.custom_services import is_custom_service_name
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigration
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationError
 from imbue.mngr_latchkey.migrations.runner import PERMISSIONS_MIGRATIONS
 from imbue.mngr_latchkey.migrations.runner import migrate_permissions
@@ -103,7 +104,7 @@ class MachineCredentials(FrozenModel):
     latchkey: Latchkey = Field(description="This computer's latchkey, which owns the desktop store and its key.")
     host_id: HostId = Field(description="The host whose machine store caches these credentials.")
 
-    def refresh(self) -> FetchedMachineState:
+    def refresh(self, migration_context: PermissionsMigrationContext) -> FetchedMachineState:
         """Read the machine back and reconcile it with this computer, and return what it holds.
 
         Everything comes back in one command: the credential store the
@@ -153,7 +154,7 @@ class MachineCredentials(FrozenModel):
         adopt_machine_desktop_egress_rules(
             self.latchkey.latchkey_directory, self.host_id, fetched.desktop_egress_rules_json
         )
-        migrated = migrate_permissions_and_push(self.host, self.latchkey, self.host_id)
+        migrated = migrate_permissions_and_push(self.host, self.latchkey, self.host_id, migration_context)
         if migrated is None:
             return fetched
         return fetched.model_copy_update(
@@ -325,6 +326,7 @@ def migrate_permissions_and_push(
     host: OuterHostInterface,
     latchkey: Latchkey,
     host_id: HostId,
+    migration_context: PermissionsMigrationContext,
     migrations: Sequence[PermissionsMigration] = PERMISSIONS_MIGRATIONS,
     # what was migrated and pushed back, or ``None`` when the policy was already in this build's format
 ) -> MigratedPermissions | None:
@@ -342,7 +344,7 @@ def migrate_permissions_and_push(
         RemoteGatewayError: when the machine does not take it.
     """
     data_dir = plugin_data_dir(latchkey.latchkey_directory)
-    if not migrate_permissions(data_dir, host_id, migrations):
+    if not migrate_permissions(data_dir, host_id, migration_context, migrations):
         return None
     permissions_json = read_host_permissions(data_dir, host_id)
     if permissions_json is None:

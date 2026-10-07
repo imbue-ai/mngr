@@ -70,6 +70,7 @@ from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationError
 from imbue.mngr_latchkey.migrations.runner import migrate_permissions
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
@@ -655,7 +656,7 @@ def _resolve_device_identity(mngr_ctx: MngrContext, cli_device_id: str | None) -
     return DesktopDeviceIdentity(device_id=device_id, hostname=socket.gethostname())
 
 
-def _migrate_hosts_without_a_machine(latchkey: Latchkey) -> None:
+def _migrate_hosts_without_a_machine(latchkey: Latchkey, migration_context: PermissionsMigrationContext) -> None:
     """Bring the policy of every host whose only copy is here to the format this build reads, in place.
 
     A host with a machine of its own is migrated when its machine is next
@@ -676,7 +677,7 @@ def _migrate_hosts_without_a_machine(latchkey: Latchkey) -> None:
             logger.warning("Skipping the data at {}, which is not a host's: {}", permissions_path.parent, e)
             continue
         try:
-            _migrate_permissions_unless_its_machine_owns_it(latchkey, host_id)
+            _migrate_permissions_unless_its_machine_owns_it(latchkey, host_id, migration_context)
         except PermissionsFormatNewerError as e:
             logger.warning(
                 "Leaving the permissions of host {} as they are; this build cannot migrate them: {}", host_id, e
@@ -687,7 +688,9 @@ def _migrate_hosts_without_a_machine(latchkey: Latchkey) -> None:
             )
 
 
-def _migrate_permissions_unless_its_machine_owns_it(latchkey: Latchkey, host_id: HostId) -> None:
+def _migrate_permissions_unless_its_machine_owns_it(
+    latchkey: Latchkey, host_id: HostId, migration_context: PermissionsMigrationContext
+) -> None:
     """Migrate the host's policy in place, unless a machine of its own owns it (and migrates it when next read).
 
     Raises:
@@ -697,7 +700,7 @@ def _migrate_permissions_unless_its_machine_owns_it(latchkey: Latchkey, host_id:
     """
     if has_machine_of_its_own(latchkey.plugin_data_dir, host_id):
         return
-    migrate_permissions(latchkey.plugin_data_dir, host_id)
+    migrate_permissions(latchkey.plugin_data_dir, host_id, migration_context)
 
 
 def _run_forward_with_error_reporting(run_supervisor: Callable[[], None]) -> None:
@@ -749,7 +752,7 @@ def _run_forward_supervisor(
 
     # Under the lock, so no second forward migrates the same files, and before
     # the gateway starts reading them.
-    _migrate_hosts_without_a_machine(latchkey)
+    _migrate_hosts_without_a_machine(latchkey, PermissionsMigrationContext(device_id=device.device_id))
 
     # Eagerly ensure the gateway is up so users see startup failures
     # immediately, not on the first agent discovery. The discovery

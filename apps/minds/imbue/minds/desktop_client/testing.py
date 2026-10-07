@@ -55,7 +55,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceLogin
 from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceRequestPayload
-from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingSyncRequest
 from imbue.minds.desktop_client.latchkey.gateway_client import PermissionEffect
@@ -122,6 +121,7 @@ from imbue.mngr_forward.tls import build_server_ssl_context
 from imbue.mngr_forward.tls import generate_server_credentials
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.custom_services import Scheme
+from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 
 
 def device_id_for_test(name: str) -> DeviceId:

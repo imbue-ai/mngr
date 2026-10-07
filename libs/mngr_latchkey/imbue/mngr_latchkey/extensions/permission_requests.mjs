@@ -41,6 +41,13 @@
  *       when a two-way sync finds the same file changed on both. The
  *       sync is not a permission: it is carried on the request for the
  *       desktop to act on, and never enters the ``effect``.
+ *       The path is always one on the desktop this gateway runs on: the
+ *       grant is minted for that desktop's device id
+ *       (``LATCHKEY_EXTENSION_LOCAL_DEVICE_ID``), so a desktop can only
+ *       ever share its own files. A workspace addresses another desktop by
+ *       sending the request there (a remote machine routes it by the
+ *       ``X-Latchkey-Desktop`` header). Without a device id the gateway
+ *       refuses file-sharing requests with HTTP 503.
  *       For ``type=="custom-service"`` the payload is
  *         ``{domain: <hostname>, scheme: "https"|"http", login: {url, flow, flow_params}|null,
  *           header: <header line with {token}>|null, credential_instructions: <text>|null}``,
@@ -404,12 +411,13 @@ function buildAccountScopeSchema(scope, account) {
 // ``file-sharing`` request. The agent reaches the Minds API through
 // the gateway's ``minds-api-proxy`` extension, which mounts under
 // ``/minds-api-proxy/...``. ``/api/v1/files`` is the
-// Minds-side WebDAV mount that actually serves files: a request for
-// the file ``/abs/path`` lands at the URL path
-// ``/api/v1/files/abs/path`` (the WebDAV share roots are mounted at
-// their on-disk path, so the outward URL mirrors the absolute path
-// one-to-one). Granting access to a specific file therefore means
-// matching the URL path exactly via a per-file permission schema.
+// Minds-side WebDAV mount that actually serves files, each desktop under
+// its own device id: the file ``/abs/path`` on desktop ``host-abc`` lands
+// at the URL path ``/api/v1/files/host-abc/abs/path`` (the WebDAV share
+// roots are mounted at their on-disk path, so the rest of the URL mirrors
+// the absolute path one-to-one). Granting access to a specific file
+// therefore means matching the URL path exactly via a per-file
+// permission schema.
 //
 // We do *not* mint a scope schema here: the file-sharing rule reuses
 // the agent baseline's ``latchkey-self`` scope (defined in
@@ -425,6 +433,13 @@ const FILE_SHARING_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/files';
 const ADMIN_PERMISSIONS_FILE = 'latchkey_admin_permissions.json';
 const FILE_SHARING_SCOPE_NAME = 'latchkey-self';
 const FILE_SHARING_PERMISSION_PREFIX = 'minds-file-server-';
+
+// The desktop this gateway runs on, set by the forward supervisor from its
+// ``--device-id`` (the same variable ``device_list.mjs`` reports on
+// ``/devices``). A file-sharing grant is always for this desktop's files.
+// Mirrors ``DesktopDeviceId`` in ``imbue/mngr_latchkey/devices.py``.
+const LOCAL_DEVICE_ID_ENV_VAR = 'LATCHKEY_EXTENSION_LOCAL_DEVICE_ID';
+const VALID_DEVICE_ID_PATTERN = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
 
 // The accounts read grant. Like file-sharing it activates a fixed permission
 // under the pre-existing ``latchkey-self`` scope (so no scope schema is minted),
@@ -539,6 +554,13 @@ class ServicesCatalogUnavailableError extends PermissionRequestsExtensionError {
   }
 }
 
+class LocalDeviceNotConfiguredError extends PermissionRequestsExtensionError {
+  constructor(detail) {
+    super(503, `File sharing is not configured on this gateway: ${detail}.`);
+    this.name = 'LocalDeviceNotConfiguredError';
+  }
+}
+
 class TargetNotConfiguredError extends PermissionRequestsExtensionError {
   constructor() {
     super(
@@ -547,6 +569,21 @@ class TargetNotConfiguredError extends PermissionRequestsExtensionError {
     );
     this.name = 'TargetNotConfiguredError';
   }
+}
+
+/**
+ * The device id of the desktop this gateway runs on: the desktop whose files a
+ * file-sharing grant made here reaches.
+ */
+function requireLocalDeviceId() {
+  const deviceId = process.env[LOCAL_DEVICE_ID_ENV_VAR];
+  if (deviceId === undefined || deviceId.length === 0) {
+    throw new LocalDeviceNotConfiguredError(`${LOCAL_DEVICE_ID_ENV_VAR} is not set`);
+  }
+  if (!VALID_DEVICE_ID_PATTERN.test(deviceId)) {
+    throw new LocalDeviceNotConfiguredError(`${LOCAL_DEVICE_ID_ENV_VAR}=${deviceId} is not a valid device id`);
+  }
+  return deviceId;
 }
 
 function resolveLatchkeyDirectory() {
@@ -1431,7 +1468,7 @@ function computeEffect(type, payload) {
     case REQUEST_TYPE_PREDEFINED:
       return computePredefinedEffect(payload.scope, payload.permissions, payload.account);
     case REQUEST_TYPE_FILE_SHARING:
-      return computeFileSharingEffect(payload.path, payload.access);
+      return computeFileSharingEffect(requireLocalDeviceId(), payload.path, payload.access);
     case REQUEST_TYPE_WORKSPACE:
       return computeWorkspaceEffect(payload.permissions, payload.target_workspace_id);
     case REQUEST_TYPE_ACCOUNTS:
@@ -1471,11 +1508,16 @@ function computePredefinedEffect(scope, permissions, account) {
 
 /**
  * Derive a stable, human-readable schema name for a file-sharing
- * permission targeted at ``filePath`` at the named ``access`` mode.
+ * permission targeted at ``filePath`` on desktop ``deviceId`` at the named
+ * ``access`` mode.
  *
  * The name has the shape
- * ``minds-file-server-<access_lower>-<filePath>`` (e.g.
- * ``minds-file-server-read-/abs/path/to/file.txt``) so:
+ * ``minds-file-server-<access_lower>-<deviceId>:<filePath>`` (e.g.
+ * ``minds-file-server-read-host-abc:/abs/path/to/file.txt``). Keep in sync with
+ * ``file_sharing_permission_name`` in ``imbue/mngr_latchkey/file_sharing.py``,
+ * which reads these names back. The shape means:
+ *
+ *  * grants for the same path on different desktops are different schemas;
  *
  *  * read and write grants for the same path are *different* schemas
  *    -- both can coexist in a user's permissions.json, and a
@@ -1494,15 +1536,15 @@ function computePredefinedEffect(scope, permissions, account) {
  * value inside permissions.json, so it has no filename-safety or
  * length constraints beyond what JSON itself allows. ``filePath``
  * has already been validated by ``validateAbsoluteFileSharingPath``
- * to start with ``/`` and to be traversal-free, which makes the
- * ``<access_lower>-/<...>`` boundary in the resulting name
- * unambiguous.
+ * to start with ``/`` and to be traversal-free, and a device id never
+ * contains a ``:``, so the first ``:`` after the access mode is where the
+ * device id ends and the path begins.
  */
-function fileSharingPermissionSchemaName(filePath, access) {
+function fileSharingPermissionSchemaName(deviceId, filePath, access) {
   if (!VALID_FILE_SHARING_ACCESS_MODES.has(access)) {
     throw new InvalidRequestBodyError(`unhandled file-sharing access mode '${access}'.`);
   }
-  return `${FILE_SHARING_PERMISSION_PREFIX}${access.toLowerCase()}-${filePath}`;
+  return `${FILE_SHARING_PERMISSION_PREFIX}${access.toLowerCase()}-${deviceId}:${filePath}`;
 }
 
 /**
@@ -1580,16 +1622,17 @@ function normalizeWebdavUrlPath(urlPath) {
   return url.pathname;
 }
 
-function computeFileSharingEffect(filePath, access) {
-  const permissionSchemaName = fileSharingPermissionSchemaName(filePath, access);
-  // WebDAV serves the on-disk path directly under the mount, so the
-  // permission's URL path is the prefix + the absolute file path.
+function computeFileSharingEffect(deviceId, filePath, access) {
+  const permissionSchemaName = fileSharingPermissionSchemaName(deviceId, filePath, access);
+  // WebDAV serves the on-disk path directly under the desktop's own mount,
+  // so the permission's URL path is the prefix + the device id + the
+  // absolute file path.
   // ``validateAbsoluteFileSharingPath`` has already guaranteed that
   // ``filePath`` starts with ``/`` and is traversal-free. We normalize
   // the combined path the same way the WHATWG URL parser normalizes the
   // incoming request's pathname so the regex matches even when the path
   // has characters the parser percent-encodes (spaces, non-ASCII, ...).
-  const fileWebdavPath = normalizeWebdavUrlPath(`${FILE_SHARING_PROXY_PATH_PREFIX}${filePath}`);
+  const fileWebdavPath = normalizeWebdavUrlPath(`${FILE_SHARING_PROXY_PATH_PREFIX}/${deviceId}${filePath}`);
   return {
     schemas: {
       [permissionSchemaName]: {
@@ -2309,7 +2352,8 @@ async function parseApproveOverrideBody(request) {
  * Resolve the effect that approving ``requestRecord`` should splice in.
  *
  * With no override (``null`` or an empty object) this is just the precomputed
- * ``requestRecord.effect``. Otherwise the effect is recomputed from the user's
+ * ``requestRecord.effect``, except that a ``file-sharing`` effect is computed
+ * afresh from the stored payload. Otherwise the effect is recomputed from the user's
  * approval-time choices, dispatched on the request type:
  *
  *  * ``predefined``: ``{account, permissions?}`` -- the account the user chose
@@ -2329,6 +2373,16 @@ async function parseApproveOverrideBody(request) {
  */
 function resolveEffectForApproval(requestRecord, override) {
   if (override === null || Object.keys(override).length === 0) {
+    // CLEANUP: return the stored effect for a file-sharing request too once no
+    // request filed before grants named a desktop can still be pending; such a
+    // record's stored effect is a grant for the device-less URL.
+    if (requestRecord.request_type === REQUEST_TYPE_FILE_SHARING) {
+      return computeFileSharingEffect(
+        requireLocalDeviceId(),
+        requestRecord.payload.path,
+        requestRecord.payload.access,
+      );
+    }
     return requestRecord.effect;
   }
   switch (requestRecord.request_type) {
@@ -2354,7 +2408,7 @@ function resolveEffectForApproval(requestRecord, override) {
       // request-creation path is handled, then recompute. The access mode is
       // fixed at creation and is not user-editable.
       const path = validateAbsoluteFileSharingPath(override.path);
-      return computeFileSharingEffect(path, requestRecord.payload.access);
+      return computeFileSharingEffect(requireLocalDeviceId(), path, requestRecord.payload.access);
     }
     case REQUEST_TYPE_WORKSPACE: {
       const { permissions, target_workspace_id } = validateWorkspaceVerbsAndTarget(

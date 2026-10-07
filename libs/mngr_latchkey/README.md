@@ -717,9 +717,11 @@ stamp with the policy. (It is a different file from upstream's
 credential store.)
 
 A migration is a `PermissionsMigration` with a `version` (consecutive from 1)
-and an `apply(permissions)` that takes the parsed policy
+and an `apply(permissions, context)` that takes the parsed policy
 (`LatchkeyPermissionsConfig`) as the version below wrote it and returns it as
-its own version writes it. The runner does the reading, writing and stamping.
+its own version writes it. The `PermissionsMigrationContext` names the desktop
+running the migration (its device id). The runner does the reading, writing
+and stamping.
 The build's migrations are listed in `migrations/runner.py`
 (`PERMISSIONS_MIGRATIONS`), and the version the last one ends in is what a
 policy this build creates is stamped with, so a fresh file is never migrated.
@@ -742,6 +744,17 @@ step that completed. It runs:
 The stamp is written after the policy it describes, on this computer and on the
 machine alike, so a failure between the two re-runs the migration rather than
 skipping it: a migration must leave a policy already in its target shape alone.
+
+The migrations so far:
+
+1. File-sharing grants name the desktop whose file they share. Each
+   `minds-file-server-<access>-<path>` gains a twin
+   `minds-file-server-<access>-<device id>:<path>`, whose URL pattern sits
+   under the device id. A policy from before was granted by the only desktop
+   there was, so the twins name the desktop migrating it. The original grant
+   stays beside its twin, so a workspace built against the device-less URL
+   keeps reaching what it was given; a later migration deletes these once no
+   supported workspace uses that URL.
 
 A policy stamped *newer* than a build knows is refused rather than read: a build
 that does not know a format cannot edit a policy in it without corrupting it. A
@@ -811,6 +824,21 @@ consume the stream and approve/delete on resolution.
     the folder on the workspace's machine once the grant is approved. The
     extension validates and stores it but never acts on it: a sync is not
     a permission, so it does not enter the `effect`.
+
+    The path is always on the desktop the gateway runs on: the grant is
+    minted for its own device id (`LATCHKEY_EXTENSION_LOCAL_DEVICE_ID`, set
+    by the forward supervisor from `--device-id`), as a permission named
+    `minds-file-server-<access>-<device id>:<path>` matching
+    `/minds-api-proxy/api/v1/files/<device id><path>`, which is where that
+    desktop's file server serves the path. A desktop therefore never grants
+    access to another desktop's files; a workspace asks a particular desktop
+    by sending the request there (the `X-Latchkey-Desktop` header, see
+    [Desktops](#desktops)). A gateway without a device id refuses
+    file-sharing requests with a 503. `imbue.mngr_latchkey.file_sharing`
+    reads these names back. It also reads the names from before grants named
+    a desktop (`minds-file-server-<access>-<path>`, matching
+    `/minds-api-proxy/api/v1/files<path>`), which a policy that already holds
+    them keeps but the extension never mints.
 
   The extension generates a `request_id` server-side, stores the
   caller-supplied fields plus the `target` permissions.json (taken
@@ -973,7 +1001,7 @@ The extension exposes the desktops it knows and lets a caller pick among them:
   seen first. It is granted to every agent by the baseline
   (`latchkey-self-read-devices`), so a workspace can learn which desktops
   exist before it addresses one.
-* An `X-Latchkey-Desktop` header on a `/permissions`, `/permission-requests`
+* An `X-Latchkey-Device` header on a `/permissions`, `/permission-requests`
   or `/minds-api-proxy` request names where it goes:
   * absent: the most recently announced desktop, which is what every
     workspace built before the header did (503 when none has ever announced

@@ -40,6 +40,16 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.account_scopes import account_scope_key
 from imbue.mngr_latchkey.account_scopes import build_account_scope_schema
 from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
+from imbue.mngr_latchkey.devices import DesktopDeviceId
+from imbue.mngr_latchkey.devices import LOCAL_DEVICE_ID_ENV_VAR
+from imbue.mngr_latchkey.file_sharing import FILE_SHARING_PERMISSION_PREFIX
+from imbue.mngr_latchkey.file_sharing import FileSharingAccess
+from imbue.mngr_latchkey.file_sharing import FileSharingGrant
+from imbue.mngr_latchkey.file_sharing import file_sharing_permission_name
+from imbue.mngr_latchkey.migrations.device_scoped_file_sharing import DeviceScopedFileSharingMigration
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.testing import ACCEPTED_CREDENTIAL_HEADERS
 from imbue.mngr_latchkey.testing import ACCEPTED_CREDENTIAL_INSTRUCTIONS
 from imbue.mngr_latchkey.testing import REJECTED_CREDENTIAL_HEADERS
@@ -63,8 +73,11 @@ _POLL_INTERVAL_SECONDS: Final[float] = 0.02
 # scope from the agent baseline (defined in ``agent_setup.py``) rather
 # than minting its own scope schema.
 _FILE_SHARING_SCOPE_NAME: Final[str] = "latchkey-self"
-_FILE_SHARING_PROXY_PATH_PREFIX: Final[str] = "/minds-api-proxy/api/v1/files"
-_FILE_SHARING_PERMISSION_PREFIX: Final[str] = "minds-file-server-"
+# The desktop the gateway under test runs on. The dot exercises the regex
+# escaping of the device id in a grant's URL pattern.
+_LOCAL_DEVICE_ID: Final[str] = "host-desktop.6021"
+# Where the desktop's file server serves its own files, through the proxy.
+_FILE_SHARING_URL_PREFIX: Final[str] = f"/minds-api-proxy/api/v1/files/{_LOCAL_DEVICE_ID}"
 
 # The cross-workspace verbs also attach to the pre-existing ``latchkey-self``
 # scope (like file-sharing and accounts): the grant rule is keyed here, and no
@@ -96,8 +109,10 @@ _FILE_SHARING_WRITE_METHODS: Final[tuple[str, ...]] = (
 
 
 def _file_sharing_permission_name(path: str, access: str) -> str:
-    """Mirror the JS helper: ``minds-file-server-<access_lower>-<path>``."""
-    return f"{_FILE_SHARING_PERMISSION_PREFIX}{access.lower()}-{path}"
+    """The name the Python side reads grants back by, so a drift between the two fails here."""
+    return file_sharing_permission_name(
+        FileSharingGrant(access=FileSharingAccess(access), device_id=DesktopDeviceId(_LOCAL_DEVICE_ID), path=path)
+    )
 
 
 # The Node driver mounts the extension under a HTTP server, passing a
@@ -181,6 +196,48 @@ def _wait_for_port(host: str, port: int, timeout: float = 5.0) -> bool:
 _ADMIN_PERMISSIONS_RELATIVE_PATH: Final[str] = "mngr_latchkey/latchkey_admin_permissions.json"
 
 
+@contextlib.contextmanager
+def _running_extension(
+    latchkey_directory: Path, permissions_config_path: Path, local_device_id: str | None
+) -> Generator[str, None, None]:
+    """Run the Node driver with ``permissions_config_path`` as the caller's context, yielding its base URL."""
+    assert _NODE_BINARY is not None
+    env = {
+        "LATCHKEY_DIRECTORY": str(latchkey_directory),
+        "TEST_PERMISSIONS_CONFIG_PATH": str(permissions_config_path),
+        "PATH": "/usr/bin:/bin",
+        # File-sharing path validation rejects paths outside the WebDAV
+        # mount roots, which the extension derives from the process's
+        # HOME / TMPDIR (Node's ``homedir()`` / ``tmpdir()``). Pin both
+        # to deterministic values so tests can use stable in-root paths
+        # (``/home/example/...`` and ``/tmp/...``) regardless of the
+        # runner's real HOME / TMPDIR.
+        "HOME": "/home/example",
+        "TMPDIR": "/tmp",
+    }
+    if local_device_id is not None:
+        env[LOCAL_DEVICE_ID_ENV_VAR] = local_device_id
+    process = subprocess.Popen(
+        [_NODE_BINARY, "--input-type=module", "-e", _build_node_driver_script()],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+    )
+    try:
+        port = _wait_for_node_port(process)
+        assert _wait_for_port("127.0.0.1", port)
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5.0)
+
+
 @pytest.fixture
 def node_extension(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, None]:
     """Spawn the Node driver pointed at a fresh LATCHKEY_DIRECTORY + target path.
@@ -193,43 +250,11 @@ def node_extension(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, No
     production. ``node_extension_as_desktop_client`` is the same driver with
     the admin context instead.
     """
-    assert _NODE_BINARY is not None
     latchkey_directory = tmp_path / "latchkey"
     latchkey_directory.mkdir()
     permissions_config_path = tmp_path / "permissions.json"
-    script = _build_node_driver_script()
-    process = subprocess.Popen(
-        [_NODE_BINARY, "--input-type=module", "-e", script],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={
-            "LATCHKEY_DIRECTORY": str(latchkey_directory),
-            "TEST_PERMISSIONS_CONFIG_PATH": str(permissions_config_path),
-            "PATH": "/usr/bin:/bin",
-            # File-sharing path validation rejects paths outside the WebDAV
-            # mount roots, which the extension derives from the process's
-            # HOME / TMPDIR (Node's ``homedir()`` / ``tmpdir()``). Pin both
-            # to deterministic values so tests can use stable in-root paths
-            # (``/home/example/...`` and ``/tmp/...``) regardless of the
-            # runner's real HOME / TMPDIR.
-            "HOME": "/home/example",
-            "TMPDIR": "/tmp",
-        },
-        text=True,
-    )
-    try:
-        port = _wait_for_node_port(process)
-        base_url = f"http://127.0.0.1:{port}"
-        assert _wait_for_port("127.0.0.1", port)
+    with _running_extension(latchkey_directory, permissions_config_path, _LOCAL_DEVICE_ID) as base_url:
         yield base_url, latchkey_directory, permissions_config_path
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5.0)
 
 
 @pytest.fixture
@@ -240,38 +265,22 @@ def node_extension_as_desktop_client(tmp_path: Path) -> Generator[tuple[str, Pat
     in the request body, so it is the only way to exercise the allowed half of
     that rule.
     """
-    assert _NODE_BINARY is not None
     latchkey_directory = tmp_path / "latchkey"
     latchkey_directory.mkdir()
     admin_permissions_path = latchkey_directory / _ADMIN_PERMISSIONS_RELATIVE_PATH
     admin_permissions_path.parent.mkdir(parents=True, exist_ok=True)
-    script = _build_node_driver_script()
-    process = subprocess.Popen(
-        [_NODE_BINARY, "--input-type=module", "-e", script],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={
-            "LATCHKEY_DIRECTORY": str(latchkey_directory),
-            "TEST_PERMISSIONS_CONFIG_PATH": str(admin_permissions_path),
-            "PATH": "/usr/bin:/bin",
-            "HOME": "/home/example",
-            "TMPDIR": "/tmp",
-        },
-        text=True,
-    )
-    try:
-        port = _wait_for_node_port(process)
-        base_url = f"http://127.0.0.1:{port}"
-        assert _wait_for_port("127.0.0.1", port)
+    with _running_extension(latchkey_directory, admin_permissions_path, _LOCAL_DEVICE_ID) as base_url:
         yield base_url, latchkey_directory, admin_permissions_path
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5.0)
+
+
+@pytest.fixture
+def node_extension_without_a_device(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, None]:
+    """The driver on a gateway that was not told which desktop it runs on."""
+    latchkey_directory = tmp_path / "latchkey"
+    latchkey_directory.mkdir()
+    permissions_config_path = tmp_path / "permissions.json"
+    with _running_extension(latchkey_directory, permissions_config_path, None) as base_url:
+        yield base_url, latchkey_directory, permissions_config_path
 
 
 @contextlib.contextmanager
@@ -489,7 +498,7 @@ def test_post_creates_file_sharing_request_with_schemas_and_rules(
     # trailing-slash / nested-below match for paths that start with
     # ``<base>/``, and rejection of anything that doesn't.
     perm_schema = schemas[permission_name]
-    expected_webdav_path = f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}"
+    expected_webdav_path = f"{_FILE_SHARING_URL_PREFIX}{target_path}"
     assert perm_schema["properties"]["path"]["type"] == "string"
     path_pattern = re.compile(perm_schema["properties"]["path"]["pattern"])
     for url_path in (
@@ -505,12 +514,80 @@ def test_post_creates_file_sharing_request_with_schemas_and_rules(
     # must not be activated by a path that merely shares a prefix
     # with ``<base>`` but does not start with ``<base>/`` (so e.g.
     # ``<base>suffix`` is rejected).
+    # Nor to the same path served by another desktop, or by none: the device id
+    # is matched literally, dot included.
     for url_path in (
         f"{expected_webdav_path}suffix",
-        f"{_FILE_SHARING_PROXY_PATH_PREFIX}/home/example/other.txt",
+        f"{_FILE_SHARING_URL_PREFIX}/home/example/other.txt",
+        f"/minds-api-proxy/api/v1/files/host-other-desktop{target_path}",
+        f"/minds-api-proxy/api/v1/files/{_LOCAL_DEVICE_ID.replace('.', 'x')}{target_path}",
+        f"/minds-api-proxy/api/v1/files{target_path}",
     ):
         assert not path_pattern.fullmatch(url_path), url_path
     assert perm_schema["properties"]["method"] == {"enum": list(expected_methods)}
+
+
+def test_file_sharing_is_refused_by_a_gateway_that_does_not_know_its_desktop(
+    node_extension_without_a_device: tuple[str, Path, Path],
+) -> None:
+    """A grant names the desktop whose file it shares, so without one there is nothing to grant."""
+    base_url, latchkey_directory, _permissions_config_path = node_extension_without_a_device
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs to access example data",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/data.txt", "access": "READ"},
+        },
+    )
+    assert status == 503
+    assert LOCAL_DEVICE_ID_ENV_VAR in json.loads(body)["error"]
+    assert not (latchkey_directory / "permission_requests").exists()
+
+
+def test_migrating_a_grant_from_before_devices_adds_the_grant_minted_today(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """The migration derives the twin's URL pattern from the old grant's rather than rebuilding it; this pins the
+    twin to what the extension mints for the same path now, spaces and dots included."""
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    target_path = "/home/example/My Documents/notes.v2"
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs the notes",
+            "type": "file-sharing",
+            "payload": {"path": target_path, "access": "WRITE"},
+        },
+    )
+    assert status == 201
+    minted = json.loads(body)["effect"]
+    # What the extension minted for the same path before grants named a desktop.
+    legacy_name = f"{FILE_SHARING_PERMISSION_PREFIX}write-{target_path}"
+    legacy_schema = {
+        "properties": {
+            "method": {"enum": list(_FILE_SHARING_WRITE_METHODS)},
+            "path": {
+                "type": "string",
+                "pattern": "^/minds-api-proxy/api/v1/files/home/example/My%20Documents/notes\\.v2(/.*)?$",
+            },
+        },
+        "required": ["method", "path"],
+    }
+    legacy_policy = LatchkeyPermissionsConfig(
+        rules=({_FILE_SHARING_SCOPE_NAME: [legacy_name]},), schemas={legacy_name: legacy_schema}
+    )
+
+    migrated = DeviceScopedFileSharingMigration(version=PermissionsFormatVersion(1)).apply(
+        legacy_policy, PermissionsMigrationContext(device_id=DesktopDeviceId(_LOCAL_DEVICE_ID))
+    )
+
+    (minted_name,) = minted["schemas"]
+    assert minted["rules"] == [{_FILE_SHARING_SCOPE_NAME: [minted_name]}]
+    assert migrated.schemas == {legacy_name: legacy_schema, **minted["schemas"]}
+    assert migrated.rules == ({_FILE_SHARING_SCOPE_NAME: [legacy_name, minted_name]},)
 
 
 @pytest.mark.parametrize(
@@ -554,8 +631,8 @@ def test_file_sharing_pattern_matches_percent_encoded_request_path(
     # ``urllib.parse.quote`` with ``safe='/'`` reproduces the WHATWG
     # path-percent-encode set for these characters (space -> %20,
     # non-ASCII -> UTF-8 %XX), matching what detent sees on the request.
-    encoded_path = urllib.parse.quote(f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}", safe="/")
-    raw_path = f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}"
+    encoded_path = urllib.parse.quote(f"{_FILE_SHARING_URL_PREFIX}{target_path}", safe="/")
+    raw_path = f"{_FILE_SHARING_URL_PREFIX}{target_path}"
     # The encoded request path matches; the raw (literal-space) path does
     # not -- the request never arrives un-encoded, and matching it would
     # be a sign the pattern was built from the wrong (raw) form.
@@ -609,7 +686,7 @@ def test_post_expands_tilde_home_path_in_file_sharing(
     assert requested_name not in schemas
     # The WebDAV pattern matches the percent-encoded expanded path.
     path_pattern = re.compile(schemas[expanded_name]["properties"]["path"]["pattern"])
-    encoded_webdav_path = urllib.parse.quote(f"{_FILE_SHARING_PROXY_PATH_PREFIX}{expanded_path}", safe="/")
+    encoded_webdav_path = urllib.parse.quote(f"{_FILE_SHARING_URL_PREFIX}{expanded_path}", safe="/")
     assert path_pattern.fullmatch(encoded_webdav_path), encoded_webdav_path
 
 
@@ -678,6 +755,52 @@ def test_approve_with_tilde_path_override_expands_home(
     assert expanded_name in applied["schemas"]
 
 
+# CLEANUP: drop this test with the recomputation in ``resolveEffectForApproval`` it covers.
+def test_approving_a_request_filed_before_devices_grants_this_desktops_path(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A request still pending from an older build carries an effect for the device-less URL, which must not be applied."""
+    base_url, latchkey_directory, permissions_config_path = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs a file",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/requested.txt", "access": "READ"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    legacy_name = f"{FILE_SHARING_PERMISSION_PREFIX}read-/home/example/requested.txt"
+    record_path = latchkey_directory / "permission_requests" / "v3" / f"{request_id}.json"
+    record = json.loads(record_path.read_text())
+    record["effect"] = {
+        "rules": [{_FILE_SHARING_SCOPE_NAME: [legacy_name]}],
+        "schemas": {
+            legacy_name: {
+                "properties": {
+                    "method": {"enum": ["GET"]},
+                    "path": {
+                        "type": "string",
+                        "pattern": "^/minds-api-proxy/api/v1/files/home/example/requested\\.txt(/.*)?$",
+                    },
+                },
+                "required": ["method", "path"],
+            }
+        },
+    }
+    record_path.write_text(json.dumps(record))
+
+    approve_status, approve_body = _post_json(f"{base_url}/permission-requests/approve/{request_id}", None)
+
+    assert approve_status == 200, approve_body
+    applied = json.loads(permissions_config_path.read_text())
+    scoped_name = _file_sharing_permission_name("/home/example/requested.txt", "READ")
+    assert applied["rules"] == [{_FILE_SHARING_SCOPE_NAME: [scoped_name]}]
+    assert list(applied["schemas"]) == [scoped_name]
+
+
 def test_read_and_write_grants_for_same_path_coexist_in_persisted_record(
     node_extension: tuple[str, Path, Path],
 ) -> None:
@@ -712,8 +835,8 @@ def test_read_and_write_grants_for_same_path_coexist_in_persisted_record(
     read_name = _file_sharing_permission_name(target_path, "READ")
     write_name = _file_sharing_permission_name(target_path, "WRITE")
     assert read_name != write_name
-    assert read_name.startswith(f"{_FILE_SHARING_PERMISSION_PREFIX}read-")
-    assert write_name.startswith(f"{_FILE_SHARING_PERMISSION_PREFIX}write-")
+    assert read_name.startswith(f"{FILE_SHARING_PERMISSION_PREFIX}read-")
+    assert write_name.startswith(f"{FILE_SHARING_PERMISSION_PREFIX}write-")
 
 
 @pytest.mark.parametrize(

@@ -18,7 +18,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
@@ -32,6 +31,10 @@ from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
+from imbue.mngr_latchkey.devices import DesktopDeviceId
+from imbue.mngr_latchkey.file_sharing import FileSharingAccess
+from imbue.mngr_latchkey.file_sharing import FileSharingGrant
+from imbue.mngr_latchkey.file_sharing import file_sharing_permission_name
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -79,6 +82,13 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
       subclass or talk to a real gateway.
     """
 
+    local_device_id: str = Field(
+        default="",
+        description=(
+            "The desktop the stand-in gateway runs on, which file-sharing grants are minted for. Empty, like a "
+            "gateway not told its device, it refuses to grant file sharing."
+        ),
+    )
     _set_calls: list[RecordedSetPermissionCall] = PrivateAttr(default_factory=list)
     _deleted_request_ids: list[str] = PrivateAttr(default_factory=list)
     _deleted_rule_calls: list[tuple[Path, str]] = PrivateAttr(default_factory=list)
@@ -136,6 +146,8 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
         target: Path,
     ) -> str:
         """Record a file-sharing request; :meth:`approve_permission_request` applies it."""
+        if not self.local_device_id:
+            raise LatchkeyGatewayClientError("file sharing is not configured on this gateway: no local device id")
         request_id = f"fake-request-{len(self._pending_file_shares) + 1}"
         self._pending_file_shares[request_id] = (path, access, target)
         return request_id
@@ -158,7 +170,9 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
         path, access, target = pending
         if override_body is not None and isinstance(override_body.get("path"), str):
             path = str(override_body["path"])
-        permission = f"minds-file-server-{str(access).lower()}-{path}"
+        permission = file_sharing_permission_name(
+            FileSharingGrant(access=access, device_id=DesktopDeviceId(self.local_device_id), path=path)
+        )
         existing = self.get_permissions_config(target)
         granted = [name for rule in existing.rules for name in rule.get(SELF_SCOPE, [])]
         if permission not in granted:
@@ -286,9 +300,6 @@ def build_fake_gateway_client() -> FakeLatchkeyGatewayClient:
     the credentials, so it needs none of them set.
     """
     return FakeLatchkeyGatewayClient()
-
-
-# The latchkey CLI's account surface
 
 
 # AWS is the browser-less service of the catalog below: latchkey cannot sign in

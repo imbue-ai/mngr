@@ -28,8 +28,10 @@ from typing import Final
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.migrations.device_scoped_file_sharing import DeviceScopedFileSharingMigration
 from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigration
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationError
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
@@ -43,7 +45,9 @@ from imbue.mngr_latchkey.store import write_permissions_format_version
 # The migrations this build knows, in the order they apply. Append new ones
 # here, never renumber or reorder existing ones: each entry's version is one
 # more than the last.
-PERMISSIONS_MIGRATIONS: Final[tuple[PermissionsMigration, ...]] = ()
+PERMISSIONS_MIGRATIONS: Final[tuple[PermissionsMigration, ...]] = (
+    DeviceScopedFileSharingMigration(version=PermissionsFormatVersion(1)),
+)
 
 
 @pure
@@ -62,6 +66,7 @@ CURRENT_PERMISSIONS_FORMAT_VERSION: Final[PermissionsFormatVersion] = latest_per
 def migrate_permissions(
     data_dir: Path,
     host_id: HostId,
+    context: PermissionsMigrationContext,
     migrations: Sequence[PermissionsMigration] = PERMISSIONS_MIGRATIONS,
     # whether the policy was rewritten, and so has to reach the host's machine when it has one
 ) -> bool:
@@ -102,7 +107,7 @@ def migrate_permissions(
         if migration.version <= recorded_version:
             continue
         with log_span("Migrating the permissions of host {} to format version {}", host_id, migration.version):
-            permissions = migration.apply(permissions)
+            permissions = migration.apply(permissions, context)
         _save_migrated_permissions(data_dir, host_id, permissions, migration.version)
     return True
 

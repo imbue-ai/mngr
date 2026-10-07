@@ -32,6 +32,8 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
+from imbue.mngr_latchkey.devices import DesktopDeviceId
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 _POLL_INTERVAL_SECONDS: Final[float] = 0.05
@@ -364,6 +366,12 @@ def read_deb_control_field(content: bytes, field_name: str) -> str:
         if line.startswith(f"{field_name}: "):
             return line.removeprefix(f"{field_name}: ")
     raise AssertionError(f"no {field_name} field in the control file:\n{control}")
+
+
+# The desktop a test's migrations run as: what grants from before grants named a
+# desktop are attributed to.
+MIGRATING_DEVICE_ID: Final[DesktopDeviceId] = DesktopDeviceId("host-migrating-desktop-5170")
+MIGRATION_CONTEXT: Final[PermissionsMigrationContext] = PermissionsMigrationContext(device_id=MIGRATING_DEVICE_ID)
 
 
 def rule_keys_of_permissions_json(permissions_json: str | None) -> list[str]:

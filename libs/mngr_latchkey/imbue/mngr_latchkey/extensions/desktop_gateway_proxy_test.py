@@ -12,10 +12,10 @@ from typing import Final
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mngr_latchkey.devices import DESKTOP_HEADER
 from imbue.mngr_latchkey.devices import DEVICES_DIR_ENV_VAR
 from imbue.mngr_latchkey.devices import DEVICE_ANNOUNCEMENT_INTERVAL_ENV_VAR
 from imbue.mngr_latchkey.devices import DEVICE_ANNOUNCEMENT_INTERVAL_SECONDS
+from imbue.mngr_latchkey.devices import DEVICE_HEADER
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.devices import DeviceRecord
 from imbue.mngr_latchkey.devices import MULTIPLE_DESKTOPS_MATCHED_HEADER
@@ -121,7 +121,7 @@ def _announce(devices_dir: Path, device_id: str, port: int, seconds_ago: float =
 def _caller_headers(desktop: str | None = None) -> dict[str, str]:
     headers = {_PASSWORD_HEADER: "the-machines-own-password", _OVERRIDE_HEADER: "a-jwt-of-the-callers-choosing"}
     if desktop is not None:
-        headers[DESKTOP_HEADER] = desktop
+        headers[DEVICE_HEADER] = desktop
     return headers
 
 
@@ -174,7 +174,7 @@ def test_a_request_naming_no_desktop_goes_to_the_most_recently_announced_one(tmp
     assert received.headers["x-latchkey-gateway-password"] == "password-of-desktop-newer"
     assert received.headers["x-latchkey-gateway-permissions-override"] == "jwt-of-desktop-newer"
     assert received.headers["authorization"] == "Bearer original"
-    assert "x-latchkey-desktop" not in received.headers
+    assert "x-latchkey-device" not in received.headers
 
 
 def test_a_request_naming_one_desktop_goes_there_and_nowhere_else(tmp_path: Path) -> None:
@@ -188,7 +188,7 @@ def test_a_request_naming_one_desktop_goes_there_and_nowhere_else(tmp_path: Path
     assert json.loads(body)["served_by"] == "b"
     assert server_a.received == []
     assert server_b.received[0].headers["x-latchkey-gateway-password"] == "password-of-desktop-b"
-    assert "x-latchkey-desktop" not in server_b.received[0].headers
+    assert "x-latchkey-device" not in server_b.received[0].headers
 
 
 def test_a_desktop_is_tried_however_long_ago_it_announced_itself(tmp_path: Path) -> None:
@@ -305,7 +305,7 @@ def test_a_plural_request_that_comes_down_to_one_desktop_answers_with_its_respon
         "password-of-desktop-a",
         "password-of-desktop-a",
     ]
-    assert all("x-latchkey-desktop" not in received.headers for received in server_a.received)
+    assert all("x-latchkey-device" not in received.headers for received in server_a.received)
 
 
 def test_a_plural_request_that_comes_down_to_one_unreachable_desktop_answers_502_by_name(tmp_path: Path) -> None:
@@ -336,19 +336,19 @@ def test_a_plural_request_that_comes_down_to_no_desktop_answers_503(tmp_path: Pa
     assert (all_status, json.loads(all_body)["error"]) == (503, "No desktop has announced itself to this machine.")
     assert (listed_status, json.loads(listed_body)["error"]) == (
         503,
-        f"None of the desktops {DESKTOP_HEADER} names (desktop-nobody, desktop-else) is known to this gateway.",
+        f"None of the desktops {DEVICE_HEADER} names (desktop-nobody, desktop-else) is known to this gateway.",
     )
     assert MULTIPLE_DESKTOPS_MATCHED_HEADER.lower() not in all_headers
     assert MULTIPLE_DESKTOPS_MATCHED_HEADER.lower() not in listed_headers
     assert server_a.received == []
 
 
-def test_a_desktop_header_mixing_all_with_names_is_refused(tmp_path: Path) -> None:
+def test_a_device_header_mixing_all_with_names_is_refused(tmp_path: Path) -> None:
     with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
         status, body = http_request(f"{gateway_url}/permissions/self", headers=_caller_headers("*, desktop-a"))
 
     assert status == 400
-    assert DESKTOP_HEADER in json.loads(body)["error"]
+    assert DEVICE_HEADER in json.loads(body)["error"]
 
 
 def test_a_record_that_is_not_a_desktops_announcement_is_ignored(tmp_path: Path) -> None:

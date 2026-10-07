@@ -79,6 +79,7 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.devices import DesktopDeviceIdentity
 from imbue.mngr_latchkey.devices import DeviceRecord
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.remote._machine import announce_device
 from imbue.mngr_latchkey.remote.provisioning import DEFAULT_REMOTE_PACKAGE_LAYOUT
 from imbue.mngr_latchkey.remote.provisioning import provision_remote_gateway
@@ -1144,6 +1145,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 latchkey=self.latchkey,
                 desktop_gateway_password=self.latchkey.derive_gateway_password(),
                 package_layout=DEFAULT_REMOTE_PACKAGE_LAYOUT,
+                migration_context=PermissionsMigrationContext(device_id=self.device.device_id),
             )
             # The machine has the command now, and this computer's tunnel is
             # up: tell it which port is this computer's before the next cycle

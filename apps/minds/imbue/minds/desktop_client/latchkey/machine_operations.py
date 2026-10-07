@@ -46,6 +46,8 @@ from imbue.minds.desktop_client.latchkey.machine_access import MachineUnreachabl
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.devices import DesktopDeviceId
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
 from imbue.mngr_latchkey.remote.credentials import read_host_permissions
@@ -109,7 +111,7 @@ class MachineOperator(MutableModel):
         """
         with self._machine(workspace_agent_id, "read that workspace's connections") as machine:
             if machine is not None:
-                machine.refresh()
+                machine.refresh(PermissionsMigrationContext(device_id=DesktopDeviceId(self.access.device_id)))
 
     def connect_service(self, workspace_agent_id: str, service_name: str, account: str) -> None:
         """Hand an account just connected here to the workspace's machine.

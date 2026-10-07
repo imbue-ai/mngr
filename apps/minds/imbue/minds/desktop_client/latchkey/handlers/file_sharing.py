@@ -9,8 +9,10 @@ appending the response event, and nudging the request's chat with the
 verdict (:mod:`.messaging`).
 
 A file-sharing permission request asks the user to grant the agent
-access to a single absolute file path on the desktop host, served
-through the ``minds-api-proxy`` Latchkey extension. Unlike its
+access to a single absolute file path on this desktop, served
+through the ``minds-api-proxy`` Latchkey extension under this desktop's
+device id. A request always concerns the desktop it reached: the gateway
+mints the grant for its own device id, and the verdict names it. Unlike its
 :mod:`.predefined` sibling, there is no per-permission checkbox list:
 the request already names the single (path, access) pair. The dialog
 does, however, let the user *edit the shared path* before approving
@@ -55,7 +57,6 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import resolve_workspace_display_name
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
-from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
@@ -80,6 +81,7 @@ from imbue.minds.desktop_client.webdav import get_file_sharing_roots
 from imbue.minds.errors import FolderSyncError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 
 # Label shown on the inbox list card (lower-case, short).
 _KIND_LABEL: Final[str] = "file sharing"
@@ -188,8 +190,11 @@ def _access_human_label(access: str) -> str:
     return access
 
 
-def _format_granted_message(file_path: str, access: str) -> str:
-    return f"Your {_access_human_label(access)} file-sharing permission request for '{file_path}' was granted."
+def _format_granted_message(file_path: str, access: str, device_id: str) -> str:
+    return (
+        f"Your {_access_human_label(access)} file-sharing permission request for '{file_path}' "
+        f"on device {device_id} was granted."
+    )
 
 
 def _format_sync_started_note(workspace_path: str) -> str:
@@ -215,8 +220,11 @@ def _parse_sync_choice(form: Mapping[str, str]) -> _SyncChoice:
     return _SyncChoice.model_validate(raw)
 
 
-def _format_denied_message(file_path: str, access: str) -> str:
-    return f"Your {_access_human_label(access)} file-sharing permission request for '{file_path}' was denied."
+def _format_denied_message(file_path: str, access: str, device_id: str) -> str:
+    return (
+        f"Your {_access_human_label(access)} file-sharing permission request for '{file_path}' "
+        f"on device {device_id} was denied."
+    )
 
 
 class FileSharingGrantHandler(RequestEventHandler):
@@ -373,8 +381,8 @@ class FileSharingGrantHandler(RequestEventHandler):
                 return make_json_error_response(unavailable_reason, status_code=400)
 
         # Only send an override to the gateway when the user actually
-        # changed the path; otherwise the gateway applies the precomputed
-        # effect verbatim (and we avoid recomputation for the common case).
+        # changed the path; otherwise the gateway grants the path the
+        # request named.
         override_path = effective_path if effective_path != payload.path else None
         try:
             self.gateway_client.approve_permission_request(
@@ -405,9 +413,9 @@ class FileSharingGrantHandler(RequestEventHandler):
             )
             return make_json_error_response(str(e), status_code=502)
 
-        message = _format_granted_message(effective_path, str(payload.access)) + self._start_sync_if_asked(
-            manager, permission_request, workspace_agent_id, effective_path, sync_choice
-        )
+        message = _format_granted_message(
+            effective_path, str(payload.access), get_state().device_id
+        ) + self._start_sync_if_asked(manager, permission_request, workspace_agent_id, effective_path, sync_choice)
         resolve_request(
             self.mngr_message_sender,
             self.data_dir,
@@ -442,7 +450,7 @@ class FileSharingGrantHandler(RequestEventHandler):
                 e,
             )
 
-        message = _format_denied_message(payload.path, str(payload.access))
+        message = _format_denied_message(payload.path, str(payload.access), get_state().device_id)
         resolve_request(
             self.mngr_message_sender,
             self.data_dir,

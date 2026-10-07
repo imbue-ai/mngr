@@ -116,6 +116,7 @@ from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import save_permissions
+from imbue.mngr_latchkey.testing import MIGRATION_CONTEXT
 from imbue.mngr_vps.container_setup import OUTER_HOST_ADD_HOST_ARGS
 
 # Opt-in gate; see the module docstring for why this is not enabled by default.
@@ -940,7 +941,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             ).read_text()
             with _machine_of(env, latchkey_directory, latchkey_binary, host_id) as machine:
                 machine.connect_service_with_permissions(_GRANTED_SERVICE, "", granted_policy)
-                fetched = machine.refresh()
+                fetched = machine.refresh(MIGRATION_CONTEXT)
 
             vps_permissions = _run_on_vps(ssh_config_path, f"cat {_VPS_PERMISSIONS_PATH}").stdout
             assert _GRANTED_SCOPE in vps_permissions, (

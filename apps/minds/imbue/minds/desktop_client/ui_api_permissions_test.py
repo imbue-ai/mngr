@@ -38,6 +38,7 @@ from imbue.minds.desktop_client.testing import create_accounts_permission_reques
 from imbue.minds.desktop_client.testing import create_file_sharing_permission_request
 from imbue.minds.desktop_client.testing import create_predefined_permission_request
 from imbue.minds.desktop_client.testing import create_workspace_permission_request
+from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -58,12 +59,12 @@ _ACCOUNT: str = "alice@example.com"
 # Generous: the stand-in mngr has to be spawned and answer before this elapses.
 _START_TIMEOUT_SECONDS: float = 20.0
 _WORKSPACE_NAME: str = "My Machine"
-_SHARED_PATH_PERMISSION: str = "minds-file-server-read-/Users/me/notes"
+_DEVICE_ID: str = "device-2b9d64"
+_SHARED_PATH_PERMISSION: str = f"minds-file-server-read-{_DEVICE_ID}:/Users/me/notes"
 # A ``latchkey-self`` name this screen does not own; every self-toggle write
 # must leave it exactly where it was.
 _BASELINE_PERMISSION: str = "minds-api-proxy-call-agent-123"
 _AWS_CREDENTIALS = {"access-key-id": "AKIAEXAMPLE", "secret-access-key": "s3cret"}
-_DEVICE_ID: str = "device-2b9d64"
 
 
 class _UnreachableGatewayClient(FakeLatchkeyGatewayClient):
@@ -114,7 +115,7 @@ def _build_client(
     host_by_agent: dict[str, str] | None = None,
     folder_sync_manager: FolderSyncManager | None = None,
     machine_operator: MachineOperator | None = None,
-    device_id: str = "",
+    device_id: str = _DEVICE_ID,
 ) -> FlaskClient:
     resolver = _WorkspaceResolver(
         url_by_agent_and_service={},
@@ -123,7 +124,11 @@ def _build_client(
         name_by_agent={str(agent_id): _WORKSPACE_NAME for agent_id in agent_ids},
         host_by_agent=host_by_agent if host_by_agent is not None else {},
     )
-    handlers = (build_permission_grant_handler(tmp_path, latchkey, gateway_client),) if has_handler else ()
+    # The gateway mints file-sharing grants for the desktop it runs on, which is the one the app is on.
+    resolved_gateway_client = (
+        gateway_client if gateway_client is not None else FakeLatchkeyGatewayClient(local_device_id=device_id)
+    )
+    handlers = (build_permission_grant_handler(tmp_path, latchkey, resolved_gateway_client),) if has_handler else ()
     client, _app, _auth_store = build_desktop_client_for_test(
         tmp_path,
         is_authenticated=is_authenticated,
@@ -174,6 +179,7 @@ def _recording_operator(tmp_path: Path, latchkey: Latchkey, push_refusal: str = 
     return _RecordingMachineOperator(
         access=MachineAccess(
             latchkey=latchkey,
+            device_id=device_id_for_test("permissions"),
             concurrency_group=ConcurrencyGroup(name="test-machine-access"),
             backend_resolver=MngrCliBackendResolver(),
         ),
@@ -469,6 +475,27 @@ def test_self_toggle_rejects_a_permission_the_screen_does_not_own(tmp_path: Path
     assert load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id)).rules == (
         {SELF_SCOPE: [_BASELINE_PERMISSION]},
     )
+
+
+def test_self_toggle_rejects_another_desktops_shared_path(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    other_desktops_permission = "minds-file-server-read-host-other-desktop-7c1e:/Users/other/notes"
+    policy = LatchkeyPermissionsConfig(
+        rules=({SELF_SCOPE: [other_desktops_permission]},), schemas={other_desktops_permission: {"type": "object"}}
+    )
+    save_permissions(permissions_path, policy)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/self-toggle",
+        json={"permission": other_desktops_permission, "enabled": False},
+    )
+
+    assert response.status_code == 400
+    assert "host-other-desktop-7c1e" in json.loads(response.data)["error"]
+    assert load_permissions(permissions_path).rules == policy.rules
 
 
 def test_connector_revoke_all_drops_every_grant_for_the_account(tmp_path: Path) -> None:
@@ -942,7 +969,7 @@ def test_disconnect_leaves_desktop_egress_grants_in_place(tmp_path: Path) -> Non
     agent_id, host_id = AgentId(), HostId()
     latchkey = _latchkey(tmp_path)
     permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
-    gateway_client = build_fake_gateway_client()
+    gateway_client = FakeLatchkeyGatewayClient(local_device_id=_DEVICE_ID)
     gateway_client.set_permission_rule(
         permissions_path, *build_account_grant("slack-api", _ACCOUNT, ("slack-chat-read",))
     )
@@ -1155,7 +1182,7 @@ def test_workspace_permissions_rejects_a_malformed_workspace_id(tmp_path: Path) 
 
 def _seed_shared_path_grant(tmp_path: Path, latchkey: FakeAccountsLatchkey, host_id: HostId, path: str) -> None:
     """Give the machine one granted shared path, so its row is in the payload."""
-    permission = f"minds-file-server-read-{path}"
+    permission = f"minds-file-server-read-{_DEVICE_ID}:{path}"
     save_permissions(
         permissions_path_for_host(latchkey.plugin_data_dir, host_id),
         LatchkeyPermissionsConfig(rules=({SELF_SCOPE: [permission]},), schemas={permission: {"type": "object"}}),
@@ -1304,7 +1331,7 @@ def test_sharing_a_new_path_files_the_grant_against_the_workspaces_own_file(tmp_
     assert response.status_code == 200
     assert _shared_path_row(json.loads(response.data), str(shared))["access"] == "WRITE"
     granted = [name for rule in load_permissions(permissions_path).rules for name in rule.get(SELF_SCOPE, [])]
-    assert f"minds-file-server-write-{shared}" in granted
+    assert f"minds-file-server-write-{_DEVICE_ID}:{shared}" in granted
 
 
 def test_sharing_a_path_hands_the_grant_to_the_workspaces_own_machine(tmp_path: Path) -> None:
@@ -1393,7 +1420,7 @@ def test_narrowing_access_to_read_drops_the_wider_grant(tmp_path: Path) -> None:
     permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
     shared = tmp_path / "notes"
     shared.mkdir()
-    write_name = f"minds-file-server-write-{shared}"
+    write_name = f"minds-file-server-write-{_DEVICE_ID}:{shared}"
     save_permissions(
         permissions_path,
         LatchkeyPermissionsConfig(rules=({SELF_SCOPE: [write_name]},), schemas={write_name: {"type": "object"}}),
@@ -1415,8 +1442,8 @@ def test_removing_a_shared_path_drops_every_access_mode(tmp_path: Path) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _latchkey(tmp_path)
     permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
-    read_name = "minds-file-server-read-/Users/me/notes"
-    write_name = "minds-file-server-write-/Users/me/notes"
+    read_name = f"minds-file-server-read-{_DEVICE_ID}:/Users/me/notes"
+    write_name = f"minds-file-server-write-{_DEVICE_ID}:/Users/me/notes"
     save_permissions(
         permissions_path,
         LatchkeyPermissionsConfig(
@@ -1441,8 +1468,8 @@ def test_a_path_held_at_both_access_modes_is_one_row_showing_the_wider(tmp_path:
     """WRITE already implies READ, so two grants are still one thing the user shared."""
     agent_id, host_id = AgentId(), HostId()
     latchkey = _latchkey(tmp_path)
-    read_name = "minds-file-server-read-/Users/me/notes"
-    write_name = "minds-file-server-write-/Users/me/notes"
+    read_name = f"minds-file-server-read-{_DEVICE_ID}:/Users/me/notes"
+    write_name = f"minds-file-server-write-{_DEVICE_ID}:/Users/me/notes"
     save_permissions(
         permissions_path_for_host(latchkey.plugin_data_dir, host_id),
         LatchkeyPermissionsConfig(
@@ -1458,6 +1485,89 @@ def test_a_path_held_at_both_access_modes_is_one_row_showing_the_wider(tmp_path:
     assert payload["shared_paths"][0]["access"] == "WRITE"
 
 
+# CLEANUP: drop the three tests of grants from before devices below with the code they cover, once
+# no policy carries a device-less file-sharing grant.
+def test_a_path_shared_before_devices_is_a_row_with_or_without_this_desktops_twin(tmp_path: Path) -> None:
+    """This desktop serves both at the device-less URL, so both are shared from it."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    migrated_names = (
+        "minds-file-server-write-/Users/me/notes",
+        f"minds-file-server-write-{_DEVICE_ID}:/Users/me/notes",
+    )
+    unmigrated_name = "minds-file-server-read-/Users/me/drafts"
+    save_permissions(
+        permissions_path_for_host(latchkey.plugin_data_dir, host_id),
+        LatchkeyPermissionsConfig(
+            rules=({SELF_SCOPE: [*migrated_names, unmigrated_name]},),
+            schemas={name: {"type": "object"} for name in (*migrated_names, unmigrated_name)},
+        ),
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)
+
+    assert [(row["path"], row["access"]) for row in payload["shared_paths"]] == [
+        ("/Users/me/drafts", "READ"),
+        ("/Users/me/notes", "WRITE"),
+    ]
+
+
+def test_removing_a_shared_path_drops_its_grants_from_before_devices_too(tmp_path: Path) -> None:
+    """Otherwise the path stays reachable at the device-less URL after its row is gone."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    names = (
+        "minds-file-server-read-/Users/me/notes",
+        f"minds-file-server-read-{_DEVICE_ID}:/Users/me/notes",
+        "minds-file-server-write-/Users/me/notes",
+    )
+    save_permissions(
+        permissions_path,
+        LatchkeyPermissionsConfig(
+            rules=({SELF_SCOPE: [_BASELINE_PERMISSION, *names]},),
+            schemas={name: {"type": "object"} for name in names},
+        ),
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/shared-path-remove",
+        json={"path": "/Users/me/notes"},
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["shared_paths"] == []
+    assert load_permissions(permissions_path).rules == ({SELF_SCOPE: [_BASELINE_PERMISSION]},)
+
+
+def test_narrowing_access_to_read_drops_the_wider_grant_from_before_devices_too(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    shared = tmp_path / "notes"
+    shared.mkdir()
+    names = (f"minds-file-server-write-{shared}", f"minds-file-server-write-{_DEVICE_ID}:{shared}")
+    save_permissions(
+        permissions_path,
+        LatchkeyPermissionsConfig(
+            rules=({SELF_SCOPE: list(names)},), schemas={name: {"type": "object"} for name in names}
+        ),
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/shared-path",
+        json={"path": str(shared), "access": "READ"},
+    )
+
+    assert response.status_code == 200
+    assert _shared_path_row(json.loads(response.data), str(shared))["access"] == "READ"
+    granted = [name for rule in load_permissions(permissions_path).rules for name in rule.get(SELF_SCOPE, [])]
+    assert granted == [f"minds-file-server-read-{_DEVICE_ID}:{shared}"]
+
+
 def test_a_folder_inside_a_synced_one_is_offered_with_the_reason_it_cannot_sync(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
@@ -1469,7 +1579,7 @@ def test_a_folder_inside_a_synced_one_is_offered_with_the_reason_it_cannot_sync(
     inner = outer / "subfolder"
     inner.mkdir(parents=True)
     manager = _folder_sync_manager(tmp_path, root_concurrency_group, agent_id)
-    permissions = tuple(f"minds-file-server-read-{path}" for path in (str(outer), str(inner)))
+    permissions = tuple(f"minds-file-server-read-{_DEVICE_ID}:{path}" for path in (str(outer), str(inner)))
     save_permissions(
         permissions_path_for_host(latchkey.plugin_data_dir, host_id),
         LatchkeyPermissionsConfig(

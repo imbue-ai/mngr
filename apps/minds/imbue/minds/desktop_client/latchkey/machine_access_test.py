@@ -15,6 +15,7 @@ from imbue.minds.desktop_client.latchkey.machine_access import MachineUnreachabl
 from imbue.minds.desktop_client.latchkey.machine_access import _load_provider_context
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
+from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.pre_readers import get_user_config_path
@@ -87,6 +88,7 @@ def _access(tmp_path: Path, provider: _StubProvider) -> tuple[MachineAccess, Hos
 
     access = _PinnedAccess(
         latchkey=latchkey,
+        device_id=device_id_for_test("machine-access"),
         concurrency_group=ConcurrencyGroup(name="machine-access-test"),
         backend_resolver=FixedHostBackendResolver(
             url_by_agent_and_service={}, fixed_host_id=host_id, known_agent_ids=(agent_id,)
@@ -167,6 +169,7 @@ def _settings_only_access(
         with ConcurrencyGroup(name="machine-access-settings-test") as concurrency_group:
             yield access_class(
                 latchkey=FakeAccountsLatchkey(latchkey_directory=latchkey_directory, latchkey_binary="/nonexistent"),
+                device_id=device_id_for_test("machine-access"),
                 concurrency_group=concurrency_group,
                 backend_resolver=FixedHostBackendResolver(
                     url_by_agent_and_service={}, fixed_host_id=HostId.generate(), known_agent_ids=()

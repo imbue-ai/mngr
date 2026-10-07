@@ -461,6 +461,7 @@ def run(
     machine_operator = MachineOperator(
         access=MachineAccess(
             latchkey=latchkey,
+            device_id=device_id,
             concurrency_group=root_concurrency_group,
             # The resolver itself, not a lookup through the app state: machine
             # operations also run on background threads (an auto-registration

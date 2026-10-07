@@ -129,6 +129,7 @@ def _build_authenticated_client(
         pending_requests=inbox,
         request_event_handlers=(handler,),
         folder_sync_manager=folder_sync_manager,
+        device_id=_DEVICE_ID,
     )
     client = app.test_client()
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
@@ -577,10 +578,11 @@ def test_deny_calls_gateway_delete_writes_response_notifies_agent(tmp_path: Path
     assert len(response_events) == 1
     assert response_events[0].status == "DENIED"
 
-    # Agent notified, with the access mode in the message text.
+    # Agent notified, with the access mode and the device in the message text.
     assert len(sender.sent_messages) == 1
     assert "/home/user/secret.txt" in sender.sent_messages[0][1]
     assert "read-only" in sender.sent_messages[0][1]
+    assert f"on device {_DEVICE_ID}" in sender.sent_messages[0][1]
 
 
 def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) -> None:
@@ -793,7 +795,7 @@ def test_grant_says_nothing_about_syncing_when_nobody_asked(
     assert response.status_code == 200, response.text
     assert (
         response.get_json()["message"]
-        == f"Your read & write file-sharing permission request for '{folder}' was granted."
+        == f"Your read & write file-sharing permission request for '{folder}' on device {_DEVICE_ID} was granted."
     )
 
 

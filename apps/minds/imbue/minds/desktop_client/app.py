@@ -2578,12 +2578,12 @@ def create_desktop_client(
         # gateway-reachable /api/v* surface; default-allowed for agents).
         app.register_blueprint(create_api_schema_blueprint())
         # Mount the WebDAV file server (a WSGI app) under /api/v1/files via
-        # Werkzeug's dispatcher. Each share root maps URL-path == on-disk-path
-        # (``~`` and ``/tmp``); the mount is gated by the same central-key
-        # Bearer check that protects the rest of /api/v1, resolving
+        # Werkzeug's dispatcher. Below this device's id, each share root maps
+        # URL-path == on-disk-path (``~`` and ``/tmp``); the mount is gated by
+        # the same central-key Bearer check that protects the rest of /api/v1, resolving
         # ``minds_api_key`` from the app's state on every request so the gate
         # stays in sync if a future code path ever rotates the key.
-        webdav_app = create_webdav_app(_MindsApiKeyProvider(app=app))
+        webdav_app = create_webdav_app(_MindsApiKeyProvider(app=app), device_id)
         # The standard Flask sub-app mount pattern; ``wsgi_app`` is typed as the
         # bound method, so assigning a WSGI middleware over it trips the checker.
         app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/api/v1/files": webdav_app})  # ty: ignore[invalid-assignment]

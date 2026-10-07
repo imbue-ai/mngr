@@ -23,7 +23,7 @@
  * fast. Records are read afresh on every request, so a desktop connecting or
  * leaving takes effect without a gateway restart.
  *
- * Which desktop a forwarded request is for is the ``X-Latchkey-Desktop``
+ * Which desktop a forwarded request is for is the ``X-Latchkey-Device``
  * header: absent, the most recently announced desktop (which is what every
  * workspace built before the header did); one device id; ``*`` for every
  * desktop the gateway knows; or a comma-separated list of device ids, of which
@@ -53,7 +53,7 @@ const DEVICE_RECORD_SUFFIX = '.json';
 // Where a desktop's tunnel binds on the machine.
 const LOOPBACK_HOST = '127.0.0.1';
 
-const DESKTOP_HEADER = 'X-Latchkey-Desktop';
+const DEVICE_HEADER = 'X-Latchkey-Device';
 const ALL_DESKTOPS = '*';
 const MULTIPLE_DESKTOPS_MATCHED_HEADER = 'X-Latchkey-Multiple-Desktops-Matched';
 const GATEWAY_PASSWORD_HEADER = 'X-Latchkey-Gateway-Password';
@@ -190,11 +190,11 @@ function isProxyRoute(pathOnly) {
 }
 
 /**
- * What the X-Latchkey-Desktop header asks for: ``{kind: 'default'}``, ``{kind:
+ * What the X-Latchkey-Device header asks for: ``{kind: 'default'}``, ``{kind:
  * 'all'}``, ``{kind: 'one', deviceId}`` or ``{kind: 'many', deviceIds}``.
  */
-function parseDesktopHeader(request) {
-  const raw = request.headers[DESKTOP_HEADER.toLowerCase()];
+function parseDeviceHeader(request) {
+  const raw = request.headers[DEVICE_HEADER.toLowerCase()];
   const value = (Array.isArray(raw) ? raw.join(',') : raw ?? '').trim();
   if (value.length === 0) return { kind: 'default' };
   if (value === ALL_DESKTOPS) return { kind: 'all' };
@@ -203,7 +203,7 @@ function parseDesktopHeader(request) {
   if (deviceIds.length === 0 || deviceIds.includes(ALL_DESKTOPS)) {
     throw new DesktopRoutingError(
       400,
-      `The ${DESKTOP_HEADER} header must name one desktop, a comma-separated list of desktops, or '*' for all of them.`,
+      `The ${DEVICE_HEADER} header must name one desktop, a comma-separated list of desktops, or '*' for all of them.`,
     );
   }
   return { kind: 'many', deviceIds };
@@ -236,7 +236,7 @@ function buildUpstreamHeaders(request, desktop) {
     if (
       HOP_BY_HOP_HEADERS.has(lowerName) ||
       lowerName === 'host' ||
-      lowerName === DESKTOP_HEADER.toLowerCase() ||
+      lowerName === DEVICE_HEADER.toLowerCase() ||
       lowerName === GATEWAY_PASSWORD_HEADER.toLowerCase() ||
       lowerName === PERMISSIONS_OVERRIDE_HEADER.toLowerCase()
     )
@@ -406,7 +406,7 @@ function listDesktops(response, desktops) {
 }
 
 async function routeToDesktops(request, response) {
-  const selection = parseDesktopHeader(request);
+  const selection = parseDeviceHeader(request);
   const desktops = await readAnnouncedDesktops();
 
   if (selection.kind === 'default') {
@@ -423,7 +423,7 @@ async function routeToDesktops(request, response) {
     if (selection.kind === 'all') throw new NoDesktopAnnouncedError();
     throw new DesktopRoutingError(
       503,
-      `None of the desktops ${DESKTOP_HEADER} names (${selection.deviceIds.join(', ')}) is known to this gateway.`,
+      `None of the desktops ${DEVICE_HEADER} names (${selection.deviceIds.join(', ')}) is known to this gateway.`,
     );
   }
   if (targets.length === 1) {

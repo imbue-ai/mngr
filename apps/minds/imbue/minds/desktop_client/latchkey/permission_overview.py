@@ -68,12 +68,6 @@ _WILDCARD_DESCRIPTION = "Unrestricted access: any request to this service is per
 # rule.
 SELF_SCOPE = "latchkey-self"
 
-# File-sharing grants: per-path permission schemas named
-# ``minds-file-server-<access>-<absolute-path>`` (see the gateway's
-# ``permission_requests.mjs``).
-FILE_SHARING_PERMISSION_PREFIX = "minds-file-server-"
-_FILE_SHARING_READ = "read"
-_FILE_SHARING_WRITE = "write"
 # User-facing labels: a write grant is a read+write superset, so it reads as
 # "read and write"; a read-only grant reads as "read".
 FILE_SHARING_READ_LABEL = "read"
@@ -298,27 +292,6 @@ def disconnect_account(latchkey: Latchkey, service_name: str, account: str) -> b
     # answer reads as "none left": claiming leftover accounts would only
     # suppress the (idempotent) revoke-all cleanup.
     return remaining_info is None or len(remaining_info.accounts) == 0
-
-
-def parse_file_sharing_permission(permission_name: str) -> tuple[str, str] | None:
-    """Split a ``minds-file-server-<access>-<path>`` name into ``(access, path)``.
-
-    Returns ``None`` for any permission name that is not a well-formed
-    file-sharing schema (so unrelated ``latchkey-self`` permissions -- baseline,
-    accounts, workspace verbs -- are ignored). The access mode is the token
-    before the first ``-`` after the prefix; the remainder (which starts with
-    ``/``) is the absolute path.
-    """
-    if not permission_name.startswith(FILE_SHARING_PERMISSION_PREFIX):
-        return None
-    remainder = permission_name[len(FILE_SHARING_PERMISSION_PREFIX) :]
-    access, separator, path = remainder.partition("-")
-    if not separator or access not in (_FILE_SHARING_READ, _FILE_SHARING_WRITE) or not path:
-        return None
-    return access, path
-
-
-# -- Cross-workspace management ("workspace") grants ---------------------------
 
 
 def parse_workspace_permission(permission_name: str) -> tuple[str, str | None] | None:

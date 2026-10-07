@@ -35,7 +35,6 @@ from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
-from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -48,7 +47,6 @@ from pydantic import JsonValue
 from pydantic import PrivateAttr
 from pydantic import model_validator
 
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
@@ -59,6 +57,7 @@ from imbue.mngr_latchkey.custom_services import Scheme
 from imbue.mngr_latchkey.custom_services import validate_credential_header
 from imbue.mngr_latchkey.custom_services import validate_credential_instructions
 from imbue.mngr_latchkey.custom_services import validate_login_flow
+from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 from imbue.mngr_latchkey.forward_supervisor import live_forward_owner
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
@@ -130,21 +129,6 @@ class PredefinedRequestPayload(FrozenModel):
 # requires one and a reader of the permissions file deserves to know the grant
 # did not come from an agent asking.
 _MINDS_SHARE_RATIONALE: Final[str] = "Shared by the user from Imbue Studio."
-
-
-class FileSharingAccess(UpperCaseStrEnum):
-    """Access mode an agent requests for a file-sharing grant.
-
-    ``READ`` unlocks the non-mutating WebDAV verbs only (GET, HEAD,
-    OPTIONS, PROPFIND); ``WRITE`` is a strict superset that also unlocks
-    the verbs that mutate the resource (PUT, DELETE, PROPPATCH, MKCOL,
-    COPY, MOVE, LOCK, UNLOCK). Read-only and read-write grants for the
-    same path live as distinct schemas in the user's permissions.json
-    so the two can be held independently.
-    """
-
-    READ = auto()
-    WRITE = auto()
 
 
 class FileSharingSyncRequest(FrozenModel):

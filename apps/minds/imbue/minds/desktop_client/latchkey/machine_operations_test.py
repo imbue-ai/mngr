@@ -14,9 +14,11 @@ from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperat
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
+from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote.credentials import FetchedMachineState
@@ -40,7 +42,7 @@ class _RecordingMachine(MachineCredentials):
         default="", description="When set, the reason this computer's own copies cannot be read or written."
     )
 
-    def refresh(self) -> FetchedMachineState:
+    def refresh(self, migration_context: PermissionsMigrationContext) -> FetchedMachineState:
         self._note("refresh")
         return FetchedMachineState(
             credentials=None,
@@ -126,6 +128,7 @@ def _operator(
     )
     access = _RecordedAccess(
         latchkey=latchkey,
+        device_id=device_id_for_test("machine-operations"),
         concurrency_group=ConcurrencyGroup(name="machine-operations-test"),
         backend_resolver=FixedHostBackendResolver(
             url_by_agent_and_service={}, fixed_host_id=host_id, known_agent_ids=(agent_id,)

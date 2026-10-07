@@ -19,7 +19,7 @@ presents when it proxies a request back to that desktop's gateway, which is why
 it lives in RAM beside the machine's own secrets rather than on disk.
 
 The desktop gateway serves the desktop-owned routes itself and ignores
-:data:`DESKTOP_HEADER`; its ``device_list.mjs`` extension answers ``/devices``
+:data:`DEVICE_HEADER`; its ``device_list.mjs`` extension answers ``/devices``
 with the desktop itself (handed to it as :data:`LOCAL_DEVICE_ID_ENV_VAR` and
 :data:`LOCAL_DEVICE_HOSTNAME_ENV_VAR`) as the one device. A machine that
 resolves the header to a single desktop relays that desktop's response
@@ -56,10 +56,10 @@ DEVICE_ANNOUNCEMENT_INTERVAL_SECONDS: Final[int] = 30
 # The header an agent names the desktop(s) a desktop-owned request is for:
 # one device id, a comma-separated list of them (unknown ones ignored), or
 # ``*`` for every desktop the gateway knows. Absent, the request goes to the
-# most recently announced desktop, which is what every agent built before
+# most recently announced desktop, which is what every agent created before
 # the header did. Only a machine's gateway reads it.
-DESKTOP_HEADER: Final[str] = "X-Latchkey-Desktop"
-DESKTOP_HEADER_ALL_DEVICES: Final[str] = "*"
+DEVICE_HEADER: Final[str] = "X-Latchkey-Device"
+DEVICE_HEADER_ALL_DEVICES: Final[str] = "*"
 # The response header marking an answer as the array of several desktops'
 # responses rather than one desktop's own response.
 MULTIPLE_DESKTOPS_MATCHED_HEADER: Final[str] = "X-Latchkey-Multiple-Desktops-Matched"

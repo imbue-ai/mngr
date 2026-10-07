@@ -2,16 +2,25 @@
 
 Backed by `wsgidav <https://wsgidav.readthedocs.io/>`.
 
-Two share roots are exposed:
+Every path starts with this desktop's device id, so that the user's
+desktops each serve their own files under a URL no other desktop answers
+(a remote workspace's gateway can reach several of them). Anything under
+another device id is refused with 404. Below the device id, two share
+roots are exposed:
 
 * the current user's home directory (``Path.home()``); and
 * ``/tmp``.
 
 Each share is mounted at its own absolute path so that the outward URL
-mirrors the on-disk path one-to-one: a file at ``/home/<user>/foo.txt``
-is reached via ``/api/v1/files/home/<user>/foo.txt``, a file at
-``/tmp/blob.bin`` via ``/api/v1/files/tmp/blob.bin``. Paths outside
-those two roots are not served.
+mirrors the on-disk path one-to-one: on desktop ``host-abc``, a file at
+``/home/<user>/foo.txt`` is reached via
+``/api/v1/files/host-abc/home/<user>/foo.txt``, a file at
+``/tmp/blob.bin`` via ``/api/v1/files/host-abc/tmp/blob.bin``. Paths
+outside those two roots are not served.
+
+The same files are also served without the device id
+(``/api/v1/files/home/<user>/foo.txt``), which is where they lived before
+desktops were told apart and where workspaces built then still look.
 
 Authentication piggy-backs on the same central-key Bearer-token check
 that gates the rest of ``/api/v1/...`` (see :mod:`api_key_auth`): a
@@ -22,9 +31,11 @@ the network and the filesystem. WsgiDAV is already a WSGI app, so it is
 mounted directly via Werkzeug's ``DispatcherMiddleware`` (no ASGI bridge).
 """
 
+import json
 import tempfile
 from collections.abc import Callable
 from collections.abc import Iterable
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -33,9 +44,14 @@ from wsgiref.types import WSGIApplication
 from wsgiref.types import WSGIEnvironment
 
 from loguru import logger
+from pydantic import ConfigDict
+from pydantic import Field
+from pydantic import SkipValidation
 from wsgidav.fs_dav_provider import FilesystemProvider
 from wsgidav.wsgidav_app import WsgiDAVApp
 
+from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.api_key_auth import is_request_authenticated
 
 # Callable that resolves the current central Imbue Studio API key. Wrapped so
@@ -72,6 +88,65 @@ def _build_bearer_auth_gate(inner: WSGIApplication, expected_key_provider: Expec
         return inner(environ, start_response)
 
     return app
+
+
+class _DeviceGate(FrozenModel):
+    """WSGI middleware letting through only requests under ``/<device_id>``, with that segment moved onto the mount.
+
+    WsgiDAV then serves the path below the device id. An empty ``device_id``
+    (an app built without one) serves nothing under a device id.
+
+    A path that starts with no device id but is under a share root is let
+    through as it is: that is the URL workspaces built before desktops were
+    told apart ask for.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    inner: SkipValidation[WSGIApplication] = Field(
+        frozen=True, description="The WebDAV app serving this desktop's files."
+    )
+    device_id: str = Field(frozen=True, description="This desktop's device id; empty when the app has none.")
+    # CLEANUP: drop this field, the branch of ``__call__`` that reads it, ``_is_under_any_share_root``
+    # and what this module's docstrings say about the device-less URL once no supported workspace
+    # reaches shared files through that URL.
+    share_roots: tuple[Path, ...] = Field(
+        frozen=True, description="The roots the WebDAV app serves, which a device-less path has to be under."
+    )
+
+    def __call__(self, environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
+        path = str(environ.get("PATH_INFO", ""))
+        requested_device_id, separator, path_below_device = path.lstrip("/").partition("/")
+        if self.device_id and requested_device_id == self.device_id:
+            device_environ = {
+                **environ,
+                "SCRIPT_NAME": f"{environ.get('SCRIPT_NAME', '')}/{requested_device_id}",
+                "PATH_INFO": f"/{path_below_device}" if separator else "",
+            }
+            return self.inner(device_environ, start_response)
+        if _is_under_any_share_root(path, self.share_roots):
+            return self.inner(environ, start_response)
+        message = (
+            f"This desktop is {self.device_id}; it only serves files under /api/v1/files/{self.device_id}/."
+            if self.device_id
+            else "File sharing is unavailable: this desktop has no device id."
+        )
+        body = json.dumps({"error": message}).encode()
+        start_response(
+            "404 Not Found",
+            [("Content-Type", "application/json"), ("Content-Length", str(len(body)))],
+        )
+        return [body]
+
+
+@pure
+def _is_under_any_share_root(path: str, share_roots: Sequence[Path]) -> bool:
+    """Whether ``path`` is one of ``share_roots`` or below one, compared the case-insensitive way WsgiDAV matches shares."""
+    lowercased_path = path.lower()
+    return any(
+        lowercased_path == str(root).lower() or lowercased_path.startswith(f"{str(root).lower()}/")
+        for root in share_roots
+    )
 
 
 def _build_wsgidav_config(share_roots: tuple[Path, ...]) -> dict[str, Any]:
@@ -128,11 +203,12 @@ def get_file_sharing_roots() -> tuple[Path, ...]:
     return (Path.home(), Path(tempfile.gettempdir()))
 
 
-def create_webdav_app(expected_key_provider: ExpectedKeyProvider) -> WSGIApplication:
+def create_webdav_app(expected_key_provider: ExpectedKeyProvider, device_id: str) -> WSGIApplication:
     """Build the WSGI app to mount under ``/api/v1/files``.
 
     The returned callable serves ``Path.home()`` and ``tempfile.gettempdir()`` (typically /tmp) via
-    WebDAV, gated by the central minds-api Bearer token resolved through
+    WebDAV under ``/<device_id>`` (and, for workspaces from before desktops were told apart, directly
+    under the mount), gated by the central minds-api Bearer token resolved through
     ``expected_key_provider`` on each request.
     """
     share_roots = get_file_sharing_roots()
@@ -142,4 +218,6 @@ def create_webdav_app(expected_key_provider: ExpectedKeyProvider) -> WSGIApplica
         "Mounted WebDAV file server with shares: {}",
         ", ".join(str(root) for root in share_roots),
     )
-    return _build_bearer_auth_gate(wsgi_app, expected_key_provider)
+    return _build_bearer_auth_gate(
+        _DeviceGate(inner=wsgi_app, device_id=device_id, share_roots=share_roots), expected_key_provider
+    )

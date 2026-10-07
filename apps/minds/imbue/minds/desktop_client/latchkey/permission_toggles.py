@@ -74,7 +74,6 @@ from imbue.minds.desktop_client.latchkey.permission_overview import FILE_SHARING
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
 from imbue.minds.desktop_client.latchkey.permission_overview import ServiceSignInOptions
 from imbue.minds.desktop_client.latchkey.permission_overview import account_label
-from imbue.minds.desktop_client.latchkey.permission_overview import parse_file_sharing_permission
 from imbue.minds.desktop_client.latchkey.permission_overview import parse_workspace_permission
 from imbue.minds.desktop_client.latchkey.permission_overview import probe_service_sign_in_options
 from imbue.minds.desktop_client.latchkey.permission_overview import resolve_target_workspace_name
@@ -102,6 +101,11 @@ from imbue.mngr_latchkey.desktop_egress import is_service_routed
 from imbue.mngr_latchkey.desktop_egress import list_desktop_egress_grants
 from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
 from imbue.mngr_latchkey.desktop_egress import serialize_desktop_egress_rules
+from imbue.mngr_latchkey.file_sharing import FileSharingAccess
+from imbue.mngr_latchkey.file_sharing import LegacyFileSharingGrant
+from imbue.mngr_latchkey.file_sharing import legacy_file_sharing_permission_name
+from imbue.mngr_latchkey.file_sharing import parse_file_sharing_permission
+from imbue.mngr_latchkey.file_sharing import parse_legacy_file_sharing_permission
 from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
 from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
@@ -692,7 +696,7 @@ def build_workspace_permissions_view(
         host_id=str(host_id),
         connections=tuple(panel for _, _, panel in sorted(connections, key=lambda row: (row[0], row[1]))),
         available_connections=tuple(sorted(available, key=lambda entry: entry.display_name.lower())),
-        file_sharing_toggles=build_file_sharing_toggles(config),
+        file_sharing_toggles=build_file_sharing_toggles(config, device_id),
         workspace_toggles=build_workspace_toggles(backend_resolver, config),
         is_credential_store_shared=not is_machine_store_of_its_own(latchkey, machine_latchkey),
     )
@@ -710,38 +714,69 @@ def _self_rule_permissions(config: LatchkeyPermissionsConfig) -> tuple[str, ...]
 
 
 @pure
-def build_file_sharing_toggles(config: LatchkeyPermissionsConfig) -> tuple[SelfPermissionToggle, ...]:
-    """Build the Local files toggle rows: granted paths plus revoked-but-restorable ones.
+def build_file_sharing_toggles(
+    config: LatchkeyPermissionsConfig,
+    # This install's device id; empty when the app was built without one, which then lists no paths of its own.
+    device_id: str,
+) -> tuple[SelfPermissionToggle, ...]:
+    """Build the Local files toggle rows: this desktop's granted paths plus its revoked-but-restorable ones.
 
     Candidates are the union of the ``minds-file-server-*`` names on the
     ``latchkey-self`` rule (granted) and the same-shaped names in the file's
     ``schemas`` object -- revocation leaves the per-path schema behind, which is
-    exactly what makes an off toggle re-enableable. Sorted by path, read before
-    write.
+    exactly what makes an off toggle re-enableable. Only grants of this
+    desktop's files are rows: a remote workspace's policy also carries what the
+    user's other desktops shared with it, which this one neither serves nor can
+    sync. Sorted by path, read before write.
+
+    A grant from before grants named a desktop is a row as well while it is
+    granted, because this desktop serves the path it names at the device-less
+    URL. It cannot be turned back on once revoked.
     """
     granted = frozenset(_self_rule_permissions(config))
-    candidates = {name for name in granted if parse_file_sharing_permission(name) is not None}
-    candidates.update(name for name in config.schemas if parse_file_sharing_permission(name) is not None)
-    rows: list[tuple[str, str, SelfPermissionToggle]] = []
-    for name in candidates:
-        parsed = parse_file_sharing_permission(name)
-        if parsed is None:
+    rows: list[tuple[str, FileSharingAccess, SelfPermissionToggle]] = []
+    for name in granted | frozenset(config.schemas):
+        grant = parse_file_sharing_permission(name)
+        if grant is None or grant.device_id != device_id:
             continue
-        access, path = parsed
         rows.append(
             (
-                path,
-                access,
+                grant.path,
+                grant.access,
                 SelfPermissionToggle(
                     permission=name,
-                    label=path,
-                    detail=FILE_SHARING_WRITE_LABEL if access == "write" else FILE_SHARING_READ_LABEL,
+                    label=grant.path,
+                    detail=_file_sharing_access_label(grant.access),
                     is_granted=name in granted,
                     can_enable=name in config.schemas,
                 ),
             )
         )
+    # CLEANUP: drop this loop once no policy carries a device-less file-sharing grant, i.e. once a
+    # permissions migration has deleted them.
+    for name in granted:
+        legacy_grant = parse_legacy_file_sharing_permission(name)
+        if legacy_grant is None:
+            continue
+        rows.append(
+            (
+                legacy_grant.path,
+                legacy_grant.access,
+                SelfPermissionToggle(
+                    permission=name,
+                    label=legacy_grant.path,
+                    detail=_file_sharing_access_label(legacy_grant.access),
+                    is_granted=True,
+                    can_enable=False,
+                ),
+            )
+        )
     return tuple(toggle for _, _, toggle in sorted(rows, key=lambda row: (row[0], row[1])))
+
+
+@pure
+def _file_sharing_access_label(access: FileSharingAccess) -> str:
+    return FILE_SHARING_WRITE_LABEL if access == FileSharingAccess.WRITE else FILE_SHARING_READ_LABEL
 
 
 def build_workspace_toggles(
@@ -1031,12 +1066,18 @@ def compute_self_permissions(
     preserved verbatim, which is why the full list is recomputed here rather
     than trusted from the client. Returns ``None`` when the flip is a no-op.
 
+    Turning a shared path off also drops the grant for the same path and access
+    from before grants named a desktop, which would otherwise keep the path
+    reachable at the device-less URL. Such a name is not itself toggleable, so
+    nothing turns one on.
+
     Raises :class:`PermissionToggleError` for a name outside the toggleable
     families, and for enabling a name whose schema definition is no longer in
     the file (detent would fail the entire permission check on an unresolvable
     reference, taking every ``latchkey-self`` grant down with it).
     """
-    if parse_file_sharing_permission(permission) is None and parse_workspace_permission(permission) is None:
+    file_sharing_grant = parse_file_sharing_permission(permission)
+    if file_sharing_grant is None and parse_workspace_permission(permission) is None:
         raise PermissionToggleError(f"Permission '{permission}' is not toggleable from the permissions screen.")
     current = _self_rule_permissions(config)
     if enabled:
@@ -1048,9 +1089,18 @@ def compute_self_permissions(
                 "ask the agent to request it again.",
             )
         return current + (permission,)
-    if permission not in current:
+    revoked = {permission}
+    # CLEANUP: revoke ``permission`` alone once no policy carries a device-less file-sharing grant, i.e.
+    # once a permissions migration has deleted them.
+    if file_sharing_grant is not None:
+        revoked.add(
+            legacy_file_sharing_permission_name(
+                LegacyFileSharingGrant(access=file_sharing_grant.access, path=file_sharing_grant.path)
+            )
+        )
+    if revoked.isdisjoint(current):
         return None
-    return tuple(name for name in current if name != permission)
+    return tuple(name for name in current if name not in revoked)
 
 
 def apply_self_toggle(

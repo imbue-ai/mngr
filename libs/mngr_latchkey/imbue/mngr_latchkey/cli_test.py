@@ -65,11 +65,14 @@ from imbue.mngr_latchkey.store import acquire_forward_lock
 from imbue.mngr_latchkey.store import forward_lock_path
 from imbue.mngr_latchkey.store import forward_owner_path
 from imbue.mngr_latchkey.store import hosts_dir
+from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import permissions_format_version_path
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import update_forward_owner_gateway_port
 from imbue.mngr_latchkey.store import write_permissions_format_version
+from imbue.mngr_latchkey.testing import MIGRATING_DEVICE_ID
+from imbue.mngr_latchkey.testing import MIGRATION_CONTEXT
 from imbue.mngr_latchkey.testing import write_raw_host_permissions
 
 # A version string the upstream ``Latchkey.initialize`` is happy with.
@@ -971,10 +974,39 @@ def test_the_forward_looks_at_hosts_without_a_machine_and_leaves_the_rest_to_the
     store_machine_encryption_key(latchkey.plugin_data_dir, remote_host_id, generate_machine_encryption_key())
 
     with capture_loguru() as log:
-        _migrate_hosts_without_a_machine(latchkey)
+        _migrate_hosts_without_a_machine(latchkey, MIGRATION_CONTEXT)
 
     assert _left_as_they_are(local_host_id) in log.getvalue()
     assert _left_as_they_are(remote_host_id) not in log.getvalue()
+
+
+def test_the_forward_attributes_a_local_hosts_grants_from_before_devices_to_its_own_device(tmp_path: Path) -> None:
+    latchkey = Latchkey(latchkey_directory=tmp_path / "latchkey")
+    legacy_name = "minds-file-server-read-/tmp/shared-3301"
+    host_id = _host_with_a_policy_here(
+        latchkey,
+        json.dumps(
+            {
+                "rules": [{"latchkey-self": [legacy_name]}],
+                "schemas": {
+                    legacy_name: {
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "pattern": "^/minds-api-proxy/api/v1/files/tmp/shared-3301(/.*)?$",
+                            }
+                        }
+                    }
+                },
+            }
+        ),
+    )
+
+    _migrate_hosts_without_a_machine(latchkey, MIGRATION_CONTEXT)
+
+    assert load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id)).rules == (
+        {"latchkey-self": [legacy_name, f"minds-file-server-read-{MIGRATING_DEVICE_ID}:/tmp/shared-3301"]},
+    )
 
 
 def test_the_forward_keeps_going_when_one_hosts_policy_cannot_be_migrated(tmp_path: Path) -> None:
@@ -986,7 +1018,7 @@ def test_the_forward_keeps_going_when_one_hosts_policy_cannot_be_migrated(tmp_pa
     _stamp_newer_than_this_build(latchkey, newer_host_id)
 
     with capture_loguru() as log:
-        _migrate_hosts_without_a_machine(latchkey)
+        _migrate_hosts_without_a_machine(latchkey, MIGRATION_CONTEXT)
 
     assert f"Failed to migrate the permissions of host {broken_host_id}" in log.getvalue()
     assert _left_as_they_are(newer_host_id) in log.getvalue()
@@ -1001,7 +1033,7 @@ def test_the_forward_skips_a_hosts_directory_that_is_not_a_hosts(tmp_path: Path)
     (stray_dir / permissions_path_for_host(latchkey.plugin_data_dir, host_id).name).write_text('{"rules": []}')
 
     with capture_loguru() as log:
-        _migrate_hosts_without_a_machine(latchkey)
+        _migrate_hosts_without_a_machine(latchkey, MIGRATION_CONTEXT)
 
     assert f"Skipping the data at {stray_dir}" in log.getvalue()
     assert _left_as_they_are(host_id) in log.getvalue()

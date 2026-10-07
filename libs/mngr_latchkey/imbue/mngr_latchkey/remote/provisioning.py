@@ -89,6 +89,7 @@ from imbue.mngr_latchkey.docker_bridge import resolve_docker_bridge_address
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationError
 from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
 from imbue.mngr_latchkey.owner_exec_vm import provision_owner_exec_vm
@@ -188,6 +189,9 @@ def provision_remote_gateway(
     # time is seeded with.
     desktop_gateway_password: str,
     package_layout: RemotePackageLayout,
+    # This computer, which grants from before grants named a desktop are attributed to when the machine's policy is
+    # migrated.
+    migration_context: PermissionsMigrationContext,
 ) -> None:
     """Stand up a VPS-resident latchkey gateway where the agent's container can reach it.
 
@@ -288,10 +292,12 @@ def provision_remote_gateway(
     if state.permissions_json is not None:
         adopt_machine_permissions(latchkey_directory, host_id, state.permissions_json)
         adopt_machine_permissions_format_version(latchkey_directory, host_id, state.permissions_format_version)
-    _migrate_adopted_permissions_and_push(host, latchkey, host_id)
+    _migrate_adopted_permissions_and_push(host, latchkey, host_id, migration_context)
 
 
-def _migrate_adopted_permissions_and_push(host: OuterHostInterface, latchkey: Latchkey, host_id: HostId) -> None:
+def _migrate_adopted_permissions_and_push(
+    host: OuterHostInterface, latchkey: Latchkey, host_id: HostId, migration_context: PermissionsMigrationContext
+) -> None:
     """Bring the policy just adopted from the machine to the format this build reads, and hand it back.
 
     A policy stamped newer than this build knows is left alone with a warning
@@ -305,7 +311,7 @@ def _migrate_adopted_permissions_and_push(host: OuterHostInterface, latchkey: La
             copy here cannot be read back, or the machine does not take it.
     """
     try:
-        migrate_permissions_and_push(host, latchkey, host_id)
+        migrate_permissions_and_push(host, latchkey, host_id, migration_context)
     except PermissionsFormatNewerError as e:
         logger.warning(
             "Leaving the permissions of host {} as its machine holds them; this build cannot migrate them: {}",

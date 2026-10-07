@@ -51,6 +51,7 @@ it must never be conflated with an empty payload.
 """
 
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Sequence
 from typing import Any
 from typing import assert_never
@@ -64,6 +65,7 @@ from pydantic import ValidationError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync import FolderSyncSpec
 from imbue.minds.desktop_client.folder_sync import FolderSyncState
@@ -76,7 +78,6 @@ from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncRecord
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceRequestPayload
-from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
@@ -86,10 +87,8 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPerm
 from imbue.minds.desktop_client.latchkey.machine_latchkey import is_machine_store_of_its_own
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_workspace
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
-from imbue.minds.desktop_client.latchkey.permission_overview import FILE_SHARING_PERMISSION_PREFIX
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
 from imbue.minds.desktop_client.latchkey.permission_overview import disconnect_account
-from imbue.minds.desktop_client.latchkey.permission_overview import parse_file_sharing_permission
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_toggles import PermissionToggleError
 from imbue.minds.desktop_client.latchkey.permission_toggles import WorkspacePermissionsView
@@ -122,6 +121,12 @@ from imbue.minds.desktop_client.ui_models import UiWorkspacePermissions
 from imbue.minds.errors import FolderSyncError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.devices import DesktopDeviceId
+from imbue.mngr_latchkey.file_sharing import FileSharingAccess
+from imbue.mngr_latchkey.file_sharing import FileSharingGrant
+from imbue.mngr_latchkey.file_sharing import file_sharing_permission_name
+from imbue.mngr_latchkey.file_sharing import parse_file_sharing_permission
+from imbue.mngr_latchkey.file_sharing import parse_legacy_file_sharing_permission
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -284,6 +289,25 @@ def _collapse_home(path: str, home_dir: str) -> str:
     return path
 
 
+@pure
+def _widest_access_by_shared_path(granted_permissions: Iterable[str]) -> dict[str, FileSharingAccess]:
+    """The access each shared path is held at, read off the granted ``minds-file-server-*`` names.
+
+    A path can be held at both access modes at once, and WRITE already implies
+    READ, so the wider of the two wins.
+    """
+    access_by_path: dict[str, FileSharingAccess] = {}
+    for permission in granted_permissions:
+        # CLEANUP: read device-scoped names only once no policy carries a device-less file-sharing
+        # grant, i.e. once a permissions migration has deleted them.
+        grant = parse_file_sharing_permission(permission) or parse_legacy_file_sharing_permission(permission)
+        if grant is None:
+            continue
+        if grant.access == FileSharingAccess.WRITE or grant.path not in access_by_path:
+            access_by_path[grant.path] = grant.access
+    return access_by_path
+
+
 def _build_shared_paths(
     toggles: Sequence[UiSelfPermissionToggle],
     manager: FolderSyncManager | None,
@@ -292,21 +316,11 @@ def _build_shared_paths(
 ) -> tuple[UiSharedPath, ...]:
     """Collapse the granted ``minds-file-server-*`` names into one row per path.
 
-    A path can be held at both access modes at once, and WRITE already implies
-    READ, so the row shows the wider of the two. Revoked names are dropped
-    entirely: what this pane lists is what is shared, and removing something
-    takes it off the list rather than leaving a switched-off reminder.
+    Revoked names are dropped entirely: what this pane lists is what is shared,
+    and removing something takes it off the list rather than leaving a
+    switched-off reminder.
     """
-    access_by_path: dict[str, FileSharingAccess] = {}
-    for toggle in toggles:
-        if not toggle.is_granted:
-            continue
-        parsed = parse_file_sharing_permission(toggle.permission)
-        if parsed is None:
-            continue
-        access, path = parsed
-        if access == "write" or path not in access_by_path:
-            access_by_path[path] = FileSharingAccess.WRITE if access == "write" else FileSharingAccess.READ
+    access_by_path = _widest_access_by_shared_path(toggle.permission for toggle in toggles if toggle.is_granted)
     remembered = (
         {} if manager is None else {record.local_path: record for record in manager.remembered_for_agent(agent_id)}
     )
@@ -552,6 +566,12 @@ def _handle_self_toggle(agent_id: str) -> Response:
     except ValidationError as e:
         logger.debug("Rejected a malformed self-toggle body: {}", e)
         return make_json_error_response("permission and enabled are required.", 400)
+    # A grant names the desktop whose file it shares, and only that desktop may change it.
+    grant = parse_file_sharing_permission(toggle_request.permission)
+    if grant is not None and grant.device_id != get_state().device_id:
+        return make_json_error_response(
+            f"'{grant.path}' is shared from device {grant.device_id}; only that desktop can change its access.", 400
+        )
     return _apply_and_refresh(
         agent_id,
         lambda: apply_self_toggle(
@@ -829,19 +849,27 @@ def _set_file_sharing_name(
     access: FileSharingAccess,
     enabled: bool,
 ) -> None:
-    """Turn one ``minds-file-server-<access>-<path>`` name on or off.
+    """Turn one ``minds-file-server-*`` name for a path of this desktop on or off.
 
     Carried to the workspace's own machine like every other permissions edit:
     the file server the name governs runs where the agent does, so a grant this
     computer alone knows about is one the agent cannot use and a revoke it
     alone knows about is one the agent still has.
+
+    Raises :class:`PermissionToggleError` when the app was built without a
+    device id, since a grant names the desktop whose file it shares.
     """
+    device_id = get_state().device_id
+    if not device_id:
+        raise PermissionToggleError("Sharing files is unavailable: this desktop has no device id.")
     apply_self_toggle(
         backend_resolver=get_state().backend_resolver,
         gateway_client=handler.gateway_client,
         latchkey=handler.latchkey,
         workspace_agent_id=agent_id,
-        permission=f"{FILE_SHARING_PERMISSION_PREFIX}{str(access).lower()}-{path}",
+        permission=file_sharing_permission_name(
+            FileSharingGrant(access=access, device_id=DesktopDeviceId(device_id), path=path)
+        ),
         enabled=enabled,
         push_permissions_to_machine=_push_permissions_to_machine(),
     )
@@ -853,10 +881,12 @@ def _revoke_file_sharing_names(
     path: str,
     accesses: Sequence[FileSharingAccess],
 ) -> None:
-    """Turn off the ``minds-file-server-<access>-<path>`` names for ``path``.
+    """Turn off the ``minds-file-server-*`` names for ``path`` on this desktop.
 
-    A name the file never carried is simply not in the recomputed rule, so
-    revoking one that was never granted writes nothing.
+    The names from before grants named a desktop go with them (see
+    :func:`compute_self_permissions`). A name the file never carried is simply
+    not in the recomputed rule, so revoking one that was never granted writes
+    nothing.
     """
     for access in accesses:
         _set_file_sharing_name(agent_id, handler, path, access, enabled=False)
@@ -926,8 +956,6 @@ def _stored_accounts(machine_latchkey: Latchkey, service_name: str) -> frozenset
     return frozenset(entry.account for entry in machine_latchkey.auth_list(is_offline=True).get(service_name, ()))
 
 
-# --- The sync half of a Local files row ---------------------------------------
-#
 # Not routes: the three ``folder-syncs/`` routes live in
 # :mod:`ui_api_folder_syncs`. What is left here is what the *permissions*
 # payload needs in order to draw a row -- each row carries the sync on its
@@ -1034,12 +1062,11 @@ def sync_direction_for(agent_id: str, path: str) -> FolderSyncDirection:
     view = _build_permissions_view_or_none(agent_id)
     if view is None:
         return FolderSyncDirection.TO_WORKSPACE
-    for toggle in view.file_sharing_toggles:
-        if not toggle.is_granted:
-            continue
-        parsed = parse_file_sharing_permission(toggle.permission)
-        if parsed is not None and parsed[1] == path and parsed[0] == "write":
-            return FolderSyncDirection.BOTH
+    access_by_path = _widest_access_by_shared_path(
+        toggle.permission for toggle in view.file_sharing_toggles if toggle.is_granted
+    )
+    if access_by_path.get(path) == FileSharingAccess.WRITE:
+        return FolderSyncDirection.BOTH
     return FolderSyncDirection.TO_WORKSPACE
 
 

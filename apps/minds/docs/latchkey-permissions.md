@@ -462,7 +462,7 @@ therefore knows the user's desktops, and lets a workspace address them:
   connected desktop refreshes its entry every interval, so how stale an entry
   is says how likely that desktop is to answer; the gateway leaves that
   judgement to the caller. Every agent may read it: it is part of the baseline.
-* An `X-Latchkey-Desktop` header on a `/permissions`, `/permission-requests` or
+* An `X-Latchkey-Device` header on a `/permissions`, `/permission-requests` or
   `/minds-api-proxy` request says which desktop it is for: one device id; `*`
   for every desktop; or a comma-separated list of ids, of which unknown ones
   are ignored. When the two plural forms come down to no desktop, the answer
@@ -477,6 +477,28 @@ therefore knows the user's desktops, and lets a workspace address them:
   nothing has to change at once. A desktop that has gone to sleep is refused
   quickly rather than waited on: the machine's sshd drops its tunnel within 90
   seconds of it going quiet.
+
+Sharing files follows from it. Each desktop serves its own files under its
+device id (`/api/v1/files/<device id>/<absolute path>`, refusing any other
+device id with a 404), and a `file-sharing` grant names the desktop whose file
+it shares: the desktop gateway that receives the request mints it for its own
+device id, so a workspace asks a particular desktop for a path by sending the
+request there, and one desktop can never grant access to another's files. The
+grant message names the device. A desktop's **Local files** pane lists only
+its own grants, since a remote workspace's policy also carries what the user's
+other desktops shared with it.
+
+Workspaces built before desktops were told apart keep working. They reach a
+shared file at `/api/v1/files/<absolute path>`, with no device id, and each
+desktop still serves its files there too. The grants made back then still
+permit that URL: the migration that brought the policy up to date left each of
+them in place and added a twin naming the desktop that first read the policy
+afterwards (see "Data-format changes" in `libs/mngr_latchkey/README.md`), so the
+same share is also reachable at the new URL. Nothing mints such a grant any
+more: a share approved today names its desktop, whichever workspace asked. In
+**Local files** an old grant is part of its path's row, on every desktop,
+because every desktop answers the old URL; removing the row, or narrowing it to
+read, revokes the old grant along with this desktop's own.
 
 A local workspace sees the same: its desktop gateway lists this computer as
 the one desktop and answers every request itself, whatever the header says,

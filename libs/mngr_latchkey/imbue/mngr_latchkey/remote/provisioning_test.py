@@ -56,6 +56,7 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import read_permissions_format_version
 from imbue.mngr_latchkey.store import write_permissions_format_version
+from imbue.mngr_latchkey.testing import MIGRATION_CONTEXT
 from imbue.mngr_latchkey.testing import write_raw_host_permissions
 
 # This computer's own gateway listen password, as every provisioning call here
@@ -94,6 +95,7 @@ def _provision(outer: OuterHostInterface, latchkey_directory: Path, host_id: Hos
         latchkey=_desktop_latchkey(latchkey_directory),
         desktop_gateway_password=_DESKTOP_PASSWORD,
         package_layout=as_vps(outer).layout,
+        migration_context=MIGRATION_CONTEXT,
     )
 
 
@@ -174,7 +176,7 @@ def test_provision_remote_gateway_installs_the_package_and_wires_a_fresh_machine
     assert config["settings"]["hideBuiltinServices"] == ["notion"]
     assert set(config["registeredServices"]) == set(additional_service_registration_entries())
     assert vps.machine_permissions() == '{\n  "rules": []\n}'
-    assert vps.machine_permissions_format_version() == 0
+    assert vps.machine_permissions_format_version() == CURRENT_PERMISSIONS_FORMAT_VERSION
     # The gateway's extension is the package's copy, where the gateway loads it from.
     shipped_extension = vps.latchkey_dir / REMOTE_EXTENSIONS_DIR_NAME / REMOTE_GATEWAY_EXTENSION_FILENAME
     assert shipped_extension.read_text() == bundled_gateway_extension_content(REMOTE_GATEWAY_EXTENSION_FILENAME)
@@ -440,6 +442,7 @@ def test_a_rewired_container_restarts_the_tunnel(tmp_path: Path) -> None:
         latchkey=_desktop_latchkey(latchkey_directory),
         desktop_gateway_password=_DESKTOP_PASSWORD,
         package_layout=vps.layout,
+        migration_context=MIGRATION_CONTEXT,
     )
 
     assert vps.tunnel_conf() == "LK_CONTAINER_SSH_USER='agent'\nLK_CONTAINER_SSH_PORT='2223'\n"
@@ -741,6 +744,7 @@ def test_provisioning_seeds_a_machine_with_no_policy_from_the_local_file(tmp_pat
     latchkey_directory = _latchkey_directory(tmp_path)
     host_id = HostId.generate()
     write_raw_host_permissions(plugin_data_dir(latchkey_directory), host_id, _GRANTED_HERE)
+    write_permissions_format_version(plugin_data_dir(latchkey_directory), host_id, CURRENT_PERMISSIONS_FORMAT_VERSION)
     outer = fake_vps(tmp_path)
 
     _provision(outer, latchkey_directory, host_id)
@@ -758,7 +762,9 @@ def test_provisioning_adopts_the_policy_the_machine_holds(tmp_path: Path) -> Non
     latchkey_directory = _latchkey_directory(tmp_path)
     host_id = HostId.generate()
     local_path = write_raw_host_permissions(plugin_data_dir(latchkey_directory), host_id, _GRANTED_HERE)
+    write_permissions_format_version(plugin_data_dir(latchkey_directory), host_id, CURRENT_PERMISSIONS_FORMAT_VERSION)
     outer = fake_vps(tmp_path, machine_permissions=_GRANTED_ELSEWHERE)
+    as_vps(outer).hold_permissions_format_version(CURRENT_PERMISSIONS_FORMAT_VERSION)
 
     _provision(outer, latchkey_directory, host_id)
 
@@ -771,8 +777,10 @@ def test_provisioning_leaves_an_unchanged_local_copy_untouched(tmp_path: Path) -
     latchkey_directory = _latchkey_directory(tmp_path)
     host_id = HostId.generate()
     local_path = write_raw_host_permissions(plugin_data_dir(latchkey_directory), host_id, _GRANTED_HERE)
+    write_permissions_format_version(plugin_data_dir(latchkey_directory), host_id, CURRENT_PERMISSIONS_FORMAT_VERSION)
     modified_at_before = local_path.stat().st_mtime_ns
     outer = fake_vps(tmp_path, machine_permissions=_GRANTED_HERE)
+    as_vps(outer).hold_permissions_format_version(CURRENT_PERMISSIONS_FORMAT_VERSION)
 
     _provision(outer, latchkey_directory, host_id)
 

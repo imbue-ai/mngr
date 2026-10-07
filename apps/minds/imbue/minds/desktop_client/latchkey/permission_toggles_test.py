@@ -134,7 +134,7 @@ def test_compute_connector_permissions_rejects_a_permission_outside_the_catalog(
         compute_connector_permissions(_slack_info(), (), "slack-users-read", True)
 
 
-_SHARED_PATH_PERMISSION = "minds-file-server-read-/Users/me/notes"
+_SHARED_PATH_PERMISSION = f"minds-file-server-read-{_DEVICE_ID}:/Users/me/notes"
 _VERB_PERMISSION = WORKSPACE_VERBS[0].permission
 _BASELINE_PERMISSION = "minds-api-proxy-call-agent-123"
 
@@ -171,12 +171,12 @@ def test_compute_self_permissions_rejects_non_toggleable_names() -> None:
 
 def test_build_file_sharing_toggles_includes_revoked_but_restorable_paths() -> None:
     """A path whose schema is still in the file renders as an off toggle that can be re-enabled."""
-    write_permission = "minds-file-server-write-/Users/me/notes"
+    write_permission = f"minds-file-server-write-{_DEVICE_ID}:/Users/me/notes"
     config = LatchkeyPermissionsConfig(
         rules=({SELF_SCOPE: [_BASELINE_PERMISSION, _SHARED_PATH_PERMISSION]},),
         schemas={_SHARED_PATH_PERMISSION: {"type": "object"}, write_permission: {"type": "object"}},
     )
-    toggles = build_file_sharing_toggles(config)
+    toggles = build_file_sharing_toggles(config, _DEVICE_ID)
     assert [(toggle.permission, toggle.is_granted, toggle.can_enable) for toggle in toggles] == [
         (_SHARED_PATH_PERMISSION, True, True),
         (write_permission, False, True),
@@ -184,6 +184,81 @@ def test_build_file_sharing_toggles_includes_revoked_but_restorable_paths() -> N
     assert toggles[0].label == "/Users/me/notes"
     assert toggles[0].detail == "read"
     assert toggles[1].detail == "read and write"
+
+
+def test_build_file_sharing_toggles_lists_only_this_desktops_paths() -> None:
+    """Another desktop's grant on the same machine is not this pane's row."""
+    other_desktops_permission = f"minds-file-server-read-{_OTHER_DEVICE_ID}:/Users/other/notes"
+    config = LatchkeyPermissionsConfig(
+        rules=({SELF_SCOPE: [_SHARED_PATH_PERMISSION, other_desktops_permission]},),
+        schemas={name: {"type": "object"} for name in (_SHARED_PATH_PERMISSION, other_desktops_permission)},
+    )
+
+    toggles = build_file_sharing_toggles(config, _DEVICE_ID)
+
+    assert [toggle.permission for toggle in toggles] == [_SHARED_PATH_PERMISSION]
+    assert build_file_sharing_toggles(config, "") == ()
+
+
+# CLEANUP: drop the tests of grants from before devices below with the code they cover, once no
+# policy carries a device-less file-sharing grant.
+_LEGACY_SHARED_PATH_PERMISSION = "minds-file-server-read-/Users/me/notes"
+
+
+def test_build_file_sharing_toggles_lists_a_granted_path_from_before_devices_as_revoke_only() -> None:
+    """Every desktop serves such a path at the device-less URL, so every desktop lists it, whoever granted it."""
+    revoked_legacy_permission = "minds-file-server-write-/Users/me/notes"
+    config = LatchkeyPermissionsConfig(
+        rules=({SELF_SCOPE: [_BASELINE_PERMISSION, _LEGACY_SHARED_PATH_PERMISSION]},),
+        schemas={name: {"type": "object"} for name in (_LEGACY_SHARED_PATH_PERMISSION, revoked_legacy_permission)},
+    )
+
+    toggles = build_file_sharing_toggles(config, _DEVICE_ID)
+
+    assert [
+        (toggle.permission, toggle.label, toggle.detail, toggle.is_granted, toggle.can_enable) for toggle in toggles
+    ] == [
+        (_LEGACY_SHARED_PATH_PERMISSION, "/Users/me/notes", "read", True, False),
+    ]
+
+
+def test_compute_self_permissions_revokes_the_grant_from_before_devices_with_its_twin() -> None:
+    """Otherwise the path stays reachable at the device-less URL after the user stopped sharing it."""
+    other_legacy_permission = "minds-file-server-write-/Users/me/notes"
+    config = _self_config(
+        (_BASELINE_PERMISSION, _LEGACY_SHARED_PATH_PERMISSION, _SHARED_PATH_PERMISSION, other_legacy_permission)
+    )
+
+    assert compute_self_permissions(config, _SHARED_PATH_PERMISSION, False) == (
+        _BASELINE_PERMISSION,
+        other_legacy_permission,
+    )
+
+
+def test_compute_self_permissions_revokes_a_grant_from_before_devices_that_has_no_twin() -> None:
+    """On a desktop other than the one that migrated the policy, the old grant is all there is for the path."""
+    config = _self_config((_BASELINE_PERMISSION, _LEGACY_SHARED_PATH_PERMISSION))
+
+    assert compute_self_permissions(config, _SHARED_PATH_PERMISSION, False) == (_BASELINE_PERMISSION,)
+
+
+def test_compute_self_permissions_refuses_a_name_from_before_devices() -> None:
+    """Nothing grants such a name any more, including turning back on one whose schema is still in the file."""
+    config = _self_config((_BASELINE_PERMISSION,), schemas={_LEGACY_SHARED_PATH_PERMISSION: {"type": "object"}})
+
+    with pytest.raises(PermissionToggleError, match="not toggleable"):
+        compute_self_permissions(config, _LEGACY_SHARED_PATH_PERMISSION, True)
+
+
+def test_compute_self_permissions_enabling_a_shared_path_leaves_the_name_from_before_devices_off() -> None:
+    schemas: dict[str, JsonValue] = {
+        _SHARED_PATH_PERMISSION: {"type": "object"},
+        _LEGACY_SHARED_PATH_PERMISSION: {"type": "object"},
+    }
+
+    updated = compute_self_permissions(_self_config((_BASELINE_PERMISSION,), schemas), _SHARED_PATH_PERMISSION, True)
+
+    assert updated == (_BASELINE_PERMISSION, _SHARED_PATH_PERMISSION)
 
 
 def test_toggles_report_a_grant_whose_schema_is_gone_as_not_re_enableable() -> None:
@@ -199,7 +274,7 @@ def test_toggles_report_a_grant_whose_schema_is_gone_as_not_re_enableable() -> N
         schemas={},
     )
 
-    file_sharing = build_file_sharing_toggles(config)
+    file_sharing = build_file_sharing_toggles(config, _DEVICE_ID)
     workspace = build_workspace_toggles(StaticBackendResolver(url_by_agent_and_service={}), config)
 
     assert [(toggle.permission, toggle.is_granted, toggle.can_enable) for toggle in file_sharing] == [
@@ -729,7 +804,7 @@ def test_apply_toggles_write_nothing_for_a_flip_that_changes_nothing(tmp_path: P
     harness.apply_connector(scope="slack-api", account=_ACCOUNT, permission="slack-chat-read", enabled=True)
     harness.apply_connector(scope="slack-api", account=_ACCOUNT, permission="slack-chat-write", enabled=False)
     harness.apply_self(_SHARED_PATH_PERMISSION, True)
-    harness.apply_self("minds-file-server-read-/Users/me/never-shared", False)
+    harness.apply_self(f"minds-file-server-read-{_DEVICE_ID}:/Users/me/never-shared", False)
 
     assert len(harness.gateway_client.set_calls) == writes_so_far
     assert harness.gateway_client.deleted_rule_calls == ()

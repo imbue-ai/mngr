@@ -41,6 +41,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.latchkey.permission_overview import resolve_workspace_host_id
+from imbue.minds.primitives import DeviceId
 from imbue.mngr.api.providers import close_provider_instances_for_context
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.plugin_manager import get_or_create_plugin_manager
@@ -91,6 +92,13 @@ class MachineAccess(MutableModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     latchkey: Latchkey = Field(frozen=True, description="This computer's latchkey, which owns every machine store.")
+    device_id: DeviceId = Field(
+        frozen=True,
+        description=(
+            "This install's device id: the desktop a machine's policy names when it is migrated from here "
+            "(see :class:`~imbue.mngr_latchkey.migrations.interface.PermissionsMigrationContext`)."
+        ),
+    )
     concurrency_group: ConcurrencyGroup = Field(
         frozen=True,
         description=(

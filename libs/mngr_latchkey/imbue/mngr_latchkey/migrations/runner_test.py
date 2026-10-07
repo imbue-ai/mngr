@@ -17,6 +17,7 @@ from imbue.mngr_latchkey.store import permissions_format_version_path
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import read_permissions_format_version
 from imbue.mngr_latchkey.store import write_permissions_format_version
+from imbue.mngr_latchkey.testing import MIGRATION_CONTEXT
 from imbue.mngr_latchkey.testing import rule_keys_of_permissions_json
 from imbue.mngr_latchkey.testing import write_raw_host_permissions
 
@@ -24,7 +25,7 @@ _EMPTY_POLICY = '{"rules": []}'
 
 
 def _migrate(data_dir: Path, host_id: HostId, migrations: Sequence[PermissionsMigration]) -> bool:
-    return migrate_permissions(data_dir, host_id, migrations)
+    return migrate_permissions(data_dir, host_id, MIGRATION_CONTEXT, migrations)
 
 
 def _rule_keys(data_dir: Path, host_id: HostId) -> list[str]:
