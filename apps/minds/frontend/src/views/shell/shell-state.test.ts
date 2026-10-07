@@ -1136,6 +1136,21 @@ describe("ShellState.reloadWorkspaceFrame", () => {
   });
 });
 
+describe("ShellState.isWorkspaceFrameOn", () => {
+  it("is true only for the workspace this window's frame shows, by either spelling", () => {
+    const { shell } = shellWithFrameOn("host-bb22");
+
+    expect(shell.isWorkspaceFrameOn("agent-aa11")).toBe(true);
+    expect(shell.isWorkspaceFrameOn("agent-cc33")).toBe(false);
+  });
+
+  it("is false in a window with no workspace frame", () => {
+    const { shell } = shellWithFrameOn(null);
+
+    expect(shell.isWorkspaceFrameOn("agent-aa11")).toBe(false);
+  });
+});
+
 describe("recovery card openness", () => {
   let shell: ShellState;
 

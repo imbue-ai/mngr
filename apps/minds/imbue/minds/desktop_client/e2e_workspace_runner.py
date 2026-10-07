@@ -1324,17 +1324,29 @@ def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_ke
     chat.wait_for_selector("[data-e2e=provider-chooser]", timeout=120_000)
     _raise_chat_window(workspace, label=label)
     # Anthropic's lane, then its API-key method under "Other ways to sign in" --
-    # the lane's primary method is the browser sign-in, which needs a human.
+    # the lane's primary method is the browser sign-in, which needs a human. When the
+    # desktop app relays that sign-in, the chooser waits on the browser, and the other
+    # ways in are behind "Try another way".
     _click_in_chat(workspace, chat, "[data-e2e=lane-anthropic]", label=label)
-    chat.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
+    chat.wait_for_selector("[data-e2e=method-api_key], [data-e2e=sign-in-another-way]", timeout=30_000)
+    if chat.query_selector("[data-e2e=method-api_key]") is None:
+        _click_in_chat(workspace, chat, "[data-e2e=sign-in-another-way]", label=label)
+        chat.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
     _click_in_chat(workspace, chat, "[data-e2e=method-api_key]", label=label)
     chat.wait_for_selector("[data-e2e=api-key-input]", timeout=30_000)
     chat.fill("[data-e2e=api-key-input]", api_key.get_secret_value())
     logger.info("[{}] submitting the API key through the chooser", label)
     _click_in_chat(workspace, chat, "[data-e2e=save-key]", label=label)
-    chat.wait_for_selector("[data-e2e=status-success]", timeout=300_000)
-    _click_in_chat(workspace, chat, "[data-e2e=done]", label=label)
-    chat.wait_for_selector("[data-e2e=provider-chooser]", state="detached", timeout=10_000)
+    # A sign-in with nothing more to say closes the chooser by itself; one whose success carries a
+    # detail stays on its success screen until Done.
+    chat.wait_for_function(
+        "() => document.querySelector('[data-e2e=provider-chooser]') === null"
+        " || document.querySelector('[data-e2e=status-success]') !== null",
+        timeout=300_000,
+    )
+    if chat.query_selector("[data-e2e=status-success]") is not None:
+        _click_in_chat(workspace, chat, "[data-e2e=done]", label=label)
+        chat.wait_for_selector("[data-e2e=provider-chooser]", state="detached", timeout=10_000)
     logger.info("[{}] signed in via the chooser", label)
 
 

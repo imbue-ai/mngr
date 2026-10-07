@@ -90,6 +90,7 @@ describe("UiChannelClient", () => {
     const sockets: FakeSocket[] = [];
     const reloads: number[] = [];
     const refreshedAgentIds: string[] = [];
+    const raisedAgentIds: string[] = [];
     const relayedTypes: string[] = [];
     const storageMap = new Map<string, string>();
     if (overrides.seededLatch === true)
@@ -112,6 +113,7 @@ describe("UiChannelClient", () => {
       },
       reloadPage: () => reloads.push(1),
       onWorkspaceRefresh: (message) => refreshedAgentIds.push(message.agent_id),
+      onBringAppToFront: (message) => raisedAgentIds.push(message.agent_id),
       relayShellEvent: (message) => relayedTypes.push(message.type),
       jitter01: () => 0.5,
       redraw: () => undefined,
@@ -127,6 +129,7 @@ describe("UiChannelClient", () => {
       refreshedAgentIds,
       relayedTypes,
       storageMap,
+      raisedAgentIds,
     };
   }
 
@@ -262,6 +265,15 @@ describe("UiChannelClient", () => {
       { count: 2, isSnapshot: true, storeCountAtCallback: 2 },
       { count: 5, isSnapshot: false, storeCountAtCallback: 5 },
     ]);
+  });
+
+  it("raises the app for bring_app_to_front, through the page's own bridge rather than main's relay", () => {
+    const { client, sockets, raisedAgentIds, relayedTypes } = makeClient();
+    client.start();
+    sockets[0].open();
+    sockets[0].receive({ type: "bring_app_to_front", agent_id: "agent-1" });
+    expect(raisedAgentIds).toEqual(["agent-1"]);
+    expect(relayedTypes).not.toContain("bring_app_to_front");
   });
 
   it("hands workspace_refresh to the shell without relaying it to main", () => {

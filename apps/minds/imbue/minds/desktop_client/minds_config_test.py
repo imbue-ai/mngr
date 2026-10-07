@@ -63,6 +63,17 @@ def test_resolve_default_account_id(
     assert resolved == expected
 
 
+def test_sign_in_browser_id_round_trips_and_clears(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    assert config.get_sign_in_browser_id() is None
+
+    config.set_sign_in_browser_id("/Applications/Firefox.app")
+    assert _make_config(tmp_path).get_sign_in_browser_id() == "/Applications/Firefox.app"
+
+    config.set_sign_in_browser_id(None)
+    assert _make_config(tmp_path).get_sign_in_browser_id() is None
+
+
 def test_settle_default_account_id_stores_the_fallback_so_it_stays_put(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     config.set_default_account_id("user-departed")

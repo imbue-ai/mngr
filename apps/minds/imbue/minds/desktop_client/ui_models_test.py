@@ -163,6 +163,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiAvailableConnection",
             "UiBootstrap",
             "UiBootstrapSeed",
+            "UiBringAppToFrontMessage",
             "UiClientStateMessage",
             "UiConnectCredentialsRequest",
             "UiConnectorDisconnectRequest",

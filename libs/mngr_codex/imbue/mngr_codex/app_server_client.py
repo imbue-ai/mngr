@@ -4,8 +4,6 @@
 daemon over its WebSocket JSON-RPC surface (``codex app-server --listen
 unix://<sock>``), instead of screen-scraping a TUI. This module is that client.
 
-Design (the injected transport)
--------------------------------
 All protocol logic lives in :class:`CodexAppServerClient`, which speaks to an
 injected transport -- a minimal synchronous ``send`` / ``receive`` / ``close`` duplex
 of JSON-RPC text frames. The real transport (:class:`WebsocketAppServerTransport`,
@@ -66,6 +64,8 @@ _NO_ACTIVE_TURN_ERROR_CODE: Final[int] = -32600
 # Default bound on a single request's round trip. The daemon answers in single-digit
 # milliseconds; a hang means the connection is wedged, so fail rather than block a send.
 _DEFAULT_REQUEST_TIMEOUT_SECONDS: Final[float] = 30.0
+# How long one read of a login wait holds the frame lock before letting another request in.
+_LOGIN_WAIT_SLICE_SECONDS: Final[float] = 1.0
 
 # Terminal ``turn.status`` values -- the turn is over and no longer steerable.
 _TERMINAL_TURN_STATUSES: Final[frozenset[str]] = frozenset({"completed", "interrupted", "failed"})
@@ -173,6 +173,54 @@ class InitializeResult(BaseModel):
     codex_home: str = Field(alias="codexHome")
     platform_family: str = Field(alias="platformFamily")
     platform_os: str = Field(alias="platformOs")
+
+
+class ChatgptLoginStart(BaseModel):
+    """A browser ChatGPT login ``account/login/start`` began: open ``auth_url``; completion names ``login_id``."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore", frozen=True)
+
+    login_id: str = Field(alias="loginId")
+    auth_url: str = Field(alias="authUrl")
+
+
+class ChatgptDeviceLoginStart(BaseModel):
+    """A device-code ChatGPT login: the user signs in at ``verification_url`` and enters ``user_code``."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore", frozen=True)
+
+    login_id: str = Field(alias="loginId")
+    verification_url: str = Field(alias="verificationUrl")
+    user_code: str = Field(alias="userCode")
+
+
+class LoginCompleted(BaseModel):
+    """The ``account/login/completed`` notification: how a login started on this connection ended."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore", frozen=True)
+
+    login_id: str | None = Field(default=None, alias="loginId")
+    success: bool
+    error: str | None = None
+
+
+class _LoginCompletionCatcher(MutableModel):
+    """A notification handler that keeps the first ``account/login/completed`` for one login."""
+
+    login_id: str
+    completion: LoginCompleted | None = None
+
+    def catch(self, method: str, params: Mapping[str, Any]) -> None:
+        if method != "account/login/completed" or self.completion is not None:
+            return
+        # Raising here would escape from whichever call is reading frames, not just the wait.
+        try:
+            completed = LoginCompleted.model_validate(params)
+        except ValidationError as e:
+            logger.warning("Ignoring an unreadable account/login/completed notification: {}", e)
+            return
+        if completed.login_id in (None, self.login_id):
+            self.completion = completed
 
 
 class ThreadInfo(BaseModel):
@@ -589,6 +637,40 @@ class CodexAppServerClient(MutableModel):
             if _UNMATERIALIZED_THREAD_MARKER not in str(exc):
                 raise
             return self.thread_read(include_turns=False)
+
+    def start_chatgpt_login(self) -> ChatgptLoginStart:
+        """Begin a browser ChatGPT login; codex listens on a loopback port the ``auth_url`` redirects to."""
+        return ChatgptLoginStart.model_validate(self._request("account/login/start", {"type": "chatgpt"}))
+
+    def start_device_login(self) -> ChatgptDeviceLoginStart:
+        """Begin a device-code ChatGPT login, for when the browser cannot reach codex's loopback port."""
+        return ChatgptDeviceLoginStart.model_validate(
+            self._request("account/login/start", {"type": "chatgptDeviceCode"})
+        )
+
+    def wait_login_completed(self, login_id: str, timeout_seconds: float) -> LoginCompleted:
+        """Wait for ``account/login/completed`` for ``login_id``, dispatching other frames meanwhile.
+
+        Reads in short slices rather than holding :attr:`_frame_lock` for the whole wait, so a
+        concurrent request on this connection is never stuck behind a login the user is still doing.
+        The completion is caught by a notification handler rather than by this loop's own reads, so
+        it is seen even when that concurrent request is what reads it off the connection.
+        Raises :class:`CodexAppServerError` when the login does not complete within the timeout.
+        """
+        catcher = _LoginCompletionCatcher(login_id=login_id)
+        handler = catcher.catch
+        with self._frame_lock:
+            self.notification_handlers.append(handler)
+        try:
+            deadline = time.monotonic() + timeout_seconds
+            while catcher.completion is None and time.monotonic() < deadline:
+                self.poll_notifications(min(_LOGIN_WAIT_SLICE_SECONDS, max(0.0, deadline - time.monotonic())))
+        finally:
+            with self._frame_lock:
+                self.notification_handlers.remove(handler)
+        if catcher.completion is not None:
+            return catcher.completion
+        raise CodexAppServerError(f"codex login {login_id!r} did not complete within {timeout_seconds:.0f}s")
 
     def model_list(self, include_hidden: bool = False) -> tuple[CodexModel, ...]:
         """Return the account's models from ``model/list`` (envelope key ``data``).

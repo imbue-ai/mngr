@@ -223,15 +223,18 @@ export class ShellState {
     this.webLogin = webLoginModel;
   }
 
+  /** Whether this window's workspace frame is showing the workspace named. */
+  isWorkspaceFrameOn(agentScopedId: string): boolean {
+    const armed = this.workspaceFrame?.armedWorkspaceAnyId() ?? null;
+    return armed !== null && this.stores.workspaces.toAgentScopedId(armed) === agentScopedId;
+  }
+
   /** Rebuild this window's workspace view, if its frame is showing the one named
    * -- and, given a cutoff, only if its page last loaded before it: a page
    * loaded since already runs what the machine serves now. */
   reloadWorkspaceFrame(agentScopedId: string, loadedBeforeMs: number | null): void {
     const frame = this.workspaceFrame;
-    if (frame === null) return;
-    const armed = frame.armedWorkspaceAnyId();
-    if (armed === null) return;
-    if (this.stores.workspaces.toAgentScopedId(armed) !== agentScopedId) return;
+    if (frame === null || !this.isWorkspaceFrameOn(agentScopedId)) return;
     const lastLoadedAtMs = frame.lastLoadedAtMs();
     if (loadedBeforeMs !== null && lastLoadedAtMs !== null && lastLoadedAtMs >= loadedBeforeMs) return;
     frame.reload();
