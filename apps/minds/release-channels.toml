@@ -34,16 +34,16 @@
 # such a build lists `["mac"]` alone.
 
 [channels.stable]
-build_id = "261003ret49em92"
-version = "0.8.4"
-fallback_branch = "minds-v0.8.4"
+build_id = "2610066k8bzbhej"
+version = "0.8.5"
+fallback_branch = "minds-v0.8.5"
 rollout_percentage = 100
 platforms = ["mac", "linux"]
 
 [channels.beta]
-build_id = "261003ret49em92"
-version = "0.8.4"
-fallback_branch = "minds-v0.8.4"
+build_id = "2610066k8bzbhej"
+version = "0.8.5"
+fallback_branch = "minds-v0.8.5"
 rollout_percentage = 100
 platforms = ["mac", "linux"]
 
@@ -69,10 +69,10 @@ platforms = ["mac", "linux"]
 # stable). The publish refuses a tag that is not on the template remote.
 
 [web_channels.stable]
-template_ref = "minds-v0.8.4"
+template_ref = "minds-v0.8.5"
 
 [web_channels.beta]
-template_ref = "minds-v0.8.4"
+template_ref = "minds-v0.8.5"
 
 [web_channels.alpha]
 template_ref = "minds-v0.8.5"
