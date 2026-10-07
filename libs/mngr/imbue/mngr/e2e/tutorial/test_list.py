@@ -197,6 +197,7 @@ def test_list_active_filter(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.modal
+@pytest.mark.usefixtures("opted_in_project_settings")
 def test_config_set_list_active_default(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can make any of those filters the default for "mngr list" by setting it in your config.
@@ -233,6 +234,7 @@ def test_config_set_list_active_default(e2e: E2eSession) -> None:
             comment="opt out for a single call via env var override",
         )
     ).to_succeed()
+    _record_subprocess_modal_usage()
 
 
 @pytest.mark.release

@@ -263,7 +263,7 @@ def test_config_set_invalid_scope(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-def test_config_unset(e2e: E2eSession, project_config_dir: Path) -> None:
+def test_config_unset(e2e: E2eSession, opted_in_project_settings: Path) -> None:
     """Tutorial block:
         # unset a config value
         mngr config unset commands.create.provider
@@ -273,18 +273,12 @@ def test_config_unset(e2e: E2eSession, project_config_dir: Path) -> None:
     value is actually gone from the settings file afterward.
     """
     # `config unset` only succeeds for a key that is actually present in the
-    # target scope (a missing key fails with "Key not found"). Seed the project
-    # settings file directly with the key already present, then unset it the way
-    # the tutorial shows -- with no `--scope`, which resolves to the project
-    # scope, so it targets this same settings.toml. We seed the file rather than
-    # establishing the value via `mngr config set` because unset is a follow-up
-    # mngr command that reloads the project file: a file written by `set` does
-    # not carry the `is_allowed_in_pytest` opt-in (the opt-in comes from other
-    # scopes), so the reload would be rejected before unset could run. Seeding
-    # the opt-in here alongside the value keeps the follow-up read valid.
-    # (This mirrors test_config_unset_missing_key.)
-    settings_path = project_config_dir / "settings.toml"
-    settings_path.write_text('is_allowed_in_pytest = true\n\n[commands.create]\nprovider = "modal"\n')
+    # target scope (a missing key fails with "Key not found"). Add the key to the
+    # project settings file directly, then unset it the way the tutorial shows --
+    # with no `--scope`, which resolves to the project scope, so it targets this
+    # same settings.toml.
+    with opted_in_project_settings.open("a") as settings_file:
+        settings_file.write('\n[commands.create]\nprovider = "modal"\n')
     # Confirm the value really is in the project settings file before we remove
     # it, the way a human would when debugging.
     settings_before = e2e.run(
@@ -307,7 +301,8 @@ def test_config_unset(e2e: E2eSession, project_config_dir: Path) -> None:
 
 
 @pytest.mark.release
-def test_config_unset_missing_key(e2e: E2eSession, project_config_dir: Path) -> None:
+@pytest.mark.usefixtures("opted_in_project_settings")
+def test_config_unset_missing_key(e2e: E2eSession) -> None:
     """Tutorial block:
         # unset a config value
         mngr config unset commands.create.provider
@@ -315,10 +310,6 @@ def test_config_unset_missing_key(e2e: E2eSession, project_config_dir: Path) -> 
     Scope: the unhappy path of the same block. Unsetting a key that is not
     present in the target scope fails with a clear "Key not found: <key>" error.
     """
-    # Seed a project config that opts into pytest but does NOT define the key.
-    settings_path = project_config_dir / "settings.toml"
-    settings_path.write_text("is_allowed_in_pytest = true\n")
-
     result = e2e.run("mngr config unset commands.create.provider", comment="unset a config value")
     expect(result).to_fail()
     # The error must name the specific key that could not be found, not just a

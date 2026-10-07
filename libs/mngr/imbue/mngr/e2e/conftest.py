@@ -870,11 +870,12 @@ def e2e(
     # ``mngr config edit``/``config set`` tutorial tests assert on the genuine
     # first-use behavior, where the project config file does not yet exist (e.g.
     # ``config edit`` creates it from a template, and ``config set`` writes a
-    # fresh file). Those tests therefore read the project file back with ``cat``
-    # rather than a follow-up ``mngr`` command, since a freshly-created project
-    # file does not carry the ``is_allowed_in_pytest`` opt-in. The opt-in for
-    # commands that load merged config comes from the profile ``settings.toml``
-    # and the project ``settings.local.toml`` seeded above.
+    # fresh file), and a file those commands create does not carry the
+    # ``is_allowed_in_pytest`` opt-in. Such a test either reads the project file
+    # back with ``cat`` instead of a follow-up ``mngr`` command, or requests the
+    # ``opted_in_project_settings`` fixture to seed the opt-in before writing.
+    # The opt-in for commands that load merged config comes from the profile
+    # ``settings.toml`` and the project ``settings.local.toml`` seeded above.
 
     # Ensure .claude/settings.local.json and the per-test project config dir
     # are gitignored. Remote providers (Modal, Docker) need to write Claude
@@ -966,3 +967,17 @@ def e2e(
         timeout=10.0,
     )
     shutil.rmtree(tmux_tmpdir, ignore_errors=True)
+
+
+@pytest.fixture
+def opted_in_project_settings(project_config_dir: Path) -> Path:
+    """Create the project-scope ``settings.toml`` holding only the pytest opt-in.
+
+    Request this from a test that runs a further ``mngr`` command after writing
+    the project config: a project file ``config set`` creates for itself carries
+    no ``is_allowed_in_pytest``, so loading it again would be rejected.
+    ``config set`` re-saves the file through tomlkit, preserving the opt-in.
+    """
+    settings_path = project_config_dir / "settings.toml"
+    settings_path.write_text("is_allowed_in_pytest = true\n")
+    return settings_path

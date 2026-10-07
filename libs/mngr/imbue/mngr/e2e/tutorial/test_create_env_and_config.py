@@ -2,7 +2,6 @@
 
 import json
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -298,6 +297,7 @@ def test_create_in_place_alias_target(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.usefixtures("opted_in_project_settings")
 def test_config_set_headless(e2e: E2eSession) -> None:
     """Tutorial block:
         # or you can set that option in your config so that it always applies:
@@ -308,19 +308,6 @@ def test_config_set_headless(e2e: E2eSession) -> None:
     get headless` (merged view), and it is persisted as `headless = true` in the
     project settings.toml on disk.
     """
-    # ``config set`` writes to the project settings.toml (the default scope).
-    # The fixture deliberately leaves that file unseeded, so seed the pytest
-    # opt-in into it first: ``config set`` loads the existing file, adds the new
-    # value and re-saves it, preserving ``is_allowed_in_pytest = true``. That way
-    # the follow-up ``mngr config get`` (which loads the merged config) passes the
-    # enforce_pytest_config_opt_in guard on the project settings.toml.
-    expect(
-        e2e.run(
-            "echo 'is_allowed_in_pytest = true' >> .$MNGR_ROOT_NAME/settings.toml",
-            comment="opt the project config into being loaded under pytest",
-        )
-    ).to_succeed()
-
     result = e2e.run(
         "mngr config set headless true",
         comment="or you can set that option in your config so that it always applies",
@@ -376,7 +363,8 @@ def test_env_var_mngr_headless(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-def test_config_set_default_provider(e2e: E2eSession, project_config_dir: Path) -> None:
+@pytest.mark.usefixtures("opted_in_project_settings")
+def test_config_set_default_provider(e2e: E2eSession) -> None:
     """Tutorial block:
         # *all* mngr options work like that. For example, if you want to always run agents in Modal by default, you can set that in your config:
         mngr config set commands.create.provider modal
@@ -387,15 +375,6 @@ def test_config_set_default_provider(e2e: E2eSession, project_config_dir: Path) 
     value persists at project scope (`mngr config get commands.create.provider
     --scope project` returns modal).
     """
-    # The scope requires reading the value back with a follow-up `mngr config
-    # get --scope project`, which reloads the project settings.toml. The e2e
-    # fixture deliberately does not seed that file, so seed it here with the
-    # pytest opt-in (mirrors test_config_unset_missing_key). `config set` loads
-    # this file via tomlkit and re-saves it, preserving the opt-in key alongside
-    # the new value, so the follow-up command passes the pytest config guard.
-    settings_path = project_config_dir / "settings.toml"
-    settings_path.write_text("is_allowed_in_pytest = true\n")
-
     result = e2e.run(
         "mngr config set commands.create.provider modal",
         comment="*all* mngr options work like that",

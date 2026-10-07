@@ -1,0 +1,5 @@
+Fixed the `test_config_set_list_active_default` e2e tutorial test, which sets the `commands.list.active` default and then reads it back.
+
+The e2e harness leaves the project `settings.toml` absent so the `config edit` tutorial tests see genuine first use, and a file `mngr config set` creates does not carry `is_allowed_in_pytest`. Every config loaded during a pytest run must set it, so the follow-up `mngr config get` and `mngr list` both failed with "Running mngr within pytest is not allowed" against the file `config set` had just written. The test now seeds the opt-in into its own project config before writing to it, through a new `opted_in_project_settings` e2e fixture that replaces the hand-written seeding line in the four other tutorial tests that needed it.
+
+The test also records its subprocess Modal usage with the resource guard: its final `mngr list` runs the full provider-discovery path, which makes a real authenticated Modal SDK call, but in a subprocess the guard's in-process monkeypatch cannot observe it.
