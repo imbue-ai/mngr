@@ -2991,12 +2991,25 @@ function openPopout(source, request, mode) {
   return bundle;
 }
 
-ipcMain.on('open-popout-window', (event, request) => {
+// The shell measures a window and the grab point in its own CSS pixels, under
+// the display zoom its page renders at; the popout's bounds and its follow
+// offset are screen pixels, so the request is scaled by that zoom.
+function scaledToSourceZoom(source, request) {
+  const zoom = source.window.webContents.getZoomFactor();
+  const scaled = { ...request };
+  for (const key of ['width', 'height', 'grabX', 'grabY']) {
+    if (Number.isFinite(request[key])) scaled[key] = request[key] * zoom;
+  }
+  return scaled;
+}
+
+ipcMain.on('open-popout-window', (event, rawRequest) => {
   const source = popoutSenderBundle(event);
-  if (!source || !isValidPopoutRequest(request, ['width', 'height'])) {
+  if (!source || !isValidPopoutRequest(rawRequest, ['width', 'height'])) {
     console.warn('[popout] dropped an open ask from an untrusted sender frame or with a malformed request');
     return;
   }
+  const request = scaledToSourceZoom(source, rawRequest);
   const existing = findPopoutBundle(request.workspaceId, request.windowId);
   if (existing && existing.popout.reattachTimer === null && !existing.popout.isReattachSettled) {
     // Already out (a "Show" from the desktop's ghost or taskbar): raise it.
@@ -3088,12 +3101,13 @@ function sendTearOut(source, request, phase) {
   }
 }
 
-ipcMain.on('begin-workspace-window-drag', (event, request) => {
+ipcMain.on('begin-workspace-window-drag', (event, rawRequest) => {
   const source = popoutSenderBundle(event);
-  if (!source || !isValidPopoutRequest(request, ['width', 'height', 'grabX', 'grabY'])) {
+  if (!source || !isValidPopoutRequest(rawRequest, ['width', 'height', 'grabX', 'grabY'])) {
     console.warn('[popout] dropped a drag-begin ask from an untrusted sender frame or with a malformed request');
     return;
   }
+  const request = scaledToSourceZoom(source, rawRequest);
   const watch = source.dragWatch;
   if (
     watch &&
