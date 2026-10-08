@@ -755,7 +755,7 @@ gateway's `permission_requests` extension carries a JavaScript copy of the two
 against drift by `account_scopes_test.py`; nothing on the JavaScript side reads
 grants back.
 
-Minds' own gateway-self scopes (`latchkey-self`, `minds-api-proxy-*`) stay
+Imbue Studio's own gateway-self scopes (`latchkey-self`, `minds-api-proxy-*`) stay
 account-agnostic: latchkey attaches no account metadata to requests an
 extension serves, so an account-gated schema would never match them.
 

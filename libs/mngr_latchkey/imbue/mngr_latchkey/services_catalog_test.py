@@ -26,7 +26,7 @@ def test_services_for_permissions_collapses_multiple_scopes_of_one_service() -> 
 
 
 def test_services_for_permissions_ignores_non_service_scopes() -> None:
-    # Minds' own internal scopes are not in the catalog and contribute nothing.
+    # Imbue Studio's own internal scopes are not in the catalog and contribute nothing.
     config = LatchkeyPermissionsConfig(rules=({"minds-api-proxy-unauthorized": []}, {"slack-api": ["slack-read-all"]}))
     assert ServicesCatalog().services_for_permissions(config) == frozenset({"slack"})
 

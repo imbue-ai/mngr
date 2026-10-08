@@ -434,7 +434,7 @@ function buildAccountScopeSchema(scope, account) {
 // ``file-sharing`` request. The agent reaches the Minds API through
 // the gateway's ``minds-api-proxy`` extension, which mounts under
 // ``/minds-api-proxy/...``. ``/api/v1/files`` is the
-// Imbue Studio-side WebDAV mount that actually serves files, each desktop under
+// Imbue Studio WebDAV mount that actually serves files, each desktop under
 // its own device id: the file ``/abs/path`` on desktop ``host-abc`` lands
 // at the URL path ``/api/v1/files/host-abc/abs/path`` (the WebDAV share
 // roots are mounted at their on-disk path, so the rest of the URL mirrors

@@ -316,12 +316,12 @@ LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR: Final[str] = "LATCHKEY_EPHEMERAL_BROWSER"
 # explicit account name.
 DEFAULT_ACCOUNT: Final[str] = ""
 
-# Google services that authenticate via the Imbue Studio-provided OAuth client (the
-# browser / consent-screen flow). ``google-directions`` is deliberately
+# Google services that authenticate via the OAuth client Imbue Studio provides
+# (the browser / consent-screen flow). ``google-directions`` is deliberately
 # excluded: it authenticates with an API key (latchkey ``set`` auth), not
-# OAuth, so it must never go through the Imbue Studio OAuth client. Keep this in sync
-# with the ``google-*`` entries in the services catalog that advertise the
-# ``browser`` auth option.
+# OAuth, so it must never go through the Imbue Studio OAuth client. Keep this
+# in sync with the ``google-*`` entries in the services catalog that advertise
+# the ``browser`` auth option.
 MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
     {
         "google-gmail",
@@ -335,21 +335,22 @@ MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
     }
 )
 
-# Imbue Studio-provided Google OAuth client, registered for a ``google-*`` service via
-# ``latchkey auth prepare`` so the user signs in against the Imbue Studio consent
-# screen instead of self-provisioning their own Google Cloud project. A single
-# pair is reused for every google service. This is an installed/desktop-app
-# OAuth client, so the "secret" is not truly confidential -- it ships inside
-# the distributed client.
+# The Google OAuth client Imbue Studio provides, registered for a ``google-*``
+# service via ``latchkey auth prepare`` so the user signs in against the
+# Imbue Studio consent screen instead of self-provisioning their own Google
+# Cloud project. A single pair is reused for every google service. This is an
+# installed/desktop-app OAuth client, so the "secret" is not truly
+# confidential -- it ships inside the distributed client.
 MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = "991889009876-ms5ln5jnvqmsrgpmi2nipkv7atmoaks8.apps.googleusercontent.com"
 MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = "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"
 
 # Services whose OAuth client is registered dynamically at sign-in (no client
-# of ours to hand over), but whose sign-in must land on an Imbue Studio-hosted redirect
-# page rather than latchkey's loopback callback. Registered for the service via
-# ``latchkey auth prepare <service> '{"redirectUri": ...}'`` (latchkey >= 3.15)
-# right before the sign-in that would register the client; the page forwards
-# the authorization result to the loopback port latchkey encodes in ``state``.
+# of ours to hand over), but whose sign-in must land on a redirect page Imbue
+# Studio hosts rather than latchkey's loopback callback. Registered for the
+# service via ``latchkey auth prepare <service> '{"redirectUri": ...}'``
+# (latchkey >= 3.15) right before the sign-in that would register the client;
+# the page forwards the authorization result to the loopback port latchkey
+# encodes in ``state``.
 MINDS_OAUTH_REDIRECT_URI_BY_SERVICE: Final[Mapping[str, str]] = {
     # This leads to a page that forwards the OAuth callback to the loopback port latchkey encodes in ``state``.
     # That way the user doesn't get to see the scary-looking localhost URL.
@@ -1716,7 +1717,7 @@ class Latchkey(MutableModel):
         recovery paths:
 
         * For an Imbue Studio Google OAuth service (:data:`MINDS_GOOGLE_OAUTH_SERVICES`),
-          register the Imbue Studio-provided client and retry, so the user signs in
+          register the client Imbue Studio provides and retry, so the user signs in
           against the Imbue Studio consent screen instead of self-provisioning their
           own Google Cloud project (see
           :meth:`_authenticate_with_minds_google_client`). That client is the
@@ -1736,8 +1737,8 @@ class Latchkey(MutableModel):
         account already left behind.
 
         A service in :data:`MINDS_OAUTH_REDIRECT_URI_BY_SERVICE` needs no client
-        of ours but does need its Imbue Studio-hosted redirect URI in place before the
-        sign-in registers a client, so that is pinned first (via
+        of ours but does need the redirect URI Imbue Studio hosts in place before
+        the sign-in registers a client, so that is pinned first (via
         :meth:`auth_prepare_redirect_uri`) whenever the sign-in draws on the
         service-level preparation -- that is, unless ``account`` names a stored
         account, whose own stored client and redirect URI latchkey reuses
@@ -1784,7 +1785,7 @@ class Latchkey(MutableModel):
         :data:`MINDS_GOOGLE_OAUTH_SERVICES` -- either because the bare sign-in
         reported that no client is registered yet, or because we are in
         ephemeral mode (adding a new account) and deliberately re-prepare rather
-        than reuse an existing client. Registers the Imbue Studio-provided client via
+        than reuse an existing client. Registers the client Imbue Studio provides via
         :meth:`auth_prepare` (so the user signs in against the Imbue Studio consent
         screen) and runs :meth:`auth_browser_login`.
 

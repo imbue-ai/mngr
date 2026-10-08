@@ -596,8 +596,8 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   // pi's abort (in interactive mode) drains the parked steers INTO the composer and stops the
   // stream, both synchronously. Since it APPENDS onto whatever is typed, we clear any draft
   // first and restore it after -- so the captured steers are sourced purely from pi's own
-  // queue (authoritative; no Imbue Studio-view lag) and no draft leaks in. The two sentinel branches
-  // differ ONLY in the returned steers' fate: flush resubmits them, retract discards them.
+  // queue (authoritative; no lag in Imbue Studio's view) and no draft leaks in. The two sentinel
+  // branches differ ONLY in the returned steers' fate: flush resubmits them, retract discards them.
   const abortAndCaptureSteers = (): string | null => {
     const ctx = latestCtx;
     if (!ctx || typeof ctx.isIdle !== "function" || ctx.isIdle() || typeof ctx.abort !== "function") {

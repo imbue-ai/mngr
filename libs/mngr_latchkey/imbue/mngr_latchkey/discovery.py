@@ -12,8 +12,8 @@ Exposes two callables:
   for the container that predates that mapping), while a desktop-to-VPS tunnel
   of this computer's own, announced to the machine on every cycle together with
   the port it was assigned, lets that gateway's forwarding extension reach
-  Imbue Studio-owned endpoints on this desktop (and, over their own tunnels, on the
-  user's other desktops). An agent whose gateway location cannot
+  the endpoints Imbue Studio owns on this desktop (and, over their own tunnels,
+  on the user's other desktops). An agent whose gateway location cannot
   be resolved yet receives *neither*: guessing the desktop gateway would
   half-work while exposing it to an agent that is not entitled to it (see
   ``_warn_unresolved_gateway_route``).

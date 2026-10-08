@@ -7,10 +7,11 @@ from the app's own name again. The same text is what gets written to
 
 The SPA dev-preview page and the visual-diff harness's rendered index page both
 had stale document titles ("minds frontend dev preview", "Mind"); the harness
-now matches the title the real page serves. The build script's console output,
-the uv-shim comment in `scripts/download-binaries.js`, the launch-to-msg
-screenshot comment, and the Desktops section of `docs/latchkey-permissions.md`
-say Imbue Studio too.
+now matches the title the real page serves. The build script's header and
+console output, the uv-shim comment in `scripts/download-binaries.js`, the
+launch-to-msg screenshot comment, the single-instance note in the e2e
+fixtures, and the Desktops section of `docs/latchkey-permissions.md` say Imbue
+Studio too.
 
 `electron/product-name.js` carried a comment claiming `package.json`'s
 `productName` "carries no space" and was distinct from the display name; it has

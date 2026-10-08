@@ -3325,7 +3325,7 @@ def test_auth_prepare_reports_failure_on_non_zero_exit(tmp_path: Path) -> None:
 
 def test_minds_google_oauth_services_excludes_directions() -> None:
     # google-directions authenticates with an API key (latchkey ``set`` auth),
-    # not OAuth, so it must never be routed through the Minds OAuth client.
+    # not OAuth, so it must never be routed through the Imbue Studio OAuth client.
     assert "google-directions" not in MINDS_GOOGLE_OAUTH_SERVICES
     assert "google-gmail" in MINDS_GOOGLE_OAUTH_SERVICES
 
@@ -3439,7 +3439,7 @@ def test_add_account_non_google_failure_surfaces_error(tmp_path: Path) -> None:
     assert is_success is False
     assert detail == "user cancelled"
     # The prepare step fails, so the sign-in is never attempted, and a
-    # non-Google service never gets the Minds Google OAuth client registered.
+    # non-Google service never gets the Imbue Studio Google OAuth client registered.
     assert [record["argv"] for record in _read_recording_report(tmp_path)] == [["auth", "browser-prepare", "slack"]]
 
 
@@ -3488,7 +3488,7 @@ def test_summarize_latchkey_failure_caps_the_summary_length() -> None:
 
 
 def test_add_account_google_failure_with_minds_client_is_surfaced(tmp_path: Path) -> None:
-    """Ephemeral add-account signs in with the Minds client only: a failure there ends the flow."""
+    """Ephemeral add-account signs in with the Imbue Studio client only: a failure there ends the flow."""
     binary = _make_google_oauth_binary(tmp_path, does_minds_login_succeed=False)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
@@ -3501,7 +3501,7 @@ def test_add_account_google_failure_with_minds_client_is_surfaced(tmp_path: Path
         _MINDS_PREPARE_ARGV,
         ["auth", "browser", "google-gmail"],
     ]
-    # The failed Minds preparation is left in place; it is not cleared (which
+    # The failed Imbue Studio preparation is left in place; it is not cleared (which
     # would wipe other accounts' credentials).
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
@@ -3574,7 +3574,7 @@ def _read_argv_calls(tmp_path: Path) -> list[object]:
     return [record["argv"] for record in _read_recording_report(tmp_path)]
 
 
-# The exact ``auth prepare`` invocation we expect for the Minds-provided client.
+# The exact ``auth prepare`` invocation we expect for the client Imbue Studio provides.
 _MINDS_PREPARE_ARGV = [
     "auth",
     "prepare",
@@ -3584,7 +3584,7 @@ _MINDS_PREPARE_ARGV = [
 
 
 def test_auth_browser_google_registers_minds_client_then_signs_in(tmp_path: Path) -> None:
-    """No client registered: register the Minds client and sign in; no clear, no self-setup."""
+    """No client registered: register the Imbue Studio client and sign in; no clear, no self-setup."""
     binary = _make_google_oauth_binary(tmp_path)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
@@ -3600,7 +3600,7 @@ def test_auth_browser_google_registers_minds_client_then_signs_in(tmp_path: Path
 
 
 def test_auth_browser_google_minds_sign_in_failure_is_surfaced_without_self_setup(tmp_path: Path) -> None:
-    """Minds client registers but its sign-in fails: the failure is returned, with no second browser flow."""
+    """The Imbue Studio client registers but its sign-in fails: the failure is returned; no second browser flow."""
     binary = _make_google_oauth_binary(tmp_path, does_minds_login_succeed=False)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
@@ -3614,13 +3614,13 @@ def test_auth_browser_google_minds_sign_in_failure_is_surfaced_without_self_setu
         _MINDS_PREPARE_ARGV,
         ["auth", "browser", "google-gmail"],
     ]
-    # The Minds preparation is left in place for the next attempt to sign in
+    # The Imbue Studio preparation is left in place for the next attempt to sign in
     # against; clearing it would also wipe other accounts' credentials.
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
 
 def test_auth_browser_google_minds_prepare_failure_is_surfaced_without_sign_in(tmp_path: Path) -> None:
-    """If registering the Minds client fails, no sign-in is attempted and the failure is returned."""
+    """If registering the Imbue Studio client fails, no sign-in is attempted and the failure is returned."""
     binary = _make_google_oauth_binary(tmp_path, does_minds_prepare_succeed=False)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
@@ -3669,7 +3669,7 @@ def test_auth_browser_google_existing_client_failure_is_never_cleared(tmp_path: 
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
 
-# The exact ``auth prepare`` invocation that pins the Minds-hosted redirect URI
+# The exact ``auth prepare`` invocation that pins the redirect URI Imbue Studio hosts
 # for Notion MCP before a sign-in registers its OAuth client.
 _NOTION_MCP_REDIRECT_PREPARE_ARGV = [
     "auth",
