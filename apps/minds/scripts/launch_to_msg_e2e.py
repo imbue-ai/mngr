@@ -1260,15 +1260,15 @@ def _create_workspace_and_first_message(
     # A fresh workspace opens on the welcome chat the creation page seeded, framed in its own
     # frame at the chat app's origin, with a composer under the seeded turns before any agent
     # exists; the first message sent there is what launches the chat's first agent. The create
-    # flow injects no AI credentials, so in API_KEY mode that send opens the provider chooser,
-    # which signs in and launches the chat with the message; in SUBSCRIPTION mode the synced
-    # Claude credentials are already an account and it launches at once.
+    # flow injects no AI credentials, so in API_KEY mode the composer is disabled and the
+    # provider chooser opens until a sign-in through it gives the chat an account; in
+    # SUBSCRIPTION mode the synced Claude credentials are already an account.
     chat = wait_for_chat_frame(workspace, label=label)
+    if ai_provider == "API_KEY":
+        sign_in_via_provider_chooser(workspace, chat, api_key=anthropic_key, label=label)
     inp = chat.wait_for_selector('textarea, [contenteditable="true"]', timeout=180_000)
     inp.fill(FIRST_PROMPT)
     inp.press("Enter")
-    if ai_provider == "API_KEY":
-        sign_in_via_provider_chooser(workspace, chat, api_key=anthropic_key, label=label)
     with contextlib.suppress(Exception):
         chat.wait_for_function(
             _wait_for_chat_text_js(f"document.body.innerText.includes({FIRST_PROMPT!r})"),

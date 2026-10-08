@@ -1309,12 +1309,11 @@ def _click_in_chat(workspace: Page | Frame, chat: Frame, selector: str, *, label
 def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_key: SecretStr, label: str) -> None:
     """Drive the provider chooser in the welcome chat's own frame through the Anthropic API-key path.
 
-    A freshly created workspace has no provider accounts, so the first message sent in
-    its welcome chat (the conversation the creation page seeded) opens the chooser in
+    A freshly created workspace has no provider accounts, so its welcome chat (the
+    conversation the creation page seeded) disables its composer and opens the chooser in
     that chat's page -- the designed first-boot step. Signing in mints a provider account
-    holding the key rather than writing a shared settings block, and launches the chat on
-    it with the message that was sent, so nothing is restarted and the success state is
-    the harness's own probe answering (which is why the success wait is generous).
+    holding the key rather than writing a shared settings block, and enables the composer;
+    the chat's first send then launches its agent on that account.
 
     Every control this clicks is targeted by a ``data-e2e`` attribute rather than copy or a
     tailwind class: this drives the template's dialog from the other repo, so it has to
