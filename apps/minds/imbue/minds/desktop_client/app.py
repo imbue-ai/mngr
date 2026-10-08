@@ -734,8 +734,7 @@ def _build_ui_accounts_message(session_store: MultiAccountSessionStore | None) -
     counts the rest. Resolving the default also stores it (see
     :func:`settle_default_account_id`), so the create form preselects the same
     one. ``has_accounts`` is derived from the account list rather than the
-    email so the start flow's account step keeps its exact "any account at
-    all" meaning.
+    email so it keeps its exact "any account at all" meaning.
     """
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = settle_default_account_id(

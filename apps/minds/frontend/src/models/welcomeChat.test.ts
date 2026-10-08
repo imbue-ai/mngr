@@ -114,6 +114,22 @@ describe("flowTurns", () => {
     ).toBe(true);
     expect(turns[1]).toEqual({ role: "user", text: "I verified it" });
   });
+
+  it("bolds the signed-in email the account question names", () => {
+    const [ask] = flowTurns([
+      {
+        kind: "step",
+        id: "account",
+        ack: "Imbue Cloud it is. You're signed in as me@example.com.",
+        answer: null,
+        said: "",
+        email: "me@example.com",
+      },
+    ]);
+    expect(ask.text).toBe(
+      "Imbue Cloud it is. You're signed in as **me@example.com**. Continue with this account or use a different one?",
+    );
+  });
 });
 
 describe("the markdown pieces", () => {

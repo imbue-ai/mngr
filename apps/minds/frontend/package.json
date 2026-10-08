@@ -24,6 +24,7 @@
     "@types/mithril": "^2.2.7",
     "@types/node": "^25.4.0",
     "eslint": "^10.0.3",
+    "fast-check": "^4.10.2",
     "jsdom": "^30.0.1",
     "json-schema-to-typescript": "^15.0.4",
     "prettier": "^3.8.1",

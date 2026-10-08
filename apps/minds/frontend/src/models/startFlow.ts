@@ -125,8 +125,8 @@ export function manifestoSchedule(): ManifestoSchedule {
   return { openerAt, questionAt, answerAt, reportingAt, answersAt };
 }
 
-export type StepId = "run" | "auth" | "retry" | "again" | "verify" | "verify-again";
-export type ChoiceId = "cloud" | "custom" | "signup" | "signin" | "verified";
+export type StepId = "run" | "auth" | "account" | "retry" | "again" | "verify" | "verify-again";
+export type ChoiceId = "cloud" | "custom" | "signup" | "signin" | "continue" | "verified";
 
 export interface FlowChoice {
   id: ChoiceId;
@@ -182,6 +182,16 @@ export const EXISTING_LOGIN_LABEL = "I already have a workspace (log in)";
 export const RESEND_EMAIL_LABEL = "Send the email again";
 export const VERIFIED_LABEL = "I verified it";
 
+const SIGNUP_CHOICE: FlowChoice = {
+  id: "signup",
+  label: "Create an account",
+  said: "",
+  ack: "You're in.",
+  isEmphasized: false,
+};
+
+const SIGNIN_ACK = "Welcome back.";
+
 const VERIFIED_CHOICE: FlowChoice = {
   id: "verified",
   label: VERIFIED_LABEL,
@@ -229,9 +239,17 @@ export const FLOW: Record<StepId, FlowStep> = {
     ask:
       "A cloud workspace runs on our machines, so it needs an Imbue account. " +
       "Sign in with the account you downloaded Imbue Studio with.",
+    choices: [SIGNUP_CHOICE, { id: "signin", label: "Sign in", said: "", ack: SIGNIN_ACK, isEmphasized: true }],
+  },
+  // The account step when an account is already signed in: the entry's ack
+  // names it, and the user may keep it or switch. Switching opens the browser
+  // sign-in, whose page offers both signing in and creating an account, so the
+  // ack cannot say which happened.
+  account: {
+    ask: "Continue with this account or use a different one?",
     choices: [
-      { id: "signup", label: "Create an account", said: "", ack: "You're in.", isEmphasized: false },
-      { id: "signin", label: "Sign in", said: "", ack: "Welcome back.", isEmphasized: true },
+      { id: "signin", label: "Use a different account", said: "", ack: SIGNUP_CHOICE.ack, isEmphasized: false },
+      { id: "continue", label: "Continue", said: "", ack: SIGNIN_ACK, isEmphasized: true },
     ],
   },
   retry: {
@@ -292,6 +310,22 @@ export function signedInSaid(email: string): string {
   return `You've signed in as ${email || "your account"}`;
 }
 
+/** What your side says on keeping the account that was already signed in. */
+export function continueAsSaid(email: string): string {
+  return `Continue as ${email}`;
+}
+
+/** What the agent says on hearing the cloud answer with an account already signed in. */
+export function signedInAck(email: string): string {
+  return `${CLOUD_CHOICE.ack} You're signed in as ${email}.`;
+}
+
+/** A signed-in account, as the flow names the one its cloud create runs under. */
+export interface FlowAccount {
+  userId: string;
+  email: string;
+}
+
 /**
  * One entry, in order. A `step` is a question, with its answer once given; a
  * `said` is a user turn with no question behind it (the reporting answer that
@@ -299,7 +333,15 @@ export function signedInSaid(email: string): string {
  * nothing to answer.
  */
 export type TranscriptEntry =
-  | { kind: "step"; id: StepId; ack: string; answer: ChoiceId | null; said: string }
+  | {
+      kind: "step";
+      id: StepId;
+      ack: string;
+      answer: ChoiceId | null;
+      said: string;
+      /** The signed-in account's email the question names, drawn in bold in its ack. */
+      email?: string;
+    }
   | { kind: "said"; text: string }
   | { kind: "note"; text: string };
 
@@ -315,14 +357,40 @@ export interface StartFlowState {
   isCloudCreatePending: boolean;
   /** The address whose verification the cloud create is waiting on, or null when none is. */
   verificationEmail: string | null;
+  /** The account the account step settled on: the one the cloud create runs under and whose email is verified. */
+  account: FlowAccount | null;
+  /** The signed-in account the open account step offers to continue as. */
+  offeredAccount: FlowAccount | null;
+  /**
+   * The accounts already signed in when a sign-in button was pressed. Only an
+   * account outside this set, or the one the sign-in itself reports, answers
+   * that press: an account that was there before is not the one just added.
+   */
+  knownAccountIds: readonly string[];
 }
 
 export function initialStartFlowState(): StartFlowState {
-  return { isStarted: false, entries: [], pending: null, isCloudCreatePending: false, verificationEmail: null };
+  return {
+    isStarted: false,
+    entries: [],
+    pending: null,
+    isCloudCreatePending: false,
+    verificationEmail: null,
+    account: null,
+    offeredAccount: null,
+    knownAccountIds: [],
+  };
 }
 
 function stepEntry(id: StepId, ack: string): TranscriptEntry {
   return { kind: "step", id, ack, answer: null, said: "" };
+}
+
+/** The account step after the cloud answer: asking for an account, or offering to continue as the one signed in. */
+function accountStepEntry(signedInAccount: FlowAccount | null): TranscriptEntry {
+  if (signedInAccount === null) return stepEntry("auth", CLOUD_CHOICE.ack);
+  const email = signedInAccount.email;
+  return { kind: "step", id: "account", ack: signedInAck(email), answer: null, said: "", email };
 }
 
 /** The user answered the reporting question, whichever way; `said` is the button they pressed. */
@@ -341,18 +409,26 @@ function withAnswer(entries: TranscriptEntry[], at: number, answer: ChoiceId, sa
   );
 }
 
+/** What the page knows about the accounts when a button is pressed. */
+export interface AnswerContext {
+  /** The default signed-in account, or null when none is signed in. */
+  signedInAccount: FlowAccount | null;
+  /** Every account signed in right now. */
+  knownAccountIds: readonly string[];
+}
+
 /**
  * The user pressed one of a question's buttons. The answer lands on that
  * question; what follows depends on the choice: the cloud path asks for an
- * account (or, with one already signed in, goes straight to creating), and the
- * custom path and the sign-ins hand off to a modal and record nothing more
- * until it is done.
+ * account (offering to continue as one already signed in), continuing owes the
+ * create, and the custom path and the sign-ins hand off to a modal and record
+ * nothing more until it is done.
  */
 export function answerStep(
   state: StartFlowState,
   at: number,
   choiceId: ChoiceId,
-  context: { isSignedIn: boolean; signedInEmail: string },
+  context: AnswerContext,
 ): StartFlowState {
   const entry = state.entries[at];
   if (entry === undefined || entry.kind !== "step") return state;
@@ -362,16 +438,33 @@ export function answerStep(
   // checks, then records the outcome with observeEmailVerified or
   // reaskEmailVerification.
   if (choiceId === "verified") return state;
+  // Any answer replaces a sign-in the flow was still waiting on: one that lands later must not answer again.
   if (choiceId === "cloud") {
     const entries = withAnswer(state.entries, at, choiceId, choice.said);
-    if (context.isSignedIn) {
-      return {
-        ...state,
-        entries: [...entries, { kind: "note", text: `${choice.ack} ${signedInSaid(context.signedInEmail)}.` }],
-        isCloudCreatePending: true,
-      };
+    const offered = context.signedInAccount;
+    return {
+      ...state,
+      entries: [...entries, accountStepEntry(offered)],
+      pending: null,
+      account: null,
+      offeredAccount: offered,
+    };
+  }
+  if (choiceId === "continue") {
+    const offered = state.offeredAccount;
+    if (offered === null || !context.knownAccountIds.includes(offered.userId)) {
+      return reofferAccountStep(state, at, context.signedInAccount);
     }
-    return { ...state, entries: [...entries, stepEntry("auth", choice.ack)] };
+    return {
+      ...state,
+      entries: [
+        ...withAnswer(state.entries, at, choiceId, continueAsSaid(offered.email)),
+        { kind: "note", text: choice.ack },
+      ],
+      pending: null,
+      account: offered,
+      isCloudCreatePending: true,
+    };
   }
   if (choiceId === "custom") {
     return {
@@ -381,7 +474,38 @@ export function answerStep(
     };
   }
   // The sign-ins: nothing is recorded until the modal reports an account.
-  return { ...state, pending: choiceId };
+  return { ...state, pending: choiceId, knownAccountIds: context.knownAccountIds };
+}
+
+/**
+ * The account offered at the account step is no longer signed in: the same
+ * question is asked again in place, about whichever account is signed in now.
+ */
+function reofferAccountStep(state: StartFlowState, at: number, signedInAccount: FlowAccount | null): StartFlowState {
+  const reasked = accountStepEntry(signedInAccount);
+  return {
+    ...state,
+    entries: state.entries.map((entry, index) => (index === at ? reasked : entry)),
+    pending: null,
+    offeredAccount: signedInAccount,
+  };
+}
+
+/**
+ * The account that answers the sign-in the flow is waiting on, or null when
+ * none has landed yet: the one the sign-in itself reports (it may be an account
+ * that was already signed in), else one that was not signed in when the button
+ * was pressed.
+ */
+export function landedAccount(
+  state: StartFlowState,
+  accounts: readonly FlowAccount[],
+  completedSignInEmail: string,
+): FlowAccount | null {
+  if (state.pending !== "signup" && state.pending !== "signin") return null;
+  const reported = accounts.find((account) => completedSignInEmail !== "" && account.email === completedSignInEmail);
+  if (reported !== undefined) return reported;
+  return accounts.find((account) => !state.knownAccountIds.includes(account.userId)) ?? null;
 }
 
 /** The user pressed the quieter "I already have one (log in)" under the first question. */
@@ -408,27 +532,46 @@ export function finishPendingModal(state: StartFlowState): StartFlowState {
  * The buttons become the receipt, the agent acknowledges, and the cloud create
  * is owed. Ignored when the flow was not waiting on an account.
  */
-export function observeSignedIn(state: StartFlowState, email: string): StartFlowState {
+export function observeSignedIn(state: StartFlowState, account: FlowAccount): StartFlowState {
   if (state.pending !== "signup" && state.pending !== "signin") return state;
-  const at = lastAuthStepIndex(state.entries);
+  const at = lastAccountStepIndex(state.entries);
   if (at < 0) return { ...state, pending: null };
-  const choice = FLOW.auth.choices.find((candidate) => candidate.id === state.pending);
-  const entries = withAnswer(state.entries, at, state.pending, signedInSaid(email));
+  const step = state.entries[at];
+  const pending = state.pending;
+  const choice = step.kind === "step" ? FLOW[step.id].choices.find((candidate) => candidate.id === pending) : undefined;
+  if (choice === undefined) throw new Error(`The account step does not offer the awaited "${pending}" choice`);
+  const entries = withAnswer(state.entries, at, state.pending, signedInSaid(account.email));
   return {
     ...state,
     pending: null,
-    entries: [...entries, { kind: "note", text: choice?.ack ?? "" }],
+    entries: [...entries, { kind: "note", text: choice.ack }],
+    account,
     isCloudCreatePending: true,
   };
 }
 
 /**
- * The signed-in account's email is not verified, and the connector will
+ * Let a landed sign-in answer the account step the flow is waiting on: the
+ * account that answers it (see landedAccount) becomes the settled one and the
+ * cloud create is owed. Unchanged while nothing has landed or nothing waits.
+ */
+export function settleAwaitedSignIn(
+  state: StartFlowState,
+  accounts: readonly FlowAccount[],
+  completedSignInEmail: string,
+): StartFlowState {
+  const landed = landedAccount(state, accounts, completedSignInEmail);
+  return landed === null ? state : observeSignedIn(state, landed);
+}
+
+/**
+ * The settled account's email is not verified, and the connector will
  * refuse the cloud create until it is. The create waits; the flow asks for
  * the click on the emailed link instead.
  */
-export function requireEmailVerification(state: StartFlowState, email: string): StartFlowState {
-  if (!state.isCloudCreatePending) return state;
+export function requireEmailVerification(state: StartFlowState): StartFlowState {
+  if (!state.isCloudCreatePending || state.account === null) return state;
+  const email = state.account.email;
   return {
     ...state,
     isCloudCreatePending: false,
@@ -490,6 +633,29 @@ export function settleCloudCreate(state: StartFlowState, refusal: string | null)
 }
 
 /**
+ * A cloud create is about to go out. If the account it is owed under has been
+ * signed out since the account step settled on it, it is refused here instead,
+ * so where to run is asked again and a fresh account step offers whoever is
+ * signed in now.
+ */
+export function refuseCreateForSignedOutAccount(
+  state: StartFlowState,
+  knownAccountIds: readonly string[],
+): StartFlowState {
+  const account = state.account;
+  if (!state.isCloudCreatePending || account === null || knownAccountIds.includes(account.userId)) return state;
+  return settleCloudCreate(state, `That did not work: ${account.email} is no longer signed in.`);
+}
+
+/**
+ * Take the reporting answer back: the whole conversation that followed it goes,
+ * and the reporting question is asked again.
+ */
+export function undoReporting(state: StartFlowState): StartFlowState {
+  return state.isStarted ? initialStartFlowState() : state;
+}
+
+/**
  * Take a question back: its answer goes, and so does everything said after it.
  * The one place the transcript does not only grow, because every later turn
  * followed from the answer being undone.
@@ -502,14 +668,15 @@ export function undoAnswer(state: StartFlowState, at: number): StartFlowState {
     pending: null,
     isCloudCreatePending: false,
     verificationEmail: null,
+    account: null,
     entries: [...state.entries.slice(0, at), { ...entry, answer: null, said: "" }],
   };
 }
 
-function lastAuthStepIndex(entries: TranscriptEntry[]): number {
+function lastAccountStepIndex(entries: TranscriptEntry[]): number {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
-    if (entry.kind === "step" && entry.id === "auth") return index;
+    if (entry.kind === "step" && (entry.id === "auth" || entry.id === "account")) return index;
   }
   return -1;
 }

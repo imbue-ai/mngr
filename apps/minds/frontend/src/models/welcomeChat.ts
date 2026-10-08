@@ -106,7 +106,8 @@ export function flowTurns(entries: TranscriptEntry[]): WelcomeChatTurn[] {
       continue;
     }
     const step = FLOW[entry.id];
-    const { lead, body } = stepText(step, entry.ack);
+    const { lead, body: plainBody } = stepText(step, entry.ack);
+    const body = entry.email === undefined ? plainBody : plainBody.replace(entry.email, `**${entry.email}**`);
     const parts: string[] = [];
     if (lead !== "") parts.push(`**${lead}**`);
     if (body !== "") parts.push(body);
