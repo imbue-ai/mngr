@@ -9,6 +9,7 @@ file covers Imbue Studio's command-building and helpers.
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import threading
@@ -2333,3 +2334,19 @@ def test_sweep_reclaims_stale_scratch_clones_but_spares_live_ones(tmp_path: Path
     assert not stale.exists()
     assert live.is_dir()
     assert unrelated.is_dir()
+
+
+def test_build_mngr_create_command_keeps_a_repo_path_with_spaces_whole_through_mngrs_build_arg_tokenizing() -> None:
+    repo_path = "/Users/someone/Imbue Dropbox/src/default-workspace-template"
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_repo_url=repo_path,
+        imbue_cloud_branch_or_tag="it's-a-branch",
+    )
+    build_arg_values = [command[index + 1] for index, flag in enumerate(command) if flag == "-b"]
+    # ``mngr create`` shell-tokenizes each ``-b`` value (``_split_cli_args``); each must come back as one token.
+    tokens = [token for value in build_arg_values for token in shlex.split(value)]
+    assert f"repo_url={repo_path}" in tokens
+    assert "repo_branch_or_tag=it's-a-branch" in tokens

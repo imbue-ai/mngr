@@ -12,6 +12,7 @@ via get_log_sink().
 import json
 import os
 import re
+import shlex
 import shutil
 import tempfile
 import threading
@@ -1029,6 +1030,15 @@ def latchkey_gateway_location_for_launch(launch_mode: LaunchMode) -> LatchkeyGat
             assert_never(unreachable)
 
 
+def _build_arg_flag(value: str) -> list[str]:
+    """``-b <value>`` for ``mngr create``, shell-quoted.
+
+    ``mngr create`` shell-tokenizes every ``-b`` value (so ``-b "--cpu 16"`` reaches the provider as two args), so a
+    value holding a space -- a template checkout under "Imbue Dropbox", say -- must be quoted to arrive whole.
+    """
+    return ["-b", shlex.quote(value)]
+
+
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     host_name: HostName,
@@ -1257,7 +1267,7 @@ def _build_mngr_create_command(
             # settings). It is a hard placement requirement: the VPS is created
             # in exactly this region.
             if region:
-                mngr_command.extend(["-b", f"--vultr-region={region}"])
+                mngr_command.extend(_build_arg_flag(f"--vultr-region={region}"))
         case LaunchMode.AWS:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "aws"])
             mngr_command.extend(_remote_host_env_flags())
@@ -1266,11 +1276,11 @@ def _build_mngr_create_command(
             # ``--aws-region`` build arg too so intent is explicit and the
             # provider's cross-region guard confirms the placement.
             if region:
-                mngr_command.extend(["-b", f"--aws-region={region}"])
+                mngr_command.extend(_build_arg_flag(f"--aws-region={region}"))
             # Per-create machine size (the form's picker); overrides the
             # provider block's default_instance_type when set.
             if instance_type:
-                mngr_command.extend(["-b", f"--aws-instance-type={instance_type}"])
+                mngr_command.extend(_build_arg_flag(f"--aws-instance-type={instance_type}"))
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
@@ -1279,9 +1289,9 @@ def _build_mngr_create_command(
             # invocation.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "imbue_cloud"])
             if imbue_cloud_repo_url:
-                mngr_command.extend(["-b", f"repo_url={imbue_cloud_repo_url}"])
+                mngr_command.extend(_build_arg_flag(f"repo_url={imbue_cloud_repo_url}"))
             if imbue_cloud_branch_or_tag:
-                mngr_command.extend(["-b", f"repo_branch_or_tag={imbue_cloud_branch_or_tag}"])
+                mngr_command.extend(_build_arg_flag(f"repo_branch_or_tag={imbue_cloud_branch_or_tag}"))
             # ``fast_mode`` selects the imbue_cloud create path: ``require``
             # adopts an exact-attribute pre-baked pool host (fast); ``prevent``
             # leases any available host and rebuilds it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile
@@ -1289,13 +1299,13 @@ def _build_mngr_create_command(
             # back to ``prevent`` on FastPathUnavailableError (see
             # ``_run_imbue_cloud_create_with_fallback``).
             if imbue_cloud_fast_mode:
-                mngr_command.extend(["-b", f"fast_mode={imbue_cloud_fast_mode}"])
+                mngr_command.extend(_build_arg_flag(f"fast_mode={imbue_cloud_fast_mode}"))
             # ``region`` is the explicit datacenter the user picked in the create
             # form (advanced settings). It is a hard requirement: the lease only
             # adopts/leases a host in this region, and the user gets a clear
             # "no capacity in <region>" error if none is available there.
             if region:
-                mngr_command.extend(["-b", f"region={region}"])
+                mngr_command.extend(_build_arg_flag(f"region={region}"))
         case LaunchMode.MODAL:
             # Same remote shape as vultr/aws: the ``main`` + ``modal`` templates
             # run the provisioning chain over SSH on the freshly-created sandbox.
@@ -1315,18 +1325,18 @@ def _build_mngr_create_command(
             mngr_command.extend(["--new-host", "--template", "main", "--template", "gcp"])
             mngr_command.extend(_remote_host_env_flags())
             if region:
-                mngr_command.extend(["-b", f"--gcp-zone={region}"])
+                mngr_command.extend(_build_arg_flag(f"--gcp-zone={region}"))
             if instance_type:
-                mngr_command.extend(["-b", f"--gcp-machine-type={instance_type}"])
+                mngr_command.extend(_build_arg_flag(f"--gcp-machine-type={instance_type}"))
         case LaunchMode.AZURE:
             # Same shape as aws; the address already selects the
             # ``byok-azure-<slug>`` account block.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "azure"])
             mngr_command.extend(_remote_host_env_flags())
             if region:
-                mngr_command.extend(["-b", f"--azure-region={region}"])
+                mngr_command.extend(_build_arg_flag(f"--azure-region={region}"))
             if instance_type:
-                mngr_command.extend(["-b", f"--azure-vm-size={instance_type}"])
+                mngr_command.extend(_build_arg_flag(f"--azure-vm-size={instance_type}"))
         case _ as unreachable:
             assert_never(unreachable)
 
