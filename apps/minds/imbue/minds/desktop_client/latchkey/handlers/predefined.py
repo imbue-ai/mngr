@@ -870,8 +870,8 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 chosen.account,
                 chosen.credential_status,
             )
-            # ``auth_browser`` owns all of the auth-flow logic, including the
-            # Imbue Studio Google OAuth client preference for ``google-*`` services.
+            # ``auth_browser`` owns all of the auth-flow logic, including registering
+            # the Imbue Studio Google OAuth client for ``google-*`` services.
             is_success, detail = machine_latchkey.auth_browser(service_info.name, account=chosen.account)
         elif accounts_before:
             logger.info("Adding a new {} account through the permission dialog", service_info.name)

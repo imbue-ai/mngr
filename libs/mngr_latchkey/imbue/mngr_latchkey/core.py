@@ -1685,32 +1685,9 @@ class Latchkey(MutableModel):
         so the browser starts with no saved session and the user lands on a
         fresh sign-in screen -- letting them add a genuinely new account rather
         than being silently re-authenticated as an already-signed-in one.
-
-        For a Minds Google OAuth service (:data:`MINDS_GOOGLE_OAUTH_SERVICES`),
-        if signing in with the official (Minds-provided) client does not
-        succeed, always fall back to a fresh self-setup ``auth browser-prepare``
-        step and retry the ephemeral sign-in, so the user can register their own
-        OAuth client. Returns ``(is_success, detail)``.
+        Returns ``(is_success, detail)``.
         """
-        is_success, detail = self.auth_browser(service_name, is_ephemeral=True)
-        if is_success:
-            return True, ""
-        if service_name not in MINDS_GOOGLE_OAUTH_SERVICES:
-            return False, detail
-        logger.info(
-            "Adding a Google account for {} via the Imbue Studio client did not succeed; "
-            "running a fresh 'auth browser-prepare' and retrying",
-            service_name,
-        )
-        is_prepared, prepare_detail = self._run_latchkey_auth_command(
-            log_label="auth browser-prepare",
-            argv=["auth", "browser-prepare", service_name],
-            service_name=service_name,
-            is_ephemeral=True,
-        )
-        if not is_prepared:
-            return False, prepare_detail
-        return self.auth_browser_login(service_name, is_ephemeral=True)
+        return self.auth_browser(service_name, is_ephemeral=True)
 
     def auth_browser(
         self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
@@ -1742,10 +1719,13 @@ class Latchkey(MutableModel):
           register the Minds-provided client and retry, so the user signs in
           against the Minds consent screen instead of self-provisioning their
           own Google Cloud project (see
-          :meth:`_authenticate_with_minds_google_client`).
+          :meth:`_authenticate_with_minds_google_client`). That client is the
+          only one ever registered here for a Google service: a failure there
+          (the user closing the consent screen, say) is reported as-is rather
+          than followed by a second browser flow.
 
-        * Otherwise -- or if that Minds attempt fails -- run the self-setup
-          ``auth browser-prepare`` step and retry the sign-in once.
+        * Otherwise, run the self-setup ``auth browser-prepare`` step and
+          retry the sign-in once.
 
         In the normal (non-ephemeral) mode the bare sign-in is attempted first,
         rather than probing which client is registered up front, so the two
@@ -1779,13 +1759,8 @@ class Latchkey(MutableModel):
                 return False, detail
         # No client is registered yet (that is exactly what the browser-prepare
         # hint means) or we're in the ephemeral mode (typically a new account).
-        # For a Minds Google OAuth service, prefer the Minds client before offering the user the self-setup flow.
         if service_name in MINDS_GOOGLE_OAUTH_SERVICES:
-            is_minds_success, minds_detail = self._authenticate_with_minds_google_client(
-                service_name, is_ephemeral=is_ephemeral
-            )
-            if is_minds_success:
-                return True, minds_detail
+            return self._authenticate_with_minds_google_client(service_name, is_ephemeral=is_ephemeral)
         logger.info(
             "latchkey auth browser {} reports preparation required; running 'auth browser-prepare' and retrying",
             service_name,
@@ -1803,7 +1778,7 @@ class Latchkey(MutableModel):
     def _authenticate_with_minds_google_client(
         self, service_name: str, *, is_ephemeral: bool = False
     ) -> tuple[bool, str]:
-        """Register the Minds Google OAuth client and retry the bare sign-in.
+        """Register the Minds Google OAuth client and run the bare sign-in against it.
 
         Reached from :meth:`auth_browser` for a service in
         :data:`MINDS_GOOGLE_OAUTH_SERVICES` -- either because the bare sign-in
@@ -1811,13 +1786,12 @@ class Latchkey(MutableModel):
         ephemeral mode (adding a new account) and deliberately re-prepare rather
         than reuse an existing client. Registers the Minds-provided client via
         :meth:`auth_prepare` (so the user signs in against the Minds consent
-        screen) and retries :meth:`auth_browser_login`.
+        screen) and runs :meth:`auth_browser_login`.
 
         On a failed sign-in the just-registered client is left in place: the
-        caller's self-setup ``auth browser-prepare`` overwrites the existing
-        preparation, so no destructive clear is needed (a clear would also wipe
-        every other account's stored credentials for the service). Returns
-        ``(is_success, detail)``.
+        next attempt signs in against it (or, in ephemeral mode, re-registers
+        the same one), and a clear would wipe every other account's stored
+        credentials for the service. Returns ``(is_success, detail)``.
         """
         is_prepared, prepare_detail = self.auth_prepare(
             service_name,
@@ -1839,8 +1813,8 @@ class Latchkey(MutableModel):
         Unlike :meth:`auth_browser`, this never auto-runs ``auth
         browser-prepare`` on failure. It is the bare sign-in used once the
         service's preparation is in place -- a registered client (the Minds
-        OAuth client via :meth:`auth_prepare`, or one a prior self-setup left
-        behind), or just a pinned redirect URI (via
+        OAuth client via :meth:`auth_prepare`, or one ``auth browser-prepare``
+        left behind), or just a pinned redirect URI (via
         :meth:`auth_prepare_redirect_uri`) for a service that registers its
         client during the sign-in itself. Returns ``(True, "")`` on a clean
         exit, otherwise ``(False, detail)``.
@@ -1898,10 +1872,8 @@ class Latchkey(MutableModel):
         latchkey 3.0.0 made ``auth clear`` account-aware:
 
         * ``is_all=True`` runs ``latchkey auth clear -y <service> --all``, wiping
-          every account's credentials *and* the service's prepared OAuth client.
-          This is what discards a failed Minds client registration (left behind
-          by :meth:`auth_prepare`) so the self-setup fallback can start clean --
-          plain ``auth clear`` no longer touches the preparation.
+          every account's credentials *and* the service's prepared OAuth client
+          (plain ``auth clear`` no longer touches the preparation).
         * ``account`` (with ``is_all=False``) runs
           ``latchkey auth clear -y <service> --account <account>``, clearing just
           that one account. The default (unnamed) account is addressed with

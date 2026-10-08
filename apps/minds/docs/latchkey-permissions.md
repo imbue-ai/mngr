@@ -119,13 +119,16 @@ second gateway URL or a different agent skill.
       browser-prepare <service>` step first when latchkey asks for it).
       Two kinds of service get a preparation of Imbue Studio's own on the way:
       a `google-*` service is signed in against the OAuth client Imbue Studio
-      provides, and Notion MCP, which registers its OAuth client at sign-in,
-      first has its redirect URI pinned to the callback page Imbue Studio hosts
-      (`latchkey auth prepare notion-mcp '{"redirectUri": ...}'`, latchkey
-      >= 3.15) so the sign-in returns through that page rather than
-      latchkey's loopback callback. The pin only applies to a sign-in that
-      draws on the service-level preparation; re-signing in to a stored
-      account reuses that account's own client and redirect URI.
+      provides (and only that one: it is never self-set-up through
+      `browser-prepare`, so a sign-in that fails against it is reported as-is
+      rather than followed by a second browser flow), and Notion MCP, which
+      registers its OAuth client at sign-in, first has its redirect URI
+      pinned to the callback page Imbue Studio hosts (`latchkey auth prepare
+      notion-mcp '{"redirectUri": ...}'`, latchkey >= 3.15) so the sign-in
+      returns through that page rather than latchkey's loopback callback.
+      The pin only applies to a sign-in that draws on the service-level
+      preparation; re-signing in to a stored account reuses that account's
+      own client and redirect URI.
       Cancellation or failure of any of these steps produces a `FAILED` outcome:
       the grant is **not** applied and the request stays pending (no
       response event is written), so the dialog surfaces the reason and the
