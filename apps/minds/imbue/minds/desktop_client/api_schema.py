@@ -66,6 +66,7 @@ from imbue.minds.desktop_client.api_models import InvitationResultResponse
 from imbue.minds.desktop_client.api_models import InviteGranteeRequest
 from imbue.minds.desktop_client.api_models import MachineSharingRequest
 from imbue.minds.desktop_client.api_models import MachineSharingResponse
+from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
@@ -180,6 +181,9 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ),
     ("GET", "/api/v1/workspace-sharing/{workspace_id}/invitation-outcomes"): _RouteModels(
         response_model=InvitationOutcomesResponse
+    ),
+    ("POST", "/api/v1/workspace-sharing/{workspace_id}/mobile-access-link"): _RouteModels(
+        response_model=MobileAccessLinkResponse
     ),
     ("GET", "/api/v1/machines/{host_id}/sharing"): _RouteModels(response_model=MachineSharingResponse),
     ("PUT", "/api/v1/machines/{host_id}/sharing"): _RouteModels(

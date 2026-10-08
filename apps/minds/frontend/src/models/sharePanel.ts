@@ -29,6 +29,7 @@ import type {
   InvitationOutcomesResponse,
   InvitationResultResponse,
   MachineSharingResponse,
+  MobileAccessLinkResponse,
   ShareLoadStatus,
   SharingGrantList,
   SharingGrantsDocument,
@@ -102,6 +103,25 @@ const INVITE_REFUSAL_MESSAGES: Record<string, string> = {
 };
 
 const INVITE_FAILURE_MESSAGE = "Could not invite";
+/** What the panel says when the route refuses: the workspace has no address to
+ * send yet, whether because sharing is off or because it is still coming up.
+ * Which of the two it is names an internal state, so the panel says neither. */
+const MOBILE_LINK_NO_ACCESS_POINT_MESSAGE =
+  "This workspace does not have a secure access point yet. If you've just " +
+  "enabled sharing and web access, please wait a few minutes before trying " +
+  "again.";
+
+const MOBILE_LINK_FAILURE_MESSAGE = "Could not send the email";
+
+/** What the panel's mobile-link control is doing, as a single typed value so
+ * exactly one of "idle", "in flight", "sent" and "refused" is ever on screen. */
+export type MobileLinkState =
+  | { readonly state: "idle" }
+  | { readonly state: "sending" }
+  /** Shown until the panel is loaded again, so the confirmation outlives the
+   * redraw that follows the send. */
+  | { readonly state: "sent"; readonly recipientEmail: string }
+  | { readonly state: "refused"; readonly message: string };
 /** What a grant can be typed as, in the order the add row offers them. */
 export const GRANT_ADD_KINDS = ["email", "email_domain"] as const;
 
@@ -326,6 +346,10 @@ export class SharePanelModel {
   // Keyed by target and grantee, as the outcomes route lists them.
   private outcomeByKey = new Map<string, GrantOutcome>();
   private readonly inviteStateByKey = new Map<GrantKey, InviteState>();
+  // What the mobile-link control is doing. One per panel rather than per
+  // target: the message carries the whole workspace's link, whichever target
+  // the pane is on.
+  private mobileLink: MobileLinkState = { state: "idle" };
   // A person is auto-invited once, when their grant first settles and the document has reached
   // Imbue Cloud; a later re-invite is the granter's own doing.
   private readonly autoInvitedKeys = new Set<GrantKey>();
@@ -405,6 +429,31 @@ export class SharePanelModel {
    * shown from the cache, or a toggle whose direction is known. */
   get isPublicationKnown(): boolean {
     return this.isPublishWriteInFlight || this.adoptedStatusSequence !== null;
+  }
+
+  /** Whether a document has arrived to draw the target pane from.
+   *
+   * Until one has, every answer the pane would give is a default dressed as a
+   * fact: no link section because publishing reads false, an empty grant list
+   * that reads as "nobody", and a mobile-link control disabled for a reason
+   * that may not be the real one. Unlike the switch's own
+   * ``isPublicationKnown``, a toggle in flight does not count -- it settles
+   * the publication, not the grants the pane lists. */
+  get isSharingDocumentKnown(): boolean {
+    return this.adoptedStatusSequence !== null;
+  }
+
+  /** Whether the pane has nothing real to draw and a read is still out.
+   *
+   * Only a read still in flight counts: a read that failed also leaves
+   * nothing adopted, and standing in a placeholder for it would pulse
+   * forever with no way out. The publish widget's own error notice carries
+   * that case. */
+  get isSharingDocumentLoading(): boolean {
+    return (
+      !this.isSharingDocumentKnown &&
+      this.statusQuery.getCurrentResult().isFetching
+    );
   }
 
   /** Nothing is known yet, and the read that will say is still out. */
@@ -690,6 +739,10 @@ export class SharePanelModel {
     // A refusal is said once, at the moment it happened (spec O5).
     for (const [key, state] of this.inviteStateByKey)
       if (state.state === "refused") this.inviteStateByKey.delete(key);
+    // The mobile link's confirmation and refusal are about the moment they
+    // happened too, so a fresh look at the panel starts over.
+    if (this.mobileLink.state !== "sending")
+      this.mobileLink = { state: "idle" };
     const cached = this.statusQuery.getCurrentResult().data;
     if (cached !== undefined && this.adoptedStatusSequence === null)
       this.adoptLoadedDocument(cached, this.nextStatusSequence());
@@ -894,6 +947,37 @@ export class SharePanelModel {
         ? INVITE_REFUSAL_MESSAGES[code]
         : errorMessageFromBody(result.body, INVITE_FAILURE_MESSAGE);
     return { state: "refused", message };
+  }
+
+  /** What the mobile-link control is doing. */
+  get mobileLinkState(): MobileLinkState {
+    return this.mobileLink;
+  }
+
+  /** Whether the link can be emailed now: sharing is on, and no request of
+   * this panel's is already in flight. A workspace whose address has not
+   * arrived yet is still askable -- the route answers with the wait. */
+  get canSendMobileAccessLink(): boolean {
+    return this.isPublished && this.mobileLink.state !== "sending";
+  }
+
+  /**
+   * Ask Imbue Cloud to email the signed-in account the link to this workspace.
+   *
+   * Where it goes is not the panel's to choose: the connector reads the
+   * address off the session, so the control cannot be aimed at anyone else.
+   */
+  async sendMobileAccessLink(): Promise<void> {
+    if (!this.canSendMobileAccessLink) return;
+    this.mobileLink = { state: "sending" };
+    this.redraw();
+    const result = await this.fetchJson(
+      `${this.shareApiBase()}/mobile-access-link`,
+      { method: "POST", headers: { "Content-Type": "application/json" } },
+    );
+    if (this.isDisposed) return;
+    this.mobileLink = adoptMobileLinkAnswer(result, this.granterEmail);
+    this.redraw();
   }
 
   /** Read what the granter may learn about every row. Nothing is readable
@@ -1756,13 +1840,41 @@ function outcomesByKey(
   return outcomes;
 }
 
-/** The refusal code of an invite the desktop answered with 409, or null. */
-function refusalCodeOf(body: unknown): string | null {
+/** The panel's reading of what the mobile-link route answered. */
+function adoptMobileLinkAnswer(
+  result: { ok: boolean; status: number; body: unknown },
+  granterEmail: string,
+): MobileLinkState {
+  if (result.ok) {
+    const body = result.body as MobileAccessLinkResponse;
+    if (body.outcome === "sent")
+      return {
+        state: "sent",
+        recipientEmail: body.recipient_email || granterEmail,
+      };
+    return { state: "refused", message: MOBILE_LINK_FAILURE_MESSAGE };
+  }
+  // Every refusal this route makes is one of the two 409s, and both mean the
+  // same thing to a reader: there is no address to send yet.
+  if (result.status === 409)
+    return { state: "refused", message: MOBILE_LINK_NO_ACCESS_POINT_MESSAGE };
+  return {
+    state: "refused",
+    message: errorMessageFromBody(result.body, MOBILE_LINK_FAILURE_MESSAGE),
+  };
+}
+
+/** The ``error`` code of a refusal body, whatever route answered it, or null. */
+function errorCodeOf(body: unknown): string | null {
   if (body === null || typeof body !== "object") return null;
   const code = (body as { error?: unknown }).error;
-  return typeof code === "string" && code in INVITE_REFUSAL_MESSAGES
-    ? code
-    : null;
+  return typeof code === "string" && code !== "" ? code : null;
+}
+
+/** The refusal code of an invite the desktop answered with 409, or null. */
+function refusalCodeOf(body: unknown): string | null {
+  const code = errorCodeOf(body);
+  return code !== null && code in INVITE_REFUSAL_MESSAGES ? code : null;
 }
 
 function grantRefusalsFrom(

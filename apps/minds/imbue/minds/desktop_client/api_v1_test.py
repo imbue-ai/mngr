@@ -4580,3 +4580,53 @@ def test_workspace_sharing_invitation_outcomes_is_empty_while_unpublished(tmp_pa
 
     assert response.status_code == 200
     assert json.loads(response.data) == {"outcomes": []}
+
+
+def test_workspace_sharing_mobile_access_link_carries_the_whole_workspaces_link_and_its_name(
+    tmp_path: Path,
+) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(is_share_env_present=True))
+    client = _invitation_client(tmp_path, agent_id, cli)
+
+    response = client.post(f"/api/v1/workspace-sharing/{agent_id}/mobile-access-link", headers=_auth_header())
+
+    assert response.status_code == 200, response.data
+    assert json.loads(response.data)["outcome"] == "sent"
+    (call,) = cli.mobile_access_link_calls
+    assert call["link"] == f"https://system_interface-shl1.{_TEST_HOST_ID}.owner1234.us1.shares.example/"
+    assert call["workspace_name"] == _INVITED_WORKSPACE_NAME
+
+
+def test_workspace_sharing_mobile_access_link_reports_a_refusal_by_its_code(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    no_link = ImbueCloudShareRefusedCliError("shares mobile-access-link: no link yet")
+    no_link.code = "no_workspace_link"
+    cli = _fake_sharing_cli(
+        mngr_caller=_ShareProbeCaller(is_share_env_present=True), mobile_access_link_results=[no_link]
+    )
+    client = _invitation_client(tmp_path, agent_id, cli)
+
+    response = client.post(f"/api/v1/workspace-sharing/{agent_id}/mobile-access-link", headers=_auth_header())
+
+    assert response.status_code == 409
+    assert json.loads(response.data)["error"] == "no_workspace_link"
+
+
+def test_workspace_sharing_mobile_access_link_leaves_an_unshared_workspace_to_imbue_cloud(
+    tmp_path: Path,
+) -> None:
+    # The desktop makes no judgment of its own about the share's state: it asks
+    # with no link, and the connector answers the refusal the panel shows.
+    agent_id = AgentId()
+    not_published = ImbueCloudShareRefusedCliError("shares mobile-access-link: not published")
+    not_published.code = "not_published"
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(), mobile_access_link_results=[not_published])
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.post(f"/api/v1/workspace-sharing/{agent_id}/mobile-access-link", headers=_auth_header())
+
+    assert response.status_code == 409
+    assert json.loads(response.data)["error"] == "not_published"
+    (call,) = cli.mobile_access_link_calls
+    assert call["link"] is None

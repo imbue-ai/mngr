@@ -808,6 +808,24 @@ mngr imbue_cloud shares invite [OPTIONS] HOST_ID
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud shares mobile-access-link
+
+**Usage:**
+
+```text
+mngr imbue_cloud shares mobile-access-link [OPTIONS] HOST_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--link` | text | The workspace's share URL; the shell's entry origin when omitted | None |
+| `--workspace-name` | text | The workspace's display name, as the message should say it | None |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud shares invitation-outcomes
 
 **Usage:**

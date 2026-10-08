@@ -61,10 +61,11 @@ class ImbueCloudShareError(ImbueCloudError):
 
 
 class ImbueCloudShareRefusedError(ImbueCloudShareError):
-    """Raised when the connector refuses a grants push or an invitation with a structured 409.
+    """Raised when the connector refuses a grants push, an invitation, or a mobile access link with a structured 409.
 
     ``code`` is the connector's reason: ``not_published``, ``grants_out_of_date``
-    (the panel pushes its document and retries once), or ``not_invitable``.
+    (the panel pushes its document and retries once), ``not_invitable``, or
+    ``no_workspace_link`` (the share's shell has registered no address yet).
     """
 
     def __init__(self, code: str, message: str) -> None:

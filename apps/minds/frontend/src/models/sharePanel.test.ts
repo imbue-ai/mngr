@@ -2425,3 +2425,122 @@ describe("what the panel calls a target", () => {
     expect(model.isDisplayNameAmbiguous("web")).toBe(false);
   });
 });
+
+describe("SharePanelModel mobile access link", () => {
+  const MOBILE_SUFFIX = "/mobile-access-link";
+
+  /** A published, live panel whose whole-workspace link is ready, so the
+   * control is offered. The mobile-link route answers with `respond`. */
+  function linkablePanel(
+    respond: Responder = () =>
+      okResult({ outcome: "sent", recipient_email: "owner@example.com" }),
+    isPublished = true,
+  ): { model: SharePanelModel; requests: RecordedRequest[] } {
+    return makeSharePanel((url, init) => {
+      if (url.endsWith(MOBILE_SUFFIX)) return respond(url, init);
+      if (url.endsWith("/invitation-outcomes"))
+        return okResult({ outcomes: [] });
+      return okResult(
+        sharingResponse({ enabled: isPublished, grants_synced: true }),
+      );
+    });
+  }
+
+  function mobileRequests(requests: RecordedRequest[]): RecordedRequest[] {
+    return requests.filter((request) => request.url.endsWith(MOBILE_SUFFIX));
+  }
+
+  it("posts to the route with no body, since the address is not the panel's to choose", async () => {
+    const { model, requests } = linkablePanel();
+    await model.load();
+
+    await model.sendMobileAccessLink();
+
+    expect(mobileRequests(requests)).toEqual([
+      {
+        url: expect.stringContaining(MOBILE_SUFFIX),
+        method: "POST",
+        body: null,
+      },
+    ]);
+    expect(model.mobileLinkState).toEqual({
+      state: "sent",
+      recipientEmail: "owner@example.com",
+    });
+  });
+
+  it("falls back to the signed-in address when the answer does not name one", async () => {
+    const { model } = linkablePanel(() => okResult({ outcome: "sent" }));
+    await model.load();
+
+    await model.sendMobileAccessLink();
+
+    expect(model.mobileLinkState).toEqual({
+      state: "sent",
+      recipientEmail: "owner@example.com",
+    });
+  });
+
+  it("says the send failed when the route answered without sending", async () => {
+    const { model } = linkablePanel(() => okResult({ outcome: "failed" }));
+    await model.load();
+
+    await model.sendMobileAccessLink();
+
+    expect(model.mobileLinkState).toEqual({
+      state: "refused",
+      message: "Could not send the email",
+    });
+  });
+
+  it("says the same thing for either refusal, naming no internal state", async () => {
+    const noAccessPoint =
+      "This workspace does not have a secure access point yet. If you've " +
+      "just enabled sharing and web access, please wait a few minutes " +
+      "before trying again.";
+    for (const error of ["no_workspace_link", "not_published"]) {
+      const { model } = linkablePanel(() => ({
+        ok: false,
+        status: 409,
+        body: { error, message: "not ready" },
+      }));
+      await model.load();
+
+      await model.sendMobileAccessLink();
+
+      expect(model.mobileLinkState).toEqual({
+        state: "refused",
+        message: noAccessPoint,
+      });
+    }
+  });
+
+  it("offers nothing to click while sharing is off, and sends nothing if asked", async () => {
+    const { model, requests } = linkablePanel(undefined, false);
+    await model.load();
+
+    expect(model.canSendMobileAccessLink).toBe(false);
+    await model.sendMobileAccessLink();
+
+    expect(mobileRequests(requests)).toEqual([]);
+    expect(model.mobileLinkState).toEqual({ state: "idle" });
+  });
+
+  it("stays askable while the workspace's address is still coming up", async () => {
+    const { model } = linkablePanel();
+    await model.load();
+    model.isLive = false;
+
+    expect(model.canSendMobileAccessLink).toBe(true);
+  });
+
+  it("clears what a past request said when the panel is looked at again", async () => {
+    const { model } = linkablePanel();
+    await model.load();
+    await model.sendMobileAccessLink();
+
+    await model.load();
+
+    expect(model.mobileLinkState).toEqual({ state: "idle" });
+  });
+});

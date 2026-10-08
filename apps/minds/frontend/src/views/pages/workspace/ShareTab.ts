@@ -11,11 +11,13 @@ import { Icon16 } from "../../components/Icon";
 import { CopyField } from "../../components/Layout";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
+import { Skeleton, SkeletonRegion } from "../../components/Skeleton";
 import { Spinner } from "../../components/Spinner";
 import type {
   Grant,
   GrantAddKind,
   InvitationStatusIndicator,
+  MobileLinkState,
   SharePanelModel,
 } from "../../../models/sharePanel";
 import { GRANT_ADD_KINDS, toGrantAddKind } from "../../../models/sharePanel";
@@ -58,6 +60,14 @@ const ADD_OFF_TOOLTIP = "Permissions cannot be granted while sharing is off";
 
 const ADD_UNKNOWN_TOOLTIP =
   "Permissions cannot be granted until the sharing status has loaded";
+
+// The control is drawn only on the whole workspace's pane, because the message
+// carries that link and no app's. It is drawn whether or not sharing is on, so
+// a reader learns the feature exists and what switch turns it on.
+const MOBILE_LINK_LABEL = "Email me a Mobile Access Link";
+
+const MOBILE_LINK_OFF_TOOLTIP =
+  "Enable sharing and web access to access this link on mobile";
 
 const SYNC_PENDING_NOTICE =
   "The permissions have not reached Imbue Cloud yet, so nobody can be " +
@@ -404,19 +414,26 @@ function renderNavEntry(
           : null,
       ]),
       // An app registers its address when it starts, so one that has never run
-      // has no link yet -- which is not the same as having no grants.
-      target === share.wholeService || share.isLabelKnown(target)
+      // has no link yet -- which is not the same as having no grants. Both
+      // this and the count come from the document, so until one lands the row
+      // says neither: an unregistered label and an empty list look exactly
+      // like a document that has not arrived.
+      share.isSharingDocumentLoading ||
+      target === share.wholeService ||
+      share.isLabelKnown(target)
         ? null
         : m(
             "span",
             { class: "shrink-0 type-helper text-tertiary" },
             "no link yet",
           ),
-      m(
-        "span",
-        { "data-share-count": target, class: COUNT_BADGE_CLASS },
-        String(share.grantCount(target)),
-      ),
+      share.isSharingDocumentLoading
+        ? m(Skeleton, { extra: "h-5 w-5 shrink-0" })
+        : m(
+            "span",
+            { "data-share-count": target, class: COUNT_BADGE_CLASS },
+            String(share.grantCount(target)),
+          ),
     ],
   );
 }
@@ -450,6 +467,7 @@ function renderTargetPane(
 ): m.Children {
   const target = share.currentTarget;
   const isWhole = target === share.wholeService;
+  if (share.isSharingDocumentLoading) return renderTargetPaneSkeleton();
   return [
     m("div", { class: "shrink-0 flex items-center gap-2" }, [
       isWhole
@@ -475,6 +493,7 @@ function renderTargetPane(
         : `Permissions below apply only to the ${targetTitle(share, target)} app.`,
     ),
     share.isPublished ? renderLinkSection(share, local) : null,
+    isWhole ? renderMobileLinkControl(share) : null,
     renderAddRow(share),
     share.isGrantsSyncPending
       ? m(
@@ -496,6 +515,49 @@ function renderTargetPane(
         ),
     renderGrantList(share, local),
   ];
+}
+
+/**
+ * The pane while no document has arrived: the same blocks in the same places,
+ * so the layout does not jump when the real pane replaces it.
+ *
+ * Every row below stands for one the pane draws -- heading, scope line, link,
+ * the mobile-link control, the add row, the list -- because drawing any of
+ * them for real would state a default as a fact.
+ */
+function renderTargetPaneSkeleton(): m.Children {
+  return m(
+    SkeletonRegion,
+    { label: "Loading permissions", extra: "flex flex-col" },
+    [
+      m("div", { class: "shrink-0 flex items-center gap-2" }, [
+        m(Skeleton, { extra: "h-5 w-5 shrink-0" }),
+        m(Skeleton, { extra: "h-5 w-64" }),
+      ]),
+      m("div", { class: "mt-2 shrink-0 flex flex-col gap-1.5" }, [
+        m(Skeleton, { extra: "h-3 w-full" }),
+        m(Skeleton, { extra: "h-3 w-2/5" }),
+      ]),
+      m("div", { class: "mt-6 shrink-0 flex flex-col gap-1.5" }, [
+        m(Skeleton, { extra: "h-4 w-12" }),
+        m("div", { class: "flex items-center gap-2" }, [
+          m(Skeleton, { extra: "h-10 flex-1" }),
+          m(Skeleton, { extra: "h-10 w-10 shrink-0" }),
+        ]),
+        m(Skeleton, { extra: "h-3 w-72" }),
+      ]),
+      m(Skeleton, { extra: "mt-4 h-9 w-64 shrink-0" }),
+      m("div", { class: "mt-6 shrink-0 flex flex-col gap-1.5" }, [
+        m(Skeleton, { extra: "h-4 w-36" }),
+        m("div", { class: "flex items-center gap-2" }, [
+          m(Skeleton, { extra: "h-10 w-52 shrink-0" }),
+          m(Skeleton, { extra: "h-10 flex-1" }),
+          m(Skeleton, { extra: "h-10 w-20 shrink-0" }),
+        ]),
+      ]),
+      m(Skeleton, { extra: "mt-6 h-12 shrink-0" }),
+    ],
+  );
 }
 
 /** Whether anyone is granted anything anywhere in this workspace. An app's own
@@ -1048,6 +1110,58 @@ function renderLinkSection(
           "Only people granted permission can open this link.",
         ),
   ]);
+}
+
+/** The control that emails the signed-in account this workspace's link, and
+ * the one line of status it leaves behind. */
+function renderMobileLinkControl(share: SharePanelModel): m.Children {
+  // Dimmed the way the add row dims, so a control that cannot be pressed is
+  // legible as one without the reader having to hover for the tooltip.
+  const offAttrs = share.canSendMobileAccessLink
+    ? {}
+    : {
+        "aria-disabled": "true",
+        "data-tooltip": MOBILE_LINK_OFF_TOOLTIP,
+        extra: "opacity-40",
+      };
+  return m("div", { id: "ws-share-mobile-link", class: "mt-4 shrink-0" }, [
+    m(
+      Button,
+      {
+        id: "ws-share-mobile-link-btn",
+        variant: "secondary",
+        ...offAttrs,
+        onclick: () => void share.sendMobileAccessLink(),
+      },
+      [m(Icon16, { name: "mail" }), MOBILE_LINK_LABEL],
+    ),
+    renderMobileLinkStatus(share.mobileLinkState),
+  ]);
+}
+
+function renderMobileLinkStatus(state: MobileLinkState): m.Children {
+  switch (state.state) {
+    case "idle":
+      return null;
+    case "sending":
+      return m(
+        "p",
+        { class: "mt-1.5 flex items-center gap-2 type-helper text-tertiary" },
+        [m(Spinner, { size: "sm", extra: "shrink-0" }), "Sending"],
+      );
+    case "sent":
+      return m(
+        "p",
+        { class: "mt-1.5 type-helper text-success" },
+        `Sent to ${state.recipientEmail}`,
+      );
+    case "refused":
+      return m(
+        "p",
+        { class: "mt-1.5 type-helper text-important" },
+        state.message,
+      );
+  }
 }
 
 async function copyLink(

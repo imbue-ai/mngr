@@ -392,6 +392,22 @@ class InvitationOutcomeEntry(WireModel):
     last_visited_at: str | None = Field(default=None, description="The grantee's latest authorized visit")
 
 
+class MobileAccessLinkOutcome(WireEnum):
+    """How a request to be emailed a workspace's link ended."""
+
+    SENT = auto()
+    FAILED = auto()
+    UNKNOWN = auto()
+
+
+class MobileAccessLinkResult(WireModel):
+    """What ``POST /shares/{host_id}/mobile-access-link`` answers."""
+
+    outcome: MobileAccessLinkOutcome = Field(description="How the request ended")
+    recipient_email: str = Field(default="", description="The requester's own address the message went to")
+    sent_at: str | None = Field(default=None, description="When the message went out, for a sent outcome")
+
+
 class NotificationPreferencesInfo(WireModel):
     """An account's notification preferences (``/accounts/me/notification-preferences``)."""
 

@@ -436,6 +436,14 @@ class InvitationOutcomesResponse(FrozenModel):
     outcomes: tuple[InvitationOutcomeEntryResponse, ...] = Field(description="One entry per open user or email grant")
 
 
+class MobileAccessLinkResponse(FrozenModel):
+    """How the request to be emailed a workspace's link ended."""
+
+    outcome: str = Field(description="sent or failed")
+    recipient_email: str = Field(default="", description="The signed-in account's own address the message went to")
+    sent_at: str | None = Field(default=None, description="When the message went out, for a sent outcome")
+
+
 class BugReportRequest(ApiRequestModel):
     """Body for submitting a bug report on behalf of an in-workspace agent.
 

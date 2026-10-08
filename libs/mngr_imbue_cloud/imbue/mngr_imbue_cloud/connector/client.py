@@ -81,6 +81,7 @@ from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
+from imbue.mngr_imbue_cloud.wire_types import MobileAccessLinkResult
 from imbue.mngr_imbue_cloud.wire_types import NotificationPreferencesInfo
 from imbue.mngr_imbue_cloud.wire_types import PaidListEntry
 from imbue.mngr_imbue_cloud.wire_types import PublicProfile
@@ -1190,6 +1191,36 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         self._raise_if_share_refused(response)
         return validate_wire(InvitationResult, self._check(response, ImbueCloudShareError))
+
+    def send_mobile_access_link(
+        self,
+        access_token: SecretStr,
+        host_id: str,
+        link: str | None,
+        workspace_name: str | None,
+    ) -> MobileAccessLinkResult:
+        """Have the connector email the caller their own workspace's link; raises ImbueCloudShareRefusedError on a 409.
+
+        The recipient is the caller's own account address, which the connector
+        reads from the session rather than from this request.
+        """
+        body: dict[str, str] = {}
+        if link:
+            body["link"] = link
+        if workspace_name:
+            body["workspace_name"] = workspace_name
+        response = self._send(
+            "POST",
+            self._url(f"/shares/{host_id}/mobile-access-link"),
+            exc_cls=ImbueCloudShareError,
+            # A retried POST after a lost response could send a second email.
+            idempotent=False,
+            headers=self._bearer(access_token),
+            json=body,
+            timeout=self.timeout_seconds,
+        )
+        self._raise_if_share_refused(response)
+        return validate_wire(MobileAccessLinkResult, self._check(response, ImbueCloudShareError))
 
     def list_invitation_outcomes(self, access_token: SecretStr, host_id: str) -> list[InvitationOutcomeEntry]:
         """The granter-visible outcome of every open user or email grant of the share."""

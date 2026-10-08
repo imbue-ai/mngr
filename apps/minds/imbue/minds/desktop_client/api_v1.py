@@ -106,6 +106,7 @@ from imbue.minds.desktop_client.api_models import InvitationResultResponse
 from imbue.minds.desktop_client.api_models import InviteGranteeRequest
 from imbue.minds.desktop_client.api_models import MachineSharingRequest
 from imbue.minds.desktop_client.api_models import MachineSharingResponse
+from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
@@ -167,6 +168,7 @@ from imbue.minds.desktop_client.sharing_handler import publish_workspace
 from imbue.minds.desktop_client.sharing_handler import publish_workspace_with_grants
 from imbue.minds.desktop_client.sharing_handler import resolve_share_target_labels_for_host
 from imbue.minds.desktop_client.sharing_handler import save_grants
+from imbue.minds.desktop_client.sharing_handler import send_mobile_access_link_for_workspace
 from imbue.minds.desktop_client.sharing_handler import unpublish_workspace
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
@@ -2891,6 +2893,26 @@ def _handle_workspace_sharing_invitation_outcomes(workspace_id: str) -> Invitati
 
 
 @require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(MobileAccessLinkResponse))
+def _handle_workspace_sharing_mobile_access_link(workspace_id: str) -> MobileAccessLinkResponse | Response:
+    """Email the signed-in account the link to its own published workspace; answers how the request ended."""
+    host_id = _sharing_host_for_workspace(workspace_id)
+    if host_id is None:
+        return _json_error(f"Unknown workspace {workspace_id}", 404)
+    state = get_state()
+    try:
+        with state.machine_sharing_locks.get_lock(host_id):
+            result = send_mobile_access_link_for_workspace(host_id, state.backend_resolver)
+    except ImbueCloudShareRefusedCliError as exc:
+        return _json_response({"error": exc.code, "message": str(exc)}, status_code=409)
+    except SharingError as exc:
+        return _json_error(str(exc), 502)
+    return MobileAccessLinkResponse(
+        outcome=result.outcome, recipient_email=result.recipient_email, sent_at=result.sent_at
+    )
+
+
+@require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(SharingReadinessResponse))
 def _handle_workspace_sharing_readiness(workspace_id: str) -> SharingReadinessResponse | Response:
     """Probe whether the workspace's shared hostname is live end to end yet."""
@@ -3637,6 +3659,12 @@ def create_api_v1_blueprint() -> Blueprint:
         view_func=_handle_workspace_sharing_invitation_outcomes,
         endpoint="workspace_sharing_invitation_outcomes",
         methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspace-sharing/<workspace_id>/mobile-access-link",
+        view_func=_handle_workspace_sharing_mobile_access_link,
+        endpoint="workspace_sharing_mobile_access_link",
+        methods=["POST"],
     )
 
     # Machine sharing (compat shims for the routes above; agents likewise

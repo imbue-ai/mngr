@@ -1,0 +1,5 @@
+- The Sharing panel now carries an "Email me a Mobile Access Link" button, which has Imbue Studio mail you the workspace's link so you can open it on your phone or in another browser. The message always goes to your own account's email address: the panel does not choose where it goes, because Imbue Cloud reads the address off your session.
+
+- The button is shown whether or not sharing is on, so you can see the feature exists; while sharing is off it is dimmed and says "Enable sharing and web access to access this link on mobile". Asking for the link before the workspace has an address answers "This workspace does not have a secure access point yet", with the suggestion to wait a few minutes.
+
+- The permissions side of the Sharing panel now shows a loading placeholder until it has heard from Imbue Cloud, instead of answering from defaults. Previously, for the several seconds the read can take, it claimed the workspace was unshared, that nobody had been granted access, and that every app had no link yet -- none of which it knew. The app list keeps its names and icons throughout and holds a placeholder where each count will be.

@@ -50,6 +50,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifie
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
+from imbue.minds.desktop_client.imbue_cloud_cli import MobileAccessLinkCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.provider_display import is_imbue_cloud_provider_name
 from imbue.minds.desktop_client.session_store import AccountSession
@@ -1283,6 +1284,45 @@ def _invite_through_cli(cli: ImbueCloudCli, attempt: _InvitationAttempt) -> Invi
         workspace_name=attempt.workspace_name,
         app_display_name=attempt.app_display_name,
     )
+
+
+def send_mobile_access_link_for_workspace(
+    host_id: str, backend_resolver: BackendResolverInterface
+) -> MobileAccessLinkCliResult:
+    """Have Imbue Cloud email the signed-in account the link to this workspace, and report how it went.
+
+    The message carries the whole workspace's link, built from the labels the
+    workspace has registered, and the workspace's display name. Where it goes
+    is not ours to choose: the connector reads the address off the session, so
+    this can only ever reach the account that asked.
+
+    A workspace with no live share is not refused here: the connector owns that
+    judgment and answers it as a structured refusal, so the desktop never has
+    to describe the share's state in its own words.
+    Raises :class:`ImbueCloudShareRefusedCliError` for the connector's
+    structured refusals, and :class:`SharingError` when the connector cannot be
+    reached.
+    """
+    state = get_state()
+    cli: ImbueCloudCli | None = state.imbue_cloud_cli
+    if cli is None:
+        raise SharingError("imbue_cloud CLI is not configured on this app.")
+    agent_id = resolve_agent_for_host(backend_resolver, host_id, state.session_store)
+    account_email = resolve_account_email_for_workspace(state.session_store, agent_id)
+    share = _read_active_share(cli, account_email, host_id)
+    label = resolve_share_target_labels(backend_resolver, agent_id).get(WHOLE_MACHINE_SERVICE)
+    link = f"https://{label}.{share.workspace_domain}/" if share is not None and label else None
+    try:
+        return cli.send_mobile_access_link(
+            account=account_email,
+            host_id=host_id,
+            link=link,
+            workspace_name=_workspace_display_name(backend_resolver, agent_id),
+        )
+    except ImbueCloudShareRefusedCliError:
+        raise
+    except ImbueCloudCliError as exc:
+        raise SharingError(f"Could not email the link: {describe_connector_failure(exc)}") from exc
 
 
 def list_invitation_outcomes_for_workspace(

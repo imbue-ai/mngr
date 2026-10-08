@@ -144,6 +144,15 @@ export interface InvitationResultResponse {
   invited_at?: string | null;
 }
 
+/** Response shape of POST /api/v1/workspace-sharing/<id>/mobile-access-link. */
+export interface MobileAccessLinkResponse {
+  /** sent or failed. */
+  outcome: string;
+  /** The signed-in account's own address the message went to. */
+  recipient_email?: string;
+  sent_at?: string | null;
+}
+
 /** The route that resolves a typed address to an account (a 404 means "store an invite"). */
 export const RESOLVE_USER_URL = "/ui/api/users/resolve";
 
