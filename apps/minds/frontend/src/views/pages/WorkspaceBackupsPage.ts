@@ -54,7 +54,7 @@ export const WorkspaceBackupsPage: m.Component<Record<string, never>, WorkspaceB
   view(vnode) {
     const { history, controller } = vnode.state;
     const restoreDisabledReason = history.isRestoreDisabledByCheck()
-      ? "This machine is offline; start it to restore a backup."
+      ? "This workspace is offline; start it to restore a backup."
       : null;
     return m(
       PageContainer,

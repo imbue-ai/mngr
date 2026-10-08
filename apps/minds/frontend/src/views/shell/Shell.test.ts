@@ -456,7 +456,7 @@ describe("Shell notifications overlay", () => {
   }
 
   it("floats over whatever surface is on screen, a hub page included, without touching it", () => {
-    // The New machine form is the routed content; opening the feed must leave
+    // The New workspace form is the routed content; opening the feed must leave
     // it as the surface and float the popover on top -- not swap in Home.
     const { state } = shellWithFeedOpen();
     const content = m("div#create-form");
@@ -797,7 +797,7 @@ describe("Shell notice band wiring", () => {
 
     const band = collectVnodes(root).find((vnode) => vnode.tag === NoticeBand);
     expect(attrsOf(band as AnyVnode).payload).toMatchObject({
-      message: "This network blocks the connection to your machines.",
+      message: "This network blocks the connection to your workspaces.",
     });
   });
 
@@ -805,12 +805,12 @@ describe("Shell notice band wiring", () => {
     [
       "reading it as out of date raises the version band",
       false,
-      "This machine is running an older version of Imbue Studio.",
+      "This workspace is running an older version of Imbue Studio.",
     ],
     [
       "a run in flight replaces that with what the run is doing",
       true,
-      "Preparing an update for this machine. Nothing changes until it's ready to land.",
+      "Preparing an update for this workspace. Nothing changes until it's ready to land.",
     ],
   ])("%s", (_name, isUpdating, expectedMessage) => {
     // A band still saying "out of date" while the update runs is the two
@@ -1023,7 +1023,7 @@ describe("Shell notice band wiring", () => {
     // Still a band -- the machine is stuck -- but the ordinary one, with the
     // device's condition kept out of it.
     expect(attrsOf(band as AnyVnode).payload).toMatchObject({
-      message: "Lost connection to this machine. Reconnecting…",
+      message: "Lost connection to this workspace. Reconnecting…",
     });
   });
 });

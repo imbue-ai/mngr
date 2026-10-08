@@ -104,7 +104,7 @@ The apps convict the machine, and at the conviction the drill sleeps the
 laptop: the dispatcher is measuring the dead network at that moment, and a
 sleep landing inside the measurement voids its reading. A gate that acted on
 the voided reading dispatched a start over a network nothing had looked at;
-that start failed, and its failure held a running machine on "This machine
+that start failed, and its failure held a running workspace on "This workspace
 stopped responding" for the rest of the day. The network stays dead for
 `--offline-after-wake` (two minutes by default) past the wake, long enough for
 such a start to fail, and is then put back for `--post-wake-wait`.

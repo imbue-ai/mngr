@@ -276,7 +276,7 @@ class HostRecoveryKind(LowerCaseStrEnum):
     START = auto()
     # ``mngr stop --stop-host`` then ``mngr start``: a real bounce, and the only
     # recovery that takes the machine down. Reached solely from the user's own
-    # "Restart machine" click, since a running-but-wedged container is the one
+    # "Restart workspace" click, since a running-but-wedged container is the one
     # case a start cannot fix.
     RESTART = auto()
 

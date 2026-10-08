@@ -172,7 +172,7 @@ def test_delete_destroyed_backup_rejects_an_unknown_agent(tmp_path: Path) -> Non
     response = client.post("/ui/api/destroyed-workspaces/agent-doesnotexist/delete-backup")
 
     assert response.status_code == 404
-    assert "No destroyed machine found" in json.loads(response.data)["error"]
+    assert "No destroyed workspace found" in json.loads(response.data)["error"]
 
 
 def test_delete_destroyed_backup_rejects_a_well_formed_but_unknown_agent(tmp_path: Path) -> None:
@@ -185,7 +185,7 @@ def test_delete_destroyed_backup_rejects_a_well_formed_but_unknown_agent(tmp_pat
     response = client.post(f"/ui/api/destroyed-workspaces/{AgentId()}/delete-backup")
 
     assert response.status_code == 404
-    assert "No destroyed machine found" in json.loads(response.data)["error"]
+    assert "No destroyed workspace found" in json.loads(response.data)["error"]
 
 
 def test_delete_destroyed_backup_without_a_reaper_is_a_conflict(tmp_path: Path) -> None:
@@ -298,7 +298,7 @@ def test_recovery_info_reports_the_backend_a_recovery_was_already_rejected_at(tm
     tracker.record_backend_outage(agent_id, "docker", "Docker Desktop is manually paused.")
     tracker.mark_recovery_failed(
         agent_id,
-        "This machine's backend is unreachable, so the recovery could not run: Docker Desktop is manually paused.",
+        "This workspace's backend is unreachable, so the recovery could not run: Docker Desktop is manually paused.",
     )
     client, _ = _build_lifecycle_client(tmp_path, backend_resolver=resolver, tracker=tracker)
 

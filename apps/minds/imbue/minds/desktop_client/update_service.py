@@ -102,19 +102,19 @@ class UpdateDispatchOutcome(UpperCaseStrEnum):
 # What each outcome that did not dispatch tells the user; the route answers with it
 # and the run slice records it, so the modal says the same thing whether it stayed open.
 DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, str]] = {
-    UpdateDispatchOutcome.ALREADY_RUNNING: "An update is already running in this machine.",
+    UpdateDispatchOutcome.ALREADY_RUNNING: "An update is already running in this workspace.",
     UpdateDispatchOutcome.UNSUPPORTED: (
-        "This machine is too old to update itself. Ask an agent inside it for help, "
-        "or create a new machine and migrate your work."
+        "This workspace is too old to update itself. Ask an agent inside it for help, "
+        "or create a new workspace and migrate your work."
     ),
-    UpdateDispatchOutcome.START_FAILED: "Couldn't start this machine to run the update.",
-    UpdateDispatchOutcome.UNREACHABLE: "Couldn't reach this machine to start the update.",
-    UpdateDispatchOutcome.SPAWN_FAILED: "Couldn't start the update agent in this machine.",
+    UpdateDispatchOutcome.START_FAILED: "Couldn't start this workspace to run the update.",
+    UpdateDispatchOutcome.UNREACHABLE: "Couldn't reach this workspace to start the update.",
+    UpdateDispatchOutcome.SPAWN_FAILED: "Couldn't start the update agent in this workspace.",
 }
 
 # Recorded for a dispatch that raised rather than returned: no outcome names what went wrong.
 _DISPATCH_RAISED_FAILURE: Final[UpdateDispatchFailure] = UpdateDispatchFailure(
-    message="Something went wrong starting the update in this machine."
+    message="Something went wrong starting the update in this workspace."
 )
 
 

@@ -79,9 +79,9 @@ BLOCKED_BY_RUNNING_CHATS_PREFIX: Final[str] = "BLOCKED_BY_RUNNING_CHATS:"
 # one leaves a backup service that fails every tick from then on, which is
 # strictly worse than the outdated service it replaced.
 BELOW_UPDATE_FLOOR_MESSAGE: Final[str] = (
-    "This machine was created before "
+    "This workspace was created before "
     f"{OLDEST_IN_PLACE_UPDATABLE_VERSION}, and today's backup service does not work on it. "
-    "Updating it would stop its backups altogether. Create a new machine and move your work across."
+    "Updating it would stop its backups altogether. Create a new workspace and move your work across."
 )
 
 # User-facing guidance when the apply script's `git stash pop` conflicted;
@@ -89,7 +89,7 @@ BELOW_UPDATE_FLOOR_MESSAGE: Final[str] = (
 # stashed changes never look lost.
 _STASH_CONFLICT_GUIDANCE: Final[str] = (
     "Your uncommitted changes could not be restored automatically; "
-    "they are preserved in the git stash (run `git stash pop` in the machine)."
+    "they are preserved in the git stash (run `git stash pop` in the workspace)."
 )
 
 # Must exceed the gate probe script's own `uv run mngr list` budget (180s)
@@ -341,7 +341,7 @@ def _apply_update_and_verify(
         return f"The update ran but verification still reports: {problem_names}. {check.detail}"
     if BackupServiceProblem.NOT_CONFIGURED in check.problems:
         registry.append_log(
-            agent_id, "Backups are still not configured for this machine; enable them from the backup settings."
+            agent_id, "Backups are still not configured for this workspace; enable them from the backup settings."
         )
     return None
 
@@ -521,7 +521,7 @@ def _resolve_restore_subpath(
     if "/workspace" in tree_root_entries:
         return "/"
     raise BackupProvisioningError(
-        f"Snapshot {snapshot.short_id} does not contain a machine (no workspace/ or code/ checkout); "
+        f"Snapshot {snapshot.short_id} does not contain a workspace (no workspace/ or code/ checkout); "
         "it cannot be restored"
     )
 
@@ -536,7 +536,7 @@ def _services_down_warning(names: list[str]) -> str:
     """
     return (
         f"The restore succeeded, but these services have not come back up: {', '.join(names)}. "
-        "The workspace is usable; the machine converges its environment in the background, so "
+        "The workspace is usable and converges its environment in the background, so "
         "this usually resolves itself, and a service that stays down needs attention "
         "independent of this restore."
     )
@@ -603,7 +603,7 @@ def _run_restore_phases(
     # anything mutates, that the snapshot the user picked lives in the same
     # repository the script will read: both came from the canonical env.
     agent_address = build_agent_address(agent_id, resolver)
-    registry.append_log(agent_id, "Making sure the machine has the right backup credentials...")
+    registry.append_log(agent_id, "Making sure the workspace has the right backup credentials...")
     reinject_canonical_env(agent_id=agent_id, agent_address=agent_address, paths=paths, parent_cg=parent_cg)
 
     # Phase 1: gate + wait (cancellable; nothing has been mutated yet). Kept
@@ -673,7 +673,7 @@ def _run_restore_phases(
         # Best-effort: bring them back before reporting the failure, so a
         # killed restore cannot leave backups (and the whole workspace) down.
         detail = (restore_result.stderr or restore_result.stdout).strip()[-800:]
-        registry.append_log(agent_id, "The restore did not report a result; restarting the machine services...")
+        registry.append_log(agent_id, "The restore did not report a result; restarting the workspace services...")
         resume_result = run_mngr_exec_on_agent(
             agent_address,
             "supervisorctl restart all",
@@ -700,7 +700,9 @@ def _run_restore_phases(
         )
         registry.fail(agent_id, f"{detail}{safety_note}")
         return
-    registry.append_log(agent_id, "Restored the backup, reinstalled dependencies, and restarted the machine services.")
+    registry.append_log(
+        agent_id, "Restored the backup, reinstalled dependencies, and restarted the workspace services."
+    )
     # Services that were already unhealthy before the restore surface as a
     # completion warning, never a failure -- see _services_converging_warning.
     warnings = _restore_completion_warnings(payload)

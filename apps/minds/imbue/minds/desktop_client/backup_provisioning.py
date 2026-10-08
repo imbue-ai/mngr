@@ -350,7 +350,8 @@ def _resolve_repository_and_backend_env(
         env = parse_restic_env(request.api_key_env_text)
         if "RESTIC_PASSWORD" in env:
             raise BackupProvisioningError(
-                "RESTIC_PASSWORD must not be set for api_key backups; Imbue Studio assigns each machine its own password"
+                "RESTIC_PASSWORD must not be set for api_key backups; "
+                "Imbue Studio assigns each workspace its own password"
             )
         repository = env.pop("RESTIC_REPOSITORY", "")
         if not repository:

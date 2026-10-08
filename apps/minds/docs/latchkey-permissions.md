@@ -47,7 +47,7 @@ second gateway URL or a different agent skill.
    with a recorded verdict) and follows the gateway's stream only as a
    change signal. A pending request never opens anything by itself: it
    waits behind the chat card's "Review & respond" relay and the "Waiting
-   on you" rows in a machine's Permissions tab.
+   on you" rows in a workspace's Permissions tab.
    Either one opens the permission popup as a **centered dialog** over the
    current window, on a dim backdrop. The popup is the only review
    surface; the other ways in all lead back to it: the titlebar bell's
@@ -67,7 +67,7 @@ second gateway URL or a different agent skill.
    The page renders a single-scope permission dialog:
    * The dialog header is the service's brand mark in a rounded square
      followed by the service name plainly (no monospace pill). The asking
-     machine is named once, in the popup's own "Permission request for
+     workspace is named once, in the popup's own "Permission request for
      <workspace>" eyebrow, so the dialog does not repeat it. Below the
      header sit the **Account** section (whenever anything is signed in,
      see below) and then the agent's rationale under a **Reason** heading.
@@ -228,7 +228,7 @@ Most third-party services come from Imbue Studio's shipped catalog. When an agen
 a domain that catalog has no entry for, it can ask for the connection to be
 *created*: it submits a `custom-service` permission request naming the domain
 and, optionally, how the service signs in through a browser. One Approve both creates
-the connection and grants the asking machine access to it.
+the connection and grants the asking workspace access to it.
 
 The dialog is the simplest of the kinds, and deliberately so:
 
@@ -873,7 +873,7 @@ Two consequences the UI makes visible:
   this computer's session, so it is usually a consent click rather than a full
   login.
 * **Sign out reaches as far as the credential is shared.** Disconnecting an
-  account from a machine's Permissions tab clears the credential of the store
+  account from a workspace's Permissions tab clears the credential of the store
   *that machine* reads and strips *that machine's* now-inert grants. A remote
   machine holds its own, so the same account keeps working everywhere else; this
   computer's store is shared by every local machine, so signing out from one of
@@ -930,7 +930,7 @@ instead of being left open. Provisioning seeds it too, before any of this: the
 pass that stands the gateway up writes the host's policy (or the deny-all
 default) alongside it rather than waiting for someone to open the tab.
 
-## Permissions tab (per machine)
+## Permissions tab (per workspace)
 
 The workspace options panel's **Permissions** tab is where connectors and
 grants live, and the only place they live: each machine holds its own
@@ -944,8 +944,8 @@ The left nav has one entry per **connection** -- a (service, account) pair
 that either has stored credentials or still appears in the host's rules,
 so a grant left behind by a disconnected account is never invisible --
 plus **Add connection**, **Local files** (the `minds-file-server-*`
-shared-path grants) and **Other machines** (the `minds-workspaces-*`
-verbs). A "Waiting on you" strip leads the pane when this machine's agents
+shared-path grants) and **Other workspaces** (the `minds-workspaces-*`
+verbs). A "Waiting on you" strip leads the pane when this workspace's agents
 have pending requests; each row opens the review popup on that request.
 
 Three properties are worth knowing:
@@ -976,14 +976,14 @@ Three properties are worth knowing:
   sign-in that cannot happen. Either way the new account arrives with
   nothing granted.
 
-* **Revoke all and Sign out are different, but both are this machine's.**
+* **Revoke all and Sign out are different, but both are this workspace's.**
   *Revoke all*, in a connection's heading, drops that account's grants and
   leaves the account connected -- so re-granting later is a click rather than a
   fresh sign-in. *Sign out*, at the foot of the panel, clears the stored
-  credential itself, so this machine's grants for it -- which would otherwise
+  credential itself, so this workspace's grants for it -- which would otherwise
   have nothing behind them -- are stripped too. Revoke all never reaches past
-  this machine; sign out reaches as far as that credential is shared (this
-  machine alone when it holds its own, every machine on this computer when it
+  this workspace; sign out reaches as far as that credential is shared (this
+  workspace alone when it holds its own, every workspace on this computer when it
   reads the desktop's store), and its copy says which. Sign out asks first,
   naming the service and account.
 
@@ -1005,7 +1005,7 @@ brings it back.
 The pane loads independently of the panel's other tabs. A latchkey gateway
 that cannot be reached shows as "permissions can't be loaded" rather than
 an empty, misleading "nothing granted", and does not take the share panel
-or Machine settings down with it.
+or Workspace settings down with it.
 
 ### Proxy through my desktop
 
@@ -1269,7 +1269,7 @@ service's requests through a different computer, or through several in a
 particular order, the user opens the Adjust editor in the Permissions tab. An
 agent cannot ask for that.
 
-### Keeping a copy on the machine
+### Keeping a copy in the workspace
 
 The three routes behind this half live under
 `/api/workspaces/<agent_id>/folder-syncs`, not under `permissions/`: `toggle`
@@ -1286,14 +1286,14 @@ setting, divided by rules that reach both edges of the card.
 
 The **access** band is the WebDAV file server, reachable only while this
 computer is awake and Imbue Studio is running. Its dropdown completes the sentence
-"Agents on this machine may": *Read only*, or *Read and write*. There is no
+"Agents in this workspace may": *Read only*, or *Read and write*. There is no
 write-without-read, because `WRITE` is a strict superset of `READ` in the
 gateway's own model. The card's remove button revokes this grant, and names
 what else it will take -- *Revoke access*, or *Revoke access and remove copy*
 when the machine is holding one.
 
-The **sync** band is a checkbox, "Keep a synchronized copy on the machine", and
-an `mngr pair` sync behind it. The machine gets its own copy, so agents can
+The **sync** band is a checkbox, "Keep a synchronized copy in the workspace", and
+an `mngr pair` sync behind it. The workspace gets its own copy, so agents can
 still reach it while this computer is asleep or offline; changes only move
 between the two while Imbue Studio is running, since the sync is a process it owns. A
 checkbox rather than the other arm of a radio, because it is additive: ticking
@@ -1306,10 +1306,10 @@ Only folders can be synced. unison, which `mngr pair` drives, has no native
 single-file sync; a shared file says so in place of the option.
 
 **Which way changes travel is not a question.** It is the access, said again:
-read-only access means this computer to the machine, read and write means both
+read-only access means this computer to the workspace, read and write means both
 ways. The band states which, in the same words the dropdown above uses --
-"Since agents on this machine may both **read and write** the folder, Imbue Studio
-synchronizes changes between your computer and this machine in both
+"Since agents in this workspace may both **read and write** the folder, Imbue Studio
+synchronizes changes between your computer and this workspace in both
 directions." Changing the access moves a running sync onto it.
 
 The one question a sync does raise is **which side wins when both changed the
@@ -1386,7 +1386,7 @@ Four more constraints are worth knowing:
   two *overlapping* folders in the **same** workspace, where the copies nest.
 * A sync runs only while Imbue Studio does, but the choice to keep a folder synced is
   remembered in `<data_dir>/folder_syncs/<agent_id>.json` and started again at
-  launch. Restoring never starts a stopped machine: a sync whose machine is off
+  launch. Restoring never starts a stopped workspace: a sync whose workspace is off
   lands on its row saying so.
 * Every change of destination is asynchronous, in both directions. A click
   records where the user wants the folder (`activity`: ACTIVE / INACTIVE /
@@ -1464,7 +1464,7 @@ request stays pending with the reason, so the user can turn the switch off or
 pick another folder and approve again; refusing afterwards would leave a grant
 the dialog never reported. Otherwise the grant is made as usual and the sync
 is started on it, travelling the way the granted access dictates (read-only
-means this computer to the machine, read and write means both ways), by the
+means this computer to the workspace, read and write means both ways), by the
 same code the card's switch runs. The sync is keyed by the workspace's
 primary agent, as the card keys its own, and not by the chat that filed the
 request: the two share a workspace name, which is how the request is resolved

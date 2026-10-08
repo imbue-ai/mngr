@@ -2668,7 +2668,9 @@ class AgentCreator(MutableModel):
                 # no pre-created scaffolding at all.
 
                 parsed_host = HostName(host_name)
-                log_sink.put("[Imbue Studio] Creating machine '{}' (mode: {})...".format(host_name, launch_mode.value))
+                log_sink.put(
+                    "[Imbue Studio] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value)
+                )
 
                 # A dead (interrupted / failed) earlier create attempt holding this
                 # same name on this provider is implicitly discarded before the
@@ -3199,6 +3201,6 @@ class AgentCreator(MutableModel):
             last_outcome.summary if last_outcome is not None else "never probed",
         )
         log_sink.put(
-            "[Imbue Studio] Warning: machine did not become ready within "
+            "[Imbue Studio] Warning: workspace did not become ready within "
             f"{timeout_seconds:.0f}s; you may see a retry page on first load."
         )

@@ -662,8 +662,8 @@ def _handle_ai_keys_context() -> Response:
                 workspace_display_name="",
                 account_email="",
                 error_message=(
-                    "This page needs to be opened from a machine: use the Sign in with Imbue "
-                    "option in the machine's Claude sign-in dialog."
+                    "This page needs to be opened from a workspace: use the Sign in with Imbue "
+                    "option in the workspace's Claude sign-in dialog."
                 ),
             )
         )
@@ -677,8 +677,8 @@ def _handle_ai_keys_context() -> Response:
                 workspace_display_name="",
                 account_email="",
                 error_message=(
-                    "This machine has no associated Imbue account. Associate an account on the "
-                    "machine's settings page, then come back here."
+                    "This workspace has no associated Imbue account. Associate an account on the "
+                    "workspace's settings page, then come back here."
                 ),
             )
         )

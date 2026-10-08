@@ -39,5 +39,5 @@ def build_static_page_html(body_html: str, head_extra: str = "") -> str:
 def build_error_page_html(title: str, message: str) -> str:
     """A friendly full-page error document with a way back home."""
     return build_static_page_html(
-        f'<h1>{escape(title)}</h1><p>{escape(message)}</p><p><a href="/">Back to machines</a></p>'
+        f'<h1>{escape(title)}</h1><p>{escape(message)}</p><p><a href="/">Back to workspaces</a></p>'
     )

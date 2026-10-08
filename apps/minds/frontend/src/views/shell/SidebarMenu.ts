@@ -211,7 +211,7 @@ export function SidebarMenu(): m.Component<SidebarMenuAttrs> {
                   m.route.set("/create");
                 },
               },
-              [m(Icon16, { name: "plus", extra: "shrink-0" }), m("span", "New machine")],
+              [m(Icon16, { name: "plus", extra: "shrink-0" }), m("span", "New workspace")],
             ),
           ],
         ),

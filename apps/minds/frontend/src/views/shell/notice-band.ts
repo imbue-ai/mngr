@@ -45,7 +45,7 @@ export interface NoticePayload {
 }
 
 const DISCOVERY_BLOCKED_MESSAGE =
-  "Imbue Studio lost contact with your machines and can't reconnect on its own. Your work is safe.";
+  "Imbue Studio lost contact with your workspaces and can't reconnect on its own. Your work is safe.";
 
 /** The conditions with a line to say: a measured, confirmed block. */
 type EnvironmentBlock = Exclude<EnvironmentCondition, "NONE" | "UNKNOWN">;
@@ -70,7 +70,7 @@ function isEnvironmentBlock(condition: EnvironmentCondition): condition is Envir
  */
 const ENVIRONMENT_BLOCKED_MESSAGE: Record<EnvironmentBlock, string> = {
   OFFLINE: "No network connection.",
-  SSH_BLOCKED: "This network blocks the connection to your machines.",
+  SSH_BLOCKED: "This network blocks the connection to your workspaces.",
 };
 
 /** Restarting the app is a desktop affordance. In a browser there is no app to
@@ -237,7 +237,7 @@ export function noticeBandFor(
       : unreachableProviderLabel !== null
         ? `Can't connect to ${unreachableProviderLabel}`
         : isDeviceCannotConnect
-          ? "Can't connect to this machine from this device"
+          ? "Can't connect to this workspace from this device"
           : null;
   if (explanation !== null) {
     return {
@@ -256,7 +256,7 @@ export function noticeBandFor(
       // Just the condition. What to do about it, and what it costs, belongs
       // to the card behind "Open recovery" -- the band is one line over the
       // machine's own screen, not the place to argue a remedy.
-      message: "This machine stopped responding.",
+      message: "This workspace stopped responding.",
       action: { label: "Open recovery", kind: "open-recovery" },
     };
   }
@@ -267,7 +267,7 @@ export function noticeBandFor(
       // One line for both states: recovery steps between them on its own, and
       // a second near-identical sentence tells the user nothing the first did
       // not -- it only rewrites the strip mid-read.
-      message: "Lost connection to this machine. Reconnecting…",
+      message: "Lost connection to this workspace. Reconnecting…",
       action: { label: "Open recovery", kind: "open-recovery" },
     };
   }
@@ -291,7 +291,7 @@ function standingNotice(notice: StandingUpdateNotice): NoticePayload | null {
       return {
         key: "workspace-out-of-date",
         variant: "warn",
-        message: "This machine is running an older version of Imbue Studio.",
+        message: "This workspace is running an older version of Imbue Studio.",
         action: SEE_UPDATE,
       };
     case "needs-recreation":
@@ -299,7 +299,7 @@ function standingNotice(notice: StandingUpdateNotice): NoticePayload | null {
       return {
         key: "workspace-needs-recreation",
         variant: "warn",
-        message: "This machine is too old to update in place.",
+        message: "This workspace is too old to update in place.",
         action: { label: "See how to update", kind: "update-workspace" },
       };
     case "none":
@@ -318,7 +318,7 @@ function updateRunNotice(phase: UpdateRunPhase, holdDetail: string | null): Noti
       return {
         key: "workspace-update-applying",
         variant: "info",
-        message: "Updating this machine. Its services restart while the update lands.",
+        message: "Updating this workspace. Its services restart while the update lands.",
         action: SEE_UPDATE,
       };
     case "preparing":
@@ -326,7 +326,7 @@ function updateRunNotice(phase: UpdateRunPhase, holdDetail: string | null): Noti
         key: "workspace-update-preparing",
         variant: "info",
         // The reader is using the machine meanwhile; the question is whether to stop.
-        message: "Preparing an update for this machine. Nothing changes until it's ready to land.",
+        message: "Preparing an update for this workspace. Nothing changes until it's ready to land.",
         action: SEE_UPDATE,
       };
     case "waiting": {
@@ -336,8 +336,8 @@ function updateRunNotice(phase: UpdateRunPhase, holdDetail: string | null): Noti
         variant: "warn",
         message:
           holdDetail !== null
-            ? `${holdDetail ? `${holdDetail} ` : ""}This machine's update is waiting for your decision in its chat.`
-            : "This machine's update has stopped to ask you something in its chat.",
+            ? `${holdDetail ? `${holdDetail} ` : ""}This workspace's update is waiting for your decision in its chat.`
+            : "This workspace's update has stopped to ask you something in its chat.",
         action: SEE_UPDATE,
       };
     }
@@ -354,11 +354,11 @@ function updateRunNotice(phase: UpdateRunPhase, holdDetail: string | null): Noti
 function updateOutcomeNotice(outcome: UpdateRunOutcome): NoticePayload | null {
   const message =
     outcome === "not-started"
-      ? "This machine's update didn't start."
+      ? "This workspace's update didn't start."
       : outcome === "failed"
-        ? "This machine's update didn't finish."
+        ? "This workspace's update didn't finish."
         : outcome === "needs-attention"
-          ? "This machine updated, and the update agent left a note for you."
+          ? "This workspace updated, and the update agent left a note for you."
           : null;
   if (message === null) return null;
   return {

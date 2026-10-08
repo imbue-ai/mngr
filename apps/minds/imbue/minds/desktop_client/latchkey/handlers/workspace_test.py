@@ -117,7 +117,7 @@ def _build_authenticated_client(
 def test_handler_claims_workspace_request_type(tmp_path: Path) -> None:
     handler, _sender = _make_handler(tmp_path, lambda r: httpx.Response(204))
     assert handler.handles_request_type() == REQUEST_TYPE_WORKSPACE
-    assert handler.kind_label() == "machine access"
+    assert handler.kind_label() == "workspace access"
 
 
 # apply_grant_request
@@ -201,7 +201,7 @@ def test_grant_all_sends_override_with_null_target(tmp_path: Path) -> None:
         "permissions": [PERM_WORKSPACES_DESTROY],
         "target_workspace_id": None,
     }
-    assert "all machines" in response.get_json()["message"]
+    assert "all workspaces" in response.get_json()["message"]
 
 
 def test_grant_rejects_empty_permissions(tmp_path: Path) -> None:

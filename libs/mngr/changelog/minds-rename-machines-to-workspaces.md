@@ -1,0 +1,1 @@
+Test-only: the observe follower tests no longer fail intermittently when a test stands in for an observer restarting. The running follower's liveness probe holds the observe lock for an instant, so the test helper now retries taking the lock instead of failing on the first try.

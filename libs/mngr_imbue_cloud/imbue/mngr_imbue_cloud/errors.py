@@ -301,12 +301,12 @@ class ImbueCloudRecordFormatTooNewError(ImbueCloudSyncError):
 # so an embedder that runs ``mngr start`` as a subprocess (the minds desktop)
 # can recognize the refusal in stderr, the way it matches mngr's
 # HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE.
-WORKSPACE_HELD_MESSAGE = "This machine is undergoing maintenance and will be back shortly."
+WORKSPACE_HELD_MESSAGE = "This workspace is undergoing maintenance and will be back shortly."
 # The connector's refusal of any start of a retired machine (``code:
 # workspace_retired``). Leads the message for the same stderr-matching reason
 # as WORKSPACE_HELD_MESSAGE.
 WORKSPACE_RETIRED_MESSAGE = (
-    "This machine has been retired and cannot be started again. "
+    "This workspace has been retired and cannot be started again. "
     "Download its data from its backups, or contact support if it has none."
 )
 
@@ -320,9 +320,15 @@ class ImbueCloudWorkspaceHeldError(ImbueCloudError):
 
     # The sentence the message leads with; a subclass swaps in its own verdict.
     lead_sentence: str = WORKSPACE_HELD_MESSAGE
+    # CLEANUP: drop once every tier's connector has been redeployed with the
+    # current sentences; until then an older connector's "This machine ..."
+    # sentence is read as this one rather than shown twice.
+    legacy_lead_sentence: str = "This machine is undergoing maintenance and will be back shortly."
 
     def __init__(self, message: str) -> None:
         detail = message.strip()
+        if detail.startswith(self.legacy_lead_sentence):
+            detail = self.lead_sentence + detail[len(self.legacy_lead_sentence) :]
         if not detail or detail.startswith(self.lead_sentence):
             super().__init__(detail or self.lead_sentence)
         else:
@@ -337,6 +343,10 @@ class ImbueCloudWorkspaceRetiredError(ImbueCloudWorkspaceHeldError):
     """
 
     lead_sentence: str = WORKSPACE_RETIRED_MESSAGE
+    legacy_lead_sentence: str = (
+        "This machine has been retired and cannot be started again. "
+        "Download its data from its backups, or contact support if it has none."
+    )
 
 
 # The hold sentences a refused start's stderr can carry, for embedders that run

@@ -580,7 +580,7 @@ def _handle_remove_workspace_record() -> Response:
                 content=json.dumps(
                     {
                         "error": (
-                            "This machine still holds its cloud lease, so its record cannot be removed; "
+                            "This workspace's machine still holds its cloud lease, so its record cannot be removed; "
                             "destroy the workspace instead."
                         )
                     }
@@ -642,7 +642,7 @@ def _handle_help_report() -> Response:
 
 # Shown when the launch's exec never reached the machine, so nothing was started there.
 _MACHINE_UNREACHABLE_ERROR: Final[str] = (
-    "Couldn't reach this machine to start an agent. It may be starting up or unavailable."
+    "Couldn't reach this workspace to start an agent. It may be starting up or unavailable."
 )
 
 
@@ -673,7 +673,7 @@ def _handle_help_assist() -> Response:
     if not workspace_agent_id_raw:
         return make_response(
             status_code=400,
-            content='{"error": "Agent help is only available inside a machine"}',
+            content='{"error": "Agent help is only available inside a workspace"}',
             media_type="application/json",
         )
     try:
@@ -704,7 +704,7 @@ def _handle_help_assist() -> Response:
             return make_response(
                 status_code=409,
                 content=json.dumps(
-                    {"error": "This machine doesn't have the agent-assist skill, so an agent can't help here yet."}
+                    {"error": "This workspace doesn't have the agent-assist skill, so an agent can't help here yet."}
                 ),
                 media_type="application/json",
             )
@@ -717,7 +717,7 @@ def _handle_help_assist() -> Response:
         case SkillChatLaunchOutcome.SPAWN_FAILED:
             # The same wall that stops an /assist chat stops every other agent
             # here, so the machine's own refusal rides along when there was one.
-            body: dict[str, object] = {"error": "Couldn't start an agent in this machine."}
+            body: dict[str, object] = {"error": "Couldn't start an agent in this workspace."}
             if launch.failure_detail:
                 body["detail"] = launch.failure_detail
             return make_response(status_code=502, content=json.dumps(body), media_type="application/json")
@@ -1538,8 +1538,8 @@ def _handle_mint_ai_key() -> Response:
             status_code=400,
             content=json.dumps(
                 {
-                    "error": "This machine has no associated Imbue account. Associate one on the "
-                    "machine's settings page first."
+                    "error": "This workspace has no associated Imbue account. Associate one on the "
+                    "workspace's settings page first."
                 }
             ),
             media_type="application/json",

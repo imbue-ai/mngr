@@ -29,7 +29,7 @@ describe("LocalPageNotice", () => {
     // only thing that can speak, and this component's one line is what hands it
     // over. The copy selection itself is notice-band.ts's own business.
     expect(noticeFor("OFFLINE")).toContain("No network connection.");
-    expect(noticeFor("SSH_BLOCKED")).toContain("This network blocks the connection to your machines.");
+    expect(noticeFor("SSH_BLOCKED")).toContain("This network blocks the connection to your workspaces.");
   });
 
   it("says nothing about a device with no trouble to report, or none measured yet", () => {

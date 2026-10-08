@@ -101,7 +101,7 @@ function aiKeysBody(
     m(
       "h2",
       { class: "type-heading text-primary text-center mb-2" },
-      "Get AI credentials for your machine",
+      "Get AI credentials for your workspace",
     ),
     m("p", { class: "type-body text-secondary text-center mb-2" }, [
       "This creates an AI key for ",

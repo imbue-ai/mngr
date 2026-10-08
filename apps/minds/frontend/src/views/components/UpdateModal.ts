@@ -57,23 +57,23 @@ function verdictMessage(update: UiWorkspaceUpdate): string {
   const landed = displayVersion(update.success_note_version || update.current_version);
   switch (update.verdict) {
     case "UPDATED":
-      return `This machine was updated${landed ? ` to ${landed}` : ""}.`;
+      return `This workspace was updated${landed ? ` to ${landed}` : ""}.`;
     case "UPDATED_WITH_REBUILD_ITEMS":
       // Not a failure: the machine is on the new version. The agent's own line
       // (drawn under this) says what it left for the reader.
       return (
-        `This machine was updated${landed ? ` to ${landed}` : ""}. ` +
+        `This workspace was updated${landed ? ` to ${landed}` : ""}. ` +
         `The update agent left a note for you${update.verdict_detail ? ":" : " in the update chat."}`
       );
     case "ALREADY_CURRENT":
-      return `This machine is already up to date${update.current_version ? ` on ${displayVersion(update.current_version)}` : ""}. Nothing was changed.`;
+      return `This workspace is already up to date${update.current_version ? ` on ${displayVersion(update.current_version)}` : ""}. Nothing was changed.`;
     case "NEEDS_RECREATION":
-      return `The update agent found that this update can't be applied to this machine in place. ${checkInLine(update)}`;
+      return `The update agent found that this update can't be applied to this workspace in place. ${checkInLine(update)}`;
     case "STUCK":
       return `The update couldn't finish and couldn't clean up after itself. ${checkInLine(update)}`;
     case "REFUSED":
       return update.in_place_compatible_ref
-        ? `The update didn't run. ${displayVersion(update.in_place_compatible_ref)} can still be applied to this machine. ${checkInLine(update)}`
+        ? `The update didn't run. ${displayVersion(update.in_place_compatible_ref)} can still be applied to this workspace. ${checkInLine(update)}`
         : `The update didn't run. ${checkInLine(update)}`;
     default:
       return "";
@@ -87,7 +87,7 @@ function modalTitle(update: UiWorkspaceUpdate, workspaceName: string): string {
     return update.unknown_reason === "NO_APP_VERSION" ? "This build can't compare versions" : `${workspaceName}'s version`;
   }
   if (update.availability === "APP_BEHIND") return `${workspaceName} is ahead of Imbue Studio`;
-  if (isRecreationRequired(update)) return `${workspaceName} needs a new machine`;
+  if (isRecreationRequired(update)) return `${workspaceName} needs a new workspace`;
   return `Update ${workspaceName}`;
 }
 
@@ -119,8 +119,8 @@ export function noBackupConfirmPrompt(handlers: { onConfirm: () => void; onCance
     m(
       "p",
       { class: "type-helper text-primary" },
-      "This machine has no backups. The update still keeps every version in git and " +
-        "offers a rollback afterwards, but there's no full-machine restore to fall back on. Go ahead?",
+      "This workspace has no backups. The update still keeps every version in git and " +
+        "offers a rollback afterwards, but there's no full workspace restore to fall back on. Go ahead?",
     ),
     m("div", { class: "flex flex-wrap items-center gap-2" }, [
       m(Button, { variant: "primary", onclick: handlers.onConfirm }, "Go ahead without backups"),
@@ -177,12 +177,12 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       m(
         "p",
         { class: "type-body text-secondary" },
-        "Imbue Studio can't detect the version of this machine.",
+        "Imbue Studio can't detect the version of this workspace.",
       ),
       m(
         "p",
         { class: "type-helper text-tertiary" },
-        "An agent inside the machine can tell you what it's running, and update it if it should be. " +
+        "An agent inside the workspace can tell you what it's running, and update it if it should be. " +
           "Running the update starts that agent: it may find there's nothing to do.",
       ),
     ];
@@ -197,17 +197,17 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         "p",
         { class: "type-body text-secondary" },
         "This build of Imbue Studio tracks a branch rather than a released version, so it has nothing to " +
-          "compare machines against. Every machine reads as unknown here, whatever version it is on.",
+          "compare workspaces against. Every workspace reads as unknown here, whatever version it is on.",
       ),
       m("div", { class: "flex flex-col gap-1" }, [
-        updateVersionRow("This machine", update.current_version),
+        updateVersionRow("This workspace", update.current_version),
         updateVersionRow("This build of Imbue Studio", update.supported_version),
       ]),
       m(
         "p",
         { class: "type-helper text-tertiary" },
-        "A released build of Imbue Studio compares each machine against the template version it ships with. You can still " +
-          "run the update: the agent inside the machine reads its own upstream, and may find there's nothing to do.",
+        "A released build of Imbue Studio compares each workspace against the template version it ships with. You can still " +
+          "run the update: the agent inside the workspace reads its own upstream, and may find there's nothing to do.",
       ),
       // Dev-loop instructions in product copy: a released build is pinned to a
       // `minds-v*` tag, so only the dev loop can reach this body.
@@ -217,7 +217,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         m("code", { class: "font-mono" }, "just minds-start-cloud"),
         " or ",
         m("code", { class: "font-mono" }, "just minds-start <minds-vX.Y.Z>"),
-        " — both also point newly created machines at that release rather than at your local worktree.",
+        " — both also point newly created workspaces at that release rather than at your local worktree.",
       ]),
     ];
   }
@@ -228,21 +228,21 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
   function needsRecreationBody(update: UiWorkspaceUpdate, workspaceName: string): m.Children {
     return [
       m("div", { class: "flex flex-col gap-1" }, [
-        updateVersionRow("This machine", update.current_version),
+        updateVersionRow("This workspace", update.current_version),
         updateVersionRow("Oldest updatable in place", "minds-v0.3.10"),
       ]),
       m(
         "p",
         { class: "type-body text-secondary" },
-        "This machine is running a version of Imbue Studio too old to update in place. " +
-          "To get it up to date, create a new machine and move your work across.",
+        "This workspace is running a version of Imbue Studio too old to update in place. " +
+          "To get it up to date, create a new workspace and move your work across.",
       ),
       m("ol", { class: "type-helper text-secondary list-decimal pl-5 flex flex-col gap-1" }, [
-        m("li", "Create a new machine."),
+        m("li", "Create a new workspace."),
         m("li", [
-          "Open the new machine and ask its agent to run ",
+          "Open the new workspace and ask its agent to run ",
           m("code", { class: "font-mono" }, migrateCommandFor(workspaceName)),
-          ". It brings this machine's work and settings across.",
+          ". It brings this workspace's work and settings across.",
         ]),
       ]),
     ];
@@ -252,7 +252,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
     return m(
       "p",
       { class: "type-body text-secondary" },
-      `This machine (${displayVersion(update.current_version)}) is newer than this copy of Imbue Studio ` +
+      `This workspace (${displayVersion(update.current_version)}) is newer than this copy of Imbue Studio ` +
         `(${displayVersion(update.supported_version)}). Update the app to catch up — there's nothing to run here.`,
     );
   }
@@ -276,7 +276,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       } else {
         body.push(
           m("div", { class: "flex flex-col gap-1" }, [
-            updateVersionRow("This machine", update.current_version),
+            updateVersionRow("This workspace", update.current_version),
             updateVersionRow("Supported by Imbue Studio", update.supported_version),
           ]),
         );
@@ -328,7 +328,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
           m(
             "p",
             { class: "type-helper text-tertiary" },
-            "Updating runs an agent inside this machine, which uses credits.",
+            "Updating runs an agent inside this workspace, which uses credits.",
           ),
         );
         // Naming a different version lives in the machine's settings;
@@ -369,7 +369,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
                 m.route.set("/create");
               },
             },
-            "Create a new machine",
+            "Create a new workspace",
           ),
         );
       } else if (isDispatchable) {

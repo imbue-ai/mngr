@@ -87,7 +87,7 @@ Key concepts in the Imbue Studio system:
   The code and older docs say "share" for this; the verb is "publish" from here on, and "share" survives only inside existing names such as share URL, share panel, and share-gateway.
 
 - **grant**: an entry in a workspace's grants document (`data/.secrets/share_grants.toml`) that admits a party to one app of the workspace while it is published.
-  The system interface is an app like the others, with one difference: a grant on it admits the entire workspace, every app included, which the Share tab calls the whole machine. A grant on any other app admits that app alone.
+  The system interface is an app like the others, with one difference: a grant on it admits the entire workspace, every app included, which the Share tab calls the whole workspace. A grant on any other app admits that app alone.
   The party is named by an account id, an email address, or a domain. The share-gateway re-reads the document on every request, so removing a grant takes effect immediately.
   A grant names who may enter and nothing more: it does not notify anyone, and it does not make someone a visitor until they visit.
 

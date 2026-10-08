@@ -13,7 +13,7 @@
 //
 // One stepper, two shells: the Shell floats it as a modal over a live machine
 // when ?workspace= is present (the add branch then targets THAT machine, and
-// "Create a new machine" hands off to the full page -- creating is a bigger job
+// "Create a new workspace" hands off to the full page -- creating is a bigger job
 // than a popup should host); otherwise it is the full page.
 
 import m from "mithril";
@@ -174,7 +174,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
 
   function machineName(): string {
     return machineAnyId !== null
-      ? (getAppContext().stores.workspaces.accentEntry(machineAnyId)?.name ?? "this machine")
+      ? (getAppContext().stores.workspaces.accentEntry(machineAnyId)?.name ?? "this workspace")
       : "";
   }
 
@@ -357,11 +357,11 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
 
   function step1Body(): m.Children {
     return m("div", { class: "flex flex-col gap-3" }, [
-      m(Button, { variant: "secondary", block: true, onclick: () => chooseCreate() }, "Create a new machine"),
+      m(Button, { variant: "secondary", block: true, onclick: () => chooseCreate() }, "Create a new workspace"),
       m(
         Button,
         { variant: "secondary", block: true, onclick: () => chooseBranch("add") },
-        isModal() ? `Add to ${machineName()}` : "Add to an existing machine",
+        isModal() ? `Add to ${machineName()}` : "Add to an existing workspace",
       ),
     ]);
   }
@@ -372,7 +372,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       // own controls, which are not part of the choice.
       m(
         "div",
-        { role: "radiogroup", "aria-label": "Where to run your machine" },
+        { role: "radiogroup", "aria-label": "Where to run your workspace" },
         m(PresetCards, {
           selectedPreset: model.selectedPreset,
           onSelect: (name: PresetName) => {
@@ -488,7 +488,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
               ...defaults.accounts.map((account) =>
                 m("option", { value: account.user_id, selected: model.accountId === account.user_id }, account.email),
               ),
-              m("option", { value: "", selected: model.accountId === "" }, "No account (private machine)"),
+              m("option", { value: "", selected: model.accountId === "" }, "No account (private workspace)"),
             ],
           ),
         ),
@@ -610,7 +610,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       m(
         "p",
         { class: "type-body text-secondary mb-4" },
-        "You'll paste this into the chat of the machine you want to add this Template to.",
+        "You'll paste this into the chat of the workspace you want to add this Template to.",
       ),
       m(
         "div",
@@ -648,7 +648,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
         ? m(
             "p",
             { class: "type-helper text-tertiary mt-2" },
-            `The link's branch (${branchName}) applies only when creating a new machine; the message above always uses the Template's published version.`,
+            `The link's branch (${branchName}) applies only when creating a new workspace; the message above always uses the Template's published version.`,
           )
         : null,
     ]);
@@ -685,7 +685,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       machines.length > 0
         ? m("div", { class: "flex flex-col gap-1.5" }, machines.map((entry) => machineRow(entry)))
         : m("p", { class: "type-body text-secondary" }, [
-            "You don't have any machines yet. ",
+            "You don't have any workspaces yet. ",
             m(
               "a",
               {
@@ -707,11 +707,11 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     const steps: StepSpec[] = [];
     const branchSummary =
       branch === "create"
-        ? "Create a new machine"
+        ? "Create a new workspace"
         : branch === "add"
           ? isModal()
             ? `Add to ${machineName()}`
-            : "Add to an existing machine"
+            : "Add to an existing workspace"
           : "";
     steps.push({
       number: 1,
@@ -763,7 +763,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       if (activeStep >= 3)
         steps.push({
           number: 3,
-          title: isModal() ? "Paste it into the chat" : "Select a machine",
+          title: isModal() ? "Paste it into the chat" : "Select a workspace",
           target: 3,
           active: activeStep === 3,
           done: false,

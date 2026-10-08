@@ -139,7 +139,7 @@ describe("HelpModel", () => {
         Promise.resolve(
           jsonResponse(
             {
-              error: "Couldn't start an agent in this machine.",
+              error: "Couldn't start an agent in this workspace.",
               detail: "Error: Unknown fields in agent_types.opencode",
             },
             502,

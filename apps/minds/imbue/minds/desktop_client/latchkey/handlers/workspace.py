@@ -62,7 +62,7 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 # Label shown on the inbox list card (lower-case, short).
-_KIND_LABEL: Final[str] = "machine access"
+_KIND_LABEL: Final[str] = "workspace access"
 
 # Form fields. ``permissions`` carries the checked verb names (shared with the
 # other dialogs so the inbox shell's Approve gating works). ``target_scope``
@@ -148,7 +148,7 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
             return ""
         backend_resolver: BackendResolverInterface = get_state().backend_resolver
         target_name = _resolve_target_name(backend_resolver, payload.target_workspace_id)
-        return f"Workspace access: {target_name}" if target_name else "Machine access"
+        return f"Workspace access: {target_name}" if target_name else "Workspace access"
 
     def build_request_detail_payload(
         self,
@@ -243,9 +243,9 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
             return make_json_error_response(str(e), status_code=502)
 
         target_label = (
-            _resolve_target_name(backend_resolver, payload.target_workspace_id) or "the selected machine"
+            _resolve_target_name(backend_resolver, payload.target_workspace_id) or "the selected workspace"
             if target_workspace_id is not None
-            else "all machines"
+            else "all workspaces"
         )
         message = _format_granted_message(granted_permissions, target_label)
         resolve_request(

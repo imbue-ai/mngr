@@ -2110,6 +2110,18 @@ def test_workspace_held_error_always_leads_with_the_sentence_and_never_shows_an_
     )
 
 
+def test_hold_errors_read_an_older_connectors_machine_sentence_as_their_own() -> None:
+    assert (
+        str(ImbueCloudWorkspaceHeldError("This machine is undergoing maintenance and will be back shortly."))
+        == WORKSPACE_HELD_MESSAGE
+    )
+    legacy_retired = (
+        "This machine has been retired and cannot be started again. "
+        "Download its data from its backups, or contact support if it has none."
+    )
+    assert str(ImbueCloudWorkspaceRetiredError(legacy_retired)) == WORKSPACE_RETIRED_MESSAGE
+
+
 def test_admin_stop_workspace_posts_the_kind_and_set_stop_kind_hits_its_route(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[str, dict]] = []
 

@@ -4,7 +4,7 @@ Feature: Scheduling an update
   The window is configurable to any hours, so the app describes it as the update window rather than as a night.
 
   @no-backup-confirmation
-  Scenario: An update on a machine without backups is confirmed at the button
+  Scenario: An update on a workspace without backups is confirmed at the button
     The go-ahead is collected once, at the button, and carried into the run: a workspace whose update flow predates the unattended one stops at its own missing-restore-point question, and nobody is necessarily watching to answer it.
     Given an out-of-date workspace without backups configured
     When the user presses Update now or Schedule update for that workspace

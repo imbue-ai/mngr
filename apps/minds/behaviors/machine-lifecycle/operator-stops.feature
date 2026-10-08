@@ -5,25 +5,25 @@ Feature: Stops the owner did not ask for
   @held-machine-maintenance
   Scenario: A held machine says so and offers no Start
     Given a remote machine whose stop kind is maintenance
-    When the machines list shows it
+    When the workspaces list shows its workspace
     Then its badge reads "Maintenance" instead of "Stopped"
     And no Start control is offered for it
-    And opening it shows "This machine is undergoing maintenance and will be back shortly." over the machine
+    And opening it shows "This workspace is undergoing maintenance and will be back shortly." over the workspace
 
   @retired-machine
   Scenario: A retired machine says it never starts again and points at its backups
-    A retirement is final: the machine's data was archived for its owner and nobody, the owner included, starts it again.
+    A retirement is final: the workspace's data was archived for its owner and nobody, the owner included, starts it again.
     Given a remote machine whose stop kind is retired
-    When the machines list shows it
+    When the workspaces list shows its workspace
     Then its badge reads "Retired" instead of "Stopped"
     And no Start control is offered for it
-    And opening it shows "This machine has been retired and cannot be started again. Download its data from its backups, or contact support if it has none." over the machine
+    And opening it shows "This workspace has been retired and cannot be started again. Download its data from its backups, or contact support if it has none." over the workspace
     And a start of it the connector refuses shows that same sentence and is not reported as a failed recovery
 
   @owner-startable-idle
   Scenario: A machine stopped to free capacity is the owner's to start
     Given a remote machine whose stop kind is idle
-    When the machines list shows it
+    When the workspaces list shows its workspace
     Then its badge reads "Stopped"
     And a Start control is offered for it
     And pressing Start starts the machine
@@ -41,13 +41,13 @@ Feature: Stops the owner did not ask for
   Scenario: A start the connector refuses as a hold is not a failure
     Given a remote machine whose stop kind is maintenance
     When a start of it is refused by the connector
-    Then the app shows "This machine is undergoing maintenance and will be back shortly."
+    Then the app shows "This workspace is undergoing maintenance and will be back shortly."
     And the app does not report a failed recovery
 
   @unknown-stop-kind-not-actionable
   Scenario: A stop kind this build does not know is treated as a hold
     Given a remote machine whose stop kind this app version does not recognize
-    When the machines list shows it
+    When the workspaces list shows its workspace
     Then no Start control is offered for it
     And the app dispatches no start of it, answering a start deeplink with the maintenance sentence
     And a start run through mngr is refused with a message telling the user to update the app

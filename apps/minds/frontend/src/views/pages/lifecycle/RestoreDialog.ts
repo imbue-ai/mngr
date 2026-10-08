@@ -43,7 +43,7 @@ export function RestoreDialog(): m.Component<RestoreDialogAttrs, RestoreDialogSt
               m(
                 "p",
                 { class: "type-body text-secondary" },
-                `Your machine's files will be replaced with the backup from ${new Date(snapshot.time).toLocaleString()}. ` +
+                `Your workspace's files will be replaced with the backup from ${new Date(snapshot.time).toLocaleString()}. ` +
                   "A safety backup of the current state is saved first.",
               ),
               m("label", { class: "flex items-center gap-2 type-body text-primary cursor-pointer" }, [

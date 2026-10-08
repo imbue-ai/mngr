@@ -1,7 +1,7 @@
-// The Permissions tab: everything agents in this machine can reach, as
+// The Permissions tab: everything agents in this workspace can reach, as
 // toggles. Left nav is one entry per connection (a signed-in or granted
 // (service, account) pair), then Add connection, then the two latchkey-self
-// families -- Local files (shared paths) and Other machines (cross-workspace
+// families -- Local files (shared paths) and Other workspaces (cross-workspace
 // verbs). The right pane holds the selected entry's toggles.
 //
 // Port of WorkspacePermissionsSection.jinja + workspace_permissions.js. The
@@ -99,7 +99,7 @@ const SELF_TOGGLE_BLOCKED_TITLE =
   "This grant can't be re-enabled; ask the agent to request it again.";
 const CONNECTOR_TOGGLE_BLOCKED_TITLE = "Connect this account before granting permissions.";
 /** Why every other control is inert while one change is being applied. */
-const PANE_BUSY_TITLE = "Waiting for the last change to reach this machine.";
+const PANE_BUSY_TITLE = "Waiting for the last change to reach this workspace.";
 
 /** Whether a control must sit out because a DIFFERENT write is still running.
  *
@@ -206,7 +206,7 @@ export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
                 m("span", { class: "font-semibold" }, machineName),
                 " can access. They can never reach beyond the permissions you grant them.",
               ]
-            : "What agents in this machine can access. They can never reach beyond the permissions you grant them.",
+            : "What agents in this workspace can access. They can never reach beyond the permissions you grant them.",
         ),
         renderBody(model, local, machineName, requestedSection, onSelectSection, onReviewRequest),
       ]);
@@ -218,7 +218,7 @@ export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
  * back to a bare description while the options load has not landed, so the
  * sentence still reads. */
 function machineLabelFor(machineName: string): string {
-  return machineName === "" ? "this machine" : machineName;
+  return machineName === "" ? "this workspace" : machineName;
 }
 
 function renderBody(
@@ -311,8 +311,8 @@ function renderWaitingPanel(
       "p",
       { class: "type-body text-secondary mb-4" },
       waitingRequests.length === 1
-        ? "An agent in this machine is waiting on an answer."
-        : "Agents in this machine are waiting on an answer. The one asked for longest is first.",
+        ? "An agent in this workspace is waiting on an answer."
+        : "Agents in this workspace are waiting on an answer. The one asked for longest is first.",
     ),
     m(
       "div",
@@ -402,7 +402,7 @@ function renderNav(
       navEntry(
         OTHER_MACHINES_SECTION,
         m(Icon16, { name: "panels-top-left", extra: "shrink-0" }),
-        m("span", { class: "truncate" }, "Other machines"),
+        m("span", { class: "truncate" }, "Other workspaces"),
       ),
     ]),
   ];
@@ -455,7 +455,7 @@ function renderConnectionPanel(
       ]),
       connection.granted_count > 0 ? renderRevokeAllButton(model, local, connection) : null,
     ]),
-    m("p", { class: "type-body text-secondary mb-4" }, "Choose what agents in this machine can do."),
+    m("p", { class: "type-body text-secondary mb-4" }, "Choose what agents in this workspace can do."),
     connection.is_connected
       ? null
       : m(
@@ -512,10 +512,10 @@ function renderConnectionPanel(
             "Disconnect from ",
             m("span", { class: "font-semibold" }, `${connection.display_name} · ${connection.account_label}`),
             isCredentialStoreShared
-              ? `. ${machineLabel} shares one sign-in with every other machine on this computer, so all ` +
+              ? `. ${machineLabel} shares one sign-in with every other workspace on this computer, so all ` +
                 `of them lose this access. `
-              : `. Only ${machineLabel} loses this access — every other machine keeps its own sign-in. `,
-            "Use Revoke all above to drop just this machine's grants and keep it connected.",
+              : `. Only ${machineLabel} loses this access — every other workspace keeps its own sign-in. `,
+            "Use Revoke all above to drop just this workspace's grants and keep it connected.",
           ]),
           m(
             Button,
@@ -577,10 +577,10 @@ function renderDisconnectDialog(
             "This will disconnect ",
             m("strong", `${connection.display_name} · ${connection.account_label}`),
             isCredentialStoreShared
-              ? ` from every machine on this computer, including ${machineLabel}. Their agents won't be able ` +
+              ? ` from every workspace on this computer, including ${machineLabel}. Their agents won't be able ` +
                 "to use it until you connect it again."
               : ` from ${machineLabel}, whose agents won't be able to use it until you connect it again. ` +
-                "Every other machine keeps its own sign-in.",
+                "Every other workspace keeps its own sign-in.",
           ]),
           model.errorMessage ? m(Notice, { variant: "error", role: "alert" }, model.errorMessage) : null,
           m("div", { class: "flex justify-end gap-3" }, [
@@ -926,10 +926,10 @@ function renderLocalFilesPanel(model: PermissionsModel): m.Children {
     m(
       "p",
       { class: "type-body text-secondary mb-4" },
-      "Files and folders on this computer that agents in this machine can reach.",
+      "Files and folders on this computer that agents in this workspace can reach.",
     ),
     rows.length === 0
-      ? m(Notice, { variant: "info" }, "No files are being shared with agents in this machine yet.")
+      ? m(Notice, { variant: "info" }, "No files are being shared with agents in this workspace yet.")
       : m(
           "div",
           { class: "flex flex-col gap-3" },
@@ -996,7 +996,7 @@ function renderAccessChoice(model: PermissionsModel, row: UiSharedPath): m.Child
   const isBusy = model.isRowBusy(rowKey);
   const isLocked = isLockedByAnotherWrite(model, rowKey);
   return renderSettingRow(
-    "Agents on this machine may",
+    "Agents in this workspace may",
     m("span", { class: "flex items-center gap-2" }, [
       isBusy ? m(Spinner, { size: "sm" }) : null,
       m(
@@ -1093,7 +1093,7 @@ function renderInactiveCopy(model: PermissionsModel, row: UiSharedPath): m.Child
   const isDiscarding = model.isRowBusy(folderSyncDiscardCopyRowKey(row.path));
   return m("div", { class: "flex items-start justify-between gap-4" }, [
     m("div", { class: "min-w-0 flex flex-col gap-0.5" }, [
-      m("span", { class: "type-body text-secondary" }, "A copy is still on the machine"),
+      m("span", { class: "type-body text-secondary" }, "A copy is still in the workspace"),
       m("span", { class: "type-helper text-tertiary" }, "Turning syncing back on picks up where it left off."),
     ]),
     m(
@@ -1205,15 +1205,15 @@ function renderAddSharedPath(model: PermissionsModel): m.Children {
 function renderOtherMachinesPanel(model: PermissionsModel): m.Children {
   const toggles = model.data?.workspace_toggles ?? [];
   return m("section", { "data-perm-panel": OTHER_MACHINES_SECTION }, [
-    m("h2", { class: "type-heading text-primary mb-1" }, "Other machines"),
+    m("h2", { class: "type-heading text-primary mb-1" }, "Other workspaces"),
     m(
       "p",
       { class: "type-body text-secondary mb-4" },
-      "What agents in this machine are allowed to do to your other machines (listing, creating, " +
+      "What agents in this workspace are allowed to do to your other workspaces (listing, creating, " +
         "destroying, SSH, and more). To grant more, ask an agent to perform the operation.",
     ),
     toggles.length === 0
-      ? m(Notice, { variant: "info" }, "Agents in this machine can't manage your other machines yet.")
+      ? m(Notice, { variant: "info" }, "Agents in this workspace can't manage your other workspaces yet.")
       : m(
           "div",
           { class: "flex flex-col pr-4" },

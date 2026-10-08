@@ -1,4 +1,4 @@
-// The Backup group inside Machine settings: what the machine's backups are
+// The Backup group inside Workspace settings: what the workspace's backups are
 // doing, the five most recent (with Download / Restore, and a link to the full
 // history at /workspace/<id>/backups), where the backups are stored, the
 // verification toggle, and the one idempotent "Update backup software"
@@ -101,8 +101,8 @@ export function BackupGroup(): m.Component<BackupGroupAttrs, BackupGroupState> {
         m(
           "p",
           { class: "type-helper text-tertiary mb-4" },
-          "If this machine is destroyed, its backups are kept for 30 days and can be downloaded from the " +
-            "Recently destroyed machines page, then deleted automatically.",
+          "If this workspace is destroyed, its backups are kept for 30 days and can be downloaded from the " +
+            "Recently destroyed workspaces page, then deleted automatically.",
         ),
 
         renderRecentBackups(vnode),
@@ -153,7 +153,7 @@ function renderRecentBackups(
             snapshots: model.snapshots.slice(0, BACKUP_SETTINGS_RECENT_LIMIT),
             controller,
             restoreDisabledReason: model.isRestoreDisabledByCheck
-              ? "This machine is offline; start it to restore a backup."
+              ? "This workspace is offline; start it to restore a backup."
               : null,
             onRestoreRequested: (snapshot) => {
               vnode.state.pendingRestoreSnapshot = snapshot;
@@ -389,9 +389,9 @@ function renderFixProblems(
           "p",
           { class: "type-helper text-tertiary" },
           isTooOld
-            ? "This machine is too old to run today's backup software. Create a new machine and ask its agent to " +
+            ? "This workspace is too old to run today's backup software. Create a new workspace and ask its agent to " +
                 "migrate your work across."
-            : "This machine is offline; start it to update its backup software.",
+            : "This workspace is offline; start it to update its backup software.",
         ),
   ]);
 }

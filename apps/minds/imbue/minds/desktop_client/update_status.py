@@ -113,10 +113,10 @@ class UpdateSkipReason(UpperCaseStrEnum):
 # Shown in the modal; each names the condition, not the code path. Window-relative
 # rather than "last night": the window is configurable to any hours.
 SKIP_REASON_MESSAGES: Final[dict[UpdateSkipReason, str]] = {
-    UpdateSkipReason.WORKSPACE_UNREACHABLE: "This machine couldn't be reached during the last update window.",
-    UpdateSkipReason.CHATS_RUNNING: "Agents were still working in this machine during the last update window.",
-    UpdateSkipReason.UPDATE_IN_FLIGHT: "An update was already running in this machine.",
-    UpdateSkipReason.ALREADY_UP_TO_DATE: "This machine was already up to date.",
+    UpdateSkipReason.WORKSPACE_UNREACHABLE: "This workspace couldn't be reached during the last update window.",
+    UpdateSkipReason.CHATS_RUNNING: "Agents were still working in this workspace during the last update window.",
+    UpdateSkipReason.UPDATE_IN_FLIGHT: "An update was already running in this workspace.",
+    UpdateSkipReason.ALREADY_UP_TO_DATE: "This workspace was already up to date.",
     UpdateSkipReason.DISPATCH_FAILED: "The update couldn't be started during the last update window.",
 }
 

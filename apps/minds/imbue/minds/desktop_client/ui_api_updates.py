@@ -54,7 +54,7 @@ _BULK_GATE_SKIP_FAILURE_BY_REASON: Final[dict[UpdateSkipReason, UpdateDispatchFa
         message=DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.UNREACHABLE]
     ),
     UpdateSkipReason.CHATS_RUNNING: UpdateDispatchFailure(
-        message="Agents were still working in this machine, so the update didn't start."
+        message="Agents were still working in this workspace, so the update didn't start."
     ),
 }
 
@@ -190,7 +190,7 @@ def _resolve_target_request(agent_id: str, *, refusal: str) -> tuple[WorkspaceUp
 
 def _handle_update_now(agent_id: str) -> Response:
     """POST /ui/api/updates/<agent_id>/now: run the update in this machine right away."""
-    resolved = _resolve_target_request(agent_id, refusal="This machine has no update to run.")
+    resolved = _resolve_target_request(agent_id, refusal="This workspace has no update to run.")
     if isinstance(resolved, Response):
         return resolved
     service, parsed_id, target_ref = resolved
@@ -203,7 +203,7 @@ def _handle_schedule_update(agent_id: str) -> Response:
     A ``target_ref`` is accepted here as on the now route: pressing the version
     field is the confirmation, and scheduling only changes when the run happens.
     """
-    resolved = _resolve_target_request(agent_id, refusal="This machine has no update to schedule.")
+    resolved = _resolve_target_request(agent_id, refusal="This workspace has no update to schedule.")
     if isinstance(resolved, Response):
         return resolved
     service, parsed_id, target_ref = resolved

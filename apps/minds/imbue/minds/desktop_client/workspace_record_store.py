@@ -137,7 +137,7 @@ SUPPORTED_PAYLOAD_FORMAT: Final[int] = 1
 
 # The user-facing remedy for every record_format / payload_format write-lock.
 RECORD_TOO_NEW_MESSAGE: Final[str] = (
-    "This machine was managed by a newer version of the app; update the app to manage it."
+    "This workspace was managed by a newer version of the app; update the app to manage it."
 )
 
 
@@ -708,7 +708,7 @@ class WorkspaceRecordStore(MutableModel):
         where last-actor-wins is the intended semantics.
         """
         if self.cli is None:
-            raise WorkspaceSyncError("machine sync is not configured (no imbue_cloud CLI)")
+            raise WorkspaceSyncError("workspace sync is not configured (no imbue_cloud CLI)")
         if is_record_too_new(record):
             raise WorkspaceRecordTooNewError(RECORD_TOO_NEW_MESSAGE)
         # The metadata-only tier: while the account has no (non-empty) master
@@ -777,7 +777,7 @@ class WorkspaceRecordStore(MutableModel):
         existing = self.find_active_record(agent_id)
         if existing is not None and existing[0] != user_id:
             raise WorkspaceSyncError(
-                "machine is associated with another account; disassociate it first, then associate"
+                "workspace is associated with another account; disassociate it first, then associate"
             )
         with self._lock:
             self._load_unlocked()
@@ -802,7 +802,7 @@ class WorkspaceRecordStore(MutableModel):
         if is_record_too_new(record):
             raise WorkspaceRecordTooNewError(RECORD_TOO_NEW_MESSAGE)
         if self.cli is None:
-            raise WorkspaceSyncError("machine sync is not configured (no imbue_cloud CLI)")
+            raise WorkspaceSyncError("workspace sync is not configured (no imbue_cloud CLI)")
         try:
             self.cli.sync_record_delete(account_email, record.agent_id)
         except ImbueCloudCliError as e:
@@ -845,7 +845,7 @@ class WorkspaceRecordStore(MutableModel):
         if existing is not None and is_record_too_new(existing):
             raise WorkspaceRecordTooNewError(RECORD_TOO_NEW_MESSAGE)
         if self.cli is None:
-            raise WorkspaceSyncError("machine sync is not configured (no imbue_cloud CLI)")
+            raise WorkspaceSyncError("workspace sync is not configured (no imbue_cloud CLI)")
         try:
             self.cli.sync_record_delete(account_email, workspace_id)
         except ImbueCloudLeaseActiveCliError as e:
@@ -1097,7 +1097,9 @@ class WorkspaceRecordStore(MutableModel):
         payload = self.decrypt_record_secrets(user_id, record)
         if payload is None:
             if is_cloud_row:
-                self._set_ssh_material_error(record.agent_id, "Could not decrypt the synced secrets for this machine.")
+                self._set_ssh_material_error(
+                    record.agent_id, "Could not decrypt the synced secrets for this workspace."
+                )
             return False
 
         # The SSH half applies to every cloud row, leased-here included.
@@ -1146,7 +1148,7 @@ class WorkspaceRecordStore(MutableModel):
             public_key_line = derive_openssh_public_key_line(payload.ssh_private_key)
             if public_key_line is None:
                 self._set_ssh_material_error(
-                    record.agent_id, "The synced SSH key for this machine could not be parsed."
+                    record.agent_id, "The synced SSH key for this workspace could not be parsed."
                 )
                 return False
             try:

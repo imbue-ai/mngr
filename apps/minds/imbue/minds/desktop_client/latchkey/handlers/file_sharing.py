@@ -198,7 +198,7 @@ def _format_granted_message(file_path: str, access: str, device_id: str) -> str:
 
 
 def _format_sync_started_note(workspace_path: str) -> str:
-    return f" A synchronized copy of it is being kept on your machine at {workspace_path}."
+    return f" A synchronized copy of it is being kept in this workspace at {workspace_path}."
 
 
 def _format_sync_declined_note() -> str:

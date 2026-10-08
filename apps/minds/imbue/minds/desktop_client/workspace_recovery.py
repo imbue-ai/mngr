@@ -3,7 +3,7 @@
 Imbue Studio recovers a machine two ways, and they are not the same action. On the
 STUCK edge it *starts* the machine, unasked: ``mngr start`` alone, which checks
 ground truth at commit time and no-ops against a host that is already running,
-so it can never bounce a live container. Only the user's "Restart machine" click
+so it can never bounce a live container. Only the user's "Restart workspace" click
 *restarts* one -- ``mngr stop --stop-host`` and then that same start -- because
 only a bounce fixes a container that is running but wedged. Which of the two an
 episode is running is :class:`HostRecoveryKind`; "restart" is reserved for the
@@ -111,7 +111,7 @@ _DEFAULT_PROVIDER_LABEL: Final[str] = "the machine backend"
 # host state (``DiscoveredHost`` has no failure_reason field), so there is no
 # provider error to show verbatim; this covers the class of causes instead.
 HOST_ACCESS_REJECTED_REASON: Final[str] = (
-    "This machine's access to the machine host was rejected. You may need to recreate the machine or contact support."
+    "This workspace's access to the machine host was rejected. You may need to recreate the workspace or contact support."
 )
 # How long a single workspace probe through the plugin is allowed to hang.
 # Short and snappy so a wedged workspace doesn't gate the recovery UI.
@@ -674,7 +674,7 @@ def _report_recovery_step_failure(
         reason = _in_band_provider_outage_reason(exc, provider_name)
         if reason is not None:
             tracker.record_backend_outage(workspace_agent_id, provider_name, reason)
-            message = f"This machine's backend is unreachable, so the recovery could not run: {reason}"
+            message = f"This workspace's backend is unreachable, so the recovery could not run: {reason}"
     device_block = read_environment_block(connectivity_detector, backend_resolver, workspace_agent_id)
     is_blocked_by_device = device_block is not EnvironmentBlock.NONE
     if is_blocked_by_device:
@@ -1456,13 +1456,13 @@ def run_host_recovery_sequence(
     must then never bounce a live container, and ``mngr start`` alone guarantees
     that -- it checks ground truth at commit time, no-ops on a running host, and
     cold-boots a stopped one. Only ``HostRecoveryKind.RESTART``, from the
-    "Restart machine" click on the recovery card, runs the stop step, since it
+    "Restart workspace" click on the recovery card, runs the stop step, since it
     may target a running-but-wedged container that only a bounce fixes.
     """
     registry.append_log(workspace_agent_id, "Starting host recovery.")
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
     if services_agent_id is None:
-        message = "Could not locate the system-services agent for this machine."
+        message = "Could not locate the system-services agent for this workspace."
         logger.error("Host recovery of {} failed: {}", workspace_agent_id, message)
         _record_recovery_failure(tracker, registry, workspace_agent_id, message)
         return
@@ -1566,7 +1566,7 @@ def run_host_recovery_sequence(
     # session had died is relaunched either way. Only the host is in question.)
     if _did_start_boot_a_host(start_stdout) is False:
         logger.info("Start step of host recovery for {} booted nothing; the host was already up", workspace_agent_id)
-        registry.append_log(workspace_agent_id, "The machine was already running; it was not restarted.")
+        registry.append_log(workspace_agent_id, "The workspace was already running; it was not restarted.")
         tracker.record_recovery_started_nothing(workspace_agent_id)
 
     # Without a plugin route there is no way to probe for recovery, so treat a

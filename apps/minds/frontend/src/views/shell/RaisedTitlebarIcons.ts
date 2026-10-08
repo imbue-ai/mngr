@@ -50,7 +50,7 @@ export const TITLEBAR_POPUP_ICONS: readonly TitlebarPopupIcon[] = [
     id: "settings",
     buttonId: "ws-tab-settings",
     icon: "settings",
-    label: "Machine settings",
+    label: "Workspace settings",
   },
   {
     id: "share",

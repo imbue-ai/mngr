@@ -48,7 +48,7 @@ function DestroyedRow(): m.Component<{
             ? m("div", { class: "type-helper text-tertiary mt-1" }, "Unlock this account's sync password to download.")
             : null,
           !row.is_locked && !row.has_backup
-            ? m("div", { class: "type-helper text-tertiary mt-1" }, "No backup was configured for this machine.")
+            ? m("div", { class: "type-helper text-tertiary mt-1" }, "No backup was configured for this workspace.")
             : null,
           row.delete_hint ? m("div", { class: "type-helper text-tertiary mt-1" }, row.delete_hint) : null,
         ]),
@@ -93,7 +93,7 @@ function DestroyedRow(): m.Component<{
                 m(
                   "span",
                   { class: "type-helper text-secondary text-right max-w-xs" },
-                  "Remove this machine? This can't be undone.",
+                  "Remove this workspace? This can't be undone.",
                 ),
                 m("span", { class: "flex items-center gap-2" }, [
                   m(Button, { variant: "danger", onclick: () => void model.deleteBackup(row.agent_id) }, "Delete forever"),
@@ -132,14 +132,14 @@ export const DestroyedWorkspacesPage: m.Component<Record<string, never>, Destroy
           ? m(
               "p",
               { class: "type-body text-secondary" },
-              `Backups of destroyed machines are kept for ${model.retentionDays} days, then deleted automatically.`,
+              `Backups of destroyed workspaces are kept for ${model.retentionDays} days, then deleted automatically.`,
             )
           : null,
         model.errorMessage !== null ? m(Notice, { variant: "error" }, model.errorMessage) : null,
         !model.isLoaded
           ? m("div", { class: "type-body text-secondary" }, "Loading...")
           : model.rows.length === 0
-            ? m("div", { class: "type-body text-secondary" }, "No recently destroyed machines.")
+            ? m("div", { class: "type-body text-secondary" }, "No recently destroyed workspaces.")
             : m(
                 "div",
                 { class: "flex flex-col gap-2" },

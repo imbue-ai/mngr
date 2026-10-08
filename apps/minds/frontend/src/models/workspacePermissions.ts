@@ -218,7 +218,7 @@ export const FILE_SHARING_ACCESSES = Object.keys(FILE_SHARING_ACCESS_LABELS) as 
 const FOLDER_SYNC_CONFLICT_LABELS: Record<FolderSyncConflict, string> = {
   NEWER: "Whichever was changed more recently",
   THIS_COMPUTER: "The change from your computer",
-  WORKSPACE: "The change from this machine",
+  WORKSPACE: "The change from this workspace",
 };
 
 const FOLDER_SYNC_STATE_LABELS: Record<FolderSyncState, string> = {

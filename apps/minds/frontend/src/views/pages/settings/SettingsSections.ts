@@ -160,7 +160,7 @@ function notificationsPanel(model: SettingsModel): m.Children {
           m(
             "span",
             { class: "type-body text-primary font-semibold" },
-            "Notify me when a machine needs me",
+            "Notify me when a workspace needs me",
           ),
           m(
             "span",
@@ -271,7 +271,7 @@ function displayPanel(model: SettingsModel): m.Children {
           m(
             "span",
             { class: "block type-helper text-tertiary" },
-            "Makes everything in the app larger or smaller, including your machines.",
+            "Makes everything in the app larger or smaller, including your workspaces.",
           ),
         ]),
         percent === null
@@ -422,7 +422,7 @@ function errorReportingPanel(model: SettingsModel): m.Children {
     m(
       "p",
       { class: "type-helper text-tertiary" },
-      "Imbue will never look into your machines without your consent.",
+      "Imbue will never look into your workspaces without your consent.",
     ),
   ]);
 }
@@ -467,11 +467,11 @@ function machineUpdatesSection(model: SettingsModel): m.Children {
   const startHour = overview.update_window_start_hour;
   const endHour = overview.update_window_end_hour;
   return m("div", { class: "mt-8" }, [
-    m("h3", { class: "type-heading text-primary mb-2" }, "Machine updates"),
+    m("h3", { class: "type-heading text-primary mb-2" }, "Workspace updates"),
     m(
       "p",
       { class: "type-body text-secondary mb-3" },
-      "When you schedule an update for a machine, Imbue Studio runs it inside this window. A machine that " +
+      "When you schedule an update for a workspace, Imbue Studio runs it inside this window. A workspace that " +
         "isn't reachable or has agents working in it when the window comes is skipped and tried again " +
         "in the next one.",
     ),
@@ -520,7 +520,7 @@ function signInsPanel(model: SettingsModel): m.Children {
     m(
       "p",
       { class: "type-body text-secondary mb-3" },
-      "When a machine connects to Claude or ChatGPT, Imbue Studio opens the sign-in page in this browser. " +
+      "When a workspace connects to Claude or ChatGPT, Imbue Studio opens the sign-in page in this browser. " +
         "Pick the one you're signed in to your AI account with.",
     ),
     m("div", { class: "flex items-center gap-2 py-3 border-b border-subtle" }, [
@@ -569,14 +569,14 @@ function masterPasswordPanel(
   if (overview === null) return null;
   const statusSentence = overview.is_master_password_set
     ? " A master password is currently set."
-    : " No master password is set yet, so only machine names and metadata sync.";
+    : " No master password is set yet, so only workspace names and metadata sync.";
   return m("section", [
     m("h2", { class: "type-heading-lg text-primary mb-2" }, "Master password"),
     m(
       "p",
       { class: "type-body text-secondary mb-6" },
-      "Protects the synced copy of your machines' access keys and backup credentials (initially empty -- nothing " +
-        "secret syncs until one is set). You'll type it once on each new device to unlock your machines there." +
+      "Protects the synced copy of your workspaces' access keys and backup credentials (initially empty -- nothing " +
+        "secret syncs until one is set). You'll type it once on each new device to unlock your workspaces there." +
         statusSentence,
     ),
     m("div", { class: "flex flex-col gap-2 max-w-md" }, [

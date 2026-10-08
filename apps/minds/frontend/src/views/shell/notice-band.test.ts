@@ -27,7 +27,7 @@ describe("noticeBandFor", () => {
     // The app starts a wedged machine unasked, so an account of a failed
     // recovery usually describes an event the user never caused and never saw.
     // The remedy and its cost live on the card behind the action.
-    expect(noticeBandFor("recovery_failed", "healthy", true)?.message).toBe("This machine stopped responding.");
+    expect(noticeBandFor("recovery_failed", "healthy", true)?.message).toBe("This workspace stopped responding.");
   });
 
   it("names the backend it cannot reach instead of the machine that reads stuck because of it", () => {
@@ -60,7 +60,7 @@ describe("noticeBandFor", () => {
     // a machine that is very likely running fine. It keeps the recovering key,
     // so the strip is not rewritten as the explanation lands.
     const band = noticeBandFor("stuck", "healthy", true, { isDeviceCannotConnect: true });
-    expect(band?.message).toBe("Can't connect to this machine from this device");
+    expect(band?.message).toBe("Can't connect to this workspace from this device");
     expect(band?.key).toBe("workspace-recovering");
     expect(band?.action?.kind).toBe("open-recovery");
     // The terminal state is the same condition better explained, so it reads alike.
@@ -111,7 +111,7 @@ describe("noticeBandFor", () => {
     // claiming they are offline is a claim they know to be false -- and they
     // would discount whatever the app says next.
     const band = noticeBandFor("stuck", "healthy", true, { deviceEnvironment: "SSH_BLOCKED" });
-    expect(band?.message).toBe("This network blocks the connection to your machines.");
+    expect(band?.message).toBe("This network blocks the connection to your workspaces.");
   });
 
   it("blames this device before it blames the backend behind it", () => {
@@ -142,7 +142,7 @@ describe("noticeBandFor", () => {
     // recovery_failed branch, the band would say "This machine stopped
     // responding." about a machine nothing here ever reached.
     const failed = noticeBandFor("recovery_failed", "healthy", true, { deviceEnvironment: "SSH_BLOCKED" });
-    expect(failed?.message).toBe("This network blocks the connection to your machines.");
+    expect(failed?.message).toBe("This network blocks the connection to your workspaces.");
   });
 
   it("does not blame this device's network for a machine that runs on it", () => {
@@ -156,7 +156,7 @@ describe("noticeBandFor", () => {
       deviceEnvironment: "OFFLINE",
       isWorkspaceNetworkDependent: false,
     });
-    expect(band?.message).toBe("Lost connection to this machine. Reconnecting…");
+    expect(band?.message).toBe("Lost connection to this workspace. Reconnecting…");
     const healthy = noticeBandFor("healthy", "healthy", true, {
       deviceEnvironment: "OFFLINE",
       isWorkspaceNetworkDependent: false,
@@ -172,7 +172,7 @@ describe("noticeBandFor", () => {
       deviceEnvironment: "OFFLINE",
       recoveryKind: "restart",
     });
-    expect(band?.message).toBe("Lost connection to this machine. Reconnecting…");
+    expect(band?.message).toBe("Lost connection to this workspace. Reconnecting…");
   });
 
   it("keeps naming the device over the app's own unattended start", () => {
@@ -203,7 +203,7 @@ describe("noticeBandFor", () => {
       isDeviceCannotConnect: true,
     });
     expect(band?.key).toBe("workspace-recovering");
-    expect(band?.message).toBe("Lost connection to this machine. Reconnecting…");
+    expect(band?.message).toBe("Lost connection to this workspace. Reconnecting…");
     // And there is nothing to say over a healthy machine, or on a hub page.
     expect(noticeBandFor("healthy", "healthy", true, { deviceEnvironment: "UNKNOWN" })).toBeNull();
     expect(localPageNoticeFor("healthy", true, "UNKNOWN")).toBeNull();
@@ -382,7 +382,7 @@ describe("noticeBandFor, an update run", () => {
       updateRunOutcome: "not-started",
       standingUpdateNotice: "out-of-date",
     });
-    expect(band?.message).toBe("This machine's update didn't start.");
+    expect(band?.message).toBe("This workspace's update didn't start.");
     expect(band?.variant).toBe("error");
     expect(band?.action?.kind).toBe("update-workspace");
   });
@@ -408,7 +408,7 @@ describe("noticeBandFor, a machine stopped on purpose", () => {
     const held = noticeBandFor("stuck", "healthy", true, { liveness: "STOPPED", stopKind: "maintenance" });
     expect(held?.key).toBe("workspace-maintenance");
     expect(held?.variant).toBe("info");
-    expect(held?.message).toBe("This machine is undergoing maintenance and will be back shortly.");
+    expect(held?.message).toBe("This workspace is undergoing maintenance and will be back shortly.");
     expect(held?.action).toBeNull();
     // Discovery death still outranks it: the band names the loss of every machine.
     expect(noticeBandFor("stuck", "blocked", true, { liveness: "STOPPED", stopKind: "maintenance" })?.key).toBe(

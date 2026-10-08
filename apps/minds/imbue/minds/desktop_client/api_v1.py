@@ -897,7 +897,7 @@ def _handle_workspaces_backups_stream() -> Response:
             info.create_time.isoformat() if info is not None and info.create_time is not None else None
         )
     invalid_rows = (
-        json.dumps(_degraded_backup_summary(invalid_id, None, "not a machine agent id")) + "\n"
+        json.dumps(_degraded_backup_summary(invalid_id, None, "not a workspace agent id")) + "\n"
         for invalid_id in invalid_agent_ids
     )
     valid_rows = _stream_workspace_backup_summaries(
@@ -1183,7 +1183,7 @@ def _handle_destroy_workspace(agent_id: str) -> tuple[OperationHandleResponse, i
     parsed_id = AgentId(agent_id)
     paths: InstallationPaths | None = get_state().api_v1_paths
     if paths is None:
-        return _json_error("Machine management not configured", 501)
+        return _json_error("Workspace management not configured", 501)
     backend_resolver = get_state().backend_resolver
     info = backend_resolver.get_agent_display_info(parsed_id)
     if info is None:
@@ -1295,7 +1295,7 @@ def _perform_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecyc
     parsed_id = AgentId(agent_id)
     parent_cg = get_state().root_concurrency_group
     if parent_cg is None:
-        return _json_error("Machine lifecycle not configured", 501)
+        return _json_error("Workspace lifecycle not configured", 501)
     backend_resolver = get_state().backend_resolver
     if parsed_id not in backend_resolver.list_known_workspace_ids():
         return _json_error(f"Unknown workspace {agent_id}", 404)
@@ -1391,11 +1391,11 @@ def _handle_workspace_rename(agent_id: str) -> Response:
         return _json_error(f"Unknown workspace {agent_id}", 404)
     parent_cg = state.root_concurrency_group
     if parent_cg is None:
-        return _json_error("Machine rename is unavailable in this configuration", 503)
+        return _json_error("Workspace rename is unavailable in this configuration", 503)
 
     raw_name = str((request.get_json(silent=True) or {}).get("name", "")).strip()
     if not raw_name:
-        return _json_field_error("A machine name is required.", "name")
+        return _json_field_error("A workspace name is required.", "name")
     try:
         new_slug = normalize_host_name_slug(raw_name)
     except InvalidName as exc:
@@ -1437,7 +1437,7 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
 
     Body: ``{"scope": "host", "start_only"?: bool}``. By default this restarts
     the host -- ``mngr stop --stop-host`` and then ``mngr start`` -- which is
-    what the recovery card's "Restart machine" click asks for. ``start_only``
+    what the recovery card's "Restart workspace" click asks for. ``start_only``
     runs the idempotent ``mngr start`` alone, for callers dispatching with no
     knowledge of the host's state; it never bounces a live container. The former
     ``services`` scope (an in-place system-services restart) was removed and is
@@ -1469,7 +1469,7 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     tracker: SystemInterfaceHealthTracker | None = state.system_interface_health_tracker
     parent_cg = state.root_concurrency_group
     if tracker is None or parent_cg is None:
-        return _json_error("Machine recovery is unavailable in this configuration", 503)
+        return _json_error("Workspace recovery is unavailable in this configuration", 503)
 
     handle = OperationHandleResponse(operation_id=str(parsed_id), kind="restart")
     # A ``start_only`` caller can race the workspace's own self-recovery, and
@@ -1611,7 +1611,7 @@ def _handle_restart_operation_status(operation_id: str) -> RestartOperationStatu
 
 # Plain-language names for the running operation in conflict (409) messages.
 _OPERATION_CONFLICT_PHRASES: Final[dict[WorkspaceOperationKind, str]] = {
-    WorkspaceOperationKind.RECOVERY: "A machine recovery",
+    WorkspaceOperationKind.RECOVERY: "A workspace recovery",
     WorkspaceOperationKind.BACKUP_UPDATE: "A backup software update",
     WorkspaceOperationKind.BACKUP_CONFIGURE: "A backup settings change",
     WorkspaceOperationKind.BACKUP_RESTORE: "A restore",

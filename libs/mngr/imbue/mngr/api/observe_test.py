@@ -73,6 +73,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import make_test_agent_details
@@ -1596,9 +1597,18 @@ def _observer_holding_the_lock(events_base_dir: Path) -> Iterator[None]:
     """Hold the observe lock for the body, standing in for a live ``mngr observe``.
 
     A follower refuses to run without this, so most follower tests need it as a
-    precondition rather than as their subject.
+    precondition rather than as their subject. A running follower's liveness probe
+    takes the lock for an instant, so the acquire retries until it lands outside one.
     """
-    fd = acquire_observe_lock(events_base_dir)
+
+    def try_acquire() -> int | None:
+        try:
+            return acquire_observe_lock(events_base_dir)
+        except ObserveLockError:
+            return None
+
+    fd, _, _ = poll_for_value(try_acquire, timeout=10.0, poll_interval=0.001)
+    assert fd is not None, "the observe lock stayed held for 10s"
     try:
         yield
     finally:

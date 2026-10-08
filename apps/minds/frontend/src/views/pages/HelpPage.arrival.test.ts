@@ -148,7 +148,7 @@ describe("HelpPage when another report arrives while it is up", () => {
     await landRoute();
 
     expect(formDescription()).toBe("beta's diagnosis");
-    expect(pageText()).toContain("An agent in machine beta wants to submit");
+    expect(pageText()).toContain("An agent in workspace beta wants to submit");
     expect(takePendingHelpLaunch()).toBeNull();
     const fetchMock = stubReportPost(async () =>
       jsonResponse({ event_id: "evt-beta" }),
@@ -249,7 +249,7 @@ describe("HelpPage when another report arrives while it is up", () => {
     await landRoute();
 
     expect(formDescription()).toBe("beta's diagnosis");
-    expect(pageText()).toContain("An agent in machine beta wants to submit");
+    expect(pageText()).toContain("An agent in workspace beta wants to submit");
     expect(m.route.param("workspace")).toBe(BETA);
     expect(takePendingHelpLaunch()).toBeNull();
   });

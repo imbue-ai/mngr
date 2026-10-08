@@ -64,7 +64,7 @@ describe("FileSharingPermissionDetailView sync option", () => {
     expect(syncSwitches(body)).toHaveLength(1);
     expect(attrsOf(syncSwitches(body)[0]).checked).toBe(true);
     const text = allText(body);
-    expect(text).toContain("Keep a synchronized copy on the machine");
+    expect(text).toContain("Keep a synchronized copy in the workspace");
     expect(text).toContain("The agent asked for this.");
     // Two-way, so the clash question is real and asked.
     expect(conflictSelects(body)).toHaveLength(1);

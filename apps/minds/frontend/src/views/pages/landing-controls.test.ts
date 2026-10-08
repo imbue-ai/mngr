@@ -293,7 +293,7 @@ describe("backupsControlFor", () => {
     );
     expect(unavailable.isShown).toBe(true);
     expect(unavailable.isEnabled).toBe(false);
-    expect(unavailable.tooltip).toContain("device that created this machine");
+    expect(unavailable.tooltip).toContain("device that created this workspace");
   });
 
   it("hides the button on a remote row with no computed access", () => {
@@ -316,20 +316,20 @@ describe("backupsControlFor", () => {
 
 describe("removeRecordFailureMessage", () => {
   it("relays the server's own explanation for a refused removal", () => {
-    const refusal = "This machine still holds its cloud lease, so its record cannot be removed; destroy the workspace instead.";
+    const refusal = "This workspace's machine still holds its cloud lease, so its record cannot be removed; destroy the workspace instead.";
     expect(removeRecordFailureMessage(409, { error: refusal })).toBe(
-      `Could not remove this machine from the list: ${refusal}`,
+      `Could not remove this workspace from the list: ${refusal}`,
     );
   });
 
   it("falls back to the status when the response carries no explanation", () => {
-    expect(removeRecordFailureMessage(502, null)).toBe("Could not remove this machine from the list: HTTP 502");
-    expect(removeRecordFailureMessage(404, {})).toBe("Could not remove this machine from the list: HTTP 404");
+    expect(removeRecordFailureMessage(502, null)).toBe("Could not remove this workspace from the list: HTTP 502");
+    expect(removeRecordFailureMessage(404, {})).toBe("Could not remove this workspace from the list: HTTP 404");
   });
 
   it("names a request that never got an answer", () => {
     expect(removeRecordFailureMessage(null, null)).toBe(
-      "Could not remove this machine from the list (the request failed).",
+      "Could not remove this workspace from the list (the request failed).",
     );
   });
 });

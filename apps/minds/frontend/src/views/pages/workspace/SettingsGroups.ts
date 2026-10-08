@@ -1,4 +1,4 @@
-// The Machine settings pane: General / Account / Backup / Updates groups
+// The Workspace settings pane: General / Account / Backup / Updates groups
 // behind a left nav, rendered by the options panel's Settings tab
 // (WorkspaceSettingsSections.jinja's successor; the old standalone
 // /workspace/<id>/settings page now redirects into that tab).
@@ -212,11 +212,11 @@ function outOfDateNotice(agentId: string): m.Children {
 function disabledUpdateReason(update: UiWorkspaceUpdate): m.Children {
   const reason =
     update.availability === "UP_TO_DATE"
-      ? "This machine is up to date."
+      ? "This workspace is up to date."
       : update.availability === "APP_BEHIND"
-        ? "This machine is newer than this copy of Imbue Studio. Update the app to catch up."
+        ? "This workspace is newer than this copy of Imbue Studio. Update the app to catch up."
         : isRecreationRequired(update)
-          ? "This machine is too old to update in place. Create a new machine and ask its agent to migrate your work across."
+          ? "This workspace is too old to update in place. Create a new workspace and ask its agent to migrate your work across."
           : "";
   return reason
     ? m("p", { class: "type-helper text-tertiary mt-2" }, reason)
@@ -312,7 +312,7 @@ function renderUpdatesGroup(
   return m("div", { class: "max-w-md" }, [
     m(SectionHeader, "Version"),
     m("div", { class: "flex flex-col gap-1 mb-8" }, [
-      updateVersionRow("This machine", update.current_version ?? ""),
+      updateVersionRow("This workspace", update.current_version ?? ""),
       updateVersionRow(
         "Supported by Imbue Studio",
         update.supported_version ?? "",
@@ -333,7 +333,7 @@ function renderUpdatesGroup(
       m(
         "p",
         { class: "type-helper text-secondary mb-3" },
-        "Updating runs an agent inside this machine, which uses credits. Its chat is the record of what was done.",
+        "Updating runs an agent inside this workspace, which uses credits. Its chat is the record of what was done.",
       ),
       held !== null
         ? // The question replaces the controls so there is one way to answer it.
@@ -475,10 +475,10 @@ function renderUpdatesGroup(
                     m(
                       "p",
                       { class: "type-helper text-tertiary" },
-                      "Works on an up-to-date machine too. A version newer than this Imbue Studio app, a branch, or a bare " +
+                      "Works on an up-to-date workspace too. A version newer than this Imbue Studio app, a branch, or a bare " +
                         "ref is allowed and applied without further confirmation: it may not be a tested release, " +
-                        "parts of this machine may stop working until the app catches up, and the update agent " +
-                        'offers a rollback afterwards. On a branch, this machine may afterwards read as "version unknown".',
+                        "parts of this workspace may stop working until the app catches up, and the update agent " +
+                        'offers a rollback afterwards. On a branch, this workspace may afterwards read as "version unknown".',
                     ),
                   ],
                 ),
@@ -515,8 +515,8 @@ function renderGeneralGroup(
         ? m(
             Notice,
             { variant: "warn" },
-            "This workspace's machine is currently unreachable, so the workspace can't be renamed " +
-              "right now. Try again once the machine reconnects.",
+            "This workspace is currently unreachable, so it can't be renamed " +
+              "right now. Try again once the workspace reconnects.",
           )
         : null,
       m("div", { class: "flex items-center gap-2" }, [
@@ -573,8 +573,8 @@ function renderGeneralGroup(
         ? m(
             Notice,
             { variant: "warn" },
-            "This machine is currently unreachable, so its color can't be changed right now. " +
-              "Try again once the machine reconnects.",
+            "This workspace is currently unreachable, so its color can't be changed right now. " +
+              "Try again once the workspace reconnects.",
           )
         : null,
       m(
@@ -667,7 +667,7 @@ function renderGeneralGroup(
     m(
       "p",
       { class: "type-body text-secondary mb-3" },
-      "Permanently destroy this machine and release any associated resources.",
+      "Permanently destroy this workspace and release any associated resources.",
     ),
     m(
       Button,
@@ -678,7 +678,7 @@ function renderGeneralGroup(
           local.isDestroyDialogOpen = true;
         },
       },
-      "Remove machine",
+      "Remove workspace",
     ),
     model.destroyErrorMessage
       ? m(
@@ -707,7 +707,7 @@ function renderMachineSizeSection(model: WorkspaceOptionsModel): m.Children {
         ? m(
             Notice,
             { variant: "info" },
-            `A new size is pending (${pendingLabel}). Restart this machine to apply it.`,
+            `A new size is pending (${pendingLabel}). Restart this workspace's machine to apply it.`,
           )
         : null,
     ]),
@@ -745,10 +745,10 @@ function renderAccountGroup(
             "p",
             { id: "leased-account-note", class: "type-body text-secondary" },
             [
-              "Machines running in Imbue Cloud can't be moved to a different account.",
+              "Workspaces running in Imbue Cloud can't be moved to a different account.",
               data.leased_owner_email
                 ? [
-                    " This machine is owned by ",
+                    " This workspace is owned by ",
                     m("strong", data.leased_owner_email),
                     ".",
                   ]
@@ -765,7 +765,7 @@ function renderAccountGroup(
               m(
                 Notice,
                 { variant: "warn" },
-                "Unlinking stops all sharing for this machine and revokes its links. " +
+                "Unlinking stops all sharing for this workspace and revokes its links. " +
                   "You will need to set up sharing again after linking it back.",
               ),
               m(
@@ -806,7 +806,7 @@ function renderAssociatePrompt(
       m(
         "p",
         { class: "type-body text-secondary mb-3" },
-        "Link this machine to an account to enable sharing and cloud backups.",
+        "Link this workspace to an account to enable sharing and cloud backups.",
       ),
       m(
         "p",
@@ -823,7 +823,7 @@ function renderAssociatePrompt(
     m(
       "p",
       { class: "type-body text-secondary mb-3" },
-      "Link this machine to one of your accounts:",
+      "Link this workspace to one of your accounts:",
     ),
     m(
       "div",
@@ -861,7 +861,7 @@ function renderDestroyDialog(
       m(
         "h2",
         { class: "type-heading-lg text-primary mb-3" },
-        "Remove machine?",
+        "Remove workspace?",
       ),
       m("p", { class: "type-body text-primary mb-4" }, [
         "This will permanently destroy ",
@@ -919,7 +919,7 @@ function renderUnlinkDialog(
       m(
         "h2",
         { class: "type-heading-lg text-primary mb-3" },
-        "Unlink this machine?",
+        "Unlink this workspace?",
       ),
       m("p", { class: "type-body text-primary mb-4" }, [
         "This stops all sharing for ",

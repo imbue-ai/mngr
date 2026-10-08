@@ -907,7 +907,7 @@ def build_workspace_toggles(
     backend_resolver: BackendResolverInterface,
     config: LatchkeyPermissionsConfig,
 ) -> tuple[SelfPermissionToggle, ...]:
-    """Build the Other machines toggle rows: granted verbs plus revoked-but-restorable ones.
+    """Build the Other workspaces toggle rows: granted verbs plus revoked-but-restorable ones.
 
     Same union-of-rule-and-schemas construction as
     :func:`build_file_sharing_toggles`. Rows follow the verb catalog's order;
@@ -926,7 +926,7 @@ def build_workspace_toggles(
             continue
         verb_permission, target = parsed
         verb = verb_by_permission[verb_permission]
-        detail = "All machines" if target is None else resolve_target_workspace_name(backend_resolver, target)
+        detail = "All workspaces" if target is None else resolve_target_workspace_name(backend_resolver, target)
         rows.append(
             (
                 verb_order[verb_permission],

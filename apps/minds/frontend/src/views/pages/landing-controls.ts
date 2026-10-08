@@ -28,13 +28,13 @@ export function isOwnerStartableStopKind(stopKind: string): boolean {
 
 /** The sentence a held machine's surfaces show; the connector answers a
  * refused start with the same words, so the two never disagree. */
-export const MAINTENANCE_MESSAGE = "This machine is undergoing maintenance and will be back shortly.";
+export const MAINTENANCE_MESSAGE = "This workspace is undergoing maintenance and will be back shortly.";
 
 /** The sentence a retired machine's surfaces show: it never runs again, and
  * its data lives in its backups (or in an archive support hands out). The
  * connector answers a refused start with the same words. */
 export const RETIRED_MESSAGE =
-  "This machine has been retired and cannot be started again. " +
+  "This workspace has been retired and cannot be started again. " +
   "Download its data from its backups, or contact support if it has none.";
 
 /** What the liveness badge says: the lifecycle label, except that a machine an
@@ -82,9 +82,9 @@ export function mindControlsFor(
  * own explanation is used when it gave one (a refused removal names the live
  * lease and points at destroy), else the status. */
 export function removeRecordFailureMessage(status: number | null, body: { error?: string } | null): string {
-  if (status === null) return "Could not remove this machine from the list (the request failed).";
+  if (status === null) return "Could not remove this workspace from the list (the request failed).";
   const detail = body?.error ?? `HTTP ${status}`;
-  return `Could not remove this machine from the list: ${detail}`;
+  return `Could not remove this workspace from the list: ${detail}`;
 }
 
 /** The question a stop or restart asks first, or null for none. An update
@@ -239,17 +239,17 @@ export function keyStateChipFor(keyState: string): KeyStateChip | null {
     case "locked":
       return {
         label: "Enter your master password to open",
-        tooltip: "This machine's access key is synced to your account; unlock it above to open the machine here",
+        tooltip: "This workspace's access key is synced to your account; unlock it above to open the workspace here",
       };
     case "syncing":
       return {
         label: "Syncing access…",
-        tooltip: "This machine's access key has not reached this device yet; it arrives with the next sync",
+        tooltip: "This workspace's access key has not reached this device yet; it arrives with the next sync",
       };
     case "unavailable":
       return {
         label: "No access from this device",
-        tooltip: "This machine's access key was never synced: set a master password on the device that created it",
+        tooltip: "This workspace's access key was never synced: set a master password on the device that created it",
       };
     default:
       return null;
@@ -291,7 +291,7 @@ export function backupsControlFor(
           isShown: true,
           isEnabled: false,
           tooltip:
-            "Unlock this account with your master password to access this machine's backups",
+            "Unlock this account with your master password to access this workspace's backups",
         };
       case "unavailable":
         return {
@@ -299,7 +299,7 @@ export function backupsControlFor(
           isEnabled: false,
           tooltip:
             "Backups aren't reachable from this device. Set a master password on the device that created " +
-            "this machine to access them from other devices.",
+            "this workspace to access them from other devices.",
         };
       default:
         return BACKUPS_HIDDEN;

@@ -100,23 +100,23 @@ export function recoverySubheading(
 ): string {
   if (health === "recovery_failed") {
     return (
-      "This machine stopped responding and needs to be restarted. " +
+      "This workspace stopped responding and needs to be restarted. " +
       "In progress work will be interrupted, but saved data will not be lost."
     );
   }
   if (isHostOffline)
-    return "This machine is stopped. Starting it again will bring your work back.";
+    return "This workspace is stopped. Starting it again will bring your work back.";
   // The outcome, stated once. This is the whole report -- the heading names the
   // condition and this says there is nothing left to do about it -- rather than
   // a separate success notice repeating it beside a heading that has to be kept
   // in step with it by hand.
   if (isNothingFurtherNeeded(health, isHostOffline))
-    return "This machine is answering again. Nothing further is needed here.";
+    return "This workspace is answering again. Nothing further is needed here.";
   // Still checking. The restart is offered all the same -- a surface the user
   // opened on purpose never withholds the action -- but the copy does not urge
   // it, because the machine may well come back without one.
   return (
-    "Imbue Studio is still checking what's wrong. This machine may come back on its own. " +
+    "Imbue Studio is still checking what's wrong. This workspace may come back on its own. " +
     "Restarting it will interrupt any work in progress."
   );
 }
@@ -130,7 +130,7 @@ export function recoverySubheading(
  * hand-author a sentence per provider failure mode.
  */
 const BACKEND_UNREACHABLE_EXPLANATION =
-  "This issue may be transient. Imbue Studio will reconnect you to your machine as soon as it can be reached again.";
+  "This issue may be transient. Imbue Studio will reconnect you to your workspace as soon as it can be reached again.";
 
 /**
  * What this device's own condition means for the machine, and what to do.
@@ -155,9 +155,9 @@ const ENVIRONMENT_BLOCKED_EXPLANATION: Record<
   string
 > = {
   OFFLINE:
-    "This device has no network connection. Imbue Studio will reconnect to your machine as soon as it does.",
+    "This device has no network connection. Imbue Studio will reconnect to your workspace as soon as it does.",
   SSH_BLOCKED:
-    "This network blocks the connection Imbue Studio uses to reach your machines (SSH). " +
+    "This network blocks the connection Imbue Studio uses to reach your workspaces (SSH). " +
     "Your browser works, but Imbue Studio can't get through. Try another network or a VPN.",
 };
 
@@ -177,7 +177,7 @@ const ENVIRONMENT_BLOCKED_EXPLANATION: Record<
  * than promising a fix that has no button behind it.
  */
 const DEVICE_CANNOT_CONNECT_CONDITION =
-  "This machine may be running normally — the connection failed on this device, before reaching it.";
+  "This workspace may be running normally — the connection failed on this device, before reaching it.";
 const DEVICE_CANNOT_CONNECT_REMEDY =
   "Restarting Imbue Studio rebuilds the connection.";
 
@@ -412,7 +412,7 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
           m(
             "div",
             { class: "flex items-center gap-2" },
-            // No Restart Machine: bouncing a machine that is probably fine
+            // No Restart workspace: bouncing a machine that is probably fine
             // would interrupt real work without touching the actual fault.
             isRestartAppAvailable
               ? m(
@@ -455,7 +455,7 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // report step back beside this.
       const onwardAction =
         onEnterMachine !== null
-          ? { label: "Open machine", onclick: onEnterMachine }
+          ? { label: "Open workspace", onclick: onEnterMachine }
           : isNothingFurtherNeeded(health, info.is_host_offline) &&
               onClose !== undefined
             ? { label: "Close", onclick: onClose }
@@ -502,7 +502,7 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
             },
             isBusy
               ? recoveryBusyActionLabel(info.is_host_offline, recoveryKind)
-              : "Restart Machine",
+              : "Restart workspace",
           ),
           m(
             Button,

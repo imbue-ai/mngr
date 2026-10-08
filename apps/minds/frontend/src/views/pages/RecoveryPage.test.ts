@@ -265,7 +265,7 @@ describe("recovery page held machine", () => {
     const rendered = render(held);
 
     const text = collectText(rendered).join(" ");
-    expect(text).toContain("Machine maintenance");
+    expect(text).toContain("Workspace maintenance");
     expect(text).toContain(MAINTENANCE_MESSAGE);
     expect(findPanel(rendered)).toBeUndefined();
   });
@@ -280,7 +280,7 @@ describe("recovery page held machine", () => {
     const rendered = render(back);
 
     expect(collectText(rendered).join(" ")).not.toContain(
-      "Machine maintenance",
+      "Workspace maintenance",
     );
     expect(findPanel(rendered)).toBeDefined();
   });
