@@ -11,8 +11,8 @@ The template repository (e.g. [default-workspace-template](https://github.com/im
 - `system/Dockerfile` -- container image definition
 - `CLAUDE.md` -- instructions for the Claude agent
 - `.agents/skills/` -- skills available to the agent
-- `system/scripts/` -- utility scripts (forward_port.py, layout.py, etc.)
-- `system/apps/` -- everything the user can open as a window on the desktop (system_interface, chat, terminal, files, browser, and user-built apps); `system/services/` -- background services with no window (app_watcher, share_gateway, host_backup, ...); `system/libs/` -- support libraries (bootstrap, ...)
+- `system/scripts/` -- utility scripts (forward_port.py, etc.)
+- `system/apps/` -- everything the user can open as a window on the desktop (system_interface, chat, terminal, files, browser, and user-built apps); `system/services/` -- background services with no window (app_watcher, share_gateway, host_backup, ...); `system/libs/` -- support libraries (bootstrap, workspace_layout -- whose `uv run --no-sync workspace-layout` command is how an agent reads and arranges the desktop, ...)
 - `data/` -- gitignored workspace data (documents, uploads, memories, per-app data, machine state, secrets)
 
 ## Key files

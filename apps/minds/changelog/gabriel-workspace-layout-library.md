@@ -1,0 +1,1 @@
+The workspace template docs no longer list `layout.py` among the template's scripts: the template replaced it with the `uv run --no-sync workspace-layout` command of its `system/libs/workspace_layout` library (default-workspace-template#759).
