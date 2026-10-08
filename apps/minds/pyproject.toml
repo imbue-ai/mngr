@@ -43,13 +43,7 @@ dependencies = [
     "imbue-mngr-pi-coding",
     "modal>=1.4.3",
     "paramiko>=3.0",
-    # Capped below 1.60: 1.62 prefixes an aria snapshot's element refs with a
-    # frame id (`[ref=f3e1]`, not `[ref=e1]`) and does not do so on every
-    # snapshot, which the UI-flow step script reads as the whole page having
-    # changed. Lift the cap once apps/minds_evals accepts the prefixed form --
-    # that project pins itself to whatever this resolves to, so its flow lab
-    # drives the same browser as the box. MIND-299.
-    "playwright>=1.40.0,<1.60",
+    "playwright>=1.40.0",
     "psycopg2-binary>=2.9",
     "pydantic>=2.0",
     # <3: spectree 3.0.0 changed the arity of the `before` hook this project
