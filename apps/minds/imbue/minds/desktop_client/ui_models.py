@@ -255,9 +255,9 @@ class NotificationKind(LowerCaseStrEnum):
     """What produced a feed entry (the lowercase values are the wire strings).
 
     A PERMISSION_REQUEST mirrors a pending latchkey request and resolves into
-    a receipt; an AGENT_MESSAGE is a chat agent's note to the user; a
-    SYSTEM_EVENT is something the app itself did (a backup outcome). The two
-    latter kinds leave the feed when read or cleared and never become receipts.
+    a receipt; an AGENT_MESSAGE is a chat agent's note to the user, which
+    resolves into a receipt once read; a SYSTEM_EVENT is something the app
+    itself did (a backup outcome), which stays unresolved until cleared.
     """
 
     PERMISSION_REQUEST = auto()
@@ -528,6 +528,13 @@ class UiBringAppToFrontMessage(FrozenModel):
     agent_id: str = Field(description="Workspace agent id whose sign-in finished")
 
 
+class UiWindowKind(LowerCaseStrEnum):
+    """Which kind of desktop window a client is."""
+
+    MAIN = auto()
+    POPOUT = auto()
+
+
 class UiClientStateMessage(FrozenModel):
     """Client -> server registration: which window this is and what it is viewing."""
 
@@ -538,6 +545,14 @@ class UiClientStateMessage(FrozenModel):
     has_focus: bool = Field(
         default=True,
         description="Whether this window currently has OS/browser focus (resent on every focus/blur)",
+    )
+    window_kind: UiWindowKind = Field(
+        default=UiWindowKind.MAIN,
+        description="A main window (shows toasts, stands in for banners while focused) or a pulled-out window",
+    )
+    is_screen_locked: bool = Field(
+        default=False,
+        description="Whether the OS reports the screen locked (desktop app on macOS and Windows only)",
     )
 
 

@@ -238,6 +238,9 @@ export interface NotificationsUiHooks {
   onEntryOpened?: () => void;
   /** Whether the /notifications feed overlay is the current route. */
   isFeedOverlayOpen: () => boolean;
+  /** Whether this window is a pulled-out window, which never flashes the
+   * feed's toasts. Absent reads as a main window. */
+  isPopoutWindow?: () => boolean;
   /** Injected in tests; defaults to electronBridge.sendShellEvent. */
   relayShellEvent?: (event: { type: string } & Record<string, unknown>) => void;
   /** Injected in tests; defaults to the global fetch. */
@@ -360,9 +363,18 @@ export class NotificationsUiController {
     const currentIds = new Set(message.entries.map((entry) => entry.id));
     this.seenEntryIds = currentIds;
     // A toast whose entry left the feed entirely has nothing to render (or
-    // open); one whose entry merely resolved stays up -- its click then
-    // navigates without opening the popup, and its timer retires it anyway.
-    this.liveToastIds = this.liveToastIds.filter((id) => currentIds.has(id));
+    // open), and one for an agent message the user has since read is old
+    // news, as its banner is. A request whose entry merely resolved stays up
+    // -- its click then navigates without opening the popup, and its timer
+    // retires it anyway.
+    const readAgentMessageIds = new Set(
+      message.entries
+        .filter((entry) => entry.kind === "agent_message" && entry.is_resolved)
+        .map((entry) => entry.id),
+    );
+    this.liveToastIds = this.liveToastIds.filter(
+      (id) => currentIds.has(id) && !readAgentMessageIds.has(id),
+    );
     this.relayBadgeCount(message.unresolved_count);
     // A snapshot frame (connect-time replay) restates the world: seed the
     // seen set silently. Same for a first frame with nothing to diff against.
@@ -373,12 +385,16 @@ export class NotificationsUiController {
     if (fresh.length === 0) return;
     const prefs = currentNotificationPrefs();
     if (!prefs.is_enabled || prefs.style === "os") return;
-    // Cards flash in every open window, focused or not, and for the
-    // workspace already on screen too: the toast is its own nudge, and a
-    // window the reader is not looking at right now still shows it when
-    // they come back (or the bell does, once its timer has run). Never
-    // while the feed overlay is open -- the arrival lands there in plain
-    // sight, and a queued flash would ambush the reader when it closes.
+    // Cards flash in every main window, focused or not, and for the
+    // workspace already on screen too: the toast is its own nudge (the
+    // backend holds the OS banner back while a main window has focus), and
+    // a window the reader is not looking at right now still shows it when
+    // they come back (or the bell does, once its timer has run). A message
+    // the reader was watching arrives already read and never flashes. Never
+    // in a pulled-out window, which has no bell to follow a toast into, and
+    // never while the feed overlay is open -- the arrival lands there in
+    // plain sight, and a queued flash would ambush the reader when it closes.
+    if (this.hooks.isPopoutWindow?.() === true) return;
     if (this.hooks.isFeedOverlayOpen()) return;
     this.liveToastIds = [
       ...fresh.map((entry) => entry.id),
@@ -500,13 +516,6 @@ export class NotificationsUiController {
   clearAll(): void {
     this.clearLiveToasts();
     this.postFeedAction("/ui/api/notifications/clear-all");
-  }
-
-  /** The route landed on a workspace: its agent messages are read. */
-  handleWorkspaceDisplayed(workspaceAgentId: string): void {
-    this.postFeedAction(
-      `/ui/api/notifications/workspace/${encodeURIComponent(workspaceAgentId)}/read`,
-    );
   }
 
   private postFeedAction(path: string): void {

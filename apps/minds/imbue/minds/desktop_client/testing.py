@@ -765,13 +765,21 @@ class RecordingNotificationDispatcher(NotificationDispatcher):
     """Dispatcher double that records dispatch calls instead of writing the Electron event."""
 
     _dispatched: list[NotificationRequest] = PrivateAttr(default_factory=list)
+    _read_chat_agent_ids: list[str] = PrivateAttr(default_factory=list)
 
     def dispatch(self, request: NotificationRequest) -> None:
         self._dispatched.append(request)
 
+    def dispatch_read(self, chat_agent_id: str) -> None:
+        self._read_chat_agent_ids.append(chat_agent_id)
+
     @property
     def dispatched(self) -> list[NotificationRequest]:
         return self._dispatched
+
+    @property
+    def read_chat_agent_ids(self) -> list[str]:
+        return self._read_chat_agent_ids
 
 
 class ChatInWorkspaceResolver(StaticBackendResolver):

@@ -41,5 +41,17 @@ def test_dispatch_outside_electron_reaches_nothing(capsys: pytest.CaptureFixture
     dispatcher = NotificationDispatcher(is_electron=False)
 
     dispatcher.dispatch(NotificationRequest(title="alpha", subtitle="Gmail", body="x"))
+    dispatcher.dispatch_read("agent-chat1")
 
     assert capsys.readouterr().out == ""
+
+
+def test_electron_read_event_names_the_chat_whose_banners_main_closes(capsys: pytest.CaptureFixture[str]) -> None:
+    """The event electron/main.js's handleNotificationRead reads ``chat_agent_id`` from."""
+    dispatcher = NotificationDispatcher(is_electron=True)
+
+    dispatcher.dispatch_read("agent-chat1")
+
+    (event,) = _emitted_events(capsys.readouterr().out)
+    assert event["event"] == "notification_read"
+    assert event["chat_agent_id"] == "agent-chat1"

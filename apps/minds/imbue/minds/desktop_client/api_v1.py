@@ -81,6 +81,7 @@ from imbue.minds.desktop_client.api_auth import json_response as _json_response
 from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
 from imbue.minds.desktop_client.api_models import AccountSummary
 from imbue.minds.desktop_client.api_models import AccountsResponse
+from imbue.minds.desktop_client.api_models import AgentNotificationReadRequest
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import AppVersionResponse
 from imbue.minds.desktop_client.api_models import BackupOperationStatusResponse
@@ -174,6 +175,7 @@ from imbue.minds.desktop_client.supertokens_routes import wake_ui_state_publishe
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_api_inbox import build_agent_message_card
+from imbue.minds.desktop_client.ui_api_inbox import resolve_chat_agent_id
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
@@ -243,16 +245,26 @@ def _handle_notification(agent_id: str) -> OkResponse | Response:
     if feed is None:
         return _json_error("Notification feed not configured", 501)
 
-    # Structure (object shape + ``message`` present and a string) is enforced by
-    # the spectree model; the remaining checks here are value-semantic.
-    body = request.get_json(silent=True, force=True) or {}
-    message = body.get("message")
-    if not message:
+    # Structure is enforced by the spectree model; the remaining check here is value-semantic.
+    body = AgentNotificationRequest.model_validate(request.get_json(silent=True, force=True) or {})
+    if not body.message:
         return _json_error("'message' field is required and must be a string", 400)
-    title = body.get("title")
-    text = f"{title}: {message}" if title else message
+    text = f"{body.title}: {body.message}" if body.title else body.message
 
-    feed.append_agent_message(build_agent_message_card(AgentId(agent_id), text, get_state().backend_resolver))
+    feed.append_agent_message(
+        build_agent_message_card(AgentId(agent_id), text, get_state().backend_resolver), watched_by=body.watched_by
+    )
+    return OkResponse(ok=True)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(json=AgentNotificationReadRequest, resp=json_response_model(OkResponse))
+def _handle_notification_read(agent_id: str) -> OkResponse | Response:
+    """Mark the agent's chat's messages read: the workspace saw the chat become watched."""
+    feed = get_state().notification_feed
+    if feed is None:
+        return _json_error("Notification feed not configured", 501)
+    feed.mark_chat_read(resolve_chat_agent_id(AgentId(agent_id), get_state().backend_resolver))
     return OkResponse(ok=True)
 
 
@@ -3401,6 +3413,9 @@ def create_api_v1_blueprint() -> Blueprint:
     # Notifications (per-agent so the gateway's per-host permission file
     # can restrict each caller to its own agent ids).
     blueprint.add_url_rule("/agents/<agent_id>/notifications", view_func=_handle_notification, methods=["POST"])
+    blueprint.add_url_rule(
+        "/agents/<agent_id>/notifications/read", view_func=_handle_notification_read, methods=["POST"]
+    )
 
     # This app's version. Baseline-granted to every agent (see
     # ``minds-app-version-read`` in ``mngr_latchkey.baseline_permissions``).

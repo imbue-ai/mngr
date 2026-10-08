@@ -45,6 +45,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
 from imbue.minds.desktop_client.api_models import AccountsResponse
+from imbue.minds.desktop_client.api_models import AgentNotificationReadRequest
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import ApiErrorResponse
 from imbue.minds.desktop_client.api_models import AppVersionResponse
@@ -121,6 +122,9 @@ class _RouteModels(FrozenModel):
 _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("POST", "/api/v1/agents/{agent_id}/notifications"): _RouteModels(
         request_model=AgentNotificationRequest, response_model=OkResponse
+    ),
+    ("POST", "/api/v1/agents/{agent_id}/notifications/read"): _RouteModels(
+        request_model=AgentNotificationReadRequest, response_model=OkResponse
     ),
     ("POST", "/api/v1/agents/{agent_id}/report"): _RouteModels(
         request_model=BugReportRequest, response_model=OkResponse

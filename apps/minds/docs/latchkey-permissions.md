@@ -648,7 +648,11 @@ primary one Imbue Studio creates. Because discovery can see a brand-new agent
 before creation has linked the host's permissions file into place, a
 registration with no file to write to is retried on later resolver
 changes rather than dropped. A new `/api/v1/agents/<id>/*` route
-therefore needs no permissions work.
+therefore needs no permissions work: the agent notifications route
+(`POST .../agents/<id>/notifications`) and its read route
+(`POST .../agents/<id>/notifications/read`, which a workspace's chat app
+calls as the chat's agent when the chat becomes watched) are both covered
+by the same rule.
 
 The bug-report route (`POST .../agents/<...>/report`) is the one
 exception: it sits in a rule *ahead* of the unauthorized gate, so it

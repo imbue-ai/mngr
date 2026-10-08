@@ -143,6 +143,7 @@ from imbue.minds.desktop_client.ui_models import UiNotificationsMessage
 from imbue.minds.desktop_client.ui_models import UiProviderEntry
 from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
+from imbue.minds.desktop_client.ui_models import UiWindowKind
 from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
@@ -2402,9 +2403,8 @@ def create_desktop_client(
     notification_feed = NotificationFeed(
         notification_dispatcher=notification_dispatcher,
         get_dispatch_preferences=_NotificationDispatchPreferencesReader(minds_config=minds_config),
-        get_connected_focused_workspace_agent_ids=_ConnectedFocusedWorkspaceAgentIdsReader(
-            broadcaster=ui_channel_broadcaster
-        ),
+        is_main_window_focused=_FocusedMainWindowReader(broadcaster=ui_channel_broadcaster),
+        is_screen_locked=_ScreenLockedReader(broadcaster=ui_channel_broadcaster),
         cleared_request_ids_path=None if paths is None else paths.data_dir / "cleared_notification_requests.json",
         # An append or clear changes the feed outside the reconcile, so it has
         # to wake the publisher itself for the frame to go out.
@@ -2712,27 +2712,37 @@ class _BackupSetupFailureReporter(FrozenModel):
         )
 
 
-class _ConnectedFocusedWorkspaceAgentIdsReader(FrozenModel):
-    """Live reader of the workspace agent ids a *focused* connected UI window is displaying.
+class _FocusedMainWindowReader(FrozenModel):
+    """Live reader of whether any connected main window has OS/browser focus.
 
-    Consulted by the notification feed at dispatch time so a request from the
-    workspace the user is actually looking at right now stays silent (the
-    in-app review popup covers it) -- distinct from the in-app toast's own
-    on-screen check, which does not require OS/browser focus: a window can be
-    displaying the right workspace while alt-tabbed away or behind another
-    app, in which case the reader is not looking at the in-app popup and
-    should still get an OS banner. Windows report their route/workspace/focus
-    over the /ui/ws channel's client_state frames.
+    Consulted by the notification feed at dispatch time: a focused main window
+    flashes every new entry as an in-app toast, which stands in for the OS
+    banner. A pulled-out window shows no toasts, so its focus does not count.
+    Windows report their kind and focus over the /ui/ws channel's client_state
+    frames.
     """
 
     broadcaster: UiChannelBroadcaster = Field(frozen=True, description="The /ui/ws fan-out holding per-window state.")
 
-    def __call__(self) -> tuple[str, ...]:
-        return tuple(
-            state.workspace_agent_id
+    def __call__(self) -> bool:
+        return any(
+            state.window_kind == UiWindowKind.MAIN and state.has_focus
             for state in self.broadcaster.get_connected_client_states()
-            if state.workspace_agent_id and state.has_focus
         )
+
+
+class _ScreenLockedReader(FrozenModel):
+    """Live reader of whether a connected window reports the screen locked.
+
+    Electron relays the OS lock to every window, which resends client_state;
+    the notification feed then delivers what it would otherwise hold back for
+    a focused window or a watched chat.
+    """
+
+    broadcaster: UiChannelBroadcaster = Field(frozen=True, description="The /ui/ws fan-out holding per-window state.")
+
+    def __call__(self) -> bool:
+        return any(state.is_screen_locked for state in self.broadcaster.get_connected_client_states())
 
 
 class _MindsApiKeyProvider(FrozenModel):

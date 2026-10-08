@@ -580,7 +580,7 @@ export const LandingPage: m.ClosureComponent = () => {
             "data-tooltip": "Settings",
             onclick: (event: MouseEvent) => {
               event.stopPropagation();
-              m.route.set(`/workspace/${entry.id}/options?tab=settings`);
+              getAppContext().shell.routeTo(`/workspace/${entry.id}/options?tab=settings`);
             },
           },
           m(Icon16, { name: "settings" }),
