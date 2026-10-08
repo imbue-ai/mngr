@@ -23,6 +23,7 @@ from imbue.concurrency_group.subprocess_utils import _POST_KILL_DRAIN_TIMEOUT_SE
 from imbue.concurrency_group.subprocess_utils import _is_timeout
 from imbue.concurrency_group.subprocess_utils import _shutdown_popen
 from imbue.concurrency_group.subprocess_utils import _start_exit_waiter
+from imbue.concurrency_group.subprocess_utils import _write_and_close_child_stdin
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
 from imbue.concurrency_group.test_utils import make_idle_child_script
@@ -582,6 +583,32 @@ def test_run_local_command_returns_the_exit_code_of_a_child_that_closed_its_pipe
 
     assert finished.is_timed_out is False
     assert finished.returncode == 7
+
+
+def test_run_local_command_reports_a_child_that_exits_without_reading_its_stdin() -> None:
+    # A payload larger than any pipe buffer is still being written when the child
+    # closes its stdin. macOS fails that write with a broken pipe; Linux usually
+    # returns the partial count instead, so
+    # test_writing_stdin_that_no_process_reads_any_more_still_closes_it pins the broken pipe there.
+    finished = run_local_command_modern_version(
+        ["sh", "-c", "exec <&-; echo 'Not logged in' >&2; exit 1"],
+        is_checked=False,
+        timeout=30.0,
+        stdin_bytes=b"x" * (1024 * 1024),
+    )
+
+    assert finished.returncode == 1
+    assert finished.stderr == "Not logged in\n"
+
+
+def test_writing_stdin_that_no_process_reads_any_more_still_closes_it() -> None:
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    child_stdin = os.fdopen(write_fd, "wb", buffering=0)
+
+    _write_and_close_child_stdin(child_stdin, b"prompt")
+
+    assert child_stdin.closed
 
 
 # An idle child's whole lifetime: long enough for a reintroduced timer to fire

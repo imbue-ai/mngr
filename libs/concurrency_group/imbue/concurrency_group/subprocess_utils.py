@@ -374,6 +374,15 @@ def _is_timeout(timeout_time: float | None = None, monotonic_fn: Callable[[], fl
         return monotonic_fn() > timeout_time
 
 
+def _write_and_close_child_stdin(child_stdin: IO[bytes], stdin_bytes: bytes) -> None:
+    with child_stdin:
+        try:
+            child_stdin.write(stdin_bytes)
+        except BrokenPipeError:
+            # Not a failure to start: the child's exit code and output say what happened.
+            logger.trace("The child stopped reading its stdin before all {} bytes were written", len(stdin_bytes))
+
+
 def run_local_command_modern_version(
     command: Sequence[str],
     is_checked: bool = True,
@@ -403,8 +412,9 @@ def run_local_command_modern_version(
     listing), such as a secret. It is written in one go immediately after the spawn, before any
     output is read, so it must stay well under the pipe buffer (64KiB on Linux, 16KiB on macOS);
     a larger payload would fill the pipe and deadlock against a child that is blocked writing
-    output nobody is draining yet. Without it the child gets an empty stdin (``DEVNULL``), which
-    is what a process with nothing to read should see.
+    output nobody is draining yet. A child that exits without reading all of it is reported by its
+    exit code and output like any other. Without it the child gets an empty stdin (``DEVNULL``),
+    which is what a process with nothing to read should see.
 
     ``name`` is an optional log-safe label for the command (see ``RunningProcess.name``); it is
     carried onto the returned ``FinishedProcess`` and any error raised so secret argument values
@@ -441,8 +451,7 @@ def run_local_command_modern_version(
             if stdin_bytes is not None:
                 # ``process.stdin`` is a pipe exactly when we asked for one above.
                 assert process.stdin is not None
-                with process.stdin as child_stdin:
-                    child_stdin.write(stdin_bytes)
+                _write_and_close_child_stdin(process.stdin, stdin_bytes)
         except (OSError, ValueError) as e:
             raise ProcessSetupError(
                 command=tuple(command),
