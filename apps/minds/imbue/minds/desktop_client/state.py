@@ -38,6 +38,7 @@ from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
+from imbue.minds.desktop_client.latchkey.machine_request_sync import MachineRequestSync
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.local_prerequisites import HostProbeInterface
@@ -252,6 +253,14 @@ class DesktopClientState(MutableModel):
     )
     permission_requests_consumer: PermissionRequestsConsumer | None = Field(
         default=None, description="Streaming permission-requests consumer (wired post-construction)"
+    )
+    machine_request_sync: MachineRequestSync | None = Field(
+        default=None,
+        description=(
+            "Carries a verdict given here to the remote machine that filed the request, and keeps this desktop's "
+            "pending requests in step with every machine's records (wired post-construction); None in minimal "
+            "setups, which can reach no machine at all."
+        ),
     )
     shutdown_event: threading.Event = Field(
         default_factory=threading.Event, description="Cross-thread flag SSE handlers poll to exit on shutdown"

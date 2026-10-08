@@ -462,6 +462,8 @@ usr/bin/mngr-latchkey                        the one command the desktop drives 
 usr/lib/mngr-latchkey/read-state             "mngr-latchkey read-state": assemble what the machine holds
 usr/lib/mngr-latchkey/apply-state            "mngr-latchkey apply-state": make the machine match a document
 usr/lib/mngr-latchkey/announce-device        "mngr-latchkey announce-device": record a desktop as connected
+usr/lib/mngr-latchkey/list-requests          "mngr-latchkey list-requests": the permission requests the machine keeps
+usr/lib/mngr-latchkey/forget-request         "mngr-latchkey forget-request": drop one, and withdraw it from every desktop
 usr/lib/mngr-latchkey/gateway-run            what supervisord runs as latchkey-gateway
 usr/lib/mngr-latchkey/tunnel-run             what supervisord runs as latchkey-tunnel (see below)
 usr/lib/mngr-latchkey/functions              sourced by all of the above
@@ -497,7 +499,7 @@ set up, and registers the supervisord programs. The package is installed before 
 daemon is provisioned, for the same reason. apt is never run from a maintainer
 script (dpkg holds its lock), which is why the bootstrap exists.
 
-Every exchange with a provisioned machine afterwards is one of the three
+Every exchange with a provisioned machine afterwards is one of the five
 commands, each a single remote command with a document on its stdin
 (`<key> <base64>` lines in a quoted heredoc: data the shell never interprets,
 and nothing from it reaches the `argv` of `mngr-latchkey`; of the `latchkey`
@@ -528,6 +530,11 @@ invocations its scripts make, only the service and account names travel in
 - `announce-device` records the desktop that sent it as connected to the
   machine (see [Desktops](#desktops)): its record, named by its device id,
   lands under the RAM-backed `devices/` directory.
+- `list-requests` answers with the permission requests the machine keeps for
+  the user's desktops (see [Permission requests across desktops](#permission-requests-across-desktops)),
+  as one JSON array; `forget-request` drops the one the document names
+  (`request_id`) and withdraws it from every connected desktop, through the
+  machine's own gateway, best-effort.
 
 The gateway binds the VPS's docker bridge address, which the agent's container
 reaches as `http://host.docker.internal:1989` through the `--add-host` mapping
@@ -852,7 +859,11 @@ blocked service; UIs (the Imbue Studio desktop client, your own front-end)
 consume the stream and approve/delete on resolution.
 
 * `POST /permission-requests` with body
-  `{"agent_id": "...", "rationale": "...", "type": "...", "payload": {...}}`.
+  `{"agent_id": "...", "rationale": "...", "type": "...", "payload": {...}}`,
+  and optionally a filename-safe `request_id` of the caller's choosing (an id
+  already pending is a 409), which is how one request keeps a single identity
+  across the user's desktops: a remote host's machine assigns it before
+  forwarding (see [Permission requests across desktops](#permission-requests-across-desktops)).
   Two `type` values are accepted:
   * `"predefined"` -- detent scope/permission grant for one signed-in
     account of the service, with payload
@@ -911,7 +922,10 @@ consume the stream and approve/delete on resolution.
 * `GET /permission-requests` returns the current queue as
   newline-delimited JSON. Each line carries the full persisted
   shape. Add `?follow=true` to keep the connection open and stream
-  every newly-POSTed request as it arrives. Available to the admin.
+  every newly-POSTed request as it arrives, and a line
+  `{"event": "deleted", "request_id": "..."}` for every request that stops
+  being pending through the extension (approved, or deleted). Available to
+  the admin.
 * `POST /permission-requests/approve/<request_id>` approves the
   named request: the extension reads it, splices its `effect` into
   its `target` permissions.json (creating the file if missing,
@@ -928,7 +942,9 @@ consume the stream and approve/delete on resolution.
 * `DELETE /permission-requests/<request_id>` removes a single pending
   request without applying its effect. UIs call this on deny so a
   fresh `?follow=true` consumer never sees the resolved request
-  again. Available to the admin.
+  again. Available to the admin, and to every agent for the ids it was told
+  (the baseline grants it, so a remote host's machine can withdraw a request
+  one desktop answered from the others, and an agent can withdraw its own).
 
 Pending requests are stored as one JSON file per request under
 `<latchkey-directory>/permission_requests/v3/`. The `v3` segment is
@@ -1101,6 +1117,52 @@ exactly as the extension forwards a request. It never takes the header: which
 desktop it picks is said by the service's route in
 [the rules file](#the-rules-file), whose hops name desktops by these device
 ids.
+
+### Permission requests across desktops
+
+A permission request outlives the desktops it was sent to: the user answers it
+on whichever desktop they are at, and a desktop that was offline when it was
+filed shows it the next time it connects. `POST /permission-requests` is
+therefore the one forwarded request the machine takes part in:
+
+* The machine assigns the request its id before forwarding and puts it in the
+  body as `request_id` (a body that already carries one is a 400), so every
+  desktop the header names files the same request under the same id. Agents
+  send `X-Latchkey-Device: *` to reach every desktop at once.
+* The machine keeps a record of what the agent sent under
+  `~/.latchkey/filed_permission_requests/v1/<request_id>.json`
+  (`imbue.mngr_latchkey.filed_permission_requests.FiledPermissionRequest`):
+  the agent's body as sent, the desktops it was for (`"*"` or the device ids
+  the header named, known to the machine or not) and when it was filed. The
+  machine validates nothing: the record is kept when some desktop accepted the
+  request (a 2xx), or when no desktop could be reached to judge it, and
+  dropped when every desktop that answered refused it.
+* The answer to the agent is the one every forwarded request gets for the
+  header's shape, except that a request that reached no desktop at all is a
+  503 saying that the request was kept on the machine for the desktops to pick
+  up when they next connect. (One that reached only an unreachable desktop is
+  kept too, and answered with that desktop's 502 as any request would be.)
+* A desktop that answers the request runs `mngr-latchkey forget-request` on
+  the machine, which drops the record and sends `DELETE
+  /permission-requests/<request_id>` with `X-Latchkey-Device: *` through the
+  machine's own gateway, so every connected desktop drops its copy too (its
+  follow stream carries the deletion to its UI). The hop to each desktop
+  presents the pair the desktop announced, whose JWT names the host's own
+  permissions file, so that file's baseline grants the DELETE. The same
+  DELETE, forwarded from an agent, also drops the machine's record.
+* A desktop syncs against the records when a machine first appears to it and
+  periodically afterwards (`mngr-latchkey list-requests`): a record for this
+  desktop it does not hold is filed on its own gateway under the record's id,
+  with the host's permissions file as the target, and the gateway judges the
+  body exactly as it would have live; a request it holds for the host that the
+  machine no longer keeps was answered on another desktop and is dropped; a
+  body its gateway refuses is one no desktop will ever take, so the machine is
+  asked to forget it. (Imbue Studio's
+  `imbue.minds.desktop_client.latchkey.machine_request_sync` does this.)
+
+A file-sharing request names one desktop by nature (the path is on that
+desktop's disk), so it is addressed to one desktop rather than broadcast; the
+record then names that desktop, and only it files the request when it syncs.
 
 ### `permissions` extension
 

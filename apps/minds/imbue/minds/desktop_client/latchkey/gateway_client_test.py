@@ -12,11 +12,14 @@ from typing import Final
 
 import httpx
 import pytest
+from pydantic import JsonValue
 
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import PermissionRequestDeleted
+from imbue.minds.desktop_client.latchkey.gateway_client import PermissionRequestRefusedError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
@@ -30,6 +33,17 @@ from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 # takes to tell waiting apart from giving up.
 _RESTART_WINDOW_SECONDS: Final[float] = 1.0
 _INITIALIZATION_TIMEOUT_SECONDS: Final[float] = 10.0
+
+
+def _pending_only(
+    items: list[StreamedPermissionRequest | PermissionRequestDeleted],
+) -> list[StreamedPermissionRequest]:
+    """The streamed lines as pending requests, which every line of a stream carrying no deletion is."""
+    pending: list[StreamedPermissionRequest] = []
+    for item in items:
+        assert isinstance(item, StreamedPermissionRequest), item
+        pending.append(item)
+    return pending
 
 
 def _build_client(handler: Callable[[httpx.Request], httpx.Response]) -> LatchkeyGatewayClient:
@@ -245,7 +259,7 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
         return httpx.Response(200, content=body, headers={"Content-Type": "application/x-ndjson"})
 
     client = _build_client(_handler)
-    items = list(client.iter_permission_requests())
+    items = _pending_only(list(client.iter_permission_requests()))
     assert [item.request_id for item in items] == ["abc", "def", "ghi"]
     assert items[0].request_type == "predefined"
     predefined_payload = items[0].payload
@@ -294,7 +308,7 @@ def test_iter_permission_requests_parses_whether_a_predefined_request_asks_for_a
         del request
         return httpx.Response(200, content=body)
 
-    items = list(_build_client(_handler).iter_permission_requests())
+    items = _pending_only(list(_build_client(_handler).iter_permission_requests()))
 
     assert [item.request_id for item in items] == ["with-proxy", "without-proxy"]
     payload_with_proxy, payload_without_proxy = items[0].payload, items[1].payload
@@ -344,12 +358,130 @@ def test_iter_permission_requests_skips_malformed_lines() -> None:
         return httpx.Response(200, content=payload)
 
     client = _build_client(_handler)
-    items = list(client.iter_permission_requests())
+    items = _pending_only(list(client.iter_permission_requests()))
     assert [item.request_id for item in items] == ["x"]
     assert items[0].request_type == "predefined"
     predefined_payload = items[0].payload
     assert isinstance(predefined_payload, PredefinedRequestPayload)
     assert predefined_payload.scope == "s-api"
+
+
+def test_iter_permission_requests_yields_a_deletion_for_a_request_that_stopped_being_pending() -> None:
+    """The one stream line that is not a request names the request that is gone, in its own type."""
+    record = {
+        "request_id": "gone-soon",
+        "agent_id": "a1",
+        "rationale": "r",
+        "request_type": "accounts",
+        "payload": {},
+        "target": "/tmp/permissions.json",
+        "effect": {"rules": []},
+    }
+    payload = (
+        json.dumps(record).encode("utf-8")
+        + b"\n"
+        + json.dumps({"event": "deleted", "request_id": "gone-soon"}).encode("utf-8")
+        + b"\n"
+        + json.dumps({"event": "deleted"}).encode("utf-8")
+        + b"\n"
+    )
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=payload)
+
+    items = list(_build_client(_handler).iter_permission_requests())
+
+    assert isinstance(items[0], StreamedPermissionRequest)
+    assert items[1] == PermissionRequestDeleted(request_id="gone-soon")
+    # A deletion naming no request is the malformed line it is: dropped, like any other.
+    assert len(items) == 2
+
+
+def test_list_permission_requests_lists_only_pending_requests() -> None:
+    """A point-in-time list carries no deletions; one that somehow did is not a pending request."""
+    record = {
+        "request_id": "still-here",
+        "agent_id": "a1",
+        "rationale": "r",
+        "request_type": "accounts",
+        "payload": {},
+        "target": "/tmp/permissions.json",
+        "effect": {"rules": []},
+    }
+    payload = json.dumps(record).encode("utf-8") + b"\n" + b'{"event": "deleted", "request_id": "other"}\n'
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=payload)
+
+    listed = _build_client(_handler).list_permission_requests()
+
+    assert [item.request_id for item in listed] == ["still-here"]
+
+
+def _filed_elsewhere_body() -> dict[str, JsonValue]:
+    return {"agent_id": "agent-" + "0" * 32, "rationale": "please", "type": "accounts", "payload": {}}
+
+
+def test_filing_a_request_as_filed_elsewhere_posts_the_body_under_the_machines_id_against_the_target() -> None:
+    posted: list[dict[str, JsonValue]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert str(request.url) == "http://gateway.invalid:1989/permission-requests"
+        posted.append(json.loads(request.content))
+        return httpx.Response(201, json={"request_id": "machine-id-41"})
+
+    _build_client(_handler).file_permission_request_as_filed_elsewhere(
+        _filed_elsewhere_body(), "machine-id-41", Path("/perms/hosts/h/latchkey_permissions.json")
+    )
+
+    assert posted == [
+        {
+            **_filed_elsewhere_body(),
+            "request_id": "machine-id-41",
+            "target": "/perms/hosts/h/latchkey_permissions.json",
+        }
+    ]
+
+
+def test_filing_a_request_already_pending_under_its_id_is_success() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(409, json={"error": "Permission request 'machine-id-41' is already pending."})
+
+    _build_client(_handler).file_permission_request_as_filed_elsewhere(
+        _filed_elsewhere_body(), "machine-id-41", Path("/perms/latchkey_permissions.json")
+    )
+
+
+def test_filing_a_request_the_gateway_refuses_raises_the_refusal_apart_from_other_failures() -> None:
+    """Only a 400 says the body is one no desktop will take; a gateway that will not let this caller name the
+    target (a 403) or that failed (a 500) says nothing about the body, so the request is left for a retry."""
+
+    def _refusing(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(400, json={"error": "Invalid request body: field 'type' must be one of ..."})
+
+    def _forbidding(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(403, json={"error": "only the desktop client may file a permission request ..."})
+
+    def _failing(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(500, json={"error": "Internal error"})
+
+    with pytest.raises(PermissionRequestRefusedError, match="refused permission request machine-id-41 with 400"):
+        _build_client(_refusing).file_permission_request_as_filed_elsewhere(
+            _filed_elsewhere_body(), "machine-id-41", Path("/perms/latchkey_permissions.json")
+        )
+    for handler, expected_status in ((_forbidding, "403"), (_failing, "500")):
+        with pytest.raises(LatchkeyGatewayClientError, match=f"returned {expected_status}") as failure:
+            _build_client(handler).file_permission_request_as_filed_elsewhere(
+                _filed_elsewhere_body(), "machine-id-41", Path("/perms/latchkey_permissions.json")
+            )
+        assert not isinstance(failure.value, PermissionRequestRefusedError)
 
 
 def test_approve_permission_request_posts_through_gateway() -> None:

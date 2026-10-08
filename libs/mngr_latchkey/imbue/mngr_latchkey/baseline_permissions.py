@@ -31,6 +31,16 @@ from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 GATEWAY_SELF_HOST: Final[str] = "latchkey-self.invalid"
 SCOPE_LATCHKEY_SELF: Final[str] = "latchkey-self"
 _PERM_CREATE_PERMISSION_REQUEST: Final[str] = "latchkey-self-create-permission-request"
+# Withdrawing one pending request by id. A request's id is known to whoever
+# filed it (the 201 answer carries it) and to the machine a remote host's
+# agents run on, which is how a request answered on one of the user's desktops
+# is taken off the others: the machine's package calls this on each desktop
+# with the credentials the desktop's announcement handed it, and those name
+# the host's own permissions file -- this one. Listing is not granted, so an
+# agent can withdraw only what it was told the id of.
+_PERM_DELETE_PERMISSION_REQUEST: Final[str] = "latchkey-self-delete-permission-request"
+# Mirrors ``VALID_REQUEST_ID_PATTERN`` in the gateway's ``permission_requests.mjs``.
+_DELETE_PERMISSION_REQUEST_PATH_PATTERN: Final[str] = r"^/permission-requests/[A-Za-z0-9._-]+$"
 _PERM_READ_SELF_PERMISSIONS: Final[str] = "latchkey-self-read-self-permissions"
 _PERM_READ_AVAILABLE_PERMISSIONS: Final[str] = "latchkey-self-read-available-permissions"
 # The list of the user's desktops the gateway knows (connected or not), which
@@ -136,6 +146,7 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
         {
             SCOPE_LATCHKEY_SELF: [
                 _PERM_CREATE_PERMISSION_REQUEST,
+                _PERM_DELETE_PERMISSION_REQUEST,
                 _PERM_READ_SELF_PERMISSIONS,
                 _PERM_READ_AVAILABLE_PERMISSIONS,
                 _PERM_READ_DEVICES,
@@ -203,6 +214,16 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
             "properties": {
                 "method": {"const": "POST"},
                 "path": {"const": "/permission-requests"},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_DELETE_PERMISSION_REQUEST: {
+            "properties": {
+                "method": {"const": "DELETE"},
+                "path": {
+                    "type": "string",
+                    "pattern": _DELETE_PERMISSION_REQUEST_PATH_PATTERN,
+                },
             },
             "required": ["method", "path"],
         },

@@ -403,15 +403,18 @@ def write_raw_host_permissions(data_dir: Path, host_id: HostId, permissions_json
     return path
 
 
-def _node_extension_driver_script(extension_path: Path) -> str:
+def _node_extension_driver_script(extension_path: Path, permissions_config_path: Path | None) -> str:
     # A request the extension leaves alone is answered by a stand-in for the
     # next extension, so a test can tell a request that passed through from
-    # one that was handled.
+    # one that was handled. The context is what the gateway hands an extension:
+    # the permissions file the caller's credentials name, when the test says.
+    context = {} if permissions_config_path is None else {"permissionsConfigPath": str(permissions_config_path)}
     return f"""
 import http from 'node:http';
 import handler from {json.dumps(extension_path.as_uri())};
+const context = Object.freeze({json.dumps(context)});
 const server = http.createServer((request, response) => {{
-  handler(request, response).then((handled) => {{
+  handler(request, response, context).then((handled) => {{
     if (!handled && !response.headersSent) {{
       response.writeHead(200, {{'Content-Type': 'application/json'}});
       response.end(JSON.stringify({{served_locally: true, path: request.url}}));
@@ -426,15 +429,24 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 
 
 @contextmanager
-def node_extension_gateway(extension_path: Path, env: Mapping[str, str]) -> Generator[str, None, None]:
+def node_extension_gateway(
+    extension_path: Path, env: Mapping[str, str], permissions_config_path: Path | None = None
+) -> Generator[str, None, None]:
     """Serve one gateway extension from a node process with ``env``, yielding its base URL.
 
     A request the extension does not handle is answered ``{"served_locally": true, "path": ...}``.
+    ``permissions_config_path`` is handed to the extension as the caller's context, as the gateway
+    hands it the permissions file the caller's credentials name.
     """
     node_binary = shutil.which("node")
     assert node_binary is not None
     process = subprocess.Popen(
-        [node_binary, "--input-type=module", "-e", _node_extension_driver_script(extension_path)],
+        [
+            node_binary,
+            "--input-type=module",
+            "-e",
+            _node_extension_driver_script(extension_path, permissions_config_path),
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

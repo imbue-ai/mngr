@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 from pydantic import Field
@@ -25,6 +26,8 @@ from imbue.mngr_latchkey.testing import http_request_with_headers
 from imbue.mngr_latchkey.testing import node_extension_gateway
 
 _EXTENSION_PATH: Final[Path] = Path(__file__).resolve().parent / "desktop_gateway_proxy.mjs"
+# The desktop's own extension, for the one test that puts real desktops behind the machine.
+_DESKTOP_EXTENSION_PATH: Final[Path] = Path(__file__).resolve().parent / "permission_requests.mjs"
 
 _PASSWORD_HEADER: Final[str] = "X-Latchkey-Gateway-Password"
 _OVERRIDE_HEADER: Final[str] = "X-Latchkey-Gateway-Permissions-Override"
@@ -56,7 +59,7 @@ class _RecordingHandler(BaseHTTPRequestHandler):
             )
         )
         response = json.dumps({"served_by": server.label, "path": self.path, "body": body.decode("utf-8")}).encode()
-        self.send_response(200)
+        self.send_response(server.status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(response)))
         self.end_headers()
@@ -68,23 +71,28 @@ class _RecordingHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._handle()
 
+    def do_DELETE(self) -> None:
+        self._handle()
+
     def log_message(self, format: str, *args: object) -> None:
         del format, args
 
 
 class _RecordingServer(ThreadingHTTPServer):
-    """Threading HTTP server carrying the requests its handler recorded, and a label to echo."""
+    """Threading HTTP server carrying the requests its handler recorded, a label to echo and the status it answers."""
 
     received: list[_RecordedRequest]
     label: str
+    status: int
 
 
 @contextmanager
-def _desktop_gateway(label: str) -> Generator[tuple[int, _RecordingServer], None, None]:
+def _desktop_gateway(label: str, status: int = 200) -> Generator[tuple[int, _RecordingServer], None, None]:
     """A fake desktop gateway on a loopback port, as a desktop's tunnel would expose it on a machine."""
     server = _RecordingServer(("127.0.0.1", 0), _RecordingHandler)
     server.received = []
     server.label = label
+    server.status = status
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -99,7 +107,40 @@ def _machine_env(devices_dir: Path) -> dict[str, str]:
     return {
         DEVICES_DIR_ENV_VAR: str(devices_dir),
         DEVICE_ANNOUNCEMENT_INTERVAL_ENV_VAR: str(DEVICE_ANNOUNCEMENT_INTERVAL_SECONDS),
+        "LATCHKEY_DIRECTORY": str(_latchkey_dir(devices_dir)),
     }
+
+
+def _latchkey_dir(devices_dir: Path) -> Path:
+    """The machine's latchkey directory, beside the device records (which are the ``.json`` files, not this)."""
+    return devices_dir / "latchkey"
+
+
+def _filed_requests(devices_dir: Path) -> dict[str, dict[str, Any]]:
+    """The requests the machine kept, by request id."""
+    directory = _latchkey_dir(devices_dir) / "filed_permission_requests" / "v1"
+    if not directory.is_dir():
+        return {}
+    return {path.stem: json.loads(path.read_text()) for path in sorted(directory.iterdir())}
+
+
+def _file_request(devices_dir: Path, request_id: str) -> Path:
+    """Leave the machine holding a filed request, as an earlier filing would have."""
+    directory = _latchkey_dir(devices_dir) / "filed_permission_requests" / "v1"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{request_id}.json"
+    path.write_text(
+        json.dumps({"request_id": request_id, "devices": "*", "created_at": "2026-01-01T00:00:00.000Z", "body": {}})
+    )
+    return path
+
+
+_FILED_BODY: Final[dict[str, Any]] = {
+    "agent_id": "agent-" + "0" * 32,
+    "rationale": "please",
+    "type": "accounts",
+    "payload": {},
+}
 
 
 def _announce(devices_dir: Path, device_id: str, port: int, seconds_ago: float = 0.0) -> DeviceRecord:
@@ -249,9 +290,10 @@ def test_a_request_for_every_desktop_reaches_each_one_and_answers_with_all_respo
     assert [json.loads(entry["body"])["served_by"] for entry in responses[:2]] == ["a", "b"]
     assert all(entry["content_type"] == "application/json" for entry in responses[:2])
     assert responses[2]["error"].startswith("Desktop is unreachable: ")
-    # The body went to each desktop whole, with that desktop's own credentials.
-    assert server_a.received[0].body == b'{"rationale": "please"}'
-    assert server_b.received[0].body == b'{"rationale": "please"}'
+    # The body went to each desktop whole (a filed request gaining its id, see
+    # below), with that desktop's own credentials.
+    assert json.loads(server_a.received[0].body)["rationale"] == "please"
+    assert json.loads(server_b.received[0].body)["rationale"] == "please"
     assert server_a.received[0].headers["x-latchkey-gateway-password"] == "password-of-desktop-a"
     assert server_b.received[0].headers["x-latchkey-gateway-password"] == "password-of-desktop-b"
 
@@ -294,10 +336,14 @@ def test_a_plural_request_that_comes_down_to_one_desktop_answers_with_its_respon
                 f"{gateway_url}/permissions/self", headers=_caller_headers("desktop-nobody,desktop-a")
             )
 
-    assert (all_status, json.loads(all_body)) == (
-        200,
-        {"served_by": "a", "path": "/permission-requests", "body": '{"rationale": "please"}'},
-    )
+    answered = json.loads(all_body)
+    assert (all_status, answered["served_by"], answered["path"]) == (200, "a", "/permission-requests")
+    # The one change to a forwarded body: a filed request carries the id the
+    # machine gave it.
+    assert json.loads(answered["body"]) == {
+        "rationale": "please",
+        "request_id": _filed_requests(tmp_path).popitem()[0],
+    }
     assert (listed_status, json.loads(listed_body)["served_by"]) == (200, "a")
     assert MULTIPLE_DESKTOPS_MATCHED_HEADER.lower() not in all_headers
     assert MULTIPLE_DESKTOPS_MATCHED_HEADER.lower() not in listed_headers
@@ -341,6 +387,265 @@ def test_a_plural_request_that_comes_down_to_no_desktop_answers_503(tmp_path: Pa
     assert MULTIPLE_DESKTOPS_MATCHED_HEADER.lower() not in all_headers
     assert MULTIPLE_DESKTOPS_MATCHED_HEADER.lower() not in listed_headers
     assert server_a.received == []
+
+
+def test_a_filed_request_gets_one_id_for_every_desktop_and_is_kept_on_the_machine(tmp_path: Path) -> None:
+    """Every desktop files the same request under the machine's id, and the machine keeps what the agent sent."""
+    with (
+        _desktop_gateway("a", status=201) as (port_a, server_a),
+        _desktop_gateway("b", status=201) as (port_b, server_b),
+    ):
+        _announce(tmp_path, "desktop-a", port_a, seconds_ago=1)
+        _announce(tmp_path, "desktop-b", port_b, seconds_ago=2)
+        with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
+            status, response_headers, body = http_request_with_headers(
+                f"{gateway_url}/permission-requests",
+                method="POST",
+                headers={**_caller_headers("*"), "Content-Type": "application/json"},
+                body=json.dumps(_FILED_BODY).encode(),
+            )
+
+    assert status == 200
+    assert response_headers[MULTIPLE_DESKTOPS_MATCHED_HEADER.lower()] == "true"
+    sent_to_a = json.loads(server_a.received[0].body)
+    sent_to_b = json.loads(server_b.received[0].body)
+    request_id = sent_to_a["request_id"]
+    assert sent_to_b["request_id"] == request_id
+    assert {key: value for key, value in sent_to_a.items() if key != "request_id"} == _FILED_BODY
+    # The body was rewritten, so its length was too.
+    assert server_a.received[0].headers["content-length"] == str(len(server_a.received[0].body))
+    assert [(entry["device_id"], entry["status"]) for entry in json.loads(body)["responses"]] == [
+        ("desktop-a", 201),
+        ("desktop-b", 201),
+    ]
+    (kept,) = _filed_requests(tmp_path).values()
+    assert kept["request_id"] == request_id
+    assert kept["devices"] == "*"
+    assert kept["body"] == _FILED_BODY
+    assert kept["created_at"].endswith("Z")
+
+
+def test_a_filed_request_one_desktop_took_is_answered_as_that_desktop_answered(tmp_path: Path) -> None:
+    """To the agent a request that reached one desktop reads exactly as if the desktop's gateway were its own."""
+    with _desktop_gateway("only", status=201) as (port, server):
+        _announce(tmp_path, "desktop-only", port)
+        with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
+            status, response_headers, body = http_request_with_headers(
+                f"{gateway_url}/permission-requests",
+                method="POST",
+                headers=_caller_headers(),
+                body=json.dumps(_FILED_BODY).encode(),
+            )
+
+    assert status == 201
+    assert MULTIPLE_DESKTOPS_MATCHED_HEADER.lower() not in response_headers
+    assert json.loads(body)["served_by"] == "only"
+    request_id = json.loads(server.received[0].body)["request_id"]
+    # A request that named no desktop went to the one desktop there was, and is
+    # kept for that desktop alone: it is what every agent from before the header
+    # expects, not a broadcast.
+    assert _filed_requests(tmp_path)[request_id]["devices"] == ["desktop-only"]
+
+
+def test_a_filed_request_every_desktop_refused_is_not_kept(tmp_path: Path) -> None:
+    """The desktops are the judges of a request: one they all turned down has no desktop left to show it."""
+    with _desktop_gateway("a", status=400) as (port_a, _server_a), _desktop_gateway("b", status=400) as (port_b, _b):
+        _announce(tmp_path, "desktop-a", port_a, seconds_ago=1)
+        _announce(tmp_path, "desktop-b", port_b, seconds_ago=2)
+        _announce(tmp_path, "desktop-gone", 1, seconds_ago=3600)
+        with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
+            status, _response_headers, body = http_request_with_headers(
+                f"{gateway_url}/permission-requests",
+                method="POST",
+                headers=_caller_headers("*"),
+                body=json.dumps(_FILED_BODY).encode(),
+            )
+
+    assert status == 200
+    assert [entry["status"] for entry in json.loads(body)["responses"]] == [400, 400, 502]
+    assert _filed_requests(tmp_path) == {}
+
+
+def test_a_filed_request_one_desktop_took_is_kept_whatever_the_others_said(tmp_path: Path) -> None:
+    with _desktop_gateway("a", status=201) as (port_a, _server_a), _desktop_gateway("b", status=400) as (port_b, _b):
+        _announce(tmp_path, "desktop-a", port_a, seconds_ago=1)
+        _announce(tmp_path, "desktop-b", port_b, seconds_ago=2)
+        with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
+            status, _response_headers, _body = http_request_with_headers(
+                f"{gateway_url}/permission-requests",
+                method="POST",
+                headers=_caller_headers("desktop-a,desktop-b,desktop-later"),
+                body=json.dumps(_FILED_BODY).encode(),
+            )
+
+    assert status == 200
+    (kept,) = _filed_requests(tmp_path).values()
+    # Kept for every desktop the header named, the one the gateway has never
+    # heard from included: it picks the request up when it first connects.
+    assert kept["devices"] == ["desktop-a", "desktop-b", "desktop-later"]
+
+
+def test_a_filed_request_no_desktop_is_there_to_receive_is_kept_and_the_503_says_so(tmp_path: Path) -> None:
+    """The agent still gets the 503 every forwarded request gets, but told that the request waits for a desktop."""
+    with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
+        all_status, all_headers, all_body = http_request_with_headers(
+            f"{gateway_url}/permission-requests",
+            method="POST",
+            headers=_caller_headers("*"),
+            body=json.dumps(_FILED_BODY).encode(),
+        )
+        one_status, _, one_body = http_request_with_headers(
+            f"{gateway_url}/permission-requests",
+            method="POST",
+            headers=_caller_headers("desktop-nobody"),
+            body=json.dumps({**_FILED_BODY, "rationale": "for one desktop"}).encode(),
+        )
+
+    assert all_status == 503
+    assert MULTIPLE_DESKTOPS_MATCHED_HEADER.lower() not in all_headers
+    assert json.loads(all_body)["error"] == (
+        "No desktop has announced itself to this machine. "
+        "The request was kept on this machine for the desktops to pick up when they next connect."
+    )
+    assert one_status == 503
+    assert json.loads(one_body)["error"] == (
+        "Desktop desktop-nobody is not known to this gateway. "
+        "The request was kept on this machine for the desktops to pick up when they next connect."
+    )
+    kept = _filed_requests(tmp_path)
+    assert {entry["body"]["rationale"]: entry["devices"] for entry in kept.values()} == {
+        "please": "*",
+        "for one desktop": ["desktop-nobody"],
+    }
+    assert all(kept_id == entry["request_id"] for kept_id, entry in kept.items())
+
+
+def test_a_filed_request_for_a_desktop_that_cannot_be_reached_is_kept_and_answered_with_its_502(
+    tmp_path: Path,
+) -> None:
+    """The desktop's failure is the agent's answer, as for any forwarded request; the machine keeps the request all the same."""
+    _announce(tmp_path, "desktop-gone", 1, seconds_ago=3600)
+    with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
+        status, _response_headers, body = http_request_with_headers(
+            f"{gateway_url}/permission-requests",
+            method="POST",
+            headers=_caller_headers("desktop-gone"),
+            body=json.dumps(_FILED_BODY).encode(),
+        )
+
+    assert status == 502
+    assert json.loads(body)["error"].startswith("Desktop desktop-gone (desktop-gone.example) is unreachable: ")
+    (kept,) = _filed_requests(tmp_path).values()
+    assert kept["devices"] == ["desktop-gone"]
+
+
+def test_a_filed_request_naming_its_own_request_id_is_refused(tmp_path: Path) -> None:
+    with _desktop_gateway("a", status=201) as (port_a, server_a):
+        _announce(tmp_path, "desktop-a", port_a)
+        with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
+            status, _response_headers, body = http_request_with_headers(
+                f"{gateway_url}/permission-requests",
+                method="POST",
+                headers=_caller_headers("*"),
+                body=json.dumps({**_FILED_BODY, "request_id": "mine"}).encode(),
+            )
+
+    assert status == 400
+    assert json.loads(body)["error"] == (
+        "A permission request's request_id is assigned by the gateway; the body must not carry one."
+    )
+    assert server_a.received == []
+    assert _filed_requests(tmp_path) == {}
+
+
+def test_a_filed_request_that_is_not_a_json_object_is_forwarded_as_sent_and_not_kept(tmp_path: Path) -> None:
+    """There is no shape to put an id into, so the desktops answer for it and the machine keeps nothing."""
+    with _desktop_gateway("a", status=400) as (port_a, server_a):
+        _announce(tmp_path, "desktop-a", port_a)
+        with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
+            status, _response_headers, body = http_request_with_headers(
+                f"{gateway_url}/permission-requests",
+                method="POST",
+                headers=_caller_headers("*"),
+                body=b"not json at all",
+            )
+
+    assert status == 400
+    assert json.loads(body)["served_by"] == "a"
+    assert server_a.received[0].body == b"not json at all"
+    assert _filed_requests(tmp_path) == {}
+
+
+def test_a_forwarded_delete_drops_the_machines_copy_of_the_request(tmp_path: Path) -> None:
+    """A request withdrawn through the machine is forgotten there too, whatever the desktops answer."""
+    kept_path = _file_request(tmp_path, "withdrawn-9d1f")
+    other_path = _file_request(tmp_path, "still-pending-4c2a")
+    with _desktop_gateway("a", status=404) as (port_a, server_a):
+        _announce(tmp_path, "desktop-a", port_a)
+        with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
+            status, _response_headers, _body = http_request_with_headers(
+                f"{gateway_url}/permission-requests/withdrawn-9d1f", method="DELETE", headers=_caller_headers("*")
+            )
+
+    assert status == 404
+    assert server_a.received[0].method == "DELETE"
+    assert not kept_path.exists()
+    assert other_path.exists()
+
+
+@contextmanager
+def _real_desktop_gateway(tmp_path: Path, name: str) -> Generator[tuple[int, Path], None, None]:
+    """A desktop's own ``permission-requests`` extension on a loopback port, with its pending directory."""
+    desktop_dir = tmp_path / name
+    latchkey_directory = desktop_dir / "latchkey"
+    latchkey_directory.mkdir(parents=True)
+    env = {"LATCHKEY_DIRECTORY": str(latchkey_directory), "HOME": str(desktop_dir), "TMPDIR": str(desktop_dir)}
+    with node_extension_gateway(
+        _DESKTOP_EXTENSION_PATH, env, permissions_config_path=desktop_dir / "host_permissions.json"
+    ) as gateway_url:
+        yield int(gateway_url.rsplit(":", 1)[1]), latchkey_directory / "permission_requests" / "v3"
+
+
+def _pending_ids(pending_dir: Path) -> list[str]:
+    return sorted(path.stem for path in pending_dir.iterdir()) if pending_dir.is_dir() else []
+
+
+def test_two_real_desktops_file_the_same_request_under_the_machines_id_and_both_drop_it_on_a_withdrawal(
+    tmp_path: Path,
+) -> None:
+    """The whole round trip through the desktops' own extension: one id everywhere, one DELETE clears it everywhere."""
+    with (
+        _real_desktop_gateway(tmp_path, "desktop-a") as (port_a, pending_a),
+        _real_desktop_gateway(tmp_path, "desktop-b") as (
+            port_b,
+            pending_b,
+        ),
+    ):
+        _announce(tmp_path, "desktop-a", port_a, seconds_ago=1)
+        _announce(tmp_path, "desktop-b", port_b, seconds_ago=2)
+        with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
+            filed_status, _headers, filed_body = http_request_with_headers(
+                f"{gateway_url}/permission-requests",
+                method="POST",
+                headers={**_caller_headers("*"), "Content-Type": "application/json"},
+                body=json.dumps(_FILED_BODY).encode(),
+            )
+            assert filed_status == 200
+            responses = json.loads(filed_body)["responses"]
+            assert [entry["status"] for entry in responses] == [201, 201]
+            filed_ids = {json.loads(entry["body"])["request_id"] for entry in responses}
+            (request_id,) = filed_ids
+            assert _pending_ids(pending_a) == _pending_ids(pending_b) == [request_id]
+            assert list(_filed_requests(tmp_path)) == [request_id]
+
+            withdrawn_status, _headers, withdrawn_body = http_request_with_headers(
+                f"{gateway_url}/permission-requests/{request_id}", method="DELETE", headers=_caller_headers("*")
+            )
+
+    assert withdrawn_status == 200
+    assert [entry["status"] for entry in json.loads(withdrawn_body)["responses"]] == [204, 204]
+    assert _pending_ids(pending_a) == _pending_ids(pending_b) == []
+    assert _filed_requests(tmp_path) == {}
 
 
 def test_a_device_header_mixing_all_with_names_is_refused(tmp_path: Path) -> None:

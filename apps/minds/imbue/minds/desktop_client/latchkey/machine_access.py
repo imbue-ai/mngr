@@ -31,6 +31,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Final
 
+import paramiko
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -58,6 +59,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
 from imbue.mngr_latchkey.store import LatchkeyStoreError
@@ -80,6 +82,22 @@ class MachineUnreachableError(Exception):
     Always something the user is waiting on the answer to, so it carries the
     machine's own reason and is shown where they clicked.
     """
+
+
+# Everything one exchange with a machine can fail with: the machine unreachable
+# (``MachineUnreachableError``, ``MngrError``, ``OSError``, paramiko) or
+# reachable and refusing (``LatchkeyError``, which covers ``RemoteGatewayError``),
+# and ``LatchkeyStoreError`` for this computer's own copies -- the machine store
+# an adopt writes, the canonical policy a push reads -- being unusable, which
+# fails the same action for the same user and must read the same way.
+MACHINE_EXCHANGE_FAILURES: Final[tuple[type[Exception], ...]] = (
+    MachineUnreachableError,
+    LatchkeyError,
+    LatchkeyStoreError,
+    MngrError,
+    OSError,
+    paramiko.SSHException,
+)
 
 
 class MachineAccess(MutableModel):

@@ -12,6 +12,9 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 
 _POLL_TIMEOUT_SECONDS: Final[float] = 2.0
+# For a wait that spans several reconnects: the consumer paces each one by a
+# second after a clean close, so two reconnects alone take the default deadline.
+_RECONNECTS_TIMEOUT_SECONDS: Final[float] = 10.0
 _POLL_INTERVAL_SECONDS: Final[float] = 0.02
 
 
@@ -73,7 +76,7 @@ def test_consumer_signals_once_per_request_and_dedupes_redeliveries() -> None:
         password="p",
         admin_jwt="jwt",
     )
-    consumer = PermissionRequestsConsumer(gateway_client=client, on_new_request=_on_new_request)
+    consumer = PermissionRequestsConsumer(gateway_client=client, on_change=_on_new_request)
     cg = ConcurrencyGroup(name="permission-requests-consumer-test")
     with cg:
         consumer.start(cg)
@@ -129,7 +132,7 @@ def test_consumer_survives_a_signal_error_and_keeps_processing() -> None:
         password="p",
         admin_jwt="jwt",
     )
-    consumer = PermissionRequestsConsumer(gateway_client=client, on_new_request=_on_new_request)
+    consumer = PermissionRequestsConsumer(gateway_client=client, on_change=_on_new_request)
     cg = ConcurrencyGroup(name="permission-requests-consumer-test")
     with cg:
         consumer.start(cg)
@@ -137,3 +140,54 @@ def test_consumer_survives_a_signal_error_and_keeps_processing() -> None:
             assert _wait_until(lambda: len(seen) >= 2)
         finally:
             consumer.stop()
+
+
+def test_consumer_signals_a_request_that_stopped_being_pending_and_forgets_having_seen_it() -> None:
+    """A deletion wakes the surfaces like a new request does, and the same id filed again is news again."""
+    record = {
+        "request_id": "r-again",
+        "agent_id": "a1",
+        "rationale": "x",
+        "request_type": "accounts",
+        "payload": {},
+        "target": "/tmp/permissions.json",
+        "effect": {"rules": []},
+    }
+    deletion = {"event": "deleted", "request_id": "r-again"}
+    # The first connection sees the request filed, withdrawn and filed again;
+    # every reconnect re-emits the request, which is then old news.
+    first_connection = b"".join(json.dumps(item).encode("utf-8") + b"\n" for item in (record, deletion, record))
+    reconnect = json.dumps(record).encode("utf-8") + b"\n"
+    signal_count = 0
+    connections = 0
+    lock = threading.Lock()
+
+    def _on_change() -> None:
+        nonlocal signal_count
+        with lock:
+            signal_count += 1
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal connections
+        del request
+        with lock:
+            connections += 1
+            content = first_connection if connections == 1 else reconnect
+        return httpx.Response(200, content=content, headers={"Content-Type": "application/x-ndjson"})
+
+    client = LatchkeyGatewayClient.from_credentials(
+        transport=httpx.MockTransport(_handler),
+        base_url="http://gateway.invalid:1989",
+        password="p",
+        admin_jwt="jwt",
+    )
+    consumer = PermissionRequestsConsumer(gateway_client=client, on_change=_on_change)
+    cg = ConcurrencyGroup(name="permission-requests-consumer-deletion-test")
+    with cg:
+        consumer.start(cg)
+        try:
+            assert _wait_until(lambda: connections >= 3, timeout=_RECONNECTS_TIMEOUT_SECONDS)
+        finally:
+            consumer.stop()
+    # Filed, withdrawn, filed again: three signals, and none for the re-emissions.
+    assert signal_count == 3

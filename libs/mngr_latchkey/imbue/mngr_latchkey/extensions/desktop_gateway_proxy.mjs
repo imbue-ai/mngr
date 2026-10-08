@@ -39,11 +39,38 @@
  * other response carries; a streaming response (``?follow=true``) is only
  * forwarded to a single desktop.
  *
+ * ``POST /permission-requests`` is the one forwarded request this machine
+ * takes part in, because a permission request outlives the desktops it was
+ * sent to: the user answers it on whichever desktop they are at, and a
+ * desktop that was offline when it was filed shows it the next time it
+ * connects. So the machine assigns the request its id before forwarding, puts
+ * it in the body as ``request_id`` (a body that already carries one is a 400:
+ * identity is the gateway's to assign) so every desktop files the same
+ * request under the same id, and keeps a copy of what the agent sent under
+ * ``<LATCHKEY_DIRECTORY>/filed_permission_requests/v1/<request_id>.json`` --
+ * the agent's body as sent, the desktops it was for (``"*"`` or a list of
+ * device ids) and when it was filed -- for the desktops to sync against. The
+ * machine validates nothing: the copy is kept when some desktop accepted the
+ * request (a 2xx) or when no desktop could be reached to judge it, and dropped
+ * when every desktop that answered refused it. The answer to the agent is the
+ * one the header's shape gives every forwarded request, with one difference:
+ * when the request reaches no desktop at all, the 503 says that the request
+ * was kept for the desktops to pick up (one that reaches an unreachable
+ * desktop is kept too, and answered with that desktop's 502). A ``DELETE
+ * /permission-requests/<request_id>`` forwarded through here also drops the
+ * machine's copy, so a request withdrawn by its agent is forgotten here too.
+ * Resolving a request the user answered on a desktop is the package's
+ * ``mngr-latchkey forget-request``, which sends that very DELETE to every
+ * desktop through this gateway.
+ *
  * Every other URL is left for the next extension.
  */
 
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const DEVICES_DIR_ENV_VAR = 'LATCHKEY_EXTENSION_DEVICES_DIR';
@@ -59,7 +86,21 @@ const MULTIPLE_DESKTOPS_MATCHED_HEADER = 'X-Latchkey-Multiple-Desktops-Matched';
 const GATEWAY_PASSWORD_HEADER = 'X-Latchkey-Gateway-Password';
 const PERMISSIONS_OVERRIDE_HEADER = 'X-Latchkey-Gateway-Permissions-Override';
 const DEVICES_ROUTE = '/devices';
-const PROXY_PATH_PREFIXES = ['/permissions', '/permission-requests', '/minds-api-proxy'];
+const PERMISSION_REQUESTS_ROUTE = '/permission-requests';
+const PERMISSION_REQUEST_ITEM_PATH_PREFIX = `${PERMISSION_REQUESTS_ROUTE}/`;
+const PROXY_PATH_PREFIXES = ['/permissions', PERMISSION_REQUESTS_ROUTE, '/minds-api-proxy'];
+
+// Where this machine keeps the requests filed through it, under its latchkey
+// directory. The version segment is bumped with any incompatible change to
+// the record's shape, so an older record is never read as a newer one.
+const FILED_REQUESTS_DIR_NAME = 'filed_permission_requests';
+const FILED_REQUESTS_SCHEMA_VERSION = 'v1';
+const FILED_REQUEST_FILE_SUFFIX = '.json';
+// The same ids the desktops' ``permission_requests.mjs`` accepts, since the
+// machine's id is what every desktop files the request under.
+const VALID_REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+const REQUEST_STORED_NOTE =
+  'The request was kept on this machine for the desktops to pick up when they next connect.';
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -187,6 +228,47 @@ async function readAnnouncedDesktops() {
 
 function isProxyRoute(pathOnly) {
   return PROXY_PATH_PREFIXES.some((prefix) => pathOnly === prefix || pathOnly.startsWith(`${prefix}/`));
+}
+
+function resolveLatchkeyDirectory() {
+  const directoryOverride = process.env.LATCHKEY_DIRECTORY;
+  if (directoryOverride !== undefined && directoryOverride.length > 0) return directoryOverride;
+  return join(homedir(), '.latchkey');
+}
+
+function filedRequestsDirectory() {
+  return join(resolveLatchkeyDirectory(), FILED_REQUESTS_DIR_NAME, FILED_REQUESTS_SCHEMA_VERSION);
+}
+
+function filedRequestPath(requestId) {
+  return join(filedRequestsDirectory(), `${requestId}${FILED_REQUEST_FILE_SUFFIX}`);
+}
+
+function generateRequestId() {
+  return randomUUID().replace(/-/g, '');
+}
+
+/** Keep the machine's copy of a filed request: a complete file, so a reader never sees a half-written one. */
+function writeFiledRequest(record) {
+  const directory = filedRequestsDirectory();
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const destination = filedRequestPath(record.request_id);
+  const temporary = join(directory, `.tmp.${record.request_id}`);
+  writeFileSync(temporary, `${JSON.stringify(record)}\n`, { encoding: 'utf-8', mode: 0o600 });
+  renameSync(temporary, destination);
+}
+
+/** Drop the machine's copy of a filed request, if it has one; an id that names no file is nothing to drop. */
+function removeFiledRequest(requestId) {
+  if (!VALID_REQUEST_ID_PATTERN.test(requestId)) return;
+  const path = filedRequestPath(requestId);
+  if (!existsSync(path)) return;
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`desktop_gateway_proxy: could not drop the filed request ${path}: ${message}`);
+  }
 }
 
 /**
@@ -343,32 +425,58 @@ function readWholeBody(stream) {
   });
 }
 
-/** Send the (buffered) request to one desktop and collect its whole response as one entry. */
+/**
+ * Send the (buffered) request to one desktop and collect its whole response:
+ * ``{desktop, status, contentType, body}`` for one that answered, or
+ * ``{desktop, status: 502, failure}`` for one that could not be reached or
+ * read. ``body`` replaces the request's own, so its length is sent afresh.
+ */
 function collectFromDesktop(request, body, desktop) {
-  const entry = { device_id: desktop.deviceId, hostname: desktop.hostname };
   return new Promise((resolve) => {
-    const upstreamRequest = httpRequest(upstreamRequestOptions(request, desktop));
+    const options = upstreamRequestOptions(request, desktop);
+    options.headers['content-length'] = String(body.length);
+    const upstreamRequest = httpRequest(options);
     upstreamRequest.on('error', (error) => {
       const message = error instanceof Error ? error.message : String(error);
-      resolve({ ...entry, status: 502, error: `Desktop is unreachable: ${message}` });
+      resolve({ desktop, status: 502, failure: `is unreachable: ${message}` });
     });
     upstreamRequest.on('response', (upstreamResponse) => {
       readWholeBody(upstreamResponse).then(
         (upstreamBody) =>
           resolve({
-            ...entry,
+            desktop,
             status: upstreamResponse.statusCode ?? 502,
-            content_type: upstreamResponse.headers['content-type'] ?? null,
+            contentType: upstreamResponse.headers['content-type'] ?? null,
             body: upstreamBody.toString('utf-8'),
           }),
         (error) => {
           const message = error instanceof Error ? error.message : String(error);
-          resolve({ ...entry, status: 502, error: `Desktop's response could not be read: ${message}` });
+          resolve({ desktop, status: 502, failure: `answered, but the response could not be read: ${message}` });
         },
       );
     });
     upstreamRequest.end(body);
   });
+}
+
+/** One desktop's collected response as an entry of an aggregated answer. */
+function toResponseEntry(collected) {
+  const entry = { device_id: collected.desktop.deviceId, hostname: collected.desktop.hostname, status: collected.status };
+  if (collected.failure !== undefined) {
+    return { ...entry, error: `Desktop ${collected.failure}` };
+  }
+  return { ...entry, content_type: collected.contentType, body: collected.body };
+}
+
+/** One desktop's collected response relayed as the whole answer, as if the request had gone there alone. */
+function relayCollected(response, collected) {
+  if (collected.failure !== undefined) {
+    sendError(response, 502, `Desktop ${collected.desktop.deviceId} (${collected.desktop.hostname}) ${collected.failure}`);
+    return;
+  }
+  const headers = collected.contentType === null ? {} : { 'Content-Type': collected.contentType };
+  response.writeHead(collected.status, headers);
+  response.end(collected.body);
 }
 
 /**
@@ -379,8 +487,8 @@ function collectFromDesktop(request, body, desktop) {
  */
 async function broadcastRequest(request, response, desktops) {
   const body = await readWholeBody(request);
-  const responses = await Promise.all(desktops.map((desktop) => collectFromDesktop(request, body, desktop)));
-  sendJson(response, 200, { responses }, { [MULTIPLE_DESKTOPS_MATCHED_HEADER]: 'true' });
+  const collected = await Promise.all(desktops.map((desktop) => collectFromDesktop(request, body, desktop)));
+  sendJson(response, 200, { responses: collected.map(toResponseEntry) }, { [MULTIPLE_DESKTOPS_MATCHED_HEADER]: 'true' });
 }
 
 /**
@@ -405,19 +513,76 @@ function listDesktops(response, desktops) {
   });
 }
 
-async function routeToDesktops(request, response) {
-  const selection = parseDeviceHeader(request);
-  const desktops = await readAnnouncedDesktops();
+/** Which desktops a filed request is recorded as being for: ``"*"`` or the device ids, known or not. */
+function filedRequestDevices(selection, targets) {
+  if (selection.kind === 'all') return ALL_DESKTOPS;
+  if (selection.kind === 'one') return [selection.deviceId];
+  if (selection.kind === 'many') return selection.deviceIds;
+  return targets.length === 0 ? ALL_DESKTOPS : [targets[0].deviceId];
+}
 
+/**
+ * File an agent's permission request: give it its id, forward it to the
+ * desktops it is for and keep this machine's copy (see the header comment).
+ * A body that is not a JSON object is forwarded as it is and never kept: the
+ * desktops refuse it, and there is no shape to put an id into.
+ */
+async function fileRequest(request, response) {
+  const rawBody = await readWholeBody(request);
+  let parsed;
+  try {
+    parsed = JSON.parse(rawBody.toString('utf-8'));
+  } catch (error) {
+    parsed = undefined;
+  }
+  const isBodyAnObject = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+  if (isBodyAnObject && parsed.request_id !== undefined) {
+    throw new DesktopRoutingError(400, "A permission request's request_id is assigned by the gateway; the body must not carry one.");
+  }
+  const requestId = isBodyAnObject ? generateRequestId() : null;
+  const body = isBodyAnObject ? Buffer.from(JSON.stringify({ ...parsed, request_id: requestId }), 'utf-8') : rawBody;
+  const selection = parseDeviceHeader(request);
+  const keep = (targets) =>
+    writeFiledRequest({
+      request_id: requestId,
+      devices: filedRequestDevices(selection, targets),
+      created_at: new Date().toISOString(),
+      body: parsed,
+    });
+
+  // The copy is kept before the agent hears back, so an answer never precedes
+  // the record a desktop would sync against.
+  const keepIfTaken = (collected) => {
+    const answered = collected.filter((entry) => entry.failure === undefined);
+    const isAccepted = answered.some((entry) => entry.status >= 200 && entry.status < 300);
+    if (requestId !== null && (isAccepted || answered.length === 0)) {
+      keep(collected.map((entry) => entry.desktop));
+    }
+  };
+  try {
+    await routeToDesktops(request, response, { body, onCollected: keepIfTaken });
+  } catch (error) {
+    // No desktop was there to judge the request: it is kept for the ones the
+    // header names, and the agent is told so along with why it went nowhere.
+    const isNoDesktop =
+      error instanceof DesktopRoutingError && error.statusCode === 503 && !(error instanceof DesktopsNotConfiguredError);
+    if (!isNoDesktop || requestId === null) throw error;
+    keep([]);
+    throw new DesktopRoutingError(503, `${error.message} ${REQUEST_STORED_NOTE}`);
+  }
+}
+
+/**
+ * The desktops the header sends a request to: the most recently announced one
+ * by default, the one named, every known one for ``*``, or the known ones among
+ * those listed. A selection that comes down to no desktop is a 503.
+ */
+function selectTargets(selection, desktops) {
   if (selection.kind === 'default') {
     if (desktops.length === 0) throw new NoDesktopAnnouncedError();
-    await proxyRequest(request, response, desktops[0]);
-    return;
+    return [desktops[0]];
   }
-  if (selection.kind === 'one') {
-    await proxyRequest(request, response, findDesktop(desktops, selection.deviceId));
-    return;
-  }
+  if (selection.kind === 'one') return [findDesktop(desktops, selection.deviceId)];
   const targets = selectDesktops(desktops, selection);
   if (targets.length === 0) {
     if (selection.kind === 'all') throw new NoDesktopAnnouncedError();
@@ -426,25 +591,53 @@ async function routeToDesktops(request, response) {
       `None of the desktops ${DEVICE_HEADER} names (${selection.deviceIds.join(', ')}) is known to this gateway.`,
     );
   }
-  if (targets.length === 1) {
-    await proxyRequest(request, response, targets[0]);
+  return targets;
+}
+
+/**
+ * Forward the request to the desktops its header names and answer the caller
+ * with the one desktop's response, or with every response side by side. With
+ * ``buffered``, its ``body`` is sent in place of the request's own, and what
+ * each desktop answered is handed to its ``onCollected`` before the caller is
+ * answered; without it the request streams through.
+ */
+async function routeToDesktops(request, response, buffered = null) {
+  const targets = selectTargets(parseDeviceHeader(request), await readAnnouncedDesktops());
+  if (buffered === null) {
+    if (targets.length === 1) {
+      await proxyRequest(request, response, targets[0]);
+    } else {
+      await broadcastRequest(request, response, targets);
+    }
     return;
   }
-  await broadcastRequest(request, response, targets);
+  const collected = await Promise.all(targets.map((desktop) => collectFromDesktop(request, buffered.body, desktop)));
+  buffered.onCollected(collected);
+  if (targets.length === 1) {
+    relayCollected(response, collected[0]);
+  } else {
+    sendJson(response, 200, { responses: collected.map(toResponseEntry) }, { [MULTIPLE_DESKTOPS_MATCHED_HEADER]: 'true' });
+  }
 }
 
 export default async function desktopGatewayProxyExtension(request, response) {
   const pathOnly = new URL(request.url ?? '', 'http://placeholder.invalid').pathname;
   const isDevicesRoute = pathOnly === DEVICES_ROUTE;
   if (!isDevicesRoute && !isProxyRoute(pathOnly)) return false;
+  const method = (request.method ?? 'GET').toUpperCase();
 
   try {
     if (isDevicesRoute) {
-      if ((request.method ?? 'GET').toUpperCase() !== 'GET') {
+      if (method !== 'GET') {
         throw new DesktopRoutingError(405, `${DEVICES_ROUTE} only answers GET.`);
       }
       listDesktops(response, await readAnnouncedDesktops());
+    } else if (pathOnly === PERMISSION_REQUESTS_ROUTE && method === 'POST') {
+      await fileRequest(request, response);
     } else {
+      if (method === 'DELETE' && pathOnly.startsWith(PERMISSION_REQUEST_ITEM_PATH_PREFIX)) {
+        removeFiledRequest(pathOnly.slice(PERMISSION_REQUEST_ITEM_PATH_PREFIX.length));
+      }
       await routeToDesktops(request, response);
     }
   } catch (error) {

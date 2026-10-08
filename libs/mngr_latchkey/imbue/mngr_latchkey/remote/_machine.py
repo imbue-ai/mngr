@@ -2,7 +2,7 @@
 
 Once the package built by :mod:`imbue.mngr_latchkey.remote.package` is
 installed on a machine, everything this computer does to it goes through the
-two commands the package provides, each one remote command:
+five commands the package provides, each one remote command:
 
 * ``mngr-latchkey read-state`` assembles what the machine holds -- the secrets
   its gateway runs under, its config, the policy it enforces, the desktop
@@ -18,6 +18,11 @@ two commands the package provides, each one remote command:
   and the secrets the gateway's extension and the curl router present on the
   hop back to it (:func:`announce_device`). Rewritten on every discovery cycle,
   so the record's age is what says whether the desktop is still connected.
+* ``mngr-latchkey list-requests`` lists the permission requests the machine
+  keeps for the user's desktops (:func:`read_filed_permission_requests`), and
+  ``mngr-latchkey forget-request`` drops one the user has answered and
+  withdraws it from every connected desktop (:func:`forget_permission_request`);
+  see :mod:`imbue.mngr_latchkey.filed_permission_requests`.
 
 The document travels on the command's stdin (a quoted heredoc in the one
 command string), as ``<key> <base64>`` lines, so a payload is visibly data
@@ -55,6 +60,9 @@ from imbue.mngr.utils.command_logging import commands_kept_out_of_logs
 from imbue.mngr_latchkey.core import EncryptedCredentialStore
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
 from imbue.mngr_latchkey.devices import DeviceRecord
+from imbue.mngr_latchkey.filed_permission_requests import FiledPermissionRequest
+from imbue.mngr_latchkey.filed_permission_requests import FiledPermissionRequestsError
+from imbue.mngr_latchkey.filed_permission_requests import parse_filed_permission_requests
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 
@@ -68,6 +76,8 @@ REMOTE_COMMAND_NAME: Final[str] = "mngr-latchkey"
 _READ_STATE_SUBCOMMAND: Final[str] = "read-state"
 _APPLY_STATE_SUBCOMMAND: Final[str] = "apply-state"
 _ANNOUNCE_DEVICE_SUBCOMMAND: Final[str] = "announce-device"
+_FORGET_REQUEST_SUBCOMMAND: Final[str] = "forget-request"
+_LIST_REQUESTS_SUBCOMMAND: Final[str] = "list-requests"
 
 # One ``read-state`` or ``apply-state``. The slowest shape is provisioning's
 # apply, which runs ``latchkey`` (a Node startup plus a store rewrite, a second
@@ -174,6 +184,7 @@ _ENTRY_INCLUDE_CREDENTIAL_STORE: Final[str] = "include_credential_store"
 _ENTRY_CONTAINER_HOST_ID: Final[str] = "container_host_id"
 _ENTRY_DEVICE_ID: Final[str] = "device_id"
 _ENTRY_DEVICE_RECORD_JSON: Final[str] = "device_record_json"
+_ENTRY_REQUEST_ID: Final[str] = "request_id"
 
 # The answers ``read-state`` prints, by the name after :data:`ANSWER_PREFIX`.
 _ANSWER_PACKAGE_VERSION: Final[str] = "PACKAGE_VERSION"
@@ -189,6 +200,8 @@ _ANSWER_CREDENTIALS: Final[str] = "CREDENTIALS"
 _ANSWER_DATA_FORMAT_VERSION: Final[str] = "DATA_FORMAT_VERSION"
 _ANSWER_HAS_CONTAINER_TUNNEL_KEY: Final[str] = "HAS_CONTAINER_TUNNEL_KEY"
 _ANSWER_CONTAINER_EXTRA_HOSTS: Final[str] = "CONTAINER_EXTRA_HOSTS"
+# The one answer ``list-requests`` prints.
+_ANSWER_FILED_PERMISSION_REQUESTS: Final[str] = "FILED_PERMISSION_REQUESTS"
 _FLAG_TRUE: Final[bytes] = b"1"
 
 
@@ -357,6 +370,40 @@ def announce_device(host: OuterHostInterface, record: DeviceRecord, failure_desc
     _run_remote_command(
         host, _remote_command(_ANNOUNCE_DEVICE_SUBCOMMAND, _announcement_document(record)), failure_description
     )
+
+
+def forget_permission_request(host: OuterHostInterface, request_id: str, failure_description: str) -> None:
+    """Drop the machine's copy of a permission request and withdraw it from every connected desktop, in one round trip.
+
+    The withdrawal is best-effort on the machine's side: a desktop that could
+    not be reached syncs the request away itself when it next connects.
+
+    Raises:
+        RemoteGatewayError: when the machine refuses or fails the command.
+    """
+    _run_remote_command(
+        host,
+        _remote_command(_FORGET_REQUEST_SUBCOMMAND, {_ENTRY_REQUEST_ID: request_id.encode("utf-8")}),
+        failure_description,
+    )
+
+
+def read_filed_permission_requests(
+    host: OuterHostInterface, failure_description: str
+) -> tuple[FiledPermissionRequest, ...]:
+    """The permission requests the machine keeps for the user's desktops, in one round trip.
+
+    Raises:
+        RemoteGatewayError: when the machine refuses or fails the command, or
+            answers with something this build cannot read.
+    """
+    stdout = _run_remote_command(host, _remote_command(_LIST_REQUESTS_SUBCOMMAND, {}), failure_description)
+    answers = _parse_answers(host, stdout, failure_description)
+    records_json = _text(answers, _ANSWER_FILED_PERMISSION_REQUESTS, host, failure_description)
+    try:
+        return parse_filed_permission_requests(records_json)
+    except FiledPermissionRequestsError as e:
+        raise RemoteGatewayError(f"Failed to {failure_description} on VPS {host.get_name()}: {e}") from e
 
 
 def read_remote_state(

@@ -507,6 +507,38 @@ desktop. So workspace logic does not depend on whether the workspace is local
 or remote. The
 mechanism is described under "Desktops" in `libs/mngr_latchkey/README.md`.
 
+### Permission requests on several computers
+
+A remote workspace's agent sends its permission requests with
+`X-Latchkey-Device: *`, so the request pops up in Imbue Studio on every
+computer the user has running. The workspace's machine gives the request its
+id before forwarding it, so every computer holds the same request, and keeps a
+record of it until the user answers. Answering it on one computer dismisses it
+on the others: that computer asks the machine to forget the request, and the
+machine withdraws it from every connected computer through its own gateway,
+which each computer's gateway reports on its stream to the app. A computer the
+withdrawal did not reach drops the request when it next syncs.
+
+If no computer is running when the agent asks, the machine keeps the request
+and tells the agent so (a 503 saying the request was kept for the desktops),
+and the app shows it when it next opens: at startup, when a machine appears in
+discovery, and every ten minutes, the app compares its pending requests for
+each remote host against that host's machine. A request the machine keeps for
+this computer and the app does not have is filed on the app's own gateway
+under the machine's id, against the workspace's permissions file here, and the
+gateway judges it exactly as it would have live; one the app has that the
+machine no longer keeps was answered on another computer and is dropped; one
+the gateway refuses is dropped from the machine too, since no computer will
+take it. The chat card on a computer that did not give the verdict is not told
+which verdict was given, only that the request is no longer pending.
+
+The withdrawal reaches a computer's gateway with the credentials that
+computer announced to the machine, which name the workspace's host policy, so
+the agent baseline grants `DELETE /permission-requests/<id>`. A policy written
+before that grant existed gains it when the app next registers the host's agents
+(every discovered agent is registered on each start), which also pushes the
+reconciled policy to the host's machine.
+
 ## Per-agent isolation
 
 Imbue Studio runs a single shared `latchkey gateway` subprocess for every

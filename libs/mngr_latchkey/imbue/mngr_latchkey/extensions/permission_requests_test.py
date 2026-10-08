@@ -18,6 +18,7 @@ skipping), mirroring the minds-api-proxy test module.
 """
 
 import contextlib
+import http.client
 import json
 import re
 import shutil
@@ -28,11 +29,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from collections.abc import Generator
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Final
+from uuid import uuid4
 
 import pytest
 
@@ -1654,6 +1657,7 @@ def test_post_accepts_path_under_temp_root(node_extension: tuple[str, Path, Path
 
 
 def test_post_rejects_extraneous_top_level_field(node_extension: tuple[str, Path, Path]) -> None:
+    """What an approval would do is the extension's to compute, never the caller's to say."""
     base_url, *_ = node_extension
     status, body = _post_json(
         f"{base_url}/permission-requests",
@@ -1662,11 +1666,158 @@ def test_post_rejects_extraneous_top_level_field(node_extension: tuple[str, Path
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
-            "request_id": "spoofed",
+            "effect": {"rules": [{"slack-api": ["any"]}]},
         },
     )
     assert status == 400
-    assert "request_id" in json.loads(body)["error"]
+    assert "effect" in json.loads(body)["error"]
+
+
+def _predefined_body(rationale: str = "x") -> dict[str, object]:
+    return {
+        "agent_id": _VALID_AGENT_ID,
+        "rationale": rationale,
+        "type": "predefined",
+        "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+    }
+
+
+def test_post_files_the_request_under_a_supplied_request_id(node_extension: tuple[str, Path, Path]) -> None:
+    """A machine (or a desktop syncing with one) names the request, so every desktop holds it under one id."""
+    base_url, latchkey_directory, _ = node_extension
+    request_id = f"machine-assigned-{uuid4().hex}"
+
+    status, body = _post_json(f"{base_url}/permission-requests", {**_predefined_body(), "request_id": request_id})
+
+    assert status == 201
+    assert json.loads(body)["request_id"] == request_id
+    stored = json.loads((latchkey_directory / "permission_requests" / "v3" / f"{request_id}.json").read_text())
+    assert stored["request_id"] == request_id
+    assert stored["rationale"] == "x"
+    list_status, _, listed = _http(f"{base_url}/permission-requests")
+    assert list_status == 200
+    assert [json.loads(line)["request_id"] for line in listed.decode("utf-8").splitlines() if line] == [request_id]
+
+
+def test_post_refuses_a_request_id_that_is_already_pending(node_extension: tuple[str, Path, Path]) -> None:
+    """A second filing under a pending id is a conflict, never a silent overwrite of what is pending."""
+    base_url, latchkey_directory, _ = node_extension
+    request_id = f"twice-{uuid4().hex}"
+    first_status, _ = _post_json(
+        f"{base_url}/permission-requests", {**_predefined_body("first"), "request_id": request_id}
+    )
+    assert first_status == 201
+
+    status, body = _post_json(
+        f"{base_url}/permission-requests", {**_predefined_body("second"), "request_id": request_id}
+    )
+
+    assert status == 409
+    assert json.loads(body)["error"] == f"Permission request '{request_id}' is already pending."
+    stored = json.loads((latchkey_directory / "permission_requests" / "v3" / f"{request_id}.json").read_text())
+    assert stored["rationale"] == "first"
+
+
+@pytest.mark.parametrize("request_id", ["", "../escape", "has space", "a/b", 7])
+def test_post_rejects_a_request_id_that_is_not_filename_safe(
+    node_extension: tuple[str, Path, Path], request_id: object
+) -> None:
+    base_url, latchkey_directory, _ = node_extension
+
+    status, body = _post_json(f"{base_url}/permission-requests", {**_predefined_body(), "request_id": request_id})
+
+    assert status == 400
+    assert json.loads(body)["error"].startswith("Invalid request_id: ")
+    assert not (latchkey_directory / "permission_requests" / "v3").exists()
+
+
+@contextlib.contextmanager
+def _following(base_url: str) -> Generator[Callable[[int], list[dict[str, object]]], None, None]:
+    """Hold a ``?follow=true`` stream open; the callable waits for that many lines and returns them decoded."""
+    parsed = urllib.parse.urlparse(base_url)
+    connection = http.client.HTTPConnection(parsed.hostname or "127.0.0.1", parsed.port, timeout=5.0)
+    connection.request("GET", "/permission-requests?follow=true")
+    response = connection.getresponse()
+    assert response.status == 200
+    lines: list[dict[str, object]] = []
+    lock = threading.Lock()
+    is_closing = threading.Event()
+
+    def _read() -> None:
+        # The stream ends by this helper tearing the connection down under the
+        # reader, which the reader sees as the socket failing, not as the end.
+        try:
+            for raw_line in response:
+                if raw_line.strip():
+                    with lock:
+                        lines.append(json.loads(raw_line))
+        except (OSError, http.client.HTTPException):
+            if not is_closing.is_set():
+                raise
+
+    reader = threading.Thread(target=_read, daemon=True)
+    reader.start()
+
+    def _wait_for_lines(count: int) -> list[dict[str, object]]:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with lock:
+                if len(lines) >= count:
+                    return list(lines)
+            threading.Event().wait(timeout=_POLL_INTERVAL_SECONDS)
+        with lock:
+            raise AssertionError(f"the follow stream carried {len(lines)} lines, not {count}: {lines}")
+
+    try:
+        yield _wait_for_lines
+    finally:
+        is_closing.set()
+        # Closing alone leaves a read in progress blocked until its timeout;
+        # shutting the socket down ends it at once. The reader then owns the
+        # response's teardown, so the connection is closed only after it.
+        if connection.sock is not None:
+            connection.sock.shutdown(socket.SHUT_RDWR)
+        reader.join(timeout=5.0)
+        assert not reader.is_alive(), "the follow stream's reader did not end with the connection"
+        connection.close()
+
+
+def test_follow_stream_announces_a_deleted_request(node_extension: tuple[str, Path, Path]) -> None:
+    """A consumer following the queue learns that a request stopped being pending, not only that one started."""
+    base_url, *_ = node_extension
+    with _following(base_url) as lines_of_stream:
+        status, body = _post_json(f"{base_url}/permission-requests", _predefined_body())
+        assert status == 201
+        request_id = json.loads(body)["request_id"]
+        delete_status, _, _ = _http(f"{base_url}/permission-requests/{request_id}", method="DELETE")
+        assert delete_status == 204
+
+        streamed = lines_of_stream(2)
+
+    assert streamed[0]["request_id"] == request_id
+    assert streamed[0]["rationale"] == "x"
+    assert streamed[1] == {"event": "deleted", "request_id": request_id}
+
+
+def test_follow_stream_announces_an_approved_request_as_deleted(node_extension: tuple[str, Path, Path]) -> None:
+    """Approving consumes the pending record, which to a follower is the same news as a delete."""
+    base_url, *_ = node_extension
+    with _following(base_url) as lines_of_stream:
+        status, body = _post_json(
+            f"{base_url}/permission-requests",
+            {
+                **_predefined_body(),
+                "payload": {"scope": "slack-api", "permissions": ["slack-read-all"], "account": "me"},
+            },
+        )
+        assert status == 201
+        request_id = json.loads(body)["request_id"]
+        approve_status, _, _ = _http(f"{base_url}/permission-requests/approve/{request_id}", method="POST")
+        assert approve_status == 200
+
+        streamed = lines_of_stream(2)
+
+    assert streamed[1] == {"event": "deleted", "request_id": request_id}
 
 
 def test_post_predefined_without_account_has_empty_effect(

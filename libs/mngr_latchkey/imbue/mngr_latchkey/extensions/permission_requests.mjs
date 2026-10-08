@@ -101,8 +101,16 @@
  *       (``{permissions, target_workspace_id}``) recomputes the effect
  *       from the user's dialog choices (verb subset + all-vs-selected).
  *
+ *       The body may also carry a ``request_id`` of the caller's choosing
+ *       (filename-safe, see ``validateRequestId``), which is how one
+ *       request keeps a single identity across the user's desktops: a
+ *       machine's gateway assigns it before forwarding an agent's
+ *       request to each of them, and a desktop that was offline files
+ *       the request under the same id when it later syncs with the
+ *       machine. An id already pending here is an HTTP 409.
+ *
  *       The extension also stores, alongside the user-supplied fields:
- *         - ``request_id`` (server-generated, UUIDv4 hex)
+ *         - ``request_id`` (as supplied, else server-generated UUIDv4 hex)
  *         - ``target``     (extension-context permissionsConfigPath: the
  *                          permissions.json file an approval would modify)
  *         - ``effect``     (precomputed ``{rules?, schemas?}`` object that
@@ -118,8 +126,11 @@
  *       With ``?follow=true`` the connection is kept open and every
  *       request newly created via this extension's POST endpoint is
  *       streamed as an additional JSONL line until the client
- *       disconnects. Filesystem changes made by anything other than
- *       the POST handler are not observed.
+ *       disconnects, and so is every request that stops being pending
+ *       through this extension (approved, or deleted), as a line of the
+ *       shape ``{"event": "deleted", "request_id": "..."}``. Filesystem
+ *       changes made by anything other than this extension's handlers
+ *       are not observed.
  *
  *   POST   /permission-requests/approve/<request_id>
  *       Approve the named request by splicing its ``effect`` into the
@@ -134,7 +145,9 @@
  *
  *   DELETE /permission-requests/<request_id>
  *       Remove the named pending request (used by the desktop client
- *       for the deny flow, and as a forget-without-grant escape hatch).
+ *       for the deny flow, by a remote host's machine to withdraw a
+ *       request another of the user's desktops has answered, and as a
+ *       forget-without-grant escape hatch).
  *
  * Each pending request is stored as a single JSON file at
  * ``<latchkey-directory>/permission_requests/v3/<request_id>.json``,
@@ -147,9 +160,10 @@
  * NOTE: extension requests still go through the gateway's permission
  * check, so callers must have a rule that allows them to talk to
  * ``latchkey-self.invalid`` on the relevant method/path. The agent
- * baseline grants ``POST /permission-requests`` only; the
- * ``/approve`` endpoint is meant to be reached from the desktop client
- * with admin-override credentials.
+ * baseline grants ``POST /permission-requests`` and ``DELETE
+ * /permission-requests/<request_id>`` only; the ``/approve`` endpoint
+ * is meant to be reached from the desktop client with admin-override
+ * credentials.
  *
  * There are potential race conditions but we ignore them for now.
  */
@@ -191,6 +205,9 @@ const APPROVE_PATH_PREFIX = '/permission-requests/approve/';
 const ITEM_PATH_PREFIX = '/permission-requests/';
 const REQUEST_FILE_SUFFIX = '.json';
 const VALID_REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+// The one line of the follow stream that is not a pending request: a request
+// that stopped being pending, named by its id.
+const STREAM_EVENT_DELETED = 'deleted';
 // The canonical agent-id definition lives in Python:
 // ``imbue.imbue_common.ids.RandomId._validate``, specialized by ``AgentId``
 // (prefix ``agent``). The gateway is pure Node with no Python in the request
@@ -550,6 +567,13 @@ class RequestNotFoundError extends PermissionRequestsExtensionError {
   constructor(requestId) {
     super(404, `Permission request '${requestId}' not found.`);
     this.name = 'RequestNotFoundError';
+  }
+}
+
+class RequestAlreadyPendingError extends PermissionRequestsExtensionError {
+  constructor(requestId) {
+    super(409, `Permission request '${requestId}' is already pending.`);
+    this.name = 'RequestAlreadyPendingError';
   }
 }
 
@@ -1384,10 +1408,10 @@ function validateWorkspacePayload(payload) {
 /**
  * Parse the POST /permission-requests body. The body must contain
  * ``agent_id``, ``rationale``, ``type``, and ``payload``; the payload
- * shape depends on the request type. Any other top-level field
- * (including a caller-supplied ``request_id`` or ``target`` or
- * ``effect``) is rejected so the server side stays the single source
- * of truth on identity and on what the approval would do.
+ * shape depends on the request type. ``request_id`` and ``target`` are
+ * optional (see the header comment and ``resolveTarget``); any other
+ * top-level field (``effect`` in particular) is rejected so the server
+ * side stays the single source of truth on what the approval would do.
  */
 async function parsePermissionRequestBody(request) {
   const raw = await readRequestBody(request);
@@ -1432,7 +1456,10 @@ async function parsePermissionRequestBody(request) {
       throw new InvalidRequestBodyError(`field 'target' must be an absolute path; got '${parsed.target}'.`);
     }
   }
-  ensureNoExtraneousFields('', ['agent_id', 'rationale', 'type', 'payload', 'target'], parsed);
+  if (parsed.request_id !== undefined) {
+    validateRequestId(parsed.request_id);
+  }
+  ensureNoExtraneousFields('', ['agent_id', 'rationale', 'type', 'payload', 'target', 'request_id'], parsed);
   let payload;
   switch (parsed.type) {
     case REQUEST_TYPE_PREDEFINED:
@@ -1461,6 +1488,7 @@ async function parsePermissionRequestBody(request) {
     type: parsed.type,
     payload,
     target: parsed.target,
+    request_id: parsed.request_id,
   };
 }
 
@@ -2018,10 +2046,11 @@ function writeJsonLine(response, value) {
 
 /**
  * In-process subscribers that get invoked synchronously after each
- * successful POST to /permission-requests. Each follow-stream adds itself
+ * successful POST to /permission-requests, and after each request stops
+ * being pending through this extension. Each follow-stream adds itself
  * to this set on connect and removes itself on disconnect.
  */
-const newRequestListeners = new Set();
+const streamEventListeners = new Set();
 
 /**
  * Cleanup callbacks for every active follow stream. The ``stop`` lifecycle
@@ -2030,22 +2059,26 @@ const newRequestListeners = new Set();
  */
 const activeFollowStreamCleanups = new Set();
 
-function subscribeToNewRequests(listener) {
-  newRequestListeners.add(listener);
+function subscribeToStreamEvents(listener) {
+  streamEventListeners.add(listener);
   return () => {
-    newRequestListeners.delete(listener);
+    streamEventListeners.delete(listener);
   };
 }
 
-function notifyNewRequest(value) {
-  for (const listener of newRequestListeners) {
+function notifyStreamEvent(value) {
+  for (const listener of streamEventListeners) {
     try {
       listener(value);
     } catch {
-      // A misbehaving listener must not break the POST handler or other
+      // A misbehaving listener must not break the handler or other
       // listeners.
     }
   }
+}
+
+function notifyRequestDeleted(requestId) {
+  notifyStreamEvent({ event: STREAM_EVENT_DELETED, request_id: requestId });
 }
 
 /**
@@ -2055,7 +2088,7 @@ function streamPermissionRequests(request, response) {
   response.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8' });
   response.flushHeaders();
 
-  const unsubscribe = subscribeToNewRequests((value) => {
+  const unsubscribe = subscribeToStreamEvents((value) => {
     writeJsonLine(response, value);
   });
   for (const value of listPermissionRequests()) {
@@ -2154,13 +2187,23 @@ async function handleCreateRequest(request, response, context) {
   const body = await parsePermissionRequestBody(request);
   const target = resolveTarget(context, body.target);
   const effect = computeEffect(body.type, body.payload);
-  // Loop on the astronomically rare UUID collision so we never overwrite
-  // an existing pending request.
-  let requestId = generateRequestId();
-  let filePath = requestFilePath(requestId);
-  while (existsSync(filePath)) {
+  let requestId;
+  let filePath;
+  if (body.request_id !== undefined) {
+    requestId = body.request_id;
+    filePath = requestFilePath(requestId);
+    if (existsSync(filePath)) {
+      throw new RequestAlreadyPendingError(requestId);
+    }
+  } else {
+    // Loop on the astronomically rare UUID collision so we never overwrite
+    // an existing pending request.
     requestId = generateRequestId();
     filePath = requestFilePath(requestId);
+    while (existsSync(filePath)) {
+      requestId = generateRequestId();
+      filePath = requestFilePath(requestId);
+    }
   }
   validateRequestId(requestId);
   // We rename the wire field ``type`` to ``request_type`` here. The
@@ -2178,7 +2221,7 @@ async function handleCreateRequest(request, response, context) {
     created_at: new Date().toISOString(),
   };
   writeJsonFileAtomic(filePath, persisted, 0o600);
-  notifyNewRequest(persisted);
+  notifyStreamEvent(persisted);
   sendJson(response, 201, persisted);
 }
 
@@ -2209,6 +2252,7 @@ function handleDeleteRequest(response, rawRequestId) {
       `Failed to delete ${filePath}: ${message}`,
     );
   }
+  notifyRequestDeleted(requestId);
   response.writeHead(204);
   response.end();
 }
@@ -2494,6 +2538,7 @@ function handleApproveRequest(response, rawRequestId, override = null) {
       `Approved ${requestId} but failed to remove pending request file ${filePath}: ${message}`,
     );
   }
+  notifyRequestDeleted(requestId);
   sendJson(response, 200, { request_id: requestId, target, applied: updated });
 }
 

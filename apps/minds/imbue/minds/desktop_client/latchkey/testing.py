@@ -20,6 +20,7 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import PermissionRequestRefusedError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
@@ -77,6 +78,9 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
       extension uses, so tests that assert on the post-grant
       permissions file work unchanged.
     * ``delete_permission_request`` records the deleted ids in memory.
+    * ``file_permission_request_as_filed_elsewhere`` records the body and
+      target under the given id (``filed_elsewhere``), refusing the ids in
+      ``refused_request_ids`` as the gateway would a bad body.
     * ``iter_permission_requests`` raises -- streaming is not modelled
       by this fake; tests that need streaming should use a custom
       subclass or talk to a real gateway.
@@ -94,6 +98,12 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
     _deleted_rule_calls: list[tuple[Path, str]] = PrivateAttr(default_factory=list)
     # Requests filed through this fake, by id, awaiting approval.
     _pending_file_shares: dict[str, tuple[str, FileSharingAccess, Path]] = PrivateAttr(default_factory=dict)
+    # Requests filed here as a remote machine recorded them, by id: the body and the target.
+    _filed_elsewhere: dict[str, tuple[dict[str, JsonValue], Path]] = PrivateAttr(default_factory=dict)
+    refused_request_ids: tuple[str, ...] = Field(
+        default=(),
+        description="Request ids this fake refuses to file as filed elsewhere, as the gateway would a bad body.",
+    )
 
     @property
     def set_calls(self) -> tuple[RecordedSetPermissionCall, ...]:
@@ -104,6 +114,11 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
     def deleted_request_ids(self) -> tuple[str, ...]:
         """Request ids the test code asked to delete, in arrival order."""
         return tuple(self._deleted_request_ids)
+
+    @property
+    def filed_elsewhere(self) -> dict[str, tuple[dict[str, JsonValue], Path]]:
+        """The requests filed here under a machine's id: ``(body, target)`` by request id."""
+        return dict(self._filed_elsewhere)
 
     @property
     def deleted_rule_calls(self) -> tuple[tuple[Path, str], ...]:
@@ -225,6 +240,16 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
 
     def delete_permission_request(self, request_id: str) -> None:
         self._deleted_request_ids.append(request_id)
+
+    def file_permission_request_as_filed_elsewhere(
+        self,
+        body: Mapping[str, JsonValue],
+        request_id: str,
+        target: Path,
+    ) -> None:
+        if request_id in self.refused_request_ids:
+            raise PermissionRequestRefusedError(f"refused permission request {request_id}")
+        self._filed_elsewhere[request_id] = (dict(body), target)
 
 
 class FixedHostBackendResolver(StaticBackendResolver):

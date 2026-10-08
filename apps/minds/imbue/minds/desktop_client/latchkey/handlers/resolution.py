@@ -2,13 +2,16 @@
 
 Lives alongside the handlers (like :mod:`.messaging`) so all four import
 a sibling rather than each other. Resolving a request means exactly
-three things, in order: durably record the verdict (the response event
+four things, in order: durably record the verdict (the response event
 log plus its in-memory index -- the authority every pending/resolved
-read consults), nudge the agent with an id-and-verdict-tagged message so
-its transcript records the outcome and it resumes, and wake the chrome
-SSE so every surface repaints. Gateway-record removal is NOT here: how
-the gateway forgets a request differs per flow (approve consumes it,
-deny DELETEs it), so that stays with each handler.
+read consults), ask the machine that filed the request (if any) to forget
+it and withdraw it from the user's other desktops, off this path and
+best-effort (see :mod:`imbue.minds.desktop_client.latchkey.machine_request_sync`),
+nudge the agent with an id-and-verdict-tagged message so its transcript
+records the outcome and it resumes, and wake the chrome SSE so every
+surface repaints. Gateway-record removal is NOT here: how this desktop's
+gateway forgets a request differs per flow (approve consumes it, deny
+DELETEs it), so that stays with each handler.
 """
 
 from pathlib import Path
@@ -53,6 +56,9 @@ def resolve_request(
             "The pending-requests view is not configured; a verdict cannot be indexed."
         )
     pending.record_response(response_event)
+    machine_request_sync = get_state().machine_request_sync
+    if machine_request_sync is not None:
+        machine_request_sync.forget_in_background(request_event_id, agent_id)
     backend_resolver: BackendResolverInterface = get_state().backend_resolver
     # The request names its chat; a seeded chat's id is not an agent's, so the nudge runs on
     # the agent the resolver knows for it (the chat's newest member) and names the chat by id.

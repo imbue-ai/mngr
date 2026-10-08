@@ -11,6 +11,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
+from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
 from imbue.mngr_latchkey.migrations.mock_permissions_migration_test import RuleAppendingMigration
 from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
@@ -710,3 +711,98 @@ def test_connecting_a_custom_service_this_computer_has_not_registered_is_refused
         credentials.connect_service("custom_example_com", "")
 
     assert as_vps(outer).recorded == []
+
+
+# The permission requests the machine keeps for the desktops.
+
+
+_FILED_RECORD = (
+    '{"request_id":"req-7a1c","devices":"*","created_at":"2026-10-07T09:00:00.000Z",'
+    '"body":{"agent_id":"agent-' + "0" * 32 + '","rationale":"please","type":"accounts","payload":{}}}'
+)
+
+
+def test_listing_filed_requests_reads_every_record_the_machine_keeps(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    vps = as_vps(outer)
+    vps.hold_filed_request("req-7a1c", _FILED_RECORD + "\n")
+    vps.hold_filed_request(
+        "req-9b2d",
+        '{"request_id":"req-9b2d","devices":["desktop-1"],"created_at":"2026-10-07T09:01:00Z","body":{"x":1}}',
+    )
+    credentials = _credentials_of(tmp_path, host_id, outer)
+
+    filed = credentials.list_filed_permission_requests()
+
+    assert [(entry.request_id, entry.devices) for entry in filed] == [("req-7a1c", "*"), ("req-9b2d", ("desktop-1",))]
+    assert filed[0].body["rationale"] == "please"
+    assert filed[0].is_for_desktop(DesktopDeviceId("desktop-anyone"))
+    assert filed[1].is_for_desktop(DesktopDeviceId("desktop-1"))
+    assert not filed[1].is_for_desktop(DesktopDeviceId("desktop-2"))
+    assert filed[0].created_at.year == 2026
+
+
+def test_listing_filed_requests_of_a_machine_that_keeps_none_is_empty(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+
+    assert _credentials_of(tmp_path, host_id, outer).list_filed_permission_requests() == ()
+
+
+def test_forgetting_a_request_drops_the_machines_copy_and_withdraws_it_from_every_desktop(tmp_path: Path) -> None:
+    """The withdrawal is one DELETE through the machine's own gateway, addressed to all desktops."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    vps = as_vps(outer)
+    vps.hold_filed_request("req-7a1c", _FILED_RECORD)
+    kept = vps.hold_filed_request("req-kept", _FILED_RECORD.replace("req-7a1c", "req-kept"))
+    vps.run_gateway_at("172.17.0.1", "machine-listen-password-3350")
+
+    _credentials_of(tmp_path, host_id, outer).forget_permission_request("req-7a1c")
+
+    assert list(vps.filed_requests()) == [kept.name]
+    (curl_call,) = vps.curl_calls()
+    assert "-X DELETE" in curl_call
+    assert "X-Latchkey-Gateway-Password: machine-listen-password-3350" in curl_call
+    assert "X-Latchkey-Device: *" in curl_call
+    assert curl_call.endswith("http://172.17.0.1:1989/permission-requests/req-7a1c")
+    # The password rode in the command's environment on the machine, never in the command this computer sent.
+    assert not vps.has_received("machine-listen-password-3350")
+
+
+def test_forgetting_a_request_is_not_failed_by_a_gateway_that_refuses_the_withdrawal(tmp_path: Path) -> None:
+    """A desktop the gateway could not reach syncs the request away itself; the machine's copy is gone either way."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    vps = as_vps(outer)
+    vps.hold_filed_request("req-7a1c", _FILED_RECORD)
+    vps.run_gateway_at("172.17.0.1", "machine-listen-password-3350")
+    vps.answer_curl_with("503")
+
+    _credentials_of(tmp_path, host_id, outer).forget_permission_request("req-7a1c")
+
+    assert vps.filed_requests() == {}
+    assert len(vps.curl_calls()) == 1
+
+
+def test_forgetting_a_request_on_a_machine_whose_gateway_is_down_drops_the_copy_without_a_withdrawal(
+    tmp_path: Path,
+) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    vps = as_vps(outer)
+    vps.hold_filed_request("req-7a1c", _FILED_RECORD)
+
+    _credentials_of(tmp_path, host_id, outer).forget_permission_request("req-7a1c")
+
+    assert vps.filed_requests() == {}
+    assert vps.curl_calls() == []
+
+
+def test_forgetting_a_request_with_an_unsafe_id_is_refused_by_the_machine(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+
+    with pytest.raises(RemoteGatewayError, match="refusing a request id with unexpected characters"):
+        _credentials_of(tmp_path, host_id, outer).forget_permission_request("../escape")

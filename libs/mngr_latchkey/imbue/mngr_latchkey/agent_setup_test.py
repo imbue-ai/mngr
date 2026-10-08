@@ -138,6 +138,7 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
         {
             "latchkey-self": [
                 "latchkey-self-create-permission-request",
+                "latchkey-self-delete-permission-request",
                 "latchkey-self-read-self-permissions",
                 "latchkey-self-read-available-permissions",
                 "latchkey-self-read-devices",
@@ -188,6 +189,12 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert schemas["latchkey-self-create-permission-request"]["properties"] == {
         "method": {"const": "POST"},
         "path": {"const": "/permission-requests"},
+    }
+    # Withdrawing a request is by id, so the path is a pattern over the ids the
+    # extension accepts rather than a ``const``.
+    assert schemas["latchkey-self-delete-permission-request"]["properties"] == {
+        "method": {"const": "DELETE"},
+        "path": {"type": "string", "pattern": r"^/permission-requests/[A-Za-z0-9._-]+$"},
     }
     assert schemas["latchkey-self-read-self-permissions"]["properties"] == {
         "method": {"const": "GET"},

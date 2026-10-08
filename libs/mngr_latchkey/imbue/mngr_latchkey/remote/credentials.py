@@ -50,12 +50,15 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import custom_service_registration_entries
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.custom_services import is_custom_service_name
+from imbue.mngr_latchkey.filed_permission_requests import FiledPermissionRequest
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigration
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationError
 from imbue.mngr_latchkey.migrations.runner import PERMISSIONS_MIGRATIONS
 from imbue.mngr_latchkey.migrations.runner import migrate_permissions
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
+from imbue.mngr_latchkey.remote._machine import forget_permission_request
+from imbue.mngr_latchkey.remote._machine import read_filed_permission_requests
 
 # Re-exported (the redundant alias marks them as such): the read side of the
 # machine store that outside consumers -- notably the Minds desktop app -- are
@@ -284,6 +287,37 @@ class MachineCredentials(FrozenModel):
         from showing an account the machine no longer has.
         """
         clear_remote_credentials(self.host, self.host_id, service_name, account, self._machine_key())
+
+    def list_filed_permission_requests(self) -> tuple[FiledPermissionRequest, ...]:
+        """The permission requests the machine keeps for the user's desktops (see :mod:`imbue.mngr_latchkey.filed_permission_requests`).
+
+        What a desktop syncs its own pending requests against: a request the
+        machine keeps that this desktop does not have is one it was offline for,
+        and one this desktop has that the machine no longer keeps was answered
+        on another of the user's desktops. Needs no key: the records are the
+        agents' own requests, not credential material.
+
+        Raises:
+            RemoteGatewayError: when the machine cannot be read.
+        """
+        return read_filed_permission_requests(
+            self.host, failure_description=f"list the permission requests host {self.host_id} keeps"
+        )
+
+    def forget_permission_request(self, request_id: str) -> None:
+        """Drop a permission request the user answered here from the machine, and withdraw it from the other desktops.
+
+        The machine forwards the withdrawal to every desktop connected to it
+        through its own gateway, so a desktop showing the request sees it go;
+        one that is not connected syncs it away when it next is. Needs no key,
+        like every operation on the requests.
+
+        Raises:
+            RemoteGatewayError: when the machine does not take it.
+        """
+        forget_permission_request(
+            self.host, request_id, failure_description=f"forget permission request {request_id} on host {self.host_id}"
+        )
 
     def _config_for(self, service_name: str) -> str:
         """This package's half of the machine's ``config.json``, as the connect of ``service_name`` should leave it.

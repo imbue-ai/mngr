@@ -6,8 +6,11 @@ gateway and the reverse tunnel, the wrapper scripts they run, the forwarding
 extension the gateway loads, and the commands this computer drives the
 machine through afterwards -- ``mngr-latchkey read-state``, which assembles
 what the machine holds, ``mngr-latchkey apply-state``, which makes the
-machine match a document handed to it, and ``mngr-latchkey announce-device``,
-which records this computer as a desktop connected to the machine (see
+machine match a document handed to it, ``mngr-latchkey announce-device``,
+which records this computer as a desktop connected to the machine,
+``mngr-latchkey list-requests``, which lists the permission requests the
+machine keeps for the user's desktops, and ``mngr-latchkey forget-request``,
+which drops one of them and withdraws it from every connected desktop (see
 :mod:`imbue.mngr_latchkey.remote._machine`).
 Its ``postinst`` installs the pinned latchkey CLI and the curl shims, loads
 the nftables policy that keeps the machine's bridge-bound services on the
@@ -69,12 +72,17 @@ from imbue.mngr_latchkey.devices import DEVICES_DIR_ENV_VAR
 from imbue.mngr_latchkey.devices import DEVICES_DIR_NAME
 from imbue.mngr_latchkey.devices import DEVICE_ANNOUNCEMENT_INTERVAL_ENV_VAR
 from imbue.mngr_latchkey.devices import DEVICE_ANNOUNCEMENT_INTERVAL_SECONDS
+from imbue.mngr_latchkey.devices import DEVICE_HEADER
+from imbue.mngr_latchkey.devices import DEVICE_HEADER_ALL_DEVICES
 from imbue.mngr_latchkey.devices import DEVICE_RECORD_SUFFIX
 from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_FIREWALL_UNIT_NAME
 from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_NFT_POLICY_FILENAME
 from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_NFT_TABLE
 from imbue.mngr_latchkey.docker_bridge import DOCKER_BRIDGE_INTERFACE_NAME
 from imbue.mngr_latchkey.docker_bridge import NFT_BINARY_PATH
+from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUESTS_DIR_NAME
+from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUESTS_SCHEMA_VERSION
+from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUEST_FILE_SUFFIX
 from imbue.mngr_latchkey.owner_exec_vm import VM_EXEC_PORT
 from imbue.mngr_latchkey.remote._machine import ANSWER_PREFIX
 from imbue.mngr_latchkey.remote._machine import DIFFERENT_MACHINE_KEY_MESSAGE
@@ -206,6 +214,11 @@ REMOTE_EXTENSIONS_DIR_NAME: Final[str] = "extensions"
 # it wrote beside the store, and the suffix it staged the extension under.
 _LEGACY_GATEWAY_RUN_SCRIPT_FILENAME: Final[str] = "gateway_run.sh"
 _LEGACY_EXTENSION_CANDIDATE_SUFFIX: Final[str] = ".candidate"
+
+# How long ``forget-request`` gives the machine's own gateway to withdraw a
+# request from every connected desktop. Each desktop answers over its tunnel in
+# well under a second; a desktop whose tunnel is dying is what the budget is for.
+_FORGET_REQUEST_TIMEOUT_SECONDS: Final[int] = 20
 
 # The ports the machine binds on its docker bridge address, which the shipped
 # nftables policy confines to that bridge (and loopback): the gateway's and the
@@ -401,6 +414,16 @@ class RemotePackageContext(FrozenModel):
     )
     device_record_suffix: str = Field(description="The suffix of a desktop's record file, after its device id.")
     devices_dir_env_var: str = Field(description="How the gateway's extension is told where the records are.")
+    device_header: str = Field(description="The header naming the desktops a forwarded request is for.")
+    all_devices: str = Field(description="The header value naming every desktop the machine knows.")
+    filed_requests_dir_name: str = Field(
+        description="Where the machine keeps the permission requests it forwarded, under its latchkey directory."
+    )
+    filed_requests_schema_version: str = Field(description="The version segment under that directory.")
+    filed_request_file_suffix: str = Field(description="The suffix of a filed request's record, after its id.")
+    forget_request_timeout_seconds: int = Field(
+        description="How long ``forget-request`` waits for the gateway to withdraw a request from the desktops."
+    )
     device_announcement_interval_env_var: str = Field(
         description="How the extension is told how often a connected desktop refreshes its record."
     )
@@ -506,6 +529,12 @@ def remote_package_context(layout: RemotePackageLayout) -> RemotePackageContext:
         devices_dir_name=DEVICES_DIR_NAME,
         device_record_suffix=DEVICE_RECORD_SUFFIX,
         devices_dir_env_var=DEVICES_DIR_ENV_VAR,
+        device_header=DEVICE_HEADER,
+        all_devices=DEVICE_HEADER_ALL_DEVICES,
+        filed_requests_dir_name=FILED_REQUESTS_DIR_NAME,
+        filed_requests_schema_version=FILED_REQUESTS_SCHEMA_VERSION,
+        filed_request_file_suffix=FILED_REQUEST_FILE_SUFFIX,
+        forget_request_timeout_seconds=_FORGET_REQUEST_TIMEOUT_SECONDS,
         device_announcement_interval_env_var=DEVICE_ANNOUNCEMENT_INTERVAL_ENV_VAR,
         device_announcement_interval_seconds=DEVICE_ANNOUNCEMENT_INTERVAL_SECONDS,
         sshd_client_alive_interval_seconds=_SSHD_CLIENT_ALIVE_INTERVAL_SECONDS,

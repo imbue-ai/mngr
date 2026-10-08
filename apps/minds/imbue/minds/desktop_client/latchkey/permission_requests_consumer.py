@@ -2,16 +2,19 @@
 
 Spawned at desktop-client startup, owns a daemon thread that holds a
 long-lived ``GET /permission-requests?follow=true`` connection open
-against the shared latchkey gateway and fires ``on_new_request`` the
-first time each pending request is seen. That is its whole job: pending
-state itself is read on demand from the gateway (see
+against the shared latchkey gateway and fires ``on_change`` the first
+time each pending request is seen, and whenever one stops being pending
+through the gateway (approved or deleted there, which is how a request
+answered on another of the user's desktops leaves this one). That is its
+whole job: pending state itself is read on demand from the gateway (see
 ``latchkey/pending_requests.py``), so the signal only wakes the chrome
 SSE -- every surface then re-reads.
 
 The stream re-emits every still-pending request on each reconnect (and
 reconnects every couple of seconds when idle), so first-sight dedup by
 ``request_id`` keeps the signal quiet when nothing changed. The seen-set
-is thread-local to the consumer and append-only.
+is thread-local to the consumer; a deletion takes its id back out, so a
+request filed again under the same id is news again.
 """
 
 import threading
@@ -27,6 +30,7 @@ from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import PermissionRequestDeleted
 
 # Backoff bounds for the reconnect loop. The lower bound keeps the
 # consumer responsive when the gateway is just slow to start; the upper
@@ -49,10 +53,10 @@ class PermissionRequestsConsumer(MutableModel):
         frozen=True,
         description="HTTP client used to talk to the gateway's bundled extension endpoints.",
     )
-    on_new_request: Callable[[], None] = Field(
+    on_change: Callable[[], None] = Field(
         description=(
-            "Invoked from the consumer thread the first time each pending request is seen; "
-            "wakes whatever re-reads pending state (in production, the chrome SSE)."
+            "Invoked from the consumer thread the first time each pending request is seen and whenever one "
+            "stops being pending; wakes whatever re-reads pending state (in production, the chrome SSE)."
         ),
     )
 
@@ -92,17 +96,21 @@ class PermissionRequestsConsumer(MutableModel):
                 for streamed in self.gateway_client.iter_permission_requests():
                     if self._stop_event.is_set():
                         return
-                    if streamed.request_id in self._seen_request_ids:
+                    if isinstance(streamed, PermissionRequestDeleted):
+                        self._seen_request_ids.discard(streamed.request_id)
+                        logger.info("Streamed permission request {} is no longer pending", streamed.request_id)
+                    elif streamed.request_id in self._seen_request_ids:
                         continue
-                    self._seen_request_ids.add(streamed.request_id)
-                    logger.info(
-                        "Streamed permission request for agent {} (request_type={}, request_id={})",
-                        streamed.agent_id,
-                        streamed.request_type,
-                        streamed.request_id,
-                    )
+                    else:
+                        self._seen_request_ids.add(streamed.request_id)
+                        logger.info(
+                            "Streamed permission request for agent {} (request_type={}, request_id={})",
+                            streamed.agent_id,
+                            streamed.request_type,
+                            streamed.request_id,
+                        )
                     try:
-                        self.on_new_request()
+                        self.on_change()
                     except (OSError, RuntimeError) as e:
                         logger.opt(exception=e).error("permission-request change signal failed: {}", e)
                     delay = _RECONNECT_MIN_DELAY_SECONDS

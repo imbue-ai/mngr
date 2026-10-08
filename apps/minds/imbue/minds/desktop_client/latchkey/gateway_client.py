@@ -103,6 +103,16 @@ class LatchkeyGatewayClientNotInitializedError(LatchkeyGatewayClientError):
     """Raised when the client isn't initialized yet."""
 
 
+class PermissionRequestRefusedError(LatchkeyGatewayClientError):
+    """Raised when the gateway refuses the body of a permission request it is asked to file (an HTTP 400).
+
+    The request is not one any gateway will ever take, so the caller has to
+    treat it as such rather than retry it. Every other failure, a 403 for a
+    caller the gateway does not let name the target among them, says nothing
+    about the body and stays a :class:`LatchkeyGatewayClientError`.
+    """
+
+
 class PredefinedRequestPayload(FrozenModel):
     """Payload for ``type == "predefined"`` permission requests."""
 
@@ -393,6 +403,28 @@ class StreamedPermissionRequest(FrozenModel):
     )
 
 
+class PermissionRequestDeleted(FrozenModel):
+    """The one follow-stream line that is not a pending request: a request that stopped being pending.
+
+    The gateway writes it when a request is approved or deleted through it,
+    as ``{"event": "deleted", "request_id": "..."}``.
+    """
+
+    request_id: str = Field(description="The request that is no longer pending.")
+
+
+# The ``event`` a stream line carries when it is not a pending request.
+_STREAM_EVENT_DELETED: Final[str] = "deleted"
+
+# The HTTP status the gateway answers a request already pending under the same
+# id with; what a desktop filing a request it learned of twice gets.
+_HTTP_STATUS_CONFLICT: Final[int] = 409
+
+# The one status that says the body (or the id) of a permission request is not
+# acceptable; the other 4xx are about the caller or the route, not the request.
+_HTTP_STATUS_BAD_REQUEST: Final[int] = 400
+
+
 class LatchkeyGatewayClient(MutableModel):
     """Synchronous client for the latchkey gateway's HTTP extensions.
 
@@ -571,14 +603,16 @@ class LatchkeyGatewayClient(MutableModel):
             return httpx.Client(timeout=_FOLLOW_READ_TIMEOUT, transport=self._transport)
         return httpx.Client(timeout=_FOLLOW_READ_TIMEOUT)
 
-    def iter_permission_requests(self) -> Iterator[StreamedPermissionRequest]:
-        """Yield every existing + future pending permission request until the connection drops.
+    def iter_permission_requests(self) -> Iterator[StreamedPermissionRequest | PermissionRequestDeleted]:
+        """Yield every existing + future pending permission request, and every request that stops being pending.
 
         Connects to ``GET /permission-requests?follow=true`` and parses
         each newline-delimited JSON line as a
-        :class:`StreamedPermissionRequest`. The iterator is exhausted
-        (raising :class:`LatchkeyGatewayClientError` on any HTTP error)
-        when the gateway closes the connection or a network error
+        :class:`StreamedPermissionRequest`, or as a
+        :class:`PermissionRequestDeleted` for the line the gateway writes
+        when a request is approved or deleted through it. The iterator is
+        exhausted (raising :class:`LatchkeyGatewayClientError` on any HTTP
+        error) when the gateway closes the connection or a network error
         terminates the stream.
 
         ``httpx.ReadTimeout`` is treated specially: the stream uses a
@@ -624,7 +658,7 @@ class LatchkeyGatewayClient(MutableModel):
                     response.raise_for_status()
                     for raw_line in response.iter_lines():
                         parsed = _parse_permission_request_line(raw_line)
-                        if parsed is not None:
+                        if isinstance(parsed, StreamedPermissionRequest):
                             requests.append(parsed)
         except httpx.HTTPError as e:
             raise self._wrap_transport_error(e, "GET /permission-requests failed") from e
@@ -679,20 +713,14 @@ class LatchkeyGatewayClient(MutableModel):
         and mount-root checks -- and a second copy of that in Python would be a
         security decision free to drift.
         """
-        self.ensure_initialized()
-        url = f"{self._require_base_url().rstrip('/')}/permission-requests"
-        body = {
+        body: dict[str, JsonValue] = {
             "agent_id": agent_id,
             "rationale": _MINDS_SHARE_RATIONALE,
             "type": "file-sharing",
             "payload": {"path": path, "access": str(access)},
             "target": str(target),
         }
-        try:
-            with self._one_shot_client() as client:
-                response = client.post(url, headers=self._build_headers(), json=body)
-        except httpx.HTTPError as e:
-            raise self._wrap_transport_error(e, f"POST {url} failed") from e
+        url, response = self._post_permission_request(body)
         if response.status_code >= 400:
             raise LatchkeyGatewayClientError(
                 f"POST {url} returned {response.status_code}: {response.text.strip()}",
@@ -701,6 +729,57 @@ class LatchkeyGatewayClient(MutableModel):
         if not isinstance(request_id, str) or not request_id:
             raise LatchkeyGatewayClientError(f"POST {url} returned no request id: {response.text.strip()}")
         return request_id
+
+    def file_permission_request_as_filed_elsewhere(
+        self,
+        body: Mapping[str, JsonValue],
+        request_id: str,
+        target: Path,
+    ) -> None:
+        """File on this gateway a request an agent filed with a remote host's machine, under the id the machine gave it.
+
+        How a desktop that was offline when the request was filed comes to
+        hold it (see :mod:`imbue.mngr_latchkey.filed_permission_requests`):
+        ``body`` is the agent's request exactly as the machine recorded it,
+        and ``target`` the workspace's permissions file here, which only Imbue
+        Studio may name (see :meth:`create_file_sharing_request`). The gateway
+        judges the body as it would have live. A request already pending here
+        under ``request_id`` is the one being filed, so a conflict is success.
+
+        Raises:
+            PermissionRequestRefusedError: when the gateway refuses the body
+                (a 400), so no desktop will ever take it.
+            LatchkeyGatewayClientError: on any other failure, which says
+                nothing about the body and is worth retrying.
+        """
+        url, response = self._post_permission_request({**body, "request_id": request_id, "target": str(target)})
+        if response.status_code == _HTTP_STATUS_CONFLICT:
+            logger.debug("Permission request {} is already pending on the gateway", request_id)
+            return
+        if response.status_code == _HTTP_STATUS_BAD_REQUEST:
+            raise PermissionRequestRefusedError(
+                f"POST {url} refused permission request {request_id} with {response.status_code}: "
+                f"{response.text.strip()}"
+            )
+        if response.status_code >= 400:
+            raise LatchkeyGatewayClientError(
+                f"POST {url} returned {response.status_code}: {response.text.strip()}",
+            )
+
+    def _post_permission_request(self, body: Mapping[str, JsonValue]) -> tuple[str, httpx.Response]:
+        """``POST /permission-requests`` with ``body``, returning the URL posted to and the gateway's answer.
+
+        Raises:
+            LatchkeyGatewayClientError: when the gateway cannot be reached.
+        """
+        self.ensure_initialized()
+        url = f"{self._require_base_url().rstrip('/')}/permission-requests"
+        try:
+            with self._one_shot_client() as client:
+                response = client.post(url, headers=self._build_headers(), json=dict(body))
+        except httpx.HTTPError as e:
+            raise self._wrap_transport_error(e, f"POST {url} failed") from e
+        return url, response
 
     def approve_permission_request(
         self,
@@ -881,7 +960,7 @@ class LatchkeyGatewayClient(MutableModel):
             )
 
 
-def _parse_permission_request_line(raw_line: str) -> StreamedPermissionRequest | None:
+def _parse_permission_request_line(raw_line: str) -> StreamedPermissionRequest | PermissionRequestDeleted | None:
     """Parse one permission-requests JSONL line, logging and skipping bad ones.
 
     A single malformed record must never take down a whole read: the gateway
@@ -896,7 +975,10 @@ def _parse_permission_request_line(raw_line: str) -> StreamedPermissionRequest |
     except json.JSONDecodeError as e:
         logger.warning("Could not parse permission-requests JSONL line {!r}: {}", line, e)
         return None
+    is_deletion = isinstance(data, dict) and data.get("event") == _STREAM_EVENT_DELETED
     try:
+        if is_deletion:
+            return PermissionRequestDeleted.model_validate({"request_id": data.get("request_id")})
         return StreamedPermissionRequest.model_validate(data)
     except ValueError as e:
         logger.warning("permission-requests JSONL line had unexpected shape {!r}: {}", line, e)

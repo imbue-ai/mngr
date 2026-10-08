@@ -10,8 +10,9 @@ them. What the scripts shell out to that a test cannot run for real is faked
 on PATH: ``latchkey`` (a tiny store-backed CLI, below), ``docker`` (finds the
 one container, reports the mappings it was created with, and runs an exec in a
 fake container home), ``ssh-keygen``
-(mints a stand-in keypair), ``supervisorctl`` (records what it was asked) and
-the one ``stat`` probe that says whether the secrets directory is RAM-backed.
+(mints a stand-in keypair), ``supervisorctl`` (records what it was asked),
+``curl`` (records what the gateway was asked and answers with a canned status)
+and the one ``stat`` probe that says whether the secrets directory is RAM-backed.
 The install itself (apt, dpkg) is faked too: the bootstrap command unpacks
 whatever ``.deb`` was last uploaded.
 
@@ -53,17 +54,24 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import PERMISSIONS_CONFIG_FILENAME
 from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.devices import DEVICES_DIR_NAME
+from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUESTS_DIR_NAME
+from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUESTS_SCHEMA_VERSION
+from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUEST_FILE_SUFFIX
 from imbue.mngr_latchkey.remote._machine import ANSWER_PREFIX
 from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine import GATEWAY_LISTEN_PASSWORD_FILENAME
 from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME
 from imbue.mngr_latchkey.remote._machine import _ANNOUNCE_DEVICE_SUBCOMMAND
+from imbue.mngr_latchkey.remote._machine import _ANSWER_FILED_PERMISSION_REQUESTS
 from imbue.mngr_latchkey.remote._machine import _ANSWER_HAS_CONTAINER_TUNNEL_KEY
 from imbue.mngr_latchkey.remote._machine import _ANSWER_HAS_CREDENTIAL_STORE
 from imbue.mngr_latchkey.remote._machine import _ANSWER_HOME
 from imbue.mngr_latchkey.remote._machine import _ANSWER_PACKAGE_VERSION
 from imbue.mngr_latchkey.remote._machine import _APPLY_STATE_SUBCOMMAND
+from imbue.mngr_latchkey.remote._machine import _FORGET_REQUEST_SUBCOMMAND
+from imbue.mngr_latchkey.remote._machine import _LIST_REQUESTS_SUBCOMMAND
 from imbue.mngr_latchkey.remote._machine import _READ_STATE_SUBCOMMAND
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
@@ -231,6 +239,24 @@ class FakeVps(MutableModel):
         """Make every supervisorctl call naming ``program_name`` fail, as when the program does not come up."""
         (self.root / "supervisorctl.fail").write_text(program_name)
 
+    def run_gateway_at(self, listen_host: str, listen_password: str) -> None:
+        """Give the machine a running gateway: the address apply-state wrote for it and the password it holds callers to."""
+        self.latchkey_dir.mkdir(parents=True, exist_ok=True)
+        (self.latchkey_dir / GATEWAY_CONF_FILENAME).write_text(f"LK_GATEWAY_LISTEN_HOST='{listen_host}'\n")
+        self.run_under(GATEWAY_LISTEN_PASSWORD_FILENAME, listen_password)
+
+    def hold_filed_request(self, request_id: str, record_json: str) -> Path:
+        """Leave the machine keeping a permission request its gateway forwarded, as its extension records one."""
+        directory = self.latchkey_dir / FILED_REQUESTS_DIR_NAME / FILED_REQUESTS_SCHEMA_VERSION
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{request_id}{FILED_REQUEST_FILE_SUFFIX}"
+        path.write_text(record_json)
+        return path
+
+    def answer_curl_with(self, status: str) -> None:
+        """Make every curl call print ``status`` as the HTTP status of its answer."""
+        (self.root / "curl.status").write_text(status)
+
     # The machine, as a test reads it back.
 
     def secret(self, filename: str) -> str | None:
@@ -312,6 +338,15 @@ class FakeVps(MutableModel):
     def docker_calls(self) -> list[str]:
         path = self.root / "docker.log"
         return path.read_text().splitlines() if path.is_file() else []
+
+    def curl_calls(self) -> list[str]:
+        path = self.root / "curl.log"
+        return path.read_text().splitlines() if path.is_file() else []
+
+    def filed_requests(self) -> dict[str, str]:
+        """The permission requests the machine keeps, by file name."""
+        directory = self.latchkey_dir / FILED_REQUESTS_DIR_NAME / FILED_REQUESTS_SCHEMA_VERSION
+        return {path.name: path.read_text() for path in sorted(directory.iterdir())} if directory.is_dir() else {}
 
     def container_authorized_keys(self, container: str, user: str) -> str:
         path = self.root / "containers" / container / user / ".ssh" / "authorized_keys"
@@ -439,6 +474,7 @@ class FakeVps(MutableModel):
             ("docker", _FAKE_DOCKER_SOURCE),
             ("ssh-keygen", _FAKE_SSH_KEYGEN_SOURCE),
             ("supervisorctl", _FAKE_SUPERVISORCTL_SOURCE),
+            ("curl", _FAKE_CURL_SOURCE),
             ("stat", _FAKE_STAT_SOURCE.replace("REAL_STAT", real_stat)),
         ):
             script = bin_dir / name
@@ -578,8 +614,12 @@ def canned_machine_answer(command: str, home: Path) -> CommandResult | None:
         }
         lines = [f"{ANSWER_PREFIX}{name}={base64.b64encode(value).decode('ascii')}" for name, value in answers.items()]
         return CommandResult(stdout="\n".join((*lines, OUTCOME_DONE_MARKER)) + "\n", stderr="", success=True)
-    if first_line.startswith(f"{REMOTE_COMMAND_NAME} {_APPLY_STATE_SUBCOMMAND}") or first_line.startswith(
-        f"{REMOTE_COMMAND_NAME} {_ANNOUNCE_DEVICE_SUBCOMMAND}"
+    if first_line.startswith(f"{REMOTE_COMMAND_NAME} {_LIST_REQUESTS_SUBCOMMAND}"):
+        answer = f"{ANSWER_PREFIX}{_ANSWER_FILED_PERMISSION_REQUESTS}={base64.b64encode(b'[]').decode('ascii')}"
+        return CommandResult(stdout=f"{answer}\n{OUTCOME_DONE_MARKER}\n", stderr="", success=True)
+    if any(
+        first_line.startswith(f"{REMOTE_COMMAND_NAME} {subcommand}")
+        for subcommand in (_APPLY_STATE_SUBCOMMAND, _ANNOUNCE_DEVICE_SUBCOMMAND, _FORGET_REQUEST_SUBCOMMAND)
     ):
         return CommandResult(stdout=f"{OUTCOME_DONE_MARKER}\n", stderr="", success=True)
     return None
@@ -753,6 +793,15 @@ _FAKE_SUPERVISORCTL_SOURCE = (
     'if [ -f "$FAKE_VPS_ROOT/supervisorctl.fail" ]; then\n'
     '  case " $* " in *" $(cat "$FAKE_VPS_ROOT/supervisorctl.fail") "*) exit 1 ;; esac\n'
     "fi\n"
+)
+
+# Records every call (one line of its arguments) and prints the status a test
+# chose (``answer_curl_with``), 204 by default, as the real one does for
+# ``-w '%{http_code}'``; what the gateway would have answered is never run.
+_FAKE_CURL_SOURCE = (
+    "#!/bin/sh\n"
+    'printf \'%s\\n\' "$*" >> "$FAKE_VPS_ROOT/curl.log"\n'
+    'if [ -f "$FAKE_VPS_ROOT/curl.status" ]; then cat "$FAKE_VPS_ROOT/curl.status"; else printf 204; fi\n'
 )
 
 # Only the one probe the package's scripts make is faked: the filesystem type

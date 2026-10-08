@@ -1,0 +1,31 @@
+#!/bin/sh
+# List the permission requests this machine keeps for the user's desktops: the
+# records the gateway's forwarding extension wrote when it forwarded each
+# request, which a desktop syncs its own pending requests against. The one
+# answer, FILED_PERMISSION_REQUESTS, is a JSON array of the records as written
+# (each is a single line of JSON); an empty array when the machine keeps none.
+# The document is read for uniformity with the other commands and may be
+# empty. The last stdout line says the script ran to its end.
+set -eu
+umask 077
+. '{{ layout.install_dir }}/functions'
+
+lk_require_secrets_dir
+_lk_scratch="$(mktemp -d "$LK_SECRETS_DIR/list.XXXXXX")"
+trap 'rm -rf "$_lk_scratch"' EXIT
+lk_read_document "$_lk_scratch/doc"
+
+{
+  printf '['
+  _lk_separator=''
+  for _lk_record in "$LK_FILED_REQUESTS_DIR"/*{{ filed_request_file_suffix }}; do
+    [ -f "$_lk_record" ] || continue
+    printf '%s' "$_lk_separator"
+    tr -d '\n' < "$_lk_record"
+    _lk_separator=','
+  done
+  printf ']'
+} > "$_lk_scratch/records"
+lk_answer FILED_PERMISSION_REQUESTS < "$_lk_scratch/records"
+
+printf '%s\n' "$LK_OUTCOME_DONE"

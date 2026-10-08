@@ -35,17 +35,14 @@ method is a no-op and the local edit is the whole change.
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-import paramiko
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_EXCHANGE_FAILURES
 from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
-from imbue.minds.desktop_client.latchkey.machine_access import MachineUnreachableError
-from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
-from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
@@ -283,18 +280,6 @@ class MachineOperator(MutableModel):
                 return
             with self.access.open_machine(workspace_agent_id, host_id) as machine:
                 yield machine
-        # ``LatchkeyError`` covers the machine refusing an exchange
-        # (``RemoteGatewayError``); ``LatchkeyStoreError`` covers this
-        # computer's own copies -- the machine store an adopt writes, the
-        # canonical policy a push reads -- being unusable, which fails the same
-        # action for the same user and must read the same way.
-        except (
-            MachineUnreachableError,
-            LatchkeyError,
-            LatchkeyStoreError,
-            MngrError,
-            OSError,
-            paramiko.SSHException,
-        ) as e:
+        except MACHINE_EXCHANGE_FAILURES as e:
             logger.warning("Could not {} for workspace {}: {}", failure_description, workspace_agent_id, e)
             raise MachineOperationError(f"Could not {failure_description}: {e}") from e

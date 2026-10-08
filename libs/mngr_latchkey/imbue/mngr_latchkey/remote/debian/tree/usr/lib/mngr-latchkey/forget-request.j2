@@ -1,0 +1,46 @@
+#!/bin/sh
+# Forget a permission request the user has answered on one of their desktops:
+# drop this machine's own copy of it, and withdraw it from every desktop
+# connected to this machine. The document (see lk_read_document) carries:
+#
+#   request_id                    the request, as the gateway named it: letters,
+#                                 digits, "-", "_" and "." only
+#
+# The withdrawal goes through this machine's own gateway, as an agent's would:
+# a DELETE of the request for every desktop (the X-Latchkey-Device header), so
+# the gateway's forwarding extension carries it to each desktop over that
+# desktop's tunnel with the pair the desktop announced, and drops this
+# machine's copy itself. The copy is removed here first all the same, so a
+# machine whose gateway is down still forgets the request; the DELETE is
+# best-effort, and what the gateway answered is printed for the log rather
+# than failing the script, since a desktop that could not be reached syncs the
+# request away itself when it next connects. The last stdout line says the
+# script ran to its end.
+set -eu
+umask 077
+. '{{ layout.install_dir }}/functions'
+
+lk_require_secrets_dir
+_lk_scratch="$(mktemp -d "$LK_SECRETS_DIR/forget.XXXXXX")"
+trap 'rm -rf "$_lk_scratch"' EXIT
+lk_read_document "$_lk_scratch/doc"
+
+_lk_request_id="$(lk_doc_get request_id)"
+case "$_lk_request_id" in
+  ''|.*|*[!A-Za-z0-9_.-]*) lk_fail "Error: refusing a request id with unexpected characters: $_lk_request_id" ;;
+esac
+rm -f "$LK_FILED_REQUESTS_DIR/$_lk_request_id{{ filed_request_file_suffix }}"
+
+if [ -s "$LK_LISTEN_PASSWORD_FILE" ] && [ -f "$LK_GATEWAY_CONF" ]; then
+  lk_source_gateway_conf
+  _lk_status="$(curl -sS -o "$_lk_scratch/answer" -w '%{http_code}' --max-time {{ forget_request_timeout_seconds }} \
+    -X DELETE \
+    -H "X-Latchkey-Gateway-Password: $(lk_secret_value "$LK_LISTEN_PASSWORD_FILE")" \
+    -H '{{ device_header }}: {{ all_devices }}' \
+    "http://$LK_GATEWAY_LISTEN_HOST:{{ outer_port }}/permission-requests/$_lk_request_id" || true)"
+  printf 'withdrew permission request %s from the desktops: HTTP %s\n' "$_lk_request_id" "${_lk_status:-no answer}"
+else
+  printf 'the gateway is not running on this machine; the desktops sync the request away when they next connect\n'
+fi
+
+printf '%s\n' "$LK_OUTCOME_DONE"

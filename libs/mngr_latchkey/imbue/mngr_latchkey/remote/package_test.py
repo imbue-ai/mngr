@@ -56,6 +56,9 @@ _SCRIPT_PATHS = (
     "usr/bin/mngr-latchkey",
     "usr/lib/mngr-latchkey/read-state",
     "usr/lib/mngr-latchkey/apply-state",
+    "usr/lib/mngr-latchkey/announce-device",
+    "usr/lib/mngr-latchkey/forget-request",
+    "usr/lib/mngr-latchkey/list-requests",
     "usr/lib/mngr-latchkey/gateway-run",
     "usr/lib/mngr-latchkey/tunnel-run",
 )
@@ -155,8 +158,10 @@ def test_the_package_lays_its_files_out_where_the_scripts_expect_them() -> None:
         "./usr/lib/mngr-latchkey/announce-device",
         "./usr/lib/mngr-latchkey/apply-state",
         "./usr/lib/mngr-latchkey/extensions/desktop_gateway_proxy.mjs",
+        "./usr/lib/mngr-latchkey/forget-request",
         "./usr/lib/mngr-latchkey/functions",
         "./usr/lib/mngr-latchkey/gateway-run",
+        "./usr/lib/mngr-latchkey/list-requests",
         "./usr/lib/mngr-latchkey/read-state",
         "./usr/lib/mngr-latchkey/tunnel-run",
     }
@@ -547,13 +552,27 @@ def test_a_message_with_an_apostrophe_is_quoted_into_the_script(tmp_path: Path) 
     assert DIFFERENT_MACHINE_PASSWORD_MESSAGE.replace("'", "'\"'\"'") in apply_state
 
 
-def test_the_command_dispatches_only_the_three_scripts(tmp_path: Path) -> None:
+def test_the_command_dispatches_only_the_five_scripts(tmp_path: Path) -> None:
     _, root = _unpacked(tmp_path)
 
     command = (root / "usr/bin" / REMOTE_COMMAND_NAME).read_text()
 
-    assert "read-state|apply-state|announce-device)" in command
+    assert "read-state|apply-state|announce-device|forget-request|list-requests)" in command
     assert "exec '/usr/lib/mngr-latchkey'/\"$1\"" in command
+
+
+def test_forget_request_withdraws_the_request_through_the_machines_own_gateway(tmp_path: Path) -> None:
+    """The DELETE goes to the gateway as an agent's would, for every desktop, with the machine's own password."""
+    _, root = _unpacked(tmp_path)
+
+    forget_request = (root / "usr/lib/mngr-latchkey/forget-request").read_text()
+
+    assert "-X DELETE" in forget_request
+    assert "-H 'X-Latchkey-Device: *'" in forget_request
+    assert '"http://$LK_GATEWAY_LISTEN_HOST:1989/permission-requests/$_lk_request_id"' in forget_request
+    assert '-H "X-Latchkey-Gateway-Password: $(lk_secret_value "$LK_LISTEN_PASSWORD_FILE")"' in forget_request
+    # The machine's own copy goes first, so a machine whose gateway is down forgets the request all the same.
+    assert forget_request.index('rm -f "$LK_FILED_REQUESTS_DIR/$_lk_request_id.json"') < forget_request.index("curl ")
 
 
 # The bootstrap.

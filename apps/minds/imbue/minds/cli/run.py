@@ -85,6 +85,7 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPerm
 from imbue.minds.desktop_client.latchkey.handlers.workspace import WorkspacePermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
+from imbue.minds.desktop_client.latchkey.machine_request_sync import MachineRequestSync
 from imbue.minds.desktop_client.latchkey.pending_requests import GatewayPendingRequests
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
@@ -134,6 +135,7 @@ from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.device_metadata import build_device_metadata_env
+from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 
@@ -877,10 +879,10 @@ def run(
     # ``root_concurrency_group``.
     permission_requests_consumer = PermissionRequestsConsumer(
         gateway_client=gateway_client,
-        # A new request only needs to wake the chrome SSE: every surface
-        # (badge, inbox, notification feed) re-reads pending state from the
-        # gateway-backed view on the way back down.
-        on_new_request=backend_resolver.notify_change,
+        # A new or withdrawn request only needs to wake the chrome SSE: every
+        # surface (badge, inbox, notification feed) re-reads pending state from
+        # the gateway-backed view on the way back down.
+        on_change=backend_resolver.notify_change,
     )
     permission_requests_consumer.start(root_concurrency_group)
     # Stash on the app state so the shutdown teardown can stop() the consumer
@@ -889,6 +891,19 @@ def run(
     # for the full CG shutdown timeout and the group surfaces a "1 strand
     # did not finish in time" warning on every clean exit.
     get_state(app).permission_requests_consumer = permission_requests_consumer
+    # A verdict given here reaches the other desktops through the machine that
+    # filed the request, and a desktop that was away catches up with every
+    # machine's records: now, as machines appear in discovery, and periodically.
+    machine_request_sync = MachineRequestSync(
+        access=machine_operator.access,
+        gateway_client=gateway_client,
+        pending_requests=pending_requests,
+        device_id=DesktopDeviceId(str(device_id)),
+        concurrency_group=root_concurrency_group,
+    )
+    backend_resolver.add_on_change_callback(machine_request_sync.notice_topology_change)
+    machine_request_sync.start()
+    get_state(app).machine_request_sync = machine_request_sync
 
     if not no_browser:
         # Open the URL that carries the one-time code rather than the bare
