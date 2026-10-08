@@ -45,6 +45,9 @@ UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
         # Deploy-time conventions shared by our internal Modal apps (remote_service_connector,
         # modal_litellm); shipped into their containers as a source mount, never to PyPI.
         "modal-app-kit",
+        # Shared plumbing for the mngr-seer issue pipeline (mngr_issue_generator,
+        # mngr_issue_worker); shipped into their containers as a source mount, never to PyPI.
+        "issue-agent-kit",
     }
 )
 
