@@ -1,8 +1,10 @@
 """The apply window: suppress health/recovery for an update's apply step, and only that step.
 
 The apply's reveal takes the workspace's services down for longer than the stuck
-threshold, so without this the tracker goes STUCK and unattended recovery restarts
-a healthy machine mid-apply. The workspace's own ``run.json`` (``apply_phase``,
+threshold, so without this the tracker goes STUCK over a healthy machine: the app
+reports an outage, and unattended recovery aims a start at it. That start is an
+idempotent ``mngr start`` that no-ops against a running host, never a bounce, so what
+the window prevents is a false outage, not a broken apply. The workspace's own ``run.json`` (``apply_phase``,
 ``apply_updated_at``, read over ``mngr exec``) is the authority for whether an
 apply is under way and for how long the window lasts; the prepare phase, which
 leaves the live workspace untouched, gets normal outage handling.
@@ -226,9 +228,10 @@ class UpdateApplyWindowManager(MutableModel):
     mngr_caller: MngrCaller = Field(frozen=True, description="Runs the run-status + agent probe.")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Places the probed machine's host.")
     concurrency_group: ConcurrencyGroup = Field(frozen=True, description="Parent group for the expiry pass.")
-    dispatch_restart: Callable[[AgentId], None] = Field(
+    dispatch_recovery: Callable[[AgentId], None] = Field(
         frozen=True,
-        description="The hand-off for a window that expired with the machine still stuck.",
+        description="The unattended-recovery hand-off for a window that expired with the machine still stuck: "
+        "an idempotent ``mngr start``, never a bounce.",
     )
     fallback_window_seconds: float = Field(
         default=DEFAULT_APPLY_WINDOW_SECONDS,
@@ -329,7 +332,7 @@ class UpdateApplyWindowManager(MutableModel):
             return False
         # Unreachable is not evidence of "no apply", but not evidence of one either, so the row
         # keeps saying the run is preparing. Arming (not just declining) matters: the stuck edge
-        # fires once per episode, so only the window's expiry can still restart a machine that
+        # fires once per episode, so only the window's expiry can still recover a machine that
         # really did die.
         logger.info(
             "Declined unattended recovery for {}: its update is in flight and it could not say "
@@ -375,7 +378,7 @@ class UpdateApplyWindowManager(MutableModel):
     def _hand_back_expired_window(self, agent_id: AgentId) -> None:
         """Return one expired window's workspace to normal handling.
 
-        A machine still STUCK gets its restart dispatched here: the stuck edge fires once
+        A machine still STUCK gets its recovery dispatched here: the stuck edge fires once
         per episode and was already declined, so nothing else would.
         """
         if self.store.get(agent_id).activity is UpdateActivity.APPLYING:
@@ -383,9 +386,9 @@ class UpdateApplyWindowManager(MutableModel):
         if self.tracker.get_health(agent_id) is not AgentHealth.STUCK:
             return
         logger.warning(
-            "The update apply window for {} expired with the machine still stuck; dispatching a restart", agent_id
+            "The update apply window for {} expired with the machine still stuck; dispatching recovery", agent_id
         )
-        self.dispatch_restart(agent_id)
+        self.dispatch_recovery(agent_id)
 
     def _run_expiry_loop(self) -> None:
         # Sleeps on the group's shutdown event so a quit does not wait out an interval.

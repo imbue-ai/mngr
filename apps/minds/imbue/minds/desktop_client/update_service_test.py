@@ -88,7 +88,7 @@ def _build_service(
         mngr_caller=caller,
         backend_resolver=backend_resolver,
         concurrency_group=concurrency_group,
-        dispatch_restart=lambda agent_id: None,
+        dispatch_recovery=lambda agent_id: None,
     )
     return _FixedHostStateService(
         state_store=store,

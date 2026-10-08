@@ -2090,23 +2090,23 @@ def _build_workspace_update_machinery(
     minds_config: MindsConfig | None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None,
     root_concurrency_group: ConcurrencyGroup | None,
-    dispatch_restart: Callable[[AgentId], None] | None,
+    dispatch_recovery: Callable[[AgentId], None] | None,
     mngr_binary: str,
     mngr_host_dir: Path,
 ) -> WorkspaceUpdateMachinery | None:
     """Assemble the update machinery, or None when this build cannot run updates.
 
     Gated as a unit: a build missing any input has no update surface (routes
-    answer 503) rather than a half-working one. ``dispatch_restart`` is the
+    answer 503) rather than a half-working one. ``dispatch_recovery`` is the
     registered unattended-recovery dispatcher's hand-back, for an apply window
-    that expired with the machine still stuck.
+    that expired with the machine still stuck: an idempotent ``mngr start``, never a bounce.
     """
     if (
         mngr_caller is None
         or paths is None
         or system_interface_health_tracker is None
         or root_concurrency_group is None
-        or dispatch_restart is None
+        or dispatch_recovery is None
     ):
         return None
     schedule_store = UpdateScheduleStore(records_dir=paths.data_dir / "update_schedules")
@@ -2120,7 +2120,7 @@ def _build_workspace_update_machinery(
         mngr_caller=mngr_caller,
         backend_resolver=backend_resolver,
         concurrency_group=root_concurrency_group,
-        dispatch_restart=dispatch_restart,
+        dispatch_recovery=dispatch_recovery,
     )
     detector = WorkspaceUpdateDetector(
         store=state_store,
@@ -2371,7 +2371,7 @@ def create_desktop_client(
         minds_config=minds_config,
         system_interface_health_tracker=system_interface_health_tracker,
         root_concurrency_group=root_concurrency_group,
-        dispatch_restart=(
+        dispatch_recovery=(
             unattended_recovery_dispatcher.dispatch_after_update_window
             if unattended_recovery_dispatcher is not None
             else None

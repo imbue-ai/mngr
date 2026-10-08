@@ -51,8 +51,8 @@ _NO_RUN_STDOUT = update_run_probe_stdout()
 _APPLYING_STDOUT = update_run_probe_stdout(run=applying_record_json(), agents=f"{_CHAT}\tRUNNING\n")
 
 
-class _RestartRecorder:
-    """Stands in for ``dispatch_host_restart`` so the hand-off is observable."""
+class _RecoveryRecorder:
+    """Stands in for ``dispatch_recovery`` so the hand-off is observable."""
 
     def __init__(self) -> None:
         self.dispatched: list[AgentId] = []
@@ -69,10 +69,10 @@ def _make_manager(
     mngr_caller: RecordingMngrCaller | None = None,
     fallback_window_seconds: float = 300.0,
     backend_resolver: MngrCliBackendResolver | None = None,
-) -> tuple[UpdateApplyWindowManager, SystemInterfaceHealthTracker, WorkspaceUpdateStateStore, _RestartRecorder]:
+) -> tuple[UpdateApplyWindowManager, SystemInterfaceHealthTracker, WorkspaceUpdateStateStore, _RecoveryRecorder]:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     store = make_update_state_store(tmp_path)
-    restarts = _RestartRecorder()
+    recoveries = _RecoveryRecorder()
     manager = UpdateApplyWindowManager(
         tracker=tracker,
         store=store,
@@ -81,10 +81,10 @@ def _make_manager(
         else RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=probe_stdout)),
         backend_resolver=backend_resolver if backend_resolver is not None else MngrCliBackendResolver(),
         concurrency_group=root_concurrency_group,
-        dispatch_restart=restarts,
+        dispatch_recovery=recoveries,
         fallback_window_seconds=fallback_window_seconds,
     )
-    return manager, tracker, store, restarts
+    return manager, tracker, store, recoveries
 
 
 def _begin_run(store: WorkspaceUpdateStateStore, agent_id: AgentId) -> None:
@@ -465,10 +465,12 @@ def test_starting_the_expiry_loop_twice_runs_one_strand(
 
 
 @pytest.mark.witnesses("workspace-updates.wedged-apply-recovered")
-def test_expiry_with_the_machine_still_stuck_hands_off_to_a_restart(
+def test_expiry_with_the_machine_still_stuck_hands_off_to_a_recovery(
     root_concurrency_group: ConcurrencyGroup, tmp_path: Path
 ) -> None:
-    manager, tracker, store, restarts = _make_manager(root_concurrency_group, tmp_path, fallback_window_seconds=-100.0)
+    manager, tracker, store, recoveries = _make_manager(
+        root_concurrency_group, tmp_path, fallback_window_seconds=-100.0
+    )
     agent_id = AgentId.generate()
     store.set_activity(agent_id, UpdateActivity.RUNNING)
     manager.open_window(agent_id)
@@ -476,7 +478,7 @@ def test_expiry_with_the_machine_still_stuck_hands_off_to_a_restart(
 
     manager.run_expiry_pass()
 
-    assert restarts.dispatched == [agent_id]
+    assert recoveries.dispatched == [agent_id]
     assert manager.is_window_open(agent_id) is False
     assert store.get(agent_id).activity is UpdateActivity.RUNNING
 
@@ -497,17 +499,17 @@ def test_a_verdict_landing_as_the_window_expires_is_not_overwritten(
     assert store.get(agent_id).verdict is UpdateVerdict.UPDATED
 
 
-def test_expiry_with_a_healthy_machine_hands_the_row_back_without_a_restart(
+def test_expiry_with_a_healthy_machine_hands_the_row_back_without_a_recovery(
     root_concurrency_group: ConcurrencyGroup, tmp_path: Path
 ) -> None:
-    manager, _, store, restarts = _make_manager(root_concurrency_group, tmp_path, fallback_window_seconds=-100.0)
+    manager, _, store, recoveries = _make_manager(root_concurrency_group, tmp_path, fallback_window_seconds=-100.0)
     agent_id = AgentId.generate()
     store.set_activity(agent_id, UpdateActivity.RUNNING)
     manager.open_window(agent_id)
 
     manager.run_expiry_pass()
 
-    assert restarts.dispatched == []
+    assert recoveries.dispatched == []
     assert store.get(agent_id).activity is UpdateActivity.RUNNING
 
 
@@ -560,7 +562,7 @@ def test_the_run_probe_reaches_its_machine_by_the_host_discovery_placed_it_on(
     """The probe runs on the stuck-edge thread with a short budget that a provider-wide listing can outlast."""
     agent_id = AgentId.generate()
     host_id = HostId.generate()
-    manager, _tracker, store, _restarts = _make_manager(
+    manager, _tracker, store, _recoveries = _make_manager(
         root_concurrency_group,
         tmp_path,
         backend_resolver=build_resolver_with_system_services(agent_id, AgentId.generate(), host_id=host_id),
