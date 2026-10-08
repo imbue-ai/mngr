@@ -1162,6 +1162,7 @@ class ImbueCloudConnectorClient(MutableModel):
         app: str | None,
         link: str | None,
         workspace_name: str | None,
+        app_display_name: str | None,
     ) -> InvitationResult:
         """Invite the grantee of one user grant or email grant; raises ImbueCloudShareRefusedError on a 409."""
         body: dict[str, str] = {}
@@ -1175,6 +1176,8 @@ class ImbueCloudConnectorClient(MutableModel):
             body["link"] = link
         if workspace_name:
             body["workspace_name"] = workspace_name
+        if app_display_name:
+            body["app_display_name"] = app_display_name
         response = self._send(
             "POST",
             self._url(f"/shares/{host_id}/invitations"),

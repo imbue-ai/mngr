@@ -2599,7 +2599,12 @@ def test_invite_grantee_sends_only_the_fields_given_and_parses_the_outcome(monke
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == "/shares/host-abc/invitations"
-        assert _json.loads(request.content) == {"email": "bob@example.com", "workspace_name": "alpha"}
+        assert _json.loads(request.content) == {
+            "email": "bob@example.com",
+            "app": "world-of-nonsense",
+            "workspace_name": "alpha",
+            "app_display_name": "World of Nonsense",
+        }
         return httpx.Response(200, json={"outcome": "invited", "invited_at": "2026-09-30T12:00:00+00:00"})
 
     client = _install_mock_httpx(monkeypatch, handler)
@@ -2609,9 +2614,10 @@ def test_invite_grantee_sends_only_the_fields_given_and_parses_the_outcome(monke
         "host-abc",
         user_id=None,
         email="bob@example.com",
-        app=None,
+        app="world-of-nonsense",
         link=None,
         workspace_name="alpha",
+        app_display_name="World of Nonsense",
     )
 
     assert result.outcome is InvitationOutcome.INVITED
@@ -2634,14 +2640,35 @@ def test_invite_grantee_maps_the_409_codes_and_tolerates_an_unknown_outcome(monk
 
     with pytest.raises(ImbueCloudShareRefusedError) as out_of_date:
         client.invite_grantee(
-            SecretStr("tok"), "host-abc", user_id="u", email=None, app=None, link=None, workspace_name=None
+            SecretStr("tok"),
+            "host-abc",
+            user_id="u",
+            email=None,
+            app=None,
+            link=None,
+            workspace_name=None,
+            app_display_name=None,
         )
     with pytest.raises(ImbueCloudShareRefusedError) as not_invitable:
         client.invite_grantee(
-            SecretStr("tok"), "host-abc", user_id="u", email=None, app=None, link=None, workspace_name=None
+            SecretStr("tok"),
+            "host-abc",
+            user_id="u",
+            email=None,
+            app=None,
+            link=None,
+            workspace_name=None,
+            app_display_name=None,
         )
     newer = client.invite_grantee(
-        SecretStr("tok"), "host-abc", user_id="u", email=None, app=None, link=None, workspace_name=None
+        SecretStr("tok"),
+        "host-abc",
+        user_id="u",
+        email=None,
+        app=None,
+        link=None,
+        workspace_name=None,
+        app_display_name=None,
     )
 
     assert out_of_date.value.code == "grants_out_of_date"

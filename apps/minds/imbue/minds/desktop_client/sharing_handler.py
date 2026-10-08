@@ -46,6 +46,7 @@ from imbue.minds.desktop_client.identity_records import record_from_cli_identity
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
@@ -67,6 +68,7 @@ from imbue.minds.desktop_client.share_materials_injection import read_share_gate
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
+from imbue.minds.desktop_client.share_targets import resolve_share_target_display_names
 from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
@@ -112,6 +114,8 @@ def describe_connector_failure(exc: Exception) -> str:
     The two failures a user can resolve get a plain sentence instead; anything
     else keeps the plugin's message, which still beats pointing at a log file.
     """
+    if isinstance(exc, ImbueCloudEmailNotVerifiedCliError):
+        return "Imbue Cloud has not verified this account's email address. Verify it, then retry."
     detail = str(exc)
     if any(signal in detail for signal in _EXPIRED_SESSION_SIGNALS):
         return "Your Imbue Cloud session has expired. You may need to log out and log in again."
@@ -1202,6 +1206,7 @@ class _InvitationAttempt(FrozenModel):
     app: str | None
     link: str | None
     workspace_name: str | None
+    app_display_name: str | None
 
 
 def invite_grantee_for_workspace(
@@ -1215,7 +1220,9 @@ def invite_grantee_for_workspace(
     """Invite one grant's grantee through the connector and return what the granter may learn.
 
     The invitation carries the target's own link, built from the labels the
-    workspace has registered, and the workspace's display name. A refusal as
+    workspace has registered, the workspace's display name, and the name the
+    share panel shows for the app, so that the mail names it the way the panel
+    does rather than by the service name behind its hostname. A refusal as
     ``grants_out_of_date`` is answered by pushing the workspace's document and
     trying once more; every other refusal propagates as
     :class:`ImbueCloudShareRefusedCliError` for the route to report by code.
@@ -1242,6 +1249,7 @@ def invite_grantee_for_workspace(
         app=None if target == WHOLE_MACHINE_SERVICE else target,
         link=f"https://{label}.{share.workspace_domain}/" if label else None,
         workspace_name=_workspace_display_name(backend_resolver, agent_id),
+        app_display_name=resolve_share_target_display_names(backend_resolver, agent_id).get(target),
     )
     return _invite_with_one_retry(cli, attempt, build_agent_address(agent_id, backend_resolver))
 
@@ -1273,6 +1281,7 @@ def _invite_through_cli(cli: ImbueCloudCli, attempt: _InvitationAttempt) -> Invi
         app=attempt.app,
         link=attempt.link,
         workspace_name=attempt.workspace_name,
+        app_display_name=attempt.app_display_name,
     )
 
 

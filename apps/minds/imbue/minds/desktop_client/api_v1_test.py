@@ -4340,11 +4340,14 @@ def test_workspace_sharing_put_delete_and_readiness_accept_the_workspace_coordin
 _INVITED_WORKSPACE_NAME: Final[str] = "Robot Butler"
 
 
-def _invitation_client(tmp_path: Path, agent_id: AgentId, cli: FakeSharingCli) -> FlaskClient:
+def _invitation_client(
+    tmp_path: Path, agent_id: AgentId, cli: FakeSharingCli, extra_service_logs: str = ""
+) -> FlaskClient:
     """A sharing client whose workspace is published, carries a display name, and whose shell registered its label."""
     cli.share = _active_share()
     service_logs = {
         str(agent_id): make_service_log("system_interface", "http://localhost:8000", "system_interface-shl1")
+        + extra_service_logs
     }
     return _sharing_client(
         tmp_path,
@@ -4428,6 +4431,55 @@ def test_workspace_sharing_invite_carries_the_targets_link_and_reports_the_outco
     assert call["app"] is None
     assert call["link"] == f"https://system_interface-shl1.{_TEST_HOST_ID}.owner1234.us1.shares.example/"
     assert call["workspace_name"] == _INVITED_WORKSPACE_NAME
+    # The whole machine is named for what it grants, never after the shell app.
+    assert call["app_display_name"] is None
+
+
+def test_workspace_sharing_invite_carries_the_name_a_person_reads_for_the_app(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(is_share_env_present=True))
+    client = _invitation_client(
+        tmp_path,
+        agent_id,
+        cli,
+        extra_service_logs=make_service_log(
+            "world-of-nonsense", "http://localhost:8100", "world-of-nonsense-fs6k", "World of Nonsense"
+        ),
+    )
+
+    response = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/invitations",
+        headers=_auth_header(),
+        json={"email": "bob@example.com", "app": "world-of-nonsense"},
+    )
+
+    assert response.status_code == 200, response.data
+    (call,) = cli.invite_calls
+    assert call["app"] == "world-of-nonsense"
+    assert call["app_display_name"] == "World of Nonsense"
+    assert call["link"] == f"https://world-of-nonsense-fs6k.{_TEST_HOST_ID}.owner1234.us1.shares.example/"
+
+
+def test_workspace_sharing_invite_sends_no_app_name_when_the_app_registered_none(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(is_share_env_present=True))
+    client = _invitation_client(
+        tmp_path,
+        agent_id,
+        cli,
+        extra_service_logs=make_service_log("web", "http://localhost:8100", "web-fs6k"),
+    )
+
+    response = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/invitations",
+        headers=_auth_header(),
+        json={"email": "bob@example.com", "app": "web"},
+    )
+
+    assert response.status_code == 200, response.data
+    (call,) = cli.invite_calls
+    assert call["app"] == "web"
+    assert call["app_display_name"] is None
 
 
 def test_workspace_sharing_invite_pushes_the_document_and_retries_once_when_out_of_date(tmp_path: Path) -> None:

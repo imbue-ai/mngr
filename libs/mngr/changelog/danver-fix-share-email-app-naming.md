@@ -1,0 +1,1 @@
+The generated CLI reference for `mngr imbue_cloud shares invite` lists its new `--app-display-name` option, the name a person reads for the app being shared, which the invitation email uses in place of the app's service name.

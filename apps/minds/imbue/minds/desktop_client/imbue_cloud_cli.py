@@ -984,6 +984,7 @@ class ImbueCloudCli(MutableModel):
         app: str | None,
         link: str | None,
         workspace_name: str | None,
+        app_display_name: str | None,
     ) -> InvitationCliResult:
         """Invite one grant's grantee; raises :class:`ImbueCloudShareRefusedCliError` on the connector's 409 codes."""
         args = ["shares", "invite", host_id, "--account", account]
@@ -993,6 +994,7 @@ class ImbueCloudCli(MutableModel):
             ("--app", app),
             ("--link", link),
             ("--workspace-name", workspace_name),
+            ("--app-display-name", app_display_name),
         ):
             if value:
                 args.extend([option, value])

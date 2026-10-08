@@ -292,6 +292,7 @@ class FakeImbueCloudCli(ImbueCloudCli):
         app: str | None,
         link: str | None,
         workspace_name: str | None,
+        app_display_name: str | None,
     ) -> InvitationCliResult:
         self.invite_calls.append(
             {
@@ -302,6 +303,7 @@ class FakeImbueCloudCli(ImbueCloudCli):
                 "app": app,
                 "link": link,
                 "workspace_name": workspace_name,
+                "app_display_name": app_display_name,
             }
         )
         if not self.invite_results:

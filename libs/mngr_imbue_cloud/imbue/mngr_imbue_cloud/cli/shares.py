@@ -234,6 +234,9 @@ def push_share_grants(host_id: str, document_file: Path, account: str | None, co
 @click.option("--app", default=None, help="The app the invitation is for (the whole workspace when omitted)")
 @click.option("--link", default=None, help="The share URL of that app; the shell's entry origin when omitted")
 @click.option("--workspace-name", default=None, help="The workspace's display name, as the invitation should say it")
+@click.option(
+    "--app-display-name", default=None, help="The name a person reads for that app, as the invitation should say it"
+)
 @click.option("--account", default=None, help="Account email (defaults to the active account)")
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
@@ -244,6 +247,7 @@ def invite_grantee(
     app: str | None,
     link: str | None,
     workspace_name: str | None,
+    app_display_name: str | None,
     account: str | None,
     connector_url: str | None,
 ) -> None:
@@ -263,7 +267,14 @@ def invite_grantee(
     parsed_account = resolve_account_or_active(store, account)
     token = get_active_token(store, client, parsed_account)
     result = client.invite_grantee(
-        token, host_id, user_id=user_id, email=email, app=app, link=link, workspace_name=workspace_name
+        token,
+        host_id,
+        user_id=user_id,
+        email=email,
+        app=app,
+        link=link,
+        workspace_name=workspace_name,
+        app_display_name=app_display_name,
     )
     emit_json(result.model_dump(mode="json"))
 

@@ -804,6 +804,7 @@ mngr imbue_cloud shares invite [OPTIONS] HOST_ID
 | `--app` | text | The app the invitation is for (the whole workspace when omitted) | None |
 | `--link` | text | The share URL of that app; the shell's entry origin when omitted | None |
 | `--workspace-name` | text | The workspace's display name, as the invitation should say it | None |
+| `--app-display-name` | text | The name a person reads for that app, as the invitation should say it | None |
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 

@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.identity_records import IdentityRecord
 from imbue.minds.desktop_client.identity_records import now_utc
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import UserIdentityCliInfo
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
@@ -202,6 +203,19 @@ def test_describe_connector_failure_reports_an_expired_session() -> None:
 
 def test_describe_connector_failure_reports_an_unverified_email() -> None:
     exc = ImbueCloudCliError('sync records push failed: Unauthenticated (401): {"detail":"Email not verified"}')
+    assert describe_connector_failure(exc) == (
+        "Imbue Cloud has not verified this account's email address. Verify it, then retry."
+    )
+
+
+def test_describe_connector_failure_reports_the_typed_verification_refusal() -> None:
+    # The invite route's refusal arrives typed rather than as the older
+    # "Email not verified" text, so the type is what has to be recognized.
+    exc = ImbueCloudEmailNotVerifiedCliError(
+        "shares invite: This action requires a verified email address (x@example.com). "
+        "Verify it via the link we email you, then retry."
+    )
+
     assert describe_connector_failure(exc) == (
         "Imbue Cloud has not verified this account's email address. Verify it, then retry."
     )
