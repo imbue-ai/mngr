@@ -206,6 +206,33 @@ def test_unrecognized_refuses_after_the_pass_budget() -> None:
     assert pane.keys == ["1", "1", "1", "1"]
 
 
+# Captured from claude 2.1.293 under --dangerously-skip-permissions. Its first option approves
+# the rm, so if this ever stops matching a named class it falls to Unrecognized, whose "1"
+# would run the command the prompt exists to stop.
+_DANGEROUS_RM_PROMPT_PANE = (
+    "⏺ Recursively delete /tmp/target\n"
+    '  ⎿  $ rm -rf "$(echo /tmp/target)"\n'
+    "────────────────────────────────────────\n"
+    " Bash command\n"
+    " Recursively delete /tmp/target\n"
+    "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
+    ' rm -rf "$(echo /tmp/target)"\n'
+    "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
+    " │ Dangerous rm operation on statically-unresolvable target: command substitution output\n"
+    " ⚠ Claude Code will automatically deny this request in 1:56, to avoid blocking progress on an unattended session\n"
+    " Do you want to proceed?\n"
+    " ❯ 1. Yes\n"
+    "   2. No\n"
+    " Esc to cancel · Tab to amend\n"
+)
+
+
+def test_dangerous_rm_prompt_is_denied_even_when_unknown_dialogs_are_answered() -> None:
+    pane = FakePane([_DANGEROUS_RM_PROMPT_PANE, _IDLE_PANE], accepts=frozenset({"Unrecognized"}))
+    deal_with_dialogs(pane)
+    assert pane.keys == ["Escape"]
+
+
 def test_unknown_token_grants_only_unknown_and_known_token_never_does() -> None:
     assert is_nonbenign_answer_allowed("Unrecognized", (ALL_KNOWN_AND_UNKNOWN_DIALOGS,)) is True
     assert is_nonbenign_answer_allowed("Unrecognized", (ALL_KNOWN_DIALOGS,)) is False

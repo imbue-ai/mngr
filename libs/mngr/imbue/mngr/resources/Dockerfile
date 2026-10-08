@@ -100,7 +100,7 @@ ENV PATH="/root/.local/bin:$PATH"
 # .mngr/settings.toml pin (`[agent_types.claude].version`). The release-test
 # `test_claude_code_version_matches_default_workspace_template_pin` enforces the
 # sync; bump both together when rolling a new claude release.
-ARG CLAUDE_CODE_VERSION="2.1.280"
+ARG CLAUDE_CODE_VERSION="2.1.293"
 RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && ( if [ -n "$CLAUDE_CODE_VERSION" ]; then cat /tmp/install_claude.sh | bash -s "$CLAUDE_CODE_VERSION"; else cat /tmp/install_claude.sh | bash; fi && test -x /root/.local/bin/claude ) || ( cat /tmp/install_claude.sh && exit 1 )
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
