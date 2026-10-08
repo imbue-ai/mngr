@@ -211,7 +211,7 @@ describe("PermissionsTab loading", () => {
   it("drops the name from the copy when the options load has not landed", async () => {
     const { root } = await render(permissionsView(), { workspaceName: "" });
     const text = allText(root);
-    expect(text).toContain("What agents in this workspace can access.");
+    expect(text).toContain("What agents in this machine can access.");
     expect(text).not.toContain("Permissions:");
   });
 });
@@ -742,7 +742,7 @@ describe("PermissionsTab connection panel", () => {
     expect(spinners(after)).toHaveLength(1);
     expect(attrsOf(withAttr(after, "data-desktop-egress-adjust")[0]).disabled).toBe(true);
     expect(attrsOf(switches(after)[1]).disabled).toBe(true);
-    expect(attrsOf(switches(after)[1]).title).toBe("Waiting for the last change to reach this workspace.");
+    expect(attrsOf(switches(after)[1]).title).toBe("Waiting for the last change to reach this machine.");
   });
 
   it("warns and blocks new grants when a connection is not connected", async () => {
@@ -775,7 +775,7 @@ describe("PermissionsTab connection panel", () => {
     expect(spinners(after)).toHaveLength(1);
     expect(attrsOf(switches(after)[0]).disabled).toBe(true);
     expect(attrsOf(switches(after)[1]).disabled).toBe(true);
-    expect(attrsOf(switches(after)[1]).title).toBe("Waiting for the last change to reach this workspace.");
+    expect(attrsOf(switches(after)[1]).title).toBe("Waiting for the last change to reach this machine.");
     expect(attrsOf(withAttr(after, "data-perm-revoke-all")[0]).disabled).toBe(true);
     expect(attrsOf(withAttr(after, "data-perm-disconnect")[0]).disabled).toBe(true);
   });
@@ -816,10 +816,10 @@ describe("PermissionsTab connection panel", () => {
     // be blurred -- which machines lose the sign-in -- is spelled out. This one
     // reads this computer's shared store, so all of its machines do.
     expect(dialogText).toContain("Disconnect Slack · Default account from this computer?");
-    expect(dialogText).toContain("from every workspace on this computer, including alpha");
+    expect(dialogText).toContain("from every machine on this computer, including alpha");
     expect(dialogText).toContain("connect it again");
     expect(dialogText).toContain("Yes, disconnect");
-    expect(allText(asked)).toContain("alpha shares one sign-in with every other workspace on this computer");
+    expect(allText(asked)).toContain("alpha shares one sign-in with every other machine on this computer");
 
     (attrsOf(withAttr(asked, "data-perm-disconnect-cancel")[0]).onclick as () => void)();
     await settle();
@@ -838,8 +838,8 @@ describe("PermissionsTab connection panel", () => {
     const dialogText = disconnectDialogText(rerender());
 
     expect(dialogText).toContain("Disconnect Slack · Default account from alpha?");
-    expect(dialogText).toContain("Every other workspace keeps its own sign-in.");
-    expect(dialogText).not.toContain("every workspace on this computer");
+    expect(dialogText).toContain("Every other machine keeps its own sign-in.");
+    expect(dialogText).not.toContain("every machine on this computer");
   });
 
   it("disconnects the account from latchkey once the confirm is accepted", async () => {
@@ -1107,8 +1107,8 @@ describe("PermissionsTab add connection and self panels", () => {
   it("says so when neither self family has anything yet", async () => {
     const localFiles = await render(permissionsView(), { requestedSection: "local-files" });
     const otherMachines = await render(permissionsView(), { requestedSection: "other-machines" });
-    expect(allText(localFiles.root)).toContain("No files are being shared with agents in this workspace yet.");
-    expect(allText(otherMachines.root)).toContain("Agents in this workspace can't manage your other workspaces yet.");
+    expect(allText(localFiles.root)).toContain("No files are being shared with agents in this machine yet.");
+    expect(allText(otherMachines.root)).toContain("Agents in this machine can't manage your other machines yet.");
   });
   it("raises a refused connection over the pane, and only the user closes it", async () => {
     // A service that turns the sign-in away usually says something the user has
@@ -1274,7 +1274,7 @@ describe("permissions tab registration", () => {
 
     // The Permissions pane is what the body dispatches to -- not the shared
     // options-load failure, which only the other two tabs wait behind.
-    expect(allText(root)).not.toContain("Could not load this workspace's options");
+    expect(allText(root)).not.toContain("Could not load this machine's options");
     const permissionsPane = collectVnodes(root).find((node) => node.tag === PermissionsTab);
     expect(permissionsPane).toBeDefined();
     expect(attrsOf(permissionsPane as AnyVnode).workspaceName).toBe("");
@@ -1351,7 +1351,7 @@ describe("PermissionsTab shared paths", () => {
     expect(removeButtons(root)).toHaveLength(1);
     const text = allText(root);
     expect(text).toContain("~/notes");
-    expect(text).toContain("Agents in this workspace may");
+    expect(text).toContain("Agents on this machine may");
     expect(text).toContain("Revoke access");
     remove();
   });
@@ -1390,7 +1390,7 @@ describe("PermissionsTab shared paths", () => {
     // "Keep in sync" said nothing about why anyone would want it.
     const { root, remove } = await renderLocalFiles(permissionsView({ shared_paths: [sharedPath()] }));
     const text = allText(root);
-    expect(text).toContain("Keep a synchronized copy in the workspace");
+    expect(text).toContain("Keep a synchronized copy on the machine");
     expect(text).toContain("when Imbue Studio is not running or your computer is offline");
     remove();
   });
@@ -1491,7 +1491,7 @@ describe("PermissionsTab shared paths", () => {
     const readOnly = await renderLocalFiles(
       permissionsView({ shared_paths: [sharedPath({ access: "READ", sync: pathSync() })] }),
     );
-    expect(allText(readOnly.root)).toContain("changes from your computer to this workspace in one direction");
+    expect(allText(readOnly.root)).toContain("changes from your computer to this machine in one direction");
     readOnly.remove();
 
     const readWrite = await renderLocalFiles(
@@ -1620,7 +1620,7 @@ describe("PermissionsTab shared paths", () => {
       }),
     );
     const text = allText(setAside.root);
-    expect(text).toContain("A copy is still in the workspace");
+    expect(text).toContain("A copy is still on the machine");
     expect(text).toContain("Remove copy");
     // Not the settings: those belong to a sync that is running.
     expect(conflictSelects(setAside.root)).toHaveLength(0);
@@ -1662,7 +1662,7 @@ describe("PermissionsTab shared paths", () => {
     );
     expect(pathRows(root)).toHaveLength(1);
     expect(syncBoxes(root)).toHaveLength(0);
-    expect(allText(root)).not.toContain("Keep a copy in the workspace");
+    expect(allText(root)).not.toContain("Keep a copy on the machine");
     remove();
   });
 

@@ -202,7 +202,7 @@ export function Shell(): m.Component<ShellAttrs> {
       // the popout's own bar instead of the titlebar and the sidebar.
       const popout = popoutFromPath(routePath);
       const isAppOverlay = isAppOverlayPath(routePath);
-      // The New workspace template stepper floats as a modal only when it is
+      // The New machine template stepper floats as a modal only when it is
       // over a machine (?workspace=); opened with none it redirects to the full
       // create form, so it is not an overlay then.
       const isTemplateRoute = routePath === "/create/template";
@@ -321,7 +321,7 @@ export function Shell(): m.Component<ShellAttrs> {
                 };
         overlayContent = content;
       } else if (isTemplateModal) {
-        // The New workspace template stepper over a live machine: a centered
+        // The New machine template stepper over a live machine: a centered
         // card, dismissed back to that machine (closeAppOverlay handles it).
         overlayAttrs = {
           shell,
@@ -478,7 +478,7 @@ export function Shell(): m.Component<ShellAttrs> {
           ? m(UpdateApplyModal, {
               workspaceName:
                 shell.stores.workspaces.entryByAnyId(workspaceParam)?.name ??
-                "this workspace",
+                "this machine",
             })
           : null,
         updateModalAgentId !== null
@@ -486,7 +486,7 @@ export function Shell(): m.Component<ShellAttrs> {
               agentId: updateModalAgentId,
               workspaceName:
                 shell.stores.workspaces.entryByAnyId(updateModalAgentId)
-                  ?.name ?? "this workspace",
+                  ?.name ?? "this machine",
               onClose: () => shell.closeUpdateModal(),
             })
           : null,

@@ -275,7 +275,7 @@ function planSection(
               ? m(
                   "span",
                   { class: "type-helper text-tertiary" },
-                  "Removes the oldest backups (each workspace keeps its latest) until you are back under the limit.",
+                  "Removes the oldest backups (each machine keeps its latest) until you are back under the limit.",
                 )
               : null,
         ])
@@ -290,7 +290,7 @@ function planSection(
               extra: "type-helper",
               ...routeLinkAttrs("/workspaces/destroyed"),
             },
-            "Review destroyed workspace backups →",
+            "Review destroyed machine backups →",
           ),
         )
       : null,
@@ -358,7 +358,7 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
   return {
     view(vnode) {
       const { model, account } = vnode.attrs;
-      const workspaceNoun = "workspace(s)";
+      const machineNoun = "machine(s)";
       return m(Card, [
         m("div", { class: "flex items-center justify-between" }, [
           m("div", [
@@ -381,7 +381,7 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
             m(
               "div",
               { class: "type-helper text-tertiary" },
-              `${account.workspace_count} ${workspaceNoun}${account.is_default ? " · Default" : ""}`,
+              `${account.workspace_count} ${machineNoun}${account.is_default ? " · Default" : ""}`,
             ),
           ]),
           m("div", { class: "flex gap-2" }, [

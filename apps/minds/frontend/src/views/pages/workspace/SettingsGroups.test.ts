@@ -29,7 +29,7 @@ import { SettingsGroups } from "./SettingsGroups";
 // is being drawn.
 const UNBACKED = "agent-" + "a".repeat(8);
 const BACKED = "agent-" + "b".repeat(8);
-const NO_BACKUP_QUESTION = "This workspace has no backups.";
+const NO_BACKUP_QUESTION = "This machine has no backups.";
 
 const OUT_OF_DATE: UiWorkspaceUpdate = {
   availability: "OUT_OF_DATE",
@@ -265,7 +265,7 @@ describe("the Updates settings group's no-backup question", () => {
 
     (answer as unknown as (response: Response) => void)(
       jsonResponse(
-        { error: "An update is already running in this workspace." },
+        { error: "An update is already running in this machine." },
         409,
       ),
     );
@@ -286,7 +286,7 @@ describe("the Updates settings group's no-backup question", () => {
       Promise.resolve(
         jsonResponse(
           {
-            error: "Couldn't start the update agent in this workspace.",
+            error: "Couldn't start the update agent in this machine.",
             detail:
               "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
           },
@@ -300,7 +300,7 @@ describe("the Updates settings group's no-backup question", () => {
 
     const refused = allText(updatesGroup(draw(BACKED)));
     expect(refused).toContain(
-      "Couldn't start the update agent in this workspace.",
+      "Couldn't start the update agent in this machine.",
     );
     expect(refused).toContain(
       "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
@@ -380,7 +380,7 @@ describe("the Updates settings group after an update that never went out", () =>
         [BACKED]: {
           ...OUT_OF_DATE,
           is_backup_configured: true,
-          dispatch_failure: "Couldn't start this workspace to run the update.",
+          dispatch_failure: "Couldn't start this machine to run the update.",
           dispatch_failure_detail: "ERROR: The box behind host-5821 is gone",
         },
       },
@@ -393,10 +393,10 @@ describe("the Updates settings group after an update that never went out", () =>
     recordFailureOnBacked();
 
     const backed = allText(updatesGroup(draw(BACKED)));
-    expect(backed).toContain("Couldn't start this workspace to run the update.");
+    expect(backed).toContain("Couldn't start this machine to run the update.");
     expect(backed).toContain("ERROR: The box behind host-5821 is gone");
     expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
-      "Couldn't start this workspace",
+      "Couldn't start this machine",
     );
   });
 
@@ -408,7 +408,7 @@ describe("the Updates settings group after an update that never went out", () =>
     press(updatesGroup(draw(BACKED)), "Update now");
 
     expect(allText(updatesGroup(draw(BACKED)))).not.toContain(
-      "Couldn't start this workspace",
+      "Couldn't start this machine",
     );
   });
 });
@@ -445,7 +445,7 @@ describe("the Account settings group on a machine leased from Imbue Cloud", () =
     );
 
     expect(section.text).toBe(
-      "Workspaces running in Imbue Cloud can't be moved to a different account. This workspace is owned by owner@example.com.",
+      "Machines running in Imbue Cloud can't be moved to a different account. This machine is owned by owner@example.com.",
     );
     expect(section.hasUnlink).toBe(false);
   });
@@ -460,7 +460,7 @@ describe("the Account settings group on a machine leased from Imbue Cloud", () =
     );
 
     expect(section.text).toBe(
-      "Workspaces running in Imbue Cloud can't be moved to a different account.",
+      "Machines running in Imbue Cloud can't be moved to a different account.",
     );
     expect(section.hasUnlink).toBe(false);
   });

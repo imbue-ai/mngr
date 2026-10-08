@@ -603,7 +603,7 @@ export class ShellState {
   closeAppOverlay(): boolean {
     const path = this.currentRoutePath();
     const search = this.currentRouteSearch();
-    // The fixed app modals are always closeable; the New workspace template
+    // The fixed app modals are always closeable; the New machine template
     // stepper is a closeable modal only while it floats over a machine
     // (?workspace=) -- with none it is a redirect, not an overlay.
     const isCloseable =
@@ -1099,7 +1099,7 @@ export class ShellState {
    *
    * Nothing raises itself while the discovery consumer is dead: every machine
    * reads unhealthy then, and the card's actions all route through the forward
-   * that consumer feeds, so it would offer "Restart workspace" over a band
+   * that consumer feeds, so it would offer "Restart Machine" over a band
    * correctly saying only restarting Imbue Studio can help.
    *
    * A card the user opened stays up when the machine answers -- they asked to

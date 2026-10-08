@@ -40,19 +40,17 @@ import {
   manifestoSchedule,
   noteVerificationEmailSent,
   observeEmailVerified,
+  observeSignedIn,
   reaskEmailVerification,
-  refuseCreateForSignedOutAccount,
   requireEmailVerification,
-  settleAwaitedSignIn,
   settleCloudCreate,
   startFlow,
   startQuestions,
   stepText,
   streamDurationMs,
   undoAnswer,
-  undoReporting,
 } from "../../models/startFlow";
-import type { ChoiceId, FlowAccount, StartFlowModel, StepId, TranscriptEntry } from "../../models/startFlow";
+import type { ChoiceId, StartFlowModel, StepId, TranscriptEntry } from "../../models/startFlow";
 import { webLogin } from "../../models/webLogin";
 import { createFormModal } from "./CreatePage";
 import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
@@ -87,8 +85,6 @@ export function transcriptTurns(
     reopenedStepIndex?: number | null;
     onAnswer?: (at: number, choiceId: ChoiceId) => void;
     onUndo?: (at: number) => void;
-    /** Take back the reporting answer, the transcript's opening user turn. */
-    onUndoReporting?: () => void;
     onAside?: (stepId: StepId) => void;
   },
 ): m.Children[] {
@@ -96,8 +92,7 @@ export function transcriptTurns(
   entries.forEach((entry, at) => {
     const key = `entry-${at}`;
     if (entry.kind === "said") {
-      const onUndoReporting = options.isPressable ? options.onUndoReporting : undefined;
-      turns.push(userTurn({ key, delayMs: 0, isInstant: options.isInstant, text: entry.text, onUndo: onUndoReporting }));
+      turns.push(userTurn({ key, delayMs: 0, isInstant: options.isInstant, text: entry.text }));
       return;
     }
     if (entry.kind === "note") {
@@ -107,14 +102,7 @@ export function transcriptTurns(
     const step = FLOW[entry.id];
     const { lead, body: ask } = stepText(step, entry.ack);
     turns.push(
-      agentTurn({
-        key: `${key}-ask`,
-        lead,
-        text: ask,
-        strong: entry.email,
-        startAtMs: FLOW_THINK_MS,
-        isInstant: options.isInstant,
-      }),
+      agentTurn({ key: `${key}-ask`, lead, text: ask, startAtMs: FLOW_THINK_MS, isInstant: options.isInstant }),
     );
     let optionsAt = FLOW_THINK_MS + streamDurationMs(`${lead}${ask}`) + FLOW_OPTIONS_GAP_MS;
     if (step.table) {
@@ -161,37 +149,21 @@ export function transcriptTurns(
 }
 
 /**
- * Whether a cached defaults payload can still back a cloud create under the
- * flow's account. The route reads the defaults when it mounts, which on a
- * first run is before the user has an account; a payload that does not list
- * the account cannot name it for the create to run under.
+ * Whether a cached defaults payload can still back a cloud create. The route
+ * reads the defaults when it mounts, which on a first run is before the user
+ * has an account; a payload that lists none while one exists names no account
+ * for the create to run under, and the front door refuses such a create.
  */
-export function areDefaultsStale(defaults: CreateFormDefaults | null, accountId: string): boolean {
-  return defaults === null || !defaults.accounts.some((account) => account.user_id === accountId);
+export function areDefaultsStale(defaults: CreateFormDefaults | null, isSignedIn: boolean): boolean {
+  return defaults === null || (isSignedIn && defaults.accounts.length === 0);
 }
 
-/** The create form's remote preset under the flow's account, submitted without the form. */
-export function cloudCreateBody(defaults: CreateFormDefaults, accountId: string): Record<string, unknown> {
+/** The create form's remote preset, submitted without the form. */
+export function cloudCreateBody(defaults: CreateFormDefaults): Record<string, unknown> {
   const model = new CreateFormModel();
   model.applyDefaults(defaults);
-  model.accountId = accountId;
   model.applyPreset("remote");
   return { ...model.submitBody() };
-}
-
-/** The signed-in accounts as the flow names them, and the default one among them. */
-function signedInAccounts(): { all: FlowAccount[]; default: FlowAccount | null } {
-  const entries = getAppContext().stores.accounts.accounts;
-  const toFlowAccount = (entry: (typeof entries)[number]): FlowAccount => ({ userId: entry.user_id, email: entry.email });
-  const defaultEntry = entries.find((entry) => entry.is_default);
-  return { all: entries.map(toFlowAccount), default: defaultEntry === undefined ? null : toFlowAccount(defaultEntry) };
-}
-
-/** The account a cloud create is owed under; the flow only owes one once its account step has settled. */
-function flowAccount(flow: StartFlowModel): FlowAccount {
-  const account = flow.state.account;
-  if (account === null) throw new Error("A cloud create is owed with no account settled");
-  return account;
 }
 
 export const StartPage: m.ClosureComponent = () => {
@@ -209,12 +181,9 @@ export const StartPage: m.ClosureComponent = () => {
   let verificationPollTimer: ReturnType<typeof setInterval> | null = null;
   let verificationPressTimer: ReturnType<typeof setTimeout> | null = null;
   // The question most recently re-opened by an undo, whose buttons come back
-  // without the arrival delay. Cleared when taking back the reporting answer
-  // empties the transcript, so a later question at the same index arrives afresh.
+  // without the arrival delay. Never cleared: an answered question renders no
+  // buttons, and every later question is a new, higher index.
   let reopenedStepIndex: number | null = null;
-  // The reporting question re-opened by taking its answer back: it has been
-  // read, so it and its buttons come back at once instead of on the opening's clock.
-  let isReportingReopened = false;
   // A window that already reached the creation page from this flow and came
   // back here starts the conversation afresh.
   flow.reset();
@@ -236,6 +205,10 @@ export const StartPage: m.ClosureComponent = () => {
     flow.submittedCreateAttemptId = operationId;
     flow.isSubmittedCreateCloudPreset = isCloudPreset;
     m.route.set(`/creating/${operationId}`);
+  }
+
+  function signedInEmail(): string {
+    return getAppContext().stores.accounts.accountEmail || webLogin.email;
   }
 
   function stopVerificationTimers(): void {
@@ -267,22 +240,17 @@ export const StartPage: m.ClosureComponent = () => {
    */
   function startCloudCreate(): void {
     if (isSubmittingCloud || isCheckingVerification || !flow.state.isCloudCreatePending) return;
-    const email = flowAccount(flow).email;
+    const email = signedInEmail();
     isCheckingVerification = true;
     fetchIsEmailVerified(email).then(
       (isVerified) => {
         isCheckingVerification = false;
         if (!flow.state.isCloudCreatePending) return;
-        // The create may have been re-owed under another account while this check ran.
-        if (flowAccount(flow).email !== email) {
-          startCloudCreate();
-          return;
-        }
         if (isVerified) {
           submitCloudCreate();
           return;
         }
-        flow.state = requireEmailVerification(flow.state);
+        flow.state = requireEmailVerification(flow.state, email);
         // No send here: the link went out when the account was created, and
         // originating another one would only burn the cooldown that the
         // user's own resend needs.
@@ -292,9 +260,7 @@ export const StartPage: m.ClosureComponent = () => {
       },
       () => {
         isCheckingVerification = false;
-        if (!flow.state.isCloudCreatePending) return;
-        if (flowAccount(flow).email !== email) startCloudCreate();
-        else submitCloudCreate();
+        if (flow.state.isCloudCreatePending) submitCloudCreate();
       },
     );
   }
@@ -305,14 +271,12 @@ export const StartPage: m.ClosureComponent = () => {
     const email = flow.state.verificationEmail;
     isCheckingVerification = true;
     try {
-      if ((await fetchIsEmailVerified(email)) && flow.state.verificationEmail === email) finishVerification();
+      if (await fetchIsEmailVerified(email)) finishVerification();
     } catch {
       // Left for the next poll.
     } finally {
       isCheckingVerification = false;
     }
-    // A create owed under another account while this poll ran was turned away by the check in flight.
-    if (flow.state.isCloudCreatePending) startCloudCreate();
   }
 
   /**
@@ -327,8 +291,7 @@ export const StartPage: m.ClosureComponent = () => {
     const attempt = (): void => {
       fetchIsEmailVerified(email).then(
         (isVerified) => {
-          // An undo since the press may have moved the wait to another account's email.
-          if (flow.state.verificationEmail !== email) return;
+          if (flow.state.verificationEmail === null) return;
           if (isVerified) {
             finishVerification();
             return;
@@ -342,7 +305,6 @@ export const StartPage: m.ClosureComponent = () => {
           redraw();
         },
         () => {
-          if (flow.state.verificationEmail !== email) return;
           verificationPressTimer = null;
           flow.state = reaskEmailVerification(flow.state);
           redraw();
@@ -363,48 +325,39 @@ export const StartPage: m.ClosureComponent = () => {
 
   function submitCloudCreate(): void {
     if (isSubmittingCloud) return;
-    flow.state = refuseCreateForSignedOutAccount(
-      flow.state,
-      signedInAccounts().all.map((account) => account.userId),
-    );
-    if (!flow.state.isCloudCreatePending) {
-      redraw();
-      return;
-    }
     isSubmittingCloud = true;
-    const accountId = flowAccount(flow).userId;
-    // Async so that a body that fails to build rejects rather than throwing past the caller's catch.
-    const submit = async (loaded: CreateFormDefaults): Promise<void> => {
-      const result = await submitCreateRequest(cloudCreateBody(loaded, accountId));
-      isSubmittingCloud = false;
-      if (result.status === 202 && typeof result.data.operation_id === "string") {
-        flow.state = settleCloudCreate(flow.state, null);
-        enterCreation(result.data.operation_id, true);
-        return;
-      }
-      const message =
-        result.status === 0 ? "Could not reach the app backend." : normalizeCreateApiError(result.data).message;
-      flow.state = settleCloudCreate(flow.state, `That did not work: ${message}`);
-      redraw();
-    };
+    const submit = (loaded: CreateFormDefaults): Promise<void> =>
+      submitCreateRequest(cloudCreateBody(loaded)).then((result) => {
+        isSubmittingCloud = false;
+        if (result.status === 202 && typeof result.data.operation_id === "string") {
+          flow.state = settleCloudCreate(flow.state, null);
+          enterCreation(result.data.operation_id, true);
+          return;
+        }
+        const message =
+          result.status === 0 ? "Could not reach the app backend." : normalizeCreateApiError(result.data).message;
+        flow.state = settleCloudCreate(flow.state, `That did not work: ${message}`);
+        redraw();
+      });
     const cached = defaults;
+    const isSignedIn = getAppContext().stores.accounts.hasAccounts;
     const ready =
-      cached !== null && !areDefaultsStale(cached, accountId)
+      cached !== null && !areDefaultsStale(cached, isSignedIn)
         ? Promise.resolve(cached)
         : fetchCreateFormDefaults(null);
-    const fail = (message: string): void => {
-      isSubmittingCloud = false;
-      flow.state = settleCloudCreate(flow.state, `That did not work: ${message}`);
-      redraw();
-    };
     // The rejection handler belongs to the read it names, not to the whole
-    // chain: a submit that throws is caught as its own failure.
+    // chain: a submit that throws must not be reported as a failed read of the
+    // settings, on top of the outcome it already recorded.
     void ready.then(
       (loaded) => {
         defaults = loaded;
-        return submit(loaded).catch(() => fail("could not send the create request."));
+        return submit(loaded);
       },
-      () => fail("could not load the create settings."),
+      () => {
+        isSubmittingCloud = false;
+        flow.state = settleCloudCreate(flow.state, "That did not work: could not load the create settings.");
+        redraw();
+      },
     );
   }
 
@@ -422,10 +375,10 @@ export const StartPage: m.ClosureComponent = () => {
       pressVerified();
       return;
     }
-    const accounts = signedInAccounts();
+    const accounts = getAppContext().stores.accounts;
     flow.state = answerStep(flow.state, at, choiceId, {
-      signedInAccount: accounts.default,
-      knownAccountIds: accounts.all.map((account) => account.userId),
+      isSignedIn: accounts.hasAccounts,
+      signedInEmail: accounts.accountEmail,
     });
     if (flow.state.pending === "custom") {
       isCustomFormOpen = true;
@@ -451,15 +404,6 @@ export const StartPage: m.ClosureComponent = () => {
     stopVerificationTimers();
     flow.state = undoAnswer(flow.state, at);
     reopenedStepIndex = at;
-    isCustomFormOpen = false;
-  }
-
-  function onUndoReporting(): void {
-    if (isSubmittingCloud) return;
-    stopVerificationTimers();
-    flow.state = undoReporting(flow.state);
-    reopenedStepIndex = null;
-    isReportingReopened = true;
     isCustomFormOpen = false;
   }
 
@@ -492,21 +436,17 @@ export const StartPage: m.ClosureComponent = () => {
       return;
     }
     if (pending === "signup" || pending === "signin") {
-      // Either signal settles the question: the account the sign-in flow
-      // reports, or an account that was not signed in when the button was
-      // pressed landing on the channel. A closed modal does not end the wait:
-      // the sign-in keeps listening after a dismiss, and an account that lands
-      // later advances the flow as if the modal had reported it. Undo, or
-      // pressing a button again, is what replaces the wait.
-      const settled = settleAwaitedSignIn(
-        flow.state,
-        signedInAccounts().all,
-        webLogin.state === "done" ? webLogin.email : "",
-      );
-      if (settled !== flow.state) {
-        // The cached defaults may have been read before this account existed.
+      // Either signal settles the question: the sign-in flow's own verdict, or
+      // the account landing on the channel. A closed modal does not end the
+      // wait: the sign-in keeps listening after a dismiss, and an account that
+      // lands later advances the flow as if the modal had reported it. Undo,
+      // or pressing a button again, is what replaces the wait.
+      if (accounts.hasAccounts || webLogin.state === "done") {
+        // The cached defaults were read before this account existed, so they
+        // name none for the create that follows; the accounts store can be a
+        // beat behind the sign-in, so areDefaultsStale cannot see it yet.
         defaults = null;
-        flow.state = settled;
+        flow.state = observeSignedIn(flow.state, signedInEmail());
         // Dismissing stops the poll, so tell the flow the sign-in landed
         // first -- on this branch the channel may well have got there before
         // any poll did, and the raise is the poll's job otherwise.
@@ -555,7 +495,7 @@ export const StartPage: m.ClosureComponent = () => {
           id: "start-reporting-ask",
           text: REPORTING_ASK,
           startAtMs: schedule.reportingAt,
-          isInstant: state.isStarted || isReportingReopened,
+          isInstant: state.isStarted,
           more: {
             id: "start-reporting-more",
             label: REPORTING_MORE_LABEL,
@@ -571,7 +511,7 @@ export const StartPage: m.ClosureComponent = () => {
         children.push(
           answerRow({
             key: "manifesto-reporting-answers",
-            delayMs: isReportingReopened ? 0 : schedule.answersAt,
+            delayMs: schedule.answersAt,
             buttons: [
               {
                 id: "reporting-no",
@@ -596,7 +536,6 @@ export const StartPage: m.ClosureComponent = () => {
           reopenedStepIndex,
           onAnswer,
           onUndo: isSubmittingCloud ? undefined : onUndo,
-          onUndoReporting: isSubmittingCloud ? undefined : onUndoReporting,
           onAside,
         }),
         scrollAnchor(state.entries.length),

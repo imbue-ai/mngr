@@ -1201,7 +1201,7 @@ def _main():
     # abort the restore. From here on, every exit owes a `restart all` --
     # registered as a debt that _finish itself pays, so no failure path can
     # forget it.
-    _progress("Stopping the workspace services...")
+    _progress("Stopping the machine services...")
     _run(["supervisorctl", "stop", "all"], timeout=300)
     _DEBTS["is_resume_owed"] = True
 
@@ -1242,7 +1242,7 @@ def _main():
     restored, restore_output = _restic_step_with_unlock_retry(restore_args, env_map, restic_binary)
     if restored != 0:
         detail = (
-            "the in-place restore failed (%s); the workspace may be mixed between versions -- "
+            "the in-place restore failed (%s); the machine may be mixed between versions -- "
             "running the restore again picks up where this one stopped." % restore_output[-500:]
         )
         _finish(result, "failed", detail)
@@ -1299,7 +1299,7 @@ def _main():
     # This pays the resume debt directly (and clears it first, so a failed
     # restart is not blindly retried by _finish) because the success path
     # must also verify the services actually came back.
-    _progress("Restarting the workspace services...")
+    _progress("Restarting the machine services...")
     _DEBTS["is_resume_owed"] = False
     # `restart all` also re-runs the env-converge one-shot, which converges the
     # (untouched) rootfs back to the restored environment record -- that is

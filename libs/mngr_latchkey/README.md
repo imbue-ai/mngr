@@ -1142,14 +1142,6 @@ therefore the one forwarded request the machine takes part in:
   503 saying that the request was kept on the machine for the desktops to pick
   up when they next connect. (One that reached only an unreachable desktop is
   kept too, and answered with that desktop's 502 as any request would be.)
-* Every answer the machine composes rather than relays -- the responses side
-  by side, that 503, that 502 -- opens with the `request_id` the machine
-  assigned, the `request_type` (the body's `type`, under the name the desktops
-  file it as), the `rationale` and the `payload` (each `null` when the body
-  lacks it), ahead of its other fields, so a parser of the agent's output
-  learns what was filed and under which id whatever the desktops said. The one
-  desktop's own response is relayed untouched: accepted, it carries all of that
-  itself.
 * A desktop that answers the request runs `mngr-latchkey forget-request` on
   the machine, which drops the record and sends `DELETE
   /permission-requests/<request_id>` with `X-Latchkey-Device: *` through the

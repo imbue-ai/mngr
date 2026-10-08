@@ -131,7 +131,7 @@ export function isTitlebarPopupRoutePath(path: string): boolean {
 }
 
 /** The workspace kept mounted behind an app-overlay modal: the ?workspace= that
- * Get help, the request-review popup, the New workspace
+ * Get help, the request-review popup, the New machine
  * template flow, and the AI-keys mint dialog forward, so those overlays float
  * over the live workspace they were opened from (kept mounted, no reload). The AI-keys dialog forwards
  * the machine's HOST id (the mint endpoint keys on it); the others forward the
@@ -189,18 +189,18 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
   if (path === "/create/template") {
     // Over a machine the template stepper is a modal floating on that
     // machine's surface (its context + accent); with no machine it redirects to
-    // the /create form, so it stays a plain New workspace page until that lands.
+    // the /create form, so it stays a plain New machine page until that lands.
     const behind = overlayBehindWorkspaceId(path, search);
     return behind !== null
       ? workspaceContext(behind, null)
-      : pageContext("New workspace");
+      : pageContext("New machine");
   }
   const creatingAttemptId = creatingAttemptIdFromPath(path);
   if (creatingAttemptId !== null) {
     return { kind: "creating", workspaceAnyId: creatingAttemptId, activeTab: null, pageLabel: "" };
   }
   if (path === "/create" || path.startsWith("/creating/")) {
-    return pageContext("New workspace");
+    return pageContext("New machine");
   }
   if (isAppOverlayPath(path)) {
     // Imbue Studio settings / Accounts / Get help / the request popup / the AI-keys

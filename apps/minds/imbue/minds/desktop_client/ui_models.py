@@ -854,7 +854,7 @@ class UiWorkspacePermissions(FrozenModel):
         description="Catalog services with no account yet"
     )
     shared_paths: tuple[UiSharedPath, ...] = Field(default=(), description="Local files rows, one per shared path")
-    workspace_toggles: tuple[UiSelfPermissionToggle, ...] = Field(description="Other workspaces (verb) rows")
+    workspace_toggles: tuple[UiSelfPermissionToggle, ...] = Field(description="Other machines (verb) rows")
     desktops: tuple[UiWorkspaceDesktop, ...] = Field(
         default=(),
         description="The desktops a desktop egress route can name, this computer first; empty when unsupported",

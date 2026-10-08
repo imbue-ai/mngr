@@ -1,4 +1,4 @@
-// The "keep a synchronized copy in the workspace" setting of one shared folder,
+// The "keep a synchronized copy on the machine" setting of one shared folder,
 // drawn the same way wherever a sync can be turned on: the Local files card in
 // the Permissions tab, and the file-sharing approval dialog.
 //
@@ -31,7 +31,7 @@ export const SETTING_SELECT_CLASS =
 export const SETTING_RAIL_CLASS =
   "mt-2 pl-3.5 border-l-2 border-subtle flex flex-col gap-2";
 
-export const SYNC_SETTING_LABEL = "Keep a synchronized copy in the workspace";
+export const SYNC_SETTING_LABEL = "Keep a synchronized copy on the machine";
 
 /** A label on the left, its control right-aligned on the right. */
 export function renderSettingRow(
@@ -83,14 +83,14 @@ function renderDirectionSentence(access: FileSharingAccess): m.Children {
   const clause: m.Children =
     access === "WRITE"
       ? [
-          "Since agents in this workspace may both ",
+          "Since agents on this machine may both ",
           m("strong", { class: "font-semibold" }, "read and write"),
-          " the folder, Imbue Studio synchronizes changes between your computer and this workspace in both directions.",
+          " the folder, Imbue Studio synchronizes changes between your computer and this machine in both directions.",
         ]
       : [
-          "Since agents in this workspace may only ",
+          "Since agents on this machine may only ",
           m("strong", { class: "font-semibold" }, "read"),
-          " the folder, Imbue Studio synchronizes changes from your computer to this workspace in one direction.",
+          " the folder, Imbue Studio synchronizes changes from your computer to this machine in one direction.",
         ];
   return m("p", { class: "type-helper text-secondary m-0" }, clause);
 }
@@ -165,7 +165,7 @@ export function renderFolderSyncSetting(
           disabled: isBusy || isUnavailable || lockedTitle !== null,
           ...(lockedTitle === null ? {} : { title: lockedTitle }),
           "data-sync-path": attrs.path,
-          "aria-label": `Keep a synchronized copy of ${attrs.path} in the workspace`,
+          "aria-label": `Keep a synchronized copy of ${attrs.path} on the machine`,
           onchange: (event: Event) =>
             attrs.onToggle((event.target as HTMLInputElement).checked),
         }),

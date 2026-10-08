@@ -9,8 +9,8 @@ _STATUS_TEXT_DEFAULT: Final[dict[str, str]] = {
     "INITIALIZING": "Starting...",
     "CLONING_REPO": "Cloning repository...",
     "CHECKING_OUT_BRANCH": "Checking out branch...",
-    "CREATING_WORKSPACE": "Creating workspace...",
-    "WAITING_FOR_READY": "Waiting for workspace to be ready...",
+    "CREATING_WORKSPACE": "Creating machine...",
+    "WAITING_FOR_READY": "Waiting for machine to be ready...",
     "DONE": "Done. Redirecting...",
 }
 
@@ -22,7 +22,7 @@ _STATUS_TEXT_IMBUE_CLOUD: Final[dict[str, str]] = {
     "CLONING_REPO": "Connecting to host...",
     "CHECKING_OUT_BRANCH": "Checking out branch...",
     "CREATING_WORKSPACE": "Setting up agent...",
-    "WAITING_FOR_READY": "Waiting for workspace to be ready...",
+    "WAITING_FOR_READY": "Waiting for machine to be ready...",
     "DONE": "Done. Redirecting...",
 }
 

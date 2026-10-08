@@ -39,7 +39,7 @@ export const DestroyingPage: m.Component<Record<string, never>, DestroyingState>
     return m(
       PageContainer,
       m("div", { class: "flex flex-col gap-4 pt-10 pb-10" }, [
-        m("h1", { class: "type-heading-lg" }, "Destroying workspace"),
+        m("h1", { class: "type-heading-lg" }, "Destroying machine"),
         m("div", { class: "flex items-center gap-2" }, [
           model.status === "running"
             ? m("div", { class: "flex items-center gap-2" }, [m(Spinner, { size: "sm" }), m("span", { class: "text-primary type-body" }, "Running...")])

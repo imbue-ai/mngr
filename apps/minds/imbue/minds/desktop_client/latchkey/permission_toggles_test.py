@@ -312,7 +312,7 @@ def test_build_workspace_toggles_labels_verbs_and_targets() -> None:
     resolver = StaticBackendResolver(url_by_agent_and_service={})
     toggles = build_workspace_toggles(resolver, config)
     by_permission = {toggle.permission: toggle for toggle in toggles}
-    assert by_permission[untargeted_verb.permission].detail == "All workspaces"
+    assert by_permission[untargeted_verb.permission].detail == "All machines"
     assert by_permission[untargeted_verb.permission].label == untargeted_verb.display_name
     # The resolver knows nothing, so the target falls back to its raw agent id.
     assert by_permission[targeted_name].detail == target_agent

@@ -1236,7 +1236,7 @@ describe("recovery card openness", () => {
   it("does not raise itself while the discovery consumer is dead", () => {
     // Every machine reads unhealthy then, and the card's own actions route
     // through the forward the dead consumer feeds -- so it would offer
-    // "Restart workspace" over a band correctly saying only the app restart helps.
+    // "Restart Machine" over a band correctly saying only the app restart helps.
     displaying(shell, AGENT);
     shell.stores.health.applyDiscoveryHealthMessage({
       type: "discovery_health",

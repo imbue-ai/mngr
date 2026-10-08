@@ -90,7 +90,7 @@ export function isChatGateFailure(message: string | null): boolean {
   const text = message ?? "";
   return (
     text.includes("cannot determine running chats") ||
-    text.includes("Could not probe the workspace")
+    text.includes("Could not probe the machine")
   );
 }
 
@@ -202,7 +202,7 @@ export class BackupOperationController {
         snapshotId: snapshot.snapshot_id,
         isCancellable: true,
         successMessage: timeText
-          ? `Workspace restored to the backup from ${timeText}. A safety backup of your previous state was saved first.`
+          ? `Machine restored to the backup from ${timeText}. A safety backup of your previous state was saved first.`
           : OPERATION_SUCCESS_MESSAGES.backup_restore,
         retryWithStopChats: () =>
           this.startRestore(snapshot, timeText, {
@@ -245,7 +245,7 @@ export class BackupOperationController {
         {},
         {
           label: "Turning backups off...",
-          successMessage: "Backups are now turned off for this workspace.",
+          successMessage: "Backups are now turned off for this machine.",
         },
       );
       return;
@@ -423,7 +423,7 @@ export class BackupOperationController {
       payload.blocked_chats.length > 0
     ) {
       this.showError(
-        `Chats are running in this workspace (${payload.blocked_chats.join(", ")}). ` +
+        `Chats are running in this machine (${payload.blocked_chats.join(", ")}). ` +
           "Stop them before continuing; they resume on your next message.",
       );
       this.isStopChatsRetryOffered = this.retryWithStopChats !== null;
@@ -562,7 +562,7 @@ export class BackupHistoryModel {
       return;
     }
     if (payload.is_configured !== true) {
-      this.statusMessage = "Backups are turned off for this workspace.";
+      this.statusMessage = "Backups are turned off for this machine.";
       this.deps.redraw();
       return;
     }
@@ -617,19 +617,19 @@ export const BACKUP_SETTINGS_RECENT_LIMIT = 5;
  */
 const BACKUP_PROBLEM_LABELS: Record<string, string> = {
   NOT_CONFIGURED:
-    'Backups are turned off for this workspace. Use "Change storage location" to turn them on.',
+    'Backups are turned off for this machine. Use "Change storage location" to turn them on.',
   CODE_OUTDATED:
-    'The backup software in this workspace is out of date. Click "Update backup software" to fix this.',
+    'The backup software in this machine is out of date. Click "Update backup software" to fix this.',
   ENV_MISSING:
-    'This workspace has lost its backup storage settings. Click "Update backup software" to restore them.',
+    'This machine has lost its backup storage settings. Click "Update backup software" to restore them.',
   ENV_MISMATCH:
-    'This workspace is set up to back up somewhere different than expected. Click "Update backup software" to fix this.',
+    'This machine is set up to back up somewhere different than expected. Click "Update backup software" to fix this.',
   SERVICE_NOT_RUNNING:
-    'The backup software in this workspace is not running. Click "Update backup software" to restart it.',
+    'The backup software in this machine is not running. Click "Update backup software" to restart it.',
   UNVERIFIABLE:
-    'Imbue Studio could not check on this workspace\'s backups. Click "Update backup software" to reset them.',
+    'Imbue Studio could not check on this machine\'s backups. Click "Update backup software" to reset them.',
   BACKUPS_STALE:
-    'This workspace has not backed up recently even though it is running. Click "Update backup software" to fix this.',
+    'This machine has not backed up recently even though it is running. Click "Update backup software" to fix this.',
 };
 
 interface BackupCheckPayload {
@@ -643,7 +643,7 @@ interface BackupCheckPayload {
 }
 
 /**
- * The Backup group in Workspace settings: the snapshot summary and the recent
+ * The Backup group in Machine settings: the snapshot summary and the recent
  * rows (fast, restic runs on this machine) plus the backup-service verdict
  * (slow, it execs into the machine), loaded independently so the slow half
  * never gates the fast one.
@@ -723,7 +723,7 @@ export class BackupSettingsModel {
     if (newest !== null)
       return `Last backup: ${new Date(newest).toLocaleString()}`;
     if (this.isSnapshotsErrored) return "Backup status unknown.";
-    if (!this.isConfigured) return "Backups are turned off for this workspace.";
+    if (!this.isConfigured) return "Backups are turned off for this machine.";
     return "No successful backup yet.";
   }
 
@@ -731,9 +731,9 @@ export class BackupSettingsModel {
   get checkLine(): string {
     const state = this.check?.check_state;
     if (state === "DISABLED")
-      return "Backup service verification is disabled for this workspace.";
+      return "Backup service verification is disabled for this machine.";
     if (state === "OFFLINE")
-      return "This workspace is offline; its backups will be checked when it is back online.";
+      return "This machine is offline; its backups will be checked when it is back online.";
     if (state === "OK") return "The backup service is up to date.";
     return "";
   }
@@ -874,7 +874,7 @@ export class DestroyedWorkspacesModel {
       "/ui/api/destroyed-workspaces",
     )) as DestroyedWorkspacesPayload | null;
     if (payload === null) {
-      this.errorMessage = "Could not load recently destroyed workspaces.";
+      this.errorMessage = "Could not load recently destroyed machines.";
       this.isLoaded = true;
       this.deps.redraw();
       return;
@@ -1074,7 +1074,7 @@ interface RecoveryStatusPayload {
 
 /** What a declined start says when the app reported no reason of its own. */
 const RECOVERY_DECLINED_FALLBACK_MESSAGE =
-  "The workspace could not be started right now. Nothing was changed.";
+  "The machine could not be started right now. Nothing was changed.";
 
 /**
  * The recovery card's driver: follow the machine's recovery state, dispatch a
@@ -1132,7 +1132,7 @@ export class RecoveryModel {
     // and without the poll the surface would hold that error until the window
     // was reloaded, while the machine recovered behind it.
     if (payload === null) {
-      this.loadError = "Could not load this workspace's recovery state.";
+      this.loadError = "Could not load this machine's recovery state.";
     } else {
       this.applyInfo(payload);
     }
@@ -1249,7 +1249,7 @@ export class RecoveryModel {
    *
    * ``kind`` of "start" skips the stop step, running only the idempotent ``mngr
    * start``: the "open this stopped machine" click-through, which has nothing
-   * to bounce. The card's own Restart workspace button asks for "restart", since
+   * to bounce. The card's own Restart Machine button asks for "restart", since
    * it may be aimed at a running-but-wedged container that only a bounce fixes.
    */
   async dispatchRecovery(kind: RecoveryKind = "restart"): Promise<void> {
@@ -1319,7 +1319,7 @@ export class RecoveryModel {
         // reports where the machine ended up.
         this.recoveryError =
           "Lost contact with the recovery; its status could not be read for several minutes. " +
-          "The workspace's state above is still being checked.";
+          "The machine's state above is still being checked.";
         this.deps.redraw();
         return;
       }

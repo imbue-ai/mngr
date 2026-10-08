@@ -47,10 +47,10 @@ def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
 
     usage_rows: list[dict[str, str]] = [
         {
-            "label": "Remote workspaces",
+            "label": "Remote machines",
             "used": str(_int_field(usage, "remote_workspaces")),
             "limit": str(_int_field(entitlements, "max_remote_workspaces")),
-            "note": "Stopped remote workspaces still count until destroyed.",
+            "note": "Stopped remote machines still count until destroyed.",
         },
         {
             "label": "Backup storage",
@@ -71,7 +71,7 @@ def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
             "note": ("Applies only to Imbue-Cloud-provided AI; your own subscription or API key is never limited."),
         },
         {
-            "label": "Synced workspaces",
+            "label": "Synced machines",
             "used": str(_int_field(usage, "active_synced_workspaces")),
             "limit": str(_int_field(entitlements, "max_active_synced_workspaces")),
             "note": "",

@@ -343,12 +343,12 @@ def _handle_delete_destroyed_backup(agent_id: str) -> Response:
         try:
             parsed_id = AgentId(agent_id)
         except ValueError:
-            return _error_response(f"No destroyed workspace found for {agent_id}.", 404)
+            return _error_response(f"No destroyed machine found for {agent_id}.", 404)
         # delete_orphan_backup_now treats a missing env as already-deleted
         # (idempotent from its perspective), so a completely unknown id must
         # be rejected here rather than reported as a successful deletion.
         if read_canonical_env(reaper.paths, parsed_id) is None:
-            return _error_response(f"No destroyed workspace found for {agent_id}.", 404)
+            return _error_response(f"No destroyed machine found for {agent_id}.", 404)
         is_deleted = reaper.delete_orphan_backup_now(parsed_id, accounts)
     if not is_deleted:
         return _error_response("Could not delete the backup; see the logs and try again.", 502)

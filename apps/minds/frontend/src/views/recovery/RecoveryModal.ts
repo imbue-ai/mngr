@@ -82,7 +82,7 @@ export function RecoveryModal(): m.Component<RecoveryModalAttrs> {
                 // dismissible, and an error state must not be the one place
                 // that shows no way out.
                 m(DialogCloseButton, { onClose }),
-                m("div", { class: "type-heading pr-10" }, "Workspace recovery"),
+                m("div", { class: "type-heading pr-10" }, "Machine recovery"),
                 m(Notice, { variant: "error" }, model.loadError),
               ],
             )

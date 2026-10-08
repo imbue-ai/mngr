@@ -1,4 +1,4 @@
-// Workspace recovery (/agents/<id>/recovery): the recovery card on a surface of
+// Machine recovery (/agents/<id>/recovery): the recovery card on a surface of
 // its own, for a window with nothing of the machine on screen -- a cold entry,
 // or a click into a machine from a list. Nothing is being preserved here, so
 // navigating costs nothing, and the titlebar stays above it throughout (home,
@@ -12,7 +12,7 @@
 // that is not there.
 //
 // Once the machine IS answering, though, the page is the only thing between the
-// reader and it, and it supplies the card's "Open workspace" button (where the
+// reader and it, and it supplies the card's "Open machine" button (where the
 // modal, with the machine already behind it, leads with Close). That is the
 // same moment the ?return_to below fires, and deliberately so: the redirect is
 // the path, and the button is what is left when there is no ?return_to to
@@ -171,7 +171,7 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
       return m(
         PageContainer,
         m("div", { class: "flex flex-col gap-4 pt-10" }, [
-          m("h1", { class: "type-heading-lg" }, "Workspace recovery"),
+          m("h1", { class: "type-heading-lg" }, "Machine recovery"),
           m(Notice, { variant: "error" }, model.loadError),
         ]),
       );
@@ -186,12 +186,12 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
       );
     }
     // Only while the machine is not answering: once the operator's start
-    // brings it back, the panel (and its Open workspace) takes over.
+    // brings it back, the panel (and its Open machine) takes over.
     if (vnode.state.heldMessage !== null && !isMachineAnswering(model)) {
       return m(
         PageContainer,
         m("div", { class: "flex flex-col gap-4 pt-10" }, [
-          m("h1", { class: "type-heading-lg" }, "Workspace maintenance"),
+          m("h1", { class: "type-heading-lg" }, "Machine maintenance"),
           m(Notice, { variant: "info" }, vnode.state.heldMessage),
         ]),
       );

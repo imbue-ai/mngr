@@ -1456,7 +1456,7 @@ def test_backup_password_change_refuses_accounts_locked_on_this_device(tmp_path:
 
 
 def test_help_assist_requires_a_workspace(tmp_path: Path) -> None:
-    """Agent help is only available inside a workspace, so a request without one is rejected."""
+    """Agent help is only available inside a machine, so a request without one is rejected."""
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.post("/help/assist", json={"description": "it broke"})
     assert response.status_code == 400
@@ -1593,7 +1593,7 @@ def test_help_assist_tells_the_user_what_a_refusing_machine_said(tmp_path: Path)
 
     assert response.status_code == 502
     body = response.get_json()
-    assert body["error"] == "Couldn't start an agent in this workspace."
+    assert body["error"] == "Couldn't start an agent in this machine."
     assert body["detail"].startswith("Error: Unknown fields in agent_types.opencode")
     # The unrelated unreachable host is the first thing mngr prints and the last thing to blame.
     assert "outer SSH unreachable" not in body["detail"]

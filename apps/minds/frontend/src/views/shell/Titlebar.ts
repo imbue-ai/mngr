@@ -190,8 +190,8 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                     TitlebarButton,
                     {
                       id: "workspace-switcher-btn",
-                      "aria-label": "Switch workspace",
-                      "data-tooltip": "Switch workspace",
+                      "aria-label": "Switch machine",
+                      "data-tooltip": "Switch machine",
                       variant: "crumb",
                       extra: "gap-1 min-w-0",
                       onclick: (event: MouseEvent) => {
@@ -290,8 +290,8 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                         TitlebarButton,
                         {
                           id: "ws-tab-settings",
-                          "aria-label": "Workspace settings",
-                          "data-tooltip": "Workspace settings",
+                          "aria-label": "Machine settings",
+                          "data-tooltip": "Machine settings",
                           tone:
                             context.activeTab === "settings"
                               ? "default"

@@ -98,8 +98,8 @@ _UNVERIFIED_EMAIL_SIGNAL: Final[str] = "Email not verified"
 # supported workspaces predate the share gateway -- i.e. after the first
 # post-v0.3.11 release is deployed and old workspaces have run update-self.
 _PRE_GATEWAY_WORKSPACE_MESSAGE: Final[str] = (
-    "This workspace's template is too old to support sharing. "
-    'Ask the workspace to update itself (send it "update yourself", which runs '
+    "This machine's workspace template is too old to support sharing. "
+    'Ask the machine to update itself (send it "update yourself", which runs '
     "the update-self skill), then publish it again."
 )
 
@@ -693,9 +693,7 @@ def _read_active_share(cli: ImbueCloudCli, account_email: str, host_id: str) -> 
     try:
         share = cli.get_share_status(account=account_email, host_id=host_id)
     except ImbueCloudCliError as exc:
-        raise SharingError(
-            f"Could not read the workspace's sharing status: {describe_connector_failure(exc)}"
-        ) from exc
+        raise SharingError(f"Could not read the machine's sharing status: {describe_connector_failure(exc)}") from exc
     return share if share is not None and share.state == "active" else None
 
 
@@ -804,7 +802,7 @@ def migrate_stale_share(
         # The connector no longer flags the share, so the panel's retry (a
         # plain read) will not inject again: only a re-publish does.
         raise SharingError(
-            "Sharing was moved to a new address, but this workspace did not receive the new share materials, so "
+            "Sharing was moved to a new address, but this machine did not receive the new share materials, so "
             f"its shared links stay down until publishing is turned off and on again for it: {exc}"
         ) from exc
     logger.info("Moved sharing for {} from {} to {}", host_id, stale_share.workspace_domain, share.workspace_domain)
@@ -1139,9 +1137,7 @@ def unpublish_workspace(
     try:
         existing = cli.get_share_status(account=account_email, host_id=host_id)
     except ImbueCloudCliError as exc:
-        raise SharingError(
-            f"Could not read the workspace's sharing status: {describe_connector_failure(exc)}"
-        ) from exc
+        raise SharingError(f"Could not read the machine's sharing status: {describe_connector_failure(exc)}") from exc
     if existing is not None and existing.state == "active":
         try:
             cli.delete_share(account=account_email, host_id=host_id)

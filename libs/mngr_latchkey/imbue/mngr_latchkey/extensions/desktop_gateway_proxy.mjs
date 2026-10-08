@@ -53,18 +53,10 @@
  * machine validates nothing: the copy is kept when some desktop accepted the
  * request (a 2xx) or when no desktop could be reached to judge it, and dropped
  * when every desktop that answered refused it. The answer to the agent is the
- * one the header's shape gives every forwarded request, with two differences:
+ * one the header's shape gives every forwarded request, with one difference:
  * when the request reaches no desktop at all, the 503 says that the request
  * was kept for the desktops to pick up (one that reaches an unreachable
- * desktop is kept too, and answered with that desktop's 502); and every
- * answer this machine composes rather than relays -- the responses side by
- * side, that 503, that 502 -- opens with the ``request_id`` the machine
- * assigned, the ``request_type`` (the body's ``type``, under the name the
- * desktops file it as), the ``rationale`` and the ``payload`` (each ``null``
- * when the body lacks it), ahead of its other fields, so a parser of the
- * agent's output learns what was filed and under which id whatever the
- * desktops said. The one desktop's own response is relayed untouched:
- * accepted, it carries all of that itself. A ``DELETE
+ * desktop is kept too, and answered with that desktop's 502). A ``DELETE
  * /permission-requests/<request_id>`` forwarded through here also drops the
  * machine's copy, so a request withdrawn by its agent is forgotten here too.
  * Resolving a request the user answered on a desktop is the package's
@@ -121,13 +113,11 @@ const HOP_BY_HOP_HEADERS = new Set([
   'upgrade',
 ]);
 
-/** A failure answered as ``{error: message}``, after any ``leadingFields`` the caller wants read first. */
 class DesktopRoutingError extends Error {
-  constructor(statusCode, message, leadingFields = {}) {
+  constructor(statusCode, message) {
     super(message);
     this.name = 'DesktopRoutingError';
     this.statusCode = statusCode;
-    this.leadingFields = leadingFields;
   }
 }
 
@@ -384,9 +374,8 @@ function sendJson(response, statusCode, payload, extraHeaders = {}) {
   response.end(body);
 }
 
-/** Answer with ``{error: message}``, after any fields the caller wants read first. */
-function sendError(response, statusCode, message, leadingFields = {}) {
-  sendJson(response, statusCode, { ...leadingFields, error: message });
+function sendError(response, statusCode, message) {
+  sendJson(response, statusCode, { error: message });
 }
 
 /** Forward the request to one desktop, streaming both ways (so ``?follow=true`` keeps following). */
@@ -479,34 +468,15 @@ function toResponseEntry(collected) {
   return { ...entry, content_type: collected.contentType, body: collected.body };
 }
 
-/**
- * One desktop's collected response relayed as the whole answer, as if the
- * request had gone there alone; only a failure to reach it is an answer this
- * machine composes, which the ``leadingFields`` open.
- */
-function relayCollected(response, collected, leadingFields = {}) {
+/** One desktop's collected response relayed as the whole answer, as if the request had gone there alone. */
+function relayCollected(response, collected) {
   if (collected.failure !== undefined) {
-    sendError(
-      response,
-      502,
-      `Desktop ${collected.desktop.deviceId} (${collected.desktop.hostname}) ${collected.failure}`,
-      leadingFields,
-    );
+    sendError(response, 502, `Desktop ${collected.desktop.deviceId} (${collected.desktop.hostname}) ${collected.failure}`);
     return;
   }
   const headers = collected.contentType === null ? {} : { 'Content-Type': collected.contentType };
   response.writeHead(collected.status, headers);
   response.end(collected.body);
-}
-
-/** Every desktop's collected response side by side, after any fields the caller wants read first. */
-function sendAggregate(response, collected, leadingFields = {}) {
-  sendJson(
-    response,
-    200,
-    { ...leadingFields, responses: collected.map(toResponseEntry) },
-    { [MULTIPLE_DESKTOPS_MATCHED_HEADER]: 'true' },
-  );
 }
 
 /**
@@ -518,7 +488,7 @@ function sendAggregate(response, collected, leadingFields = {}) {
 async function broadcastRequest(request, response, desktops) {
   const body = await readWholeBody(request);
   const collected = await Promise.all(desktops.map((desktop) => collectFromDesktop(request, body, desktop)));
-  sendAggregate(response, collected);
+  sendJson(response, 200, { responses: collected.map(toResponseEntry) }, { [MULTIPLE_DESKTOPS_MATCHED_HEADER]: 'true' });
 }
 
 /**
@@ -571,15 +541,6 @@ async function fileRequest(request, response) {
   }
   const requestId = isBodyAnObject ? generateRequestId() : null;
   const body = isBodyAnObject ? Buffer.from(JSON.stringify({ ...parsed, request_id: requestId }), 'utf-8') : rawBody;
-  // Under the names the desktops file them as.
-  const leadingFields = isBodyAnObject
-    ? {
-        request_id: requestId,
-        request_type: parsed.type ?? null,
-        rationale: parsed.rationale ?? null,
-        payload: parsed.payload ?? null,
-      }
-    : {};
   const selection = parseDeviceHeader(request);
   const keep = (targets) =>
     writeFiledRequest({
@@ -599,7 +560,7 @@ async function fileRequest(request, response) {
     }
   };
   try {
-    await routeToDesktops(request, response, { body, onCollected: keepIfTaken, leadingFields });
+    await routeToDesktops(request, response, { body, onCollected: keepIfTaken });
   } catch (error) {
     // No desktop was there to judge the request: it is kept for the ones the
     // header names, and the agent is told so along with why it went nowhere.
@@ -607,7 +568,7 @@ async function fileRequest(request, response) {
       error instanceof DesktopRoutingError && error.statusCode === 503 && !(error instanceof DesktopsNotConfiguredError);
     if (!isNoDesktop || requestId === null) throw error;
     keep([]);
-    throw new DesktopRoutingError(503, `${error.message} ${REQUEST_STORED_NOTE}`, leadingFields);
+    throw new DesktopRoutingError(503, `${error.message} ${REQUEST_STORED_NOTE}`);
   }
 }
 
@@ -636,10 +597,9 @@ function selectTargets(selection, desktops) {
 /**
  * Forward the request to the desktops its header names and answer the caller
  * with the one desktop's response, or with every response side by side. With
- * ``buffered``, its ``body`` is sent in place of the request's own, what
+ * ``buffered``, its ``body`` is sent in place of the request's own, and what
  * each desktop answered is handed to its ``onCollected`` before the caller is
- * answered, and its ``leadingFields`` open every answer composed here rather
- * than relayed from the one desktop; without it the request streams through.
+ * answered; without it the request streams through.
  */
 async function routeToDesktops(request, response, buffered = null) {
   const targets = selectTargets(parseDeviceHeader(request), await readAnnouncedDesktops());
@@ -654,9 +614,9 @@ async function routeToDesktops(request, response, buffered = null) {
   const collected = await Promise.all(targets.map((desktop) => collectFromDesktop(request, buffered.body, desktop)));
   buffered.onCollected(collected);
   if (targets.length === 1) {
-    relayCollected(response, collected[0], buffered.leadingFields);
+    relayCollected(response, collected[0]);
   } else {
-    sendAggregate(response, collected, buffered.leadingFields);
+    sendJson(response, 200, { responses: collected.map(toResponseEntry) }, { [MULTIPLE_DESKTOPS_MATCHED_HEADER]: 'true' });
   }
 }
 
@@ -682,7 +642,7 @@ export default async function desktopGatewayProxyExtension(request, response) {
     }
   } catch (error) {
     if (error instanceof DesktopRoutingError) {
-      sendError(response, error.statusCode, error.message, error.leadingFields);
+      sendError(response, error.statusCode, error.message);
     } else if (!response.headersSent) {
       const message = error instanceof Error ? error.message : String(error);
       sendError(response, 502, `Desktop routing failure: ${message}`);

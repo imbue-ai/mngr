@@ -78,7 +78,7 @@ export function isFailureVerdict(verdict: UpdateVerdict | null | undefined): boo
  * label is the truth; a stopped one could not be asked, so its label may be stale. */
 export function labelVersionNote(liveness: string | undefined): string | null {
   if (liveness !== "STOPPED") return null;
-  return "Read from when this workspace was created — start it to see the version it's actually running.";
+  return "Read from when this machine was created — start it to see the version it's actually running.";
 }
 
 /** A template ref as the reader sees it: `minds-v0.8.2` -> `v0.8.2`; any other ref as is. */
@@ -146,7 +146,7 @@ export interface UpdateActivityNotice {
 }
 
 const STARTING_NOTICE: UpdateActivityNotice = {
-  message: "Starting the update agent in this workspace…",
+  message: "Starting the update agent in this machine…",
   isWaiting: true,
 };
 
@@ -163,7 +163,7 @@ export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = 
   switch (update.activity) {
     case "APPLYING":
       return {
-        message: `Updating this workspace${target ? ` to ${target}` : ""}. Its services restart while the update lands.`,
+        message: `Updating this machine${target ? ` to ${target}` : ""}. Its services restart while the update lands.`,
         isWaiting: false,
       };
     case "STARTING":
@@ -238,8 +238,8 @@ export function updateBadgeFor(update: UiWorkspaceUpdate | null, isUpdating: boo
       tone: "warn",
       label: "Waiting for you",
       tooltip: update?.is_hold_recorded
-        ? "The update is waiting for your decision — open this workspace to continue"
-        : "The update agent has stopped and is waiting in its chat — open this workspace to continue",
+        ? "The update is waiting for your decision — open this machine to continue"
+        : "The update agent has stopped and is waiting in its chat — open this machine to continue",
       isSpinnerShown: false,
     };
   }
@@ -250,10 +250,10 @@ export function updateBadgeFor(update: UiWorkspaceUpdate | null, isUpdating: boo
       tone: "neutral",
       label: isApplying ? "Updating…" : "Preparing update…",
       tooltip: isApplying
-        ? "The update is landing; this workspace's services restart while it does"
+        ? "The update is landing; this machine's services restart while it does"
         : update?.target_override
-          ? `An update to ${update.target_override} is being prepared in this workspace`
-          : "An update is being prepared in this workspace; the workspace itself is untouched so far",
+          ? `An update to ${update.target_override} is being prepared in this machine`
+          : "An update is being prepared in this machine; the machine itself is untouched so far",
       isSpinnerShown: true,
     };
   }
@@ -273,7 +273,7 @@ export function updateBadgeFor(update: UiWorkspaceUpdate | null, isUpdating: boo
       state: "failed",
       tone: "error",
       label: "Update failed",
-      tooltip: "See what happened to this workspace's update",
+      tooltip: "See what happened to this machine's update",
       isSpinnerShown: false,
     };
   }
@@ -293,7 +293,7 @@ export function updateBadgeFor(update: UiWorkspaceUpdate | null, isUpdating: boo
       state: "needs-recreation",
       tone: "warn",
       label: "Recreate to update",
-      tooltip: "This workspace is too old to update in place — see how to move your work to a new one",
+      tooltip: "This machine is too old to update in place — see how to move your work to a new one",
       isSpinnerShown: false,
     };
   }
@@ -303,7 +303,7 @@ export function updateBadgeFor(update: UiWorkspaceUpdate | null, isUpdating: boo
       state: isScheduled ? "scheduled" : "out-of-date",
       tone: "warn",
       label: isScheduled ? "Update scheduled" : "Update available",
-      tooltip: isScheduled ? "See the update scheduled for this workspace" : "See the update available for this workspace",
+      tooltip: isScheduled ? "See the update scheduled for this machine" : "See the update available for this machine",
       isSpinnerShown: false,
     };
   }
@@ -316,8 +316,8 @@ export function updateBadgeFor(update: UiWorkspaceUpdate | null, isUpdating: boo
       // including ones whose version it did read.
       tooltip:
         update.unknown_reason === "NO_APP_VERSION"
-          ? "This build of Imbue Studio has no released version to compare workspaces against — open to check anyway"
-          : "Imbue Studio can't tell which version this workspace is running — open to check",
+          ? "This build of Imbue Studio has no released version to compare machines against — open to check anyway"
+          : "Imbue Studio can't tell which version this machine is running — open to check",
       isSpinnerShown: false,
     };
   }
@@ -330,7 +330,7 @@ export function updateBadgeFor(update: UiWorkspaceUpdate | null, isUpdating: boo
       state: "scheduled",
       tone: "neutral",
       label: "Update scheduled",
-      tooltip: "See the update scheduled for this workspace",
+      tooltip: "See the update scheduled for this machine",
       isSpinnerShown: false,
     };
   }

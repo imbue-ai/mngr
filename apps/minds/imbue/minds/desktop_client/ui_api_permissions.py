@@ -196,7 +196,7 @@ def _waiting_request_title_and_service(
     if isinstance(payload, FileSharingRequestPayload):
         return "Local files", req.rationale, ""
     if isinstance(payload, WorkspaceRequestPayload):
-        return "Other workspaces", req.rationale, ""
+        return "Other machines", req.rationale, ""
     if isinstance(payload, AccountsRequestPayload):
         return "Device accounts", req.rationale, ""
     if isinstance(payload, CustomServiceRequestPayload):
@@ -561,7 +561,7 @@ def _handle_connector_toggle(agent_id: str) -> Response:
 
 
 def _handle_self_toggle(agent_id: str) -> Response:
-    """POST .../permissions/self-toggle: flip one Local files / Other workspaces permission."""
+    """POST .../permissions/self-toggle: flip one Local files / Other machines permission."""
     prelude = _write_prelude(agent_id)
     if isinstance(prelude, Response):
         return prelude
@@ -787,7 +787,7 @@ def _handle_shared_path(agent_id: str) -> Response:
         return make_json_error_response("path is required, and access must be READ or WRITE.", status_code=400)
     host_id = resolve_workspace_host_id(get_state().backend_resolver, agent_id)
     if host_id is None:
-        return make_json_error_response("Could not work out which workspace to share with.", status_code=400)
+        return make_json_error_response("Could not work out which machine to share with.", status_code=400)
     permissions_path = permissions_path_for_host(handler.latchkey.plugin_data_dir, host_id)
     try:
         request_id = handler.gateway_client.create_file_sharing_request(

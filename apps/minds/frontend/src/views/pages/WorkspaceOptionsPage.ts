@@ -1,5 +1,5 @@
 // The workspace options overlay (/workspace/<id>/options?tab=&group=&section=
-// &target=): Permissions + Share workspace + Workspace settings over one
+// &target=): Permissions + Share machine + Machine settings over one
 // options-data load. This owns the URL-backed tab/group/section state and the
 // two models; the docked panel chrome (backdrop, tab strip, card) lives in
 // WorkspaceOptionsOverlay, which the Shell floats over the still-mounted

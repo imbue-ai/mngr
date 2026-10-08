@@ -173,7 +173,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     }
     isAwaitingSignIn = true;
     void webLogin.start(
-      "Sign in or create an Imbue account to run your workspace on Imbue Cloud. " +
+      "Sign in or create an Imbue account to run your machine on Imbue Cloud. " +
         "You can also cancel and run it directly on your computer.",
     );
   }
@@ -338,7 +338,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
           m(TextInput, {
             id: "host_name",
             name: "host_name",
-            placeholder: "my-workspace",
+            placeholder: "my-machine",
             value: model.hostName,
             extra: model.hostNameError ? "!border-important focus:!outline-important" : "",
             oninput: (event: InputEvent) => {
@@ -470,7 +470,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
             ? m("div", { id: "backup-api-key-row", class: "mt-2" }, [
                 m(FormLabel, { target: "backup_api_key_env" }, "restic environment"),
                 m("p", { class: "mb-1 type-helper text-tertiary" }, [
-                  "Written verbatim to restic.env. Don't set RESTIC_PASSWORD -- Imbue Studio assigns each workspace its ",
+                  "Written verbatim to restic.env. Don't set RESTIC_PASSWORD -- Imbue Studio assigns each machine its ",
                   "own. See the ",
                   m(
                     Link,
@@ -512,7 +512,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
           m(
             "p",
             { class: "mt-1 type-helper text-tertiary" },
-            "Make the workspace reachable from the Imbue Studio web client (only you are granted). Requires an account.",
+            "Make the machine reachable from the Imbue Studio web client (only you are granted). Requires an account.",
           ),
           model.enableWebAccess && model.accountId === ""
             ? m(
@@ -716,7 +716,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                 isEmbedded
                   ? null
                   : m("div", { class: "text-center mb-12" }, [
-                      m("p", { class: "type-label uppercase tracking-wide text-secondary" }, "Create a workspace"),
+                      m("p", { class: "type-label uppercase tracking-wide text-secondary" }, "Create a machine"),
                       m("h1", { class: "type-heading-lg text-primary mt-1" }, "Where should it run?"),
                     ]),
                 model.submitError
@@ -731,7 +731,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                   // carries its own controls, which are not part of the choice.
                   m(
                     "div",
-                    { role: "radiogroup", "aria-label": "Where to run your workspace" },
+                    { role: "radiogroup", "aria-label": "Where to run your machine" },
                     m(PresetCards, {
                       selectedPreset: model.selectedPreset,
                       onSelect: (name: PresetName) => {
@@ -775,7 +775,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                           account.email,
                         ),
                       ),
-                      m("option", { value: "", selected: model.accountId === "" }, "No account (private workspace)"),
+                      m("option", { value: "", selected: model.accountId === "" }, "No account (private machine)"),
                     ],
                   ),
                   !model.isAdvancedOpen

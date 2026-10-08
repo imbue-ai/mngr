@@ -260,7 +260,8 @@ PREVENT_INIT_DOCSTRINGS = RegexRatchetRule(
 PREVENT_ARGS_IN_DOCSTRINGS = RegexRatchetRule(
     rule_name="Args: sections in docstrings",
     rule_description="Never include 'Args:' sections in docstrings. Use inline parameter comments if needed",
-    pattern_string=r'"""[\s\S]{0,500}Args:',
+    # The word boundary keeps a name ending in ``Args`` (``-> ShowArgs:``, ``class FooArgs:``) from counting.
+    pattern_string=r'"""[\s\S]{0,500}\bArgs:',
     is_multiline=True,
 )
 

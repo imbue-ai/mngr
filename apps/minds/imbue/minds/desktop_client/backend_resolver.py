@@ -1679,7 +1679,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 if str(agent_id) not in self._logged_malformed_color_agents:
                     logger.warning(
                         "Ignoring malformed color label {!r} for agent {}; "
-                        "rendering as default. Repick in Workspace settings to fix.",
+                        "rendering as default. Repick in machine settings to fix.",
                         raw,
                         agent_id,
                     )

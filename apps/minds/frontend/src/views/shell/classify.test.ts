@@ -65,7 +65,7 @@ describe("classifyRoute", () => {
   it("labels hub pages like the legacy chrome", () => {
     expect(classifyRoute("/create")).toMatchObject({
       kind: "page",
-      pageLabel: "New workspace",
+      pageLabel: "New machine",
     });
     // A creation page wears its in-flight attempt's frame: the attempt id is
     // the coordinate the titlebar names and paints from.
@@ -77,10 +77,10 @@ describe("classifyRoute", () => {
     // A creating path that names something other than an attempt stays a page.
     expect(classifyRoute("/creating/agent-ff00").kind).toBe("page");
     // Template over a machine is that machine's modal; standalone it is a
-    // plain New workspace page (until it redirects to the create form).
+    // plain New machine page (until it redirects to the create form).
     expect(classifyRoute("/create/template")).toMatchObject({
       kind: "page",
-      pageLabel: "New workspace",
+      pageLabel: "New machine",
     });
     expect(
       classifyRoute("/create/template", "workspace=agent-ab12"),
@@ -168,7 +168,7 @@ describe("app overlay routing", () => {
       "agent-ab12",
     );
     expect(overlayBehindWorkspaceId("/inbox", "")).toBeNull();
-    // The New workspace template stepper floats over the machine it was opened
+    // The New machine template stepper floats over the machine it was opened
     // from; with none it redirects to the create form (no behind-workspace).
     expect(
       overlayBehindWorkspaceId("/create/template", "workspace=agent-ab12"),

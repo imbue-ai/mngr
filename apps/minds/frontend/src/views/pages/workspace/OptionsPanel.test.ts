@@ -24,14 +24,14 @@ describe("the options pane heading", () => {
     expect(title).not.toContain("Sharing");
     expect(title).toContain("alpha");
     expect(title).not.toContain(":");
-    expect(title).not.toContain("Share workspace");
+    expect(title).not.toContain("Share machine");
   });
 
   it("draws the person-with-plus glyph beside Share", () => {
     expect(headingGlyph("share")).toBe(ICONS_16["user-plus"]);
   });
 
-  it("draws the gear glyph beside Workspace settings", () => {
+  it("draws the gear glyph beside Machine settings", () => {
     expect(headingGlyph("settings")).toBe(ICONS_16["settings"]);
   });
 });

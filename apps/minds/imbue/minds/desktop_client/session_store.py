@@ -332,7 +332,7 @@ class MultiAccountSessionStore(MutableModel):
         is owned by another account (disassociate first, then associate).
         """
         if self.record_store is None:
-            raise WorkspaceSyncError("Workspace sync is not configured; cannot associate workspaces")
+            raise WorkspaceSyncError("Machine sync is not configured; cannot associate machines")
         account = self._require_account(user_id)
         self.record_store.associate_workspace_or_raise(user_id, account.email, agent_id, resolver)
         logger.info("Associated machine {} with user {}", agent_id, user_id[:8])

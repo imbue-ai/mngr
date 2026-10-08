@@ -3430,7 +3430,7 @@ def test_add_account_runs_ephemeral_auth_browser(tmp_path: Path) -> None:
 
 def test_add_account_non_google_failure_surfaces_error(tmp_path: Path) -> None:
     # Every call fails; the browser-prepare step fails first, so its error is
-    # surfaced as-is.
+    # surfaced as-is and no Google-only ``auth prepare`` fallback is attempted.
     binary = _make_env_recording_binary(tmp_path, exit_code=1, stderr="user cancelled")
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
@@ -3438,8 +3438,8 @@ def test_add_account_non_google_failure_surfaces_error(tmp_path: Path) -> None:
 
     assert is_success is False
     assert detail == "user cancelled"
-    # The prepare step fails, so the sign-in is never attempted, and a
-    # non-Google service never gets the Minds Google OAuth client registered.
+    # The prepare step fails, so the sign-in is never attempted and there is no
+    # Minds Google OAuth client registration for a non-Google service.
     assert [record["argv"] for record in _read_recording_report(tmp_path)] == [["auth", "browser-prepare", "slack"]]
 
 
@@ -3487,22 +3487,24 @@ def test_summarize_latchkey_failure_caps_the_summary_length() -> None:
     assert summary.endswith("…")
 
 
-def test_add_account_google_failure_with_minds_client_is_surfaced(tmp_path: Path) -> None:
-    """Ephemeral add-account signs in with the Minds client only: a failure there ends the flow."""
+def test_add_account_google_falls_back_to_browser_prepare_when_official_client_fails(tmp_path: Path) -> None:
+    # Ephemeral add-account re-prepares the Minds client first; when that sign-in
+    # fails it falls back to a fresh self-setup browser-prepare and retries.
     binary = _make_google_oauth_binary(tmp_path, does_minds_login_succeed=False)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
-    is_success, detail = latchkey.add_account("google-gmail")
+    is_success, _detail = latchkey.add_account("google-gmail")
 
-    assert is_success is False
-    assert detail == "minds consent declined"
+    assert is_success is True
     argv_calls = _read_argv_calls(tmp_path)
     assert argv_calls == [
         _MINDS_PREPARE_ARGV,
         ["auth", "browser", "google-gmail"],
+        ["auth", "browser-prepare", "google-gmail"],
+        ["auth", "browser", "google-gmail"],
     ]
-    # The failed Minds preparation is left in place; it is not cleared (which
-    # would wipe other accounts' credentials).
+    # The failed Minds preparation is left for browser-prepare to overwrite; it
+    # is not cleared (which would wipe other accounts' credentials).
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
 
@@ -3513,17 +3515,17 @@ def _make_google_oauth_binary(
     does_minds_prepare_succeed: bool = True,
     does_minds_login_succeed: bool = True,
     does_preregistered_login_succeed: bool = True,
+    does_self_setup_prepare_succeed: bool = True,
 ) -> Path:
     """Build a fake latchkey CLI that models the google OAuth client lifecycle.
 
     A marker file records which client is registered: ``auth prepare`` writes
-    ``minds``, ``auth clear`` removes it, and an optional pre-existing client
-    starts as ``preregistered``. ``auth browser`` fails asking for
-    ``browser-prepare`` when nothing is registered, and otherwise succeeds or
-    fails per the registered client's configured outcome. A Google service is
-    never self-set-up, so ``auth browser-prepare`` is unexpected and exits 2
-    like any other unknown command. Every invocation appends its argv to the
-    shared recording report.
+    ``minds``, ``auth browser-prepare`` writes ``self-setup``, ``auth clear``
+    removes it, and an optional pre-existing client starts as ``preregistered``.
+    ``auth browser`` fails asking for ``browser-prepare`` when nothing is
+    registered, and otherwise succeeds or fails per the registered client's
+    configured outcome. Every invocation appends its argv to the shared
+    recording report.
     """
     script = tmp_path / "latchkey"
     report_path = tmp_path / "latchkey_report.jsonl"
@@ -3544,6 +3546,12 @@ def _make_google_oauth_binary(
         "        open(marker_path, 'w').write('minds')\n"
         "        sys.exit(0)\n"
         "    sys.stderr.write('minds prepare failed')\n"
+        "    sys.exit(1)\n"
+        "if argv[:2] == ['auth', 'browser-prepare']:\n"
+        f"    if {does_self_setup_prepare_succeed}:\n"
+        "        open(marker_path, 'w').write('self-setup')\n"
+        "        sys.exit(0)\n"
+        "    sys.stderr.write('self-setup prepare failed')\n"
         "    sys.exit(1)\n"
         "if argv[:2] == ['auth', 'clear']:\n"
         "    if os.path.exists(marker_path):\n"
@@ -3599,39 +3607,41 @@ def test_auth_browser_google_registers_minds_client_then_signs_in(tmp_path: Path
     ]
 
 
-def test_auth_browser_google_minds_sign_in_failure_is_surfaced_without_self_setup(tmp_path: Path) -> None:
-    """Minds client registers but its sign-in fails: the failure is returned, with no second browser flow."""
+def test_auth_browser_google_minds_sign_in_failure_falls_back_to_self_setup(tmp_path: Path) -> None:
+    """Minds client registers but its sign-in fails: fall back to the self-setup flow (no clear)."""
     binary = _make_google_oauth_binary(tmp_path, does_minds_login_succeed=False)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
-    is_success, detail = latchkey.auth_browser("google-gmail")
+    is_success, _detail = latchkey.auth_browser("google-gmail")
 
-    assert is_success is False
-    assert detail == "minds consent declined"
+    assert is_success is True
     argv_calls = _read_argv_calls(tmp_path)
+    # browser-prepare overwrites the stale Minds preparation, so no clear is
+    # needed between the failed Minds sign-in and the self-setup browser-prepare.
     assert argv_calls == [
         ["auth", "browser", "google-gmail"],
         _MINDS_PREPARE_ARGV,
         ["auth", "browser", "google-gmail"],
+        ["auth", "browser-prepare", "google-gmail"],
+        ["auth", "browser", "google-gmail"],
     ]
-    # The Minds preparation is left in place for the next attempt to sign in
-    # against; clearing it would also wipe other accounts' credentials.
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
 
-def test_auth_browser_google_minds_prepare_failure_is_surfaced_without_sign_in(tmp_path: Path) -> None:
-    """If registering the Minds client fails, no sign-in is attempted and the failure is returned."""
+def test_auth_browser_google_minds_prepare_failure_falls_through_without_clearing(tmp_path: Path) -> None:
+    """If registering the Minds client fails, skip the sign-in and the clear and go to self-setup."""
     binary = _make_google_oauth_binary(tmp_path, does_minds_prepare_succeed=False)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
-    is_success, detail = latchkey.auth_browser("google-gmail")
+    is_success, _detail = latchkey.auth_browser("google-gmail")
 
-    assert is_success is False
-    assert detail == "minds prepare failed"
+    assert is_success is True
     argv_calls = _read_argv_calls(tmp_path)
     assert argv_calls == [
         ["auth", "browser", "google-gmail"],
         _MINDS_PREPARE_ARGV,
+        ["auth", "browser-prepare", "google-gmail"],
+        ["auth", "browser", "google-gmail"],
     ]
     # We never registered our client, so nothing of ours is cleared.
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls

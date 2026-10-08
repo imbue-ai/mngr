@@ -778,7 +778,7 @@ def test_workspaces_backups_stream_degrades_non_agent_ids_without_failing_the_ba
     row_by_id = {row["agent_id"]: row for row in lines}
     assert set(row_by_id) == {str(agent_id), create_attempt_id}
     assert row_by_id[str(agent_id)]["error"] is None
-    assert row_by_id[create_attempt_id]["error"] == "not a workspace agent id"
+    assert row_by_id[create_attempt_id]["error"] == "not a machine agent id"
 
 
 def test_workspaces_backups_stream_degrades_unresolved_rows_on_row_timeout() -> None:
@@ -1991,7 +1991,7 @@ def test_patch_provider_disable_with_active_workspaces_conflicts(tmp_path: Path)
     response = client.patch("/api/v1/desktop/providers/local", headers=_auth_header(), json={"enabled": False})
 
     assert response.status_code == 409
-    assert "active workspace" in json.loads(response.data)["error"].lower()
+    assert "active machine" in json.loads(response.data)["error"].lower()
 
 
 @pytest.mark.parametrize(
@@ -3378,14 +3378,14 @@ def test_restart_operation_status_reports_a_declined_start_as_neither_done_nor_f
     client = _client_with_workspace(tmp_path, agent_id)
     registry = get_state(client.application).workspace_operation_registry
     registry.start(agent_id, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
-    registry.decline(agent_id, "This workspace is undergoing maintenance and will be back shortly.")
+    registry.decline(agent_id, "This machine is undergoing maintenance and will be back shortly.")
 
     body = json.loads(client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header()).data)
 
     assert body["status"] == "DECLINED"
     assert body["is_done"] is False
     assert body["error"] is None
-    assert body["warning"] == "This workspace is undergoing maintenance and will be back shortly."
+    assert body["warning"] == "This machine is undergoing maintenance and will be back shortly."
 
 
 def test_restart_operation_status_hides_backup_operation_records(tmp_path: Path) -> None:
@@ -3534,7 +3534,7 @@ def test_backup_service_update_conflicts_with_a_running_operation(
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
 
     assert response.status_code == 409
-    assert "A workspace recovery is already in progress" in json.loads(response.data)["error"]
+    assert "A machine recovery is already in progress" in json.loads(response.data)["error"]
     # The dispatch did not replace the running record.
     record = registry.get(agent_id)
     assert record is not None

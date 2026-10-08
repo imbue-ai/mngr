@@ -251,7 +251,7 @@ describe("RecoveryCardBody", () => {
     expect(text).toContain(
       "In progress work will be interrupted, but saved data will not be lost.",
     );
-    expect(text).toContain("Restart workspace");
+    expect(text).toContain("Restart Machine");
     expect(text).toContain("Report a problem");
   });
 
@@ -261,7 +261,7 @@ describe("RecoveryCardBody", () => {
     const text = renderCard({ ...UNRESPONSIVE, health: "stuck" });
     expect(text).toContain("my-machine isn't responding yet.");
     expect(text).toContain("Imbue Studio is still checking what's wrong.");
-    expect(text).toContain("Restart workspace");
+    expect(text).toContain("Restart Machine");
   });
 
   it("names the backend and withholds the restart when the backend is unreachable", () => {
@@ -278,12 +278,12 @@ describe("RecoveryCardBody", () => {
 
     expect(text).toContain("my-machine unreachable: Can't connect to Docker");
     expect(text).toContain(
-      "Imbue Studio will reconnect you to your workspace as soon as it can be reached again.",
+      "Imbue Studio will reconnect you to your machine as soon as it can be reached again.",
     );
     expect(text).toContain(
       "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
     );
-    expect(text).not.toContain("Restart workspace");
+    expect(text).not.toContain("Restart Machine");
     // A card with no remedy still has to let the user say something about it.
     expect(text).toContain("Report a problem");
   });
@@ -303,7 +303,7 @@ describe("RecoveryCardBody", () => {
 
     expect(text).toContain("my-machine is responding again.");
     expect(text).not.toContain("Can't connect to Imbue Cloud");
-    expect(text).toContain("Restart workspace");
+    expect(text).toContain("Restart Machine");
   });
 
   it("explains this device's dead network and offers no restart to route over it", () => {
@@ -318,10 +318,10 @@ describe("RecoveryCardBody", () => {
     expect(text).toContain("Can't connect to my-machine from this device");
     expect(text).toContain("This device has no network connection.");
     expect(text).toContain(
-      "Imbue Studio will reconnect to your workspace as soon as it does.",
+      "Imbue Studio will reconnect to your machine as soon as it does.",
     );
     expect(text).toContain("Waiting for network");
-    expect(text).not.toContain("Restart workspace");
+    expect(text).not.toContain("Restart Machine");
     expect(text).toContain("Report a problem");
   });
 
@@ -335,11 +335,11 @@ describe("RecoveryCardBody", () => {
     });
 
     expect(text).toContain(
-      "This network blocks the connection Imbue Studio uses to reach your workspaces (SSH).",
+      "This network blocks the connection Imbue Studio uses to reach your machines (SSH).",
     );
     expect(text).toContain("Try another network or a VPN.");
     expect(text).not.toContain("This device has no network connection.");
-    expect(text).not.toContain("Restart workspace");
+    expect(text).not.toContain("Restart Machine");
   });
 
   it("blames this device before it blames the backend behind it", () => {
@@ -373,7 +373,7 @@ describe("RecoveryCardBody", () => {
 
     expect(text).toContain("This device has no network connection.");
     expect(text).not.toContain("Can't connect to Imbue Cloud");
-    expect(text).not.toContain("Restart workspace");
+    expect(text).not.toContain("Restart Machine");
   });
 
   it("keeps narrating the restart the user asked for", () => {
@@ -476,12 +476,12 @@ describe("RecoveryCardBody", () => {
     };
     const model = modelShowing(held);
     model.recoveryNotice =
-      "This workspace is undergoing maintenance and will be back shortly.";
+      "This machine is undergoing maintenance and will be back shortly.";
 
     const text = renderCard(held, model);
 
     expect(text).toContain(
-      "This workspace is undergoing maintenance and will be back shortly.",
+      "This machine is undergoing maintenance and will be back shortly.",
     );
     expect(text).toContain("my-machine is stopped.");
     expect(text).not.toContain("unresponsive");
@@ -529,7 +529,7 @@ describe("RecoveryCardBody", () => {
     // heading that declines to claim a restart must decline to claim one too.
     expect(text).toContain("Reconnecting...");
     expect(text).not.toContain("Restarting...");
-    expect(text).not.toContain("Restart workspace");
+    expect(text).not.toContain("Restart Machine");
   });
 
   it("says restarting from the click, before the tracker has caught up", async () => {
@@ -579,7 +579,7 @@ describe("RecoveryCardBody", () => {
     expect(cardTextWithErrorDetailsOpen(info)).toContain(
       "No known_hosts file at /keys/known_hosts; refusing to connect",
     );
-    expect(text).not.toContain("Restart workspace");
+    expect(text).not.toContain("Restart Machine");
     expect(text).toContain("Report a problem");
   });
 
@@ -648,7 +648,7 @@ describe("RecoveryCardBody", () => {
     model.isRecoverySucceeded = true;
     const text = renderedText(renderRoot(RecoveryCardBody, { model }));
     expect(text).toContain("my-machine is responding again.");
-    expect(text).toContain("This workspace is answering again.");
+    expect(text).toContain("This machine is answering again.");
     expect(text).not.toContain("isn't responding yet");
     expect(text).not.toContain("Imbue Studio is still checking what's wrong.");
   });
@@ -663,7 +663,7 @@ describe("RecoveryCardBody", () => {
       renderRoot(RecoveryCardBody, { model, isSelfDismissing: true }),
     );
     expect(text).toContain("Reconnecting...");
-    expect(text).not.toContain("Restart workspace");
+    expect(text).not.toContain("Restart Machine");
   });
 
   it("keeps that window free of the device's condition too", () => {
@@ -699,17 +699,17 @@ describe("RecoveryCardBody", () => {
       onEnterMachine: enter,
     });
 
-    expect(renderedText(rendered)).toContain("Open workspace");
-    clickButtonLabeled(rendered, "Open workspace");
+    expect(renderedText(rendered)).toContain("Open machine");
+    clickButtonLabeled(rendered, "Open machine");
     expect(enter).toHaveBeenCalledOnce();
   });
 
   it("says nothing about entering the machine on a surface that already can", () => {
-    // The modal passes no way into the machine, and gets no Open workspace: it
+    // The modal passes no way into the machine, and gets no Open machine: it
     // would sit on top of the very machine it offered to open.
     const model = modelShowing({ ...UNRESPONSIVE, health: "healthy" });
     expect(renderedText(renderRoot(RecoveryCardBody, { model }))).not.toContain(
-      "Open workspace",
+      "Open machine",
     );
   });
 
@@ -720,7 +720,7 @@ describe("RecoveryCardBody", () => {
 
     expect(buttonVariants(rendered)).toEqual([
       ["Close", "primary"],
-      ["Restart workspace", "secondary"],
+      ["Restart Machine", "secondary"],
       ["Report a problem", "secondary"],
     ]);
     clickButtonLabeled(rendered, "Close");
@@ -739,7 +739,7 @@ describe("RecoveryCardBody", () => {
         onClose: () => {},
       });
       expect(buttonVariants(rendered)).toEqual([
-        ["Restart workspace", "primary"],
+        ["Restart Machine", "primary"],
         ["Report a problem", "secondary"],
       ]);
     }

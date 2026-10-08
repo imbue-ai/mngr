@@ -58,10 +58,10 @@ function modeChoice(model: HelpModel): m.Children {
             "span",
             { class: "block type-helper text-tertiary" },
             isAssistAvailable
-              ? "Opens a new chat in this workspace that diagnoses the issue and fixes what it can."
+              ? "Opens a new chat in this machine that diagnoses the issue and fixes what it can."
               : model.launch.workspaceAgentId
-                ? "Available once this workspace is responding."
-                : "Open a workspace to use this.",
+                ? "Available once this machine is responding."
+                : "Open a machine to use this.",
           ),
         ]),
       ],
@@ -179,7 +179,7 @@ export function formPhase(model: HelpModel): m.Children {
       ? m("p", { class: "type-body text-primary mb-4" }, [
           model.launch.workspaceName
             ? m.fragment({}, [
-                "An agent in workspace ",
+                "An agent in machine ",
                 m(
                   "span",
                   { class: "font-semibold" },
@@ -187,7 +187,7 @@ export function formPhase(model: HelpModel): m.Children {
                 ),
                 " wants to submit this report:",
               ])
-            : "An agent in this workspace wants to submit this report:",
+            : "An agent in this machine wants to submit this report:",
         ])
       : m(
           "p",
@@ -273,7 +273,7 @@ function loadingPhase(): m.Children {
     m(
       "p",
       { class: "type-helper text-tertiary mt-1" },
-      "Setting up a new chat in this workspace. This can take a few seconds.",
+      "Setting up a new chat in this machine. This can take a few seconds.",
     ),
   ]);
 }

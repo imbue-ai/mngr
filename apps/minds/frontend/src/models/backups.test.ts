@@ -159,7 +159,7 @@ describe("failure classification", () => {
     ).toBe(true);
     expect(isSafetySnapshotFailure("something else")).toBe(false);
     expect(isChatGateFailure("cannot determine running chats")).toBe(true);
-    expect(isChatGateFailure("Could not probe the workspace")).toBe(true);
+    expect(isChatGateFailure("Could not probe the machine")).toBe(true);
     expect(isChatGateFailure(null)).toBe(false);
   });
 });
@@ -172,7 +172,7 @@ describe("BackupHistoryModel", () => {
     deps.getResponses.push({ is_configured: false });
     await model.loadPage();
     expect(model.statusMessage).toBe(
-      "Backups are turned off for this workspace.",
+      "Backups are turned off for this machine.",
     );
 
     deps.getResponses.push({ is_configured: true, snapshots_error: "boom" });
@@ -277,7 +277,7 @@ describe("BackupOperationController", () => {
     await settle();
     expect(controller.isRunning).toBe(false);
     expect(controller.successMessage).toContain(
-      "Workspace restored to the backup from 5 days ago",
+      "Machine restored to the backup from 5 days ago",
     );
     expect(successCount).toBe(1);
   });
@@ -298,7 +298,7 @@ describe("BackupOperationController", () => {
     await settle();
 
     expect(controller.errorMessage).toContain(
-      "Chats are running in this workspace (main)",
+      "Chats are running in this machine (main)",
     );
     expect(controller.isStopChatsRetryOffered).toBe(true);
 
@@ -580,7 +580,7 @@ describe("RecoveryModel", () => {
     deps.getResponses.push({
       status: "DECLINED",
       is_done: false,
-      warning: "This workspace is undergoing maintenance.",
+      warning: "This machine is undergoing maintenance.",
     });
     deps.runScheduled();
     await settle();
@@ -589,7 +589,7 @@ describe("RecoveryModel", () => {
     expect(model.isRecoverySucceeded).toBe(false);
     expect(model.recoveryError).toBeNull();
     expect(model.recoveryNotice).toBe(
-      "This workspace is undergoing maintenance.",
+      "This machine is undergoing maintenance.",
     );
 
     // Once the operator's start brings the machine back, the notice is stale.
@@ -923,7 +923,7 @@ describe("BackupSettingsModel", () => {
 
     deps.getResponses.push({ is_configured: false, snapshots: [] });
     await model.loadSnapshots();
-    expect(model.statusLine).toBe("Backups are turned off for this workspace.");
+    expect(model.statusLine).toBe("Backups are turned off for this machine.");
     expect(model.emptyHistoryMessage).toContain("Backups are turned off");
 
     deps.getResponses.push({
@@ -1046,7 +1046,7 @@ describe("BackupSettingsModel", () => {
     // The fresh verdict, not an optimistic flip: the re-check is what decides.
     expect(model.isVerificationEnabled).toBe(false);
     expect(model.checkLine).toBe(
-      "Backup service verification is disabled for this workspace.",
+      "Backup service verification is disabled for this machine.",
     );
     expect(model.isVerificationPending).toBe(false);
     expect(model.verificationError).toBeNull();
