@@ -1,5 +1,5 @@
 /**
- * Build script for Minds desktop app.
+ * Build script for the Imbue Studio desktop app.
  *
  * Stages everything ToDesktop packages under `resources/`, one complete tree
  * per shipped target:
@@ -521,7 +521,7 @@ function copySharedPayloadInto(targetDir) {
 }
 
 async function main() {
-  console.log('Building Minds desktop app...\n');
+  console.log('Building Imbue Studio desktop app...\n');
 
   // Clean resources directory
   if (fs.existsSync(RESOURCES_DIR)) {

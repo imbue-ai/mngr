@@ -453,7 +453,7 @@ Details worth knowing:
 
 ## Desktops
 
-A user may run Minds on several computers at once, and each of them connects to
+A user may run Imbue Studio on several computers at once, and each of them connects to
 every remote workspace's machine with a reverse SSH tunnel of its own (the app
 hands the forward supervisor its device id, under which the supervisor announces
 this computer to each machine every discovery cycle). The workspace's gateway

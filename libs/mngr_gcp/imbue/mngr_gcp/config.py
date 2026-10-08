@@ -94,7 +94,7 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
     ``project_id`` and ``service_account_email`` / ``service_account_scopes``
     are plain, non-secret identifiers -- not credential material.
 
-    Exception: when ``service_account_key_json`` is set (the Minds bring-your-own-
+    Exception: when ``service_account_key_json`` is set (the Imbue Studio bring-your-own-
     account paste flow), that pasted service-account key is used to build
     credentials directly, bypassing ADC, and its embedded ``project_id`` becomes
     the resolved-project fallback. Mirrors the OVH/Vultr providers holding

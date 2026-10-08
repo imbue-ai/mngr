@@ -114,7 +114,7 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
     boto3's default credential chain (``AWS_*`` env vars, ``~/.aws/credentials``,
     ``~/.aws/config``, EC2 IMDS) is used exclusively -- the Modal/GCP/Azure
     convention. When explicit ``aws_access_key_id`` + ``aws_secret_access_key``
-    are set (the Minds "bring your own account" paste flow), they take
+    are set (the Imbue Studio "bring your own account" paste flow), they take
     precedence and are handed straight to ``boto3.Session``; the ambient chain
     is bypassed. Mirrors the OVH/Vultr providers, which also hold ``SecretStr``
     key material for exactly this reason.

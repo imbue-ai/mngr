@@ -1,6 +1,6 @@
 """Verb metadata for the cross-workspace ``minds-workspaces`` API.
 
-Minds exposes a small cross-workspace management API
+Imbue Studio exposes a small cross-workspace management API
 (``/api/v1/workspaces/...``) that an agent in one workspace can call to act on
 *other* workspaces -- listing them, reading detail, creating, destroying,
 starting/stopping, exporting and managing backups, establishing SSH access,

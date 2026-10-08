@@ -203,7 +203,7 @@ const MODEL_STATE_NAME = "model_state.json";
 const INBOX_NAME = "pi_inbox";
 // Where prior-generation inbox lines are archived at load (raw history preserved
 // verbatim), so `pi_inbox` itself only ever holds current-generation lines. The
-// Minds queue mirror replays `pi_inbox` from zero and relies on this scoping.
+// Imbue Studio queue mirror replays `pi_inbox` from zero and relies on this scoping.
 const INBOX_HISTORY_NAME = "pi_inbox_history";
 const INBOX_POLL_MS = 200;
 // How many consecutive drain ticks a flush/retract sentinel may be deferred waiting for
@@ -215,18 +215,18 @@ const INBOX_POLL_MS = 200;
 // the flush/retract and commit as a visible duplicate -- the class the queue-sweep series
 // already accepts -- which is strictly better than a stop that never lands.
 const SENTINEL_SETTLE_MAX_TICKS = 10;
-// Atomic shoulder-tap control records. Minds appends one JSON OBJECT line to pi_inbox
+// Atomic shoulder-tap control records. Imbue Studio appends one JSON OBJECT line to pi_inbox
 // (a normal message is a JSON *string*, so the two never collide). Because it rides the
 // same ordered append-only inbox, every message queued before it has already been injected
 // by the time we see it. There are two sentinels, one distinct key each -- a separate key,
 // not a field on one, so an old extension treats the unknown key as inert rather than
-// mistaking a retract for a flush and double-sending. Kept in sync with the Minds pi
+// mistaking a retract for a flush and double-sending. Kept in sync with the Imbue Studio pi
 // endpoint (harnesses/pi_coding/inbox.py).
 //   * Flush (shoulder tap): interrupt the running turn and RESUBMIT its parked steers as
 //     one merged turn.
 const INTERRUPT_KEY = "minds_interrupt";
 //   * Retract (stop button): interrupt the running turn and DISCARD its parked steers --
-//     Minds hands the queued messages back to the user's composer, so resubmitting them
+//     Imbue Studio hands the queued messages back to the user's composer, so resubmitting them
 //     here would double-deliver.
 const RETRACT_KEY = "minds_interrupt_retract";
 //   * Compaction request sentinel: trigger manual session compaction with optional instructions.
@@ -537,7 +537,7 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   // `session_start` writes AFTER this load, so nothing can land concurrently here).
   // Archive them to the sibling history file (raw history preserved verbatim) and
   // truncate the inbox in place, so the inbox holds current-generation lines only BY
-  // CONSTRUCTION -- the offset seed below then reads 0, and the Minds queue mirror's
+  // CONSTRUCTION -- the offset seed below then reads 0, and the Imbue Studio queue mirror's
   // replay-from-zero of `pi_inbox` is generation-scoped with no extra bookkeeping.
   safe("inbox generation reset", () => {
     if (existsSync(inboxPath)) {
@@ -596,7 +596,7 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   // pi's abort (in interactive mode) drains the parked steers INTO the composer and stops the
   // stream, both synchronously. Since it APPENDS onto whatever is typed, we clear any draft
   // first and restore it after -- so the captured steers are sourced purely from pi's own
-  // queue (authoritative; no Minds-view lag) and no draft leaks in. The two sentinel branches
+  // queue (authoritative; no Imbue Studio-view lag) and no draft leaks in. The two sentinel branches
   // differ ONLY in the returned steers' fate: flush resubmits them, retract discards them.
   const abortAndCaptureSteers = (): string | null => {
     const ctx = latestCtx;
@@ -685,7 +685,7 @@ export default function mngrPiLifecycle(pi: PiApi): void {
             // Flush: resubmit the parked steers as one merged turn (pause the drain until idle).
             pendingResubmit = steers;
           }
-          // Retract: discard the steers -- Minds hands them back to the user's composer, so
+          // Retract: discard the steers -- Imbue Studio hands them back to the user's composer, so
           // resubmitting them here would double-deliver. pendingResubmit stays null, so the
           // drain simply resumes on the next tick.
           return; // interrupted -> end this tick

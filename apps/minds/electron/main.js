@@ -114,7 +114,7 @@ try {
   migrateLegacyDataDir({ legacyDir: legacyDataDir, roots: platformRoots });
 } catch (err) {
   const detail = recordMigrationFailure({ roots: platformRoots, legacyDir: legacyDataDir, error: err });
-  dialog.showErrorBox('Minds could not move its data', detail);
+  dialog.showErrorBox(`${PRODUCT_DISPLAY_NAME} could not move its data`, detail);
   throw err;
 }
 

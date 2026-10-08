@@ -213,7 +213,7 @@ _ENV_EXTENSION_PERMISSIONS_ROOT: Final[str] = "LATCHKEY_EXTENSION_PERMISSIONS_RO
 _GATEWAY_EXTENSIONS_SUBDIR: Final[str] = "extensions"
 
 # The desktop and VPS gateways intentionally load disjoint extension sets. The
-# desktop owns all stateful Minds endpoints; the VPS loads only the transparent
+# desktop owns all stateful Imbue Studio endpoints; the VPS loads only the transparent
 # forwarder that sends those endpoint families back to the desktop gateway.
 # The catalog the gateway extensions validate against. Named because it is the
 # one bundled file that is not shipped verbatim: custom services are overlaid
@@ -316,10 +316,10 @@ LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR: Final[str] = "LATCHKEY_EPHEMERAL_BROWSER"
 # explicit account name.
 DEFAULT_ACCOUNT: Final[str] = ""
 
-# Google services that authenticate via the Minds-provided OAuth client (the
+# Google services that authenticate via the Imbue Studio-provided OAuth client (the
 # browser / consent-screen flow). ``google-directions`` is deliberately
 # excluded: it authenticates with an API key (latchkey ``set`` auth), not
-# OAuth, so it must never go through the Minds OAuth client. Keep this in sync
+# OAuth, so it must never go through the Imbue Studio OAuth client. Keep this in sync
 # with the ``google-*`` entries in the services catalog that advertise the
 # ``browser`` auth option.
 MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
@@ -335,8 +335,8 @@ MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
     }
 )
 
-# Minds-provided Google OAuth client, registered for a ``google-*`` service via
-# ``latchkey auth prepare`` so the user signs in against the Minds consent
+# Imbue Studio-provided Google OAuth client, registered for a ``google-*`` service via
+# ``latchkey auth prepare`` so the user signs in against the Imbue Studio consent
 # screen instead of self-provisioning their own Google Cloud project. A single
 # pair is reused for every google service. This is an installed/desktop-app
 # OAuth client, so the "secret" is not truly confidential -- it ships inside
@@ -345,7 +345,7 @@ MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = "991889009876-ms5ln5jnvqmsrgpmi2nipkv
 MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = "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"
 
 # Services whose OAuth client is registered dynamically at sign-in (no client
-# of ours to hand over), but whose sign-in must land on a Minds-hosted redirect
+# of ours to hand over), but whose sign-in must land on an Imbue Studio-hosted redirect
 # page rather than latchkey's loopback callback. Registered for the service via
 # ``latchkey auth prepare <service> '{"redirectUri": ...}'`` (latchkey >= 3.15)
 # right before the sign-in that would register the client; the page forwards
@@ -1715,9 +1715,9 @@ class Latchkey(MutableModel):
         error is the signal that nothing is registered yet, and it drives two
         recovery paths:
 
-        * For a Minds Google OAuth service (:data:`MINDS_GOOGLE_OAUTH_SERVICES`),
-          register the Minds-provided client and retry, so the user signs in
-          against the Minds consent screen instead of self-provisioning their
+        * For an Imbue Studio Google OAuth service (:data:`MINDS_GOOGLE_OAUTH_SERVICES`),
+          register the Imbue Studio-provided client and retry, so the user signs in
+          against the Imbue Studio consent screen instead of self-provisioning their
           own Google Cloud project (see
           :meth:`_authenticate_with_minds_google_client`). That client is the
           only one ever registered here for a Google service: a failure there
@@ -1736,7 +1736,7 @@ class Latchkey(MutableModel):
         account already left behind.
 
         A service in :data:`MINDS_OAUTH_REDIRECT_URI_BY_SERVICE` needs no client
-        of ours but does need its Minds-hosted redirect URI in place before the
+        of ours but does need its Imbue Studio-hosted redirect URI in place before the
         sign-in registers a client, so that is pinned first (via
         :meth:`auth_prepare_redirect_uri`) whenever the sign-in draws on the
         service-level preparation -- that is, unless ``account`` names a stored
@@ -1778,14 +1778,14 @@ class Latchkey(MutableModel):
     def _authenticate_with_minds_google_client(
         self, service_name: str, *, is_ephemeral: bool = False
     ) -> tuple[bool, str]:
-        """Register the Minds Google OAuth client and run the bare sign-in against it.
+        """Register the Imbue Studio Google OAuth client and run the bare sign-in against it.
 
         Reached from :meth:`auth_browser` for a service in
         :data:`MINDS_GOOGLE_OAUTH_SERVICES` -- either because the bare sign-in
         reported that no client is registered yet, or because we are in
         ephemeral mode (adding a new account) and deliberately re-prepare rather
-        than reuse an existing client. Registers the Minds-provided client via
-        :meth:`auth_prepare` (so the user signs in against the Minds consent
+        than reuse an existing client. Registers the Imbue Studio-provided client via
+        :meth:`auth_prepare` (so the user signs in against the Imbue Studio consent
         screen) and runs :meth:`auth_browser_login`.
 
         On a failed sign-in the just-registered client is left in place: the
@@ -1812,7 +1812,7 @@ class Latchkey(MutableModel):
 
         Unlike :meth:`auth_browser`, this never auto-runs ``auth
         browser-prepare`` on failure. It is the bare sign-in used once the
-        service's preparation is in place -- a registered client (the Minds
+        service's preparation is in place -- a registered client (the Imbue Studio
         OAuth client via :meth:`auth_prepare`, or one ``auth browser-prepare``
         left behind), or just a pinned redirect URI (via
         :meth:`auth_prepare_redirect_uri`) for a service that registers its
@@ -1835,7 +1835,7 @@ class Latchkey(MutableModel):
         Runs ``latchkey auth prepare <service>
         '{"clientId":...,"clientSecret":...}'`` so a subsequent
         :meth:`auth_browser_login` signs the user in against that client
-        (e.g. the Minds Google consent screen) instead of requiring them to
+        (e.g. the Imbue Studio Google consent screen) instead of requiring them to
         self-provision their own OAuth project. Returns ``(True, "")`` on a
         clean exit, otherwise ``(False, detail)``.
         """

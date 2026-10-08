@@ -479,7 +479,7 @@ async function downloadUv(resourcesDir, { platform, arch }) {
  * Xcode. The shim runs Apple's real tool wherever one is present and otherwise
  * exits nonzero, which uv reports as a non-fatal warning.
  *
- * Minds never links libpython (it runs bin/python3.12, which statically links
+ * Imbue Studio never links libpython (it runs bin/python3.12, which statically links
  * it), so an unpatched install name is inert here.
  */
 async function writeUvShims(resourcesDir, { platform }) {

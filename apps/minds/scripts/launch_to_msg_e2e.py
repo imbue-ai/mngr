@@ -324,7 +324,7 @@ def snap_page(target: Page | Frame, name: str) -> None:
 
     Raise this page's BrowserWindow to the top of the macOS z-order
     BEFORE the screencapture; otherwise the full-desktop shot just
-    captures whatever Minds window the WindowServer has at front
+    captures whatever Imbue Studio window the WindowServer has at front
     (usually still the original /start window because Playwright
     routes UI events through CDP, never through a real mouse click
     that would update WindowServer focus).

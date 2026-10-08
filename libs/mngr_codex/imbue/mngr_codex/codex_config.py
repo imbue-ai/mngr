@@ -83,7 +83,7 @@ _HOOKS_FILENAME: str = "hooks.json"
 # makes codex fail to bind with ``path must be shorter than SUN_LEN``. So it lives at a short,
 # stable ``/tmp`` path keyed by a hash of ``CODEX_HOME`` -- ``/tmp`` (never ``$TMPDIR``, which is
 # long on macOS) keeps it short, the hash keeps it unique per agent and identical for every client
-# (daemon, ``--remote`` TUI, mngr's WebSocket client, Minds). A stale socket from a prior run is
+# (daemon, ``--remote`` TUI, mngr's WebSocket client, Imbue Studio). A stale socket from a prior run is
 # ``rm -f``'d before the daemon binds.
 #
 # The socket sits in a per-agent directory, never directly in ``/tmp``: codex (0.157 and later)
