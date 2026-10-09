@@ -177,7 +177,7 @@ PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 # code strictly needs: the newest release with a hard dependency here is
 # 3.17.0, the first to accept the ``--strict`` flag :meth:`Latchkey.auth_browser_login`
 # always passes.
-LATCHKEY_MIN_VERSION: Final[str] = "3.17.0"
+LATCHKEY_MIN_VERSION: Final[str] = "3.18.0"
 
 # Fixed port at which every containerized/VM/VPS agent reaches the Latchkey
 # gateway. A desktop-gateway agent sees it on its own 127.0.0.1 (a per-agent
