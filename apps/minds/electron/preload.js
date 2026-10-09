@@ -111,6 +111,15 @@ contextBridge.exposeInMainWorld('mindsNative', {
   onPopoutDropTarget: (callback) => {
     ipcRenderer.on('popout-drop-target', (_event, isOver) => callback(Boolean(isOver)));
   },
+
+  // Link routing (electron/link-routing.js).
+  reportWorkspaceLinkHandling: (report) => ipcRenderer.send('workspace-link-handling', report),
+  openExternalLink: (url) => ipcRenderer.send('open-external-link', url),
+  onOpenLink: (callback) => {
+    ipcRenderer.on('open-link', (_event, url) => {
+      if (typeof url === 'string') callback(url);
+    });
+  },
   openNotificationInExistingWindow: (route, entry) => ipcRenderer.invoke('open-notification-in-existing-window', route, entry),
   onOpenNotification: (callback) => {
     notificationListener = callback;
