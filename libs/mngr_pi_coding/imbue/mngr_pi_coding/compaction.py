@@ -11,6 +11,9 @@ from typing import Any
 from loguru import logger
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.compaction_transcript import COMPACTION_TRANSCRIPT_CACHE
+from imbue.mngr.agents.compaction_transcript import CompactionTranscriptReading
+from imbue.mngr.agents.compaction_transcript import CompactionTranscriptScanner
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentLifecycleState
 from imbue.mngr_pi_coding.pi_coding_config import ACTIVE_MARKER_NAME
@@ -37,153 +40,152 @@ def parse_iso_timestamp(timestamp_str: str) -> datetime | None:
         return None
 
 
-def extract_latest_assistant_timestamp_from_jsonl(raw_text: str) -> datetime | None:
-    """Extract timestamp of the most recent assistant turn or compaction in a JSONL transcript."""
-    if not raw_text:
-        return None
-    lines = raw_text.strip().splitlines()
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
-            logger.warning("Failed to parse JSONL line when extracting assistant timestamp: {}", e)
-            continue
-        if not isinstance(record, dict):
-            continue
+def extract_assistant_timestamp_from_record(record: dict[str, Any]) -> datetime | None:
+    """Return the timestamp of a transcript record if it is assistant activity with a usable one."""
+    is_assistant_activity = False
+    ts_val: Any = None
 
-        is_assistant_activity = False
-        ts_val: Any = None
-
-        event_type = record.get("type")
-        msg = record.get("message")
-        if isinstance(msg, dict):
-            if msg.get("role") == "assistant":
-                is_assistant_activity = True
-                ts_val = record.get("timestamp") or msg.get("timestamp")
-        elif event_type in ("assistant", "assistant_message"):
+    event_type = record.get("type")
+    msg = record.get("message")
+    if isinstance(msg, dict):
+        if msg.get("role") == "assistant":
+            is_assistant_activity = True
+            ts_val = record.get("timestamp") or msg.get("timestamp")
+    elif event_type in ("assistant", "assistant_message"):
+        is_assistant_activity = True
+        ts_val = record.get("timestamp")
+    elif event_type == "step":
+        if record.get("source") in ("agent", "assistant"):
             is_assistant_activity = True
             ts_val = record.get("timestamp")
-        elif event_type == "step":
-            if record.get("source") in ("agent", "assistant"):
-                is_assistant_activity = True
-                ts_val = record.get("timestamp")
-        elif event_type == "cost_snapshot":
-            event_id = str(record.get("event_id", ""))
-            if "compaction" not in event_id:
-                is_assistant_activity = True
-                ts_val = record.get("timestamp")
-        else:
-            pass
+    elif event_type == "cost_snapshot":
+        event_id = str(record.get("event_id", ""))
+        if "compaction" not in event_id:
+            is_assistant_activity = True
+            ts_val = record.get("timestamp")
+    else:
+        pass
 
-        if is_assistant_activity and ts_val is not None:
-            if isinstance(ts_val, (int, float)):
-                try:
-                    # In Pi, timestamps in milliseconds (e.g. 1700000000000) vs seconds
-                    if ts_val > 1e11:
-                        ts_val = ts_val / 1000.0
-                    return datetime.fromtimestamp(ts_val, tz=timezone.utc)
-                except (ValueError, OverflowError, OSError):
-                    pass
-            elif isinstance(ts_val, str):
-                dt = parse_iso_timestamp(ts_val)
-                if dt is not None:
-                    return dt
-            else:
-                pass
-
-    return None
-
-
-def extract_context_tokens_from_jsonl(raw_text: str) -> int | None:
-    """Extract prompt context token count from the most recent turn in a JSONL transcript."""
-    if not raw_text:
+    if not is_assistant_activity or ts_val is None:
         return None
-    lines = raw_text.strip().splitlines()
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
+    if isinstance(ts_val, (int, float)):
         try:
-            record = json.loads(line)
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
-            logger.warning("Failed parsing line in JSONL transcript: {}", e)
-            continue
-        if not isinstance(record, dict):
-            continue
+            # In Pi, timestamps in milliseconds (e.g. 1700000000000) vs seconds
+            seconds = ts_val / 1000.0 if ts_val > 1e11 else ts_val
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
+    elif isinstance(ts_val, str):
+        return parse_iso_timestamp(ts_val)
+    else:
+        return None
 
-        # 1. Check raw assistant message usage (raw transcript or native session)
-        msg = record.get("message")
-        if isinstance(msg, dict):
-            usage = msg.get("usage")
-            if isinstance(usage, dict):
-                inp = usage.get("input") or usage.get("input_tokens") or 0
-                cached = usage.get("cacheRead") or usage.get("cache_read") or usage.get("cache_read_input_tokens") or 0
-                cache_write = (
-                    usage.get("cacheWrite")
-                    or usage.get("cache_creation")
-                    or usage.get("cache_creation_input_tokens")
-                    or 0
-                )
-                if isinstance(inp, int) and isinstance(cached, int) and isinstance(cache_write, int):
-                    total = inp + cached + cache_write
-                    if total > 0:
-                        return total
-                total_tokens = usage.get("totalTokens") or usage.get("total_tokens")
-                output = usage.get("output") or usage.get("output_tokens") or 0
-                if isinstance(total_tokens, int) and isinstance(output, int) and total_tokens > output:
-                    return total_tokens - output
 
-        # 2. Check cost_snapshot tokens dict (usage stream)
-        tokens = record.get("tokens")
-        if isinstance(tokens, dict):
-            inp = tokens.get("input") or 0
-            cached = tokens.get("cache_read") or 0
-            cache_creation = tokens.get("cache_creation") or 0
-            if isinstance(inp, int) and isinstance(cached, int) and isinstance(cache_creation, int):
-                total = inp + cached + cache_creation
+def extract_context_tokens_from_record(record: dict[str, Any]) -> int | None:
+    """Return a transcript record's prompt context token count, or None if it reports none (or zero)."""
+    # 1. Check raw assistant message usage (raw transcript or native session)
+    msg = record.get("message")
+    if isinstance(msg, dict):
+        usage = msg.get("usage")
+        if isinstance(usage, dict):
+            inp = usage.get("input") or usage.get("input_tokens") or 0
+            cached = usage.get("cacheRead") or usage.get("cache_read") or usage.get("cache_read_input_tokens") or 0
+            cache_write = (
+                usage.get("cacheWrite") or usage.get("cache_creation") or usage.get("cache_creation_input_tokens") or 0
+            )
+            if isinstance(inp, int) and isinstance(cached, int) and isinstance(cache_write, int):
+                total = inp + cached + cache_write
+                if total > 0:
+                    return total
+            total_tokens = usage.get("totalTokens") or usage.get("total_tokens")
+            output = usage.get("output") or usage.get("output_tokens") or 0
+            if isinstance(total_tokens, int) and isinstance(output, int) and total_tokens > output:
+                return total_tokens - output
+
+    # 2. Check cost_snapshot tokens dict (usage stream)
+    tokens = record.get("tokens")
+    if isinstance(tokens, dict):
+        inp = tokens.get("input") or 0
+        cached = tokens.get("cache_read") or 0
+        cache_creation = tokens.get("cache_creation") or 0
+        if isinstance(inp, int) and isinstance(cached, int) and isinstance(cache_creation, int):
+            total = inp + cached + cache_creation
+            if total > 0:
+                return total
+
+    # 3. Check common transcript metrics (ATIF step)
+    metrics = record.get("metrics")
+    if isinstance(metrics, dict):
+        prompt_tokens = metrics.get("prompt_tokens")
+        if isinstance(prompt_tokens, int) and prompt_tokens > 0:
+            return prompt_tokens
+
+    # 4. Check generic usage dict in record or payload
+    raw_payload = record.get("payload")
+    payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+    for candidate in (record.get("usage"), payload.get("usage")):
+        if isinstance(candidate, dict):
+            inp = candidate.get("input") or candidate.get("input_tokens") or 0
+            cached = (
+                candidate.get("cacheRead")
+                or candidate.get("cache_read")
+                or candidate.get("cache_read_input_tokens")
+                or 0
+            )
+            cache_write = (
+                candidate.get("cacheWrite")
+                or candidate.get("cache_creation")
+                or candidate.get("cache_creation_input_tokens")
+                or 0
+            )
+            if isinstance(inp, int) and isinstance(cached, int) and isinstance(cache_write, int):
+                total = inp + cached + cache_write
                 if total > 0:
                     return total
 
-        # 3. Check common transcript metrics (ATIF step)
-        metrics = record.get("metrics")
-        if isinstance(metrics, dict):
-            prompt_tokens = metrics.get("prompt_tokens")
-            if isinstance(prompt_tokens, int) and prompt_tokens > 0:
-                return prompt_tokens
-
-        # 4. Check generic usage dict in record or payload
-        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
-        for candidate in (record.get("usage"), payload.get("usage")):
-            if isinstance(candidate, dict):
-                inp = candidate.get("input") or candidate.get("input_tokens") or 0
-                cached = (
-                    candidate.get("cacheRead")
-                    or candidate.get("cache_read")
-                    or candidate.get("cache_read_input_tokens")
-                    or 0
-                )
-                cache_write = (
-                    candidate.get("cacheWrite")
-                    or candidate.get("cache_creation")
-                    or candidate.get("cache_creation_input_tokens")
-                    or 0
-                )
-                if isinstance(inp, int) and isinstance(cached, int) and isinstance(cache_write, int):
-                    total = inp + cached + cache_write
-                    if total > 0:
-                        return total
-
-        # 5. Check compaction entry tokensBefore
-        if record.get("type") == "compaction":
-            entry = record.get("entry") if isinstance(record.get("entry"), dict) else record
-            tokens_before = entry.get("tokensBefore")
-            if isinstance(tokens_before, int) and tokens_before > 0:
-                return tokens_before
-
     return None
+
+
+def is_compaction_record(record: dict[str, Any]) -> bool:
+    """Whether a raw transcript, session, usage stream or common transcript record marks a compaction."""
+    event_type = record.get("type")
+    if event_type == "compaction":
+        return True
+    elif event_type == "cost_snapshot":
+        return "compaction" in str(record.get("event_id", ""))
+    elif event_type == "step":
+        extra = record.get("extra")
+        context_management = extra.get("context_management") if isinstance(extra, dict) else None
+        return isinstance(context_management, dict) and context_management.get("type") == "compaction"
+    else:
+        return False
+
+
+class PiCompactionTranscriptScanner(CompactionTranscriptScanner):
+    """Finds the newest assistant activity timestamp and context token count in a Pi transcript or session file.
+
+    A compaction record newer than every usage leaves the context size unknown until the next reply.
+    The compaction's own token counts are not used: they describe the context before it was compacted.
+    """
+
+    def visit_older_record(self, record: dict[str, Any]) -> None:
+        if self.latest_assistant_timestamp is None:
+            self.latest_assistant_timestamp = extract_assistant_timestamp_from_record(record)
+        if not self.is_context_size_settled():
+            if is_compaction_record(record):
+                self.is_context_size_unknown_since_compaction = True
+            else:
+                self.latest_context_tokens = extract_context_tokens_from_record(record)
+
+
+def _read_pi_transcript(agent: BaseAgent[Any], transcript_path: Path) -> CompactionTranscriptReading | None:
+    return COMPACTION_TRANSCRIPT_CACHE.read_transcript(
+        host=agent.host,
+        host_id=agent.host_id,
+        agent_id=agent.id,
+        transcript_path=transcript_path,
+        scanner_factory=PiCompactionTranscriptScanner,
+    )
 
 
 def get_agent_last_compacted_idle_since(agent: BaseAgent[Any]) -> datetime | None:
@@ -240,12 +242,10 @@ def get_agent_idle_since(agent: BaseAgent[Any]) -> datetime | None:
                 pass
 
         for path in transcript_candidates:
-            if agent.host.path_exists(path):
-                content = agent.host.read_text_file(path)
-                ts = extract_latest_assistant_timestamp_from_jsonl(content)
-                if ts is not None:
-                    idle_since_dt = ts
-                    break
+            reading = _read_pi_transcript(agent, path)
+            if reading is not None and reading.latest_assistant_timestamp is not None:
+                idle_since_dt = reading.latest_assistant_timestamp
+                break
 
         if idle_since_dt is None:
             idle_since_path = agent_dir / IDLE_SINCE_FILENAME
@@ -280,7 +280,10 @@ def get_agent_idle_since(agent: BaseAgent[Any]) -> datetime | None:
 
 
 def get_agent_context_tokens(agent: BaseAgent[Any]) -> int | None:
-    """Return the total prompt context token count from the agent's most recent turn, or None if unknown."""
+    """Return the total prompt context token count from the agent's most recent turn, or None if unknown.
+
+    The count is unknown after a compaction until the agent's next reply reports one.
+    """
     try:
         agent_dir = agent._get_agent_dir()
         candidates: list[Path] = [
@@ -303,11 +306,15 @@ def get_agent_context_tokens(agent: BaseAgent[Any]) -> int | None:
         )
 
         for path in candidates:
-            if agent.host.path_exists(path):
-                content = agent.host.read_text_file(path)
-                tokens = extract_context_tokens_from_jsonl(content)
-                if tokens is not None:
-                    return tokens
+            reading = _read_pi_transcript(agent, path)
+            if reading is not None and reading.is_context_size_settled():
+                if reading.is_context_size_unknown_since_compaction:
+                    logger.debug(
+                        "Context size of agent {} is unknown until its next reply: {} has a compaction newer than any usage",
+                        agent.name,
+                        path,
+                    )
+                return reading.latest_context_tokens
 
         return None
     except (MngrError, OSError, ValueError, KeyError, AttributeError) as e:

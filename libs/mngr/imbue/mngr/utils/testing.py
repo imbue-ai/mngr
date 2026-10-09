@@ -1691,3 +1691,32 @@ def poll_until_file_contains(path: Path, text: str, timeout: float = 5.0) -> boo
     does not wait for the substitution, so the file can trail the command's exit.
     """
     return poll_until(lambda: path.exists() and text in path.read_text(), timeout=timeout)
+
+
+# Takes an exclusive flock on argv[1], signals that it holds it by creating argv[2], then waits to be killed.
+_FLOCK_HOLDER_SCRIPT: Final[str] = (
+    "import fcntl, signal, sys\n"
+    "lock_file = open(sys.argv[1], 'w')\n"
+    "fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)\n"
+    "open(sys.argv[2], 'w').close()\n"
+    "signal.pause()\n"
+)
+
+
+@contextmanager
+def file_lock_held_by_another_process(
+    lock_path: Path, concurrency_group: ConcurrencyGroup
+) -> Generator[None, None, None]:
+    """Hold an exclusive flock on ``lock_path`` from a separate process for the duration of the block."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    held_marker_path = lock_path.with_name(f"{lock_path.name}.held-{uuid4().hex}")
+    process = concurrency_group.run_process_in_background(
+        [sys.executable, "-c", _FLOCK_HOLDER_SCRIPT, str(lock_path), str(held_marker_path)],
+        is_checked_by_group=False,
+        shutdown_timeout_sec=1.0,
+    )
+    try:
+        wait_for(held_marker_path.exists, timeout=10.0, error_message=f"No process took the lock on {lock_path}")
+        yield
+    finally:
+        process.terminate(force_kill_seconds=1.0)

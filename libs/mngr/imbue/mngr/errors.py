@@ -1,5 +1,6 @@
 import re
 import sys
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -295,6 +296,30 @@ class SendMessageError(AgentError):
         self.reason = reason
         self.kind = kind
         super().__init__(f"Failed to send message to agent {agent_name}: {reason}")
+
+
+class MessageLockTimeoutError(AgentError):
+    """Another send to the agent held its message lock for longer than the caller was willing to wait."""
+
+    def __init__(self, agent_name: str, timeout_seconds: float) -> None:
+        self.agent_name = agent_name
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"Agent {agent_name} is busy: another send to it held its message lock for over {timeout_seconds:.1f}s"
+        )
+
+
+class AgentNoLongerIdleError(AgentError):
+    """The agent left the idle period an action was decided for (it became active, or finished another turn)."""
+
+    def __init__(self, agent_name: str, expected_idle_since: datetime, current_idle_since: datetime | None) -> None:
+        self.agent_name = agent_name
+        self.expected_idle_since = expected_idle_since
+        self.current_idle_since = current_idle_since
+        current_description = "not idle" if current_idle_since is None else f"idle since {current_idle_since}"
+        super().__init__(
+            f"Agent {agent_name} is no longer idle since {expected_idle_since}; it is now {current_description}"
+        )
 
 
 class MessageDeliveredButBlockedError(SendMessageError):
@@ -793,6 +818,14 @@ class MalformedJsonlLineError(MngrError, ValueError):
     ``MalformedJsonLineWarner`` (which buffers a malformed line until the next non-empty
     line proves it wasn't a partial write).
     """
+
+
+class JsonlFileShrankDuringScanError(MngrError):
+    """Raised when a JSONL file being scanned backward was truncated or replaced between two of the scan's reads."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(f"{path} shrank while it was being scanned")
 
 
 class EventsFollowReaderDiedError(MngrError):

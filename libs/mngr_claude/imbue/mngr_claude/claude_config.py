@@ -792,14 +792,43 @@ IDLE_SINCE_FILENAME: Final[str] = "idle_since"
 # Marker file (in ``$MNGR_AGENT_STATE_DIR``) storing the idle_since ISO timestamp for which compaction was executed.
 LAST_COMPACTED_IDLE_SINCE_FILENAME: Final[str] = "last_compacted_idle_since"
 
+# Marker file (in ``$MNGR_AGENT_STATE_DIR``) present while Claude is compacting its context.
+# Holds ``{"trigger": "manual"|"auto"|"unknown", "started_at": "<utc iso>"}``. This name is
+# also a literal in the hook shell snippets below; keep the two in sync.
+COMPACTING_MARKER_FILENAME: Final[str] = "compacting"
+
+# File (in ``$MNGR_AGENT_STATE_DIR``) describing the most recent completed compaction:
+# ``{"trigger": "manual"|"auto"|"unknown", "ended_at": "<utc iso>"}``. This name is also a
+# literal in the hook shell snippets below.
+LAST_COMPACTION_FILENAME: Final[str] = "last_compaction.json"
+
+
+# Shell snippet that appends one activity event so `mngr observe` promptly
+# re-fetches the agent's state.
+_EMIT_ACTIVITY_EVENT: Final[str] = (
+    """mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl"""
+)
 
 # Shell snippet that marks the agent idle: removes the 'active' and
 # 'permissions_waiting' marker files (so the lifecycle probe reports WAITING
-# rather than RUNNING), records the idle timestamp, and emits an activity event
-# so `mngr observe` promptly re-fetches the agent's state. Shared by the Notification
-# idle_prompt hook and the SessionStart startup/resume hook so the two stay byte-identical.
+# rather than RUNNING), records the idle timestamp, and emits an activity event.
+# Shared by the Notification idle_prompt hook and the SessionStart startup/resume
+# hook so the two stay byte-identical.
 _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT: Final[str] = (
-    """rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting" && date -u +"%Y-%m-%dT%H:%M:%S.000000000Z" > "$MNGR_AGENT_STATE_DIR/idle_since" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl"""
+    """rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting" && date -u +"%Y-%m-%dT%H:%M:%S.000000000Z" > "$MNGR_AGENT_STATE_DIR/idle_since" && """
+    + _EMIT_ACTIVITY_EVENT
+)
+
+# Shell snippet for the compaction hooks: reads the hook payload from stdin and
+# sets _MNGR_TRIGGER to its 'trigger' ("manual" or "auto"), or "unknown" when the
+# field is absent, jq is missing, or the payload is malformed. The payload goes
+# through printf, never echo: PostCompact's compact_summary carries JSON-escaped
+# newlines that echo would expand into invalid JSON. Restricting the value to the
+# known triggers also keeps it safe to splice into the JSON files written below.
+_READ_COMPACTION_TRIGGER: Final[str] = (
+    "_MNGR_HOOK_INPUT=$(cat);"
+    """ _MNGR_TRIGGER=$(printf '%s' "$_MNGR_HOOK_INPUT" | jq -r '.trigger // "unknown"' 2>/dev/null);"""
+    ' case "$_MNGR_TRIGGER" in manual|auto) ;; *) _MNGR_TRIGGER=unknown ;; esac; '
 )
 
 
@@ -849,8 +878,16 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       abnormal exit (container restart, OOM, crash -- where the Stop hook never
       ran) is stale and must be reset, otherwise the agent reports RUNNING
       forever. ``compact`` is excluded because auto-compaction fires mid-turn
-      while Claude is genuinely active.
+      while Claude is genuinely active. The same branch removes a stranded
+      'compacting' marker (a compaction cancelled with Escape or cut short by a
+      crash fires no PostCompact).
     - UserPromptSubmit: creates 'active' file, removes 'permissions_waiting', signals tmux wait-for
+    - PreCompact: writes the 'compacting' marker (atomically via .tmp + mv) and emits an
+      activity event. Fires for both a ``/compact`` and Claude's own auto-compaction.
+    - PostCompact: writes 'last_compaction.json' (atomically via .tmp + mv), removes the
+      'compacting' marker, and emits an activity event. Both compaction hooks always exit 0:
+      a PreCompact exit 2 would block the compaction and any non-zero exit surfaces an error,
+      so a missing jq, an unwritable state dir or a malformed payload must not fail them.
     - PermissionRequest: creates 'permissions_waiting' file (Claude is waiting for permission approval)
     - PostToolUse: removes 'permissions_waiting' file (tool completed, permission resolved)
     - PostToolUseFailure: removes 'permissions_waiting' file (tool failed/denied, permission resolved)
@@ -892,6 +929,20 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       launch command clears it before each claude launch (a stale claim could
       otherwise match a recycled pid belonging to another live claude and block
       every guarded hook, including the SessionStart re-claim).
+    - compacting: Claude is compacting its context. JSON
+      ``{"trigger": "manual"|"auto"|"unknown", "started_at": "<utc iso>"}``. Can be
+      left behind by a cancelled or failed compaction, by a user PreCompact hook that
+      blocks the compaction (matching hooks run in parallel), or by ``/clear``, so
+      consumers should treat an old marker as stale; the next startup/resume
+      SessionStart removes it.
+    - last_compaction.json: the most recent completed compaction, JSON
+      ``{"trigger": "manual"|"auto"|"unknown", "ended_at": "<utc iso>"}``.
+      Overwritten by each PostCompact; the summary itself stays in the transcript.
+
+    These hooks are written into the agent's Claude settings only when the agent is
+    provisioned at create; starting or restarting an agent does not rewrite them. An
+    agent created before a hook was added never runs it, so consumers must tolerate the
+    'compacting' and 'last_compaction.json' files never appearing.
 
     Every state-writing hook is prefixed with MAIN_SESSION_ONLY_GUARD rather
     than bare SESSION_GUARD: a nested claude launched from inside the agent
@@ -974,6 +1025,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                                 MAIN_SESSION_ONLY_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
                                 ' _MNGR_SOURCE=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".source // empty");'
                                 ' case "$_MNGR_SOURCE" in startup|resume)'
+                                ' rm -f "$MNGR_AGENT_STATE_DIR/compacting";'
                                 ' touch "$MNGR_AGENT_STATE_DIR/claude_process_started" && '
                                 + _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT
                                 + " ;; esac"
@@ -988,7 +1040,8 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": MAIN_SESSION_ONLY_GUARD
-                            + """touch "$MNGR_AGENT_STATE_DIR/active" && rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting" "$MNGR_AGENT_STATE_DIR/idle_since" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl""",
+                            + 'touch "$MNGR_AGENT_STATE_DIR/active" && rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting" "$MNGR_AGENT_STATE_DIR/idle_since" && '
+                            + _EMIT_ACTIVITY_EVENT,
                         },
                         {
                             # FIXME: remove this hook once released senders no
@@ -1003,6 +1056,39 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                             "type": "command",
                             "command": MAIN_SESSION_ONLY_GUARD
                             + "tmux wait-for -S \"mngr-submit-$(tmux display-message -p '#S')\" 2>/dev/null || true",
+                        },
+                    ]
+                }
+            ],
+            "PreCompact": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                MAIN_SESSION_ONLY_GUARD
+                                + _READ_COMPACTION_TRIGGER
+                                + """printf '{"trigger": "%s", "started_at": "%s"}\\n' "$_MNGR_TRIGGER" "$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")" > "$MNGR_AGENT_STATE_DIR/compacting.tmp" && mv "$MNGR_AGENT_STATE_DIR/compacting.tmp" "$MNGR_AGENT_STATE_DIR/compacting"; """
+                                + _EMIT_ACTIVITY_EVENT
+                                + "; exit 0"
+                            ),
+                        },
+                    ]
+                }
+            ],
+            "PostCompact": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                MAIN_SESSION_ONLY_GUARD
+                                + _READ_COMPACTION_TRIGGER
+                                + """printf '{"trigger": "%s", "ended_at": "%s"}\\n' "$_MNGR_TRIGGER" "$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")" > "$MNGR_AGENT_STATE_DIR/last_compaction.json.tmp" && mv "$MNGR_AGENT_STATE_DIR/last_compaction.json.tmp" "$MNGR_AGENT_STATE_DIR/last_compaction.json";"""
+                                + ' rm -f "$MNGR_AGENT_STATE_DIR/compacting"; '
+                                + _EMIT_ACTIVITY_EVENT
+                                + "; exit 0"
+                            ),
                         },
                     ]
                 }

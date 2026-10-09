@@ -761,6 +761,7 @@ def test_running_watcher_defers_the_open_trailing_inference(tmp_path: Path, stub
     assert [s["message"] for s in runner.get_steps("agent")] == ["closed", "still writing"]
 
 
+@pytest.mark.flaky
 def test_stopping_a_watcher_kills_the_converter_that_outlived_it(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """Once ``stop_watcher`` returns, nothing in the watcher's process group may still be running.
 

@@ -1,0 +1,3 @@
+- `PiCodingAgent.request_compaction` supports the bounded message-lock wait and idle re-check that mngr's autocompact plugin now uses. With `message_lock_timeout_seconds` it raises `MessageLockTimeoutError` instead of waiting on another send, and with `expected_idle_since` it skips with `AgentNoLongerIdleError` when the agent is no longer idle since that moment. A compaction that could not take the lock no longer records itself as done, and the idle start it records is now read once the lock is held.
+
+- The inbox append that delivers a message or a compaction request now has a timeout, so a stuck host command fails the send instead of holding the message lock forever. An append that fails with no output says it may have hit the timeout.

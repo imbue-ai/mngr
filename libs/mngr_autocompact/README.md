@@ -89,10 +89,14 @@ For example, to compact stale agents every 5 minutes with cron:
 
 Agents are only compacted once per idle epoch (until a new turn completes), ensuring that frequent checks never issue redundant compactions.
 
+A check never waits on a busy agent. If another send to the agent (a user's message, a `mngr message`) holds its message lock for more than a few seconds, or the agent is no longer idle once the lock is free, it is skipped and reconsidered on the next check.
+
+A long-running process that embeds mngr can run the same check on its own timer instead of launching the CLI: `compact_stale_agents_by_name(mngr_ctx, names)` in `imbue.mngr_autocompact.manager` compacts whichever of the named agents are stale and returns the names it compacted. Unlike `mngr autocompact run`, it skips a name it cannot use (one matching no agent, an agent on an offline host, a stopped agent, or one without compaction support) rather than failing the batch, since an embedder lists its agents a moment before calling. Its docstring has the details, including the provider instances a caller that builds a context per call must release.
+
 ## Agent Compatibility
 
 The plugin is agent-agnostic and interacts with any agent implementing the `HasCompactionMixin` interface (`imbue.mngr.interfaces.agent.HasCompactionMixin`), including:
-- `request_compaction(instructions=None)`: sends `/compact` (optionally with instructions) or the agent's native compaction command.
+- `request_compaction(instructions=None, message_lock_timeout_seconds=None, expected_idle_since=None)`: sends `/compact` (optionally with instructions) or the agent's native compaction command, optionally bounding the wait for the agent's message lock and skipping an agent that is no longer idle since the given moment.
 - `get_cache_ttl_minutes()`: reports prompt cache TTL (default: 60 minutes for Claude).
-- `get_context_tokens()`: reports context token count from recent transcript turns.
+- `get_context_tokens()`: reports context token count from recent transcript turns, or `None` when it is unknown. The Claude and Pi harnesses report `None` after a compaction until the agent's next turn reports a real size, so an agent compacted since its last turn is not compacted again.
 - `get_idle_since()`: reports when the agent finished its latest turn.

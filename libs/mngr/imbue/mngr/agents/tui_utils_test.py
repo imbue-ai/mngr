@@ -33,9 +33,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
-# =========================================================================
 # Paste-detection helpers
-# =========================================================================
 
 
 def test_normalize_for_match_strips_non_alnum_and_lowercases() -> None:
@@ -90,9 +88,7 @@ def test_is_slash_command_message() -> None:
     assert is_slash_command_message("hello") is False
 
 
-# =========================================================================
 # Probe constructors
-# =========================================================================
 
 
 def test_build_changed_token_probe_uses_same_command_for_baseline_and_poll() -> None:
@@ -108,9 +104,7 @@ def test_build_file_mtime_token_command_covers_gnu_and_bsd_stat() -> None:
     assert 'stat -f %Fm "$MARKER"' in command
 
 
-# =========================================================================
 # Confirmation-command generation
-# =========================================================================
 
 
 _FAKE_TARGET = TmuxWindowTarget(session_name="probe-target", window=0)
@@ -183,9 +177,7 @@ def test_confirmation_command_retries_unconditionally_without_pane_probe() -> No
     assert "capture-pane" not in command
 
 
-# =========================================================================
 # Output parsing
-# =========================================================================
 
 
 def test_parse_confirmation_output_reads_confirming_probe() -> None:
@@ -214,9 +206,7 @@ def test_parse_confirmation_output_handles_empty_output() -> None:
     assert outcome.confirming_probe_name is None
 
 
-# =========================================================================
 # submit_message_and_confirm via in-memory probe agent
-# =========================================================================
 
 
 class _ProbeAgent(BaseAgent[AgentTypeConfig]):
@@ -247,6 +237,21 @@ def test_send_enter_keystroke_runs_tmux_send_keys() -> None:
     assert [c for c in agent.captured_commands if not c.startswith(("tmux show-options", "tmux copy-mode"))] == [
         "tmux send-keys -t =probe-target:0 Enter"
     ]
+
+
+def test_send_enter_keystroke_bounds_every_tmux_command() -> None:
+    host = ScriptedHost()
+    agent = _ProbeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("probe"),
+        agent_type=AgentTypeName("probe"),
+        host=host,
+        captured_commands=host.captured,
+        send_command_timeout_seconds=7.5,
+    )
+    send_enter_keystroke(agent, _FAKE_TARGET)
+    assert len(host.captured) == 2
+    assert host.captured_timeout_seconds == [7.5, 7.5]
 
 
 def test_send_enter_keystroke_raises_on_command_failure() -> None:
@@ -364,9 +369,7 @@ def test_raise_for_unconfirmed_submission_includes_diagnostics() -> None:
     assert "pane still shows the typed message" in error_text
 
 
-# =========================================================================
 # Real-tmux engine tests
-# =========================================================================
 
 
 @pytest.fixture

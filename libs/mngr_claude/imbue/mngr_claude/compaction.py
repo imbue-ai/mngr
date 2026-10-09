@@ -1,17 +1,29 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
+from typing import Any
+from typing import Final
 
 from loguru import logger
 
+from imbue.mngr.agents.compaction_transcript import COMPACTION_TRANSCRIPT_CACHE
+from imbue.mngr.agents.compaction_transcript import CompactionTranscriptReading
+from imbue.mngr.agents.compaction_transcript import CompactionTranscriptScanner
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.errors import MngrError
 from imbue.mngr_claude.claude_config import IDLE_SINCE_FILENAME
 from imbue.mngr_claude.claude_config import LAST_COMPACTED_IDLE_SINCE_FILENAME
 
 CLAUDE_DEFAULT_CACHE_TTL_MINUTES: int = 60
+
+# Searched in this order for both the idle timestamp and the context token count.
+_CLAUDE_TRANSCRIPT_RELATIVE_PATHS: Final[tuple[str, ...]] = (
+    "logs/claude_transcript/events.jsonl",
+    "events/claude/common_transcript/events.jsonl",
+    "transcript.jsonl",
+)
 
 
 def parse_iso_timestamp(timestamp_str: str) -> datetime | None:
@@ -26,31 +38,74 @@ def parse_iso_timestamp(timestamp_str: str) -> datetime | None:
         return None
 
 
-def extract_latest_assistant_timestamp_from_jsonl(raw_text: str) -> datetime | None:
-    """Extract timestamp of the most recent assistant turn in a JSONL transcript."""
-    if not raw_text:
+def extract_assistant_timestamp_from_record(record: dict[str, Any]) -> datetime | None:
+    """Return the timestamp of a transcript record if it is an assistant turn with a parseable one."""
+    if record.get("type") not in ("assistant", "assistant_message"):
         return None
-    lines = raw_text.strip().splitlines()
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
-            logger.warning("Failed to parse JSONL line when extracting assistant timestamp: {}", e)
-            continue
-        if not isinstance(record, dict):
-            continue
+    ts_str = record.get("timestamp")
+    return parse_iso_timestamp(ts_str) if isinstance(ts_str, str) else None
 
-        event_type = record.get("type")
-        if event_type in ("assistant", "assistant_message"):
-            ts_str = record.get("timestamp")
-            if isinstance(ts_str, str):
-                dt = parse_iso_timestamp(ts_str)
-                if dt is not None:
-                    return dt
-    return None
+
+def extract_context_tokens_from_record(record: dict[str, Any]) -> int | None:
+    """Return a transcript record's prompt context token count, or None if it reports none (or zero)."""
+    usage: dict[str, object] | None = None
+    event_type = record.get("type")
+    if event_type in ("assistant", "assistant_message"):
+        msg = record.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("usage"), dict):
+            usage = msg["usage"]
+        elif isinstance(record.get("usage"), dict):
+            usage = record["usage"]
+        else:
+            usage = None
+    elif isinstance(record.get("usage"), dict):
+        usage = record["usage"]
+    else:
+        usage = None
+
+    if usage is None:
+        return None
+    try:
+        input_tokens = int(usage.get("input_tokens") or 0)
+        cache_read = int(usage.get("cache_read_input_tokens") or usage.get("cache_read_tokens") or 0)
+        cache_write = int(usage.get("cache_creation_input_tokens") or usage.get("cache_write_tokens") or 0)
+    except (ValueError, TypeError):
+        return None
+    total = input_tokens + cache_read + cache_write
+    return total if total > 0 else None
+
+
+def is_compact_boundary_record(record: dict[str, Any]) -> bool:
+    """Whether a transcript record is the boundary Claude writes when it compacts the conversation."""
+    return record.get("type") == "system" and record.get("subtype") == "compact_boundary"
+
+
+class ClaudeCompactionTranscriptScanner(CompactionTranscriptScanner):
+    """Finds the newest assistant-turn timestamp and context token count in a Claude transcript.
+
+    A compact boundary newer than every usage leaves the context size unknown until the next reply.
+    The boundary's own post-compaction estimate is not used: it leaves out the session's fixed
+    overhead, so the next reply's real usage runs several times larger.
+    """
+
+    def visit_older_record(self, record: dict[str, Any]) -> None:
+        if self.latest_assistant_timestamp is None:
+            self.latest_assistant_timestamp = extract_assistant_timestamp_from_record(record)
+        if not self.is_context_size_settled():
+            if is_compact_boundary_record(record):
+                self.is_context_size_unknown_since_compaction = True
+            else:
+                self.latest_context_tokens = extract_context_tokens_from_record(record)
+
+
+def _read_claude_transcript(agent: InteractiveTuiAgent, transcript_path: Path) -> CompactionTranscriptReading | None:
+    return COMPACTION_TRANSCRIPT_CACHE.read_transcript(
+        host=agent.host,
+        host_id=agent.host_id,
+        agent_id=agent.id,
+        transcript_path=transcript_path,
+        scanner_factory=ClaudeCompactionTranscriptScanner,
+    )
 
 
 def get_agent_idle_since(agent: InteractiveTuiAgent) -> datetime | None:
@@ -63,18 +118,11 @@ def get_agent_idle_since(agent: InteractiveTuiAgent) -> datetime | None:
         idle_since_dt: datetime | None = None
 
         # Prefer the timestamp of the latest assistant turn in the transcript
-        for rel_path in [
-            "logs/claude_transcript/events.jsonl",
-            "events/claude/common_transcript/events.jsonl",
-            "transcript.jsonl",
-        ]:
-            transcript_path = agent_dir / rel_path
-            if agent.host.path_exists(transcript_path):
-                content = agent.host.read_text_file(transcript_path)
-                ts = extract_latest_assistant_timestamp_from_jsonl(content)
-                if ts is not None:
-                    idle_since_dt = ts
-                    break
+        for rel_path in _CLAUDE_TRANSCRIPT_RELATIVE_PATHS:
+            reading = _read_claude_transcript(agent, agent_dir / rel_path)
+            if reading is not None and reading.latest_assistant_timestamp is not None:
+                idle_since_dt = reading.latest_assistant_timestamp
+                break
 
         if idle_since_dt is None:
             idle_since_path = agent_dir / IDLE_SINCE_FILENAME
@@ -133,66 +181,24 @@ def record_agent_compacted(agent: InteractiveTuiAgent, idle_since: datetime | No
     agent.host.write_text_file(agent_dir / IDLE_SINCE_FILENAME, iso_str)
 
 
-def extract_context_tokens_from_jsonl(raw_text: str) -> int | None:
-    """Extract prompt context token count from the most recent assistant turn in a JSONL transcript."""
-    if not raw_text:
-        return None
-    lines = raw_text.strip().splitlines()
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
-            logger.warning("Failed parsing line in JSONL transcript: {}", e)
-            continue
-        if not isinstance(record, dict):
-            continue
-
-        usage: dict[str, object] | None = None
-        event_type = record.get("type")
-        if event_type in ("assistant", "assistant_message"):
-            msg = record.get("message")
-            if isinstance(msg, dict) and isinstance(msg.get("usage"), dict):
-                usage = msg["usage"]
-            elif isinstance(record.get("usage"), dict):
-                usage = record["usage"]
-            else:
-                usage = None
-        elif isinstance(record.get("usage"), dict):
-            usage = record["usage"]
-        else:
-            usage = None
-
-        if usage is not None:
-            try:
-                input_tokens = int(usage.get("input_tokens") or 0)
-                cache_read = int(usage.get("cache_read_input_tokens") or usage.get("cache_read_tokens") or 0)
-                cache_write = int(usage.get("cache_creation_input_tokens") or usage.get("cache_write_tokens") or 0)
-                total = input_tokens + cache_read + cache_write
-                if total > 0:
-                    return total
-            except (ValueError, TypeError):
-                continue
-    return None
-
-
 def get_agent_context_tokens(agent: InteractiveTuiAgent) -> int | None:
-    """Return the total prompt context token count from the agent's most recent turn, or None if unknown."""
+    """Return the total prompt context token count from the agent's most recent turn, or None if unknown.
+
+    The count is unknown after a compaction until the agent's next reply reports one.
+    """
     try:
         agent_dir = agent._get_agent_dir()
-        for rel_path in [
-            "logs/claude_transcript/events.jsonl",
-            "events/claude/common_transcript/events.jsonl",
-            "transcript.jsonl",
-        ]:
+        for rel_path in _CLAUDE_TRANSCRIPT_RELATIVE_PATHS:
             transcript_path = agent_dir / rel_path
-            if agent.host.path_exists(transcript_path):
-                content = agent.host.read_text_file(transcript_path)
-                tokens = extract_context_tokens_from_jsonl(content)
-                if tokens is not None:
-                    return tokens
+            reading = _read_claude_transcript(agent, transcript_path)
+            if reading is not None and reading.is_context_size_settled():
+                if reading.is_context_size_unknown_since_compaction:
+                    logger.debug(
+                        "Context size of agent {} is unknown until its next reply: {} has a compaction newer than any usage",
+                        agent.name,
+                        transcript_path,
+                    )
+                return reading.latest_context_tokens
         return None
     except (MngrError, OSError, ValueError, KeyError, AttributeError) as e:
         logger.debug("Failed resolving context token count for agent {}: {}", agent.name, e)

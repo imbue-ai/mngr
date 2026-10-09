@@ -93,17 +93,43 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
 
         Default: no detection (return None). Subclasses that can recognize
         their input row (e.g. via the prompt glyph) may override; a non-None
-        return produces a warning and a structured agent event, and the send
-        proceeds (today's append behavior is preserved).
+        return that ``_clear_preexisting_input_text_if_restored_command`` does
+        not clear produces a warning and a structured agent event, and the send
+        proceeds, appending to the leftover text.
         """
         return None
 
-    def _warn_if_preexisting_input_text(self, tmux_target: TmuxWindowTarget) -> None:
+    def _clear_preexisting_input_text_if_restored_command(
+        self, tmux_target: TmuxWindowTarget, leftover_text: str
+    ) -> bool:
+        """Clear leftover input text that the TUI itself restored there; return whether the row is now empty.
+
+        Some TUIs put a cancelled command back into the input box (Claude Code restores a
+        cancelled ``/compact``), and appending the next message to it would submit that message
+        as the command's arguments. Default: never clear, so the leftover is warned about and the
+        new message is appended. An override must clear only text it recognizes as such a
+        restored command, never a draft a person typed, and return True only once the input row
+        is confirmed empty.
+        """
+        return False
+
+    def _clear_or_warn_about_preexisting_input_text(self, tmux_target: TmuxWindowTarget) -> None:
         pane_content = self._capture_pane_content(tmux_target)
         if pane_content is None:
             return
         leftover_text = self._detect_preexisting_input_text(pane_content)
         if leftover_text is None:
+            return
+        if self._clear_preexisting_input_text_if_restored_command(tmux_target, leftover_text):
+            logger.info(
+                "Cleared a restored command draft from the input box of agent {} before sending: {!r}",
+                self.name,
+                leftover_text,
+            )
+            self.record_message_delivery_event(
+                "cleared_restored_input_text",
+                f"cleared a restored command draft from the input box before paste: {leftover_text!r}",
+            )
             return
         logger.warning(
             "Input box of agent {} already contains text before sending; the new message will be appended: {!r}",
@@ -115,13 +141,13 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
             f"input box already contained text before paste: {leftover_text!r}",
         )
 
-    def send_message(self, message: str) -> None:
+    def _send_message_holding_lock(self, message: str) -> None:
         """Send a message via paste-detection + evidence-confirmed submission.
 
-        Acquires an exclusive file lock to prevent concurrent sends from
-        interleaving tmux input -- and, just as importantly, so two mngr sends
-        can never confirm against each other's submission evidence. Runs
-        ``_preflight_send_message`` first -- errors from preflight indicate a
+        Runs under the message lock (see ``send_message``), which keeps concurrent sends from
+        interleaving tmux input -- and, just as importantly, means two mngr sends can never
+        confirm against each other's submission evidence. Runs ``_preflight_send_message``
+        first -- errors from preflight indicate a
         condition that won't resolve by resending (e.g., a blocking dialog),
         and a blocking dialog must be surfaced rather than waited on (the ready
         indicator never appears while a dialog occupies the pane). Then waits
@@ -137,10 +163,10 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         and often leave no observable evidence, so an unconfirmed send logs a
         warning and records an agent event instead of failing.
         """
-        with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
+        with log_span("Sending message to agent {} (length={})", self.name, len(message)):
             self._preflight_send_message(self.tmux_target)
             wait_for_tui_ready(self, self.tmux_target, self.get_tui_ready_indicator())
-            self._warn_if_preexisting_input_text(self.tmux_target)
+            self._clear_or_warn_about_preexisting_input_text(self.tmux_target)
             self._send_tmux_literal_keys(self.tmux_target, message)
             wait_for_paste_visible(self, self.tmux_target, message)
 

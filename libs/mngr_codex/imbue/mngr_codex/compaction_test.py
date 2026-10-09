@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -10,16 +11,22 @@ import pytest
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.mngr.agents.jsonl_backward_scan import scan_jsonl_file_backward
+from imbue.mngr.agents.mock_host_file_read_test import InMemoryHostFileReader
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentNoLongerIdleError
+from imbue.mngr.errors import MessageLockTimeoutError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.agent import AgentLifecycleState
 from imbue.mngr.interfaces.agent import require_compaction_agent
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import FileTailRead
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.testing import file_lock_held_by_another_process
 from imbue.mngr_codex.app_server_client import CodexAppServerError
 from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_OUTPUT_RELATIVE
 from imbue.mngr_codex.codex_config import IDLE_SINCE_FILENAME
@@ -27,8 +34,7 @@ from imbue.mngr_codex.codex_config import LAST_COMPACTED_IDLE_SINCE_FILENAME
 from imbue.mngr_codex.codex_config import RAW_TRANSCRIPT_OUTPUT_RELATIVE
 from imbue.mngr_codex.codex_config import TRANSCRIPT_PATH_FILENAME
 from imbue.mngr_codex.compaction import CODEX_DEFAULT_CACHE_TTL_MINUTES
-from imbue.mngr_codex.compaction import extract_context_tokens_from_jsonl
-from imbue.mngr_codex.compaction import extract_latest_assistant_timestamp_from_jsonl
+from imbue.mngr_codex.compaction import CodexCompactionTranscriptScanner
 from imbue.mngr_codex.compaction import get_agent_context_tokens
 from imbue.mngr_codex.compaction import get_agent_idle_since
 from imbue.mngr_codex.compaction import get_agent_last_compacted_idle_since
@@ -55,6 +61,14 @@ class _RecordingHost(FakeHost):
         if Path(path) in self.raise_on_read:
             raise OSError("Simulated read failure")
         return self.files[Path(path)]
+
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+        if Path(path) in self.raise_on_read:
+            raise OSError("Simulated read failure")
+        if Path(path) not in self.files:
+            raise FileNotFoundError(f"File not found: {path}")
+        content = self.files[Path(path)].encode("utf-8")
+        return FileTailRead(file_size=len(content), content=content[start_byte:])
 
     def write_text_file(
         self,
@@ -119,6 +133,21 @@ class _RecordingCodexAgent(CodexAgent):
         pass
 
 
+def _scan_text(raw_text: str) -> CodexCompactionTranscriptScanner:
+    path = Path("/agent/rollout.jsonl")
+    scanner = CodexCompactionTranscriptScanner()
+    scan_jsonl_file_backward(InMemoryHostFileReader(contents_by_path={path: raw_text.encode("utf-8")}), path, scanner)
+    return scanner
+
+
+def _latest_assistant_timestamp(raw_text: str) -> datetime | None:
+    return _scan_text(raw_text).latest_assistant_timestamp
+
+
+def _latest_context_tokens(raw_text: str) -> int | None:
+    return _scan_text(raw_text).latest_context_tokens
+
+
 def test_parse_iso_timestamp() -> None:
     # RFC3339 with Z
     dt = parse_iso_timestamp("2026-08-27T12:00:00Z")
@@ -142,11 +171,11 @@ def test_parse_iso_timestamp() -> None:
     assert parse_iso_timestamp("   ") is None
 
 
-def test_extract_latest_assistant_timestamp_from_jsonl() -> None:
-    assert extract_latest_assistant_timestamp_from_jsonl("") is None
-    assert extract_latest_assistant_timestamp_from_jsonl("not json\n") is None
-    assert extract_latest_assistant_timestamp_from_jsonl('\n  \n  123\n  "hello"\n') is None
-    assert extract_latest_assistant_timestamp_from_jsonl('{"type": "other"}\n   \n{"type": "other"}') is None
+def test_scanner_finds_latest_assistant_timestamp() -> None:
+    assert _latest_assistant_timestamp("") is None
+    assert _latest_assistant_timestamp("not json\n") is None
+    assert _latest_assistant_timestamp('\n  \n  123\n  "hello"\n') is None
+    assert _latest_assistant_timestamp('{"type": "other"}\n   \n{"type": "other"}') is None
 
     # Multi-turn rollout events
     raw_transcript = (
@@ -155,14 +184,14 @@ def test_extract_latest_assistant_timestamp_from_jsonl() -> None:
         '{"type": "event_msg", "timestamp": "2026-08-27T12:02:00Z", "payload": {"type": "task_complete", "completed_at": 1787832120}}\n'
     )
     expected = datetime.fromtimestamp(1787832120, tz=timezone.utc)
-    assert extract_latest_assistant_timestamp_from_jsonl(raw_transcript) == expected
+    assert _latest_assistant_timestamp(raw_transcript) == expected
 
     # Compacted and token usage events alone are NOT assistant activity
     compacted_transcript = '{"type": "compacted", "timestamp": "2026-08-27T13:00:00Z"}\n'
-    assert extract_latest_assistant_timestamp_from_jsonl(compacted_transcript) is None
+    assert _latest_assistant_timestamp(compacted_transcript) is None
 
     usage_transcript = '{"type": "token_usage_record", "timestamp": "2026-08-27T14:00:00Z", "payload": {"usage": {"input_tokens": 500}}}\n'
-    assert extract_latest_assistant_timestamp_from_jsonl(usage_transcript) is None
+    assert _latest_assistant_timestamp(usage_transcript) is None
 
     # Real turn followed by compaction ignores the compaction turn and keeps the real assistant timestamp
     post_compaction_transcript = (
@@ -171,97 +200,81 @@ def test_extract_latest_assistant_timestamp_from_jsonl() -> None:
         '{"type": "event_msg", "timestamp": "2026-08-27T12:05:01Z", "payload": {"type": "task_complete", "turn_id": "turn-compact", "last_agent_message": null, "completed_at": 1787832301}}\n'
         '{"type": "compacted", "timestamp": "2026-08-27T12:05:02Z", "payload": {"latest_token_usage_record": {"turn_id": "turn-compact"}}}\n'
     )
-    assert extract_latest_assistant_timestamp_from_jsonl(post_compaction_transcript) == expected
+    assert _latest_assistant_timestamp(post_compaction_transcript) == expected
 
     # Compaction task_complete without compacted record is also ignored
     compaction_no_compacted = (
         '{"type": "event_msg", "timestamp": "2026-08-27T12:02:00Z", "payload": {"type": "task_complete", "turn_id": "turn-1", "last_agent_message": "hi", "completed_at": 1787832120}}\n'
         '{"type": "event_msg", "timestamp": "2026-08-27T12:05:01Z", "payload": {"type": "task_complete", "turn_id": "turn-compact-2", "last_agent_message": null, "completed_at": 1787832301}}\n'
     )
-    assert extract_latest_assistant_timestamp_from_jsonl(compaction_no_compacted) == expected
+    assert _latest_assistant_timestamp(compaction_no_compacted) == expected
 
     # response_item variations (assistant role, reasoning, function_call, custom_tool_call)
     for ptype in ("reasoning", "function_call", "custom_tool_call"):
         tr = f'{{"type": "response_item", "timestamp": "2026-08-27T12:00:00Z", "payload": {{"type": "{ptype}"}}}}\n'
-        assert extract_latest_assistant_timestamp_from_jsonl(tr) == datetime(
-            2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc
-        )
+        assert _latest_assistant_timestamp(tr) == datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc)
 
     # response_item from user is ignored
     tr_user = '{"type": "response_item", "timestamp": "2026-08-27T12:00:00Z", "payload": {"role": "user", "type": "user_message"}}\n'
-    assert extract_latest_assistant_timestamp_from_jsonl(tr_user) is None
+    assert _latest_assistant_timestamp(tr_user) is None
 
     # assistant and assistant_message event types
     tr_asst = '{"type": "assistant", "timestamp": "2026-08-27T12:00:00Z"}\n'
-    assert extract_latest_assistant_timestamp_from_jsonl(tr_asst) == datetime(
-        2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc
-    )
+    assert _latest_assistant_timestamp(tr_asst) == datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc)
     tr_asst_msg = '{"type": "assistant_message", "timestamp": "2026-08-27T12:00:00Z"}\n'
-    assert extract_latest_assistant_timestamp_from_jsonl(tr_asst_msg) == datetime(
-        2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc
-    )
+    assert _latest_assistant_timestamp(tr_asst_msg) == datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc)
 
     # step event types (agent, assistant vs user)
     tr_step_agent = '{"type": "step", "source": "agent", "timestamp": "2026-08-27T12:00:00Z"}\n'
-    assert extract_latest_assistant_timestamp_from_jsonl(tr_step_agent) == datetime(
-        2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc
-    )
+    assert _latest_assistant_timestamp(tr_step_agent) == datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc)
     tr_step_asst = '{"type": "step", "source": "assistant", "timestamp": "2026-08-27T12:00:00Z"}\n'
-    assert extract_latest_assistant_timestamp_from_jsonl(tr_step_asst) == datetime(
-        2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc
-    )
+    assert _latest_assistant_timestamp(tr_step_asst) == datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc)
     tr_step_user = '{"type": "step", "source": "user", "timestamp": "2026-08-27T12:00:00Z"}\n'
-    assert extract_latest_assistant_timestamp_from_jsonl(tr_step_user) is None
+    assert _latest_assistant_timestamp(tr_step_user) is None
 
     # observation event type
     tr_obs = '{"type": "observation", "timestamp": "2026-08-27T12:00:00Z"}\n'
-    assert extract_latest_assistant_timestamp_from_jsonl(tr_obs) == datetime(
-        2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc
-    )
+    assert _latest_assistant_timestamp(tr_obs) == datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc)
 
     # unknown event type is ignored
     tr_unk = '{"type": "unknown_event", "timestamp": "2026-08-27T12:00:00Z"}\n'
-    assert extract_latest_assistant_timestamp_from_jsonl(tr_unk) is None
+    assert _latest_assistant_timestamp(tr_unk) is None
 
     # timestamp in payload rather than root record
     tr_payload_ts = (
         '{"type": "event_msg", "payload": {"type": "agent_message", "timestamp": "2026-08-27T12:00:00Z"}}\n'
     )
-    assert extract_latest_assistant_timestamp_from_jsonl(tr_payload_ts) == datetime(
-        2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc
-    )
+    assert _latest_assistant_timestamp(tr_payload_ts) == datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc)
 
     # completed_at overflow falls back to timestamp
     tr_overflow = '{"type": "event_msg", "timestamp": "2026-08-27T12:00:00Z", "payload": {"type": "task_complete", "completed_at": 1e50}}\n'
-    assert extract_latest_assistant_timestamp_from_jsonl(tr_overflow) == datetime(
-        2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc
-    )
+    assert _latest_assistant_timestamp(tr_overflow) == datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc)
 
 
-def test_extract_context_tokens_from_jsonl() -> None:
-    assert extract_context_tokens_from_jsonl("") is None
-    assert extract_context_tokens_from_jsonl("not json\n") is None
-    assert extract_context_tokens_from_jsonl('\n  \n123\n"text"\n') is None
-    assert extract_context_tokens_from_jsonl('{"type": "other"}\n   \n{"type": "other"}') is None
+def test_scanner_finds_latest_context_tokens() -> None:
+    assert _latest_context_tokens("") is None
+    assert _latest_context_tokens("not json\n") is None
+    assert _latest_context_tokens('\n  \n123\n"text"\n') is None
+    assert _latest_context_tokens('{"type": "other"}\n   \n{"type": "other"}') is None
 
     # Codex token_count format with last_token_usage
     transcript = '{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 1234, "output_tokens": 50}, "total_token_usage": {"input_tokens": 5000, "output_tokens": 200}}}}\n'
-    assert extract_context_tokens_from_jsonl(transcript) == 1234
+    assert _latest_context_tokens(transcript) == 1234
 
     # Post-compaction token_count with input_tokens=0 but total_tokens > 0 uses total_tokens
     compaction_token_count = '{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 0, "total_tokens": 5565}, "total_token_usage": {"input_tokens": 84809, "total_tokens": 84919}}}}\n'
-    assert extract_context_tokens_from_jsonl(compaction_token_count) == 5565
+    assert _latest_context_tokens(compaction_token_count) == 5565
 
     # Codex token_count format with total_token_usage fallback
     transcript_fallback = '{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 0}, "total_token_usage": {"input_tokens": 4321}}}}\n'
-    assert extract_context_tokens_from_jsonl(transcript_fallback) == 4321
+    assert _latest_context_tokens(transcript_fallback) == 4321
 
     # Multiple events returns the latest
     multi_turn = (
         '{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 1000}}}}\n'
         '{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 2500}}}}\n'
     )
-    assert extract_context_tokens_from_jsonl(multi_turn) == 2500
+    assert _latest_context_tokens(multi_turn) == 2500
 
 
 def test_get_agent_context_tokens(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
@@ -589,3 +602,309 @@ def test_codex_agent_post_compaction_transcript_not_idle(tmp_path: Path, temp_mn
         '{"type": "event_msg", "timestamp": "2026-08-27T12:10:00Z", "payload": {"type": "agent_message", "message": "new response"}}\n'
     )
     assert compaction_agent.get_idle_since() == datetime(2026, 8, 27, 12, 10, 0, tzinfo=timezone.utc)
+
+
+def _reference_latest_assistant_timestamp(raw_text: str) -> datetime | None:
+    """A whole-file, newest-first parser of the newest assistant timestamp, kept as an oracle."""
+    compaction_turn_ids: set[str] = set()
+    for line in reversed(raw_text.strip().splitlines()):
+        stripped = line.strip()
+        record = json.loads(stripped) if stripped else None
+        if not isinstance(record, dict):
+            continue
+        event_type = record.get("type")
+        raw_payload = record.get("payload")
+        payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+        if event_type == "compacted":
+            if isinstance(raw_payload, dict):
+                tur = raw_payload.get("latest_token_usage_record")
+                if isinstance(tur, dict) and tur.get("turn_id"):
+                    compaction_turn_ids.add(str(tur["turn_id"]))
+            continue
+        if event_type in ("token_usage_record", "token_count"):
+            continue
+        if payload.get("type") == "item_completed":
+            item = payload.get("item")
+            if isinstance(item, dict) and item.get("type") == "ContextCompaction" and payload.get("turn_id"):
+                compaction_turn_ids.add(str(payload["turn_id"]))
+            continue
+        is_assistant_activity = False
+        if event_type == "event_msg":
+            ptype = payload.get("type")
+            if ptype == "agent_message":
+                is_assistant_activity = True
+            elif ptype == "task_complete":
+                turn_id = payload.get("turn_id")
+                is_assistant_activity = not (
+                    (turn_id and str(turn_id) in compaction_turn_ids)
+                    or ("last_agent_message" in payload and payload["last_agent_message"] is None)
+                )
+            else:
+                is_assistant_activity = False
+        elif event_type == "response_item":
+            role = payload.get("role")
+            is_assistant_activity = role == "assistant" or (
+                role != "user" and payload.get("type") in ("message", "reasoning", "function_call", "custom_tool_call")
+            )
+        elif event_type in ("assistant", "assistant_message", "observation"):
+            is_assistant_activity = True
+        elif event_type == "step":
+            is_assistant_activity = record.get("source") in ("agent", "assistant")
+        else:
+            is_assistant_activity = False
+        if is_assistant_activity:
+            completed_at = payload.get("completed_at")
+            if isinstance(completed_at, (int, float)):
+                return datetime.fromtimestamp(completed_at, tz=timezone.utc)
+            ts_str = record.get("timestamp") or payload.get("timestamp")
+            dt = parse_iso_timestamp(ts_str) if isinstance(ts_str, str) else None
+            if dt is not None:
+                return dt
+    return None
+
+
+def _reference_context_tokens(raw_text: str) -> int | None:
+    """A whole-file, newest-first parser of the context size, kept as an oracle."""
+    for line in reversed(raw_text.strip().splitlines()):
+        stripped = line.strip()
+        record = json.loads(stripped) if stripped else None
+        if not isinstance(record, dict):
+            continue
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        info = payload.get("info") if payload.get("type") == "token_count" else None
+        if not isinstance(info, dict):
+            continue
+        last_usage = info.get("last_token_usage")
+        if isinstance(last_usage, dict):
+            for key in ("input_tokens", "total_tokens"):
+                value = last_usage.get(key)
+                if isinstance(value, int) and value > 0:
+                    return value
+        total_usage = info.get("total_token_usage")
+        if isinstance(total_usage, dict):
+            value = total_usage.get("input_tokens")
+            if isinstance(value, int) and value > 0:
+                return value
+    return None
+
+
+def _rollout(*records: dict[str, Any]) -> str:
+    return "".join(json.dumps(record) + "\n" for record in records)
+
+
+def _user_message(minute: int) -> dict[str, Any]:
+    return {
+        "type": "event_msg",
+        "timestamp": f"2026-08-27T12:{minute:02d}:00.000Z",
+        "payload": {"type": "user_message", "message": "please continue"},
+    }
+
+
+def _assistant_message(minute: int) -> dict[str, Any]:
+    return {
+        "type": "response_item",
+        "timestamp": f"2026-08-27T12:{minute:02d}:20.000Z",
+        "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
+    }
+
+
+def _function_call_output(minute: int, output: str) -> dict[str, Any]:
+    return {
+        "type": "response_item",
+        "timestamp": f"2026-08-27T12:{minute:02d}:25.000Z",
+        "payload": {"type": "function_call_output", "role": "user", "call_id": f"call_{minute}", "output": output},
+    }
+
+
+def _token_count(minute: int, input_tokens: int) -> dict[str, Any]:
+    return {
+        "type": "event_msg",
+        "timestamp": f"2026-08-27T12:{minute:02d}:30.000Z",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {"input_tokens": input_tokens, "output_tokens": 300},
+                "total_token_usage": {"input_tokens": input_tokens * 3, "output_tokens": 900},
+            },
+        },
+    }
+
+
+def _task_complete(minute: int, turn_id: str, last_agent_message: str | None) -> dict[str, Any]:
+    return {
+        "type": "event_msg",
+        "timestamp": f"2026-08-27T12:{minute:02d}:40.000Z",
+        "payload": {
+            "type": "task_complete",
+            "turn_id": turn_id,
+            "last_agent_message": last_agent_message,
+            "completed_at": 1787832000 + minute * 60,
+        },
+    }
+
+
+def _compaction_item_completed(minute: int, turn_id: str) -> dict[str, Any]:
+    return {
+        "type": "event_msg",
+        "timestamp": f"2026-08-27T12:{minute:02d}:41.000Z",
+        "payload": {"type": "item_completed", "turn_id": turn_id, "item": {"type": "ContextCompaction"}},
+    }
+
+
+def _compacted(minute: int, turn_id: str) -> dict[str, Any]:
+    return {
+        "type": "compacted",
+        "timestamp": f"2026-08-27T12:{minute:02d}:42.000Z",
+        "payload": {"latest_token_usage_record": {"turn_id": turn_id}},
+    }
+
+
+_CODEX_ROLLOUT_FIXTURES = {
+    "turns_with_large_tool_output_after_the_last_turn": _rollout(
+        _user_message(1),
+        _assistant_message(1),
+        _token_count(1, 41000),
+        _task_complete(1, "turn-1", "done"),
+        _user_message(2),
+        _assistant_message(2),
+        _token_count(2, 52000),
+        _function_call_output(2, "q" * 150_000),
+    ),
+    "compaction_turn_after_a_real_turn": _rollout(
+        _user_message(1),
+        _assistant_message(1),
+        _token_count(1, 180000),
+        _task_complete(1, "turn-1", "done"),
+        _compaction_item_completed(3, "turn-compact"),
+        _token_count(3, 6000),
+        _task_complete(3, "turn-compact", None),
+        _compacted(3, "turn-compact"),
+    ),
+    "compacted_record_names_the_newest_completed_turn": _rollout(
+        _user_message(1),
+        _assistant_message(1),
+        _token_count(1, 90000),
+        _task_complete(1, "turn-1", "done"),
+        _compacted(2, "turn-1"),
+    ),
+    "no_assistant_activity": _rollout(_user_message(1), _token_count(1, 1000)),
+}
+
+
+@pytest.mark.parametrize("fixture_name", sorted(_CODEX_ROLLOUT_FIXTURES))
+def test_agent_compaction_values_match_the_whole_file_parsers(
+    fixture_name: str, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    rollout = _CODEX_ROLLOUT_FIXTURES[fixture_name]
+    host = _RecordingHost(host_dir=tmp_path)
+    agent = _make_agent(tmp_path, temp_mngr_ctx, host)
+    host.files[tmp_path / RAW_TRANSCRIPT_OUTPUT_RELATIVE] = rollout
+
+    assert get_agent_idle_since(agent) == _reference_latest_assistant_timestamp(rollout)
+    assert get_agent_context_tokens(agent) == _reference_context_tokens(rollout)
+
+
+def test_appended_compaction_record_naming_the_cached_turn_is_honored(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    host = _RecordingHost(host_dir=tmp_path)
+    agent = _make_agent(tmp_path, temp_mngr_ctx, host)
+    raw_path = tmp_path / RAW_TRANSCRIPT_OUTPUT_RELATIVE
+    host.files[raw_path] = _rollout(
+        _user_message(1), _assistant_message(1), _token_count(1, 90000), _task_complete(4, "turn-1", "done")
+    )
+    before_compaction = get_agent_idle_since(agent)
+
+    host.files[raw_path] += _rollout(_compacted(5, "turn-1"))
+    after_compaction = get_agent_idle_since(agent)
+
+    assert before_compaction == datetime.fromtimestamp(1787832000 + 4 * 60, tz=timezone.utc)
+    assert after_compaction == _reference_latest_assistant_timestamp(host.files[raw_path])
+    assert after_compaction == datetime(2026, 8, 27, 12, 1, 20, tzinfo=timezone.utc)
+
+
+def test_appended_turn_updates_the_cached_values(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    host = _RecordingHost(host_dir=tmp_path)
+    agent = _make_agent(tmp_path, temp_mngr_ctx, host)
+    raw_path = tmp_path / RAW_TRANSCRIPT_OUTPUT_RELATIVE
+    host.files[raw_path] = _rollout(_user_message(1), _assistant_message(1), _token_count(1, 90000))
+    get_agent_idle_since(agent)
+    get_agent_context_tokens(agent)
+
+    host.files[raw_path] += _rollout(_user_message(7), _assistant_message(7), _token_count(7, 95000))
+
+    assert get_agent_idle_since(agent) == datetime(2026, 8, 27, 12, 7, 20, tzinfo=timezone.utc)
+    assert get_agent_context_tokens(agent) == 95000
+
+
+def _make_agent(
+    tmp_path: Path,
+    mngr_ctx: MngrContext,
+    host: _RecordingHost,
+    mock_client: _MockAppServerClient | None = None,
+) -> _RecordingCodexAgent:
+    return _RecordingCodexAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-codex"),
+        agent_type=AgentTypeName("codex"),
+        work_dir=tmp_path,
+        create_time=datetime.now(timezone.utc),
+        host_id=HostId.generate(),
+        mngr_ctx=mngr_ctx,
+        agent_config=CodexAgentConfig(check_installation=False),
+        host=host,
+        override_agent_dir=tmp_path,
+        mock_client=mock_client,
+        mock_lifecycle_state=AgentLifecycleState.WAITING,
+    )
+
+
+_COMPACTION_IDLE_SINCE = datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _make_idle_recording_codex_agent(
+    tmp_path: Path, temp_mngr_ctx: MngrContext, mock_client: _MockAppServerClient
+) -> _RecordingCodexAgent:
+    host = _RecordingHost(host_dir=tmp_path)
+    host.files[tmp_path / IDLE_SINCE_FILENAME] = _COMPACTION_IDLE_SINCE.isoformat()
+    return _make_agent(tmp_path, temp_mngr_ctx, host, mock_client)
+
+
+def test_codex_request_compaction_gives_up_on_a_message_lock_another_process_holds(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    mock_client = _MockAppServerClient()
+    agent = _make_idle_recording_codex_agent(tmp_path, temp_mngr_ctx, mock_client)
+
+    with file_lock_held_by_another_process(tmp_path / "message.lock", temp_mngr_ctx.concurrency_group):
+        with pytest.raises(MessageLockTimeoutError):
+            agent.request_compaction(message_lock_timeout_seconds=0.5, expected_idle_since=_COMPACTION_IDLE_SINCE)
+
+    assert mock_client.compact_calls == []
+    assert get_agent_last_compacted_idle_since(agent) is None
+
+
+def test_codex_request_compaction_skips_an_agent_that_became_active(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    mock_client = _MockAppServerClient()
+    agent = _make_idle_recording_codex_agent(tmp_path, temp_mngr_ctx, mock_client)
+    agent.mock_lifecycle_state = AgentLifecycleState.RUNNING
+
+    with pytest.raises(AgentNoLongerIdleError):
+        agent.request_compaction(message_lock_timeout_seconds=5.0, expected_idle_since=_COMPACTION_IDLE_SINCE)
+
+    assert mock_client.compact_calls == []
+    assert get_agent_last_compacted_idle_since(agent) is None
+
+
+def test_codex_request_compaction_records_the_idle_start_it_compacted(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    mock_client = _MockAppServerClient()
+    agent = _make_idle_recording_codex_agent(tmp_path, temp_mngr_ctx, mock_client)
+
+    agent.request_compaction(message_lock_timeout_seconds=5.0, expected_idle_since=_COMPACTION_IDLE_SINCE)
+
+    assert len(mock_client.compact_calls) == 1
+    assert get_agent_last_compacted_idle_since(agent) == _COMPACTION_IDLE_SINCE

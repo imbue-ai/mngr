@@ -672,6 +672,15 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         ...
 
     @abstractmethod
+    def load_agents_from_refs(self, agent_refs: Sequence[DiscoveredAgent]) -> list[AgentInterface]:
+        """Return the agents for these refs to agents on this host, in ref order, without reading any other agent.
+
+        An agent is built from its ref's ``certified_data`` when that holds the full record;
+        otherwise only its own data.json is read from the host, and it is left out if missing.
+        """
+        ...
+
+    @abstractmethod
     def create_agent_work_dir(
         self,
         host: OnlineHostInterface,

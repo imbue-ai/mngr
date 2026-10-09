@@ -2,17 +2,25 @@
 
 import json
 import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
+from inline_snapshot import snapshot
 
+from imbue.mngr_claude.claude_config import COMPACTING_MARKER_FILENAME
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
+from imbue.mngr_claude.claude_config import LAST_COMPACTION_FILENAME
+from imbue.mngr_claude.claude_config import MAIN_SESSION_ONLY_GUARD
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
 from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
 from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
+from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import check_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import check_source_directory_trusted
@@ -1196,3 +1204,243 @@ def test_mark_claude_agent_idle_is_idempotent_on_absent_markers(tmp_path: Path) 
     assert not (state_dir / "active").exists()
     events_file = host_dir / "events" / "mngr" / "activity" / "events.jsonl"
     assert len(events_file.read_text().splitlines()) == 1
+
+
+_UTC_HOOK_TIMESTAMP_PATTERN = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000000000Z"
+
+_REQUIRES_JQ = pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required to run the compaction hooks")
+
+
+def _readiness_hook_command(event_name: str, hook_index: int = 0) -> str:
+    return build_readiness_hooks_config()["hooks"][event_name][0]["hooks"][hook_index]["command"]
+
+
+def _run_hook_command(
+    command: str,
+    payload: str,
+    state_dir: Path,
+    host_dir: Path,
+    shell: str = "bash",
+    path: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a readiness hook command the way Claude Code does: payload on stdin, guard satisfied."""
+    return subprocess.run(
+        [shell, "-c", command],
+        input=payload,
+        env={
+            "MAIN_CLAUDE_SESSION_ID": "sess-compaction-48213",
+            "MNGR_AGENT_STATE_DIR": str(state_dir),
+            "MNGR_HOST_DIR": str(host_dir),
+            "PATH": os.environ.get("PATH", "") if path is None else path,
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def _make_state_and_host_dirs(tmp_path: Path) -> tuple[Path, Path]:
+    state_dir = tmp_path / "agent"
+    state_dir.mkdir()
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    return state_dir, host_dir
+
+
+def _assert_single_activity_event(host_dir: Path) -> None:
+    events_file = host_dir / "events" / "mngr" / "activity" / "events.jsonl"
+    lines = events_file.read_text().splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    assert event["source"] == "mngr/activity"
+    assert event["type"] == "activity"
+    assert event["event_id"].startswith("evt-")
+    assert re.fullmatch(_UTC_HOOK_TIMESTAMP_PATTERN, event["timestamp"])
+
+
+def test_build_readiness_hooks_config_has_compaction_hooks() -> None:
+    """PreCompact and PostCompact are registered unmatched, guarded, and always exit 0."""
+    config = build_readiness_hooks_config()
+
+    for event_name in ("PreCompact", "PostCompact"):
+        groups = config["hooks"][event_name]
+        assert len(groups) == 1
+        assert "matcher" not in groups[0]
+        assert len(groups[0]["hooks"]) == 1
+        command = groups[0]["hooks"][0]["command"]
+        assert command.startswith(MAIN_SESSION_ONLY_GUARD)
+        assert command.endswith("; exit 0")
+
+    assert _readiness_hook_command("PreCompact")[len(MAIN_SESSION_ONLY_GUARD) :] == snapshot(
+        '_MNGR_HOOK_INPUT=$(cat); _MNGR_TRIGGER=$(printf \'%s\' "$_MNGR_HOOK_INPUT" | jq -r \'.trigger // "unknown"\' 2>/dev/null); case "$_MNGR_TRIGGER" in manual|auto) ;; *) _MNGR_TRIGGER=unknown ;; esac; printf \'{"trigger": "%s", "started_at": "%s"}\\n\' "$_MNGR_TRIGGER" "$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")" > "$MNGR_AGENT_STATE_DIR/compacting.tmp" && mv "$MNGR_AGENT_STATE_DIR/compacting.tmp" "$MNGR_AGENT_STATE_DIR/compacting"; mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo \'{"source": "mngr/activity", "type": "activity", "event_id": "\'"evt-$(head -c 16 /dev/urandom | xxd -p)"\'", "timestamp": "\'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"\'"}\' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl; exit 0'
+    )
+    assert _readiness_hook_command("PostCompact")[len(MAIN_SESSION_ONLY_GUARD) :] == snapshot(
+        '_MNGR_HOOK_INPUT=$(cat); _MNGR_TRIGGER=$(printf \'%s\' "$_MNGR_HOOK_INPUT" | jq -r \'.trigger // "unknown"\' 2>/dev/null); case "$_MNGR_TRIGGER" in manual|auto) ;; *) _MNGR_TRIGGER=unknown ;; esac; printf \'{"trigger": "%s", "ended_at": "%s"}\\n\' "$_MNGR_TRIGGER" "$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")" > "$MNGR_AGENT_STATE_DIR/last_compaction.json.tmp" && mv "$MNGR_AGENT_STATE_DIR/last_compaction.json.tmp" "$MNGR_AGENT_STATE_DIR/last_compaction.json"; rm -f "$MNGR_AGENT_STATE_DIR/compacting"; mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo \'{"source": "mngr/activity", "type": "activity", "event_id": "\'"evt-$(head -c 16 /dev/urandom | xxd -p)"\'", "timestamp": "\'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"\'"}\' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl; exit 0'
+    )
+
+
+def test_build_readiness_hooks_config_session_start_startup_branch_removes_compacting_marker() -> None:
+    """The startup|resume branch removes a stranded 'compacting' marker before resetting the activity markers."""
+    command = _readiness_hook_command("SessionStart", hook_index=4)
+
+    assert (
+        'case "$_MNGR_SOURCE" in startup|resume) rm -f "$MNGR_AGENT_STATE_DIR/compacting";'
+        ' touch "$MNGR_AGENT_STATE_DIR/claude_process_started" && rm -f "$MNGR_AGENT_STATE_DIR/active"'
+    ) in command
+
+
+@_REQUIRES_JQ
+@pytest.mark.parametrize("trigger", ["manual", "auto"])
+def test_pre_compact_hook_writes_marker_with_trigger_and_emits_one_activity_event(
+    tmp_path: Path, trigger: str
+) -> None:
+    state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
+    payload = json.dumps({"session_id": "sess-compaction-48213", "hook_event_name": "PreCompact", "trigger": trigger})
+
+    result = _run_hook_command(_readiness_hook_command("PreCompact"), payload, state_dir, host_dir)
+
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    marker = json.loads((state_dir / COMPACTING_MARKER_FILENAME).read_text())
+    assert set(marker) == {"trigger", "started_at"}
+    assert marker["trigger"] == trigger
+    assert re.fullmatch(_UTC_HOOK_TIMESTAMP_PATTERN, marker["started_at"])
+    assert not (state_dir / f"{COMPACTING_MARKER_FILENAME}.tmp").exists()
+    _assert_single_activity_event(host_dir)
+
+
+@_REQUIRES_JQ
+def test_post_compact_hook_records_last_compaction_removes_marker_and_emits_one_activity_event(
+    tmp_path: Path,
+) -> None:
+    state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
+    (state_dir / COMPACTING_MARKER_FILENAME).write_text('{"trigger": "auto", "started_at": "x"}\n')
+    payload = json.dumps(
+        {
+            "session_id": "sess-compaction-48213",
+            "hook_event_name": "PostCompact",
+            "trigger": "auto",
+            "compact_summary": "Summary of the work so far.",
+        }
+    )
+
+    result = _run_hook_command(_readiness_hook_command("PostCompact"), payload, state_dir, host_dir)
+
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert not (state_dir / COMPACTING_MARKER_FILENAME).exists()
+    last_compaction = json.loads((state_dir / LAST_COMPACTION_FILENAME).read_text())
+    assert set(last_compaction) == {"trigger", "ended_at"}
+    assert last_compaction["trigger"] == "auto"
+    assert re.fullmatch(_UTC_HOOK_TIMESTAMP_PATTERN, last_compaction["ended_at"])
+    assert not (state_dir / f"{LAST_COMPACTION_FILENAME}.tmp").exists()
+    _assert_single_activity_event(host_dir)
+
+
+@_REQUIRES_JQ
+@pytest.mark.parametrize(
+    "event_name, written_filename",
+    [("PreCompact", COMPACTING_MARKER_FILENAME), ("PostCompact", LAST_COMPACTION_FILENAME)],
+)
+@pytest.mark.parametrize(
+    "payload",
+    [
+        json.dumps({"session_id": "sess-compaction-48213"}),
+        json.dumps({"session_id": "sess-compaction-48213", "trigger": 'x", "injected": "y'}),
+        "not json at all",
+        "",
+    ],
+)
+def test_compaction_hooks_record_unknown_trigger_for_missing_or_unexpected_trigger(
+    tmp_path: Path, event_name: str, written_filename: str, payload: str
+) -> None:
+    state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
+
+    result = _run_hook_command(_readiness_hook_command(event_name), payload, state_dir, host_dir)
+
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    written = json.loads((state_dir / written_filename).read_text())
+    assert written["trigger"] == "unknown"
+    assert "injected" not in written
+
+
+@_REQUIRES_JQ
+@pytest.mark.parametrize("shell", ["bash", "sh"])
+def test_post_compact_hook_parses_payload_whose_summary_contains_escaped_newlines(tmp_path: Path, shell: str) -> None:
+    """A compact_summary with JSON-escaped newlines must not corrupt the payload.
+
+    Run under ``sh`` too, whose ``echo`` (dash on Linux, macOS sh) expands backslash escapes.
+    """
+    state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
+    payload = json.dumps(
+        {
+            "session_id": "sess-compaction-48213",
+            "hook_event_name": "PostCompact",
+            "trigger": "manual",
+            "compact_summary": "Line one\nLine two\\with a backslash\n\tIndented line",
+        }
+    )
+    assert "\\n" in payload
+
+    result = _run_hook_command(_readiness_hook_command("PostCompact"), payload, state_dir, host_dir, shell=shell)
+
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert json.loads((state_dir / LAST_COMPACTION_FILENAME).read_text())["trigger"] == "manual"
+
+
+@pytest.mark.parametrize(
+    "event_name, written_filename",
+    [("PreCompact", COMPACTING_MARKER_FILENAME), ("PostCompact", LAST_COMPACTION_FILENAME)],
+)
+def test_compaction_hooks_exit_zero_and_record_unknown_when_jq_is_unavailable(
+    tmp_path: Path, event_name: str, written_filename: str
+) -> None:
+    """Without jq the hooks still succeed."""
+    state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
+    tools_dir = tmp_path / "tools-without-jq"
+    tools_dir.mkdir()
+    for tool in ("cat", "date", "mv", "rm", "mkdir", "head", "xxd"):
+        tool_path = shutil.which(tool)
+        assert tool_path is not None, f"{tool} is required on PATH"
+        (tools_dir / tool).symlink_to(tool_path)
+    bash_path = shutil.which("bash")
+    assert bash_path is not None
+    payload = json.dumps({"session_id": "sess-compaction-48213", "trigger": "manual"})
+
+    result = _run_hook_command(
+        _readiness_hook_command(event_name), payload, state_dir, host_dir, shell=bash_path, path=str(tools_dir)
+    )
+
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert json.loads((state_dir / written_filename).read_text())["trigger"] == "unknown"
+    _assert_single_activity_event(host_dir)
+
+
+@pytest.mark.parametrize("event_name", ["PreCompact", "PostCompact"])
+def test_compaction_hooks_exit_zero_when_state_and_host_dirs_are_unwritable(tmp_path: Path, event_name: str) -> None:
+    """Every write failing (marker, last_compaction.json and the activity event) still exits 0."""
+    regular_file = tmp_path / "not-a-directory"
+    regular_file.write_text("")
+    payload = json.dumps({"session_id": "sess-compaction-48213", "trigger": "auto"})
+
+    result = _run_hook_command(
+        _readiness_hook_command(event_name), payload, regular_file / "agent", regular_file / "host"
+    )
+
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert result.stderr != ""
+
+
+@_REQUIRES_JQ
+@pytest.mark.parametrize("source, should_remove", [("startup", True), ("resume", True), ("compact", False)])
+def test_session_start_hook_removes_stale_compacting_marker_on_startup_and_resume(
+    tmp_path: Path, source: str, should_remove: bool
+) -> None:
+    """A fresh Claude process clears a marker stranded by a cancelled or crashed compaction."""
+    state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
+    marker = state_dir / COMPACTING_MARKER_FILENAME
+    marker.write_text('{"trigger": "manual", "started_at": "2026-10-06T12:00:00.000000000Z"}\n')
+    payload = json.dumps({"session_id": "sess-compaction-48213", "source": source})
+
+    result = _run_hook_command(_readiness_hook_command("SessionStart", hook_index=4), payload, state_dir, host_dir)
+
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert marker.exists() != should_remove

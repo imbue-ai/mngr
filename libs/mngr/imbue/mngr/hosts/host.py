@@ -557,19 +557,26 @@ _AGENTS_DIR_MISSING_MARKER: Final[str] = "---MNGR_AGENTS_DIR_MISSING---"
 
 
 @pure
-def build_read_agent_data_files_command(agents_dir: Path) -> str:
-    """The shell command that prints every ``<agent dir>/data.json`` under ``agents_dir``, each behind a marker line.
+def build_read_agent_data_files_command(agents_dir: Path, agent_ids: Sequence[AgentId] | None) -> str:
+    """The shell command that prints each ``<agent dir>/data.json`` under ``agents_dir``, each behind a marker line.
 
-    A single ``awk`` reads all of them, so the cost does not grow a process per agent: on a
-    sandboxed runtime (gVisor) each spawn costs tens of milliseconds.
+    It reads every agent's when ``agent_ids`` is None, otherwise only those agents' (skipping any
+    that is missing). A single ``awk`` reads all of them, so the cost does not grow a process per
+    agent: on a sandboxed runtime (gVisor) each spawn costs tens of milliseconds.
     """
     awk_program = (
         f'BEGIN {{ for (i = 1; i < ARGC; i++) {{ print "{_AGENT_DATA_FILE_MARKER}" ARGV[i]; '
         "while ((getline line < ARGV[i]) > 0) print line; close(ARGV[i]) } exit }"
     )
+    data_file_words = (
+        "*/data.json"
+        if agent_ids is None
+        else " ".join(shlex.quote(f"{agent_id}/data.json") for agent_id in agent_ids)
+    )
     return (
         f"cd {shlex.quote(str(agents_dir))} 2>/dev/null || {{ echo '{_AGENTS_DIR_MISSING_MARKER}'; exit 0; }}; "
-        'set -- */data.json; [ -f "$1" ] || exit 0; '
+        f'set --; for data_file in {data_file_words}; do [ -f "$data_file" ] && set -- "$@" "$data_file"; done; '
+        '[ "$#" -gt 0 ] || exit 0; '
         f'awk {shlex.quote(awk_program)} "$@"'
     )
 
@@ -595,12 +602,28 @@ def parse_agent_data_files_output(stdout: str) -> dict[str, str] | None:
     return {name: "\n".join(lines).strip() for name, lines in lines_by_agent_dir_name.items()}
 
 
-def _read_local_agent_data_files(agents_dir: Path) -> dict[str, str] | None:
-    """Each agent state dir's ``data.json`` contents under a local ``agents_dir``; None when it does not exist."""
+_AGENT_RECORD_KEYS_FOR_LOADING: Final[tuple[str, ...]] = ("id", "name", "type", "work_dir", "create_time")
+
+
+@pure
+def _has_full_agent_record(agent_ref: DiscoveredAgent) -> bool:
+    """Whether the ref's certified data is this agent's own record, holding every field an agent is built from."""
+    certified_data = agent_ref.certified_data
+    return certified_data.get("id") == str(agent_ref.agent_id) and all(
+        key in certified_data for key in _AGENT_RECORD_KEYS_FOR_LOADING
+    )
+
+
+def _read_local_agent_data_files(agents_dir: Path, agent_ids: Sequence[AgentId] | None) -> dict[str, str] | None:
+    """Each agent state dir's (or only ``agent_ids``') ``data.json`` contents under a local ``agents_dir``.
+
+    None when ``agents_dir`` does not exist.
+    """
     if not agents_dir.is_dir():
         return None
+    agent_dirs = agents_dir.iterdir() if agent_ids is None else (agents_dir / str(agent_id) for agent_id in agent_ids)
     content_by_agent_dir_name: dict[str, str] = {}
-    for agent_dir in agents_dir.iterdir():
+    for agent_dir in agent_dirs:
         try:
             content_by_agent_dir_name[agent_dir.name] = (agent_dir / "data.json").read_text()
         except (FileNotFoundError, NotADirectoryError):
@@ -1577,7 +1600,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     def get_agents(self) -> list[AgentInterface]:
         """Get all agents on this host."""
         agents_dir = get_agents_root_dir(self.host_dir)
-        content_by_agent_dir_name = self._read_agent_data_files(timeout_seconds=None)
+        content_by_agent_dir_name = self._read_agent_data_files(timeout_seconds=None, agent_ids=None)
         if content_by_agent_dir_name is None:
             logger.trace("Failed to find agents directory for host {}", self.id)
             return []
@@ -1587,6 +1610,41 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             for agent_dir_name, content in content_by_agent_dir_name.items()
         ]
         logger.trace("Loaded {} agent(s) from host {}", len(agents), self.id)
+        return agents
+
+    def load_agents_from_refs(self, agent_refs: Sequence[DiscoveredAgent]) -> list[AgentInterface]:
+        for agent_ref in agent_refs:
+            if agent_ref.host_id != self.id:
+                raise HostError(f"Agent {agent_ref.agent_id} is on host {agent_ref.host_id}, not on host {self.id}")
+
+        # Some providers report a ref without its full record (e.g. a lease stub), so read those agents' data.json.
+        # Each id is listed once: the batched remote read would print a repeated file twice, as invalid JSON.
+        unrecorded_agent_ids = list(
+            dict.fromkeys(agent_ref.agent_id for agent_ref in agent_refs if not _has_full_agent_record(agent_ref))
+        )
+        read_content_by_agent_dir_name = (
+            (self._read_agent_data_files(timeout_seconds=None, agent_ids=unrecorded_agent_ids) or {})
+            if unrecorded_agent_ids
+            else {}
+        )
+
+        agents_dir = get_agents_root_dir(self.host_dir)
+        agents: list[AgentInterface] = []
+        for agent_ref in agent_refs:
+            read_content = read_content_by_agent_dir_name.get(str(agent_ref.agent_id))
+            if _has_full_agent_record(agent_ref):
+                agents.append(self._build_agent_from_data(agent_ref.certified_data))
+            elif read_content is not None:
+                agents.append(self._load_agent_from_data(agents_dir / str(agent_ref.agent_id), read_content))
+            else:
+                logger.trace("Skipped agent {} on host {}: it has no data.json", agent_ref.agent_id, self.id)
+        logger.trace(
+            "Loaded {} of {} requested agent(s) from host {}, reading {} data.json file(s)",
+            len(agents),
+            len(agent_refs),
+            self.id,
+            len(read_content_by_agent_dir_name),
+        )
         return agents
 
     def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
@@ -1605,7 +1663,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """
         with log_span("Loading all agents from host {}", self.id):
             agents_dir = get_agents_root_dir(self.host_dir)
-            content_by_agent_dir_name = self._read_agent_data_files(timeout_seconds=timeout_seconds)
+            content_by_agent_dir_name = self._read_agent_data_files(timeout_seconds=timeout_seconds, agent_ids=None)
             if content_by_agent_dir_name is None:
                 logger.trace("Failed to find agents directory for host {}", self.id)
                 return []
@@ -1628,23 +1686,31 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             logger.trace("Loaded {} agent reference(s) from host {}", len(agent_refs), self.id)
             return agent_refs
 
-    def _read_agent_data_files(self, timeout_seconds: float | None) -> dict[str, str] | None:
-        """Every agent's ``data.json`` contents keyed by its state dir name, read in one go.
+    def _read_agent_data_files(
+        self, timeout_seconds: float | None, agent_ids: Sequence[AgentId] | None
+    ) -> dict[str, str] | None:
+        """Every agent's (or only ``agent_ids``') ``data.json`` contents keyed by its state dir name, read in one go.
 
         None when the host has no agents dir. Agent dirs without a ``data.json`` are left out.
         """
         agents_dir = get_agents_root_dir(self.host_dir)
         if self.is_local:
-            return _read_local_agent_data_files(agents_dir)
+            return _read_local_agent_data_files(agents_dir, agent_ids)
         result = self.execute_idempotent_command(
-            build_read_agent_data_files_command(agents_dir), timeout_seconds=timeout_seconds
+            build_read_agent_data_files_command(agents_dir, agent_ids), timeout_seconds=timeout_seconds
         )
         if not result.success:
             raise HostError(f"Failed to read agent data from {agents_dir} on host {self.id}: {result.stderr.strip()}")
         return parse_agent_data_files_output(result.stdout)
 
     def _load_agent_from_data(self, agent_dir: Path, content: str) -> AgentInterface:
-        """Load an agent from the contents of the ``data.json`` in its state directory.
+        """Load an agent from the contents of the ``data.json`` in its state directory."""
+        data = json.loads(content)
+        logger.trace("Loaded agent {} from {}", data.get("name"), agent_dir)
+        return self._build_agent_from_data(data)
+
+    def _build_agent_from_data(self, data: Mapping[str, Any]) -> AgentInterface:
+        """Build an agent from its parsed ``data.json`` record.
 
         If the agent's stored type is no longer registered (e.g. the plugin
         was uninstalled or the type was renamed since the agent was created),
@@ -1660,9 +1726,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         state as ``RUNNING_UNKNOWN_AGENT_TYPE`` so users see that something
         is off.
         """
-        data = json.loads(content)
-        logger.trace("Loaded agent {} from {}", data.get("name"), agent_dir)
-
         agent_type = AgentTypeName(data["type"])
         try:
             resolved = resolve_agent_type(agent_type, self.mngr_ctx.config)

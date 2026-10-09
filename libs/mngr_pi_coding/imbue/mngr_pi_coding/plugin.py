@@ -18,6 +18,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import build_stderr_tee_redirect
+from imbue.mngr.agents.base_agent import describe_failed_send_command
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.output_styles import read_output_style_files
@@ -53,6 +54,7 @@ from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
+from imbue.mngr.interfaces.agent import read_idle_since_for_compaction
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -593,9 +595,14 @@ class PiCodingAgent(
         a line.
         """
         inbox_path = self._get_agent_dir() / _INBOX_FILE_NAME
-        result = self.host.execute_stateful_command(_inbox_append_command(inbox_path, message))
+        result = self.host.execute_stateful_command(
+            _inbox_append_command(inbox_path, message), timeout_seconds=self.send_command_timeout_seconds
+        )
         if not result.success:
-            raise SendMessageError(str(self.name), f"failed to write to pi inbox: {result.stderr or result.stdout}")
+            raise SendMessageError(
+                str(self.name),
+                f"failed to write to pi inbox: {describe_failed_send_command(result, self.send_command_timeout_seconds)}",
+            )
 
     def _confirm_turn_started(self, timeout: float = _TURN_CONFIRM_TIMEOUT_SECONDS) -> None:
         """Wait for the injected message to start a turn (the ``active`` marker appearing)."""
@@ -615,24 +622,32 @@ class PiCodingAgent(
             "(is the lifecycle extension running?)",
         )
 
-    # --- HasCompactionMixin capability implementation ---
+    # HasCompactionMixin capability implementation
 
-    def request_compaction(self, instructions: str | None = None) -> None:
+    def request_compaction(
+        self,
+        instructions: str | None = None,
+        message_lock_timeout_seconds: float | None = None,
+        expected_idle_since: datetime | None = None,
+    ) -> None:
         """Perform context compaction on the Pi agent by inboxing a compaction sentinel."""
-        current_idle_since = self.get_idle_since()
-        try:
-            with self._message_lock(), log_span("Requesting context compaction for pi agent {}", self.name):
-                payload: dict[str, Any] = {COMPACTION_REQUEST_KEY: True}
-                if instructions and instructions.strip():
-                    payload["instructions"] = instructions.strip()
+        payload: dict[str, Any] = {COMPACTION_REQUEST_KEY: True}
+        if instructions and instructions.strip():
+            payload["instructions"] = instructions.strip()
+        with (
+            self._message_lock(timeout_seconds=message_lock_timeout_seconds),
+            log_span("Requesting context compaction for pi agent {}", self.name),
+        ):
+            current_idle_since = read_idle_since_for_compaction(self, self.name, expected_idle_since)
+            try:
                 self._append_to_inbox(payload)
-        finally:
-            # Even if compaction fails, we still record it.
-            # The goal of this is to be conservative around compaction: We want to avoid trying to compact an
-            # agent over and over as part of `mngr autocompact` when compaction isn't going through.
-            # We prefer in that case to just not compact, rather than continuously sending more compaction
-            # requests to the agent.
-            record_agent_compacted(self, idle_since=current_idle_since)
+            finally:
+                # Even if compaction fails, we still record it.
+                # The goal of this is to be conservative around compaction: We want to avoid trying to compact an
+                # agent over and over as part of `mngr autocompact` when compaction isn't going through.
+                # We prefer in that case to just not compact, rather than continuously sending more compaction
+                # requests to the agent.
+                record_agent_compacted(self, idle_since=current_idle_since)
 
     def get_cache_ttl_minutes(self) -> int | None:
         """Return the prompt cache TTL in minutes for the agent's current model provider."""

@@ -109,6 +109,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -4304,7 +4305,7 @@ def test_read_agent_data_files_command_returns_every_agents_data_json_verbatim(
     (agents_dir / "agent-empty" / "data.json").write_text("")
     (agents_dir / "agent-without-data").mkdir()
 
-    result = local_host.execute_idempotent_command(build_read_agent_data_files_command(agents_dir))
+    result = local_host.execute_idempotent_command(build_read_agent_data_files_command(agents_dir, None))
     content_by_agent_dir_name = parse_agent_data_files_output(result.stdout)
 
     assert result.success
@@ -4321,12 +4322,242 @@ def test_read_agent_data_files_command_tells_a_missing_agents_dir_from_an_empty_
     local_host: Host,
     tmp_path: Path,
 ) -> None:
-    missing_result = local_host.execute_idempotent_command(build_read_agent_data_files_command(tmp_path / "absent"))
+    missing_result = local_host.execute_idempotent_command(
+        build_read_agent_data_files_command(tmp_path / "absent", None)
+    )
     (tmp_path / "empty").mkdir()
-    empty_result = local_host.execute_idempotent_command(build_read_agent_data_files_command(tmp_path / "empty"))
+    empty_result = local_host.execute_idempotent_command(build_read_agent_data_files_command(tmp_path / "empty", None))
 
     assert parse_agent_data_files_output(missing_result.stdout) is None
     assert parse_agent_data_files_output(empty_result.stdout) == {}
+
+
+def test_read_agent_data_files_command_reads_only_the_named_agents_and_skips_missing_ones(
+    local_host: Host,
+    tmp_path: Path,
+) -> None:
+    agents_dir = tmp_path / "agents"
+    requested_id = AgentId.generate()
+    unrelated_id = AgentId.generate()
+    for agent_id in (requested_id, unrelated_id):
+        (agents_dir / str(agent_id)).mkdir(parents=True)
+        (agents_dir / str(agent_id) / "data.json").write_text(json.dumps({"id": str(agent_id)}))
+
+    # The missing agent comes first so a check of only the first file would stop the read
+    command = build_read_agent_data_files_command(agents_dir, [AgentId.generate(), requested_id])
+    result = local_host.execute_idempotent_command(command)
+
+    assert result.success
+    assert parse_agent_data_files_output(result.stdout) == {str(requested_id): json.dumps({"id": str(requested_id)})}
+
+
+def test_read_agent_data_files_command_reads_nothing_when_no_named_agent_exists(
+    local_host: Host,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "agents").mkdir()
+
+    result = local_host.execute_idempotent_command(
+        build_read_agent_data_files_command(tmp_path / "agents", [AgentId.generate()])
+    )
+
+    assert result.success
+    assert parse_agent_data_files_output(result.stdout) == {}
+
+
+def _create_generic_agent_state(host: Host, work_dir: Path) -> AgentInterface:
+    return host.create_agent_state(
+        work_dir,
+        CreateAgentOptions(
+            name=AgentName(f"agent-{get_short_random_string()}"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 48213"),
+        ),
+    )
+
+
+def test_load_agents_from_refs_returns_only_the_requested_agents_in_ref_order(
+    local_host: Host,
+    temp_work_dir: Path,
+) -> None:
+    first_agent, _unrequested_agent, third_agent = (
+        _create_generic_agent_state(local_host, temp_work_dir) for _ in range(3)
+    )
+    ref_by_agent_id = {ref.agent_id: ref for ref in local_host.discover_agents()}
+
+    agents = local_host.load_agents_from_refs([ref_by_agent_id[third_agent.id], ref_by_agent_id[first_agent.id]])
+
+    assert [(agent.id, agent.name, agent.agent_type, agent.work_dir) for agent in agents] == [
+        (third_agent.id, third_agent.name, third_agent.agent_type, third_agent.work_dir),
+        (first_agent.id, first_agent.name, first_agent.agent_type, first_agent.work_dir),
+    ]
+
+
+def test_load_agents_from_refs_builds_agents_from_certified_data_without_reading_the_host(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    agent = _create_generic_agent_state(local_host, temp_work_dir)
+    refs = local_host.discover_agents()
+    (get_agent_state_dir_path(temp_host_dir, agent.id) / "data.json").unlink()
+
+    agents = local_host.load_agents_from_refs(refs)
+
+    assert [(loaded.id, loaded.name) for loaded in agents] == [(agent.id, agent.name)]
+
+
+def test_load_agents_from_refs_reads_data_json_for_a_ref_without_its_record(
+    local_host: Host,
+    temp_work_dir: Path,
+) -> None:
+    agent = _create_generic_agent_state(local_host, temp_work_dir)
+    stub_ref = DiscoveredAgent(
+        host_id=local_host.id, agent_id=agent.id, agent_name=agent.name, provider_name=ProviderInstanceName("local")
+    )
+    gone_ref = DiscoveredAgent(
+        host_id=local_host.id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("gone-agent"),
+        provider_name=ProviderInstanceName("local"),
+    )
+
+    agents = local_host.load_agents_from_refs([gone_ref, stub_ref])
+
+    assert [(loaded.id, loaded.name, loaded.agent_type) for loaded in agents] == [
+        (agent.id, agent.name, agent.agent_type)
+    ]
+
+
+def test_load_agents_from_refs_rejects_a_ref_to_another_host(local_host: Host) -> None:
+    other_host_ref = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("elsewhere"),
+        provider_name=ProviderInstanceName("local"),
+    )
+
+    with pytest.raises(HostError, match="not on host"):
+        local_host.load_agents_from_refs([other_host_ref])
+
+
+def test_load_agents_from_refs_on_a_remote_host_reads_only_refs_without_a_record_in_one_command(
+    local_provider: LocalProviderInstance,
+) -> None:
+    host_id = HostId.generate()
+    recorded_agent_id = AgentId.generate()
+    unrecorded_agent_id = AgentId.generate()
+
+    def make_agent_data(agent_id: AgentId, name: str) -> dict[str, str]:
+        return {
+            "id": str(agent_id),
+            "name": name,
+            "type": "generic",
+            "work_dir": "/tmp/work",
+            "create_time": "2026-01-01T00:00:00+00:00",
+        }
+
+    recorded_commands: list[str] = []
+
+    class _RecordingReadHost(Host):
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            timeout_seconds: float | None = None,
+            raise_on_timeout: bool = False,
+        ) -> CommandResult:
+            recorded_commands.append(command)
+            completed = subprocess.run(["sh", "-c", command], capture_output=True, text=True)
+            return CommandResult(stdout=completed.stdout, stderr=completed.stderr, success=completed.returncode == 0)
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    host = _RecordingReadHost(
+        id=host_id,
+        host_name=HostName("test"),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+    unrecorded_state_dir = get_agent_state_dir_path(host.host_dir, unrecorded_agent_id)
+    unrecorded_state_dir.mkdir(parents=True)
+    (unrecorded_state_dir / "data.json").write_text(
+        json.dumps(make_agent_data(unrecorded_agent_id, "unrecorded-agent"))
+    )
+    recorded_ref = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=recorded_agent_id,
+        agent_name=AgentName("recorded-agent"),
+        provider_name=local_provider.name,
+        certified_data=make_agent_data(recorded_agent_id, "recorded-agent"),
+    )
+    unrecorded_ref = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=unrecorded_agent_id,
+        agent_name=AgentName("unrecorded-agent"),
+        provider_name=local_provider.name,
+    )
+
+    agents = host.load_agents_from_refs([recorded_ref, unrecorded_ref, unrecorded_ref])
+
+    assert [(agent.id, agent.name) for agent in agents] == [
+        (recorded_agent_id, AgentName("recorded-agent")),
+        (unrecorded_agent_id, AgentName("unrecorded-agent")),
+        (unrecorded_agent_id, AgentName("unrecorded-agent")),
+    ]
+    assert len(recorded_commands) == 1
+    assert recorded_commands[0].count(str(unrecorded_agent_id)) == 1
+    assert str(recorded_agent_id) not in recorded_commands[0]
+    assert "*/data.json" not in recorded_commands[0]
+
+
+def test_load_agents_from_refs_on_a_remote_host_runs_no_command_when_every_ref_has_its_record(
+    local_provider: LocalProviderInstance,
+) -> None:
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+
+    class _NoCommandHost(Host):
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            timeout_seconds: float | None = None,
+            raise_on_timeout: bool = False,
+        ) -> CommandResult:
+            raise AssertionError(f"no command should run, but ran: {command}")
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    host = _NoCommandHost(
+        id=host_id,
+        host_name=HostName("test"),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+    ref = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=agent_id,
+        agent_name=AgentName("recorded-agent"),
+        provider_name=local_provider.name,
+        certified_data={
+            "id": str(agent_id),
+            "name": "recorded-agent",
+            "type": "generic",
+            "work_dir": "/tmp/work",
+            "create_time": "2026-01-01T00:00:00+00:00",
+        },
+    )
+
+    agents = host.load_agents_from_refs([ref])
+
+    assert [(agent.id, agent.name, agent.work_dir) for agent in agents] == [
+        (agent_id, AgentName("recorded-agent"), Path("/tmp/work"))
+    ]
 
 
 # Tests for Host.provision_agent

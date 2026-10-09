@@ -789,21 +789,16 @@ def _set_up_assemble_command_pipeline(
 def test_claude_agent_assemble_command_resume_branch_runs_when_session_jsonl_exists(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Regression: the resume guard must actually find an adopted session JSONL on disk.
+    """The resume guard must find an adopted session JSONL on disk.
 
-    The original bug was a ``find`` invocation without the ``.jsonl`` suffix
-    (``-name "$MAIN_CLAUDE_SESSION_ID"`` instead of ``-name "$MAIN_CLAUDE_SESSION_ID.jsonl"``).
-    Files on disk are named ``<session_id>.jsonl``, so the guard returned no
-    matches, the ``&&`` short-circuited, and the silent ``||`` fallback ran
-    ``claude --session-id <fresh agent uuid>`` instead of ``claude --resume <adopted_id>``.
-    The end-user symptom was that ``--adopt`` appeared to do nothing
-    and a brand-new session opened with no error.
+    When the guard finds no ``<session_id>.jsonl``, the silent ``||`` fallback runs
+    ``claude --session-id <fresh agent uuid>`` instead of ``claude --resume <adopted_id>``,
+    so ``--adopt`` opens a brand-new session with no error.
 
     This test executes the assembled shell pipeline against a stub ``claude``
     binary that records its argv, with a real session ``.jsonl`` planted under
     ``projects/`` where the resume gate's ``find`` backstop searches. The argv
-    recorded by the stub must contain ``--resume <session_id>`` -- if it
-    contains ``--session-id <agent_uuid>`` instead, the regression is back.
+    recorded by the stub must contain ``--resume <session_id>``.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
@@ -1229,7 +1224,7 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     assert hooks[4]["type"] == "command"
     assert "_MNGR_SOURCE" in reset_markers_hook
     assert "startup|resume" in reset_markers_hook
-    assert "compact" not in reset_markers_hook
+    assert 'case "$_MNGR_SOURCE" in startup|resume)' in reset_markers_hook
     assert 'rm -f "$MNGR_AGENT_STATE_DIR/active"' in reset_markers_hook
     assert "permissions_waiting" in reset_markers_hook
 
@@ -1628,7 +1623,7 @@ def test_tui_ready_indicator_matches_column_zero_input_prompt_only(
     assert indicator("some output\n❯ ")
     # An open selector's indented option line (`  ❯ 1. ...`) must NOT count as ready.
     assert not indicator("────\n  ❯ 1. Yes, switch\n    2. No")
-    # A past turn echoed above a dialog must NOT count as ready -- the regression this fixes.
+    # A past turn echoed above a dialog must NOT count as ready.
     occupied = "\n".join(
         ["❯ /theme", "  ⎿  Theme set to dark"]
         + ["   Settings  Status   Config   Usage   Stats"]
@@ -2038,6 +2033,93 @@ def _make_scripted_agent(
     )
 
 
+class _KeyRecordingClaudeAgent(_ScriptedPaneClaudeAgent):
+    """Test double that records each named key pressed and advances the scripted pane one frame per key."""
+
+    pressed_keys: list[str] = Field(default_factory=list)
+
+    def _press_key(self, tmux_target: TmuxWindowTarget, key: str) -> None:
+        self.pressed_keys.append(key)
+        self.pane_position = min(self.pane_position + 1, len(self.scripted_panes) - 1)
+
+
+def _input_box_pane(input_text: str) -> str:
+    return f"● Compaction cancelled\n────────\n❯ {input_text}\n────────\n  ⏵⏵ bypass permissions on"
+
+
+_EMPTY_INPUT_BOX_PANE = _input_box_pane("")
+
+
+@pytest.mark.parametrize(
+    "restored_text",
+    [
+        "/compact  <optional custom summarization instructions>",
+        "/compact keep only the API decisions",
+        "/compact",
+    ],
+)
+def test_send_clears_restored_compact_draft_instead_of_appending(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext, restored_text: str
+) -> None:
+    """A cancelled /compact left in the input box is cleared with Ctrl+E, Ctrl+U before pasting."""
+    restored_pane = _input_box_pane(restored_text)
+    agent = _make_scripted_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        [restored_pane, restored_pane, _EMPTY_INPUT_BOX_PANE],
+        agent_class=_KeyRecordingClaudeAgent,
+    )
+    assert isinstance(agent, _KeyRecordingClaudeAgent)
+
+    agent._clear_or_warn_about_preexisting_input_text(_TARGET)
+
+    assert agent.pressed_keys == ["C-e", "C-u"]
+    assert [event_type for event_type, _ in agent.recorded_events] == ["cleared_restored_input_text"]
+    assert restored_text in agent.recorded_events[0][1]
+
+
+@pytest.mark.parametrize("leftover_text", ["/compactor foo", "hello", "please /compact later"])
+def test_send_keeps_and_warns_about_a_draft_that_is_not_a_restored_compact(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext, leftover_text: str
+) -> None:
+    """Any other leftover text may be a person's draft: no keys are pressed and the append warning fires."""
+    agent = _make_scripted_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        [_input_box_pane(leftover_text), _EMPTY_INPUT_BOX_PANE],
+        agent_class=_KeyRecordingClaudeAgent,
+    )
+    assert isinstance(agent, _KeyRecordingClaudeAgent)
+
+    agent._clear_or_warn_about_preexisting_input_text(_TARGET)
+
+    assert agent.pressed_keys == []
+    assert [event_type for event_type, _ in agent.recorded_events] == ["preexisting_input_text"]
+    assert leftover_text in agent.recorded_events[0][1]
+
+
+def test_send_falls_back_to_append_warning_when_clearing_restored_compact_leaves_text(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """When the input row still holds text after the clear keys, the send warns and appends."""
+    restored_text = "/compact keep only the API decisions"
+    agent = _make_scripted_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        [_input_box_pane(restored_text)],
+        agent_class=_KeyRecordingClaudeAgent,
+    )
+    assert isinstance(agent, _KeyRecordingClaudeAgent)
+
+    agent._clear_or_warn_about_preexisting_input_text(_TARGET)
+
+    assert agent.pressed_keys == ["C-e", "C-u"]
+    assert [event_type for event_type, _ in agent.recorded_events] == ["preexisting_input_text"]
+
+
 def test_post_submit_dialog_observe_seconds_defaults_to_module_constant() -> None:
     """The observe window defaults to the shared module constant when unset."""
     config = ClaudeAgentConfig()
@@ -2188,7 +2270,7 @@ def test_configure_agent_hooks_writes_managed_file_not_settings_local(
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    # Init git but do NOT add a .gitignore entry: this used to raise.
+    # Init git but do NOT add a .gitignore entry.
     init_git_repo(work_dir, initial_commit=False)
 
     agent = _make_hooks_test_agent(
@@ -2762,9 +2844,7 @@ def test_provision_does_not_extend_trust_for_non_worktree(
     # Trust was written by _write_all_dialogs_dismissed, but the provision could
     # not extend trust from a source directory because _find_git_source_path
     # returns None (work_dir is not a git worktree). Assert the negative: the
-    # global config's projects must contain ONLY the pre-existing work_dir entry,
-    # so a regression that erroneously extended trust (adding the source path or
-    # other entries) would fail here.
+    # global config's projects must contain ONLY the pre-existing work_dir entry.
     config_path = Path.home() / ".claude.json"
     config = json.loads(config_path.read_text())
     assert set(config["projects"].keys()) == {str(agent.work_dir.resolve())}
@@ -4577,9 +4657,7 @@ def test_provision_raises_on_version_mismatch(
         # canned `claude --version`; we keep a SimpleNamespace for the controlled
         # version output but give write_file a real implementation that writes to
         # disk. This lets the background-script provisioning threads (which call
-        # host.write_file) complete cleanly instead of silently swallowing the
-        # write, which previously left a thread raising an unhandled exception
-        # (the reason the PytestUnhandledThreadExceptionWarning filter was needed).
+        # host.write_file) complete cleanly.
         def _real_write_file(path: Path, content: bytes, mode: str | None = None) -> None:
             del mode
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -4852,7 +4930,7 @@ def test_on_after_provisioning_adopts_session_by_id(
     assert dest_memory_file.exists(), f"Memory file not found at {dest_memory_file}"
     assert dest_memory_file.read_text() == "# Memory\n"
 
-    # Regression: verify the session file is discoverable under the config dir
+    # Verify the session file is discoverable under the config dir
     # (the launch chain's resume gates check the encoded project dir, with a
     # find over projects/ as the backstop).
     claude_config_dir = agent.get_claude_config_dir()

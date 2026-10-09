@@ -61,9 +61,7 @@ from imbue.mngr_pi_coding.plugin import agent_field_generators
 from imbue.mngr_pi_coding.plugin import register_agent_aliases
 from imbue.mngr_pi_coding.plugin import register_agent_type
 
-# =============================================================================
 # Test helpers
-# =============================================================================
 
 
 class _StubHost(FakeHost):
@@ -147,9 +145,7 @@ def _setup_home_pi(tmp_path: Path) -> Path:
     return tmp_path / "home"
 
 
-# =============================================================================
 # PiCodingAgentConfig tests
-# =============================================================================
 
 
 def test_pi_coding_agent_config_has_correct_defaults() -> None:
@@ -178,9 +174,7 @@ def test_pi_coding_agent_config_merge_with_override() -> None:
     assert str(merged.command) == "pi"
 
 
-# =============================================================================
 # PiCodingAgent method tests
-# =============================================================================
 
 
 def test_pi_coding_agent_is_concrete_and_instantiable() -> None:
@@ -228,9 +222,7 @@ def test_get_provision_file_transfers_returns_empty(pi_agent: PiCodingAgent, tmp
     assert pi_agent.get_provision_file_transfers(host, options, mngr_ctx) == []
 
 
-# =============================================================================
 # on_before_provisioning tests
-# =============================================================================
 
 
 def test_on_before_provisioning_warns_when_no_credentials(
@@ -269,9 +261,7 @@ def test_on_before_provisioning_does_not_warn_when_auth_file_present(
     assert not any("No API credentials detected" in message for message in log_warnings)
 
 
-# =============================================================================
 # Provisioning tests
-# =============================================================================
 
 
 def test_setup_local_config_dir_symlinks_auth(tmp_path: Path, pi_agent: PiCodingAgent, local_host: Host) -> None:
@@ -549,9 +539,7 @@ def test_provision_raises_when_remote_install_disabled(tmp_path: Path, pi_agent:
         pi_agent.provision(host, options, mngr_ctx)
 
 
-# =============================================================================
 # Transcript mixin
-# =============================================================================
 
 
 def test_is_common_transcript_enabled_reflects_config(pi_agent: PiCodingAgent) -> None:
@@ -567,9 +555,7 @@ def test_transcript_scripts_are_empty_because_extension_emits(pi_agent: PiCoding
     assert pi_agent.get_common_transcript_scripts() == {}
 
 
-# =============================================================================
 # modify_env_vars: lifecycle-extension knobs
-# =============================================================================
 
 
 def test_modify_env_vars_sets_extension_knobs(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
@@ -629,9 +615,7 @@ def test_modify_env_vars_leaves_version_check_when_policy_auto(
     assert "PI_SKIP_VERSION_CHECK" not in env_vars
 
 
-# =============================================================================
 # assemble_command
-# =============================================================================
 
 
 def test_assemble_command_loads_extension_and_resumes(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
@@ -703,9 +687,7 @@ def test_assemble_command_omits_approve_by_default(pi_agent: PiCodingAgent, tmp_
     assert "--approve" not in command
 
 
-# =============================================================================
 # Lifecycle extension provisioning + readiness
-# =============================================================================
 
 
 def test_provision_lifecycle_extension_writes_resource(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
@@ -715,9 +697,7 @@ def test_provision_lifecycle_extension_writes_resource(pi_agent: PiCodingAgent, 
     assert extension_path.read_text() == _load_resource(_LIFECYCLE_EXTENSION_NAME)
 
 
-# =============================================================================
 # System prompt: output style + append_system_prompt -> APPEND_SYSTEM.md
-# =============================================================================
 
 
 class _StyleReadingHost:
@@ -790,9 +770,7 @@ def test_wait_for_ready_signal_returns_once_sentinel_present(pi_agent: PiCodingA
     assert calls == [1]
 
 
-# =============================================================================
 # Workspace trust (pi 0.79+ "Trust project folder?" dialog)
-# =============================================================================
 
 
 def test_read_pi_trust_parses_bools_and_drops_null(tmp_path: Path) -> None:
@@ -927,9 +905,7 @@ def test_seed_per_agent_workspace_trust_writes_per_agent_file(pi_agent: PiCoding
     assert all(value is True for value in data.values())
 
 
-# =============================================================================
 # Session adoption (--adopt and --from clone)
-# =============================================================================
 
 
 def _write_pi_session(sessions_dir: Path, subdir: str, session_id: str, cwd: str = "/old/cwd") -> Path:
@@ -1039,9 +1015,7 @@ def test_adopt_from_clone_empty_store_warns(
     assert not (agent._get_agent_dir() / _SESSION_FILE_NAME).exists()
 
 
-# =============================================================================
 # Message delivery via the inbox (pi.sendUserMessage injection)
-# =============================================================================
 
 
 def test_inbox_append_command_json_encodes_and_appends() -> None:
@@ -1082,14 +1056,23 @@ def test_send_message_appends_inbox_then_confirms(tmp_path: Path, pi_agent: PiCo
     pi_agent.send_message("hello from mngr")
 
 
-def test_send_message_raises_when_inbox_write_fails(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
+@pytest.mark.parametrize(
+    ("stderr", "expected_reason"),
+    [
+        ("disk full", "failed to write to pi inbox: disk full"),
+        ("", r"failed to write to pi inbox: no output \(it may have hit the 15s timeout\)"),
+    ],
+)
+def test_send_message_raises_when_inbox_write_fails(
+    tmp_path: Path, pi_agent: PiCodingAgent, stderr: str, expected_reason: str
+) -> None:
     host = _stub_host(
         tmp_path,
         is_local=True,
-        command_results={"printf": CommandResult(stdout="", stderr="disk full", success=False)},
+        command_results={"printf": CommandResult(stdout="", stderr=stderr, success=False)},
     )
     object.__setattr__(pi_agent, "host", host)
-    with pytest.raises(SendMessageError, match="failed to write to pi inbox"):
+    with pytest.raises(SendMessageError, match=expected_reason):
         pi_agent.send_message("hello")
 
 
@@ -1123,9 +1106,7 @@ def test_lifecycle_extension_contract_matches_python_constants() -> None:
         )
 
 
-# =============================================================================
 # Preservation on destroy
-# =============================================================================
 
 
 def test_pi_coding_config_preserves_on_destroy_by_default() -> None:

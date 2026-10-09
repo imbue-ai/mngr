@@ -86,6 +86,7 @@ from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.agent import SupportsLiveOutputMixin
+from imbue.mngr.interfaces.agent import read_idle_since_for_compaction
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import RelativePath
@@ -143,6 +144,7 @@ from imbue.mngr_claude.compaction import CLAUDE_DEFAULT_CACHE_TTL_MINUTES
 from imbue.mngr_claude.compaction import get_agent_context_tokens
 from imbue.mngr_claude.compaction import get_agent_idle_since
 from imbue.mngr_claude.compaction import record_agent_compacted
+from imbue.mngr_claude.dialogs import COMPACT_COMMAND
 from imbue.mngr_claude.dialogs import DialogBlocked
 from imbue.mngr_claude.dialogs import INPUT_PROMPT_GLYPH
 from imbue.mngr_claude.dialogs import Unrecognized
@@ -151,6 +153,7 @@ from imbue.mngr_claude.dialogs import deal_with_dialogs
 from imbue.mngr_claude.dialogs import get_input_region
 from imbue.mngr_claude.dialogs import has_input_prompt_line
 from imbue.mngr_claude.dialogs import is_nonbenign_answer_allowed
+from imbue.mngr_claude.dialogs import is_restored_compact_command
 from imbue.mngr_claude.dialogs import is_shell_command_message
 from imbue.mngr_claude.dialogs import is_stranded_in_empty_shell_mode
 from imbue.mngr_claude.stream_buffer import SnapshotDeltaReader
@@ -167,6 +170,12 @@ _MODEL_STATE_FILE_NAME: Final[str] = "model_state.json"
 # `❯` prompt to return after each.
 _SHELL_MODE_EXIT_MAX_ATTEMPTS: Final[int] = 3
 _SHELL_MODE_EXIT_POLL_SECONDS: Final[float] = 2.0
+
+# How long to wait for the input row to empty after clearing a restored `/compact` draft.
+_RESTORED_COMMAND_CLEAR_POLL_SECONDS: Final[float] = 2.0
+# Claude Code's editing keys that empty a one-line input: end of line, then delete to line start.
+# Both are inert on an empty input (unlike Ctrl+C, whose second press exits).
+_INPUT_LINE_CLEAR_KEYS: Final[tuple[str, ...]] = ("C-e", "C-u")
 
 # Paths within ~/.claude/ to sync to the per-agent config dir.
 # Used by both get_files_for_deploy() and provision() to ensure consistency.
@@ -2572,6 +2581,39 @@ class ClaudeAgent(
                 return leftover_text
         return None
 
+    def _clear_preexisting_input_text_if_restored_command(
+        self, tmux_target: TmuxWindowTarget, leftover_text: str
+    ) -> bool:
+        """Clear a ``/compact`` that Claude Code restored to the input box when its compaction was cancelled.
+
+        Appending the next message to it would submit ``/compact <message>``: another compaction,
+        and the message lost. Any other leftover text may be a person's draft, so it is left for
+        the append warning.
+        """
+        if not is_restored_compact_command(leftover_text):
+            return False
+        for key in _INPUT_LINE_CLEAR_KEYS:
+            self._press_key(tmux_target, key)
+        if poll_until(lambda: self._is_input_row_empty(tmux_target), timeout=_RESTORED_COMMAND_CLEAR_POLL_SECONDS):
+            return True
+        logger.warning(
+            "Agent {} still shows text in its input box after clearing a restored {!r}", self.name, leftover_text
+        )
+        return False
+
+    def _is_input_row_empty(self, tmux_target: TmuxWindowTarget) -> bool:
+        """Whether the pane shows Claude Code's input row with nothing typed in it."""
+        content = self._capture_pane_content(tmux_target)
+        return (
+            content is not None
+            and has_input_prompt_line(content)
+            and self._detect_preexisting_input_text(content) is None
+        )
+
+    def _press_key(self, tmux_target: TmuxWindowTarget, key: str) -> None:
+        """Send one named tmux key (e.g. ``C-u``) to the agent's pane."""
+        send_key_keystroke(self, tmux_target, key)
+
     def get_live_output_path(self) -> Path:
         """Return the path to this agent's response-streaming buffer file.
 
@@ -2622,24 +2664,16 @@ class ClaudeAgent(
             ):
                 # Nothing recognisable and no input box yet is what a pane that has not finished
                 # painting looks like, and preflight runs before the readiness wait -- so raising
-                # here on the first look would fail sends that only needed a moment. It is reached:
-                # `create` delivers the first message as soon as the session_started hook fires,
-                # which is when claude STARTS, not when its TUI has drawn. The startup path already
-                # refuses to treat Unrecognized as blocked for this reason.
-                #
-                # Waits the SAME window the readiness check would have. Before the dialog registry
-                # an unreadable pane was not preflight's business at all: it fell through to that
-                # check, which polls for the prompt for this long. Anything shorter refuses a pane
-                # that used to be waited for -- which on a slow or cold-starting host is a pane
-                # that would have come up fine.
+                # here on the first look would fail sends that only needed a moment. `create`
+                # delivers the first message as soon as the session_started hook fires, which is
+                # when claude STARTS, not when its TUI has drawn.
                 return
             raise DialogDetectedError(str(self.name), e.nickname, e.message) from e
 
     def _unpainted_pane_grace_seconds(self) -> float:
         """How long preflight waits for the input box before refusing an unreadable pane.
 
-        The same window the readiness check itself polls for. A method so a test can shorten it;
-        production has no reason to.
+        The same window the readiness check itself polls for. A method so a test can shorten it.
         """
         return TUI_READY_TIMEOUT_SECONDS
 
@@ -2797,22 +2831,31 @@ class ClaudeAgent(
 
     # HasCompactionMixin capability implementation
 
-    def request_compaction(self, instructions: str | None = None) -> None:
+    def request_compaction(
+        self,
+        instructions: str | None = None,
+        message_lock_timeout_seconds: float | None = None,
+        expected_idle_since: datetime | None = None,
+    ) -> None:
         """Perform context compaction by sending /compact to Claude Code.
 
         If ``instructions`` is provided, it is appended to the ``/compact`` command
         (e.g. ``/compact <instructions>``).
         """
-        try:
-            command = f"/compact {instructions.strip()}" if instructions and instructions.strip() else "/compact"
-            self.send_message(command)
-        finally:
-            # Even if compaction fails, we still record it.
-            # The goal of this is to be conservative around compaction: We want to avoid trying to compact an
-            # agent over and over as part of `mngr autocompact` when compaction isn't going through.
-            # We prefer in that case to just not compact, rather than continuously sending more compaction
-            # requests to the agent.
-            record_agent_compacted(self)
+        command = (
+            f"{COMPACT_COMMAND} {instructions.strip()}" if instructions and instructions.strip() else COMPACT_COMMAND
+        )
+        with self._message_lock(timeout_seconds=message_lock_timeout_seconds):
+            read_idle_since_for_compaction(self, self.name, expected_idle_since)
+            try:
+                self._send_message_holding_lock(command)
+            finally:
+                # Even if compaction fails, we still record it.
+                # The goal of this is to be conservative around compaction: We want to avoid trying to compact an
+                # agent over and over as part of `mngr autocompact` when compaction isn't going through.
+                # We prefer in that case to just not compact, rather than continuously sending more compaction
+                # requests to the agent.
+                record_agent_compacted(self)
 
     def get_cache_ttl_minutes(self) -> int | None:
         """Return Claude Code's prompt cache TTL (60 minutes)."""

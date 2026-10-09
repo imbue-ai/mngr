@@ -33,6 +33,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import describe_failed_send_command
 from imbue.mngr.errors import SendFailureKind
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -287,11 +288,11 @@ def send_key_keystroke(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, key
     # The agent's pane, not the window's active one: a split would otherwise send this keystroke
     # into whatever shell the user just opened.
     send_cmd = f"tmux send-keys -t {agent._send_target_arg(tmux_target)} {key}"
-    result = agent.host.execute_stateful_command(send_cmd)
+    result = agent.host.execute_stateful_command(send_cmd, timeout_seconds=agent.send_command_timeout_seconds)
     if not result.success:
         raise SendMessageError(
             str(agent.name),
-            f"tmux send-keys {key} failed: {result.stderr or result.stdout}",
+            f"tmux send-keys {key} failed: {describe_failed_send_command(result, agent.send_command_timeout_seconds)}",
         )
 
 
@@ -300,9 +301,7 @@ def send_enter_keystroke(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget) -
     send_key_keystroke(agent, tmux_target, "Enter")
 
 
-# ---------------------------------------------------------------------------
 # Submit-and-confirm engine
-# ---------------------------------------------------------------------------
 
 
 @pure

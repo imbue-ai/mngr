@@ -28,6 +28,7 @@ from imbue.mngr_claude.dialogs import deal_with_dialogs
 from imbue.mngr_claude.dialogs import is_nonbenign_answer_allowed
 from imbue.mngr_claude.dialogs import is_option_highlighted
 from imbue.mngr_claude.dialogs import is_pending_shell_command
+from imbue.mngr_claude.dialogs import is_restored_compact_command
 from imbue.mngr_claude.dialogs import is_stranded_in_empty_shell_mode
 
 _IDLE_PANE = "some assistant output\n\n❯ \n  ? for shortcuts\n"
@@ -367,12 +368,8 @@ def test_transcript_quoting_a_footer_is_not_a_dialog() -> None:
 
 
 def test_dialog_is_found_with_the_users_own_turns_echoed_above_it() -> None:
-    """The regression this whole change exists for.
-
-    Claude echoes every past user turn with the prompt glyph at column 0, so a whole-pane
+    """Claude echoes every past user turn with the prompt glyph at column 0, so a whole-pane
     search for that glyph reports "the input box is here" in any conversation with history.
-    Measured on a live agent whose settings window was open: the send pasted into the
-    window's search field because the pane was read as ready.
     """
     pane = "\n".join(
         ["❯ /theme", "  ⎿  Theme set to dark", "❯ alr", "  ⎿  ok"]
@@ -538,3 +535,20 @@ def test_option_labels_match_installed_binary() -> None:
         if isinstance(dialog, Answerable):
             label = dialog.get_option_label()
             assert label.encode() in blob, f"{dialog.get_nickname()}: option {label!r} not in binary"
+
+
+@pytest.mark.parametrize(
+    "input_text, expected",
+    [
+        ("/compact", True),
+        ("/compact  <optional custom summarization instructions>", True),
+        ("/compact keep only the API decisions", True),
+        ("/compactor foo", False),
+        ("/compact-later", False),
+        ("hello", False),
+        ("please /compact later", False),
+        ("", False),
+    ],
+)
+def test_is_restored_compact_command_matches_only_the_compact_command(input_text: str, expected: bool) -> None:
+    assert is_restored_compact_command(input_text) is expected
