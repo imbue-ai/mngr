@@ -166,23 +166,6 @@ def _caller_headers(desktop: str | None = None) -> dict[str, str]:
     return headers
 
 
-def _assert_opens_with_the_filing(
-    answer: dict[str, Any],
-    request_id: str,
-    request_type: str | None,
-    rationale: str | None,
-    payload: dict[str, Any] | None,
-) -> None:
-    """Every answer the machine composes for a filed request opens with what was filed, and under which id."""
-    expected = [
-        ("request_id", request_id),
-        ("request_type", request_type),
-        ("rationale", rationale),
-        ("payload", payload),
-    ]
-    assert list(answer.items())[: len(expected)] == expected
-
-
 def test_devices_lists_every_announced_desktop_most_recently_heard_from_first(tmp_path: Path) -> None:
     """The listing reports when each desktop was last heard from and how often one checks in, and judges neither."""
     _announce(tmp_path, "desktop-old", 41001, seconds_ago=3600)
@@ -431,16 +414,10 @@ def test_a_filed_request_gets_one_id_for_every_desktop_and_is_kept_on_the_machin
     assert {key: value for key, value in sent_to_a.items() if key != "request_id"} == _FILED_BODY
     # The body was rewritten, so its length was too.
     assert server_a.received[0].headers["content-length"] == str(len(server_a.received[0].body))
-    answer = json.loads(body)
-    assert [(entry["device_id"], entry["status"]) for entry in answer["responses"]] == [
+    assert [(entry["device_id"], entry["status"]) for entry in json.loads(body)["responses"]] == [
         ("desktop-a", 201),
         ("desktop-b", 201),
     ]
-    # What was filed, and under which id, leads the answer: a parser that
-    # reads only the start of the agent's output still finds it.
-    _assert_opens_with_the_filing(
-        answer, request_id, _FILED_BODY["type"], _FILED_BODY["rationale"], _FILED_BODY["payload"]
-    )
     (kept,) = _filed_requests(tmp_path).values()
     assert kept["request_id"] == request_id
     assert kept["devices"] == "*"
@@ -462,12 +439,7 @@ def test_a_filed_request_one_desktop_took_is_answered_as_that_desktop_answered(t
 
     assert status == 201
     assert MULTIPLE_DESKTOPS_MATCHED_HEADER.lower() not in response_headers
-    # The desktop's own answer, byte for byte: nothing prepended.
-    assert json.loads(body) == {
-        "served_by": "only",
-        "path": "/permission-requests",
-        "body": server.received[0].body.decode(),
-    }
+    assert json.loads(body)["served_by"] == "only"
     request_id = json.loads(server.received[0].body)["request_id"]
     # A request that named no desktop went to the one desktop there was, and is
     # kept for that desktop alone: it is what every agent from before the header
@@ -477,7 +449,7 @@ def test_a_filed_request_one_desktop_took_is_answered_as_that_desktop_answered(t
 
 def test_a_filed_request_every_desktop_refused_is_not_kept(tmp_path: Path) -> None:
     """The desktops are the judges of a request: one they all turned down has no desktop left to show it."""
-    with _desktop_gateway("a", status=400) as (port_a, server_a), _desktop_gateway("b", status=400) as (port_b, _b):
+    with _desktop_gateway("a", status=400) as (port_a, _server_a), _desktop_gateway("b", status=400) as (port_b, _b):
         _announce(tmp_path, "desktop-a", port_a, seconds_ago=1)
         _announce(tmp_path, "desktop-b", port_b, seconds_ago=2)
         _announce(tmp_path, "desktop-gone", 1, seconds_ago=3600)
@@ -490,30 +462,7 @@ def test_a_filed_request_every_desktop_refused_is_not_kept(tmp_path: Path) -> No
             )
 
     assert status == 200
-    answer = json.loads(body)
-    assert [entry["status"] for entry in answer["responses"]] == [400, 400, 502]
-    assert answer["request_id"] == json.loads(server_a.received[0].body)["request_id"]
-    assert _filed_requests(tmp_path) == {}
-
-
-def test_a_filed_request_one_desktop_refused_is_answered_as_that_desktop_answered(tmp_path: Path) -> None:
-    """A refusal, like an acceptance, is the one desktop's own answer, relayed untouched: nothing was filed to report."""
-    with _desktop_gateway("only", status=400) as (port, server):
-        _announce(tmp_path, "desktop-only", port)
-        with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
-            status, _response_headers, body = http_request_with_headers(
-                f"{gateway_url}/permission-requests",
-                method="POST",
-                headers=_caller_headers(),
-                body=json.dumps(_FILED_BODY).encode(),
-            )
-
-    assert status == 400
-    assert json.loads(body) == {
-        "served_by": "only",
-        "path": "/permission-requests",
-        "body": server.received[0].body.decode(),
-    }
+    assert [entry["status"] for entry in json.loads(body)["responses"]] == [400, 400, 502]
     assert _filed_requests(tmp_path) == {}
 
 
@@ -549,19 +498,17 @@ def test_a_filed_request_no_desktop_is_there_to_receive_is_kept_and_the_503_says
             f"{gateway_url}/permission-requests",
             method="POST",
             headers=_caller_headers("desktop-nobody"),
-            body=json.dumps({"agent_id": _FILED_BODY["agent_id"], "rationale": "for one desktop"}).encode(),
+            body=json.dumps({**_FILED_BODY, "rationale": "for one desktop"}).encode(),
         )
 
     assert all_status == 503
     assert MULTIPLE_DESKTOPS_MATCHED_HEADER.lower() not in all_headers
-    all_answer = json.loads(all_body)
-    assert all_answer["error"] == (
+    assert json.loads(all_body)["error"] == (
         "No desktop has announced itself to this machine. "
         "The request was kept on this machine for the desktops to pick up when they next connect."
     )
     assert one_status == 503
-    one_answer = json.loads(one_body)
-    assert one_answer["error"] == (
+    assert json.loads(one_body)["error"] == (
         "Desktop desktop-nobody is not known to this gateway. "
         "The request was kept on this machine for the desktops to pick up when they next connect."
     )
@@ -571,12 +518,6 @@ def test_a_filed_request_no_desktop_is_there_to_receive_is_kept_and_the_503_says
         "for one desktop": ["desktop-nobody"],
     }
     assert all(kept_id == entry["request_id"] for kept_id, entry in kept.items())
-    kept_id_by_rationale = {entry["body"]["rationale"]: kept_id for kept_id, entry in kept.items()}
-    _assert_opens_with_the_filing(
-        all_answer, kept_id_by_rationale["please"], _FILED_BODY["type"], "please", _FILED_BODY["payload"]
-    )
-    assert set(all_answer) == {"request_id", "request_type", "rationale", "payload", "error"}
-    _assert_opens_with_the_filing(one_answer, kept_id_by_rationale["for one desktop"], None, "for one desktop", None)
 
 
 def test_a_filed_request_for_a_desktop_that_cannot_be_reached_is_kept_and_answered_with_its_502(
@@ -593,13 +534,9 @@ def test_a_filed_request_for_a_desktop_that_cannot_be_reached_is_kept_and_answer
         )
 
     assert status == 502
-    answer = json.loads(body)
-    assert answer["error"].startswith("Desktop desktop-gone (desktop-gone.example) is unreachable: ")
+    assert json.loads(body)["error"].startswith("Desktop desktop-gone (desktop-gone.example) is unreachable: ")
     (kept,) = _filed_requests(tmp_path).values()
     assert kept["devices"] == ["desktop-gone"]
-    _assert_opens_with_the_filing(
-        answer, kept["request_id"], _FILED_BODY["type"], _FILED_BODY["rationale"], _FILED_BODY["payload"]
-    )
 
 
 def test_a_filed_request_naming_its_own_request_id_is_refused(tmp_path: Path) -> None:
@@ -622,13 +559,9 @@ def test_a_filed_request_naming_its_own_request_id_is_refused(tmp_path: Path) ->
 
 
 def test_a_filed_request_that_is_not_a_json_object_is_forwarded_as_sent_and_not_kept(tmp_path: Path) -> None:
-    """There is no shape to put an id into, so the desktops answer for it, the machine keeps nothing and reports nothing filed."""
-    with (
-        _desktop_gateway("a", status=400) as (port_a, server_a),
-        _desktop_gateway("b", status=400) as (port_b, server_b),
-    ):
-        _announce(tmp_path, "desktop-a", port_a, seconds_ago=1)
-        _announce(tmp_path, "desktop-b", port_b, seconds_ago=2)
+    """There is no shape to put an id into, so the desktops answer for it and the machine keeps nothing."""
+    with _desktop_gateway("a", status=400) as (port_a, server_a):
+        _announce(tmp_path, "desktop-a", port_a)
         with node_extension_gateway(_EXTENSION_PATH, _machine_env(tmp_path)) as gateway_url:
             status, _response_headers, body = http_request_with_headers(
                 f"{gateway_url}/permission-requests",
@@ -637,15 +570,9 @@ def test_a_filed_request_that_is_not_a_json_object_is_forwarded_as_sent_and_not_
                 body=b"not json at all",
             )
 
-    assert status == 200
-    answer = json.loads(body)
-    # The answer the machine composes has no request_id to open with: none was assigned.
-    assert set(answer) == {"responses"}
-    assert [(entry["device_id"], entry["status"]) for entry in answer["responses"]] == [
-        ("desktop-a", 400),
-        ("desktop-b", 400),
-    ]
-    assert server_a.received[0].body == server_b.received[0].body == b"not json at all"
+    assert status == 400
+    assert json.loads(body)["served_by"] == "a"
+    assert server_a.received[0].body == b"not json at all"
     assert _filed_requests(tmp_path) == {}
 
 

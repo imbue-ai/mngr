@@ -240,17 +240,6 @@ class AgentNotificationRequest(ApiRequestModel):
 
     message: str = Field(description="Free-text notification body")
     title: str | None = Field(default=None, description="Optional title, shown as a prefix on the body")
-    watched_by: tuple[str, ...] = Field(
-        default=(),
-        description=(
-            "Ids of the chat page instances showing this chat to a focused reader; non-empty means the "
-            "notification is recorded as read and not shown. Absent when the workspace does not know."
-        ),
-    )
-
-
-class AgentNotificationReadRequest(ApiRequestModel):
-    """Body for marking a chat's notifications read (the chat is being watched); carries no fields."""
 
 
 class EstablishSshRequest(ApiRequestModel):
@@ -434,14 +423,6 @@ class InvitationOutcomesResponse(FrozenModel):
     """Every open user or email grant's granter-visible outcome."""
 
     outcomes: tuple[InvitationOutcomeEntryResponse, ...] = Field(description="One entry per open user or email grant")
-
-
-class MobileAccessLinkResponse(FrozenModel):
-    """How the request to be emailed a workspace's link ended."""
-
-    outcome: str = Field(description="sent or failed")
-    recipient_email: str = Field(default="", description="The signed-in account's own address the message went to")
-    sent_at: str | None = Field(default=None, description="When the message went out, for a sent outcome")
 
 
 class BugReportRequest(ApiRequestModel):

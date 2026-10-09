@@ -3157,7 +3157,7 @@ def test_auth_browser_uses_auth_browser_subcommand(tmp_path: Path) -> None:
     report_path = tmp_path / "latchkey_report.jsonl"
     line = report_path.read_text().strip()
     record = json.loads(line)
-    assert record == {"argv": ["auth", "browser", "slack", "--strict"], "env_LATCHKEY_DIRECTORY": str(tmp_path)}
+    assert record == {"argv": ["auth", "browser", "slack"], "env_LATCHKEY_DIRECTORY": str(tmp_path)}
 
 
 def _make_prepare_required_binary(
@@ -3234,9 +3234,9 @@ def test_auth_browser_runs_browser_prepare_and_retries_when_preparation_required
     records = _read_recording_report(tmp_path)
     argv_calls = [record["argv"] for record in records]
     assert argv_calls == [
-        ["auth", "browser", "slack", "--strict"],
+        ["auth", "browser", "slack"],
         ["auth", "browser-prepare", "slack"],
-        ["auth", "browser", "slack", "--strict"],
+        ["auth", "browser", "slack"],
     ]
 
 
@@ -3255,7 +3255,7 @@ def test_auth_browser_reports_failure_when_browser_prepare_fails(tmp_path: Path)
     assert detail == "prepare blew up"
     argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
     assert argv_calls == [
-        ["auth", "browser", "slack", "--strict"],
+        ["auth", "browser", "slack"],
         ["auth", "browser-prepare", "slack"],
     ]
 
@@ -3270,7 +3270,7 @@ def test_auth_browser_does_not_retry_on_unrelated_failure(tmp_path: Path) -> Non
     assert is_success is False
     assert detail == "user cancelled"
     argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
-    assert argv_calls == [["auth", "browser", "slack", "--strict"]]
+    assert argv_calls == [["auth", "browser", "slack"]]
 
 
 def test_auth_browser_login_reports_success_on_zero_exit(tmp_path: Path) -> None:
@@ -3282,7 +3282,7 @@ def test_auth_browser_login_reports_success_on_zero_exit(tmp_path: Path) -> None
     assert is_success is True
     assert detail == ""
     argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
-    assert argv_calls == [["auth", "browser", "slack", "--strict"]]
+    assert argv_calls == [["auth", "browser", "slack"]]
 
 
 def test_auth_browser_login_does_not_run_browser_prepare_on_failure(tmp_path: Path) -> None:
@@ -3296,7 +3296,7 @@ def test_auth_browser_login_does_not_run_browser_prepare_on_failure(tmp_path: Pa
     assert "browser-prepare" in detail.lower()
     # Only the single bare ``auth browser`` call; no ``browser-prepare``, no retry.
     argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
-    assert argv_calls == [["auth", "browser", "slack", "--strict"]]
+    assert argv_calls == [["auth", "browser", "slack"]]
 
 
 def test_auth_prepare_invokes_prepare_with_json_payload(tmp_path: Path) -> None:
@@ -3325,7 +3325,7 @@ def test_auth_prepare_reports_failure_on_non_zero_exit(tmp_path: Path) -> None:
 
 def test_minds_google_oauth_services_excludes_directions() -> None:
     # google-directions authenticates with an API key (latchkey ``set`` auth),
-    # not OAuth, so it must never be routed through the Imbue Studio OAuth client.
+    # not OAuth, so it must never be routed through the Minds OAuth client.
     assert "google-directions" not in MINDS_GOOGLE_OAUTH_SERVICES
     assert "google-gmail" in MINDS_GOOGLE_OAUTH_SERVICES
 
@@ -3421,7 +3421,7 @@ def test_add_account_runs_ephemeral_auth_browser(tmp_path: Path) -> None:
     # account is never bound to a client/session left by an earlier one.
     assert [record["argv"] for record in records] == [
         ["auth", "browser-prepare", "slack"],
-        ["auth", "browser", "slack", "--strict"],
+        ["auth", "browser", "slack"],
     ]
     # The ephemeral-browser env var is set on every call so the sign-in starts
     # from a fresh session.
@@ -3430,7 +3430,7 @@ def test_add_account_runs_ephemeral_auth_browser(tmp_path: Path) -> None:
 
 def test_add_account_non_google_failure_surfaces_error(tmp_path: Path) -> None:
     # Every call fails; the browser-prepare step fails first, so its error is
-    # surfaced as-is.
+    # surfaced as-is and no Google-only ``auth prepare`` fallback is attempted.
     binary = _make_env_recording_binary(tmp_path, exit_code=1, stderr="user cancelled")
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
@@ -3438,8 +3438,8 @@ def test_add_account_non_google_failure_surfaces_error(tmp_path: Path) -> None:
 
     assert is_success is False
     assert detail == "user cancelled"
-    # The prepare step fails, so the sign-in is never attempted, and a
-    # non-Google service never gets the Imbue Studio Google OAuth client registered.
+    # The prepare step fails, so the sign-in is never attempted and there is no
+    # Minds Google OAuth client registration for a non-Google service.
     assert [record["argv"] for record in _read_recording_report(tmp_path)] == [["auth", "browser-prepare", "slack"]]
 
 
@@ -3487,22 +3487,24 @@ def test_summarize_latchkey_failure_caps_the_summary_length() -> None:
     assert summary.endswith("…")
 
 
-def test_add_account_google_failure_with_minds_client_is_surfaced(tmp_path: Path) -> None:
-    """Ephemeral add-account signs in with the Imbue Studio client only: a failure there ends the flow."""
+def test_add_account_google_falls_back_to_browser_prepare_when_official_client_fails(tmp_path: Path) -> None:
+    # Ephemeral add-account re-prepares the Minds client first; when that sign-in
+    # fails it falls back to a fresh self-setup browser-prepare and retries.
     binary = _make_google_oauth_binary(tmp_path, does_minds_login_succeed=False)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
-    is_success, detail = latchkey.add_account("google-gmail")
+    is_success, _detail = latchkey.add_account("google-gmail")
 
-    assert is_success is False
-    assert detail == "minds consent declined"
+    assert is_success is True
     argv_calls = _read_argv_calls(tmp_path)
     assert argv_calls == [
         _MINDS_PREPARE_ARGV,
-        ["auth", "browser", "google-gmail", "--strict"],
+        ["auth", "browser", "google-gmail"],
+        ["auth", "browser-prepare", "google-gmail"],
+        ["auth", "browser", "google-gmail"],
     ]
-    # The failed Imbue Studio preparation is left in place; it is not cleared (which
-    # would wipe other accounts' credentials).
+    # The failed Minds preparation is left for browser-prepare to overwrite; it
+    # is not cleared (which would wipe other accounts' credentials).
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
 
@@ -3513,17 +3515,17 @@ def _make_google_oauth_binary(
     does_minds_prepare_succeed: bool = True,
     does_minds_login_succeed: bool = True,
     does_preregistered_login_succeed: bool = True,
+    does_self_setup_prepare_succeed: bool = True,
 ) -> Path:
     """Build a fake latchkey CLI that models the google OAuth client lifecycle.
 
     A marker file records which client is registered: ``auth prepare`` writes
-    ``minds``, ``auth clear`` removes it, and an optional pre-existing client
-    starts as ``preregistered``. ``auth browser`` fails asking for
-    ``browser-prepare`` when nothing is registered, and otherwise succeeds or
-    fails per the registered client's configured outcome. A Google service is
-    never self-set-up, so ``auth browser-prepare`` is unexpected and exits 2
-    like any other unknown command. Every invocation appends its argv to the
-    shared recording report.
+    ``minds``, ``auth browser-prepare`` writes ``self-setup``, ``auth clear``
+    removes it, and an optional pre-existing client starts as ``preregistered``.
+    ``auth browser`` fails asking for ``browser-prepare`` when nothing is
+    registered, and otherwise succeeds or fails per the registered client's
+    configured outcome. Every invocation appends its argv to the shared
+    recording report.
     """
     script = tmp_path / "latchkey"
     report_path = tmp_path / "latchkey_report.jsonl"
@@ -3544,6 +3546,12 @@ def _make_google_oauth_binary(
         "        open(marker_path, 'w').write('minds')\n"
         "        sys.exit(0)\n"
         "    sys.stderr.write('minds prepare failed')\n"
+        "    sys.exit(1)\n"
+        "if argv[:2] == ['auth', 'browser-prepare']:\n"
+        f"    if {does_self_setup_prepare_succeed}:\n"
+        "        open(marker_path, 'w').write('self-setup')\n"
+        "        sys.exit(0)\n"
+        "    sys.stderr.write('self-setup prepare failed')\n"
         "    sys.exit(1)\n"
         "if argv[:2] == ['auth', 'clear']:\n"
         "    if os.path.exists(marker_path):\n"
@@ -3574,7 +3582,7 @@ def _read_argv_calls(tmp_path: Path) -> list[object]:
     return [record["argv"] for record in _read_recording_report(tmp_path)]
 
 
-# The exact ``auth prepare`` invocation we expect for the client Imbue Studio provides.
+# The exact ``auth prepare`` invocation we expect for the Minds-provided client.
 _MINDS_PREPARE_ARGV = [
     "auth",
     "prepare",
@@ -3584,7 +3592,7 @@ _MINDS_PREPARE_ARGV = [
 
 
 def test_auth_browser_google_registers_minds_client_then_signs_in(tmp_path: Path) -> None:
-    """No client registered: register the Imbue Studio client and sign in; no clear, no self-setup."""
+    """No client registered: register the Minds client and sign in; no clear, no self-setup."""
     binary = _make_google_oauth_binary(tmp_path)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
@@ -3593,45 +3601,47 @@ def test_auth_browser_google_registers_minds_client_then_signs_in(tmp_path: Path
     assert is_success is True
     assert detail == ""
     assert _read_argv_calls(tmp_path) == [
-        ["auth", "browser", "google-gmail", "--strict"],
+        ["auth", "browser", "google-gmail"],
         _MINDS_PREPARE_ARGV,
-        ["auth", "browser", "google-gmail", "--strict"],
+        ["auth", "browser", "google-gmail"],
     ]
 
 
-def test_auth_browser_google_minds_sign_in_failure_is_surfaced_without_self_setup(tmp_path: Path) -> None:
-    """The Imbue Studio client registers but its sign-in fails: the failure is returned; no second browser flow."""
+def test_auth_browser_google_minds_sign_in_failure_falls_back_to_self_setup(tmp_path: Path) -> None:
+    """Minds client registers but its sign-in fails: fall back to the self-setup flow (no clear)."""
     binary = _make_google_oauth_binary(tmp_path, does_minds_login_succeed=False)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
-    is_success, detail = latchkey.auth_browser("google-gmail")
+    is_success, _detail = latchkey.auth_browser("google-gmail")
 
-    assert is_success is False
-    assert detail == "minds consent declined"
+    assert is_success is True
     argv_calls = _read_argv_calls(tmp_path)
+    # browser-prepare overwrites the stale Minds preparation, so no clear is
+    # needed between the failed Minds sign-in and the self-setup browser-prepare.
     assert argv_calls == [
-        ["auth", "browser", "google-gmail", "--strict"],
+        ["auth", "browser", "google-gmail"],
         _MINDS_PREPARE_ARGV,
-        ["auth", "browser", "google-gmail", "--strict"],
+        ["auth", "browser", "google-gmail"],
+        ["auth", "browser-prepare", "google-gmail"],
+        ["auth", "browser", "google-gmail"],
     ]
-    # The Imbue Studio preparation is left in place for the next attempt to sign in
-    # against; clearing it would also wipe other accounts' credentials.
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
 
-def test_auth_browser_google_minds_prepare_failure_is_surfaced_without_sign_in(tmp_path: Path) -> None:
-    """If registering the Imbue Studio client fails, no sign-in is attempted and the failure is returned."""
+def test_auth_browser_google_minds_prepare_failure_falls_through_without_clearing(tmp_path: Path) -> None:
+    """If registering the Minds client fails, skip the sign-in and the clear and go to self-setup."""
     binary = _make_google_oauth_binary(tmp_path, does_minds_prepare_succeed=False)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
-    is_success, detail = latchkey.auth_browser("google-gmail")
+    is_success, _detail = latchkey.auth_browser("google-gmail")
 
-    assert is_success is False
-    assert detail == "minds prepare failed"
+    assert is_success is True
     argv_calls = _read_argv_calls(tmp_path)
     assert argv_calls == [
-        ["auth", "browser", "google-gmail", "--strict"],
+        ["auth", "browser", "google-gmail"],
         _MINDS_PREPARE_ARGV,
+        ["auth", "browser-prepare", "google-gmail"],
+        ["auth", "browser", "google-gmail"],
     ]
     # We never registered our client, so nothing of ours is cleared.
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
@@ -3646,7 +3656,7 @@ def test_auth_browser_google_already_registered_signs_in_with_one_call(tmp_path:
 
     assert is_success is True
     assert detail == ""
-    assert _read_argv_calls(tmp_path) == [["auth", "browser", "google-gmail", "--strict"]]
+    assert _read_argv_calls(tmp_path) == [["auth", "browser", "google-gmail"]]
 
 
 def test_auth_browser_google_existing_client_failure_is_never_cleared(tmp_path: Path) -> None:
@@ -3665,11 +3675,11 @@ def test_auth_browser_google_existing_client_failure_is_never_cleared(tmp_path: 
     argv_calls = _read_argv_calls(tmp_path)
     # The pre-existing client is preserved: no prepare and no clear, because we
     # only ever touch a client we registered ourselves.
-    assert argv_calls == [["auth", "browser", "google-gmail", "--strict"]]
+    assert argv_calls == [["auth", "browser", "google-gmail"]]
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
 
-# The exact ``auth prepare`` invocation that pins the redirect URI Imbue Studio hosts
+# The exact ``auth prepare`` invocation that pins the Minds-hosted redirect URI
 # for Notion MCP before a sign-in registers its OAuth client.
 _NOTION_MCP_REDIRECT_PREPARE_ARGV = [
     "auth",
@@ -3701,7 +3711,7 @@ def test_auth_browser_notion_mcp_pins_minds_redirect_uri_before_first_sign_in(tm
     assert detail == ""
     assert _read_argv_calls(tmp_path) == [
         _NOTION_MCP_REDIRECT_PREPARE_ARGV,
-        ["auth", "browser", "notion-mcp", "--strict"],
+        ["auth", "browser", "notion-mcp"],
     ]
 
 
@@ -3725,9 +3735,7 @@ def test_auth_browser_notion_mcp_re_sign_in_of_stored_account_does_not_re_pin(tm
     is_success, _detail = latchkey.auth_browser("notion-mcp", account="jane@example.com:Acme")
 
     assert is_success is True
-    assert _read_argv_calls(tmp_path) == [
-        ["auth", "browser", "notion-mcp", "--strict", "--account", "jane@example.com:Acme"]
-    ]
+    assert _read_argv_calls(tmp_path) == [["auth", "browser", "notion-mcp", "--account", "jane@example.com:Acme"]]
 
 
 def test_add_account_notion_mcp_pins_redirect_uri_before_ephemeral_sign_in(tmp_path: Path) -> None:
@@ -3742,7 +3750,7 @@ def test_add_account_notion_mcp_pins_redirect_uri_before_ephemeral_sign_in(tmp_p
     assert [record["argv"] for record in records] == [
         _NOTION_MCP_REDIRECT_PREPARE_ARGV,
         ["auth", "browser-prepare", "notion-mcp"],
-        ["auth", "browser", "notion-mcp", "--strict"],
+        ["auth", "browser", "notion-mcp"],
     ]
     # Only the browser flows run from a fresh session; pinning the redirect
     # URI opens no browser.

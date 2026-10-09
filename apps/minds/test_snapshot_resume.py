@@ -683,10 +683,10 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def _sign_in_and_chat(page: Page | Frame, api_key: str, token: str) -> None:
-    """Sign in from the welcome chat the creation page opened, then message it; its composer waits for a provider."""
+    """Message the welcome chat the creation page opened; its first send is what asks for the account."""
     chat = wait_for_chat_input(page)
-    sign_in_via_provider_chooser(page, chat, api_key=SecretStr(api_key), label="sign-in")
     send_chat_message(chat, page, token)
+    sign_in_via_provider_chooser(page, chat, api_key=SecretStr(api_key), label="sign-in")
     await_chat_reply(chat, page, token)
 
 
@@ -709,11 +709,11 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
 
     The product-level first-boot round-trip: the create flow injects no AI
     credentials, so the workspace boots unauthenticated, open on the welcome chat
-    the creation page seeded with the onboarding conversation, whose composer is
-    disabled while the provider chooser opens in the chat's own frame; the test
-    fills the API-key path in the real chooser UI (which mints a provider account
-    holding the key), sends the chat's first message, which launches its agent,
-    then asserts the agent answers it (echoes a unique token) -- end-to-end
+    the creation page seeded with the onboarding conversation; the first message
+    sent there asks for an account by showing the provider chooser in the chat's
+    own frame; the test fills the API-key path in the real chooser UI (which mints
+    a provider account holding the key), which launches the chat with that
+    message, then asserts the agent answers it (echoes a unique token) -- end-to-end
     through the real Electron app and the desktop client proxy.
 
     Runs in the snapshot offload sandbox, reusing the warm Electron toolchain

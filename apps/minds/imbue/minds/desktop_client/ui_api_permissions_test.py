@@ -424,7 +424,7 @@ def test_connector_toggle_rejects_a_body_without_enabled(tmp_path: Path) -> None
 
 
 def test_self_toggle_flips_a_shared_path_and_preserves_unrelated_names(tmp_path: Path) -> None:
-    """Local files / Other workspaces flips rewrite the whole rule but own only their own names."""
+    """Local files / Other machines flips rewrite the whole rule but own only their own names."""
     agent_id, host_id = AgentId(), HostId()
     latchkey = _latchkey(tmp_path)
     permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
@@ -1422,7 +1422,7 @@ def test_workspace_permissions_lists_waiting_requests_oldest_first(tmp_path: Pat
         ),
         pytest.param(
             lambda agent_id: create_workspace_permission_request(agent_id=agent_id, rationale="why"),
-            "Other workspaces",
+            "Other machines",
             "",
             id="cross-workspace",
         ),

@@ -2,9 +2,8 @@
 
 The one delivery channel is the Electron main process: a ``notification``
 JSONL event on stdout, which main renders as a native notification and routes
-the click of, and a ``notification_read`` event, on which main closes the
-banners it still shows for a chat. Outside Electron (a bare ``minds run``)
-nothing reaches the OS; the in-app feed still records every entry.
+the click of. Outside Electron (a bare ``minds run``) nothing reaches the OS;
+the in-app feed still records every entry.
 """
 
 from loguru import logger
@@ -55,10 +54,3 @@ class NotificationDispatcher(FrozenModel):
             "Emitting notification event for Electron: title={!r} subtitle={!r}", request.title, request.subtitle
         )
         emit_event("notification", data, OutputFormat.JSONL)
-
-    def dispatch_read(self, chat_agent_id: str) -> None:
-        """Tell Electron the chat's messages were read, so it closes the chat's delivered banners."""
-        if not self.is_electron:
-            return
-        logger.debug("Emitting notification_read event for Electron: chat={}", chat_agent_id)
-        emit_event("notification_read", {"chat_agent_id": chat_agent_id}, OutputFormat.JSONL)

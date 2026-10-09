@@ -260,11 +260,6 @@ def build_notification_card(
     )
 
 
-def resolve_chat_agent_id(agent_id: AgentId, backend_resolver: BackendResolverInterface) -> str:
-    """The stable chat id an agent's notifications are filed under: its chat label, else the agent id itself."""
-    return backend_resolver.get_agent_label(agent_id, CHAT_ID_LABEL) or str(agent_id)
-
-
 def build_agent_message_card(
     agent_id: AgentId,
     body: str,
@@ -280,7 +275,7 @@ def build_agent_message_card(
     The click target is the agent's stable chat id, so a chat that moves to
     another agent keeps receiving its notifications in the same conversation.
     """
-    chat_id = resolve_chat_agent_id(agent_id, backend_resolver)
+    chat_id = backend_resolver.get_agent_label(agent_id, CHAT_ID_LABEL) or str(agent_id)
     info = backend_resolver.get_agent_display_info(agent_id)
     chat_name = info.agent_name if info is not None else str(agent_id)
     workspace_name = backend_resolver.get_workspace_name(agent_id) or ""

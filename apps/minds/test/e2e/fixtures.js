@@ -10,7 +10,7 @@
 //
 // To run cleanly, quit any user-launched Imbue Studio.app first -- Playwright's
 // `electron.launch()` will deadlock-exit silently on Electron's
-// requestSingleInstanceLock if a prior Imbue Studio is still alive (we hit this
+// requestSingleInstanceLock if a prior Minds is still alive (we hit this
 // in early iterations: PID 28024 lingered after Cmd-Q).
 
 const path = require('path');

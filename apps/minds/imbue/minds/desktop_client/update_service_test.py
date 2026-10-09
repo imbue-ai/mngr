@@ -88,7 +88,7 @@ def _build_service(
         mngr_caller=caller,
         backend_resolver=backend_resolver,
         concurrency_group=concurrency_group,
-        dispatch_recovery=lambda agent_id: None,
+        dispatch_restart=lambda agent_id: None,
     )
     return _FixedHostStateService(
         state_store=store,
@@ -658,7 +658,7 @@ def test_an_update_whose_machine_would_not_start_carries_the_starts_diagnosis_an
     assert dispatch.failure_detail == "ERROR: The box behind host-5821 is gone"
     assert started == [agent_id]
     assert len(caller.calls) == 1
-    assert store.get(agent_id).dispatch_failure == "Couldn't start this workspace to run the update."
+    assert store.get(agent_id).dispatch_failure == "Couldn't start this machine to run the update."
 
 
 @pytest.mark.parametrize(

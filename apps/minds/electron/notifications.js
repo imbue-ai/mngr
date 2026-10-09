@@ -2,63 +2,28 @@
 
 const { parseWorkspaceId, parseSpaWorkspaceRouteId } = require('./surface-routing');
 const { PRODUCT_DISPLAY_NAME } = require('./product-name');
-const { decideWorkspaceWindowTarget } = require('./window-policy');
 
 // All notification clicks share destination lookup, window selection, focus,
-// and navigation. Native banners have no source window. A click for a
-// workspace lands in that workspace's main window, and opens one when there
-// is none: it never takes over a window showing another workspace. A click
-// the source window can answer itself (it shows the workspace, or shows none)
-// is left to its renderer's local gesture (e.g. an in-place review popup),
-// signalled by false.
-function routeNotificationClick(
-  url,
-  source,
-  { findWindow, mostRecentWindow, showsWorkspace, focus, navigate, openWindow, openEntry },
-) {
+// and navigation. Native banners have no source window. In-app clicks can
+// fall back to their source's local renderer gesture (e.g. an in-place review
+// popup), signalled by false. Never create a window just for a notification.
+function routeNotificationClick(url, source, { findWindow, mostRecentWindow, focus, navigate, openEntry }) {
   const originId = parseWorkspaceId(url);
   const workspaceId = originId || parseSpaWorkspaceRouteId(url);
-  if (!workspaceId) {
-    if (source) return false;
-    const target = mostRecentWindow();
-    if (!target) {
-      landInNewWindow(url, { openWindow, openEntry });
-      return true;
-    }
-    focus(target);
-    if (openEntry) openEntry(target, { isNewWindow: false });
-    else if (url) navigate(target, url);
-    return true;
-  }
-  const existing = findWindow(workspaceId);
-  const decision = decideWorkspaceWindowTarget({
-    existing,
-    source,
-    mayNavigateSource: !!source && !showsWorkspace(source),
-  });
-  if (decision === 'navigate-source') return false;
-  if (decision === 'open-new') {
-    landInNewWindow(url, { openWindow, openEntry });
-    return true;
-  }
-  focus(existing);
+  const existing = workspaceId ? findWindow(workspaceId) : null;
+  const target = existing || source || mostRecentWindow();
+  if (!target || target === source) return false;
+  focus(target);
   // Feed-backed banners and in-app clicks enter the renderer's one action:
   // dismiss the reminder, close its menu, and open its destination.
   if (openEntry) {
-    openEntry(existing, { isNewWindow: false });
+    openEntry(target);
     return true;
   }
-  // A workspace-origin link just raises the workspace's window; SPA links
-  // must also deliver their chat/review query or subpage to it.
-  if (!originId) navigate(existing, url);
+  // A workspace-origin link just raises an existing workspace; SPA links
+  // must also deliver their chat/review query or subpage to that window.
+  if (url && (!originId || !existing)) navigate(target, url);
   return true;
-}
-
-// A new window loads the destination itself; an entry action waits there for
-// the page to come up rather than navigating it a second time.
-function landInNewWindow(url, { openWindow, openEntry }) {
-  const opened = openWindow(url);
-  if (opened && openEntry) openEntry(opened, { isNewWindow: true });
 }
 
 // Pure helpers behind main.js's native-notification and link-fallback paths.
@@ -80,41 +45,6 @@ function nativeNotificationOptionsFor(event, platform) {
     return subtitle ? { title, subtitle, body } : { title, body };
   }
   return { title, body: subtitle && body ? `${subtitle}\n${body}` : subtitle || body };
-}
-
-// The banners the OS may still be showing, per chat. A banner leaves once it
-// is clicked or closed; closing a chat's (it was read) takes the rest down.
-// Takes anything with Electron Notification's on('close'|'click') and close().
-function createBannerRegistry() {
-  const bannersByChatAgentId = new Map();
-  return {
-    remember(chatAgentId, notification) {
-      if (!chatAgentId) return;
-      let banners = bannersByChatAgentId.get(chatAgentId);
-      if (!banners) {
-        banners = new Set();
-        bannersByChatAgentId.set(chatAgentId, banners);
-      }
-      banners.add(notification);
-      const forget = () => {
-        banners.delete(notification);
-        if (banners.size === 0 && bannersByChatAgentId.get(chatAgentId) === banners) {
-          bannersByChatAgentId.delete(chatAgentId);
-        }
-      };
-      notification.on('close', forget);
-      notification.on('click', forget);
-    },
-    /** Close the chat's live banners; returns how many there were. */
-    closeChat(chatAgentId) {
-      const banners = bannersByChatAgentId.get(chatAgentId);
-      if (!banners) return 0;
-      bannersByChatAgentId.delete(chatAgentId);
-      const closing = [...banners];
-      for (const notification of closing) notification.close();
-      return closing.length;
-    },
-  };
 }
 
 // What to tell the reader when no app handles a link. The address itself (or
@@ -139,7 +69,6 @@ function linkFallbackFor(url) {
 }
 
 module.exports = {
-  createBannerRegistry,
   routeNotificationClick,
   nativeNotificationOptionsFor,
   linkFallbackFor,

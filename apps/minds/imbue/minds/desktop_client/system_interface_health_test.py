@@ -576,7 +576,7 @@ def test_a_recorded_backend_outage_outlives_the_attempt_but_not_the_episode() ->
     before = datetime.now(timezone.utc)
 
     tracker.record_backend_outage(aid, "docker", "Docker Desktop is manually paused.")
-    tracker.mark_recovery_failed(aid, "This workspace's backend is unreachable, so the restart could not run: paused")
+    tracker.mark_recovery_failed(aid, "This machine's backend is unreachable, so the restart could not run: paused")
 
     outage = tracker.get_backend_outage(aid)
     assert outage is not None

@@ -151,24 +151,7 @@ describe("NotificationsUiController flash decisions", () => {
     expect(controller.liveToastIds).toEqual([]);
   });
 
-  it("records a watched agent message, which arrives already read, without flashing it", () => {
-    const { controller } = seeded();
-    controller.handleNotificationsMessage(
-      message([agentMessage("m1", { is_resolved: true })]),
-    );
-    expect(controller.liveToastIds).toEqual([]);
-  });
-
-  it("never flashes in a pulled-out window, which still relays the dock count", () => {
-    const { controller, relayed } = seeded({ isPopoutWindow: () => true });
-    controller.handleNotificationsMessage(
-      message([agentMessage("m1"), entry("n1")]),
-    );
-    expect(controller.liveToastIds).toEqual([]);
-    expect(relayed.at(-1)).toEqual({ type: "notifications_count", count: 2 });
-  });
-
-  it("flashes every kind, in every main window, whatever is on screen or focused", () => {
+  it("flashes every kind, in every window, whatever is on screen or focused", () => {
     // No focus gate and no on-screen gate: the controller takes neither
     // signal, so a background window and the workspace already on screen
     // flash exactly like a focused window showing something else.
@@ -231,20 +214,6 @@ describe("NotificationsUiController flash decisions", () => {
     controller.handleNotificationsMessage(message([entry("n1")]));
     controller.handleNotificationsMessage(
       message([entry("n1", { is_resolved: true, outcome: "denied" })]),
-    );
-    expect(controller.liveToastIds).toEqual(["n1"]);
-  });
-
-  it("retires a live toast once its agent message is read, as its banner is", () => {
-    const { controller } = seeded();
-    controller.handleNotificationsMessage(
-      message([agentMessage("m1"), entry("n1")]),
-    );
-    controller.handleNotificationsMessage(
-      message([
-        entry("n1", { is_resolved: true, outcome: "approved" }),
-        agentMessage("m1", { is_resolved: true }),
-      ]),
     );
     expect(controller.liveToastIds).toEqual(["n1"]);
   });
@@ -576,6 +545,12 @@ describe("NotificationsUiController feed actions", () => {
       "/ui/api/notifications/n1/clear",
       "/ui/api/notifications/clear-all",
     ]);
+  });
+
+  it("tells the app when a workspace is displayed, so its agent messages read", () => {
+    const { controller, posted } = seeded();
+    controller.handleWorkspaceDisplayed("agent-aa11");
+    expect(posted).toEqual(["/ui/api/notifications/workspace/agent-aa11/read"]);
   });
 });
 

@@ -1595,7 +1595,7 @@ def test_recovery_step_failure_names_the_step_when_the_machines_provider_is_unkn
 
     message = tracker.get_last_recovery_error(workspace_agent) or ""
     assert message.startswith("Start step of host recovery failed:")
-    assert "This workspace's backend is unreachable" not in message
+    assert "This machine's backend is unreachable" not in message
     assert tracker.get_backend_outage(workspace_agent) is None
 
 

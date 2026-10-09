@@ -81,7 +81,6 @@ from imbue.minds.desktop_client.api_auth import json_response as _json_response
 from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
 from imbue.minds.desktop_client.api_models import AccountSummary
 from imbue.minds.desktop_client.api_models import AccountsResponse
-from imbue.minds.desktop_client.api_models import AgentNotificationReadRequest
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import AppVersionResponse
 from imbue.minds.desktop_client.api_models import BackupOperationStatusResponse
@@ -106,7 +105,6 @@ from imbue.minds.desktop_client.api_models import InvitationResultResponse
 from imbue.minds.desktop_client.api_models import InviteGranteeRequest
 from imbue.minds.desktop_client.api_models import MachineSharingRequest
 from imbue.minds.desktop_client.api_models import MachineSharingResponse
-from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
@@ -168,7 +166,6 @@ from imbue.minds.desktop_client.sharing_handler import publish_workspace
 from imbue.minds.desktop_client.sharing_handler import publish_workspace_with_grants
 from imbue.minds.desktop_client.sharing_handler import resolve_share_target_labels_for_host
 from imbue.minds.desktop_client.sharing_handler import save_grants
-from imbue.minds.desktop_client.sharing_handler import send_mobile_access_link_for_workspace
 from imbue.minds.desktop_client.sharing_handler import unpublish_workspace
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
@@ -177,7 +174,6 @@ from imbue.minds.desktop_client.supertokens_routes import wake_ui_state_publishe
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_api_inbox import build_agent_message_card
-from imbue.minds.desktop_client.ui_api_inbox import resolve_chat_agent_id
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
@@ -247,26 +243,16 @@ def _handle_notification(agent_id: str) -> OkResponse | Response:
     if feed is None:
         return _json_error("Notification feed not configured", 501)
 
-    # Structure is enforced by the spectree model; the remaining check here is value-semantic.
-    body = AgentNotificationRequest.model_validate(request.get_json(silent=True, force=True) or {})
-    if not body.message:
+    # Structure (object shape + ``message`` present and a string) is enforced by
+    # the spectree model; the remaining checks here are value-semantic.
+    body = request.get_json(silent=True, force=True) or {}
+    message = body.get("message")
+    if not message:
         return _json_error("'message' field is required and must be a string", 400)
-    text = f"{body.title}: {body.message}" if body.title else body.message
+    title = body.get("title")
+    text = f"{title}: {message}" if title else message
 
-    feed.append_agent_message(
-        build_agent_message_card(AgentId(agent_id), text, get_state().backend_resolver), watched_by=body.watched_by
-    )
-    return OkResponse(ok=True)
-
-
-@require_api_or_cookie_auth
-@API_SPEC.validate(json=AgentNotificationReadRequest, resp=json_response_model(OkResponse))
-def _handle_notification_read(agent_id: str) -> OkResponse | Response:
-    """Mark the agent's chat's messages read: the workspace saw the chat become watched."""
-    feed = get_state().notification_feed
-    if feed is None:
-        return _json_error("Notification feed not configured", 501)
-    feed.mark_chat_read(resolve_chat_agent_id(AgentId(agent_id), get_state().backend_resolver))
+    feed.append_agent_message(build_agent_message_card(AgentId(agent_id), text, get_state().backend_resolver))
     return OkResponse(ok=True)
 
 
@@ -911,7 +897,7 @@ def _handle_workspaces_backups_stream() -> Response:
             info.create_time.isoformat() if info is not None and info.create_time is not None else None
         )
     invalid_rows = (
-        json.dumps(_degraded_backup_summary(invalid_id, None, "not a workspace agent id")) + "\n"
+        json.dumps(_degraded_backup_summary(invalid_id, None, "not a machine agent id")) + "\n"
         for invalid_id in invalid_agent_ids
     )
     valid_rows = _stream_workspace_backup_summaries(
@@ -1197,7 +1183,7 @@ def _handle_destroy_workspace(agent_id: str) -> tuple[OperationHandleResponse, i
     parsed_id = AgentId(agent_id)
     paths: InstallationPaths | None = get_state().api_v1_paths
     if paths is None:
-        return _json_error("Workspace management not configured", 501)
+        return _json_error("Machine management not configured", 501)
     backend_resolver = get_state().backend_resolver
     info = backend_resolver.get_agent_display_info(parsed_id)
     if info is None:
@@ -1309,7 +1295,7 @@ def _perform_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecyc
     parsed_id = AgentId(agent_id)
     parent_cg = get_state().root_concurrency_group
     if parent_cg is None:
-        return _json_error("Workspace lifecycle not configured", 501)
+        return _json_error("Machine lifecycle not configured", 501)
     backend_resolver = get_state().backend_resolver
     if parsed_id not in backend_resolver.list_known_workspace_ids():
         return _json_error(f"Unknown workspace {agent_id}", 404)
@@ -1405,11 +1391,11 @@ def _handle_workspace_rename(agent_id: str) -> Response:
         return _json_error(f"Unknown workspace {agent_id}", 404)
     parent_cg = state.root_concurrency_group
     if parent_cg is None:
-        return _json_error("Workspace rename is unavailable in this configuration", 503)
+        return _json_error("Machine rename is unavailable in this configuration", 503)
 
     raw_name = str((request.get_json(silent=True) or {}).get("name", "")).strip()
     if not raw_name:
-        return _json_field_error("A workspace name is required.", "name")
+        return _json_field_error("A machine name is required.", "name")
     try:
         new_slug = normalize_host_name_slug(raw_name)
     except InvalidName as exc:
@@ -1451,7 +1437,7 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
 
     Body: ``{"scope": "host", "start_only"?: bool}``. By default this restarts
     the host -- ``mngr stop --stop-host`` and then ``mngr start`` -- which is
-    what the recovery card's "Restart workspace" click asks for. ``start_only``
+    what the recovery card's "Restart machine" click asks for. ``start_only``
     runs the idempotent ``mngr start`` alone, for callers dispatching with no
     knowledge of the host's state; it never bounces a live container. The former
     ``services`` scope (an in-place system-services restart) was removed and is
@@ -1483,7 +1469,7 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     tracker: SystemInterfaceHealthTracker | None = state.system_interface_health_tracker
     parent_cg = state.root_concurrency_group
     if tracker is None or parent_cg is None:
-        return _json_error("Workspace recovery is unavailable in this configuration", 503)
+        return _json_error("Machine recovery is unavailable in this configuration", 503)
 
     handle = OperationHandleResponse(operation_id=str(parsed_id), kind="restart")
     # A ``start_only`` caller can race the workspace's own self-recovery, and
@@ -1625,7 +1611,7 @@ def _handle_restart_operation_status(operation_id: str) -> RestartOperationStatu
 
 # Plain-language names for the running operation in conflict (409) messages.
 _OPERATION_CONFLICT_PHRASES: Final[dict[WorkspaceOperationKind, str]] = {
-    WorkspaceOperationKind.RECOVERY: "A workspace recovery",
+    WorkspaceOperationKind.RECOVERY: "A machine recovery",
     WorkspaceOperationKind.BACKUP_UPDATE: "A backup software update",
     WorkspaceOperationKind.BACKUP_CONFIGURE: "A backup settings change",
     WorkspaceOperationKind.BACKUP_RESTORE: "A restore",
@@ -2893,26 +2879,6 @@ def _handle_workspace_sharing_invitation_outcomes(workspace_id: str) -> Invitati
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(resp=json_response_model(MobileAccessLinkResponse))
-def _handle_workspace_sharing_mobile_access_link(workspace_id: str) -> MobileAccessLinkResponse | Response:
-    """Email the signed-in account the link to its own published workspace; answers how the request ended."""
-    host_id = _sharing_host_for_workspace(workspace_id)
-    if host_id is None:
-        return _json_error(f"Unknown workspace {workspace_id}", 404)
-    state = get_state()
-    try:
-        with state.machine_sharing_locks.get_lock(host_id):
-            result = send_mobile_access_link_for_workspace(host_id, state.backend_resolver)
-    except ImbueCloudShareRefusedCliError as exc:
-        return _json_response({"error": exc.code, "message": str(exc)}, status_code=409)
-    except SharingError as exc:
-        return _json_error(str(exc), 502)
-    return MobileAccessLinkResponse(
-        outcome=result.outcome, recipient_email=result.recipient_email, sent_at=result.sent_at
-    )
-
-
-@require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(SharingReadinessResponse))
 def _handle_workspace_sharing_readiness(workspace_id: str) -> SharingReadinessResponse | Response:
     """Probe whether the workspace's shared hostname is live end to end yet."""
@@ -3435,9 +3401,6 @@ def create_api_v1_blueprint() -> Blueprint:
     # Notifications (per-agent so the gateway's per-host permission file
     # can restrict each caller to its own agent ids).
     blueprint.add_url_rule("/agents/<agent_id>/notifications", view_func=_handle_notification, methods=["POST"])
-    blueprint.add_url_rule(
-        "/agents/<agent_id>/notifications/read", view_func=_handle_notification_read, methods=["POST"]
-    )
 
     # This app's version. Baseline-granted to every agent (see
     # ``minds-app-version-read`` in ``mngr_latchkey.baseline_permissions``).
@@ -3659,12 +3622,6 @@ def create_api_v1_blueprint() -> Blueprint:
         view_func=_handle_workspace_sharing_invitation_outcomes,
         endpoint="workspace_sharing_invitation_outcomes",
         methods=["GET"],
-    )
-    blueprint.add_url_rule(
-        "/workspace-sharing/<workspace_id>/mobile-access-link",
-        view_func=_handle_workspace_sharing_mobile_access_link,
-        endpoint="workspace_sharing_mobile_access_link",
-        methods=["POST"],
     )
 
     # Machine sharing (compat shims for the routes above; agents likewise

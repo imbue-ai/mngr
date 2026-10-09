@@ -39,7 +39,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
-from imbue.minds.desktop_client.imbue_cloud_cli import MobileAccessLinkCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import NotificationPreferencesCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliRelayEndpoint
@@ -293,7 +292,6 @@ class FakeImbueCloudCli(ImbueCloudCli):
         app: str | None,
         link: str | None,
         workspace_name: str | None,
-        app_display_name: str | None,
     ) -> InvitationCliResult:
         self.invite_calls.append(
             {
@@ -304,39 +302,11 @@ class FakeImbueCloudCli(ImbueCloudCli):
                 "app": app,
                 "link": link,
                 "workspace_name": workspace_name,
-                "app_display_name": app_display_name,
             }
         )
         if not self.invite_results:
             return InvitationCliResult(outcome="invited", invited_at="2026-09-30T12:00:00+00:00")
         result = self.invite_results.pop(0) if len(self.invite_results) > 1 else self.invite_results[0]
-        if isinstance(result, ImbueCloudCliError):
-            raise result
-        return result
-
-    mobile_access_link_calls: list[dict[str, Any]] = Field(
-        default_factory=list, description="Every send_mobile_access_link call's arguments"
-    )
-    mobile_access_link_results: list[MobileAccessLinkCliResult | ImbueCloudCliError] = Field(
-        default_factory=list,
-        description="What send_mobile_access_link answers, consumed in order (the last repeats); an error is raised",
-    )
-
-    def send_mobile_access_link(
-        self, *, account: str, host_id: str, link: str | None, workspace_name: str | None
-    ) -> MobileAccessLinkCliResult:
-        self.mobile_access_link_calls.append(
-            {"account": account, "host_id": host_id, "link": link, "workspace_name": workspace_name}
-        )
-        if not self.mobile_access_link_results:
-            return MobileAccessLinkCliResult(
-                outcome="sent", recipient_email=account, sent_at="2026-09-30T12:00:00+00:00"
-            )
-        result = (
-            self.mobile_access_link_results.pop(0)
-            if len(self.mobile_access_link_results) > 1
-            else self.mobile_access_link_results[0]
-        )
         if isinstance(result, ImbueCloudCliError):
             raise result
         return result

@@ -168,7 +168,7 @@ def associate_workspace_account(
         session_store.associate_workspace(matched.user_id, str(agent_id), backend_resolver)
     except WorkspaceSyncError as exc:
         raise WorkspaceAssociationError(
-            f"Could not link this workspace to the account: {describe_connector_failure(exc)}", 502
+            f"Could not link this machine to the account: {describe_connector_failure(exc)}", 502
         ) from exc
     # Wake the chrome SSE so the tile picks up its new 'account' field
     # immediately rather than at the next discovery heartbeat.
@@ -229,7 +229,7 @@ def disassociate_workspace_account(
         session_store.disassociate_workspace(str(account.user_id), str(agent_id))
     except WorkspaceSyncError as exc:
         raise WorkspaceAssociationError(
-            f"Could not unlink this workspace from the account: {describe_connector_failure(exc)}", 502
+            f"Could not unlink this machine from the account: {describe_connector_failure(exc)}", 502
         ) from exc
     if isinstance(backend_resolver, MngrCliBackendResolver):
         backend_resolver.notify_change()

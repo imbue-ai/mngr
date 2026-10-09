@@ -1,7 +1,7 @@
 // The chat primitives the start flow and the creation page are drawn with: a
 // user turn (the grey bubble on the right), an agent turn (a bare paragraph
 // streamed a character at a time), the row of buttons a question offers, the
-// two-column comparison, and the undo control beside an answered bubble.
+// two-column comparison, and the undo control inside an answered bubble.
 //
 // Arrival is CSS: every turn carries its own delay as a custom property and a
 // fresh `key`, so a newly mounted node runs its animation from the start and a
@@ -48,16 +48,15 @@ export function streamedText(
 }
 
 /**
- * The same stream with one run of it set apart (italic or bold). Every
- * character keeps the delay it would have had, so the emphasis changes how the
- * turn is drawn and not when any of it lands.
+ * The same stream with one run of it in italics. Every character keeps the
+ * delay it would have had, so the emphasis changes how the turn is drawn and
+ * not when any of it lands.
  */
 function emphasisedText(
   text: string,
   phrase: string,
   startAtMs: number,
   isInstant: boolean,
-  tag: "em" | "strong",
 ): m.Children {
   const at = text.indexOf(phrase);
   if (at < 0) return streamedText(text, startAtMs, isInstant);
@@ -65,7 +64,7 @@ function emphasisedText(
     startAtMs + index * CHAT_STREAM_STEP_MS;
   return [
     streamedText(text.slice(0, at), startAtMs, isInstant),
-    m(tag, streamedText(phrase, stepAt(at), isInstant)),
+    m("em", streamedText(phrase, stepAt(at), isInstant)),
     streamedText(
       text.slice(at + phrase.length),
       stepAt(at + phrase.length),
@@ -100,44 +99,42 @@ function arrivalClass(attrs: ArrivalAttrs): string {
 export function userTurn(
   attrs: ArrivalAttrs & { text: string; onUndo?: () => void },
 ): m.Children {
-  // The undo sits beside the bubble: it acts on the answer rather than being
-  // part of what was said.
-  const undo = attrs.onUndo
-    ? m(
-        "button",
-        {
-          type: "button",
-          class:
-            "inline-flex shrink-0 cursor-pointer items-center opacity-60 transition-opacity hover:opacity-100",
-          "aria-label": "Change answer",
-          "data-tooltip": "Change answer",
-          "data-tooltip-placement": "above",
-          onclick: attrs.onUndo,
-        },
-        m(Icon16, { name: "undo" }),
-      )
-    : null;
   return m(
     "div",
     {
       key: attrs.key,
-      class: "mt-10 flex items-center justify-end gap-2 first:mt-0" + arrivalClass(attrs),
+      class: "mt-10 flex justify-end first:mt-0" + arrivalClass(attrs),
       style: arrivalStyle(attrs),
     },
-    [
-      m(
-        "div",
-        {
-          class:
-            "max-w-[80%] rounded-[18px] rounded-br-[4px] bg-fill-subtle px-4 py-2.5 leading-[1.5] " +
-            // break-words, not break-all: ordinary prose still wraps at spaces,
-            // and only a token with nowhere to break is split.
-            "whitespace-pre-wrap break-words",
-        },
+    m(
+      "div",
+      {
+        class:
+          "max-w-[80%] rounded-[18px] rounded-br-[4px] bg-fill-subtle px-4 py-2.5 leading-[1.5] " +
+          // break-words, not break-all: ordinary prose still wraps at spaces,
+          // and only a token with nowhere to break is split.
+          "whitespace-pre-wrap break-words" +
+          (attrs.onUndo ? " flex items-center gap-2" : ""),
+      },
+      [
         attrs.text,
-      ),
-      undo,
-    ],
+        attrs.onUndo
+          ? m(
+              "button",
+              {
+                type: "button",
+                class:
+                  "-mr-1 inline-flex shrink-0 cursor-pointer items-center opacity-60 transition-opacity hover:opacity-100",
+                "aria-label": "Change answer",
+                "data-tooltip": "Change answer",
+                "data-tooltip-placement": "above",
+                onclick: attrs.onUndo,
+              },
+              m(Icon16, { name: "undo" }),
+            )
+          : null,
+      ],
+    ),
   );
 }
 
@@ -167,8 +164,6 @@ export function agentTurn(attrs: {
   lead?: string;
   /** A run of the text to draw in italics: the phrase the turn is about. */
   emphasis?: string;
-  /** A run of the text to draw in bold: a name the turn states. */
-  strong?: string;
   /** A type class for the whole turn, when it is not body text. */
   class?: string;
   more?: TurnMore;
@@ -180,11 +175,9 @@ export function agentTurn(attrs: {
       ? attrs.startAtMs
       : attrs.startAtMs + streamDurationMs(lead) + CHAT_STREAM_STEP_MS;
   const text =
-    attrs.emphasis !== undefined
-      ? emphasisedText(attrs.text, attrs.emphasis, textAt, isInstant, "em")
-      : attrs.strong !== undefined
-        ? emphasisedText(attrs.text, attrs.strong, textAt, isInstant, "strong")
-        : streamedText(attrs.text, textAt, isInstant);
+    attrs.emphasis === undefined
+      ? streamedText(attrs.text, textAt, isInstant)
+      : emphasisedText(attrs.text, attrs.emphasis, textAt, isInstant);
   const body =
     attrs.textId !== undefined ? m("span", { id: attrs.textId }, text) : text;
   return m(
@@ -516,13 +509,13 @@ const transcriptScroller = new TranscriptScroller();
 /**
  * A sentinel the column scrolls to whenever `turnCount` changes. Its height is
  * the clearance ``block: "end"`` leaves under the last turn: without it an
- * answer row (or an undo button beside the final bubble) comes to rest flush
+ * answer row (or an undo button on the final bubble) comes to rest flush
  * against the bottom edge.
  */
 export function scrollAnchor(turnCount: number): m.Children {
   return m("div", {
     key: "scroll-anchor",
-    class: "h-24 shrink-0",
+    class: "h-8 shrink-0",
     "aria-hidden": "true",
     oncreate: (vnode: m.VnodeDOM) =>
       transcriptScroller.mounted(vnode.dom as HTMLElement, turnCount),

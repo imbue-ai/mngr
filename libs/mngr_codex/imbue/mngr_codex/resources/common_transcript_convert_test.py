@@ -36,7 +36,7 @@ from imbue.mngr_codex.resources.testing import rollout_user_message as _user
 # injection riding in as a user-role message.
 _REAL_0146_ROLLOUT = Path(__file__).parent / "test_fixtures" / "codex_0146_rollout_exec_turn.jsonl"
 
-# A rollout captured from codex 0.154.0 running with Imbue Studio's codex features (code mode only,
+# A rollout captured from codex 0.154.0 running with Minds' codex features (code mode only,
 # unified exec off in the user config), in the paginated history mode. One code-mode program runs
 # four shell commands -- one fails, one is built from a JavaScript variable -- a second prints
 # ALL_TOOLS, and a third yields a `sleep` that its wait collects and the turn's end then kills.

@@ -1,0 +1,5 @@
+A running agent no longer reads as STOPPED for a moment while it is being renamed.
+
+`mngr rename` renames the agent's tmux session before it rewrites the agent's `data.json`, and a listing loads each agent's name before it checks for the agent's session. A listing that ran in between (`mngr list`, or an `mngr observe` snapshot) looked for a session that no longer existed and reported the live agent STOPPED. Seen in practice when the minds chat app auto-named a new chat: the observer emitted one STOPPED event for the chat's agent mid-turn.
+
+New tmux sessions now carry the agent's id in a `@mngr_agent_id` session option, which survives `rename-session`, and the lifecycle probe finds the session by that id. So does the single-command listing that Modal, VPS and imbue cloud hosts use, which reads each agent's name just after it lists the host's tmux panes and could miss a rename landing in between. It falls back to the session named after the agent, which is how sessions started before this change are still found.

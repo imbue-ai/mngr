@@ -1,4 +1,4 @@
-// The workspace-options overlay: the Permissions / Share workspace / Workspace
+// The workspace-options overlay: the Permissions / Share machine / Machine
 // settings panel docked under the titlebar's icon-tabs, a faithful port of the
 // legacy WorkspaceOptionsShell.jinja docked presentation.
 //

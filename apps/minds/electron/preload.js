@@ -75,11 +75,8 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // Bring the app back in front after an external-browser OAuth hop.
   bringAppToFront: () => ipcRenderer.send('bring-app-to-front'),
 
-  // Multi-window (desktop-only concept). A workspace has one main window: a
-  // window asks before it navigates onto a workspace, and main answers
-  // { opened_elsewhere: true } when it raised the workspace's own window instead.
+  // Multi-window (desktop-only concept).
   openWorkspaceInNewWindow: (agentId) => ipcRenderer.send('open-workspace-in-new-window', agentId),
-  claimWorkspaceWindow: (workspaceId, route) => ipcRenderer.invoke('claim-workspace-window', workspaceId, route),
 
   // Pulled-out workspace windows (the pull-out-window spec). The workspace
   // shell asks for one through the embed contract; the SPA relays the ask
@@ -162,10 +159,6 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // them itself while keyboard focus sits inside the workspace iframe.
   onWindowFocusChanged: (callback) => {
     ipcRenderer.on('window-focus-changed', (_event, isFocused) => callback(Boolean(isFocused)));
-  },
-  // The OS locked or unlocked the screen (macOS and Windows only).
-  onScreenLockChanged: (callback) => {
-    ipcRenderer.on('screen-lock-changed', (_event, isLocked) => callback(Boolean(isLocked)));
   },
   // A one-off in-app toast main wants shown here (the "couldn't open link"
   // fallback after the address was copied).

@@ -553,7 +553,6 @@ def test_push_share_grants_and_invite_raise_the_typed_refusal_with_its_code() ->
             app="notes",
             link="https://notes-x.host-1.owner.us1.shares.example/",
             workspace_name="alpha",
-            app_display_name="Notes",
         )
     with pytest.raises(ImbueCloudShareRefusedCliError) as push_exc:
         cli.push_share_grants(account="owner@example.com", host_id="host-1", document={})
@@ -567,7 +566,6 @@ def test_push_share_grants_and_invite_raise_the_typed_refusal_with_its_code() ->
         and "--app" in invite_argv
         and "--link" in invite_argv
         and "--workspace-name" in invite_argv
-        and invite_argv[invite_argv.index("--app-display-name") + 1] == "Notes"
     )
     assert "--user-id" not in invite_argv
 
@@ -599,7 +597,6 @@ def test_invite_parses_the_outcome_and_outcomes_parse_each_entry() -> None:
         app=None,
         link=None,
         workspace_name=None,
-        app_display_name=None,
     )
     outcomes = cli.list_invitation_outcomes(account="owner@example.com", host_id="host-1")
 

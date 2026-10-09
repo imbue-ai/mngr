@@ -300,10 +300,10 @@ def test_agent_notification_title_becomes_a_prefix_on_the_body(tmp_path: Path) -
     assert entry.body == "Test run: all green"
 
 
-def _app_with_moved_chat(
-    tmp_path: Path, workspace_agent_id: AgentId, chat_id: AgentId, members: tuple[AgentId, ...]
-) -> tuple[Flask, BackendResolverInterface]:
-    """An app whose resolver knows a chat that has run on each of ``members`` in turn, under one ``chat_id``."""
+def test_agent_notifications_keep_the_same_chat_destination_across_agents(tmp_path: Path) -> None:
+    workspace_agent_id = AgentId()
+    chat_id = AgentId()
+    members = (AgentId(), AgentId())
     resolver = make_resolver_with_data(
         json.dumps(
             {
@@ -337,14 +337,6 @@ def _app_with_moved_chat(
         minds_api_key=_TEST_KEY,
         mngr_caller=RecordingMngrCaller(),
     )
-    return app, resolver
-
-
-def test_agent_notifications_keep_the_same_chat_destination_across_agents(tmp_path: Path) -> None:
-    workspace_agent_id = AgentId()
-    chat_id = AgentId()
-    members = (AgentId(), AgentId())
-    app, resolver = _app_with_moved_chat(tmp_path, workspace_agent_id, chat_id, members)
 
     for member in members:
         response = app.test_client().post(
@@ -363,64 +355,6 @@ def test_agent_notifications_keep_the_same_chat_destination_across_agents(tmp_pa
         assert entry.workspace_name == "alpha"
         assert entry.workspace_accent == "#123456"
         assert entry.title == "migration-chat"
-
-
-def test_a_watched_agent_notification_is_recorded_read(tmp_path: Path) -> None:
-    workspace_agent_id = AgentId()
-    chat_agent_id = AgentId()
-    client, app = _client_with_chat(tmp_path, workspace_agent_id, chat_agent_id)
-
-    watched = client.post(
-        f"/api/v1/agents/{chat_agent_id}/notifications",
-        json={"message": "Seen as it happened", "watched_by": ["instance-1", "instance-2"]},
-        headers=_auth_header(),
-    )
-    unwatched = client.post(
-        f"/api/v1/agents/{chat_agent_id}/notifications",
-        json={"message": "Nobody was looking", "watched_by": []},
-        headers=_auth_header(),
-    )
-
-    assert watched.status_code == 200
-    assert unwatched.status_code == 200
-    resolved_by_body = {entry.body: entry.is_resolved for entry in _feed_entries(app)}
-    assert resolved_by_body == {"Seen as it happened": True, "Nobody was looking": False}
-
-
-def test_reading_a_chat_through_one_of_its_agents_resolves_the_chat_messages(tmp_path: Path) -> None:
-    workspace_agent_id = AgentId()
-    chat_agent_id = AgentId()
-    client, app = _client_with_chat(tmp_path, workspace_agent_id, chat_agent_id)
-    client.post(
-        f"/api/v1/agents/{chat_agent_id}/notifications",
-        json={"message": "The migration finished."},
-        headers=_auth_header(),
-    )
-
-    response = client.post(f"/api/v1/agents/{chat_agent_id}/notifications/read", json={}, headers=_auth_header())
-    again = client.post(f"/api/v1/agents/{chat_agent_id}/notifications/read", json={}, headers=_auth_header())
-
-    assert response.status_code == 200
-    # Nothing left to read is still a success: the workspace calls on every watch transition.
-    assert again.status_code == 200
-    (entry,) = _feed_entries(app)
-    assert entry.is_resolved is True
-
-
-def test_reading_a_chat_resolves_messages_filed_by_its_earlier_agent(tmp_path: Path) -> None:
-    """The chat moved to a new agent: reading through the new one still reads what the old one sent."""
-    earlier, current = AgentId(), AgentId()
-    app, _resolver = _app_with_moved_chat(tmp_path, AgentId(), AgentId(), (earlier, current))
-    client = app.test_client()
-    client.post(
-        f"/api/v1/agents/{earlier}/notifications", json={"message": "Done on the old agent"}, headers=_auth_header()
-    )
-
-    response = client.post(f"/api/v1/agents/{current}/notifications/read", json={}, headers=_auth_header())
-
-    assert response.status_code == 200
-    (entry,) = _feed_entries(app)
-    assert entry.is_resolved is True
 
 
 def test_agent_notification_without_a_message_is_rejected(tmp_path: Path) -> None:
@@ -844,7 +778,7 @@ def test_workspaces_backups_stream_degrades_non_agent_ids_without_failing_the_ba
     row_by_id = {row["agent_id"]: row for row in lines}
     assert set(row_by_id) == {str(agent_id), create_attempt_id}
     assert row_by_id[str(agent_id)]["error"] is None
-    assert row_by_id[create_attempt_id]["error"] == "not a workspace agent id"
+    assert row_by_id[create_attempt_id]["error"] == "not a machine agent id"
 
 
 def test_workspaces_backups_stream_degrades_unresolved_rows_on_row_timeout() -> None:
@@ -2057,7 +1991,7 @@ def test_patch_provider_disable_with_active_workspaces_conflicts(tmp_path: Path)
     response = client.patch("/api/v1/desktop/providers/local", headers=_auth_header(), json={"enabled": False})
 
     assert response.status_code == 409
-    assert "active workspace" in json.loads(response.data)["error"].lower()
+    assert "active machine" in json.loads(response.data)["error"].lower()
 
 
 @pytest.mark.parametrize(
@@ -3444,14 +3378,14 @@ def test_restart_operation_status_reports_a_declined_start_as_neither_done_nor_f
     client = _client_with_workspace(tmp_path, agent_id)
     registry = get_state(client.application).workspace_operation_registry
     registry.start(agent_id, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
-    registry.decline(agent_id, "This workspace is undergoing maintenance and will be back shortly.")
+    registry.decline(agent_id, "This machine is undergoing maintenance and will be back shortly.")
 
     body = json.loads(client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header()).data)
 
     assert body["status"] == "DECLINED"
     assert body["is_done"] is False
     assert body["error"] is None
-    assert body["warning"] == "This workspace is undergoing maintenance and will be back shortly."
+    assert body["warning"] == "This machine is undergoing maintenance and will be back shortly."
 
 
 def test_restart_operation_status_hides_backup_operation_records(tmp_path: Path) -> None:
@@ -3600,7 +3534,7 @@ def test_backup_service_update_conflicts_with_a_running_operation(
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
 
     assert response.status_code == 409
-    assert "A workspace recovery is already in progress" in json.loads(response.data)["error"]
+    assert "A machine recovery is already in progress" in json.loads(response.data)["error"]
     # The dispatch did not replace the running record.
     record = registry.get(agent_id)
     assert record is not None
@@ -4340,14 +4274,11 @@ def test_workspace_sharing_put_delete_and_readiness_accept_the_workspace_coordin
 _INVITED_WORKSPACE_NAME: Final[str] = "Robot Butler"
 
 
-def _invitation_client(
-    tmp_path: Path, agent_id: AgentId, cli: FakeSharingCli, extra_service_logs: str = ""
-) -> FlaskClient:
+def _invitation_client(tmp_path: Path, agent_id: AgentId, cli: FakeSharingCli) -> FlaskClient:
     """A sharing client whose workspace is published, carries a display name, and whose shell registered its label."""
     cli.share = _active_share()
     service_logs = {
         str(agent_id): make_service_log("system_interface", "http://localhost:8000", "system_interface-shl1")
-        + extra_service_logs
     }
     return _sharing_client(
         tmp_path,
@@ -4431,55 +4362,6 @@ def test_workspace_sharing_invite_carries_the_targets_link_and_reports_the_outco
     assert call["app"] is None
     assert call["link"] == f"https://system_interface-shl1.{_TEST_HOST_ID}.owner1234.us1.shares.example/"
     assert call["workspace_name"] == _INVITED_WORKSPACE_NAME
-    # The whole machine is named for what it grants, never after the shell app.
-    assert call["app_display_name"] is None
-
-
-def test_workspace_sharing_invite_carries_the_name_a_person_reads_for_the_app(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(is_share_env_present=True))
-    client = _invitation_client(
-        tmp_path,
-        agent_id,
-        cli,
-        extra_service_logs=make_service_log(
-            "world-of-nonsense", "http://localhost:8100", "world-of-nonsense-fs6k", "World of Nonsense"
-        ),
-    )
-
-    response = client.post(
-        f"/api/v1/workspace-sharing/{agent_id}/invitations",
-        headers=_auth_header(),
-        json={"email": "bob@example.com", "app": "world-of-nonsense"},
-    )
-
-    assert response.status_code == 200, response.data
-    (call,) = cli.invite_calls
-    assert call["app"] == "world-of-nonsense"
-    assert call["app_display_name"] == "World of Nonsense"
-    assert call["link"] == f"https://world-of-nonsense-fs6k.{_TEST_HOST_ID}.owner1234.us1.shares.example/"
-
-
-def test_workspace_sharing_invite_sends_no_app_name_when_the_app_registered_none(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(is_share_env_present=True))
-    client = _invitation_client(
-        tmp_path,
-        agent_id,
-        cli,
-        extra_service_logs=make_service_log("web", "http://localhost:8100", "web-fs6k"),
-    )
-
-    response = client.post(
-        f"/api/v1/workspace-sharing/{agent_id}/invitations",
-        headers=_auth_header(),
-        json={"email": "bob@example.com", "app": "web"},
-    )
-
-    assert response.status_code == 200, response.data
-    (call,) = cli.invite_calls
-    assert call["app"] == "web"
-    assert call["app_display_name"] is None
 
 
 def test_workspace_sharing_invite_pushes_the_document_and_retries_once_when_out_of_date(tmp_path: Path) -> None:
@@ -4580,53 +4462,3 @@ def test_workspace_sharing_invitation_outcomes_is_empty_while_unpublished(tmp_pa
 
     assert response.status_code == 200
     assert json.loads(response.data) == {"outcomes": []}
-
-
-def test_workspace_sharing_mobile_access_link_carries_the_whole_workspaces_link_and_its_name(
-    tmp_path: Path,
-) -> None:
-    agent_id = AgentId()
-    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(is_share_env_present=True))
-    client = _invitation_client(tmp_path, agent_id, cli)
-
-    response = client.post(f"/api/v1/workspace-sharing/{agent_id}/mobile-access-link", headers=_auth_header())
-
-    assert response.status_code == 200, response.data
-    assert json.loads(response.data)["outcome"] == "sent"
-    (call,) = cli.mobile_access_link_calls
-    assert call["link"] == f"https://system_interface-shl1.{_TEST_HOST_ID}.owner1234.us1.shares.example/"
-    assert call["workspace_name"] == _INVITED_WORKSPACE_NAME
-
-
-def test_workspace_sharing_mobile_access_link_reports_a_refusal_by_its_code(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    no_link = ImbueCloudShareRefusedCliError("shares mobile-access-link: no link yet")
-    no_link.code = "no_workspace_link"
-    cli = _fake_sharing_cli(
-        mngr_caller=_ShareProbeCaller(is_share_env_present=True), mobile_access_link_results=[no_link]
-    )
-    client = _invitation_client(tmp_path, agent_id, cli)
-
-    response = client.post(f"/api/v1/workspace-sharing/{agent_id}/mobile-access-link", headers=_auth_header())
-
-    assert response.status_code == 409
-    assert json.loads(response.data)["error"] == "no_workspace_link"
-
-
-def test_workspace_sharing_mobile_access_link_leaves_an_unshared_workspace_to_imbue_cloud(
-    tmp_path: Path,
-) -> None:
-    # The desktop makes no judgment of its own about the share's state: it asks
-    # with no link, and the connector answers the refusal the panel shows.
-    agent_id = AgentId()
-    not_published = ImbueCloudShareRefusedCliError("shares mobile-access-link: not published")
-    not_published.code = "not_published"
-    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(), mobile_access_link_results=[not_published])
-    client = _sharing_client(tmp_path, agent_id, cli)
-
-    response = client.post(f"/api/v1/workspace-sharing/{agent_id}/mobile-access-link", headers=_auth_header())
-
-    assert response.status_code == 409
-    assert json.loads(response.data)["error"] == "not_published"
-    (call,) = cli.mobile_access_link_calls
-    assert call["link"] is None

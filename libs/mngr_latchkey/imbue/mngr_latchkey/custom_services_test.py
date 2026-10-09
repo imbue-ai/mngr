@@ -586,7 +586,7 @@ def test_preserve_remote_config_receives_the_desktop_custom_services() -> None:
 
 
 def test_overlay_a_service_registered_after_the_first_read_is_visible(tmp_path: Path) -> None:
-    # Imbue Studio builds one catalog when it starts and keeps it for the life of the
+    # Minds builds one catalog when it starts and keeps it for the life of the
     # process, so an approval that registers a service mid-session has to show
     # up on the same instance: otherwise the connection exists and works, but
     # every surface that names services keeps claiming it does not.

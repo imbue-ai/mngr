@@ -2110,18 +2110,6 @@ def test_workspace_held_error_always_leads_with_the_sentence_and_never_shows_an_
     )
 
 
-def test_hold_errors_read_an_older_connectors_machine_sentence_as_their_own() -> None:
-    assert (
-        str(ImbueCloudWorkspaceHeldError("This machine is undergoing maintenance and will be back shortly."))
-        == WORKSPACE_HELD_MESSAGE
-    )
-    legacy_retired = (
-        "This machine has been retired and cannot be started again. "
-        "Download its data from its backups, or contact support if it has none."
-    )
-    assert str(ImbueCloudWorkspaceRetiredError(legacy_retired)) == WORKSPACE_RETIRED_MESSAGE
-
-
 def test_admin_stop_workspace_posts_the_kind_and_set_stop_kind_hits_its_route(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[str, dict]] = []
 
@@ -2599,12 +2587,7 @@ def test_invite_grantee_sends_only_the_fields_given_and_parses_the_outcome(monke
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == "/shares/host-abc/invitations"
-        assert _json.loads(request.content) == {
-            "email": "bob@example.com",
-            "app": "world-of-nonsense",
-            "workspace_name": "alpha",
-            "app_display_name": "World of Nonsense",
-        }
+        assert _json.loads(request.content) == {"email": "bob@example.com", "workspace_name": "alpha"}
         return httpx.Response(200, json={"outcome": "invited", "invited_at": "2026-09-30T12:00:00+00:00"})
 
     client = _install_mock_httpx(monkeypatch, handler)
@@ -2614,10 +2597,9 @@ def test_invite_grantee_sends_only_the_fields_given_and_parses_the_outcome(monke
         "host-abc",
         user_id=None,
         email="bob@example.com",
-        app="world-of-nonsense",
+        app=None,
         link=None,
         workspace_name="alpha",
-        app_display_name="World of Nonsense",
     )
 
     assert result.outcome is InvitationOutcome.INVITED
@@ -2640,35 +2622,14 @@ def test_invite_grantee_maps_the_409_codes_and_tolerates_an_unknown_outcome(monk
 
     with pytest.raises(ImbueCloudShareRefusedError) as out_of_date:
         client.invite_grantee(
-            SecretStr("tok"),
-            "host-abc",
-            user_id="u",
-            email=None,
-            app=None,
-            link=None,
-            workspace_name=None,
-            app_display_name=None,
+            SecretStr("tok"), "host-abc", user_id="u", email=None, app=None, link=None, workspace_name=None
         )
     with pytest.raises(ImbueCloudShareRefusedError) as not_invitable:
         client.invite_grantee(
-            SecretStr("tok"),
-            "host-abc",
-            user_id="u",
-            email=None,
-            app=None,
-            link=None,
-            workspace_name=None,
-            app_display_name=None,
+            SecretStr("tok"), "host-abc", user_id="u", email=None, app=None, link=None, workspace_name=None
         )
     newer = client.invite_grantee(
-        SecretStr("tok"),
-        "host-abc",
-        user_id="u",
-        email=None,
-        app=None,
-        link=None,
-        workspace_name=None,
-        app_display_name=None,
+        SecretStr("tok"), "host-abc", user_id="u", email=None, app=None, link=None, workspace_name=None
     )
 
     assert out_of_date.value.code == "grants_out_of_date"

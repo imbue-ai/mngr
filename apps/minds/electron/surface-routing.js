@@ -66,24 +66,6 @@ function parsePopoutRoute(url) {
   }
 }
 
-// The workspace an app-level overlay route floats over (its ?workspace=
-// param), which stays mounted behind the overlay; null for any other route.
-// Mirrors overlayBehindWorkspaceId in frontend/src/views/shell/classify.ts;
-// keep the path set in sync.
-const OVERLAY_BEHIND_WORKSPACE_PATHS = new Set(['/help', '/inbox', '/create/template', '/settings/ai-keys']);
-
-function parseOverlayBehindWorkspaceId(url) {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    if (!OVERLAY_BEHIND_WORKSPACE_PATHS.has(parsed.pathname)) return null;
-    const workspace = parsed.searchParams.get('workspace');
-    return workspace && /^(?:agent|host)-[a-f0-9]+$/i.test(workspace) ? workspace : null;
-  } catch {
-    return null;
-  }
-}
-
 // The SPA path of a popout (a route parsePopoutRoute reads back). A popout
 // the app reopens (a restore, a reload) carries `?reopened=1`, which the SPA
 // passes on to the workspace shell: a reopened popout's shell trusts the
@@ -98,6 +80,5 @@ module.exports = {
   parseWorkspaceId,
   parseSpaWorkspaceRouteId,
   parsePopoutRoute,
-  parseOverlayBehindWorkspaceId,
   popoutRoutePath,
 };

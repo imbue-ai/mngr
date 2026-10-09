@@ -118,7 +118,7 @@ describe("the update modal's Update now", () => {
     const { draw, onClose } = harness(() =>
       Promise.resolve(
         jsonResponse(
-          { error: "An update is already running in this workspace." },
+          { error: "An update is already running in this machine." },
           409,
         ),
       ),
@@ -128,7 +128,7 @@ describe("the update modal's Update now", () => {
 
     expect(onClose).not.toHaveBeenCalled();
     expect(allText(draw())).toContain(
-      "An update is already running in this workspace.",
+      "An update is already running in this machine.",
     );
   });
 
@@ -139,7 +139,7 @@ describe("the update modal's Update now", () => {
       Promise.resolve(
         jsonResponse(
           {
-            error: "Couldn't start the update agent in this workspace.",
+            error: "Couldn't start the update agent in this machine.",
             detail:
               "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
           },
@@ -162,13 +162,13 @@ describe("the update modal's Update now", () => {
       () => Promise.resolve(jsonResponse({ ok: true })),
       {
         ...OUT_OF_DATE,
-        dispatch_failure: "Couldn't reach this workspace to start the update.",
+        dispatch_failure: "Couldn't reach this machine to start the update.",
         dispatch_failure_detail: "Error: Could not reach host host-1234: connection refused",
       },
     );
 
     const text = allText(draw());
-    expect(text).toContain("Couldn't reach this workspace to start the update.");
+    expect(text).toContain("Couldn't reach this machine to start the update.");
     expect(text).toContain("Error: Could not reach host host-1234: connection refused");
 
     press(draw(), "Dismiss");
@@ -181,13 +181,13 @@ describe("the update modal's Update now", () => {
     // The press is the newer question; the old answer beside its spinner would read as its reply.
     const { draw } = harness(() => new Promise<Response>(() => undefined), {
       ...OUT_OF_DATE,
-      dispatch_failure: "Couldn't reach this workspace to start the update.",
+      dispatch_failure: "Couldn't reach this machine to start the update.",
     });
-    expect(allText(draw())).toContain("Couldn't reach this workspace to start the update.");
+    expect(allText(draw())).toContain("Couldn't reach this machine to start the update.");
 
     press(draw(), "Update now");
 
-    expect(allText(draw())).not.toContain("Couldn't reach this workspace to start the update.");
+    expect(allText(draw())).not.toContain("Couldn't reach this machine to start the update.");
   });
 
   it("offers scheduling as the primary action", () => {
@@ -213,7 +213,7 @@ describe("the update modal's verdict line", () => {
     });
 
     expect(allText(draw())).toContain(
-      "This workspace was updated to v0.4.1.",
+      "This machine was updated to v0.4.1.",
     );
   });
 
@@ -262,7 +262,7 @@ describe("the update modal over a machine too old to update in place", () => {
       TOO_OLD,
     );
 
-    press(draw(), "Create a new workspace");
+    press(draw(), "Create a new machine");
 
     expect(onClose).toHaveBeenCalled();
     expect(routeSet).toHaveBeenCalledWith("/create");

@@ -43,7 +43,7 @@ know what a rule grants inspects the *schema structure* instead, via
 single place that knows either side of that structure, so a change to the
 generated shape only has to be made here.
 
-Only catalog-backed third-party service scopes are account-scoped. Imbue Studio's
+Only catalog-backed third-party service scopes are account-scoped. Minds'
 own gateway-self scopes (``latchkey-self``, ``minds-api-proxy-*``) must stay
 account-agnostic: latchkey attaches no ``customMetadata`` at all to requests
 it serves from a gateway extension, so an account-gated schema would never

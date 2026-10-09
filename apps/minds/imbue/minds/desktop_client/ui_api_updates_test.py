@@ -827,7 +827,7 @@ def test_a_spawn_that_raises_leaves_no_run_locked_behind_it(
     # The request that raised carries no sentence of ours, so the row is where the reader learns of it.
     assert (
         service.state_store.get(agent_id).dispatch_failure
-        == "Something went wrong starting the update in this workspace."
+        == "Something went wrong starting the update in this machine."
     )
 
 
@@ -1046,7 +1046,7 @@ def test_a_refused_spawn_tells_the_user_what_the_machine_said(
 
     assert response.status_code == 502
     body = response.get_json()
-    assert body["error"] == "Couldn't start the update agent in this workspace."
+    assert body["error"] == "Couldn't start the update agent in this machine."
     assert body["detail"].startswith("Error: Unknown fields in agent_types.opencode")
     # The unrelated unreachable host is what the user would otherwise blame.
     assert "outer SSH unreachable" not in body["detail"]
@@ -1173,7 +1173,7 @@ def test_a_machine_that_refuses_the_agent_has_its_refusal_shown_and_the_run_slot
 ) -> None:
     """A machine with no provider account signed in refuses the create in its own words; the app shows them
     and gives the run slot back, so signing in and pressing Update again works."""
-    refusal = "No provider account is signed in for this workspace. Sign in from a chat, then try again."
+    refusal = "No provider account is signed in on this machine. Sign in from a chat tab, then try again."
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
@@ -1199,7 +1199,7 @@ def test_a_machine_that_refuses_the_agent_has_its_refusal_shown_and_the_run_slot
 
     assert response.status_code == 502
     body = response.get_json()
-    assert body["error"] == "Couldn't start the update agent in this workspace."
+    assert body["error"] == "Couldn't start the update agent in this machine."
     assert refusal in body["detail"]
     # The run slot must come back, or a retry after signing in would be refused as already running.
     assert _service(app).state_store.get(agent_id).activity is UpdateActivity.IDLE
@@ -1213,7 +1213,7 @@ def _published(app: Flask, agent_id: AgentId) -> UiWorkspaceUpdate:
 def _press_update_now_and_fail_to_reach(client: FlaskClient, app: Flask, agent_id: AgentId) -> None:
     """Press Update now on a machine the launch cannot reach even once started, and check the row recorded why."""
     assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 502
-    assert _published(app, agent_id).dispatch_failure == "Couldn't reach this workspace to start the update."
+    assert _published(app, agent_id).dispatch_failure == "Couldn't reach this machine to start the update."
 
 
 @pytest.mark.witnesses("workspace-updates.unsent-update-is-reported", partial="the published row, not its rendering")
@@ -1236,7 +1236,7 @@ def test_an_update_that_could_not_reach_the_machine_is_published_for_a_modal_ope
     assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 502
 
     published = _published(app, agent_id)
-    assert published.dispatch_failure == "Couldn't reach this workspace to start the update."
+    assert published.dispatch_failure == "Couldn't reach this machine to start the update."
     assert published.dispatch_failure_detail == "Could not reach host host-1234: connection refused"
     assert published.activity is UpdateActivity.IDLE
 
@@ -1255,7 +1255,7 @@ def test_a_launch_that_timed_out_is_published_without_a_detail_it_never_had(
     assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 502
 
     published = _published(app, agent_id)
-    assert published.dispatch_failure == "Couldn't start the update agent in this workspace."
+    assert published.dispatch_failure == "Couldn't start the update agent in this machine."
     assert published.dispatch_failure_detail == ""
 
 
@@ -1280,9 +1280,9 @@ def test_an_update_whose_machine_would_not_start_publishes_the_starts_own_diagno
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
 
     assert response.status_code == 502
-    assert response.get_json()["error"] == "Couldn't start this workspace to run the update."
+    assert response.get_json()["error"] == "Couldn't start this machine to run the update."
     published = _published(app, agent_id)
-    assert published.dispatch_failure == "Couldn't start this workspace to run the update."
+    assert published.dispatch_failure == "Couldn't start this machine to run the update."
     assert "ERROR: The box behind host-5821 is gone" in published.dispatch_failure_detail
     assert published.activity is UpdateActivity.IDLE
 
@@ -1291,7 +1291,7 @@ def test_an_update_whose_machine_would_not_start_publishes_the_starts_own_diagno
 def test_an_update_agent_the_machine_refused_is_published_in_the_machines_own_words(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    refusal = "No provider account is signed in for this workspace. Sign in from a chat, then try again."
+    refusal = "No provider account is signed in on this machine. Sign in from a chat tab, then try again."
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
@@ -1311,7 +1311,7 @@ def test_an_update_agent_the_machine_refused_is_published_in_the_machines_own_wo
     assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 502
 
     published = _published(app, agent_id)
-    assert published.dispatch_failure == "Couldn't start the update agent in this workspace."
+    assert published.dispatch_failure == "Couldn't start the update agent in this machine."
     assert refusal in published.dispatch_failure_detail
 
 
@@ -1399,11 +1399,11 @@ _QUIET_GATE_RESULT = MngrCallResult(returncode=0, stdout='MINDS_BACKUP_GATE_JSON
 @pytest.mark.parametrize(
     ("results", "is_host_running", "expected_failure"),
     (
-        ((_READY_RESULT,), False, "Couldn't reach this workspace to start the update."),
+        ((_READY_RESULT,), False, "Couldn't reach this machine to start the update."),
         # An unreadable chat gate counts as agents working in the machine.
-        ((_READY_RESULT,), True, "Agents were still working in this workspace, so the update didn't start."),
+        ((_READY_RESULT,), True, "Agents were still working in this machine, so the update didn't start."),
         # A quiet gate, and then a launch that cannot reach the machine even once it is started.
-        ((_QUIET_GATE_RESULT, _HOST_OFFLINE), True, "Couldn't reach this workspace to start the update."),
+        ((_QUIET_GATE_RESULT, _HOST_OFFLINE), True, "Couldn't reach this machine to start the update."),
     ),
     ids=["host-unknown", "chats-running", "dispatch-unreached"],
 )

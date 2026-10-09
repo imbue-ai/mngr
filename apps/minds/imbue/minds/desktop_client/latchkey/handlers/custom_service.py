@@ -125,7 +125,7 @@ _KIND_LABEL: Final[str] = "new connection"
 def _format_granted_message(base_api_url: str) -> str:
     return (
         f"Your request to store credentials for {base_api_url} was granted. They are stored securely and "
-        f"this workspace can use them; requests to {base_api_url} will have them attached."
+        f"this machine can use them; requests to {base_api_url} will have them attached."
     )
 
 

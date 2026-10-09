@@ -36,13 +36,13 @@ export function UpdateApplyModal(): m.Component<UpdateApplyModalAttrs> {
             m(
               "div",
               { class: "type-body text-secondary" },
-              "The update is landing. This workspace's services restart while it does, " +
+              "The update is landing. This machine's services restart while it does, " +
                 "so it is unavailable until that finishes -- usually a few minutes.",
             ),
             m(
               "div",
               { class: "type-helper text-secondary" },
-              "Your other workspaces are still reachable from the workspace switcher.",
+              "Your other machines are still reachable from the machine switcher.",
             ),
           ],
         ),

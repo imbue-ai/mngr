@@ -7,37 +7,20 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { EventEmitter } = require('node:events');
-const {
-  createBannerRegistry,
-  linkFallbackFor,
-  nativeNotificationOptionsFor,
-  routeNotificationClick,
-} = require('../../electron/notifications');
-
-// The window-set hooks every test starts from; each test overrides the ones it exercises.
-function windows(overrides) {
-  return {
-    findWindow: () => assert.fail('no workspace to look up'),
-    mostRecentWindow: () => assert.fail('no fallback window expected'),
-    showsWorkspace: () => true,
-    focus: () => assert.fail('nothing to focus'),
-    navigate: () => assert.fail('nothing to navigate'),
-    openWindow: () => assert.fail('no window should open'),
-    ...overrides,
-  };
-}
+const { linkFallbackFor, nativeNotificationOptionsFor, routeNotificationClick } = require('../../electron/notifications');
 
 test('feed-backed native and in-app clicks deliver the same entry action instead of just navigating', () => {
   const target = {};
   for (const source of [null, { name: 'source window' }]) {
     const actions = [];
-    assert.equal(routeNotificationClick('http://localhost:7777/workspace/agent-abcd?chat=c', source, windows({
+    assert.equal(routeNotificationClick('http://localhost:7777/workspace/agent-abcd?chat=c', source, {
       findWindow: () => target,
+      mostRecentWindow: () => target,
       focus: (window) => actions.push(['focus', window]),
-      openEntry: (window, how) => actions.push(['open-entry', window, how]),
-    })), true);
-    assert.deepEqual(actions, [['focus', target], ['open-entry', target, { isNewWindow: false }]]);
+      openEntry: (window) => actions.push(['open-entry', window]),
+      navigate: () => assert.fail('must use the shared entry action'),
+    }), true);
+    assert.deepEqual(actions, [['focus', target], ['open-entry', target]]);
   }
 });
 
@@ -45,11 +28,13 @@ test('native feed entries without a workspace still run their acknowledgement ac
   const target = {};
   for (const url of ['http://localhost:7777/accounts', null]) {
     const opened = [];
-    assert.equal(routeNotificationClick(url, null, windows({
+    assert.equal(routeNotificationClick(url, null, {
+      findWindow: () => assert.fail('no workspace to find'),
       mostRecentWindow: () => target,
       focus: () => {},
       openEntry: (window) => opened.push(window),
-    })), true);
+      navigate: () => assert.fail('must use the shared entry action'),
+    }), true);
     assert.deepEqual(opened, [target]);
   }
 });
@@ -61,131 +46,67 @@ for (const kind of ['native banner', 'in-app notification']) {
     for (const suffix of ['?chat=chat-123', '?review=req-123', '/backups']) {
       const url = `http://localhost:7777/workspace/agent-abcd${suffix}`;
       const actions = [];
-      assert.equal(routeNotificationClick(url, source, windows({
+      assert.equal(routeNotificationClick(url, source, {
         findWindow: (id) => { assert.equal(id, 'agent-abcd'); return existing; },
+        mostRecentWindow: () => assert.fail('must prefer the existing workspace'),
         focus: (target) => actions.push(['focus', target]),
         navigate: (target, destination) => actions.push(['navigate', target, destination]),
-      })), true);
+      }), true);
       assert.deepEqual(actions, [['focus', existing], ['navigate', existing, url]]);
     }
   });
 }
 
-test('a click the source window can answer itself stays local', () => {
-  const url = 'http://localhost:7777/workspace/agent-abcd?chat=c';
-  // The source already shows the workspace.
-  const onWorkspace = {};
-  assert.equal(routeNotificationClick(url, onWorkspace, windows({ findWindow: () => onWorkspace })), false);
-  // The source shows no workspace, and none shows this one: it takes the workspace on.
-  const blank = {};
-  assert.equal(routeNotificationClick(url, blank, windows({
-    findWindow: () => null,
-    showsWorkspace: () => false,
-  })), false);
+test('notification clicks stay local when no other window shows the workspace', () => {
+  const source = {};
+  for (const target of [null, source]) {
+    assert.equal(routeNotificationClick('http://localhost:7777/workspace/agent-abcd?chat=c', source, {
+      findWindow: () => target,
+      mostRecentWindow: () => assert.fail('must prefer the source'),
+      openEntry: () => assert.fail('the source renderer must run its own action once'),
+      focus: () => assert.fail('must stay local'),
+      navigate: () => assert.fail('must stay local'),
+    }), false);
+  }
 });
 
-for (const kind of ['native banner', 'in-app notification']) {
-  test(`${kind} for a workspace with no window opens one, never taking over another workspace's`, () => {
-    const source = kind === 'native banner' ? null : { name: 'shows another workspace' };
-    const url = 'http://localhost:7777/workspace/agent-abcd?chat=c';
-    const opened = { name: 'new window' };
-    const actions = [];
-    assert.equal(routeNotificationClick(url, source, windows({
-      findWindow: () => null,
-      showsWorkspace: () => true,
-      openWindow: (destination) => { actions.push(['open', destination]); return opened; },
-      openEntry: (window, how) => actions.push(['open-entry', window, how]),
-    })), true);
-    // The new window loads the destination itself; the entry action waits for its page.
-    assert.deepEqual(actions, [['open', url], ['open-entry', opened, { isNewWindow: true }]]);
-  });
-}
-
-test('account-level clicks fall back to the most recent window, or open one when none is open', () => {
-  const url = 'http://localhost:7777/accounts';
+test('native clicks fall back to the most recent window for new workspaces and account events', () => {
   const recent = {};
-  const actions = [];
-  assert.equal(routeNotificationClick(url, null, windows({
-    mostRecentWindow: () => recent,
-    focus: (target) => actions.push(['focus', target]),
-    navigate: (target, destination) => actions.push(['navigate', target, destination]),
-  })), true);
-  assert.deepEqual(actions, [['focus', recent], ['navigate', recent, url]]);
-
-  const opened = [];
-  assert.equal(routeNotificationClick(url, null, windows({
-    mostRecentWindow: () => null,
-    openWindow: (destination) => { opened.push(destination); return {}; },
-  })), true);
-  assert.deepEqual(opened, [url]);
+  for (const url of ['http://localhost:7777/workspace/agent-abcd?chat=c', 'http://localhost:7777/accounts']) {
+    const actions = [];
+    assert.equal(routeNotificationClick(url, null, {
+      findWindow: () => null,
+      mostRecentWindow: () => recent,
+      focus: (target) => actions.push(['focus', target]),
+      navigate: (target, destination) => actions.push(['navigate', target, destination]),
+    }), true);
+    assert.deepEqual(actions, [['focus', recent], ['navigate', recent, url]]);
+  }
 });
 
 test('workspace-origin notifications focus an existing window without resetting its page', () => {
   const existing = {};
   const focused = [];
-  assert.equal(routeNotificationClick('http://agent-abcd.localhost:7777/chat', null, windows({
+  assert.equal(routeNotificationClick('http://agent-abcd.localhost:7777/chat', null, {
     findWindow: (id) => { assert.equal(id, 'agent-abcd'); return existing; },
+    mostRecentWindow: () => assert.fail('must prefer the existing workspace'),
     focus: (target) => focused.push(target),
     navigate: () => assert.fail('must preserve the page'),
-  })), true);
+  }), true);
   assert.deepEqual(focused, [existing]);
 });
 
-test('a notification without a destination just raises the app, opening a window when none is open', () => {
-  const recent = {};
-  const focused = [];
-  assert.equal(routeNotificationClick(null, null, windows({
-    mostRecentWindow: () => recent,
-    focus: (target) => focused.push(target),
-  })), true);
-  assert.deepEqual(focused, [recent]);
-
-  const opened = [];
-  assert.equal(routeNotificationClick(null, null, windows({
-    mostRecentWindow: () => null,
-    openWindow: (destination) => { opened.push(destination); return {}; },
-  })), true);
-  assert.deepEqual(opened, [null]);
-});
-
-// Stands in for Electron's Notification: an emitter whose close() also emits 'close', as the OS's does.
-class FakeBanner extends EventEmitter {
-  constructor() {
-    super();
-    this.closeCount = 0;
+test('a notification without a destination just raises the app, and no windows is a no-op', () => {
+  for (const recent of [{}, null]) {
+    const focused = [];
+    assert.equal(routeNotificationClick(null, null, {
+      findWindow: () => assert.fail('no workspace to look up'),
+      mostRecentWindow: () => recent,
+      focus: (target) => focused.push(target),
+      navigate: () => assert.fail('no destination to navigate'),
+    }), recent !== null);
+    assert.deepEqual(focused, recent ? [recent] : []);
   }
-
-  close() {
-    this.closeCount += 1;
-    this.emit('close');
-  }
-}
-
-test("reading a chat closes that chat's live banners and leaves every other chat's up", () => {
-  const registry = createBannerRegistry();
-  const [first, second, otherChat, clicked] = [new FakeBanner(), new FakeBanner(), new FakeBanner(), new FakeBanner()];
-  registry.remember('chat-a', first);
-  registry.remember('chat-a', second);
-  registry.remember('chat-a', clicked);
-  registry.remember('chat-b', otherChat);
-  clicked.emit('click');
-
-  assert.equal(registry.closeChat('chat-a'), 2);
-
-  assert.deepEqual([first.closeCount, second.closeCount, clicked.closeCount, otherChat.closeCount], [1, 1, 0, 0]);
-  // Read again: nothing is left to close.
-  assert.equal(registry.closeChat('chat-a'), 0);
-  assert.equal(registry.closeChat('chat-b'), 1);
-});
-
-test('a banner with no chat is never tracked', () => {
-  const registry = createBannerRegistry();
-  const banner = new FakeBanner();
-  registry.remember('', banner);
-  registry.remember(undefined, banner);
-
-  assert.equal(registry.closeChat(''), 0);
-  assert.equal(banner.listenerCount('close'), 0);
 });
 
 test('a banner carries the workspace as title, headline as subtitle, detail as body on macOS', () => {

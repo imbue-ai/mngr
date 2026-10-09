@@ -17,7 +17,6 @@ const fs = require('fs');
 const path = require('path');
 
 const { MIGRATION_MARKER_NAME, migrationPlanFor } = require('./platform-roots');
-const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 
 // The state root's subtrees whose files point at the legacy root rather than
 // merely mentioning it, with the predicate that picks the ones to rewrite.
@@ -281,7 +280,7 @@ function ensureLegacyLatchkeyLink({ legacyDir, roots, log = console.log }) {
  */
 function recordMigrationFailure({ roots, legacyDir, error, log = console.error }) {
   const detail =
-    `${PRODUCT_DISPLAY_NAME} could not finish moving its data out of ${legacyDir}.\n\n` +
+    `Minds could not finish moving its data out of ${legacyDir}.\n\n` +
     `${error && error.stack ? error.stack : error}\n\n` +
     'Nothing was deleted; whatever has not moved yet is still there, and the next launch retries.';
   try {

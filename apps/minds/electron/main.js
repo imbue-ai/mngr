@@ -28,12 +28,7 @@ const {
 const { startRelaunchAfterExit } = require('./linux-relaunch');
 // Workspace-URL classification lives in ./surface-routing so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
-const {
-  parseOverlayBehindWorkspaceId,
-  parseWorkspaceId,
-  parsePopoutRoute,
-  popoutRoutePath,
-} = require('./surface-routing');
+const { parseWorkspaceId, parsePopoutRoute, popoutRoutePath } = require('./surface-routing');
 // Pulled-out workspace windows (the pull-out-window spec): the pure decisions
 // live in ./popout-policy so they can be unit-tested under plain node.
 const {
@@ -50,18 +45,7 @@ const {
   POPOUT_MIN_HEIGHT,
 } = require('./popout-policy');
 const { createTearOutWatch } = require('./tear-out-watch');
-const {
-  createBannerRegistry,
-  linkFallbackFor,
-  nativeNotificationOptionsFor,
-  routeNotificationClick,
-} = require('./notifications');
-const {
-  decideWorkspaceWindowTarget,
-  dedupeRestoreEntries,
-  isBareWorkspaceRoute,
-  resolveDuplicateWorkspaceLanding,
-} = require('./window-policy');
+const { linkFallbackFor, nativeNotificationOptionsFor, routeNotificationClick } = require('./notifications');
 const {
   shouldWriteSessionState,
   createDebouncedSaver,
@@ -114,7 +98,7 @@ try {
   migrateLegacyDataDir({ legacyDir: legacyDataDir, roots: platformRoots });
 } catch (err) {
   const detail = recordMigrationFailure({ roots: platformRoots, legacyDir: legacyDataDir, error: err });
-  dialog.showErrorBox(`${PRODUCT_DISPLAY_NAME} could not move its data`, detail);
+  dialog.showErrorBox('Minds could not move its data', detail);
   throw err;
 }
 
@@ -368,52 +352,31 @@ function findPopoutBundle(workspaceId, windowId) {
   return null;
 }
 
-// The workspace a window holds: the one it shows, or the one an app overlay
-// on it floats over.
-function heldWorkspaceIdOf(bundle) {
-  return bundle.currentWorkspaceId || bundle.overlayOverWorkspaceId;
-}
-
-// Windows currently holding ``workspaceId``: its one main window (see
-// window-policy.js) and any of its pulled-out windows.
+// Windows currently showing ``workspaceId`` (there may be several: the
+// one-window-per-workspace rule was deliberately dropped with the collapse --
+// a browser user can always open the same workspace in two tabs).
 function findBundlesForWorkspace(workspaceId) {
   const found = [];
   if (!workspaceId) return found;
   for (const b of bundles) {
-    if (!b.window.isDestroyed() && sameWorkspaceId(heldWorkspaceIdOf(b), workspaceId)) found.push(b);
+    if (!b.window.isDestroyed() && sameWorkspaceId(b.currentWorkspaceId, workspaceId)) found.push(b);
   }
   return found;
 }
 
-// ``bundle`` landed on a workspace ``holder`` already holds: raise the holder
-// with what the landing was for, and send ``bundle`` back where it came from.
-function yieldDuplicateWorkspaceLanding(bundle, holder, route, isArrivedByGoingBack) {
-  const history = bundle.window.webContents.navigationHistory;
-  const { isRouteHandedOver, retreat } = resolveDuplicateWorkspaceLanding({
-    route,
-    isArrivedByGoingBack,
-    canGoBack: history.canGoBack(),
-    canGoForward: history.canGoForward(),
-  });
-  console.log(`[nav] ${route} is held by another window; raising it and sending this one ${retreat}`);
-  focusBundle(holder);
-  if (isRouteHandedOver) navigateBundle(holder, route);
-  if (retreat === 'back') history.goBack();
-  else if (retreat === 'forward') history.goForward();
-  else if (backendBaseUrl) navigateBundle(bundle, backendBaseUrl + '/');
-}
-
-// The main window currently showing ``workspaceId``, or null. It scans
-// ``mruWindows`` (most-recently-focused order) so a transient second main
-// window -- one caught mid-claim -- resolves to the one the user last used.
+// The most-recently-focused window currently showing ``workspaceId``, or null.
+// Unlike ``findBundlesForWorkspace``, which scans ``bundles`` (Set insertion /
+// window-creation order), this scans ``mruWindows`` (kept in actual
+// most-recently-focused order) -- the ordering a "focus the window already
+// showing this" gesture needs when more than one window is showing it.
 // Popouts are excluded: a gesture that navigates "the window showing this
 // workspace" must never land on a popout, which shows exactly one pulled-out
-// window and nothing else. ``excludedBundle``, when given, is never the answer.
-function mostRecentBundleForWorkspace(workspaceId, excludedBundle = null) {
+// window and nothing else.
+function mostRecentBundleForWorkspace(workspaceId) {
   if (!workspaceId) return null;
   for (const b of mruWindows) {
-    if (b === excludedBundle || b.window.isDestroyed() || !isNavigationTarget(b.kind)) continue;
-    if (sameWorkspaceId(heldWorkspaceIdOf(b), workspaceId)) return b;
+    if (b.window.isDestroyed() || !isNavigationTarget(b.kind)) continue;
+    if (sameWorkspaceId(b.currentWorkspaceId, workspaceId)) return b;
   }
   return null;
 }
@@ -451,18 +414,6 @@ function repaintAllWindowsAfterWake(trigger) {
     repainted += 1;
   }
   console.log(`[wake-repaint] ${trigger}: forced repaint of ${repainted} window(s)`);
-}
-
-// The last lock state relayed, so a page that loads while the screen is
-// locked starts out knowing it.
-let isScreenLocked = false;
-
-function relayScreenLockToAllWindows(isLocked) {
-  isScreenLocked = isLocked;
-  for (const b of bundles) {
-    if (b.window.isDestroyed() || b.window.webContents.isDestroyed()) continue;
-    b.window.webContents.send('screen-lock-changed', isLocked);
-  }
 }
 
 // Popouts are excluded unless asked for, as in mostRecentBundleForWorkspace;
@@ -707,10 +658,6 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
     // titles: the displayed workspace's /goto path, or the local page path.
     currentContentUrl: null,
     currentWorkspaceId: null,
-    overlayOverWorkspaceId: null,
-    // The window's place in its history at its last committed navigation,
-    // which tells a step back from a step forward.
-    historyIndex: null,
     preErrorUrl: null,
     isErrorState: false,
     isLoadingState: true,
@@ -747,7 +694,6 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
   win.webContents.on('did-finish-load', () => {
     updateOsTitle(bundle);
     applyDisplayZoomTo(win.webContents);
-    if (isScreenLocked) win.webContents.send('screen-lock-changed', true);
   });
   win.webContents.on('did-navigate', () => applyDisplayZoomTo(win.webContents));
 
@@ -868,8 +814,8 @@ function wireBundleNavigationEvents(bundle) {
   const wc = bundle.window.webContents;
 
   // Top-level navigation: the SPA's routes (hub pages and /workspace/<id>).
-  // The SPA owns the UI; main records what it needs for session persistence,
-  // titles, and error recovery, and holds each workspace to one main window.
+  // The SPA owns the UI; main just records what it needs for session
+  // persistence, titles, and error recovery.
   const onTopLevelNavigate = (url) => {
     if (bundle.isErrorState) return;
     let parsed = null;
@@ -882,9 +828,6 @@ function wireBundleNavigationEvents(bundle) {
     bundle.chromeLoadFailedUrl = null;
     bundle.isChromeCrashed = false;
     console.log(`[nav] window committed ${url}`);
-    const historyIndex = wc.navigationHistory.getActiveIndex();
-    const isArrivedByGoingBack = bundle.historyIndex !== null && historyIndex < bundle.historyIndex;
-    bundle.historyIndex = historyIndex;
     // The SPA's workspace routes (/workspace/<id>, and its /options overlay,
     // which keeps the workspace surface mounted underneath -- but NOT
     // /workspace/<id>/settings, a legacy redirect route) show a workspace:
@@ -894,22 +837,8 @@ function wireBundleNavigationEvents(bundle) {
     // before discovery re-confirms the agent).
     const workspaceRouteMatch = parsed.pathname.match(/^\/workspace\/((?:agent|host)-[a-f0-9]+)(?:\/options)?\/?$/i);
     const popoutRoute = parsePopoutRoute(url);
-    // An app overlay keeps the workspace it was opened over mounted behind
-    // it, so the window still holds that workspace: another window asking for
-    // it is sent here, and closing the overlay never leaves two main windows
-    // on it.
-    const overlayBehind = parseOverlayBehindWorkspaceId(url);
-    const landedWorkspaceId = toHostScopedWorkspaceId(workspaceRouteMatch ? workspaceRouteMatch[1] : overlayBehind);
-    // The one checkpoint of the one-main-window rule: every path onto a
-    // workspace commits here, history steps included.
-    const holder = mostRecentBundleForWorkspace(landedWorkspaceId, bundle);
-    if (holder) {
-      yieldDuplicateWorkspaceLanding(bundle, holder, parsed.pathname + parsed.search, isArrivedByGoingBack);
-      return;
-    }
-    bundle.overlayOverWorkspaceId = overlayBehind ? landedWorkspaceId : null;
     if (workspaceRouteMatch) {
-      bundle.currentWorkspaceId = landedWorkspaceId;
+      bundle.currentWorkspaceId = toHostScopedWorkspaceId(workspaceRouteMatch[1]);
       bundle.currentContentUrl = '/goto/' + bundle.currentWorkspaceId + '/';
     } else if (popoutRoute) {
       // A popout persists as its own port-independent route, host-keyed like
@@ -1549,10 +1478,7 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
     }
     results.push(entry);
   }
-  // One main window per workspace, even from a session saved before the rule.
-  const mainWindowWorkspaceIdOf = (entry) =>
-    (isPopoutEntry(entry) ? null : persistedEntryWorkspaceId(toAbsoluteUrl(entry.url)));
-  return dedupeRestoreEntries(results, mainWindowWorkspaceIdOf, sameWorkspaceId);
+  return results;
 }
 
 // The popout route a persisted entry names, or null for a main window's. Its
@@ -2109,13 +2035,7 @@ async function onReady() {
   installDockMenu();
   installDevDockIcon();
   powerMonitor.on('resume', () => repaintAllWindowsAfterWake('resume'));
-  powerMonitor.on('unlock-screen', () => {
-    repaintAllWindowsAfterWake('unlock-screen');
-    relayScreenLockToAllWindows(false);
-  });
-  // Relayed so each window's client_state carries it: the backend's banner
-  // gate stops trusting focus, and watched chats, while the screen is locked.
-  powerMonitor.on('lock-screen', () => relayScreenLockToAllWindows(true));
+  powerMonitor.on('unlock-screen', () => repaintAllWindowsAfterWake('unlock-screen'));
 
   initialBundle = createBundle();
   sizeFromSavedSession(initialBundle);
@@ -2410,9 +2330,6 @@ function applyStartupRouting(bundle, { route, restorable, savedState }, { bounds
     // second popout of the same window would be a duplicate.
     const popoutRoute = popoutEntryRoute(entry);
     if (popoutRoute && findPopoutBundle(popoutRoute.workspaceId, popoutRoute.windowId)) continue;
-    // Likewise a main window for a workspace a window already open shows.
-    const workspaceId = popoutRoute ? null : persistedEntryWorkspaceId(toAbsoluteUrl(entry.url));
-    if (workspaceId && mostRecentBundleForWorkspace(workspaceId)) continue;
     const restored = openNewWindow(toRestoredContentUrl(entry), { showInactive: true });
     restoreWindowBounds(restored, entry);
     restoredBundles.push(restored);
@@ -2439,7 +2356,7 @@ async function startBackendWithRetry() {
   try {
     const { loginUrl, port } = await startBackend(
       (status) => broadcastStatusToLoadingWindows(status),
-      (event) => (event.event === 'notification_read' ? handleNotificationRead(event) : handleNotification(event)),
+      (event) => handleNotification(event),
       (event) => handleAuthEvent(event),
       (event) => handleMngrForwardStarted(event),
       (line) => broadcastStartupLogLine(line),
@@ -2613,39 +2530,18 @@ function openNotificationDestination(url, source = null, entry = null) {
   return routeNotificationClick(url ? toAbsoluteUrl(url) : null, source, {
     findWindow: mostRecentBundleForWorkspace,
     mostRecentWindow: getMostRecentWindow,
-    showsWorkspace: (bundle) => !!heldWorkspaceIdOf(bundle),
     focus: focusBundleFromNotificationClick,
     navigate: navigateBundle,
-    openWindow: (destination) => {
-      if (!backendBaseUrl || lastErrorTakeover || isShuttingDown || isQuitSequenceRunning) {
-        console.log('[notification] click opens no window: the backend is not serving or the app is quitting');
-        return null;
-      }
-      const opened = openNewWindow(destination || backendBaseUrl + '/');
-      focusBundleFromNotificationClick(opened);
-      return opened;
-    },
-    openEntry: entry ? (target, { isNewWindow }) => {
-      if (!isNewWindow && isOnBackendPage(target) && !target.window.webContents.isLoading()) {
+    openEntry: entry ? (target) => {
+      if (isOnBackendPage(target) && !target.window.webContents.isLoading()) {
         target.window.webContents.send('open-notification', entry);
-        return;
+      } else {
+        // Keep the action until the new page has registered its listener.
+        target.pendingNotificationEntries.push(entry);
+        navigateBundle(target, url || '/');
       }
-      // Keep the action until the page has registered its listener.
-      target.pendingNotificationEntries.push(entry);
-      if (!isNewWindow) navigateBundle(target, url || '/');
     } : undefined,
   });
-}
-
-// The banners the OS may still be showing, so reading a chat can take its down.
-const liveBanners = createBannerRegistry();
-
-// The backend's ``notification_read`` event: the chat's messages were read
-// (someone is watching the chat), so its banners are old news.
-function handleNotificationRead(event) {
-  const chatAgentId = typeof event.chat_agent_id === 'string' ? event.chat_agent_id : '';
-  const closedCount = liveBanners.closeChat(chatAgentId);
-  if (closedCount > 0) console.log(`[notification] chat ${chatAgentId} was read: closed ${closedCount} banner(s)`);
 }
 
 function handleNotification(event) {
@@ -2680,7 +2576,6 @@ function handleNotification(event) {
     console.warn(`[notification] failed to display (OS-reported): ${JSON.stringify(title)}`);
   });
   notification.on('click', () => openNotificationDestination(event.url, null, event.entry));
-  liveBanners.remember(event.entry && event.entry.chat_agent_id, notification);
   notification.show();
   console.log(`[notification] .show() called for ${JSON.stringify(title)} -- if no banner appeared, check System Settings > Notifications for this app`);
 }
@@ -3296,40 +3191,12 @@ ipcMain.on('set-popout-title', (event, title) => {
   updateOsTitle(bundle);
 });
 
-function isWorkspaceIdArgument(workspaceId) {
-  return typeof workspaceId === 'string' && /^(?:agent|host)-[a-f0-9]{1,64}$/i.test(workspaceId);
-}
-
-// "Open in new window": the workspace's own main window when it has one.
 ipcMain.on('open-workspace-in-new-window', (_event, agentId) => {
-  if (!isWorkspaceIdArgument(agentId)) return;
-  const existing = mostRecentBundleForWorkspace(agentId);
-  if (decideWorkspaceWindowTarget({ existing, source: null, mayNavigateSource: false }) === 'focus-existing') {
-    focusBundle(existing);
-    return;
-  }
+  if (typeof agentId !== 'string' || !/^(?:agent|host)-[a-f0-9]{1,64}$/i.test(agentId)) return;
+  // "Open in new window" always opens a new window, even when another window
+  // already shows the workspace (two windows on one workspace is allowed).
   const url = wrapperUrlForWorkspace(agentId);
   if (url) openNewWindow(url);
-});
-
-// A main window asks before it navigates onto a workspace another main window
-// may already show. When one does, that window is raised (and handed the
-// route when it names more than the bare workspace) and the asker stays put;
-// otherwise the asker is recorded as the workspace's window at once, so a
-// second window asking before this one commits is sent here too.
-ipcMain.handle('claim-workspace-window', (event, workspaceId, route) => {
-  const source = getBundleFromEvent(event);
-  if (!source || isPopoutBundle(source) || !isWorkspaceIdArgument(workspaceId)) return { opened_elsewhere: false };
-  const existing = mostRecentBundleForWorkspace(workspaceId);
-  if (decideWorkspaceWindowTarget({ existing, source, mayNavigateSource: true }) === 'focus-existing') {
-    focusBundle(existing);
-    if (typeof route === 'string' && route.startsWith('/workspace/') && !isBareWorkspaceRoute(route)) {
-      navigateBundle(existing, route);
-    }
-    return { opened_elsewhere: true };
-  }
-  source.currentWorkspaceId = toHostScopedWorkspaceId(workspaceId);
-  return { opened_elsewhere: false };
 });
 
 ipcMain.handle('open-notification-in-existing-window', (event, route, entry) => {

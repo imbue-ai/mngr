@@ -217,20 +217,17 @@ class ImbueCloudSyncConflictCliError(ImbueCloudCliError):
 
 # The connector's structured refusals of a grants push or an invitation,
 # relayed by the plugin as the JSON body's ``code``.
-_SHARE_REFUSAL_CODES: Final[frozenset[str]] = frozenset(
-    {"not_published", "grants_out_of_date", "not_invitable", "no_workspace_link"}
-)
+_SHARE_REFUSAL_CODES: Final[frozenset[str]] = frozenset({"not_published", "grants_out_of_date", "not_invitable"})
 
 
 class ImbueCloudShareRefusedCliError(ImbueCloudCliError):
-    """The connector refused a grants push, an invitation, or a mobile access link with a structured 409.
+    """The connector refused a grants push or an invitation with a structured 409.
 
     ``code`` is the reason: ``not_published`` (the workspace is unpublished),
     ``grants_out_of_date`` (the centralized grants table holds no open grant
-    for the subject: push the document, then try once more), ``not_invitable``
-    (the grantee has already joined, or the workspace has no link yet), or
-    ``no_workspace_link`` (the workspace's shell has registered no address or
-    name yet, so there is nothing to email).
+    for the subject: push the document, then try once more), or
+    ``not_invitable`` (the grantee has already joined, or the workspace has no
+    link yet).
     """
 
     code: str = ""
@@ -354,14 +351,6 @@ class InvitationCliResult(WireModel):
 
     outcome: str
     invited_at: str | None = None
-
-
-class MobileAccessLinkCliResult(WireModel):
-    """Result of `mngr imbue_cloud shares mobile-access-link`: how the request to be emailed the link ended."""
-
-    outcome: str
-    recipient_email: str = ""
-    sent_at: str | None = None
 
 
 class InvitationOutcomeCliEntry(WireModel):
@@ -995,7 +984,6 @@ class ImbueCloudCli(MutableModel):
         app: str | None,
         link: str | None,
         workspace_name: str | None,
-        app_display_name: str | None,
     ) -> InvitationCliResult:
         """Invite one grant's grantee; raises :class:`ImbueCloudShareRefusedCliError` on the connector's 409 codes."""
         args = ["shares", "invite", host_id, "--account", account]
@@ -1005,7 +993,6 @@ class ImbueCloudCli(MutableModel):
             ("--app", app),
             ("--link", link),
             ("--workspace-name", workspace_name),
-            ("--app-display-name", app_display_name),
         ):
             if value:
                 args.extend([option, value])
@@ -1017,23 +1004,6 @@ class ImbueCloudCli(MutableModel):
         if not isinstance(parsed, dict) or not isinstance(parsed.get("outcome"), str):
             raise ImbueCloudCliError("Malformed shares invite output: expected an outcome")
         return InvitationCliResult.model_validate(parsed)
-
-    def send_mobile_access_link(
-        self, *, account: str, host_id: str, link: str | None, workspace_name: str | None
-    ) -> MobileAccessLinkCliResult:
-        """Have the connector email the account its own workspace's link; raises on the connector's 409 codes."""
-        args = ["shares", "mobile-access-link", host_id, "--account", account]
-        for option, value in (("--link", link), ("--workspace-name", workspace_name)):
-            if value:
-                args.extend([option, value])
-        result = self._run(args, cg_name="imbue-cloud-shares-mobile-access-link")
-        refused = self._share_refusal_from(result, "shares mobile-access-link")
-        if refused is not None:
-            raise refused
-        parsed = self._expect_success(result, "shares mobile-access-link")
-        if not isinstance(parsed, dict) or not isinstance(parsed.get("outcome"), str):
-            raise ImbueCloudCliError("Malformed shares mobile-access-link output: expected an outcome")
-        return MobileAccessLinkCliResult.model_validate(parsed)
 
     def list_invitation_outcomes(self, *, account: str, host_id: str) -> list[InvitationOutcomeCliEntry]:
         """What the granter may learn about each open user or email grant of the share."""

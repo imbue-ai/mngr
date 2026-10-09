@@ -8,7 +8,6 @@ import type {
   UiNotificationEntry,
   UiWorkspacesMessage,
 } from "./channel/messages";
-import type { CreateFormDefaults } from "./models/create";
 import { createAppQueryClient } from "./models/queryClient";
 import type { SettingsOverview } from "./models/settings";
 import type { SharePanelModelOptions } from "./models/sharePanel";
@@ -144,33 +143,6 @@ export function secondAccountEntry(): UiAccountEntry {
     email: "bob@example.com",
     is_default: false,
   });
-}
-
-/** A create-form defaults payload with accountEntry's account as the default and Imbue Cloud selected. */
-export function createFormDefaults(overrides: Partial<CreateFormDefaults> = {}): CreateFormDefaults {
-  return {
-    accounts: [{ user_id: "user-1", email: "alice@example.com" }],
-    default_account_id: "user-1",
-    launch_modes: ["IMBUE_CLOUD", "LIMA", "DOCKER"],
-    selected_launch_mode: "IMBUE_CLOUD",
-    docker_runtimes: ["RUNC", "RUNSC"],
-    selected_docker_runtime: "RUNSC",
-    backup_providers: ["IMBUE_CLOUD", "API_KEY", "CONFIGURE_LATER"],
-    selected_backup_provider: "IMBUE_CLOUD",
-    region_options_by_launch_mode: { IMBUE_CLOUD: ["US-EAST-VA", "US-WEST-OR"] },
-    region_selected_by_launch_mode: { IMBUE_CLOUD: "US-WEST-OR" },
-    instance_types_by_backend: {},
-    default_instance_type_by_backend: {},
-    cloud_accounts: [],
-    byok_clouds_enabled: false,
-    git_url: "https://github.com/imbue-ai/default-workspace-template.git",
-    branch: "minds-v9.9.9",
-    color: "#0b292b",
-    prefill: null,
-    local_prerequisites: [],
-    local_launch_mode: "DOCKER",
-    ...overrides,
-  };
 }
 
 /** One notification-feed entry as the wire carries it: an unresolved

@@ -134,7 +134,7 @@ omit = [
   "*/utils/testing.py",
   "*/utils/plugin_testing.py",
   "*/utils/mock_provider.py",
-  # Imbue Studio has its own coverage configuration (apps/minds/pyproject.toml)
+  # Minds app has its own coverage configuration (apps/minds/pyproject.toml)
   "*/minds/*",
   # These packages are gated individually by their own (lower) fail_under
   # thresholds; excluding them from the combined report keeps the

@@ -214,7 +214,7 @@ def run_backup_trim(
     )
     return False, (
         "Still over the storage limit after trimming old backups "
-        "(each workspace keeps at least its latest backup)." + untrimmable_suffix
+        "(each machine keeps at least its latest backup)." + untrimmable_suffix
     )
 
 

@@ -27,7 +27,7 @@
  *       ``effect``: it can only be resolved by a client that supplies
  *       the chosen account in the approve override body, never by a
  *       bare ``/approve`` call.
- *       ``proxy: true`` asks Imbue Studio to also send the service's requests
+ *       ``proxy: true`` asks Minds to also send the service's requests
  *       out through the desktop that approves the request, once the grant
  *       is approved: that desktop puts itself first on the service's
  *       desktop egress route. Like a file-sharing ``sync`` it is not a
@@ -41,7 +41,7 @@
  *       expanded to an absolute path before storage), and must not
  *       contain any ``..`` segments (rejected as a path-traversal
  *       attempt). ``~user`` notation for another user's home is
- *       rejected. ``sync`` asks Imbue Studio to also keep a synchronized copy
+ *       rejected. ``sync`` asks Minds to also keep a synchronized copy
  *       of the folder on the workspace's machine once the grant is
  *       approved; ``conflict`` (default ``NEWER``) says which side wins
  *       when a two-way sync finds the same file changed on both. The
@@ -434,7 +434,7 @@ function buildAccountScopeSchema(scope, account) {
 // ``file-sharing`` request. The agent reaches the Minds API through
 // the gateway's ``minds-api-proxy`` extension, which mounts under
 // ``/minds-api-proxy/...``. ``/api/v1/files`` is the
-// Imbue Studio WebDAV mount that actually serves files, each desktop under
+// Minds-side WebDAV mount that actually serves files, each desktop under
 // its own device id: the file ``/abs/path`` on desktop ``host-abc`` lands
 // at the URL path ``/api/v1/files/host-abc/abs/path`` (the WebDAV share
 // roots are mounted at their on-disk path, so the rest of the URL mirrors
@@ -679,10 +679,10 @@ function ensureNoExtraneousFields(parent, allowed, parsed) {
 }
 
 /**
- * The on-disk roots the Imbue Studio WebDAV server mounts: the current user's
+ * The on-disk roots the Minds WebDAV server mounts: the current user's
  * home directory and the system temp directory. Computed from Node's
  * ``homedir()`` / ``tmpdir()`` which -- on the desktop host, where the
- * gateway and the Imbue Studio WebDAV server run as the same user in the same
+ * gateway and the Minds WebDAV server run as the same user in the same
  * environment -- match the ``Path.home()`` / ``tempfile.gettempdir()``
  * roots that ``webdav.py`` actually serves.
  *
@@ -783,7 +783,7 @@ function validateAbsoluteFileSharingPath(rawPath) {
   // name / WebDAV pattern derived downstream -- all operate on a
   // canonical absolute path.
   const expandedPath = expandFileSharingHomePrefix(rawPath);
-  // POSIX rule -- absolute paths must start with '/'. The Imbue Studio host
+  // POSIX rule -- absolute paths must start with '/'. The Minds host
   // is always POSIX (macOS or Linux), so we do not accept
   // Windows-style ``C:\\...`` paths.
   if (!expandedPath.startsWith('/')) {
@@ -809,7 +809,7 @@ function validateAbsoluteFileSharingPath(rawPath) {
   if (!normalized.startsWith('/') || normalized.includes('/../') || normalized.endsWith('/..')) {
     throw new InvalidRequestBodyError(`payload.'path' normalizes to a traversed path: ${rawPath} -> ${normalized}.`);
   }
-  // Reject anything the Imbue Studio WebDAV server could never serve: it mounts
+  // Reject anything the Minds WebDAV server could never serve: it mounts
   // only the home and temp roots, so a grant elsewhere is inert (404).
   const roots = fileSharingMountRoots();
   if (!roots.some((root) => isPathWithinFileSharingRoot(normalized, root))) {

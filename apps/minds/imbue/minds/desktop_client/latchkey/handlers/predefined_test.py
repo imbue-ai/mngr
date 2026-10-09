@@ -380,7 +380,7 @@ def test_grant_with_missing_credentials_invokes_auth_browser(tmp_path: Path) -> 
     assert result.outcome == GrantOutcome.GRANTED
     auth_recording = _read_recording(tmp_path / "auth_latchkey_report.jsonl")
     assert len(auth_recording) == 1
-    assert auth_recording[0]["argv"] == ["auth", "browser", "slack", "--strict"]
+    assert auth_recording[0]["argv"] == ["auth", "browser", "slack"]
 
 
 def test_grant_with_invalid_credentials_also_invokes_auth_browser(tmp_path: Path) -> None:
@@ -1468,7 +1468,7 @@ def test_grant_re_signs_in_a_specific_stale_account(tmp_path: Path) -> None:
     # latchkey was told which account to re-authenticate, so it reuses that
     # account's stored client rather than the service-level preparation.
     recording = _read_recording(tmp_path / "auth_latchkey_report.jsonl")
-    assert recording[0]["argv"] == ["auth", "browser", "slack", "--strict", "--account", "alice@x"]
+    assert recording[0]["argv"] == ["auth", "browser", "slack", "--account", "alice@x"]
     on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
     assert on_disk["rules"] == [{account_scope_key("slack-api", "alice@x"): ["slack-read-all"]}]
 

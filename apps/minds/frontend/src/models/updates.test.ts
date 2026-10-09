@@ -94,7 +94,7 @@ describe("UpdatesStore", () => {
       Promise.resolve(
         new Response(
           JSON.stringify({
-            error: "Couldn't start the update agent in this workspace.",
+            error: "Couldn't start the update agent in this machine.",
             detail: "Error: Unknown fields in agent_types.opencode",
           }),
           { status: 502 },
@@ -238,7 +238,7 @@ describe("update state predicates", () => {
   });
 
   it("reports an update that never went out ahead of an earlier run's outcome", () => {
-    const update = { ...OUT_OF_DATE, verdict: "STUCK" as const, dispatch_failure: "Couldn't start this workspace." };
+    const update = { ...OUT_OF_DATE, verdict: "STUCK" as const, dispatch_failure: "Couldn't start this machine." };
     expect(updateRunOutcome(update)).toBe("not-started");
   });
 });
@@ -257,10 +257,10 @@ describe("updateBadgeFor", () => {
       false,
     );
     expect(devBuild?.label).toBe("Version unknown");
-    expect(devBuild?.tooltip).not.toContain("this workspace");
+    expect(devBuild?.tooltip).not.toContain("this machine");
 
     const unreadable = updateBadgeFor(UNKNOWN, false);
-    expect(unreadable?.tooltip).toContain("this workspace");
+    expect(unreadable?.tooltip).toContain("this machine");
   });
 
   it("shows the run in flight ahead of everything the detection sweep says", () => {
@@ -305,14 +305,14 @@ describe("updateBadgeFor", () => {
 
   it("says an update that never went out didn't start, ahead of an earlier run's outcome", () => {
     const badge = updateBadgeFor(
-      { ...OUT_OF_DATE, verdict: "STUCK", dispatch_failure: "Couldn't reach this workspace to start the update." },
+      { ...OUT_OF_DATE, verdict: "STUCK", dispatch_failure: "Couldn't reach this machine to start the update." },
       false,
     );
     expect(badge).toMatchObject({
       state: "failed",
       tone: "error",
       label: "Update didn't start",
-      tooltip: "Couldn't reach this workspace to start the update.",
+      tooltip: "Couldn't reach this machine to start the update.",
     });
   });
 

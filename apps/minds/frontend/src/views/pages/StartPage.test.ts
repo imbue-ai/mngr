@@ -1,5 +1,6 @@
 import type m from "mithril";
 import { describe, expect, it } from "vitest";
+import type { CreateFormDefaults } from "../../models/create";
 import {
   EXISTING_LOGIN_LABEL,
   REPORTING_ACCEPT_LABEL,
@@ -11,15 +12,37 @@ import {
   startQuestions,
   undoAnswer,
 } from "../../models/startFlow";
-import { allText, attrsOf, collectVnodes, createFormDefaults, withAttr } from "../../testing";
+import { allText, attrsOf, collectVnodes, withAttr } from "../../testing";
 import { areDefaultsStale, cloudCreateBody, transcriptTurns } from "./StartPage";
 
-const SIGNED_OUT = { signedInAccount: null, knownAccountIds: [] };
-const SIGNED_IN = { signedInAccount: { userId: "user-1", email: "a@b.com" }, knownAccountIds: ["user-1"] };
+function defaults(): CreateFormDefaults {
+  return {
+    accounts: [{ user_id: "user-1", email: "alice@example.com" }],
+    default_account_id: "user-1",
+    launch_modes: ["IMBUE_CLOUD", "LIMA", "DOCKER"],
+    selected_launch_mode: "IMBUE_CLOUD",
+    docker_runtimes: ["RUNC", "RUNSC"],
+    selected_docker_runtime: "RUNSC",
+    backup_providers: ["IMBUE_CLOUD", "API_KEY", "CONFIGURE_LATER"],
+    selected_backup_provider: "IMBUE_CLOUD",
+    region_options_by_launch_mode: { IMBUE_CLOUD: ["US-EAST-VA", "US-WEST-OR"] },
+    region_selected_by_launch_mode: { IMBUE_CLOUD: "US-WEST-OR" },
+    instance_types_by_backend: {},
+    default_instance_type_by_backend: {},
+    cloud_accounts: [],
+    byok_clouds_enabled: false,
+    git_url: "https://github.com/imbue-ai/default-workspace-template.git",
+    branch: "minds-v9.9.9",
+    color: "#0b292b",
+    prefill: null,
+    local_prerequisites: [],
+    local_launch_mode: "DOCKER",
+  };
+}
 
 describe("cloudCreateBody", () => {
   it("is the create form's remote preset with the default account and its region", () => {
-    const body = cloudCreateBody(createFormDefaults(), "user-1");
+    const body = cloudCreateBody(defaults());
     expect(body).toMatchObject({
       launch_mode: "IMBUE_CLOUD",
       backup_provider: "IMBUE_CLOUD",
@@ -32,32 +55,23 @@ describe("cloudCreateBody", () => {
     });
   });
 
-  it("runs under the flow's account rather than the default", () => {
-    const withBob = createFormDefaults({
-      accounts: [
-        { user_id: "user-1", email: "alice@example.com" },
-        { user_id: "user-2", email: "bob@example.com" },
-      ],
-    });
-    expect(cloudCreateBody(withBob, "user-2")).toMatchObject({ account_id: "user-2" });
-  });
 });
 
 describe("areDefaultsStale", () => {
-  it("re-reads defaults that do not list the flow's account", () => {
+  it("re-reads defaults that list no account once one exists", () => {
     // The route reads the defaults when it mounts, which on a first run is
-    // before the account step; a create built from those could not name the
-    // account that signed in since.
-    expect(areDefaultsStale(createFormDefaults({ accounts: [], default_account_id: "" }), "user-1")).toBe(true);
-    expect(areDefaultsStale(createFormDefaults(), "user-2")).toBe(true);
+    // before the account step; a create built from those would carry no
+    // account and be refused.
+    expect(areDefaultsStale({ ...defaults(), accounts: [], default_account_id: "" }, true)).toBe(true);
   });
 
-  it("keeps defaults that already list the flow's account", () => {
-    expect(areDefaultsStale(createFormDefaults(), "user-1")).toBe(false);
+  it("keeps defaults that already list the account, and anything read while signed out", () => {
+    expect(areDefaultsStale(defaults(), true)).toBe(false);
+    expect(areDefaultsStale({ ...defaults(), accounts: [], default_account_id: "" }, false)).toBe(false);
   });
 
   it("has nothing to keep when none were read", () => {
-    expect(areDefaultsStale(null, "user-1")).toBe(true);
+    expect(areDefaultsStale(null, false)).toBe(true);
   });
 });
 
@@ -77,7 +91,7 @@ describe("transcriptTurns", () => {
   });
 
   it("renders an answered question as the user's words with an undo, and no buttons", () => {
-    const answered = answerStep(started, 1, "cloud", SIGNED_OUT);
+    const answered = answerStep(started, 1, "cloud", { isSignedIn: false, signedInEmail: "" });
     const turns = transcriptTurns(answered.entries, { isInstant: true, isPressable: true, onUndo: () => undefined });
     const text = allText(turns);
     expect(text).toContain("On Imbue Cloud");
@@ -92,7 +106,7 @@ describe("transcriptTurns", () => {
   });
 
   it("brings a re-opened question's buttons back without the arrival delay", () => {
-    const reopened = undoAnswer(answerStep(started, 1, "cloud", SIGNED_OUT), 1);
+    const reopened = undoAnswer(answerStep(started, 1, "cloud", { isSignedIn: false, signedInEmail: "" }), 1);
     const delayOf = (turns: m.Children[]): string =>
       String(
         collectVnodes(turns)
@@ -114,36 +128,19 @@ describe("transcriptTurns", () => {
   });
 });
 
-describe("transcriptTurns on the account question with an account signed in", () => {
-  const asked = answerStep(startQuestions(initialStartFlowState(), REPORTING_ACCEPT_LABEL), 1, "cloud", SIGNED_IN);
-
-  it("bolds the signed-in email and offers to continue with it or use a different account", () => {
-    const turns = transcriptTurns(asked.entries, { isInstant: true, isPressable: true });
-    const strongTexts = collectVnodes(turns)
-      .filter((node) => node.tag === "strong")
-      .map((node) => allText(node));
-    expect(strongTexts).toEqual(["a@b.com"]);
-    const labels = withAttr(turns, "data-answer").map((node) => allText(node));
-    expect(labels).toEqual(["Use a different account", "Continue"]);
-  });
-});
-
 describe("transcriptTurns on the verification question", () => {
   const waiting = requireEmailVerification(
-    answerStep(
-      answerStep(startQuestions(initialStartFlowState(), REPORTING_ACCEPT_LABEL), 1, "cloud", SIGNED_IN),
-      2,
-      "continue",
-      SIGNED_IN,
-    ),
+    answerStep(startQuestions(initialStartFlowState(), REPORTING_ACCEPT_LABEL), 1, "cloud", {
+      isSignedIn: true,
+      signedInEmail: "a@b.com",
+    }),
+    "a@b.com",
   );
 
   it("leads with the requirement in bold, names the address, and offers only the verified button plus a resend", () => {
     const turns = transcriptTurns(waiting.entries, { isInstant: true, isPressable: true });
-    const strongTexts = collectVnodes(turns)
-      .filter((node) => node.tag === "strong")
-      .map((node) => allText(node));
-    expect(strongTexts).toContain("You must verify your email");
+    const strong = collectVnodes(turns).find((node) => node.tag === "strong");
+    expect(allText(strong)).toBe("You must verify your email");
     expect(allText(turns)).toContain("(click the link emailed to a@b.com when you created your account)");
     expect(withAttr(turns, "data-answer").map((node) => node.attrs?.["data-answer"])).toEqual(["verified"]);
     expect(allText(withAttr(turns, "data-aside"))).toContain(RESEND_EMAIL_LABEL);
@@ -163,7 +160,7 @@ describe("transcriptTurns on the verification question", () => {
     });
     expect(allText(turns)).toContain("I verified it");
     const undos = collectVnodes(turns).filter((node) => node.attrs?.["aria-label"] === "Change answer");
-    // The where-to-run and account answers keep their undo; the verified one has none.
-    expect(undos).toHaveLength(2);
+    // Only the where-to-run answer keeps its undo.
+    expect(undos).toHaveLength(1);
   });
 });

@@ -860,7 +860,7 @@ class CodexAgent(
         """Record the root rollout's absolute path in ``codex_transcript_path`` for the streamer.
 
         ``stream_transcript.sh`` tails the file named here to build the raw + common transcripts (what
-        ``mngr transcript`` and the Imbue Studio web chat read). On a turn TYPED into the TUI, codex's
+        ``mngr transcript`` and the Minds web chat read). On a turn TYPED into the TUI, codex's
         ``UserPromptSubmit`` hook (``record_session_pointers.sh``) records it -- but that hook never
         fires on mngr's programmatic ``turn/start`` turns, so without this the transcript stays empty
         for every web/CLI-driven send. mngr records it itself from the rollout ``inject_items`` just

@@ -43,16 +43,14 @@ def _make_feed(
     is_enabled: bool = True,
     style: NotificationStyle = NotificationStyle.BOTH,
     constructed_at: datetime = _CONSTRUCTED_AT,
-    is_main_window_focused: bool = False,
-    is_screen_locked: bool = False,
+    connected_workspace_agent_ids: tuple[str, ...] = (),
     cleared_request_ids_path: Path | None = None,
 ) -> NotificationFeed:
     preferences = NotificationDispatchPreferences(is_enabled=is_enabled, style=style)
     return NotificationFeed(
         notification_dispatcher=dispatcher,
         get_dispatch_preferences=lambda: preferences,
-        is_main_window_focused=lambda: is_main_window_focused,
-        is_screen_locked=lambda: is_screen_locked,
+        get_connected_focused_workspace_agent_ids=lambda: connected_workspace_agent_ids,
         constructed_at=constructed_at,
         cleared_request_ids_path=cleared_request_ids_path,
     )
@@ -311,8 +309,7 @@ def test_a_response_landing_between_the_dispatch_decision_and_the_dispatch_itsel
     feed = NotificationFeed(
         notification_dispatcher=dispatcher,
         get_dispatch_preferences=get_dispatch_preferences,
-        is_main_window_focused=lambda: False,
-        is_screen_locked=lambda: False,
+        get_connected_focused_workspace_agent_ids=lambda: (),
         constructed_at=_CONSTRUCTED_AT,
     )
 
@@ -433,44 +430,34 @@ def test_the_gateway_z_suffixed_timestamp_format_parses_and_dispatches() -> None
     assert len(dispatcher.dispatched) == 1
 
 
-@pytest.mark.witnesses(
-    "notifications.focused-main-window-toasts", partial="covers the banner side; toasts are the renderer's"
-)
-@pytest.mark.witnesses(
-    "notifications.unfocused-app-banners", partial="covers the banner side; toasts are the renderer's"
-)
-@pytest.mark.witnesses(
-    "notifications.os-only-preference-banners", partial="covers the banner side; toasts are the renderer's"
-)
-@pytest.mark.parametrize(
-    ("style", "is_main_window_focused", "is_screen_locked", "is_dispatch_expected"),
-    [
-        # A focused main window's toast stands in for the banner, whatever workspace it shows.
-        (NotificationStyle.BOTH, True, False, False),
-        # Nothing in front of the reader: the banner is the only nudge they will see.
-        (NotificationStyle.BOTH, False, False, True),
-        # A locked machine's windows may still report focus; nobody sees a toast behind the lock.
-        (NotificationStyle.BOTH, True, True, True),
-        # With no toasts allowed, the banner is the only surface left even while focused.
-        (NotificationStyle.OS, True, False, True),
-    ],
-)
-def test_the_banner_is_the_fallback_for_a_toast_nobody_can_see(
-    style: NotificationStyle, is_main_window_focused: bool, is_screen_locked: bool, is_dispatch_expected: bool
-) -> None:
+def test_no_dispatch_when_a_focused_connected_window_displays_the_asking_workspace() -> None:
     dispatcher = _make_recording_dispatcher()
-    feed = _make_feed(
-        dispatcher=dispatcher,
-        style=style,
-        is_main_window_focused=is_main_window_focused,
-        is_screen_locked=is_screen_locked,
-    )
+    agent_id = "agent-" + "a" * 32
+    feed = _make_feed(dispatcher=dispatcher, connected_workspace_agent_ids=(agent_id,))
 
-    feed.reconcile((_card("evt-1"),), {})
-    feed.append_agent_message(_agent_message())
-    feed.append_system_event(_system_event(workspace_agent_id=""))
+    message = feed.reconcile((_card("evt-1", workspace_agent_id=agent_id),), {})
 
-    assert len(dispatcher.dispatched) == (3 if is_dispatch_expected else 0)
+    assert message.unresolved_count == 1
+    assert dispatcher.dispatched == []
+
+
+def test_dispatch_proceeds_when_connected_windows_display_other_workspaces() -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher, connected_workspace_agent_ids=("agent-" + "b" * 32,))
+
+    feed.reconcile((_card("evt-1", workspace_agent_id="agent-" + "a" * 32),), {})
+
+    assert len(dispatcher.dispatched) == 1
+
+
+def test_an_unresolvable_workspace_entry_still_dispatches_with_windows_connected() -> None:
+    """No workspace agent id means the entry can never be "on screen"."""
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher, connected_workspace_agent_ids=("agent-" + "b" * 32,))
+
+    feed.reconcile((_card("evt-1", workspace_agent_id=""),), {})
+
+    assert len(dispatcher.dispatched) == 1
 
 
 def test_a_recreated_entry_after_eviction_does_not_dispatch_again() -> None:
@@ -581,67 +568,19 @@ def test_an_agent_message_enters_the_feed_unresolved_and_counts_toward_the_badge
     assert changes == [1]
 
 
-def _unresolved_ids(message: UiNotificationsMessage) -> set[str]:
-    return {entry.id for entry in message.entries if not entry.is_resolved}
+def test_navigating_to_a_workspace_reads_only_its_agent_messages() -> None:
+    feed = _make_feed()
+    other_workspace = "agent-" + "b" * 32
+    feed.append_agent_message(_agent_message())
+    kept = feed.append_agent_message(_agent_message(workspace_agent_id=other_workspace))
+    kept_event = feed.append_system_event(_system_event())
 
-
-@pytest.mark.witnesses(
-    "notifications.reading-a-chat-resolves-its-messages",
-    partial="covers the feed and the read event; closing banners is Electron's",
-)
-def test_a_watched_chat_reads_only_its_own_agent_messages() -> None:
-    dispatcher = _make_recording_dispatcher()
-    feed = _make_feed(dispatcher=dispatcher)
-    other_chat = "agent-" + "d" * 32
-    feed.reconcile((_card("evt-1"),), {})
-    first = feed.append_agent_message(_agent_message(), sent_at=_at(1))
-    second = feed.append_agent_message(_agent_message(), sent_at=_at(2))
-    kept = feed.append_agent_message(_agent_message(chat_agent_id=other_chat), sent_at=_at(3))
-    changes: list[int] = []
-    feed.on_change = lambda: changes.append(1)
-
-    assert feed.mark_chat_read(_CHAT_ID) is True
-    message = feed.reconcile((_card("evt-1"),), {})
-
-    assert _unresolved_ids(message) == {"evt-1", kept.id}
-    # Receipts stay in the feed, below everything still unread.
-    assert _entry_ids(message)[-2:] == [second.id, first.id]
-    assert message.unresolved_count == 2
-    assert dispatcher.read_chat_agent_ids == [_CHAT_ID]
-    assert changes == [1]
-    assert feed.mark_chat_read(_CHAT_ID) is False
-    assert feed.mark_chat_read("") is False
-    assert dispatcher.read_chat_agent_ids == [_CHAT_ID]
-
-
-@pytest.mark.witnesses("notifications.watched-shows-nothing")
-def test_a_message_the_chat_is_watched_for_arrives_read_and_surfaces_nowhere() -> None:
-    dispatcher = _make_recording_dispatcher()
-    feed = _make_feed(dispatcher=dispatcher)
-    changes: list[int] = []
-    feed.on_change = lambda: changes.append(1)
-
-    entry = feed.append_agent_message(_agent_message(), watched_by=("instance-1",))
+    assert feed.mark_workspace_read(_WORKSPACE_ID) is True
     message = feed.reconcile((), {})
 
-    assert entry.is_resolved is True
-    assert [listed.id for listed in message.entries] == [entry.id]
-    assert message.unresolved_count == 0
-    assert dispatcher.dispatched == []
-    assert changes == [1]
-
-
-@pytest.mark.witnesses("notifications.locked-screen-overrides-watched")
-def test_a_locked_screen_overrides_the_watchers_and_delivers() -> None:
-    """The watcher may be this very machine, with the chat left focused behind the lock screen."""
-    dispatcher = _make_recording_dispatcher()
-    feed = _make_feed(dispatcher=dispatcher, is_screen_locked=True)
-
-    entry = feed.append_agent_message(_agent_message(), watched_by=("instance-1",))
-
-    assert entry.is_resolved is False
-    assert feed.reconcile((), {}).unresolved_count == 1
-    assert len(dispatcher.dispatched) == 1
+    assert {entry.id for entry in message.entries} == {kept.id, kept_event.id}
+    assert feed.mark_workspace_read(_WORKSPACE_ID) is False
+    assert feed.mark_workspace_read("") is False
 
 
 def test_an_agent_message_whose_workspace_left_the_list_drops_out() -> None:
@@ -752,26 +691,8 @@ def test_unresolved_count_spans_every_kind() -> None:
     ]
 
 
-@pytest.mark.witnesses("notifications.read-messages-stay-as-receipts")
-def test_eviction_drops_read_agent_messages_before_anything_unread() -> None:
-    feed = _make_feed()
-    read = [feed.append_agent_message(_agent_message(), sent_at=_at(n)) for n in range(3)]
-    feed.mark_chat_read(_CHAT_ID)
-    unread = [
-        feed.append_agent_message(_agent_message(chat_agent_id="agent-" + "d" * 32), sent_at=_at(10))
-        for _ in range(49)
-    ]
-
-    message = feed.reconcile((), {})
-
-    # 49 unread + 3 read = 52: the two oldest receipts go, the newest stays.
-    assert len(message.entries) == 50
-    assert _unresolved_ids(message) == {entry.id for entry in unread}
-    assert [entry.id for entry in message.entries if entry.is_resolved] == [read[2].id]
-
-
 def test_eviction_across_kinds_drops_only_resolved_requests() -> None:
-    """Unread agent messages are never evicted: the cap takes the resolved request instead."""
+    """Agent messages and system events are unresolved until read, so the cap never evicts them."""
     feed = _make_feed()
     feed.reconcile((_card("evt-old"),), {})
     feed.reconcile((), {"evt-old": NotificationOutcome.APPROVED})
@@ -838,6 +759,27 @@ def test_an_agent_message_is_not_silenced_as_startup_backfill() -> None:
     feed = _make_feed(dispatcher=dispatcher, constructed_at=_at(30))
 
     feed.append_agent_message(_agent_message(), sent_at=_at(0))
+
+    assert len(dispatcher.dispatched) == 1
+
+
+def test_an_agent_message_for_the_workspace_on_screen_in_a_focused_window_stays_silent() -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher, connected_workspace_agent_ids=(_WORKSPACE_ID,))
+
+    feed.append_agent_message(_agent_message())
+    feed.append_agent_message(_agent_message(workspace_agent_id="agent-" + "b" * 32))
+
+    assert [request.url for request in dispatcher.dispatched] == [
+        f"/workspace/{'agent-' + 'b' * 32}?chat={_CHAT_ID}",
+    ]
+
+
+def test_an_account_level_event_fires_whatever_windows_are_focused() -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher, connected_workspace_agent_ids=(_WORKSPACE_ID,))
+
+    feed.append_system_event(_system_event(workspace_agent_id=""))
 
     assert len(dispatcher.dispatched) == 1
 

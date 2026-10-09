@@ -61,7 +61,7 @@ def test_the_windows_hand_back_runs_through_the_registered_dispatcher_without_th
         minds_config=None,
         system_interface_health_tracker=tracker,
         root_concurrency_group=root_concurrency_group,
-        dispatch_recovery=dispatcher.dispatch_after_update_window,
+        dispatch_restart=dispatcher.dispatch_after_update_window,
         mngr_binary="mngr",
         mngr_host_dir=tmp_path / "hosts",
     )
@@ -73,7 +73,7 @@ def test_the_windows_hand_back_runs_through_the_registered_dispatcher_without_th
     dispatcher(workspace_agent)
     assert not dispatcher._owed_agent_ids, "the stuck edge is declined while an apply owns the machine"
 
-    machinery.service.apply_window.dispatch_recovery(workspace_agent)
+    machinery.service.apply_window.dispatch_restart(workspace_agent)
 
     assert poll_until(
         lambda: str(workspace_agent) in dispatcher._owed_agent_ids,

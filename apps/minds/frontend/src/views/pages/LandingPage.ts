@@ -234,7 +234,7 @@ export const LandingPage: m.ClosureComponent = () => {
     const question = lifecycleConfirmation("stop", entry.name, isApplying);
     if (question !== null && !window.confirm(question)) return;
     void state.tracker.stop(entry.id).then((isOk) => {
-      if (!isOk) window.alert(`Could not stop "${entry.name}". Check the workspace's provider and try again.`);
+      if (!isOk) window.alert(`Could not stop "${entry.name}". Check the machine's provider and try again.`);
     });
   }
 
@@ -384,7 +384,7 @@ export const LandingPage: m.ClosureComponent = () => {
     if (agentIds.length < 2) return null;
     return m(Notice, { extra: "mb-4", id: "landing-bulk-updates" }, [
       m("div", { class: "flex items-center justify-between gap-3 flex-wrap" }, [
-        m("span", `${agentIds.length} workspaces have an update available.`),
+        m("span", `${agentIds.length} machines have an update available.`),
         m("div", { class: "flex items-center gap-2" }, [
           m(Button, { variant: "primary", onclick: () => runBulkAction("schedule", false) }, "Schedule all updates"),
           m(Button, { variant: "secondary", onclick: () => runBulkAction("now", false) }, "Update all now"),
@@ -395,8 +395,8 @@ export const LandingPage: m.ClosureComponent = () => {
             m(
               "span",
               { class: "type-helper" },
-              "Some of these workspaces have no backups: their updates keep every version in git " +
-                "and offer a rollback, but there's no full workspace restore to fall back on.",
+              "Some of these machines have no backups: their updates keep every version in git " +
+                "and offer a rollback, but there's no full-machine restore to fall back on.",
             ),
             m("div", { class: "flex items-center gap-2" }, [
               m(
@@ -501,13 +501,13 @@ export const LandingPage: m.ClosureComponent = () => {
               {
                 variant: "ghost",
                 size: "icon",
-                "aria-label": "Start workspace",
-                "data-tooltip": "Start workspace",
+                "aria-label": "Start machine",
+                "data-tooltip": "Start machine",
                 onclick: (event: MouseEvent) => {
                   event.stopPropagation();
                   void state.tracker.start(entry.id).then((isOk) => {
                     if (!isOk) {
-                      window.alert(`Could not start "${entry.name}". Check the workspace's provider and try again.`);
+                      window.alert(`Could not start "${entry.name}". Check the machine's provider and try again.`);
                     }
                   });
                 },
@@ -521,8 +521,8 @@ export const LandingPage: m.ClosureComponent = () => {
               {
                 variant: "ghost",
                 size: "icon",
-                "aria-label": "Stop workspace",
-                "data-tooltip": "Stop workspace",
+                "aria-label": "Stop machine",
+                "data-tooltip": "Stop machine",
                 onclick: (event: MouseEvent) => {
                   event.stopPropagation();
                   stopMind(entry);
@@ -537,8 +537,8 @@ export const LandingPage: m.ClosureComponent = () => {
               {
                 variant: "ghost",
                 size: "icon",
-                "aria-label": "Restart workspace",
-                "data-tooltip": "Restart workspace",
+                "aria-label": "Restart machine",
+                "data-tooltip": "Restart machine",
                 onclick: (event: MouseEvent) => {
                   event.stopPropagation();
                   const question = lifecycleConfirmation("restart", entry.name, stores.updates.isApplying(entry.id));
@@ -557,7 +557,7 @@ export const LandingPage: m.ClosureComponent = () => {
               {
                 variant: "ghost",
                 size: "icon",
-                "aria-label": "Open workspace in new window",
+                "aria-label": "Open machine in new window",
                 "data-tooltip": "Open in new window",
                 onclick: (event: MouseEvent) => {
                   event.stopPropagation();
@@ -576,11 +576,11 @@ export const LandingPage: m.ClosureComponent = () => {
           {
             variant: "ghost",
             size: "icon",
-            "aria-label": "Workspace settings",
+            "aria-label": "Machine settings",
             "data-tooltip": "Settings",
             onclick: (event: MouseEvent) => {
               event.stopPropagation();
-              getAppContext().shell.routeTo(`/workspace/${entry.id}/options?tab=settings`);
+              m.route.set(`/workspace/${entry.id}/options?tab=settings`);
             },
           },
           m(Icon16, { name: "settings" }),
@@ -635,7 +635,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 {
                   type: "button",
                   class: `${BADGE_CLASS} bg-fill-subtle text-important cursor-pointer border-0`,
-                  "data-tooltip": "Sign in again from the Accounts page to see this workspace here",
+                  "data-tooltip": "Sign in again from the Accounts page to see this machine here",
                   onclick: () => m.route.set("/accounts"),
                 },
                 chip.label,
@@ -769,7 +769,7 @@ export const LandingPage: m.ClosureComponent = () => {
               Notice,
               { variant: "error", extra: "mb-4", id: "landing-extras-error" },
               m("div", { class: "flex items-center justify-between gap-3" }, [
-                m("span", "Could not load workspace details. Some rows may be missing or incomplete."),
+                m("span", "Could not load machine details. Some rows may be missing or incomplete."),
                 m(Button, { variant: "secondary", onclick: () => loadExtras(state) }, "Retry"),
               ]),
             )
@@ -777,7 +777,7 @@ export const LandingPage: m.ClosureComponent = () => {
         hasRows
           ? m("div", [
               m("div", { class: "flex items-center justify-between mb-4" }, [
-                m("h1", { class: "type-heading text-primary" }, "Workspaces"),
+                m("h1", { class: "type-heading text-primary" }, "Machines"),
                 m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/create") }, "Create"),
               ]),
               bulkUpdateActions(),
@@ -787,7 +787,7 @@ export const LandingPage: m.ClosureComponent = () => {
                       m(
                         "span",
                         { class: "type-body text-primary" },
-                        `Enter your master password to unlock synced workspaces for ${extras.locked_account_emails.join(", ")}.`,
+                        `Enter your master password to unlock synced machines for ${extras.locked_account_emails.join(", ")}.`,
                       ),
                       m("div", { class: "flex items-center gap-2" }, [
                         m("input", {
@@ -831,7 +831,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/create") }, "Create"),
               ])
             : m("div", { class: "text-center py-12" }, [
-                m("p", { class: "text-tertiary mb-6" }, "No workspaces yet"),
+                m("p", { class: "text-tertiary mb-6" }, "No machines yet"),
                 m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/create") }, "Create"),
               ]),
         m(
@@ -844,7 +844,7 @@ export const LandingPage: m.ClosureComponent = () => {
               class: "inline-flex items-center gap-2 type-helper text-tertiary hover:text-primary no-underline",
               ...routeLinkAttrs("/workspaces/destroyed"),
             },
-            m("span", "Recently destroyed workspaces"),
+            m("span", "Recently destroyed machines"),
           ),
         ),
         providerEntries.length > 0

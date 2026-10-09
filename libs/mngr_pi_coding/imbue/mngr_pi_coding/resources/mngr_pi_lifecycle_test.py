@@ -997,7 +997,7 @@ def _run_sentinel_scenario(tmp_path: Path, scenario: dict[str, Any]) -> Path:
 
 def test_retract_during_a_turn_aborts_discards_and_restores_draft(tmp_path: Path) -> None:
     """A retract sentinel while a turn runs interrupts it, restores the pre-existing draft, and
-    resubmits nothing -- the parked steers are discarded (Imbue Studio hands them back to the composer)."""
+    resubmits nothing -- the parked steers are discarded (Minds hands them back to the composer)."""
     state = _run_sentinel_scenario(
         tmp_path,
         {

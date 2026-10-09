@@ -28,7 +28,7 @@ not carry, so they live here as curated constants. A scope without a curated
 display name falls back to a title-cased service name and is reported on stderr
 so a maintainer can curate it.
 
-Imbue Studio's own *additional* (custom) services -- ones detent has no schemas for, e.g.
+Minds' own *additional* (custom) services -- ones detent has no schemas for, e.g.
 ``claude.ai`` -- are appended from ``additional_services.json`` (see
 :mod:`imbue.mngr_latchkey.additional_services`). Folding them in here is what
 lets every reader of the catalog work from one file in one shape; that file

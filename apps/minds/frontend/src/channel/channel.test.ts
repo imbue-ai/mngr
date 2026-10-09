@@ -83,7 +83,6 @@ describe("UiChannelClient", () => {
       expectedSchemaVersion?: number | null;
       seededLatch?: boolean;
       hasWindowFocus?: () => boolean;
-      isScreenLocked?: () => boolean;
       onNotificationsChanged?: (message: UiNotificationsMessage) => void;
     } = {},
   ) {
@@ -120,7 +119,6 @@ describe("UiChannelClient", () => {
       redraw: () => undefined,
       storage,
       hasWindowFocus: overrides.hasWindowFocus,
-      isScreenLocked: overrides.isScreenLocked,
       onNotificationsChanged: overrides.onNotificationsChanged,
     });
     return {
@@ -183,29 +181,7 @@ describe("UiChannelClient", () => {
     expect(afterBlur.has_focus).toBe(false);
   });
 
-  it("reports whether the window is a main window or a popout, and the screen lock", () => {
-    let isLocked = false;
-    const { client, sockets } = makeClient({ isScreenLocked: () => isLocked });
-    client.start();
-    sockets[0].open();
-    type Frame = { window_kind: string; is_screen_locked: boolean };
-    const lastFrame = (): Frame => JSON.parse(sockets[0].sent.at(-1) ?? "{}") as Frame;
-
-    client.setClientState("/workspace/agent-1", "agent-1");
-    expect(lastFrame()).toMatchObject({ window_kind: "main", is_screen_locked: false });
-
-    client.setClientState("/popout/agent-1/win-1", "agent-1");
-    expect(lastFrame().window_kind).toBe("popout");
-
-    // The lock changes nothing the route dedup sees, so it is resent explicitly.
-    isLocked = true;
-    const framesBeforeLock = sockets[0].sent.length;
-    client.resendClientState();
-    expect(sockets[0].sent.length).toBe(framesBeforeLock + 1);
-    expect(lastFrame().is_screen_locked).toBe(true);
-  });
-
-  it("resendClientState resends client_state even with route and workspace unchanged", () => {
+  it("notifyFocusChanged resends client_state even with route and workspace unchanged", () => {
     // A bare focus/blur changes neither: setClientState's own dedup would
     // otherwise swallow it, leaving the server's OS-dispatch gate reading a
     // stale focus state until some other navigation happens to occur.
@@ -218,7 +194,7 @@ describe("UiChannelClient", () => {
     const framesAfterOpen = sockets[0].sent.length;
 
     hasFocus = false;
-    client.resendClientState();
+    client.notifyFocusChanged();
 
     expect(sockets[0].sent.length).toBe(framesAfterOpen + 1);
     const frame = JSON.parse(sockets[0].sent.at(-1) ?? "{}") as {

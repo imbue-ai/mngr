@@ -1029,7 +1029,7 @@ def test_the_sweep_reads_the_run_record_only_for_reachable_idle_rows(
 
 
 _UNREACHED_FAILURE = UpdateDispatchFailure(
-    message="Couldn't reach this workspace to start the update.", detail="Error: connection refused"
+    message="Couldn't reach this machine to start the update.", detail="Error: connection refused"
 )
 
 
@@ -1045,7 +1045,7 @@ def test_only_a_run_started_after_a_failed_dispatch_clears_it_from_outside_the_a
         agent_id,
         _run_record(chat="update-earlier", started_at=claimed_at - timedelta(days=1), verdict=UpdateVerdict.UPDATED),
     )
-    assert store.get(agent_id).dispatch_failure == "Couldn't reach this workspace to start the update."
+    assert store.get(agent_id).dispatch_failure == "Couldn't reach this machine to start the update."
 
     store.observe_run_record(
         agent_id, _run_record(chat="update-by-hand", started_at=claimed_at + timedelta(minutes=5))

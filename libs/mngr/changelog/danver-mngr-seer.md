@@ -1,1 +1,0 @@
-Classified the new `issue-agent-kit` library (shared plumbing for the mngr-seer issue pipeline) as unpublished in the plugin catalog: like `modal-app-kit`, it ships into the pipeline apps' Modal containers as a source mount and is never released to PyPI, so the release tooling must not offer it or require `==` pins on its internal dependencies.

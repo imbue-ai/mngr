@@ -174,10 +174,11 @@ PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 # Move it in lockstep with the versions we install
 # (:data:`imbue.mngr_latchkey.remote.provisioning.LATCHKEY_VERSION` and the
 # in-workspace pin in default-workspace-template) rather than to track what the
-# code strictly needs: the newest release with a hard dependency here is
-# 3.17.0, the first to accept the ``--strict`` flag :meth:`Latchkey.auth_browser_login`
-# always passes.
-LATCHKEY_MIN_VERSION: Final[str] = "3.18.0"
+# code strictly needs: the newest release with a hard dependency here is 3.2.0,
+# the first to report the account whose credentials it injects to detent as
+# ``customMetadata.account`` -- what the per-account permission grants
+# (:mod:`imbue.mngr_latchkey.account_scopes`) read.
+LATCHKEY_MIN_VERSION: Final[str] = "3.16.2"
 
 # Fixed port at which every containerized/VM/VPS agent reaches the Latchkey
 # gateway. A desktop-gateway agent sees it on its own 127.0.0.1 (a per-agent
@@ -212,7 +213,7 @@ _ENV_EXTENSION_PERMISSIONS_ROOT: Final[str] = "LATCHKEY_EXTENSION_PERMISSIONS_RO
 _GATEWAY_EXTENSIONS_SUBDIR: Final[str] = "extensions"
 
 # The desktop and VPS gateways intentionally load disjoint extension sets. The
-# desktop owns all stateful Imbue Studio endpoints; the VPS loads only the transparent
+# desktop owns all stateful Minds endpoints; the VPS loads only the transparent
 # forwarder that sends those endpoint families back to the desktop gateway.
 # The catalog the gateway extensions validate against. Named because it is the
 # one bundled file that is not shipped verbatim: custom services are overlaid
@@ -315,12 +316,12 @@ LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR: Final[str] = "LATCHKEY_EPHEMERAL_BROWSER"
 # explicit account name.
 DEFAULT_ACCOUNT: Final[str] = ""
 
-# Google services that authenticate via the OAuth client Imbue Studio provides
-# (the browser / consent-screen flow). ``google-directions`` is deliberately
+# Google services that authenticate via the Minds-provided OAuth client (the
+# browser / consent-screen flow). ``google-directions`` is deliberately
 # excluded: it authenticates with an API key (latchkey ``set`` auth), not
-# OAuth, so it must never go through the Imbue Studio OAuth client. Keep this
-# in sync with the ``google-*`` entries in the services catalog that advertise
-# the ``browser`` auth option.
+# OAuth, so it must never go through the Minds OAuth client. Keep this in sync
+# with the ``google-*`` entries in the services catalog that advertise the
+# ``browser`` auth option.
 MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
     {
         "google-gmail",
@@ -334,22 +335,21 @@ MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
     }
 )
 
-# The Google OAuth client Imbue Studio provides, registered for a ``google-*``
-# service via ``latchkey auth prepare`` so the user signs in against the
-# Imbue Studio consent screen instead of self-provisioning their own Google
-# Cloud project. A single pair is reused for every google service. This is an
-# installed/desktop-app OAuth client, so the "secret" is not truly
-# confidential -- it ships inside the distributed client.
+# Minds-provided Google OAuth client, registered for a ``google-*`` service via
+# ``latchkey auth prepare`` so the user signs in against the Minds consent
+# screen instead of self-provisioning their own Google Cloud project. A single
+# pair is reused for every google service. This is an installed/desktop-app
+# OAuth client, so the "secret" is not truly confidential -- it ships inside
+# the distributed client.
 MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = "991889009876-ms5ln5jnvqmsrgpmi2nipkv7atmoaks8.apps.googleusercontent.com"
 MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = "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"
 
 # Services whose OAuth client is registered dynamically at sign-in (no client
-# of ours to hand over), but whose sign-in must land on a redirect page Imbue
-# Studio hosts rather than latchkey's loopback callback. Registered for the
-# service via ``latchkey auth prepare <service> '{"redirectUri": ...}'``
-# (latchkey >= 3.15) right before the sign-in that would register the client;
-# the page forwards the authorization result to the loopback port latchkey
-# encodes in ``state``.
+# of ours to hand over), but whose sign-in must land on a Minds-hosted redirect
+# page rather than latchkey's loopback callback. Registered for the service via
+# ``latchkey auth prepare <service> '{"redirectUri": ...}'`` (latchkey >= 3.15)
+# right before the sign-in that would register the client; the page forwards
+# the authorization result to the loopback port latchkey encodes in ``state``.
 MINDS_OAUTH_REDIRECT_URI_BY_SERVICE: Final[Mapping[str, str]] = {
     # This leads to a page that forwards the OAuth callback to the loopback port latchkey encodes in ``state``.
     # That way the user doesn't get to see the scary-looking localhost URL.
@@ -1685,9 +1685,32 @@ class Latchkey(MutableModel):
         so the browser starts with no saved session and the user lands on a
         fresh sign-in screen -- letting them add a genuinely new account rather
         than being silently re-authenticated as an already-signed-in one.
-        Returns ``(is_success, detail)``.
+
+        For a Minds Google OAuth service (:data:`MINDS_GOOGLE_OAUTH_SERVICES`),
+        if signing in with the official (Minds-provided) client does not
+        succeed, always fall back to a fresh self-setup ``auth browser-prepare``
+        step and retry the ephemeral sign-in, so the user can register their own
+        OAuth client. Returns ``(is_success, detail)``.
         """
-        return self.auth_browser(service_name, is_ephemeral=True)
+        is_success, detail = self.auth_browser(service_name, is_ephemeral=True)
+        if is_success:
+            return True, ""
+        if service_name not in MINDS_GOOGLE_OAUTH_SERVICES:
+            return False, detail
+        logger.info(
+            "Adding a Google account for {} via the Imbue Studio client did not succeed; "
+            "running a fresh 'auth browser-prepare' and retrying",
+            service_name,
+        )
+        is_prepared, prepare_detail = self._run_latchkey_auth_command(
+            log_label="auth browser-prepare",
+            argv=["auth", "browser-prepare", service_name],
+            service_name=service_name,
+            is_ephemeral=True,
+        )
+        if not is_prepared:
+            return False, prepare_detail
+        return self.auth_browser_login(service_name, is_ephemeral=True)
 
     def auth_browser(
         self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
@@ -1715,17 +1738,14 @@ class Latchkey(MutableModel):
         error is the signal that nothing is registered yet, and it drives two
         recovery paths:
 
-        * For an Imbue Studio Google OAuth service (:data:`MINDS_GOOGLE_OAUTH_SERVICES`),
-          register the client Imbue Studio provides and retry, so the user signs in
-          against the Imbue Studio consent screen instead of self-provisioning their
+        * For a Minds Google OAuth service (:data:`MINDS_GOOGLE_OAUTH_SERVICES`),
+          register the Minds-provided client and retry, so the user signs in
+          against the Minds consent screen instead of self-provisioning their
           own Google Cloud project (see
-          :meth:`_authenticate_with_minds_google_client`). That client is the
-          only one ever registered here for a Google service: a failure there
-          (the user closing the consent screen, say) is reported as-is rather
-          than followed by a second browser flow.
+          :meth:`_authenticate_with_minds_google_client`).
 
-        * Otherwise, run the self-setup ``auth browser-prepare`` step and
-          retry the sign-in once.
+        * Otherwise -- or if that Minds attempt fails -- run the self-setup
+          ``auth browser-prepare`` step and retry the sign-in once.
 
         In the normal (non-ephemeral) mode the bare sign-in is attempted first,
         rather than probing which client is registered up front, so the two
@@ -1736,8 +1756,8 @@ class Latchkey(MutableModel):
         account already left behind.
 
         A service in :data:`MINDS_OAUTH_REDIRECT_URI_BY_SERVICE` needs no client
-        of ours but does need the redirect URI Imbue Studio hosts in place before
-        the sign-in registers a client, so that is pinned first (via
+        of ours but does need its Minds-hosted redirect URI in place before the
+        sign-in registers a client, so that is pinned first (via
         :meth:`auth_prepare_redirect_uri`) whenever the sign-in draws on the
         service-level preparation -- that is, unless ``account`` names a stored
         account, whose own stored client and redirect URI latchkey reuses
@@ -1759,8 +1779,13 @@ class Latchkey(MutableModel):
                 return False, detail
         # No client is registered yet (that is exactly what the browser-prepare
         # hint means) or we're in the ephemeral mode (typically a new account).
+        # For a Minds Google OAuth service, prefer the Minds client before offering the user the self-setup flow.
         if service_name in MINDS_GOOGLE_OAUTH_SERVICES:
-            return self._authenticate_with_minds_google_client(service_name, is_ephemeral=is_ephemeral)
+            is_minds_success, minds_detail = self._authenticate_with_minds_google_client(
+                service_name, is_ephemeral=is_ephemeral
+            )
+            if is_minds_success:
+                return True, minds_detail
         logger.info(
             "latchkey auth browser {} reports preparation required; running 'auth browser-prepare' and retrying",
             service_name,
@@ -1778,20 +1803,21 @@ class Latchkey(MutableModel):
     def _authenticate_with_minds_google_client(
         self, service_name: str, *, is_ephemeral: bool = False
     ) -> tuple[bool, str]:
-        """Register the Imbue Studio Google OAuth client and run the bare sign-in against it.
+        """Register the Minds Google OAuth client and retry the bare sign-in.
 
         Reached from :meth:`auth_browser` for a service in
         :data:`MINDS_GOOGLE_OAUTH_SERVICES` -- either because the bare sign-in
         reported that no client is registered yet, or because we are in
         ephemeral mode (adding a new account) and deliberately re-prepare rather
-        than reuse an existing client. Registers the client Imbue Studio provides via
-        :meth:`auth_prepare` (so the user signs in against the Imbue Studio consent
-        screen) and runs :meth:`auth_browser_login`.
+        than reuse an existing client. Registers the Minds-provided client via
+        :meth:`auth_prepare` (so the user signs in against the Minds consent
+        screen) and retries :meth:`auth_browser_login`.
 
         On a failed sign-in the just-registered client is left in place: the
-        next attempt signs in against it (or, in ephemeral mode, re-registers
-        the same one), and a clear would wipe every other account's stored
-        credentials for the service. Returns ``(is_success, detail)``.
+        caller's self-setup ``auth browser-prepare`` overwrites the existing
+        preparation, so no destructive clear is needed (a clear would also wipe
+        every other account's stored credentials for the service). Returns
+        ``(is_success, detail)``.
         """
         is_prepared, prepare_detail = self.auth_prepare(
             service_name,
@@ -1805,28 +1831,21 @@ class Latchkey(MutableModel):
     def auth_browser_login(
         self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
     ) -> tuple[bool, str]:
-        """Run a single ``latchkey auth browser <service> --strict`` with no preparation fallback.
+        """Run a single ``latchkey auth browser <service>`` with no preparation fallback.
 
         ``account`` is passed through to latchkey's global ``--account`` option
         (see :meth:`auth_browser`).
 
-        ``--strict`` (latchkey >= 3.17.0) makes the sign-in fail, instead of
-        storing a partial credential, when the user grants fewer permissions
-        than the service asked for -- a Google consent screen left with some
-        checkboxes unticked. Only services that can tell what was granted
-        enforce it (of the built-in ones, just Google); for the rest the flag
-        is a no-op, so it is passed unconditionally.
-
         Unlike :meth:`auth_browser`, this never auto-runs ``auth
         browser-prepare`` on failure. It is the bare sign-in used once the
-        service's preparation is in place -- a registered client (the Imbue Studio
-        OAuth client via :meth:`auth_prepare`, or one ``auth browser-prepare``
-        left behind), or just a pinned redirect URI (via
+        service's preparation is in place -- a registered client (the Minds
+        OAuth client via :meth:`auth_prepare`, or one a prior self-setup left
+        behind), or just a pinned redirect URI (via
         :meth:`auth_prepare_redirect_uri`) for a service that registers its
         client during the sign-in itself. Returns ``(True, "")`` on a clean
         exit, otherwise ``(False, detail)``.
         """
-        argv = ["auth", "browser", service_name, "--strict"]
+        argv = ["auth", "browser", service_name]
         if account is not None:
             argv.extend(["--account", account])
         return self._run_latchkey_auth_command(
@@ -1842,7 +1861,7 @@ class Latchkey(MutableModel):
         Runs ``latchkey auth prepare <service>
         '{"clientId":...,"clientSecret":...}'`` so a subsequent
         :meth:`auth_browser_login` signs the user in against that client
-        (e.g. the Imbue Studio Google consent screen) instead of requiring them to
+        (e.g. the Minds Google consent screen) instead of requiring them to
         self-provision their own OAuth project. Returns ``(True, "")`` on a
         clean exit, otherwise ``(False, detail)``.
         """
@@ -1879,8 +1898,10 @@ class Latchkey(MutableModel):
         latchkey 3.0.0 made ``auth clear`` account-aware:
 
         * ``is_all=True`` runs ``latchkey auth clear -y <service> --all``, wiping
-          every account's credentials *and* the service's prepared OAuth client
-          (plain ``auth clear`` no longer touches the preparation).
+          every account's credentials *and* the service's prepared OAuth client.
+          This is what discards a failed Minds client registration (left behind
+          by :meth:`auth_prepare`) so the self-setup fallback can start clean --
+          plain ``auth clear`` no longer touches the preparation.
         * ``account`` (with ``is_all=False``) runs
           ``latchkey auth clear -y <service> --account <account>``, clearing just
           that one account. The default (unnamed) account is addressed with

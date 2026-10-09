@@ -43,7 +43,7 @@ export function WorkspacePermissionDetailView(): m.Component<WorkspacePermission
       const targetedVerbs = detail.verbs.filter((verb) => verb.is_targeted);
       return m(PermissionsShell, {
         model,
-        headerLabel: "Other workspaces",
+        headerLabel: "Other machines",
         mark: m(Icon16, { name: "key", extra: "text-primary" }),
         rationale: detail.rationale,
         progressLabel: "Granting permission...",
@@ -53,13 +53,13 @@ export function WorkspacePermissionDetailView(): m.Component<WorkspacePermission
             ...generalVerbs.map((verb) => verbCheckbox(model, verb)),
           ]),
           m("div", { class: "flex flex-col gap-1.5" }, [
-            m("p", { class: "type-label text-secondary" }, "Workspace-specific permissions"),
+            m("p", { class: "type-label text-secondary" }, "Machine-specific permissions"),
             detail.show_target_choice
-              ? m("p", { class: "type-helper text-tertiary" }, "These act on individual workspaces.")
+              ? m("p", { class: "type-helper text-tertiary" }, "These act on individual machines.")
               : m(
                   Notice,
                   { variant: "warn" },
-                  "No specific workspace was named, so these permissions apply to all workspaces.",
+                  "No specific machine was named, so these permissions apply to all machines.",
                 ),
             ...targetedVerbs.map((verb) => verbCheckbox(model, verb)),
             detail.show_target_choice
@@ -76,7 +76,7 @@ export function WorkspacePermissionDetailView(): m.Component<WorkspacePermission
                     }),
                     m("span", { class: "type-body text-primary" }, [
                       "Only ",
-                      m("b", detail.target_workspace_name ?? "the selected workspace"),
+                      m("b", detail.target_workspace_name ?? "the selected machine"),
                     ]),
                   ]),
                   m("label", { class: "flex items-center gap-2 cursor-pointer" }, [
@@ -89,7 +89,7 @@ export function WorkspacePermissionDetailView(): m.Component<WorkspacePermission
                         model.targetScope = "all";
                       },
                     }),
-                    m("span", { class: "type-body text-primary" }, "All workspaces"),
+                    m("span", { class: "type-body text-primary" }, "All machines"),
                   ]),
                 ])
               : null,

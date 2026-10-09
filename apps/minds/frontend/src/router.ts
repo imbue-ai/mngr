@@ -181,7 +181,7 @@ export function navigateExternalUrl(shell: ShellState, url: string): void {
       m.route.set("/create/template", query);
       return;
     }
-    shell.routeTo(parsed.pathname + parsed.search);
+    m.route.set(parsed.pathname + parsed.search);
   } catch {
     m.route.set("/");
   }

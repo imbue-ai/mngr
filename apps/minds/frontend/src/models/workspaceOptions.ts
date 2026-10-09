@@ -1,5 +1,5 @@
 // Model for the workspace options panel + settings page: the options-data
-// load, the Workspace settings actions (rename / color / account / lifecycle),
+// load, the Machine settings actions (rename / color / account / lifecycle),
 // and the share panel's own model, which this load constructs.
 
 import m from "mithril";
@@ -144,15 +144,6 @@ export interface InvitationResultResponse {
   invited_at?: string | null;
 }
 
-/** Response shape of POST /api/v1/workspace-sharing/<id>/mobile-access-link. */
-export interface MobileAccessLinkResponse {
-  /** sent or failed. */
-  outcome: string;
-  /** The signed-in account's own address the message went to. */
-  recipient_email?: string;
-  sent_at?: string | null;
-}
-
 /** The route that resolves a typed address to an account (a 404 means "store an invite"). */
 export const RESOLVE_USER_URL = "/ui/api/users/resolve";
 
@@ -233,7 +224,7 @@ export function errorMessageFromBody(body: unknown, fallback: string): string {
   return fallback;
 }
 
-/** Load + action state for the Workspace settings panes. */
+/** Load + action state for the Machine settings panes. */
 export class WorkspaceOptionsModel {
   readonly agentId: string;
   status: "loading" | "load_failed" | "ready" = "loading";
@@ -333,7 +324,7 @@ export class WorkspaceOptionsModel {
   async rename(newName: string): Promise<boolean> {
     const trimmed = newName.trim();
     if (!trimmed) {
-      this.renameErrorMessage = "A workspace name is required.";
+      this.renameErrorMessage = "A machine name is required.";
       this.redrawImpl();
       return false;
     }
@@ -482,9 +473,9 @@ export function colorErrorMessageFor(status: number, body: unknown): string {
     case "invalid_hex":
       return "That hex value is not valid. Use #rrggbb or #rgb.";
     case "not_primary":
-      return "This agent isn't a workspace's primary agent; color can't be set.";
+      return "This agent isn't a primary machine; color can't be set.";
     case "stale_provider":
-      return "This workspace is currently unreachable; try again later.";
+      return "This machine is currently unreachable; try again later.";
     case "host_unreachable":
       return "Could not reach the machine host. Try again in a moment.";
     default:

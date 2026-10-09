@@ -484,7 +484,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
                   reject(new Error(`Backend emitted login URL but server never became ready: ${err.message}`));
                 });
               }
-            } else if ((event.event === 'notification' || event.event === 'notification_read') && onNotification) {
+            } else if (event.event === 'notification' && onNotification) {
               onNotification(event);
             } else if ((event.event === 'auth_success' || event.event === 'auth_required') && onAuthEvent) {
               onAuthEvent(event);

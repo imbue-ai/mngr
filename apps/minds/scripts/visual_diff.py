@@ -460,7 +460,7 @@ def render_spa_index_html(bootstrap: UiBootstrap) -> str:
         "  <head>\n"
         '    <meta charset="utf-8">\n'
         '    <meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        "    <title>Imbue Studio</title>\n"
+        "    <title>Mind</title>\n"
         f"    <script>window.__MINDS_BOOTSTRAP__ = {bootstrap_json};</script>\n"
         '    <link rel="modulepreload" href="/_static/embed_contract.js">\n'
         f"    {entry_tags}\n"

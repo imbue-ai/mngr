@@ -143,7 +143,6 @@ from imbue.minds.desktop_client.ui_models import UiNotificationsMessage
 from imbue.minds.desktop_client.ui_models import UiProviderEntry
 from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
-from imbue.minds.desktop_client.ui_models import UiWindowKind
 from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
@@ -581,7 +580,7 @@ def _handle_remove_workspace_record() -> Response:
                 content=json.dumps(
                     {
                         "error": (
-                            "This workspace's machine still holds its cloud lease, so its record cannot be removed; "
+                            "This machine still holds its cloud lease, so its record cannot be removed; "
                             "destroy the workspace instead."
                         )
                     }
@@ -643,7 +642,7 @@ def _handle_help_report() -> Response:
 
 # Shown when the launch's exec never reached the machine, so nothing was started there.
 _MACHINE_UNREACHABLE_ERROR: Final[str] = (
-    "Couldn't reach this workspace to start an agent. It may be starting up or unavailable."
+    "Couldn't reach this machine to start an agent. It may be starting up or unavailable."
 )
 
 
@@ -674,7 +673,7 @@ def _handle_help_assist() -> Response:
     if not workspace_agent_id_raw:
         return make_response(
             status_code=400,
-            content='{"error": "Agent help is only available inside a workspace"}',
+            content='{"error": "Agent help is only available inside a machine"}',
             media_type="application/json",
         )
     try:
@@ -705,7 +704,7 @@ def _handle_help_assist() -> Response:
             return make_response(
                 status_code=409,
                 content=json.dumps(
-                    {"error": "This workspace doesn't have the agent-assist skill, so an agent can't help here yet."}
+                    {"error": "This machine doesn't have the agent-assist skill, so an agent can't help here yet."}
                 ),
                 media_type="application/json",
             )
@@ -718,7 +717,7 @@ def _handle_help_assist() -> Response:
         case SkillChatLaunchOutcome.SPAWN_FAILED:
             # The same wall that stops an /assist chat stops every other agent
             # here, so the machine's own refusal rides along when there was one.
-            body: dict[str, object] = {"error": "Couldn't start an agent in this workspace."}
+            body: dict[str, object] = {"error": "Couldn't start an agent in this machine."}
             if launch.failure_detail:
                 body["detail"] = launch.failure_detail
             return make_response(status_code=502, content=json.dumps(body), media_type="application/json")
@@ -735,7 +734,8 @@ def _build_ui_accounts_message(session_store: MultiAccountSessionStore | None) -
     counts the rest. Resolving the default also stores it (see
     :func:`settle_default_account_id`), so the create form preselects the same
     one. ``has_accounts`` is derived from the account list rather than the
-    email so it keeps its exact "any account at all" meaning.
+    email so the start flow's account step keeps its exact "any account at
+    all" meaning.
     """
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = settle_default_account_id(
@@ -1539,8 +1539,8 @@ def _handle_mint_ai_key() -> Response:
             status_code=400,
             content=json.dumps(
                 {
-                    "error": "This workspace has no associated Imbue account. Associate one on the "
-                    "workspace's settings page first."
+                    "error": "This machine has no associated Imbue account. Associate one on the "
+                    "machine's settings page first."
                 }
             ),
             media_type="application/json",
@@ -2090,23 +2090,23 @@ def _build_workspace_update_machinery(
     minds_config: MindsConfig | None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None,
     root_concurrency_group: ConcurrencyGroup | None,
-    dispatch_recovery: Callable[[AgentId], None] | None,
+    dispatch_restart: Callable[[AgentId], None] | None,
     mngr_binary: str,
     mngr_host_dir: Path,
 ) -> WorkspaceUpdateMachinery | None:
     """Assemble the update machinery, or None when this build cannot run updates.
 
     Gated as a unit: a build missing any input has no update surface (routes
-    answer 503) rather than a half-working one. ``dispatch_recovery`` is the
+    answer 503) rather than a half-working one. ``dispatch_restart`` is the
     registered unattended-recovery dispatcher's hand-back, for an apply window
-    that expired with the machine still stuck: an idempotent ``mngr start``, never a bounce.
+    that expired with the machine still stuck.
     """
     if (
         mngr_caller is None
         or paths is None
         or system_interface_health_tracker is None
         or root_concurrency_group is None
-        or dispatch_recovery is None
+        or dispatch_restart is None
     ):
         return None
     schedule_store = UpdateScheduleStore(records_dir=paths.data_dir / "update_schedules")
@@ -2120,7 +2120,7 @@ def _build_workspace_update_machinery(
         mngr_caller=mngr_caller,
         backend_resolver=backend_resolver,
         concurrency_group=root_concurrency_group,
-        dispatch_recovery=dispatch_recovery,
+        dispatch_restart=dispatch_restart,
     )
     detector = WorkspaceUpdateDetector(
         store=state_store,
@@ -2371,7 +2371,7 @@ def create_desktop_client(
         minds_config=minds_config,
         system_interface_health_tracker=system_interface_health_tracker,
         root_concurrency_group=root_concurrency_group,
-        dispatch_recovery=(
+        dispatch_restart=(
             unattended_recovery_dispatcher.dispatch_after_update_window
             if unattended_recovery_dispatcher is not None
             else None
@@ -2403,8 +2403,9 @@ def create_desktop_client(
     notification_feed = NotificationFeed(
         notification_dispatcher=notification_dispatcher,
         get_dispatch_preferences=_NotificationDispatchPreferencesReader(minds_config=minds_config),
-        is_main_window_focused=_FocusedMainWindowReader(broadcaster=ui_channel_broadcaster),
-        is_screen_locked=_ScreenLockedReader(broadcaster=ui_channel_broadcaster),
+        get_connected_focused_workspace_agent_ids=_ConnectedFocusedWorkspaceAgentIdsReader(
+            broadcaster=ui_channel_broadcaster
+        ),
         cleared_request_ids_path=None if paths is None else paths.data_dir / "cleared_notification_requests.json",
         # An append or clear changes the feed outside the reconcile, so it has
         # to wake the publisher itself for the frame to go out.
@@ -2712,37 +2713,27 @@ class _BackupSetupFailureReporter(FrozenModel):
         )
 
 
-class _FocusedMainWindowReader(FrozenModel):
-    """Live reader of whether any connected main window has OS/browser focus.
+class _ConnectedFocusedWorkspaceAgentIdsReader(FrozenModel):
+    """Live reader of the workspace agent ids a *focused* connected UI window is displaying.
 
-    Consulted by the notification feed at dispatch time: a focused main window
-    flashes every new entry as an in-app toast, which stands in for the OS
-    banner. A pulled-out window shows no toasts, so its focus does not count.
-    Windows report their kind and focus over the /ui/ws channel's client_state
-    frames.
+    Consulted by the notification feed at dispatch time so a request from the
+    workspace the user is actually looking at right now stays silent (the
+    in-app review popup covers it) -- distinct from the in-app toast's own
+    on-screen check, which does not require OS/browser focus: a window can be
+    displaying the right workspace while alt-tabbed away or behind another
+    app, in which case the reader is not looking at the in-app popup and
+    should still get an OS banner. Windows report their route/workspace/focus
+    over the /ui/ws channel's client_state frames.
     """
 
     broadcaster: UiChannelBroadcaster = Field(frozen=True, description="The /ui/ws fan-out holding per-window state.")
 
-    def __call__(self) -> bool:
-        return any(
-            state.window_kind == UiWindowKind.MAIN and state.has_focus
+    def __call__(self) -> tuple[str, ...]:
+        return tuple(
+            state.workspace_agent_id
             for state in self.broadcaster.get_connected_client_states()
+            if state.workspace_agent_id and state.has_focus
         )
-
-
-class _ScreenLockedReader(FrozenModel):
-    """Live reader of whether a connected window reports the screen locked.
-
-    Electron relays the OS lock to every window, which resends client_state;
-    the notification feed then delivers what it would otherwise hold back for
-    a focused window or a watched chat.
-    """
-
-    broadcaster: UiChannelBroadcaster = Field(frozen=True, description="The /ui/ws fan-out holding per-window state.")
-
-    def __call__(self) -> bool:
-        return any(state.is_screen_locked for state in self.broadcaster.get_connected_client_states())
 
 
 class _MindsApiKeyProvider(FrozenModel):

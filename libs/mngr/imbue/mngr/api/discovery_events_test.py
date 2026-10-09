@@ -352,7 +352,7 @@ def test_append_discovery_event_creates_dirs_and_writes(temp_config: MngrConfig)
 def test_emit_discovery_error_event_round_trips_provider_name(temp_config: MngrConfig) -> None:
     """Provider-attributable errors must carry the offending provider name through.
 
-    Imbue Studio's providers panel keys off this field to surface per-provider
+    Minds' providers panel keys off this field to surface per-provider
     error badges; without it the consumer would have to pattern-match the
     error message to figure out which ``[providers.<name>]`` block failed.
     """

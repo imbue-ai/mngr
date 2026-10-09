@@ -17,7 +17,6 @@ import { RESOLVE_USER_URL } from "../../../models/workspaceOptions";
 import type { Grant, SharePanelModelOptions } from "../../../models/sharePanel";
 import { GRANT_ADD_KINDS, SharePanelModel } from "../../../models/sharePanel";
 import { Modal } from "../../components/Modal";
-import { Skeleton, SkeletonRegion } from "../../components/Skeleton";
 import { Spinner } from "../../components/Spinner";
 import { ShareTab } from "./ShareTab";
 
@@ -60,12 +59,12 @@ async function readyPanel(
 /** A published panel whose link is live. */
 async function publishedPanel(
   response: Partial<MachineSharingResponse> = {},
-  overrides: Partial<SharePanelModelOptions> = {},
 ): Promise<SharePanelModel> {
-  return readyPanel(
-    { enabled: true, url: "https://m.relay.example/", ...response },
-    overrides,
-  );
+  return readyPanel({
+    enabled: true,
+    url: "https://m.relay.example/",
+    ...response,
+  });
 }
 
 function renderTab(share: SharePanelModel): m.Vnode {
@@ -209,9 +208,13 @@ describe("ShareTab publish widget", () => {
     expect(collectVnodes(widget).some((vnode) => vnode.tag === Spinner)).toBe(
       false,
     );
-    // The pane waits too, as a skeleton: there is no add row to disable and
-    // no grant list to call empty until the document says so.
-    expect(addControls(renderTab(share))).toEqual([undefined, undefined, undefined]);
+    // The add row waits too, and says why in the same terms: nothing is off.
+    for (const control of addControls(renderTab(share))) {
+      expect(attrsOf(control)["aria-disabled"]).toBe("true");
+      expect(attrsOf(control)["data-tooltip"]).toBe(
+        "Permissions cannot be granted until the sharing status has loaded",
+      );
+    }
   });
 
   it("greys the switch out, rather than drawing it off, when the first read failed", async () => {
@@ -492,235 +495,6 @@ describe("ShareTab link section", () => {
     const share = await readyPanel();
 
     expect(byId(renderTab(share), "ws-share-link")).toBeUndefined();
-  });
-});
-
-describe("ShareTab loading skeleton", () => {
-  /** A panel whose status read never answers, so the pane stays loading. */
-  function loadingPanel(): SharePanelModel {
-    const share = new SharePanelModel(
-      sharePanelOptions({ fetchJson: () => new Promise(() => undefined) }),
-    );
-    void share.load();
-    return share;
-  }
-
-  function skeletonOf(share: SharePanelModel): AnyVnode | undefined {
-    return collectVnodes(renderTab(share)).find(
-      (vnode) => vnode.tag === SkeletonRegion,
-    );
-  }
-
-  it("stands a skeleton of several blocks in the pane while the document is still coming", () => {
-    const share = loadingPanel();
-
-    const region = skeletonOf(share) as AnyVnode;
-
-    expect(attrsOf(region).label).toBe("Loading permissions");
-    expect(
-      collectVnodes(region).filter((vnode) => vnode.tag === Skeleton).length,
-    ).toBeGreaterThan(1);
-  });
-
-  it("announces the wait as one region, rather than reading its shapes out", () => {
-    const share = loadingPanel();
-
-    const drawn = collectVnodes(renderTabDeep(share));
-    // The switch announces its own wait beside this one; each names the
-    // region it stands in, so neither has to speak for the other.
-    const announced = drawn.filter(
-      (vnode) => attrsOf(vnode)["aria-label"] === "Loading permissions",
-    );
-
-    expect(announced).toHaveLength(1);
-    expect(attrsOf(announced[0]).role).toBe("status");
-    expect(attrsOf(announced[0])["aria-busy"]).toBe("true");
-    // Each block is a shape with nothing to say; only the region speaks.
-    const blocks = drawn.filter((vnode) =>
-      classTokensOf(vnode).includes("animate-pulse"),
-    );
-    expect(blocks.length).toBeGreaterThan(1);
-    for (const block of blocks)
-      expect(attrsOf(block)["aria-hidden"]).toBe("true");
-  });
-
-  it("states nothing about the link, who is granted, or the mobile link while it waits", () => {
-    const share = loadingPanel();
-
-    const root = renderTab(share);
-
-    expect(byId(root, "ws-share-link")).toBeUndefined();
-    expect(byId(root, "ws-share-empty")).toBeUndefined();
-    expect(byId(root, "ws-share-mobile-link")).toBeUndefined();
-    expect(allText(root)).not.toContain("Nobody has been granted access yet");
-    expect(allText(root)).not.toContain("Enable sharing and web access");
-  });
-
-  it("skeletons an app's pane on the same terms as the whole workspace's", () => {
-    const share = loadingPanel();
-    share.selectTarget("web");
-
-    expect(skeletonOf(share)).toBeDefined();
-    expect(allText(renderTab(share))).not.toContain(
-      "Nobody has been granted access yet",
-    );
-  });
-
-  it("keeps the nav's names but states no count and no missing link while it waits", () => {
-    const share = loadingPanel();
-
-    const root = renderTab(share);
-    const entries = navEntries(root);
-
-    expect(allText(entries[0])).toContain("Whole workspace");
-    expect(allText(root)).not.toContain("no link yet");
-    for (const entry of entries) {
-      expect(
-        collectVnodes(entry).some(
-          (vnode) => attrsOf(vnode)["data-share-count"] !== undefined,
-        ),
-      ).toBe(false);
-      expect(
-        collectVnodes(entry).some((vnode) => vnode.tag === Skeleton),
-      ).toBe(true);
-    }
-  });
-
-  it("gives the nav its counts back once the document lands", async () => {
-    const share = await publishedPanel();
-
-    const entries = navEntries(renderTab(share));
-
-    for (const entry of entries)
-      expect(
-        collectVnodes(entry).some(
-          (vnode) => attrsOf(vnode)["data-share-count"] !== undefined,
-        ),
-      ).toBe(true);
-  });
-
-  it("gives the pane over to the document as soon as one lands", async () => {
-    const share = await publishedPanel();
-
-    expect(skeletonOf(share)).toBeUndefined();
-    expect(byId(renderTab(share), "ws-share-link")).toBeDefined();
-  });
-
-  it("does not leave a read that failed pulsing forever", async () => {
-    const share = new SharePanelModel(
-      sharePanelOptions({
-        fetchJson: () =>
-          Promise.resolve({
-            ok: false,
-            status: 502,
-            body: { error: "relay down" },
-          }),
-      }),
-    );
-    await share.load();
-
-    expect(skeletonOf(share)).toBeUndefined();
-    expect(allText(renderTab(share))).toContain("relay down");
-  });
-});
-
-describe("ShareTab mobile access link", () => {
-  /** A published, live panel whose mobile-link route answers with `answer`. */
-  async function linkablePanel(
-    answer: unknown = { outcome: "sent", recipient_email: "owner@example.com" },
-  ): Promise<SharePanelModel> {
-    return publishedPanel(
-      {},
-      {
-        fetchJson: (url: string) =>
-          Promise.resolve(
-            url.endsWith("/mobile-access-link")
-              ? { ok: true, status: 200, body: answer }
-              : {
-                  ok: true,
-                  status: 200,
-                  body: {
-                    enabled: true,
-                    url: "https://m.relay.example/",
-                    grants: {
-                      workspace: { emails: [], email_domains: [] },
-                      services: {},
-                    },
-                  },
-                },
-          ),
-      },
-    );
-  }
-
-  function pressMobileLink(root: unknown): void {
-    (
-      attrsOf(byId(root, "ws-share-mobile-link-btn") as AnyVnode)
-        .onclick as () => void
-    )();
-  }
-
-  it("offers the control under the whole workspace's link, saying nothing until it is pressed", async () => {
-    const share = await publishedPanel();
-
-    const control = byId(renderTab(share), "ws-share-mobile-link");
-
-    expect(allText(control).trim()).toBe("Email me a Mobile Access Link");
-  });
-
-  it("draws nothing for an app, whose link the message would not carry", async () => {
-    const share = await publishedPanel();
-    share.selectTarget("web");
-
-    expect(byId(renderTab(share), "ws-share-mobile-link")).toBeUndefined();
-  });
-
-  it("still draws the control while sharing is off, disabled, naming the switch that enables it", async () => {
-    const share = await readyPanel();
-
-    const button = byId(
-      renderTab(share),
-      "ws-share-mobile-link-btn",
-    ) as AnyVnode;
-
-    expect(attrsOf(button)["aria-disabled"]).toBe("true");
-    expect(attrsOf(button)["data-tooltip"]).toBe(
-      "Enable sharing and web access to access this link on mobile",
-    );
-  });
-
-  it("leaves the control pressable while the workspace's address is still coming up", async () => {
-    const share = await publishedPanel();
-    share.isLive = false;
-
-    const button = byId(
-      renderTab(share),
-      "ws-share-mobile-link-btn",
-    ) as AnyVnode;
-
-    expect(attrsOf(button)["aria-disabled"]).toBeUndefined();
-  });
-
-  it("names the address a sent message went to, and nothing more", async () => {
-    const share = await linkablePanel();
-
-    pressMobileLink(renderTab(share));
-    await settle();
-    const control = byId(renderTab(share), "ws-share-mobile-link");
-
-    expect(allText(control)).toContain("Sent to owner@example.com");
-    expect(allText(control)).not.toContain("Sent to owner@example.com.");
-  });
-
-  it("shows a failed send where the confirmation would have gone", async () => {
-    const share = await linkablePanel({ outcome: "failed" });
-
-    pressMobileLink(renderTab(share));
-    await settle();
-
-    expect(allText(byId(renderTab(share), "ws-share-mobile-link"))).toContain(
-      "Could not send the email",
-    );
   });
 });
 

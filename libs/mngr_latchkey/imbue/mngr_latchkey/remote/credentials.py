@@ -61,7 +61,7 @@ from imbue.mngr_latchkey.remote._machine import forget_permission_request
 from imbue.mngr_latchkey.remote._machine import read_filed_permission_requests
 
 # Re-exported (the redundant alias marks them as such): the read side of the
-# machine store that outside consumers -- notably the Imbue Studio desktop app -- are
+# machine store that outside consumers -- notably the Minds desktop app -- are
 # meant to reach through this module rather than through the private mirror.
 from imbue.mngr_latchkey.remote._mirror import latchkey_for_machine as latchkey_for_machine
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store

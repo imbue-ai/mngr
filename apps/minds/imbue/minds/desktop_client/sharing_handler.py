@@ -46,11 +46,9 @@ from imbue.minds.desktop_client.identity_records import record_from_cli_identity
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
-from imbue.minds.desktop_client.imbue_cloud_cli import MobileAccessLinkCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.provider_display import is_imbue_cloud_provider_name
 from imbue.minds.desktop_client.session_store import AccountSession
@@ -69,7 +67,6 @@ from imbue.minds.desktop_client.share_materials_injection import read_share_gate
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
-from imbue.minds.desktop_client.share_targets import resolve_share_target_display_names
 from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
@@ -101,8 +98,8 @@ _UNVERIFIED_EMAIL_SIGNAL: Final[str] = "Email not verified"
 # supported workspaces predate the share gateway -- i.e. after the first
 # post-v0.3.11 release is deployed and old workspaces have run update-self.
 _PRE_GATEWAY_WORKSPACE_MESSAGE: Final[str] = (
-    "This workspace's template is too old to support sharing. "
-    'Ask the workspace to update itself (send it "update yourself", which runs '
+    "This machine's workspace template is too old to support sharing. "
+    'Ask the machine to update itself (send it "update yourself", which runs '
     "the update-self skill), then publish it again."
 )
 
@@ -115,8 +112,6 @@ def describe_connector_failure(exc: Exception) -> str:
     The two failures a user can resolve get a plain sentence instead; anything
     else keeps the plugin's message, which still beats pointing at a log file.
     """
-    if isinstance(exc, ImbueCloudEmailNotVerifiedCliError):
-        return "Imbue Cloud has not verified this account's email address. Verify it, then retry."
     detail = str(exc)
     if any(signal in detail for signal in _EXPIRED_SESSION_SIGNALS):
         return "Your Imbue Cloud session has expired. You may need to log out and log in again."
@@ -698,9 +693,7 @@ def _read_active_share(cli: ImbueCloudCli, account_email: str, host_id: str) -> 
     try:
         share = cli.get_share_status(account=account_email, host_id=host_id)
     except ImbueCloudCliError as exc:
-        raise SharingError(
-            f"Could not read the workspace's sharing status: {describe_connector_failure(exc)}"
-        ) from exc
+        raise SharingError(f"Could not read the machine's sharing status: {describe_connector_failure(exc)}") from exc
     return share if share is not None and share.state == "active" else None
 
 
@@ -809,7 +802,7 @@ def migrate_stale_share(
         # The connector no longer flags the share, so the panel's retry (a
         # plain read) will not inject again: only a re-publish does.
         raise SharingError(
-            "Sharing was moved to a new address, but this workspace did not receive the new share materials, so "
+            "Sharing was moved to a new address, but this machine did not receive the new share materials, so "
             f"its shared links stay down until publishing is turned off and on again for it: {exc}"
         ) from exc
     logger.info("Moved sharing for {} from {} to {}", host_id, stale_share.workspace_domain, share.workspace_domain)
@@ -1144,9 +1137,7 @@ def unpublish_workspace(
     try:
         existing = cli.get_share_status(account=account_email, host_id=host_id)
     except ImbueCloudCliError as exc:
-        raise SharingError(
-            f"Could not read the workspace's sharing status: {describe_connector_failure(exc)}"
-        ) from exc
+        raise SharingError(f"Could not read the machine's sharing status: {describe_connector_failure(exc)}") from exc
     if existing is not None and existing.state == "active":
         try:
             cli.delete_share(account=account_email, host_id=host_id)
@@ -1207,7 +1198,6 @@ class _InvitationAttempt(FrozenModel):
     app: str | None
     link: str | None
     workspace_name: str | None
-    app_display_name: str | None
 
 
 def invite_grantee_for_workspace(
@@ -1221,9 +1211,7 @@ def invite_grantee_for_workspace(
     """Invite one grant's grantee through the connector and return what the granter may learn.
 
     The invitation carries the target's own link, built from the labels the
-    workspace has registered, the workspace's display name, and the name the
-    share panel shows for the app, so that the mail names it the way the panel
-    does rather than by the service name behind its hostname. A refusal as
+    workspace has registered, and the workspace's display name. A refusal as
     ``grants_out_of_date`` is answered by pushing the workspace's document and
     trying once more; every other refusal propagates as
     :class:`ImbueCloudShareRefusedCliError` for the route to report by code.
@@ -1250,7 +1238,6 @@ def invite_grantee_for_workspace(
         app=None if target == WHOLE_MACHINE_SERVICE else target,
         link=f"https://{label}.{share.workspace_domain}/" if label else None,
         workspace_name=_workspace_display_name(backend_resolver, agent_id),
-        app_display_name=resolve_share_target_display_names(backend_resolver, agent_id).get(target),
     )
     return _invite_with_one_retry(cli, attempt, build_agent_address(agent_id, backend_resolver))
 
@@ -1282,47 +1269,7 @@ def _invite_through_cli(cli: ImbueCloudCli, attempt: _InvitationAttempt) -> Invi
         app=attempt.app,
         link=attempt.link,
         workspace_name=attempt.workspace_name,
-        app_display_name=attempt.app_display_name,
     )
-
-
-def send_mobile_access_link_for_workspace(
-    host_id: str, backend_resolver: BackendResolverInterface
-) -> MobileAccessLinkCliResult:
-    """Have Imbue Cloud email the signed-in account the link to this workspace, and report how it went.
-
-    The message carries the whole workspace's link, built from the labels the
-    workspace has registered, and the workspace's display name. Where it goes
-    is not ours to choose: the connector reads the address off the session, so
-    this can only ever reach the account that asked.
-
-    A workspace with no live share is not refused here: the connector owns that
-    judgment and answers it as a structured refusal, so the desktop never has
-    to describe the share's state in its own words.
-    Raises :class:`ImbueCloudShareRefusedCliError` for the connector's
-    structured refusals, and :class:`SharingError` when the connector cannot be
-    reached.
-    """
-    state = get_state()
-    cli: ImbueCloudCli | None = state.imbue_cloud_cli
-    if cli is None:
-        raise SharingError("imbue_cloud CLI is not configured on this app.")
-    agent_id = resolve_agent_for_host(backend_resolver, host_id, state.session_store)
-    account_email = resolve_account_email_for_workspace(state.session_store, agent_id)
-    share = _read_active_share(cli, account_email, host_id)
-    label = resolve_share_target_labels(backend_resolver, agent_id).get(WHOLE_MACHINE_SERVICE)
-    link = f"https://{label}.{share.workspace_domain}/" if share is not None and label else None
-    try:
-        return cli.send_mobile_access_link(
-            account=account_email,
-            host_id=host_id,
-            link=link,
-            workspace_name=_workspace_display_name(backend_resolver, agent_id),
-        )
-    except ImbueCloudShareRefusedCliError:
-        raise
-    except ImbueCloudCliError as exc:
-        raise SharingError(f"Could not email the link: {describe_connector_failure(exc)}") from exc
 
 
 def list_invitation_outcomes_for_workspace(

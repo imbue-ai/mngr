@@ -474,7 +474,7 @@ def default_permissions_path(data_dir: Path) -> Path:
 
     The shared ``latchkey gateway`` consults this file when an incoming
     request does not carry a valid ``X-Latchkey-Gateway-Permissions-Override``
-    JWT. Imbue Studio materializes it with empty rules (deny-all) so an agent
+    JWT. Minds materializes it with empty rules (deny-all) so an agent
     that escapes the JWT mechanism cannot reach any service.
     """
     return data_dir / _DEFAULT_PERMISSIONS_FILENAME
