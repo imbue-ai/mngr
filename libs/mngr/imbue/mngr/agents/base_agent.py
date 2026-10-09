@@ -29,6 +29,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
 from imbue.mngr.hosts.tmux import AGENT_PANE_ID_OPTION
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
@@ -188,9 +189,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         # Persist agent data to external storage (e.g., Modal volume)
         self.host.save_agent_data(self.id, data)
 
-    # =========================================================================
     # Certified Field Getters/Setters
-    # =========================================================================
 
     def get_command(self) -> CommandString:
         data = self._read_data()
@@ -227,9 +226,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         data["start_on_boot"] = value
         self._write_data(data)
 
-    # =========================================================================
     # Interaction
-    # =========================================================================
 
     def is_running(self) -> bool:
         """Check if the agent is currently running by checking lifecycle state."""
@@ -309,9 +306,20 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             return LifecycleProbeResult(state=AgentLifecycleState.STOPPED)
 
     def _build_lifecycle_probe_command(self) -> str:
-        """Build the command that probes the agent's primary window for lifecycle state."""
+        """Build the command that probes the agent's primary window for lifecycle state.
+
+        The session is found by the agent id it carries, falling back to the session named after
+        this agent: a rename moves the session before it rewrites data.json, so the name this
+        agent was loaded with can already be gone while the agent runs on.
+        """
+        # CLEANUP: drop the name fallback once no running session predates the AGENT_ID_OPTION
+        # stamp, i.e. once every host has restarted its agents on an mngr that sets it.
+        id_filter = shlex.quote(f"id={self.id}")
         return (
-            f"tmux list-panes -t {self.tmux_target.as_shell_arg()} "
+            f"session=$(tmux list-sessions -F '#{{{AGENT_ID_OPTION}}}|#{{session_name}}' 2>/dev/null"
+            f" | awk -F'|' -v {id_filter} '$1 == id {{print $2; exit}}'); "
+            f'[ -n "$session" ] || session={shlex.quote(self.session_name)}; '
+            f'tmux list-panes -t "=$session:"{shlex.quote(str(self.tmux_target.window))} '
             f"-F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1"
         )
 
@@ -527,9 +535,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         found = content is not None and text in content
         return found
 
-    # =========================================================================
     # Status (Reported)
-    # =========================================================================
 
     def get_reported_url(self) -> str | None:
         status_path = self._get_agent_dir() / "status" / "url"
@@ -546,9 +552,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         except FileNotFoundError:
             return None
 
-    # =========================================================================
     # Activity
-    # =========================================================================
 
     def get_reported_activity_time(self, activity_type: ActivitySource) -> datetime | None:
         """Return the last activity time using file modification time.
@@ -627,9 +631,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         except FileNotFoundError:
             return None
 
-    # =========================================================================
     # Plugin Data (Certified)
-    # =========================================================================
 
     def get_plugin_data(self, plugin_name: str) -> dict[str, Any]:
         data = self._read_data()
@@ -643,9 +645,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         agent_data["plugin"][plugin_name] = data
         self._write_data(agent_data)
 
-    # =========================================================================
     # Plugin Data (Reported)
-    # =========================================================================
 
     def get_reported_plugin_file(self, plugin_name: str, filename: str) -> str:
         plugin_path = self._get_agent_dir() / "plugin" / plugin_name / filename
@@ -665,9 +665,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         except (OSError, HostConnectionError):
             return []
 
-    # =========================================================================
     # Environment
-    # =========================================================================
 
     def get_env_vars(self) -> dict[str, str]:
         env_path = self._get_agent_dir() / "env"
@@ -692,9 +690,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         env[key] = value
         self.set_env_vars(env)
 
-    # =========================================================================
     # Computed Properties
-    # =========================================================================
 
     @property
     def runtime_seconds(self) -> float | None:
@@ -704,9 +700,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         now = datetime.now(timezone.utc)
         return (now - start_time).total_seconds()
 
-    # =========================================================================
     # Provisioning Lifecycle
-    # =========================================================================
 
     def on_before_provisioning(
         self,
@@ -753,9 +747,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         Subclasses can override to perform finalization after provisioning.
         """
 
-    # =========================================================================
     # Destruction Lifecycle
-    # =========================================================================
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Default implementation: no-op.

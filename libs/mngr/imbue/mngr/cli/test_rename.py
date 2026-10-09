@@ -18,6 +18,7 @@ from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
@@ -30,6 +31,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.testing import create_test_agent_via_cli
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -141,6 +143,37 @@ def test_rename_running_agent_renames_tmux_session(
             error_message=f"New tmux session {new_session_name} should exist after rename",
         )
         assert not tmux_session_exists(old_session_name), "Old tmux session should not exist"
+
+
+@pytest.mark.tmux
+def test_an_agent_loaded_before_a_rename_reads_the_same_lifecycle_as_one_loaded_after(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    mngr_test_prefix: str,
+    plugin_manager: pluggy.PluginManager,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A listing loads each agent's name and then probes its tmux session; a rename landing in between has
+    already moved the session, so a probe by the loaded name must still find it rather than report STOPPED."""
+    agent_name = f"test-rename-probe-{uuid4().hex}"
+    new_name = f"test-renamed-probe-{uuid4().hex}"
+    old_session_name = f"{mngr_test_prefix}{agent_name}"
+    new_session_name = f"{mngr_test_prefix}{new_name}"
+
+    with tmux_session_cleanup(old_session_name), tmux_session_cleanup(new_session_name):
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, command="sleep 847295"
+        )
+        host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
+        (agent_loaded_before,) = [agent for agent in host.get_agents() if str(agent.name) == agent_name]
+
+        rename_result = cli_runner.invoke(rename, [agent_name, new_name], obj=plugin_manager, catch_exceptions=False)
+        assert rename_result.exit_code == 0, f"Rename failed: {rename_result.output}"
+
+        (agent_loaded_after,) = [agent for agent in host.get_agents() if str(agent.name) == new_name]
+        lifecycle_after = agent_loaded_after.get_lifecycle_state()
+        assert lifecycle_after != AgentLifecycleState.STOPPED
+        assert agent_loaded_before.get_lifecycle_state() == lifecycle_after
 
 
 def test_rename_dry_run_does_not_change_agent(
@@ -294,9 +327,7 @@ def test_rename_json_output(
     assert "agent_id" in output
 
 
-# =============================================================================
 # Offline path tests (OfflineHost.rename_agent)
-# =============================================================================
 
 
 class _RecordingMockProvider(MockProviderInstance):

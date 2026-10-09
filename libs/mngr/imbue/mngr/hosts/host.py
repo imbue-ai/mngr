@@ -70,6 +70,7 @@ from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.hosts.outer_host import SSH_CHANNEL_OPEN_TIMEOUT_SECONDS
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import retry_on_transient_ssh_error
+from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
 from imbue.mngr.hosts.tmux import AGENT_PANE_ID_OPTION
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -4177,6 +4178,9 @@ def _build_start_agent_shell_command(
     steps.append(
         f"(tmux set-option -t {quoted_exact_agent_session} {AGENT_PANE_ID_OPTION}"
         f" \"$(tmux display-message -p -t {quoted_exact_agent_window} '#{{pane_id}}')\" || true)"
+    )
+    steps.append(
+        f"(tmux set-option -t {quoted_exact_agent_session} {AGENT_ID_OPTION} {shlex.quote(str(agent.id))} || true)"
     )
 
     # Pin the agent window to a stable, usable geometry. tmux's default window-size
