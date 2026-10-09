@@ -38,8 +38,19 @@ let backendProcess = null;
  * needed. Returns ``{}`` whenever the router is absent -- on Windows, which
  * it is never fetched for -- so latchkey falls back to the system curl. Never point ``LATCHKEY_CURL`` at a nonexistent file,
  * which would break every credential check.
+ *
+ * In dev mode an exported ``MINDS_LATCHKEY_CURL`` names the curl to use
+ * instead, so the gateway's requests can be run through another curl -- one
+ * that points them at a stand-in for a third-party service, say. A packaged
+ * build ignores it, like MINDS_LATCHKEY_BINARY in paths.getLatchkeyPath: a
+ * stale export from a parent shell must not be able to redirect a shipped
+ * binary.
  */
 function latchkeyCurlEnv() {
+  const fromEnv = process.env.MINDS_LATCHKEY_CURL;
+  if (paths.isDev() && fromEnv) {
+    return { LATCHKEY_CURL: fromEnv };
+  }
   const router = paths.getLatchkeyCurlRouterPath();
   if (!fs.existsSync(router)) {
     return {};
