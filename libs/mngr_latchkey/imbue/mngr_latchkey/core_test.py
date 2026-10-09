@@ -3157,7 +3157,7 @@ def test_auth_browser_uses_auth_browser_subcommand(tmp_path: Path) -> None:
     report_path = tmp_path / "latchkey_report.jsonl"
     line = report_path.read_text().strip()
     record = json.loads(line)
-    assert record == {"argv": ["auth", "browser", "slack"], "env_LATCHKEY_DIRECTORY": str(tmp_path)}
+    assert record == {"argv": ["auth", "browser", "slack", "--strict"], "env_LATCHKEY_DIRECTORY": str(tmp_path)}
 
 
 def _make_prepare_required_binary(
@@ -3234,9 +3234,9 @@ def test_auth_browser_runs_browser_prepare_and_retries_when_preparation_required
     records = _read_recording_report(tmp_path)
     argv_calls = [record["argv"] for record in records]
     assert argv_calls == [
-        ["auth", "browser", "slack"],
+        ["auth", "browser", "slack", "--strict"],
         ["auth", "browser-prepare", "slack"],
-        ["auth", "browser", "slack"],
+        ["auth", "browser", "slack", "--strict"],
     ]
 
 
@@ -3255,7 +3255,7 @@ def test_auth_browser_reports_failure_when_browser_prepare_fails(tmp_path: Path)
     assert detail == "prepare blew up"
     argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
     assert argv_calls == [
-        ["auth", "browser", "slack"],
+        ["auth", "browser", "slack", "--strict"],
         ["auth", "browser-prepare", "slack"],
     ]
 
@@ -3270,7 +3270,7 @@ def test_auth_browser_does_not_retry_on_unrelated_failure(tmp_path: Path) -> Non
     assert is_success is False
     assert detail == "user cancelled"
     argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
-    assert argv_calls == [["auth", "browser", "slack"]]
+    assert argv_calls == [["auth", "browser", "slack", "--strict"]]
 
 
 def test_auth_browser_login_reports_success_on_zero_exit(tmp_path: Path) -> None:
@@ -3282,7 +3282,7 @@ def test_auth_browser_login_reports_success_on_zero_exit(tmp_path: Path) -> None
     assert is_success is True
     assert detail == ""
     argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
-    assert argv_calls == [["auth", "browser", "slack"]]
+    assert argv_calls == [["auth", "browser", "slack", "--strict"]]
 
 
 def test_auth_browser_login_does_not_run_browser_prepare_on_failure(tmp_path: Path) -> None:
@@ -3296,7 +3296,7 @@ def test_auth_browser_login_does_not_run_browser_prepare_on_failure(tmp_path: Pa
     assert "browser-prepare" in detail.lower()
     # Only the single bare ``auth browser`` call; no ``browser-prepare``, no retry.
     argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
-    assert argv_calls == [["auth", "browser", "slack"]]
+    assert argv_calls == [["auth", "browser", "slack", "--strict"]]
 
 
 def test_auth_prepare_invokes_prepare_with_json_payload(tmp_path: Path) -> None:
@@ -3421,7 +3421,7 @@ def test_add_account_runs_ephemeral_auth_browser(tmp_path: Path) -> None:
     # account is never bound to a client/session left by an earlier one.
     assert [record["argv"] for record in records] == [
         ["auth", "browser-prepare", "slack"],
-        ["auth", "browser", "slack"],
+        ["auth", "browser", "slack", "--strict"],
     ]
     # The ephemeral-browser env var is set on every call so the sign-in starts
     # from a fresh session.
@@ -3499,7 +3499,7 @@ def test_add_account_google_failure_with_minds_client_is_surfaced(tmp_path: Path
     argv_calls = _read_argv_calls(tmp_path)
     assert argv_calls == [
         _MINDS_PREPARE_ARGV,
-        ["auth", "browser", "google-gmail"],
+        ["auth", "browser", "google-gmail", "--strict"],
     ]
     # The failed Imbue Studio preparation is left in place; it is not cleared (which
     # would wipe other accounts' credentials).
@@ -3593,9 +3593,9 @@ def test_auth_browser_google_registers_minds_client_then_signs_in(tmp_path: Path
     assert is_success is True
     assert detail == ""
     assert _read_argv_calls(tmp_path) == [
-        ["auth", "browser", "google-gmail"],
+        ["auth", "browser", "google-gmail", "--strict"],
         _MINDS_PREPARE_ARGV,
-        ["auth", "browser", "google-gmail"],
+        ["auth", "browser", "google-gmail", "--strict"],
     ]
 
 
@@ -3610,9 +3610,9 @@ def test_auth_browser_google_minds_sign_in_failure_is_surfaced_without_self_setu
     assert detail == "minds consent declined"
     argv_calls = _read_argv_calls(tmp_path)
     assert argv_calls == [
-        ["auth", "browser", "google-gmail"],
+        ["auth", "browser", "google-gmail", "--strict"],
         _MINDS_PREPARE_ARGV,
-        ["auth", "browser", "google-gmail"],
+        ["auth", "browser", "google-gmail", "--strict"],
     ]
     # The Imbue Studio preparation is left in place for the next attempt to sign in
     # against; clearing it would also wipe other accounts' credentials.
@@ -3630,7 +3630,7 @@ def test_auth_browser_google_minds_prepare_failure_is_surfaced_without_sign_in(t
     assert detail == "minds prepare failed"
     argv_calls = _read_argv_calls(tmp_path)
     assert argv_calls == [
-        ["auth", "browser", "google-gmail"],
+        ["auth", "browser", "google-gmail", "--strict"],
         _MINDS_PREPARE_ARGV,
     ]
     # We never registered our client, so nothing of ours is cleared.
@@ -3646,7 +3646,7 @@ def test_auth_browser_google_already_registered_signs_in_with_one_call(tmp_path:
 
     assert is_success is True
     assert detail == ""
-    assert _read_argv_calls(tmp_path) == [["auth", "browser", "google-gmail"]]
+    assert _read_argv_calls(tmp_path) == [["auth", "browser", "google-gmail", "--strict"]]
 
 
 def test_auth_browser_google_existing_client_failure_is_never_cleared(tmp_path: Path) -> None:
@@ -3665,7 +3665,7 @@ def test_auth_browser_google_existing_client_failure_is_never_cleared(tmp_path: 
     argv_calls = _read_argv_calls(tmp_path)
     # The pre-existing client is preserved: no prepare and no clear, because we
     # only ever touch a client we registered ourselves.
-    assert argv_calls == [["auth", "browser", "google-gmail"]]
+    assert argv_calls == [["auth", "browser", "google-gmail", "--strict"]]
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
 
 
@@ -3701,7 +3701,7 @@ def test_auth_browser_notion_mcp_pins_minds_redirect_uri_before_first_sign_in(tm
     assert detail == ""
     assert _read_argv_calls(tmp_path) == [
         _NOTION_MCP_REDIRECT_PREPARE_ARGV,
-        ["auth", "browser", "notion-mcp"],
+        ["auth", "browser", "notion-mcp", "--strict"],
     ]
 
 
@@ -3725,7 +3725,9 @@ def test_auth_browser_notion_mcp_re_sign_in_of_stored_account_does_not_re_pin(tm
     is_success, _detail = latchkey.auth_browser("notion-mcp", account="jane@example.com:Acme")
 
     assert is_success is True
-    assert _read_argv_calls(tmp_path) == [["auth", "browser", "notion-mcp", "--account", "jane@example.com:Acme"]]
+    assert _read_argv_calls(tmp_path) == [
+        ["auth", "browser", "notion-mcp", "--strict", "--account", "jane@example.com:Acme"]
+    ]
 
 
 def test_add_account_notion_mcp_pins_redirect_uri_before_ephemeral_sign_in(tmp_path: Path) -> None:
@@ -3740,7 +3742,7 @@ def test_add_account_notion_mcp_pins_redirect_uri_before_ephemeral_sign_in(tmp_p
     assert [record["argv"] for record in records] == [
         _NOTION_MCP_REDIRECT_PREPARE_ARGV,
         ["auth", "browser-prepare", "notion-mcp"],
-        ["auth", "browser", "notion-mcp"],
+        ["auth", "browser", "notion-mcp", "--strict"],
     ]
     # Only the browser flows run from a fresh session; pinning the redirect
     # URI opens no browser.

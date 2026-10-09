@@ -174,11 +174,10 @@ PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 # Move it in lockstep with the versions we install
 # (:data:`imbue.mngr_latchkey.remote.provisioning.LATCHKEY_VERSION` and the
 # in-workspace pin in default-workspace-template) rather than to track what the
-# code strictly needs: the newest release with a hard dependency here is 3.2.0,
-# the first to report the account whose credentials it injects to detent as
-# ``customMetadata.account`` -- what the per-account permission grants
-# (:mod:`imbue.mngr_latchkey.account_scopes`) read.
-LATCHKEY_MIN_VERSION: Final[str] = "3.16.2"
+# code strictly needs: the newest release with a hard dependency here is
+# 3.17.0, the first to accept the ``--strict`` flag :meth:`Latchkey.auth_browser_login`
+# always passes.
+LATCHKEY_MIN_VERSION: Final[str] = "3.17.0"
 
 # Fixed port at which every containerized/VM/VPS agent reaches the Latchkey
 # gateway. A desktop-gateway agent sees it on its own 127.0.0.1 (a per-agent
@@ -1806,10 +1805,17 @@ class Latchkey(MutableModel):
     def auth_browser_login(
         self, service_name: str, *, is_ephemeral: bool = False, account: str | None = None
     ) -> tuple[bool, str]:
-        """Run a single ``latchkey auth browser <service>`` with no preparation fallback.
+        """Run a single ``latchkey auth browser <service> --strict`` with no preparation fallback.
 
         ``account`` is passed through to latchkey's global ``--account`` option
         (see :meth:`auth_browser`).
+
+        ``--strict`` (latchkey >= 3.17.0) makes the sign-in fail, instead of
+        storing a partial credential, when the user grants fewer permissions
+        than the service asked for -- a Google consent screen left with some
+        checkboxes unticked. Only services that can tell what was granted
+        enforce it (of the built-in ones, just Google); for the rest the flag
+        is a no-op, so it is passed unconditionally.
 
         Unlike :meth:`auth_browser`, this never auto-runs ``auth
         browser-prepare`` on failure. It is the bare sign-in used once the
@@ -1820,7 +1826,7 @@ class Latchkey(MutableModel):
         client during the sign-in itself. Returns ``(True, "")`` on a clean
         exit, otherwise ``(False, detail)``.
         """
-        argv = ["auth", "browser", service_name]
+        argv = ["auth", "browser", service_name, "--strict"]
         if account is not None:
             argv.extend(["--account", account])
         return self._run_latchkey_auth_command(
