@@ -19,6 +19,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import BoundedHostRead
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -398,6 +399,24 @@ def test_connection_error_fallback_reports_the_provider_recorded_resources(
     assert host_details.resource is not None
     assert host_details.resource.cpu.count == 3
     assert host_details.resource.memory_gb == 6.0
+
+
+def test_online_host_whose_recorded_size_cannot_be_read_lists_with_no_size(
+    host_id: HostId, provider: MockProviderInstance
+) -> None:
+    """A provider that cannot answer an online host's size from its records degrades the row, not the listing."""
+    online_host = _make_mock_online_host(host_id)
+    online_host.get_agents.return_value = []
+    online_host.get_provider_resources.side_effect = MngrError("no recorded shape for this host")
+    provider.mock_hosts = [online_host]
+
+    host_ref = DiscoveredHost(host_id=host_id, host_name=HostName("test-host"), provider_name=provider.name)
+    with capture_loguru() as captured:
+        host_details, _agent_details_list = provider.get_host_and_agent_details(host_ref, [])
+
+    assert host_details.state == HostState.RUNNING
+    assert host_details.resource is None
+    assert "Could not read the recorded size of host" in captured.getvalue()
 
 
 def test_offline_field_generators_populate_plugin_data_via_get_host_and_agent_details(

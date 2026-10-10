@@ -1109,6 +1109,22 @@ class OfflineCapableVpsProvider(VpsProvider):
         except HostNotFoundError:
             return []
 
+    def _host_record_for_sizing(self, host_id: HostId) -> VpsHostRecord | None:
+        """The cached record, else the mirrored one, else the base lookup.
+
+        A stopped host's record is not cached (the listing reconstructs the host
+        from the instance list) but its mirror in the state store carries the
+        recorded shape, and reading it is an object-store read rather than a
+        connection to the host.
+        """
+        cached_record = self._host_record_cache.get(host_id)
+        if cached_record is not None:
+            return cached_record
+        mirrored_record = self._state_store.read_host_record(host_id)
+        if mirrored_record is not None:
+            return mirrored_record
+        return super()._host_record_for_sizing(host_id)
+
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         """Return the host's persisted agent records, on-volume when reachable else offline.
 

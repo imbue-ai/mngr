@@ -17,6 +17,11 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
+from imbue.mngr.providers.provider_release_testing import assert_host_resources_match
+from imbue.mngr.providers.provider_release_testing import host_from_list_json
+from imbue.mngr.providers.provider_release_testing import host_resources_from_list_json
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.sizing import host_resources_for_shape
 from imbue.mngr_vultr.client import VultrVpsClient
 from imbue.mngr_vultr.testing import VULTR_RELEASE_TESTS_OPT_IN
 from imbue.mngr_vultr.testing import VULTR_TEST_OS_ID
@@ -104,14 +109,17 @@ class TestVultrProviderLifecycle:
     """Tests for the full VPS Docker provider lifecycle."""
 
     @pytest.mark.rsync
-    def test_create_exec_and_destroy(self, vultr_test_settings_dir: Path) -> None:
+    def test_create_exec_and_destroy(
+        self, vultr_test_settings_dir: Path, vultr_release_client: VultrVpsClient
+    ) -> None:
         """Provisioning a real Vultr VPS yields an agent that is fully usable end to end.
 
         Asserts that ``create`` succeeds, that a subsequent ``exec`` actually runs a
         command on the remote VPS (the unique marker ``hello-from-vultr`` appears in
-        stdout), that the provisioned host_dir ``/mngr`` exists on the box, and that
-        ``list`` reports the agent under the ``vultr`` provider. Each assertion fails
-        if provisioning, remote exec, or registration silently no-ops.
+        stdout), that the provisioned host_dir ``/mngr`` exists on the box, that
+        ``list`` reports the agent under the ``vultr`` provider, and that the size
+        ``list`` reports is the size Vultr says the instance has. Each assertion fails
+        if provisioning, remote exec, registration, or size recording silently no-ops.
         """
         agent_name = f"test-vultr-{int(time.time()) % 100000}"
 
@@ -147,6 +155,22 @@ class TestVultrProviderLifecycle:
             assert result.returncode == 0, f"List failed: {result.stderr}"
             assert agent_name in result.stdout
             assert "vultr" in result.stdout
+
+            # The size `list` reports is the size Vultr says the instance has. The host is
+            # auto-named, so it is found through the agent; Vultr labels the instance after it.
+            result = _run_mngr(vultr_test_settings_dir, "list", "--format", "json")
+            assert result.returncode == 0, f"List failed: {result.stderr}"
+            listed_host = host_from_list_json(result.stdout, agent_name)
+            assert listed_host is not None, f"`mngr list` does not list {agent_name}"
+            listed_resources = host_resources_from_list_json(result.stdout, agent_name)
+            assert listed_resources is not None, f"`mngr list` reports no size for {agent_name}"
+            instance_label = f"mngr-{listed_host['name']}"
+            instances = [i for i in vultr_release_client.list_instances() if i.get("label") == instance_label]
+            assert len(instances) == 1, f"expected one Vultr instance labeled {instance_label}, found {len(instances)}"
+            instance = instances[0]
+            shape = vultr_release_client.get_instance_shape(VpsInstanceId(instance["id"]), str(instance.get("plan")))
+            assert shape is not None, f"Vultr reports no shape for instance {instance['id']}"
+            assert_host_resources_match(listed_resources, host_resources_for_shape(shape))
         finally:
             _destroy(vultr_test_settings_dir, agent_name)
 

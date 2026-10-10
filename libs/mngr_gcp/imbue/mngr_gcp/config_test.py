@@ -2,6 +2,7 @@
 
 import pytest
 from google.auth.credentials import AnonymousCredentials
+from pydantic import ValidationError
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_gcp.config import GcpProviderConfig
@@ -112,3 +113,23 @@ def test_default_source_image_is_global_debian_family() -> None:
     # it does not need the image to ship cloud-init.
     config = GcpProviderConfig(project_id="p")
     assert "global/images/family/debian-13" in config.default_source_image
+
+
+def test_root_disk_defaults_to_thirty_gb_and_the_legacy_boot_disk_field_is_unset() -> None:
+    config = GcpProviderConfig(project_id="my-project")
+
+    assert config.root_disk_size_gb == 30
+    assert config.boot_disk_size_gb is None
+
+
+def test_legacy_boot_disk_size_gb_sets_the_unified_root_disk_size() -> None:
+    config = GcpProviderConfig.model_validate({"project_id": "my-project", "boot_disk_size_gb": 40})
+
+    assert config.root_disk_size_gb == 40
+    assert config.boot_disk_size_gb is None
+    assert "root_disk_size_gb" in config.model_fields_set
+
+
+def test_legacy_boot_disk_size_gb_disagreeing_with_root_disk_size_gb_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="boot_disk_size_gb .* and root_disk_size_gb .* disagree"):
+        GcpProviderConfig.model_validate({"boot_disk_size_gb": 40, "root_disk_size_gb": 50})

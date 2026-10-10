@@ -232,11 +232,27 @@ class FakeVirtualMachinesOperations:
         return self.list_result
 
 
+class FakeResourceSkusOperations:
+    """Fake ComputeManagementClient.resource_skus: ``list`` returns canned SKUs and records the filter."""
+
+    def __init__(self) -> None:
+        self.list_result: list[Any] = []
+        self.list_error: Exception | None = None
+        self.last_list_filter: str | None = None
+
+    def list(self, filter: str | None = None) -> list[Any]:
+        self.last_list_filter = filter
+        if self.list_error is not None:
+            raise self.list_error
+        return self.list_result
+
+
 class FakeComputeClient:
-    """Fake ComputeManagementClient bundling the virtual_machines operations."""
+    """Fake ComputeManagementClient bundling the virtual_machines and resource_skus operations."""
 
     def __init__(self) -> None:
         self.virtual_machines = FakeVirtualMachinesOperations()
+        self.resource_skus = FakeResourceSkusOperations()
 
 
 class FakePublicIPAddressesOperations:

@@ -31,7 +31,11 @@ from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store import VpsHostStore
 from imbue.mngr_vps.host_store import open_host_store
 from imbue.mngr_vps.host_store import resolve_volume_device
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
 
 _AGENT_ID_1 = AgentId.generate()
 _AGENT_ID_2 = AgentId.generate()
@@ -535,3 +539,34 @@ def test_list_persisted_agent_data_reads_all_agents_in_one_round_trip(tmp_path: 
     # Exactly one batched read, and identical regardless of how many agents exist.
     assert delta_two == 1
     assert delta_five == 1
+
+
+def test_vps_host_config_round_trips_the_recorded_shape() -> None:
+    config = VpsHostConfig(
+        vps_instance_id=VpsInstanceId("inst-abc123"),
+        region="ewr",
+        plan="vc2-2c-4gb",
+        shape=VpsInstanceShape(vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(4096), root_disk_gb=VpsDiskGb(80)),
+    )
+    record = VpsHostRecord(certified_host_data=_make_certified_data(), config=config)
+
+    restored = VpsHostRecord.model_validate_json(record.model_dump_json())
+
+    assert restored.config is not None
+    assert restored.config.shape == config.shape
+
+
+def test_vps_host_config_written_before_shapes_were_recorded_reads_with_no_shape() -> None:
+    legacy_config_json = json.dumps(
+        {
+            "vps_instance_id": "inst-abc123",
+            "region": "ewr",
+            "plan": "vc2-2c-4gb",
+            "container_name": "c",
+            "volume_name": "v",
+        }
+    )
+
+    config = VpsHostConfig.model_validate_json(legacy_config_json)
+
+    assert config.shape is None

@@ -23,6 +23,7 @@ from imbue.mngr.interfaces.data_types import HostConfig
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.sizing import VpsInstanceShape
 
 # Sentinel marking the start of each agent JSON file in batched-read output.
 # Chosen to be extremely unlikely to appear inside any real agent record:
@@ -45,6 +46,13 @@ class VpsHostConfig(HostConfig):
     vps_instance_id: VpsInstanceId = Field(description="Provider-specific VPS instance ID")
     region: str = Field(description="Region where the VPS was created")
     plan: str = Field(description="VPS plan (CPU/RAM specification)")
+    shape: VpsInstanceShape | None = Field(
+        default=None,
+        description=(
+            "The instance shape (vCPUs, RAM, root disk) the cloud reported at create; None on a record "
+            "written before shapes were recorded"
+        ),
+    )
     start_args: tuple[str, ...] = Field(default=(), description="Docker run arguments for replay on snapshot restore")
     image: str | None = Field(default=None, description="Docker image used for the container")
     container_name: str | None = Field(default=None, description="Docker container name on the VPS (None for bare)")

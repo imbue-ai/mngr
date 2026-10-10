@@ -34,7 +34,7 @@ default_instance_type = "t3.small"  # EC2 instance type
 allowed_ssh_cidrs = ["203.0.113.4/32"]
 
 # Optional EBS sizing
-root_volume_size_gb = 30
+root_disk_size_gb = 30
 root_volume_type = "gp3"
 ```
 
@@ -89,7 +89,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Either {'kind': 'existing', 'id': 'sg-...'} to attach an existing security group, or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. The auto-create path consults allowed_ssh_cidrs. |
 | `subnet_id` | `None` | Subnet ID. When None, EC2 picks the default-VPC subnet for the AZ. |
 | `vpc_id` | `None` | VPC ID. Only used to scope auto-created security group lookups. |
-| `root_volume_size_gb` | `30` | Size of the root EBS volume in GB. |
+| `root_volume_size_gb` | `None` | Deprecated alias of root_disk_size_gb (the root EBS volume size in GB); set root_disk_size_gb instead. |
 | `root_volume_type` | `gp3` | EBS volume type for the root volume. |
 | `iam_instance_profile` | `None` | Optional IAM instance profile name attached to launched instances. |
 | `state_bucket_name` | `None` (auto-derived) | S3 bucket where mngr stores a stopped instance's state so it is readable without starting the instance. When None, named 'mngr-state-<account_id>-<region>'. The bucket is required infrastructure (run `mngr aws prepare`); there is no tag fallback. |
@@ -99,6 +99,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `aws_access_key_id` | `None` | Explicit AWS access key id. When set together with aws_secret_access_key, these are passed directly to boto3 and take precedence over the ambient credential chain. Used by the Imbue Studio bring-your-own-account paste flow. Leave unset to use the ambient chain. |
 | `aws_secret_access_key` | `None` | Explicit AWS secret access key. See aws_access_key_id. |
 | `aws_session_token` | `None` | Optional AWS session token, for temporary (STS/SSO) credentials. Only used when aws_access_key_id / aws_secret_access_key are set. |
+| `root_disk_size_gb` | `30` | Size of the VM's root disk in GB (the EBS root volume on AWS, the boot disk on GCP, the OS managed disk on Azure). With container isolation the agent's data lives on a loop file carved from this disk minus `outer_disk_reserved_gb`. |
 | `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound CIDR blocks allowed on tcp/22 and the container SSH port in the security group / NSG / firewall rule the provider's `prepare` command creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to restrict to your own, or () for no ingress (no rule is created, so the instance is unreachable from outside its network). A warning is logged when the effective range is 0.0.0.0/0 or empty. Replaced, not merged, across config layers. |
 | `associate_public_ip` | `true` | Assign a public IPv4 address to the instance. Required for the current mngr-from-developer-laptop SSH access model. For a more secure deployment, set to False and run mngr from a bastion inside the network. |
 | `auto_shutdown_seconds` | `None` | When set, the host OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts) -- a hard max-lifetime cap, distinct from the activity-based default_idle_timeout. Whether the halt stops, terminates, or deletes the instance is provider-specific (see the provider's README). |

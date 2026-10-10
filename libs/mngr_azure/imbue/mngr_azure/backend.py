@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from functools import cached_property
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from typing import Final
 
@@ -43,8 +44,13 @@ from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
+from imbue.mngr_vps.sizing import legacy_shape_with_root_disk
 from imbue.mngr_vps.systemd import render_systemd_unit
 
 # The self-stopping idle watcher (in-container sentinel + host-side systemd
@@ -187,6 +193,38 @@ class ParsedAzureBuildOptions(ParsedVpsBuildOptions):
     )
 
 
+# CLEANUP: drop this table, and the provider's ``_legacy_shape_for_plan``, once
+# no host record predates shape recording (the shape is recorded at create).
+# The plans in use before shapes were recorded: the provider default plus the
+# sizes the Imbue Studio create form offers.
+_LEGACY_AZURE_VM_SIZE_SHAPES: Final[Mapping[str, VpsInstanceShape]] = MappingProxyType(
+    {
+        "Standard_B2s": VpsInstanceShape(vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(4096), root_disk_gb=None),
+        "Standard_B2ms": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(8192), root_disk_gb=None
+        ),
+        "Standard_D2s_v6": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(8192), root_disk_gb=None
+        ),
+        "Standard_D2ads_v6": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(8192), root_disk_gb=None
+        ),
+        "Standard_D2s_v5": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(8192), root_disk_gb=None
+        ),
+        "Standard_D4s_v6": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(4), memory_mib=VpsMemoryMib(16384), root_disk_gb=None
+        ),
+        "Standard_D4ads_v6": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(4), memory_mib=VpsMemoryMib(16384), root_disk_gb=None
+        ),
+        "Standard_D8s_v6": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(8), memory_mib=VpsMemoryMib(32768), root_disk_gb=None
+        ),
+    }
+)
+
+
 class AzureProvider(OfflineCapableVpsProvider):
     """Azure-specific provider that discovers hosts via the VM list in the resource group."""
 
@@ -318,6 +356,11 @@ class AzureProvider(OfflineCapableVpsProvider):
         # pointing at ``mngr azure prepare`` when the subnet is missing.
         self.azure_client.resolve_subnet_id()
 
+    def _legacy_shape_for_plan(self, plan: str) -> VpsInstanceShape | None:
+        return legacy_shape_with_root_disk(
+            _LEGACY_AZURE_VM_SIZE_SHAPES, plan, VpsDiskGb(self.azure_config.root_disk_size_gb)
+        )
+
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedAzureBuildOptions:
         """Parse Azure-prefixed build args.
 
@@ -384,11 +427,9 @@ class AzureProvider(OfflineCapableVpsProvider):
     # its Static IP, so it is still listed and then fails fast over the bounded SSH
     # connect timeout before being reconstructed offline -- see that base method.
 
-    # =========================================================================
     # Deallocate/start (idle-pause + resume) -- the base OfflineCapableVpsProvider
     # owns the orchestration; here we supply the Azure-specific cloud-API hooks
     # plus the static-IP rebind no-ops.
-    # =========================================================================
 
     def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
         with log_span("Deallocating Azure VM"):
@@ -406,9 +447,7 @@ class AzureProvider(OfflineCapableVpsProvider):
         """No-op: Azure's Static IP means the known_hosts entry is unchanged across a
         deallocate/start, so no pre-connect rebind is needed."""
 
-    # =========================================================================
     # Self-stopping idle watcher (sentinel + host-side systemd deallocate)
-    # =========================================================================
 
     @property
     def _supports_bare_isolation(self) -> bool:
@@ -490,9 +529,7 @@ class AzureProvider(OfflineCapableVpsProvider):
         except AzureError as e:
             raise MngrError(f"Azure self-deallocate role assignment failed: {e}") from e
 
-    # =========================================================================
     # Offline discovery (so DEALLOCATED hosts list + resolve by name from the bucket)
-    # =========================================================================
 
     def _host_name_tag_key(self) -> str:
         # The host name is mirrored into the Azure ``mngr-host-name`` tag (as
@@ -607,7 +644,7 @@ class AzureProviderBackend(ProviderBackendInterface):
             image_sku=config.image_sku,
             image_version=config.image_version,
             admin_username=config.admin_username,
-            os_disk_size_gb=config.os_disk_size_gb,
+            os_disk_size_gb=config.root_disk_size_gb,
             os_disk_type=config.os_disk_type,
             allowed_ssh_cidrs=config.allowed_ssh_cidrs,
             associate_public_ip=config.associate_public_ip,

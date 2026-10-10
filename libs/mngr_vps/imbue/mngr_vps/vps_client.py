@@ -13,6 +13,7 @@ from imbue.mngr_vps.errors import VpsError
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.sizing import VpsInstanceShape
 
 
 class VpsClientInterface(MutableModel, ABC):
@@ -56,6 +57,18 @@ class VpsClientInterface(MutableModel, ABC):
     @abstractmethod
     def get_instance_ip(self, instance_id: VpsInstanceId) -> str:
         """Get the main IPv4 address of a VPS instance."""
+        ...
+
+    @abstractmethod
+    def get_instance_shape(self, instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+        """The vCPUs, RAM, and root disk of a created instance, or None when the cloud cannot describe them.
+
+        Called once at create, after the instance exists. A cloud that sizes by
+        plan (EC2 instance type, GCE machine type, Azure VM size) describes
+        ``plan`` and reports the root disk it was configured to attach; a cloud
+        that reports the shape on the instance itself (Vultr, OVH) reads
+        ``instance_id``.
+        """
         ...
 
     slow_provisioning_warning_threshold_seconds: float = Field(
@@ -155,6 +168,9 @@ class ExternallyManagedVpsClient(VpsClientInterface):
 
     def get_instance_ip(self, instance_id: VpsInstanceId) -> str:
         raise self._unavailable("get_instance_ip")
+
+    def get_instance_shape(self, instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+        raise self._unavailable("get_instance_shape")
 
     def wait_for_instance_active(
         self,

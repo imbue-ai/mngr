@@ -9,6 +9,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vultr.backend import VULTR_BACKEND_NAME
 from imbue.mngr_vultr.backend import VultrProviderBackend
+from imbue.mngr_vultr.backend import _LEGACY_VULTR_PLAN_SHAPES
 from imbue.mngr_vultr.backend import register_provider_backend
 from imbue.mngr_vultr.config import VultrProviderConfig
 
@@ -66,3 +67,11 @@ def test_build_provider_instance_raises_not_authorized_when_api_key_missing(
     # (reported as unavailable) rather than dropping it from the listing.
     assert isinstance(exc_info.value, ProviderUnavailableError)
     assert exc_info.value.provider_name == name
+
+
+def test_legacy_plan_table_covers_the_default_plan_with_its_bundled_disk() -> None:
+    shape = _LEGACY_VULTR_PLAN_SHAPES[VultrProviderConfig().default_plan]
+
+    assert shape.vcpu_count == 2
+    assert shape.memory_mib == 4096
+    assert shape.root_disk_gb == 80

@@ -1,5 +1,6 @@
 import json
 import shutil
+from typing import Any
 
 import google.auth
 from google.auth import exceptions as google_auth_exceptions
@@ -8,6 +9,7 @@ from google.oauth2 import service_account
 from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
+from pydantic import model_validator
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
@@ -17,6 +19,7 @@ from imbue.mngr_gcp.errors import GcpProjectError
 from imbue.mngr_gcp.errors import GcpZoneRegionMismatchError
 from imbue.mngr_gcp.state_bucket import GcsStateBucket
 from imbue.mngr_vps.config import OfflineCapableVpsProviderConfig
+from imbue.mngr_vps.config import fold_legacy_root_disk_size_key
 
 # OAuth scope granting full access to all Google Cloud Platform APIs. Only
 # applied when ``service_account_email`` is set (attaching a service account to
@@ -138,9 +141,9 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
             "image run inside the VM)."
         ),
     )
-    boot_disk_size_gb: int = Field(
-        default=30,
-        description="Boot disk size in GB.",
+    boot_disk_size_gb: int | None = Field(
+        default=None,
+        description="Deprecated alias of root_disk_size_gb (the boot disk size in GB); set root_disk_size_gb instead.",
     )
     boot_disk_type: str = Field(
         default="pd-balanced",
@@ -208,6 +211,11 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
             "flow. Leave unset to use ADC."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_legacy_boot_disk_size(cls, raw_config: Any) -> Any:
+        return fold_legacy_root_disk_size_key(raw_config, "boot_disk_size_gb")
 
     def get_credentials_and_resolved_project(self) -> tuple[Credentials, str | None]:
         """Resolve Google Application Default Credentials and the project ADC infers.

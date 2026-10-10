@@ -194,7 +194,6 @@ def test_parse_build_args_rejects_unknown_azure_flag(temp_mngr_ctx: MngrContext)
         provider._parse_build_args(["--azure-bogus=1"])
 
 
-# =============================================================================
 # Offline paths (stop/start lifecycle): instance lookup, offline discovery from
 # the cheap identity tags, and the no-bucket state-store behavior.
 #
@@ -207,7 +206,6 @@ def test_parse_build_args_rejects_unknown_azure_flag(temp_mngr_ctx: MngrContext)
 # now live solely in the Blob state bucket (via ``_state_store``). The base
 # identity tags (``mngr-host-id`` / ``mngr-host-name``) are still stamped at
 # create and drive offline discovery of a deallocated VM.
-# =============================================================================
 
 
 def _build_stubbed_provider(
@@ -608,9 +606,7 @@ def test_remirror_host_name_is_noop_without_config(temp_mngr_ctx: MngrContext) -
     assert compute.virtual_machines.updated == []
 
 
-# =============================================================================
 # State store selection (BucketHostStateStore, or raise when the bucket is absent)
-# =============================================================================
 
 
 def test_state_store_raises_prepare_pointer_when_no_bucket(temp_mngr_ctx: MngrContext) -> None:
@@ -629,9 +625,7 @@ def test_state_store_is_bucket_store_when_bucket_exists(temp_mngr_ctx: MngrConte
     assert store.bucket is bucket
 
 
-# =============================================================================
 # Idle-watcher / sentinel module functions (systemd path/service + deallocate)
-# =============================================================================
 
 
 def test_build_idle_watcher_service_unit_execstart_points_at_deallocate_script() -> None:
@@ -704,3 +698,22 @@ def test_gc_provider_resources_delegates_to_client(temp_mngr_ctx: MngrContext) -
     reclaimed = provider.gc_provider_resources(dry_run=True)
     assert client.reclaim_calls == [("azure-test", True)]
     assert [(r.kind, r.name) for r in reclaimed] == [("network_interface", "old-nic")]
+
+
+def test_legacy_shape_for_plan_fills_the_configured_root_disk_into_the_default_vm_size(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=None)
+
+    shape = provider._legacy_shape_for_plan(provider.azure_config.default_vm_size)
+
+    assert shape is not None
+    assert shape.vcpu_count == 2
+    assert shape.memory_mib == 4096
+    assert shape.root_disk_gb == provider.azure_config.root_disk_size_gb
+
+
+def test_legacy_shape_for_plan_is_none_for_a_vm_size_outside_the_table(temp_mngr_ctx: MngrContext) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=None)
+
+    assert provider._legacy_shape_for_plan("Standard_M416s_v2") is None

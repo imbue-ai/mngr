@@ -22,8 +22,13 @@ from pathlib import Path
 import ovh
 import pytest
 
+from imbue.mngr.providers.provider_release_testing import assert_host_resources_match
+from imbue.mngr.providers.provider_release_testing import host_from_list_json
+from imbue.mngr.providers.provider_release_testing import host_resources_from_list_json
 from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.config import OvhProviderConfig
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.sizing import host_resources_for_shape
 
 
 def _has_ovh_credentials() -> bool:
@@ -117,9 +122,11 @@ class TestOvhProviderLifecycle:
 
         Asserts that `mngr create --provider ovh` succeeds, then that `exec` runs a
         command on the live VPS and returns its stdout ("hello-from-ovh"), that the
-        host build context was actually uploaded (the `/mngr` host_dir exists), and
-        that `list` reports the agent on the `ovh` backend. These would fail if create
-        silently no-op'd, the VPS were unreachable, or the build context never synced.
+        host build context was actually uploaded (the `/mngr` host_dir exists), that
+        `list` reports the agent on the `ovh` backend, and that the size `list`
+        reports is the size OVH says the VPS model has. These would fail if create
+        silently no-op'd, the VPS were unreachable, the build context never synced,
+        or the shape was never recorded.
         """
         agent_name = f"test-ovh-{int(time.time()) % 100000}"
 
@@ -151,6 +158,21 @@ class TestOvhProviderLifecycle:
             assert result.returncode == 0, f"List failed: {result.stderr}"
             assert agent_name in result.stdout
             assert "ovh" in result.stdout
+
+            # The size `list` reports is the size OVH says the VPS model has. The host is
+            # auto-named, so it is found through the agent; its SSH hostname is the OVH
+            # serviceName, which is the client's instance id.
+            result = _run_mngr(ovh_test_settings_dir, "list", "--format", "json")
+            assert result.returncode == 0, f"List failed: {result.stderr}"
+            listed_host = host_from_list_json(result.stdout, agent_name)
+            assert listed_host is not None, f"`mngr list` does not list {agent_name}"
+            listed_resources = host_resources_from_list_json(result.stdout, agent_name)
+            assert listed_resources is not None, f"`mngr list` reports no size for {agent_name}"
+            service_name = (listed_host.get("ssh") or {}).get("host")
+            assert service_name, f"`mngr list` reports no SSH host for {agent_name}"
+            shape = _build_client().get_instance_shape(VpsInstanceId(service_name), OvhProviderConfig().default_plan)
+            assert shape is not None, f"OVH reports no shape for {service_name}"
+            assert_host_resources_match(listed_resources, host_resources_for_shape(shape))
         finally:
             _destroy(ovh_test_settings_dir, agent_name)
 

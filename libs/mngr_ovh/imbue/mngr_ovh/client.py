@@ -27,8 +27,12 @@ from imbue.mngr_ovh._tag_keys import MNGR_RECYCLING_LOCK_TAG_KEY
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
 _DEFAULT_VPS_TASK_POLL_INTERVAL: Final[float] = 5.0
@@ -261,9 +265,7 @@ class OvhVpsClient(VpsClientInterface):
             )
         return self._ssh_key_cache[key_id]
 
-    # =========================================================================
     # Instance operations
-    # =========================================================================
 
     def create_instance(
         self,
@@ -378,6 +380,21 @@ class OvhVpsClient(VpsClientInterface):
         """Return the raw ``GET /vps/{s}`` payload."""
         return dict(self._call("GET", f"/vps/{instance_id}") or {})
 
+    def get_instance_shape(self, instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+        """The vCores, RAM (OVH reports MB), and disk of the VPS's ``model``; None when the payload lacks them."""
+        del plan
+        model = self.get_instance(instance_id).get("model") or {}
+        vcore_count = model.get("vcore")
+        memory_mb = model.get("memory")
+        disk_gb = model.get("disk")
+        if not vcore_count or not memory_mb:
+            return None
+        return VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(int(vcore_count)),
+            memory_mib=VpsMemoryMib(int(memory_mb)),
+            root_disk_gb=VpsDiskGb(int(disk_gb)) if disk_gb else None,
+        )
+
     def get_service_info(self, service_name: str) -> dict[str, Any]:
         """Return the raw ``GET /vps/{s}/serviceInfos`` payload.
 
@@ -459,9 +476,7 @@ class OvhVpsClient(VpsClientInterface):
                 elapsed,
             )
 
-    # =========================================================================
     # Task polling
-    # =========================================================================
 
     def wait_for_task(
         self,
@@ -548,9 +563,7 @@ class OvhVpsClient(VpsClientInterface):
                 ids.extend(int(t) for t in payload)
         return ids
 
-    # =========================================================================
     # SSH key shim
-    # =========================================================================
 
     def upload_ssh_key(self, name: str, public_key: str) -> str:
         """In-memory cache: OVH classic VPS has no SSH key store.

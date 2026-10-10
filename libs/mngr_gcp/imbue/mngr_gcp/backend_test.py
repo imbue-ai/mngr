@@ -774,3 +774,22 @@ def test_to_offline_host_raises_when_no_host_state_metadata(temp_mngr_ctx: MngrC
     instances.list_result = [_instance("i-1", "TERMINATED", host_id=host_id)]
     with pytest.raises(HostNotFoundError):
         provider.to_offline_host(host_id)
+
+
+def test_legacy_shape_for_plan_fills_the_configured_root_disk_into_the_default_machine_type(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=None)
+
+    shape = provider._legacy_shape_for_plan(provider.gcp_config.default_machine_type)
+
+    assert shape is not None
+    assert shape.vcpu_count == 2
+    assert shape.memory_mib == 2048
+    assert shape.root_disk_gb == provider.gcp_config.root_disk_size_gb
+
+
+def test_legacy_shape_for_plan_is_none_for_a_machine_type_outside_the_table(temp_mngr_ctx: MngrContext) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=None)
+
+    assert provider._legacy_shape_for_plan("c3-highmem-176") is None

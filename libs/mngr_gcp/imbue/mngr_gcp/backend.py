@@ -3,6 +3,7 @@ import os
 from collections.abc import Mapping
 from collections.abc import Sequence
 from functools import cached_property
+from types import MappingProxyType
 from typing import Any
 from typing import Final
 
@@ -49,7 +50,12 @@ from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
 from imbue.mngr_vps.instance_offline import host_name_from_prefixed_value
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
+from imbue.mngr_vps.sizing import legacy_shape_with_root_disk
 
 # GCP has no object-storage state bucket; the offline mirror lives in the
 # instance's own GCE *metadata*, which is large and permissive (256 KB per value,
@@ -175,6 +181,33 @@ class ParsedGcpBuildOptions(ParsedVpsBuildOptions):
     )
 
 
+# CLEANUP: drop this table, and the provider's ``_legacy_shape_for_plan``, once
+# no host record predates shape recording (the shape is recorded at create).
+# The plans in use before shapes were recorded: the provider default plus the
+# sizes the Imbue Studio create form offers.
+_LEGACY_GCP_MACHINE_TYPE_SHAPES: Final[Mapping[str, VpsInstanceShape]] = MappingProxyType(
+    {
+        "e2-small": VpsInstanceShape(vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(2048), root_disk_gb=None),
+        "e2-medium": VpsInstanceShape(vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(4096), root_disk_gb=None),
+        "e2-standard-2": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(8192), root_disk_gb=None
+        ),
+        "n2-standard-2": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(8192), root_disk_gb=None
+        ),
+        "e2-standard-4": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(4), memory_mib=VpsMemoryMib(16384), root_disk_gb=None
+        ),
+        "n2-standard-4": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(4), memory_mib=VpsMemoryMib(16384), root_disk_gb=None
+        ),
+        "e2-standard-8": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(8), memory_mib=VpsMemoryMib(32768), root_disk_gb=None
+        ),
+    }
+)
+
+
 class GcpProvider(OfflineCapableVpsProvider):
     """GCP-specific provider that discovers hosts via the GCE instances.list API."""
 
@@ -239,6 +272,11 @@ class GcpProvider(OfflineCapableVpsProvider):
         # ``create_instance`` path resolves it again to get the target tag; this
         # extra GET is cheap and is what lets the failure happen early and clean.
         self.gcp_client.resolve_firewall()
+
+    def _legacy_shape_for_plan(self, plan: str) -> VpsInstanceShape | None:
+        return legacy_shape_with_root_disk(
+            _LEGACY_GCP_MACHINE_TYPE_SHAPES, plan, VpsDiskGb(self.gcp_config.root_disk_size_gb)
+        )
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedGcpBuildOptions:
         """Parse GCP-prefixed build args.
@@ -346,11 +384,9 @@ class GcpProvider(OfflineCapableVpsProvider):
     # (cached listing -> non-empty main_ip) covers GCP unchanged: a stopped GCE
     # instance loses its external IP and is excluded by the non-empty IP check.
 
-    # =========================================================================
     # Native GCE stop/start (idle-pause + resume) -- the base
     # OfflineCapableVpsProvider owns the orchestration; here we supply only the
     # GCE-specific cloud-API hooks.
-    # =========================================================================
 
     def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
         with log_span("Stopping GCE instance"):
@@ -360,9 +396,7 @@ class GcpProvider(OfflineCapableVpsProvider):
         with log_span("Starting GCE instance"):
             return self.gcp_client.start_instance(instance_id)
 
-    # =========================================================================
     # Self-stopping idle watcher (in-container sentinel + host-side systemd)
-    # =========================================================================
 
     @property
     def _supports_bare_isolation(self) -> bool:
@@ -390,10 +424,8 @@ class GcpProvider(OfflineCapableVpsProvider):
             if self._metadata_dict(instance).get(HOST_ID_METADATA_KEY) == wanted
         ]
 
-    # =========================================================================
     # Offline discovery + the metadata-backed state store (so STOPPED hosts list
     # and resolve by name without SSH, uniformly with the AWS/Azure buckets)
-    # =========================================================================
 
     @cached_property
     def _state_store(self) -> HostStateStore:
@@ -665,7 +697,7 @@ class GcpProviderBackend(ProviderBackendInterface):
             # which is the Docker *container* image run inside the VM.
             image=config.default_source_image,
             machine_type=config.default_machine_type,
-            boot_disk_size_gb=config.boot_disk_size_gb,
+            boot_disk_size_gb=config.root_disk_size_gb,
             boot_disk_type=config.boot_disk_type,
             network=config.network,
             subnetwork=config.subnetwork,

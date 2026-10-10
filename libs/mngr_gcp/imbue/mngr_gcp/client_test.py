@@ -25,6 +25,7 @@ from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.errors import InvalidGceIdentifierError
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
+from imbue.mngr_gcp.testing import FakeMachineTypesClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.errors import VpsProvisioningError
@@ -71,9 +72,7 @@ def _running_instance(name: str = "mngr-test-host", nat_ip: str = "") -> compute
     )
 
 
-# =============================================================================
 # Label / name sanitization
-# =============================================================================
 
 
 def test_to_gce_label_value_lowercases_and_replaces() -> None:
@@ -123,9 +122,7 @@ def test_gce_instance_name_rejects_invalid() -> None:
         GceInstanceName("Has-Upper")
 
 
-# =============================================================================
 # create_instance
-# =============================================================================
 
 
 def test_create_instance_builds_expected_resource() -> None:
@@ -394,9 +391,7 @@ def test_create_instance_raises_clear_error_for_unknown_ssh_key() -> None:
         )
 
 
-# =============================================================================
 # ensure_firewall
-# =============================================================================
 
 
 def test_ensure_firewall_skips_rule_and_warns_when_no_cidrs(log_warnings: list[str]) -> None:
@@ -510,9 +505,7 @@ def test_delete_firewall_tolerates_concurrent_delete() -> None:
     assert client.delete_firewall() == "mngr-gcp-ssh"
 
 
-# =============================================================================
 # destroy / status / ip / list
-# =============================================================================
 
 
 def test_destroy_instance() -> None:
@@ -650,9 +643,7 @@ def test_list_mngr_managed_instances_translates_api_error() -> None:
         client.list_mngr_managed_instances()
 
 
-# =============================================================================
 # stop_instance / start_instance (GCP-only idle-pause + resume)
-# =============================================================================
 
 
 def test_stop_instance_calls_stop_and_polls_to_terminated() -> None:
@@ -695,9 +686,7 @@ def test_start_instance_times_out_if_not_running() -> None:
         client.start_instance(VpsInstanceId("mngr-host-1"), timeout_seconds=0.0)
 
 
-# =============================================================================
 # set_instance_metadata / get_instance_metadata (offline-discovery mirror)
-# =============================================================================
 
 
 def test_set_instance_metadata_upsert_merges_with_existing() -> None:
@@ -804,9 +793,7 @@ def test_get_instance_metadata_returns_empty_when_instance_gone() -> None:
     assert client.get_instance_metadata(VpsInstanceId("mngr-host-1")) == {}
 
 
-# =============================================================================
 # SSH keys (in-memory map; no native GCE resource)
-# =============================================================================
 
 
 def test_delete_ssh_key_is_tolerant_of_absent_key() -> None:
@@ -815,3 +802,40 @@ def test_delete_ssh_key_is_tolerant_of_absent_key() -> None:
     client.delete_ssh_key("k1")
     # Deleting an absent key is a tolerant no-op (fresh-process delete).
     client.delete_ssh_key("nonexistent")
+
+
+# Instance shape
+
+
+def _client_with_machine_types(machine_types: FakeMachineTypesClient) -> GcpVpsClient:
+    return _StubbedGcpVpsClient(
+        credentials=AnonymousCredentials(),
+        project_id="test-project",
+        zone="us-west1-a",
+        image="projects/debian-cloud/global/images/family/debian-13",
+        boot_disk_size_gb=40,
+        stubbed_instances_client=FakeInstancesClient(),
+        stubbed_firewalls_client=_present_firewalls(),
+        stubbed_machine_types_client=machine_types,
+    )
+
+
+def test_get_instance_shape_reports_the_machine_type_and_the_boot_disk() -> None:
+    machine_types = FakeMachineTypesClient()
+    machine_types.get_result = compute_v1.MachineType(name="e2-small", guest_cpus=2, memory_mb=2048)
+    client = _client_with_machine_types(machine_types)
+
+    shape = client.get_instance_shape(VpsInstanceId("mngr-test-host"), "e2-small")
+
+    assert shape is not None
+    assert shape.vcpu_count == 2
+    assert shape.memory_mib == 2048
+    assert shape.root_disk_gb == 40
+    assert machine_types.requested == ["e2-small"]
+
+
+def test_get_instance_shape_translates_an_unknown_machine_type_into_a_vps_api_error() -> None:
+    client = _client_with_machine_types(FakeMachineTypesClient())
+
+    with pytest.raises(VpsApiError):
+        client.get_instance_shape(VpsInstanceId("mngr-test-host"), "e2-nonexistent")

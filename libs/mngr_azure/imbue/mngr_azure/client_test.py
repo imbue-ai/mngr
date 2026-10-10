@@ -788,3 +788,60 @@ def test_is_role_assignment_exists_classifies_409_and_message() -> None:
     # Whitespace-insensitive match (the message can be spaced "Role Assignment Exists").
     assert client._is_role_assignment_exists(VpsApiError(400, "Role Assignment Exists")) is True
     assert client._is_role_assignment_exists(VpsApiError(400, "some other error")) is False
+
+
+# Instance shape
+
+
+def _vm_sku(name: str, capabilities: dict[str, str]) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        resource_type="virtualMachines",
+        capabilities=[SimpleNamespace(name=key, value=value) for key, value in capabilities.items()],
+    )
+
+
+def test_get_instance_shape_picks_the_named_vm_size_out_of_the_regional_sku_list() -> None:
+    compute = FakeComputeClient()
+    compute.resource_skus.list_result = [
+        SimpleNamespace(name="Premium_LRS", resource_type="disks", capabilities=[]),
+        _vm_sku("Standard_B2s", {"vCPUs": "2", "MemoryGB": "4"}),
+        _vm_sku("Standard_D2s_v6", {"vCPUs": "2", "MemoryGB": "8"}),
+    ]
+    client = _make_client(compute=compute)
+
+    shape = client.get_instance_shape(VpsInstanceId("mngr-vm"), "Standard_D2s_v6")
+
+    assert shape is not None
+    assert shape.vcpu_count == 2
+    assert shape.memory_mib == 8192
+    assert shape.root_disk_gb == client.os_disk_size_gb
+    assert compute.resource_skus.last_list_filter == f"location eq '{_REGION}'"
+
+
+def test_get_instance_shape_keeps_fractional_memory_in_mib() -> None:
+    compute = FakeComputeClient()
+    compute.resource_skus.list_result = [_vm_sku("Standard_B1ms", {"vCPUs": "1", "MemoryGB": "1.5"})]
+    client = _make_client(compute=compute)
+
+    shape = client.get_instance_shape(VpsInstanceId("mngr-vm"), "Standard_B1ms")
+
+    assert shape is not None
+    assert shape.memory_mib == 1536
+
+
+def test_get_instance_shape_is_none_when_the_vm_size_is_not_offered_in_the_region() -> None:
+    compute = FakeComputeClient()
+    compute.resource_skus.list_result = [_vm_sku("Standard_B2s", {"vCPUs": "2", "MemoryGB": "4"})]
+    client = _make_client(compute=compute)
+
+    assert client.get_instance_shape(VpsInstanceId("mngr-vm"), "Standard_D96s_v6") is None
+
+
+def test_get_instance_shape_translates_a_catalog_error_into_a_vps_api_error() -> None:
+    compute = FakeComputeClient()
+    compute.resource_skus.list_error = make_azure_http_error(403, "forbidden")
+    client = _make_client(compute=compute)
+
+    with pytest.raises(VpsApiError):
+        client.get_instance_shape(VpsInstanceId("mngr-vm"), "Standard_B2s")

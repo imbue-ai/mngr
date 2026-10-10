@@ -264,7 +264,8 @@ class _AwsReleaseProfile(VpsCloudReleaseProfile):
     supports_offline_host_dir = True
 
     def __init__(self, client: AwsVpsClient, isolation: IsolationMode) -> None:
-        super().__init__(client, isolation)
+        # The release settings pin no instance type, so the trip's host gets the config default.
+        super().__init__(client, isolation, AwsProviderConfig().default_instance_type)
         self._aws_client = client
 
     def unavailable_reason(self) -> str | None:

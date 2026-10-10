@@ -227,6 +227,23 @@ class FakeFirewallsClient:
         return FakeOperation(error=self.delete_error)
 
 
+class FakeMachineTypesClient:
+    """Fake MachineTypesClient: returns a canned machine type (or raises) for ``get``."""
+
+    def __init__(self) -> None:
+        self.get_result: compute_v1.MachineType | None = None
+        self.get_error: Exception | None = None
+        self.requested: list[str] = []
+
+    def get(self, *, project: str, zone: str, machine_type: str) -> compute_v1.MachineType:
+        self.requested.append(machine_type)
+        if self.get_error is not None:
+            raise self.get_error
+        if self.get_result is None:
+            raise google_api_exceptions.NotFound(f"machine type {machine_type} not found in {project}/{zone}")
+        return self.get_result
+
+
 class _StubbedGcpVpsClient(GcpVpsClient):
     """Test-only GcpVpsClient that injects fake compute clients.
 
@@ -240,6 +257,7 @@ class _StubbedGcpVpsClient(GcpVpsClient):
 
     stubbed_instances_client: Any = Field(default=None, description="Fake InstancesClient")
     stubbed_firewalls_client: Any = Field(default=None, description="Fake FirewallsClient")
+    stubbed_machine_types_client: Any = Field(default=None, description="Fake MachineTypesClient")
 
     def _instances(self) -> Any:
         return self.stubbed_instances_client
@@ -247,15 +265,16 @@ class _StubbedGcpVpsClient(GcpVpsClient):
     def _firewalls(self) -> Any:
         return self.stubbed_firewalls_client
 
+    def _machine_types(self) -> Any:
+        return self.stubbed_machine_types_client
 
-# =============================================================================
+
 # In-memory fake GCS + stubbed bucket/volume for tests that need offline host_dir
 # without real Google Cloud Storage. Lives here (not in ``state_bucket_test.py``)
 # so multiple test modules can import the fakes/stubs uniformly (mirrors
 # ``libs/mngr_azure/imbue/mngr_azure/testing.py`` housing ``_StubbedBlobStateBucket``).
 # The google-cloud-storage SDK has no first-party in-memory testing harness (no
 # moto-equivalent), so the fakes cover exactly the methods production calls.
-# =============================================================================
 
 # A credential placeholder for the bucket/volume models: pydantic validates the
 # field type, but the fake client never actually authenticates with it.

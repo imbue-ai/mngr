@@ -44,16 +44,20 @@ manually with credentials present, e.g.::
 from __future__ import annotations
 
 import abc
+import json
+import math
 import os
 import subprocess
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 import pytest
 from loguru import logger
 
+from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import run_mngr_subprocess
@@ -247,6 +251,16 @@ class ProviderReleaseProfile(abc.ABC):
     def is_backend_clean(self, handle: str) -> bool:
         """Probe the cloud API: is the host's compute gone (no leaked instance / sandbox)?"""
 
+    def expected_host_resources(self, handle: str) -> HostResources | None:
+        """The size the cloud itself reports for the launched host, or None when the trip does not check size.
+
+        Read through the cloud API (not through mngr), so Trip 1 can assert that
+        the size ``mngr list`` reports for the host is what the cloud says the
+        host was created with. The default skips the check.
+        """
+        del handle
+        return None
+
 
 def _run_mngr(
     settings_dir: Path,
@@ -321,6 +335,51 @@ def _host_state_in_list(settings_dir: Path, project_dir: Path, host_name: str) -
             tokens = line.split()
             return tokens[-1] if tokens else None
     return None
+
+
+def _host_resources_in_list(settings_dir: Path, project_dir: Path, agent_name: str) -> HostResources | None:
+    """Return the ``host.resource`` ``mngr list --format json`` reports for ``agent_name``'s host, or None if absent."""
+    result = _run_mngr(settings_dir, project_dir, "list", "--format", "json", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+    if result.returncode != 0:
+        return None
+    return host_resources_from_list_json(result.stdout, agent_name)
+
+
+def host_from_list_json(list_output: str, agent_name: str) -> dict[str, Any] | None:
+    """Pick the ``host`` object of the agent named ``agent_name`` out of a ``mngr list --format json`` document.
+
+    None when no such agent is listed. The lookup is by *agent* name because a
+    ``mngr create NAME --provider P`` host is auto-named, so NAME is all the
+    caller knows. The JSON document is the last ``{``-prefixed line of the
+    output (the lines before it are log output the merged stream carries).
+    """
+    json_lines = [line for line in list_output.splitlines() if line.startswith("{")]
+    if not json_lines:
+        return None
+    document = json.loads(json_lines[-1])
+    for agent in document.get("agents", []):
+        if agent.get("name") == agent_name:
+            return agent.get("host")
+    return None
+
+
+def host_resources_from_list_json(list_output: str, agent_name: str) -> HostResources | None:
+    """Pick ``agent_name``'s ``host.resource`` out of a ``mngr list --format json`` document, or None if absent."""
+    host = host_from_list_json(list_output, agent_name)
+    if host is None or host.get("resource") is None:
+        return None
+    return HostResources.model_validate(host["resource"])
+
+
+def assert_host_resources_match(listed: HostResources, expected: HostResources) -> None:
+    """Assert the listed size is the expected one (CPU count and disk exactly, memory to within rounding)."""
+    assert listed.cpu.count == expected.cpu.count, (
+        f"listed {listed.cpu.count} CPUs, the cloud says {expected.cpu.count}"
+    )
+    assert math.isclose(listed.memory_gb, expected.memory_gb, rel_tol=0.01), (
+        f"listed {listed.memory_gb} GB of memory, the cloud says {expected.memory_gb}"
+    )
+    assert listed.disk_gb == expected.disk_gb, f"listed {listed.disk_gb} GB of disk, the cloud says {expected.disk_gb}"
 
 
 def _assert_stopped_container_lists_stopped_and_revives_via_start(
@@ -443,6 +502,13 @@ def run_provider_release_trip1(
             f"host should be RUNNING in `mngr list`:\n"
             f"{_run_mngr(settings_dir, project_dir, 'list', timeout=_LIFECYCLE_TIMEOUT_SECONDS).stdout}"
         )
+
+        # 3b. The size `mngr list` reports is the size the cloud says the host was created with.
+        expected_resources = profile.expected_host_resources(handle)
+        if expected_resources is not None:
+            listed_resources = _host_resources_in_list(settings_dir, project_dir, host_name)
+            assert listed_resources is not None, f"`mngr list` reports no size for {host_name}"
+            assert_host_resources_match(listed_resources, expected_resources)
 
         # 4. Write a marker file on the host and read it straight back.
         written = _exec_on_host(settings_dir, project_dir, host_name, f"echo {marker_token} > {_MARKER_HOST_PATH}")

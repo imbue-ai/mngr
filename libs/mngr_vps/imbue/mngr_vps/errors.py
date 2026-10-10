@@ -55,3 +55,7 @@ class ContainerSetupError(VpsError):
 
 class VpsConfigError(VpsError, ValueError):
     """Raised when a VpsProviderConfig combines mutually-incompatible options."""
+
+
+class VpsHostSizeUnknownError(VpsError):
+    """Raised when a host's size cannot be determined from its record (no recorded shape and an unknown plan)."""

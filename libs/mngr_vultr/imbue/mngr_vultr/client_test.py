@@ -160,3 +160,34 @@ class TestVultrVpsClientSshKeys:
         with patch("requests.request", return_value=response):
             with pytest.raises(VpsApiError):
                 client.upload_ssh_key("test", "ssh-ed25519 AAAA test")
+
+
+class _CannedInstanceVultrClient(VultrVpsClient):
+    """Client whose ``GET /instances/{id}`` answers from a canned instance payload."""
+
+    instance_payload: dict[str, Any]
+
+    def _get(self, path: str) -> dict[str, Any] | None:
+        assert path.startswith("/instances/")
+        return {"instance": self.instance_payload}
+
+
+def _canned_client(instance_payload: dict[str, Any]) -> VultrVpsClient:
+    return _CannedInstanceVultrClient(api_key=SecretStr("test-api-key"), os_id=2625, instance_payload=instance_payload)
+
+
+def test_get_instance_shape_reads_vcpus_ram_and_disk_off_the_instance() -> None:
+    client = _canned_client({"id": "inst-1", "plan": "vc2-2c-4gb", "vcpu_count": 2, "ram": 4096, "disk": 80})
+
+    shape = client.get_instance_shape(VpsInstanceId("inst-1"), "vc2-2c-4gb")
+
+    assert shape is not None
+    assert shape.vcpu_count == 2
+    assert shape.memory_mib == 4096
+    assert shape.root_disk_gb == 80
+
+
+def test_get_instance_shape_is_none_when_the_instance_reports_no_size() -> None:
+    client = _canned_client({"id": "inst-1", "plan": "vc2-2c-4gb"})
+
+    assert client.get_instance_shape(VpsInstanceId("inst-1"), "vc2-2c-4gb") is None

@@ -495,3 +495,24 @@ class TestOvhVpsClientSshKeyShim:
         client.delete_ssh_key("k1")
         with pytest.raises(MngrError):
             client.get_cached_public_key("k1")
+
+
+def test_get_instance_shape_reads_the_vps_model() -> None:
+    def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        assert (method, path) == ("GET", "/vps/vps-abc.vps.ovh.us")
+        return {"model": {"name": "vps-2025-model1", "vcore": 1, "memory": 8192, "disk": 80}, "state": "running"}
+
+    client = _client_with_call(fake_call)
+
+    shape = client.get_instance_shape(VpsInstanceId("vps-abc.vps.ovh.us"), "vps-2025-model1")
+
+    assert shape is not None
+    assert shape.vcpu_count == 1
+    assert shape.memory_mib == 8192
+    assert shape.root_disk_gb == 80
+
+
+def test_get_instance_shape_is_none_when_the_model_carries_no_size() -> None:
+    client = _client_with_call(lambda *args, **kwargs: {"model": {"name": "vps-2025-model1"}})
+
+    assert client.get_instance_shape(VpsInstanceId("vps-abc.vps.ovh.us"), "vps-2025-model1") is None

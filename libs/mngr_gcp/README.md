@@ -33,7 +33,7 @@ default_machine_type = "e2-small"  # machine type (~2 vCPU / 2GB)
 allowed_ssh_cidrs = ["203.0.113.4/32"]
 
 # Optional boot-disk sizing
-boot_disk_size_gb = 30
+root_disk_size_gb = 30
 boot_disk_type = "pd-balanced"
 ```
 
@@ -117,7 +117,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `default_zone` | gcloud `compute/zone`, else `us-west1-a` | Zone for new instances (GCE VMs are zonal). When unset, taken from the active 'gcloud config get compute/zone'. Must lie in default_region when both are set explicitly. |
 | `default_machine_type` | `e2-small` | GCE machine type. |
 | `default_source_image` | `projects/debian-cloud/global/images/family/debian-13` | GCE VM boot-disk image (distinct from the base default_image, the Docker container image run inside the VM). |
-| `boot_disk_size_gb` | `30` | Boot disk size in GB. |
+| `boot_disk_size_gb` | `None` | Deprecated alias of root_disk_size_gb (the boot disk size in GB); set root_disk_size_gb instead. |
 | `boot_disk_type` | `pd-balanced` | Boot disk type. |
 | `network` | `default` | VPC network for the instance NIC and firewall rule. |
 | `subnetwork` | `None` | Optional explicit subnetwork (required for custom-mode VPCs); None lets GCE pick for auto-mode networks. |
@@ -129,6 +129,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `state_bucket_name` | `None` | GCS bucket where mngr stores a stopped instance's offline host_dir mirror so it is readable without starting the instance. When None, named 'mngr-state-<project_id>'. The bucket is provisioned by `mngr gcp prepare` and only used when `is_offline_host_dir_enabled` is on; the host + agent records still live in GCE instance metadata regardless. |
 | `is_offline_host_dir_enabled` | `true` | When on (default), a stopped instance's host_dir is readable without starting it, so `mngr event` / `mngr transcript` / `mngr file` work against it. `mngr gcp prepare` sets up the GCS bucket it needs. Set False to turn it off. |
 | `service_account_key_json` | `None` | Full JSON contents of a GCP service-account key. When set, credentials are built from it directly (bypassing Application Default Credentials) and its embedded project_id is used as the resolved-project fallback. Used by the Imbue Studio bring-your-own-account paste flow. Leave unset to use ADC. |
+| `root_disk_size_gb` | `30` | Size of the VM's root disk in GB (the EBS root volume on AWS, the boot disk on GCP, the OS managed disk on Azure). With container isolation the agent's data lives on a loop file carved from this disk minus `outer_disk_reserved_gb`. |
 | `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound CIDR blocks allowed on tcp/22 and the container SSH port in the security group / NSG / firewall rule the provider's `prepare` command creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to restrict to your own, or () for no ingress (no rule is created, so the instance is unreachable from outside its network). A warning is logged when the effective range is 0.0.0.0/0 or empty. Replaced, not merged, across config layers. |
 | `auto_shutdown_seconds` | `None` | When set, the host OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts) -- a hard max-lifetime cap, distinct from the activity-based default_idle_timeout. Whether the halt stops, terminates, or deletes the instance is provider-specific (see the provider's README). |
 <!-- END GENERATED CONFIG TABLE -->
@@ -155,7 +156,7 @@ storage.objects.list, storage.objects.delete
 ```
 compute.instances.create, compute.instances.delete, compute.instances.get,
 compute.instances.list, compute.instances.stop, compute.instances.start,
-compute.firewalls.get, compute.zoneOperations.get
+compute.firewalls.get, compute.zoneOperations.get, compute.machineTypes.get
 ```
 
 When `is_offline_host_dir_enabled` is on (default), the runtime stop/start

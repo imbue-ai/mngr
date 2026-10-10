@@ -146,6 +146,16 @@ Every provider built on `VpsProvider` gets the same hardening, applied by the sh
 - **Container restart policy.** Every container runs with `--restart=unless-stopped` unless your `default_start_args` or `-s` already set a policy, so an OOM kill, a daemon restart, or a VM reboot brings a running container back on its own (the entrypoint relaunches sshd), while `mngr stop --stop-host` and the idle stop leave it stopped. A container that did stop behind mngr's back still lists its agents and shows the host as `STOPPED`, and `mngr start` revives it.
 - **Docker daemon and journal bounds.** Container logs rotate (`json-file`, `max-size 50m`, `max-file 3`), the build cache is bounded (`defaultKeepStorage 1GB`), and the journal is capped at 512 MiB. The `daemon.json` is merged with jq so the gVisor runtime entry survives, and docker is restarted only when it is already running and the canonical content changed.
 
+## Sizing
+
+A host's size is its cloud instance shape, chosen at create through the provider's build args (`--aws-instance-type=`, `--gcp-machine-type=`, `--azure-vm-size=`, `--vultr-plan=`, `--ovh-plan=`) and fixed for the life of the host (see `libs/mngr/docs/concepts/hosts.md`, "Sizing"). Right after the instance exists, `create` asks the cloud what that shape is (`VpsClientInterface.get_instance_shape`: vCPUs, RAM, and the root disk) and records it on the host record (`VpsHostConfig.shape`), so `mngr list` reports `host.resource` from the record alone, for a stopped host as much as a running one. A describe that fails is logged and the host lists with an unknown size rather than failing the create.
+
+The three cloud providers with a configurable root disk share one knob, `root_disk_size_gb` on `OfflineCapableVpsProviderConfig` (default 30 GB). Their former per-cloud names (`root_volume_size_gb` on AWS, `boot_disk_size_gb` on GCP, `os_disk_size_gb` on Azure) are still accepted as deprecated aliases and fold into the unified field; setting both to different values is a config error. Vultr and OVH bundle the disk with the plan and have no knob.
+
+The reported size is the VM's: with container isolation the agent container is capped at the VM's RAM minus a 1 GiB reserve (see "Host and container hardening"), and its data lives on a loop file carved from the root disk minus `outer_disk_reserved_gb`.
+
+A host record written before shapes were recorded has none; the provider then answers from a small static table of the plans in use at the time (the provider default plus the sizes the Imbue Studio create form offers, with the configured root disk as the best estimate of the disk) and otherwise lists the size as unknown.
+
 ## Implementing a new VPS provider
 
 To add support for a new VPS provider (e.g., DigitalOcean, Hetzner):

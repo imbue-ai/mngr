@@ -3,6 +3,7 @@ from typing import Final
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.primitives import PositiveInt
 
 # The per-host key helpers moved to mngr core (shared with docker/modal/lima);
 # re-exported here so vps callers keep their historical import path.
@@ -24,6 +25,18 @@ VPS_KNOWN_HOSTS_NAME: Final[str] = "vps_known_hosts"
 
 class VpsInstanceId(NonEmptyStr):
     """Unique identifier for a VPS instance as assigned by the provider."""
+
+
+class VpsVcpuCount(PositiveInt):
+    """The number of vCPUs a cloud instance shape has. Must be > 0."""
+
+
+class VpsMemoryMib(PositiveInt):
+    """The RAM of a cloud instance shape, in MiB. Must be > 0."""
+
+
+class VpsDiskGb(PositiveInt):
+    """The size of a cloud instance's root disk, in GB as the cloud reports it. Must be > 0."""
 
 
 class IsolationMode(UpperCaseStrEnum):

@@ -10,12 +10,14 @@ from azure.identity import DefaultAzureCredential
 from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
+from pydantic import model_validator
 
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_azure.errors import AzureSubscriptionError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
 from imbue.mngr_vps.config import PublicIpVpsProviderConfig
+from imbue.mngr_vps.config import fold_legacy_root_disk_size_key
 
 # Storage-account names are globally unique, 3-24 chars, lowercase alphanumeric
 # only (no hyphens). The derived name is ``mngrst<hash>`` where ``<hash>`` is a
@@ -191,7 +193,10 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
             "forwards the key into root's authorized_keys, so mngr's root SSH works regardless."
         ),
     )
-    os_disk_size_gb: int = Field(default=30, description="Size of the OS managed disk in GB.")
+    os_disk_size_gb: int | None = Field(
+        default=None,
+        description="Deprecated alias of root_disk_size_gb (the OS managed-disk size in GB); set root_disk_size_gb instead.",
+    )
     os_disk_type: str = Field(
         default="StandardSSD_LRS",
         description="OS managed-disk storage account type (e.g. 'StandardSSD_LRS', 'Premium_LRS', 'Standard_LRS').",
@@ -228,6 +233,11 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
         default=None,
         description="Service-principal client secret. Only used when client_id + tenant_id are also set.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_legacy_os_disk_size(cls, raw_config: Any) -> Any:
+        return fold_legacy_root_disk_size_key(raw_config, "os_disk_size_gb")
 
     def get_credential(self) -> Any:
         """Return a ``DefaultAzureCredential`` for the management clients.

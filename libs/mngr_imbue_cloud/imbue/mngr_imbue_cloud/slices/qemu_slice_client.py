@@ -55,6 +55,7 @@ from imbue.mngr_imbue_cloud.slices.qemu_slice import build_qemu_status_command
 from imbue.mngr_imbue_cloud.slices.qemu_slice import parse_gen2_reserved_line
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.sizing import VpsInstanceShape
 
 # Box tooling lives in /usr/local/bin; a non-interactive SSH shell may not source
 # the slice user's profile, so PATH is set explicitly.
@@ -438,6 +439,10 @@ class QemuSliceVpsClient(SliceVmClientInterface):
         tags: Mapping[str, str],
     ) -> VpsInstanceId:
         raise self._unavailable("create_instance")
+
+    def get_instance_shape(self, instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+        # The slice provider records the carved shape itself; nothing describes a slice after the fact.
+        raise self._unavailable("get_instance_shape")
 
     def upload_ssh_key(self, name: str, public_key: str) -> str:
         raise self._unavailable("upload_ssh_key")

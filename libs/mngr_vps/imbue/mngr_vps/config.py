@@ -1,4 +1,6 @@
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 from typing import Self
 
 from pydantic import Field
@@ -161,14 +163,23 @@ class VpsProviderConfig(ProviderInstanceConfig):
 class OfflineCapableVpsProviderConfig(VpsProviderConfig):
     """Config base for cloud VPS providers with a managed SSH-ingress rule.
 
-    Carries the SSH-ingress allow-list shared by the AWS / Azure / GCP providers,
-    each of which threads it into the security group / NSG / firewall rule that
-    ``mngr <cloud> prepare`` creates. ``associate_public_ip`` (whether to give the
-    instance a public IP) is *not* lifted here because GCP names its equivalent
-    field ``associate_external_ip``; see ``PublicIpVpsProviderConfig`` for the
+    Carries the root-disk size and the SSH-ingress allow-list shared by the AWS /
+    Azure / GCP providers, each of which threads them into its VM create and into
+    the security group / NSG / firewall rule that ``mngr <cloud> prepare``
+    creates. ``associate_public_ip`` (whether to give the instance a public IP)
+    is *not* lifted here because GCP names its equivalent field
+    ``associate_external_ip``; see ``PublicIpVpsProviderConfig`` for the
     AWS/Azure-only field.
     """
 
+    root_disk_size_gb: int = Field(
+        default=30,
+        description=(
+            "Size of the VM's root disk in GB (the EBS root volume on AWS, the boot disk on GCP, "
+            "the OS managed disk on Azure). With container isolation the agent's data lives on a "
+            "loop file carved from this disk minus `outer_disk_reserved_gb`."
+        ),
+    )
     allowed_ssh_cidrs: ScalarStrTuple = Field(
         default=ScalarTuple(("0.0.0.0/0",)),
         description=(
@@ -180,6 +191,35 @@ class OfflineCapableVpsProviderConfig(VpsProviderConfig):
             "Replaced, not merged, across config layers."
         ),
     )
+
+
+# CLEANUP: drop ``fold_legacy_root_disk_size_key`` and the three deprecated
+# per-cloud disk fields (``root_volume_size_gb`` / ``boot_disk_size_gb`` /
+# ``os_disk_size_gb``) once no settings file names them any more.
+def fold_legacy_root_disk_size_key(raw_config: Any, legacy_key: str) -> Any:
+    """Rewrite a deprecated per-cloud disk key in a raw config mapping into ``root_disk_size_gb``.
+
+    The three clouds used to name the knob differently; the legacy key is still
+    accepted so existing settings keep working. The value moves onto the unified
+    key (so only that field records as explicitly set) and the legacy key is
+    dropped. Raises ``VpsConfigError`` when both are set to different values, since
+    silently picking one would hide a misconfiguration. Anything that is not a
+    mapping (an already-built model, for instance) passes through untouched.
+    """
+    if not isinstance(raw_config, Mapping):
+        return raw_config
+    legacy_value = raw_config.get(legacy_key)
+    if legacy_value is None:
+        return raw_config
+    folded = {key: value for key, value in raw_config.items() if key != legacy_key}
+    unified_value = folded.get("root_disk_size_gb")
+    if unified_value is not None and unified_value != legacy_value:
+        raise VpsConfigError(
+            f"{legacy_key} ({legacy_value}) and root_disk_size_gb ({unified_value}) disagree; "
+            f"{legacy_key} is a deprecated alias of root_disk_size_gb, so set only root_disk_size_gb"
+        )
+    folded["root_disk_size_gb"] = legacy_value
+    return folded
 
 
 class PublicIpVpsProviderConfig(OfflineCapableVpsProviderConfig):

@@ -5,6 +5,7 @@ from pathlib import Path
 import boto3
 import pytest
 from moto import mock_aws
+from pydantic import ValidationError
 
 from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
@@ -41,7 +42,8 @@ def test_default_config_values() -> None:
     # (those providers ship no managed firewall). Production users should tighten.
     assert config.allowed_ssh_cidrs == ("0.0.0.0/0",)
     assert config.associate_public_ip is True
-    assert config.root_volume_size_gb == 30
+    assert config.root_disk_size_gb == 30
+    assert config.root_volume_size_gb is None
     assert config.root_volume_type == "gp3"
     assert config.auto_shutdown_seconds is None
 
@@ -214,3 +216,17 @@ def _provider_narrowing_paths(base: AwsProviderConfig, override: AwsProviderConf
     provider-config level."""
     _, narrowings = merge_models_via_overlay(base, override)
     return narrowings
+
+
+def test_legacy_root_volume_size_gb_sets_the_unified_root_disk_size() -> None:
+    config = AwsProviderConfig.model_validate({"root_volume_size_gb": 40})
+
+    assert config.root_disk_size_gb == 40
+    assert config.root_volume_size_gb is None
+    # Only the unified field records as set, so config-layer merging keys on it.
+    assert config.model_fields_set == {"root_disk_size_gb"}
+
+
+def test_legacy_root_volume_size_gb_disagreeing_with_root_disk_size_gb_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="root_volume_size_gb .* and root_disk_size_gb .* disagree"):
+        AwsProviderConfig.model_validate({"root_volume_size_gb": 40, "root_disk_size_gb": 50})

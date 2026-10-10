@@ -57,7 +57,11 @@ from imbue.mngr_vps.container_setup import run_docker
 from imbue.mngr_vps.data_types import ContainerFile
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.interfaces import HostRealizer
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
 
 # region/plan are meaningless for a box-carved slice VM, but the shared
 # VpsProvider finalize path persists them, so use stable placeholders.
@@ -548,6 +552,13 @@ class SliceVpsDockerProvider(VpsProvider):
                     vps_host_public_key=vps_host_public_key,
                     region=region,
                     plan=_SLICE_PLAN,
+                    # The carve is the one place the slice's shape is known; the
+                    # data disk is the disk the agent's container lives on.
+                    shape=VpsInstanceShape(
+                        vcpu_count=VpsVcpuCount(vcpus),
+                        memory_mib=VpsMemoryMib(memory_mib),
+                        root_disk_gb=VpsDiskGb(disk_gib),
+                    ),
                     image=create_image,
                     tags=tags,
                     build_args=create_build_args,

@@ -69,6 +69,7 @@ from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.instance import _VpsDiscoveryData
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
 
@@ -98,6 +99,9 @@ class _NoopVpsClient(VpsClientInterface):
 
     def get_instance_ip(self, instance_id: VpsInstanceId) -> str:
         raise AssertionError("VpsClient.get_instance_ip must not be called from discovery tests")
+
+    def get_instance_shape(self, instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+        raise AssertionError("VpsClient.get_instance_shape must not be called from discovery tests")
 
     def wait_for_instance_active(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> str:
         raise AssertionError("VpsClient.wait_for_instance_active must not be called from discovery tests")

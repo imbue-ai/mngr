@@ -1260,3 +1260,44 @@ def test_resolve_default_ami_id_wraps_a_describe_images_failure(
 
     with pytest.raises(AwsAmiResolutionError, match="Could not list Debian AMIs in region 'us-east-1'"):
         client.resolve_default_ami_id(_X86_INSTANCE_TYPE)
+
+
+# Instance shape
+
+
+def test_get_instance_shape_reports_the_described_instance_type_and_the_root_volume(
+    stubbed_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "describe_instance_types",
+        {
+            "InstanceTypes": [
+                {
+                    "InstanceType": _X86_INSTANCE_TYPE,
+                    "VCpuInfo": {"DefaultVCpus": 2},
+                    "MemoryInfo": {"SizeInMiB": 2048},
+                }
+            ]
+        },
+        _describe_instance_types_params(_X86_INSTANCE_TYPE),
+    )
+
+    shape = client.get_instance_shape(VpsInstanceId("i-0123"), _X86_INSTANCE_TYPE)
+
+    assert shape is not None
+    assert shape.vcpu_count == 2
+    assert shape.memory_mib == 2048
+    assert shape.root_disk_gb == client.root_volume_size_gb
+    stubber.assert_no_pending_responses()
+
+
+def test_get_instance_shape_is_none_when_ec2_describes_no_such_instance_type(
+    stubbed_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "describe_instance_types", {"InstanceTypes": []}, _describe_instance_types_params("t9.nonexistent")
+    )
+
+    assert client.get_instance_shape(VpsInstanceId("i-0123"), "t9.nonexistent") is None

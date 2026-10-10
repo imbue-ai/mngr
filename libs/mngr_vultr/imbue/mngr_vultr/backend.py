@@ -1,4 +1,6 @@
+from collections.abc import Mapping
 from collections.abc import Sequence
+from types import MappingProxyType
 from typing import Any
 from typing import Final
 
@@ -17,11 +19,27 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import parse_vps_build_args
 from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.primitives import VpsDiskGb
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vultr import hookimpl
 from imbue.mngr_vultr.client import VultrVpsClient
 from imbue.mngr_vultr.config import VultrProviderConfig
 
 VULTR_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("vultr")
+
+
+# CLEANUP: drop this table, and the provider's ``_legacy_shape_for_plan``, once
+# no host record predates shape recording (the shape is recorded at create).
+# The one plan in use before shapes were recorded (the provider default).
+_LEGACY_VULTR_PLAN_SHAPES: Final[Mapping[str, VpsInstanceShape]] = MappingProxyType(
+    {
+        "vc2-2c-4gb": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(4096), root_disk_gb=VpsDiskGb(80)
+        ),
+    }
+)
 
 
 class VultrProvider(VpsProvider):
@@ -47,6 +65,9 @@ class VultrProvider(VpsProvider):
         discovery flow filter by SSH-reachability + state-container presence.
         """
         return self.vultr_client.list_instances()
+
+    def _legacy_shape_for_plan(self, plan: str) -> VpsInstanceShape | None:
+        return _LEGACY_VULTR_PLAN_SHAPES.get(plan)
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         """Parse Vultr-prefixed build args (--vultr-region, --vultr-plan, --git-depth)."""

@@ -7,6 +7,7 @@ from typing import Any
 from typing import Final
 
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.providers.provider_release_testing import ProviderReleaseProfile
@@ -16,6 +17,7 @@ from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.primitives import IsolationMode
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.sizing import host_resources_for_shape
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Trip 2's idle-watcher timeout for the cloud trio. 45s mirrors the existing per-provider idle
@@ -65,9 +67,12 @@ class VpsCloudReleaseProfile(ProviderReleaseProfile):
     supports_vps_migration_arg_check = True
     unavailable_error_substring = "is not available"
 
-    def __init__(self, client: VpsClientInterface, isolation: IsolationMode) -> None:
+    def __init__(self, client: VpsClientInterface, isolation: IsolationMode, plan: str) -> None:
         self._client = client
         self._isolation = isolation
+        # The instance type / machine type / VM size the trip's host is created with, so the
+        # size assertion can ask the cloud what that shape is.
+        self._plan = plan
         # The container shape snapshots via `docker commit`; the bare shape has no snapshots.
         self.supports_snapshots = isolation is IsolationMode.CONTAINER
         # NONE isolation runs the agent on the VM's OS (no container), so Trip 1 runs its bare-shape
@@ -84,6 +89,12 @@ class VpsCloudReleaseProfile(ProviderReleaseProfile):
     @abstractmethod
     def find_launched_host_handle(self, host_name: str) -> str | None:
         """Return the cloud id of the host this test launched (via its pytest-launched label)."""
+
+    def expected_host_resources(self, handle: str) -> HostResources:
+        """Always checks size: a cloud that cannot describe the plan it just launched is a failure, not a skip."""
+        shape = self._client.get_instance_shape(VpsInstanceId(handle), self._plan)
+        assert shape is not None, f"the cloud reports no shape for plan {self._plan!r} of launched host {handle}"
+        return host_resources_for_shape(shape)
 
     def out_of_band_container_stop_command(self) -> str:
         return f"docker stop $(docker ps -q --filter label={LABEL_HOST_ID})"

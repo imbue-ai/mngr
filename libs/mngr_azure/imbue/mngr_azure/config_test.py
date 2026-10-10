@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from azure.identity import DefaultAzureCredential
+from pydantic import ValidationError
 
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.config import read_az_cli_default_subscription
@@ -23,6 +24,8 @@ def test_default_config_values() -> None:
     assert config.subnet_name == "mngr-subnet"
     assert config.nsg_name == "mngr-nsg"
     assert config.os_disk_type == "StandardSSD_LRS"
+    assert config.root_disk_size_gb == 30
+    assert config.os_disk_size_gb is None
     # Open by default (fail-open) to match the AWS / GCP providers; a warning is
     # logged at prepare/create time and production users are expected to tighten it.
     assert config.allowed_ssh_cidrs == ("0.0.0.0/0",)
@@ -169,3 +172,16 @@ def test_build_state_bucket_uses_resolved_name_and_scope() -> None:
     assert bucket.subscription_id == "sub-123"
     assert bucket.resource_group == "mngr"
     assert bucket.region == "westus"
+
+
+def test_legacy_os_disk_size_gb_sets_the_unified_root_disk_size() -> None:
+    config = AzureProviderConfig.model_validate({"subscription_id": "sub-123", "os_disk_size_gb": 40})
+
+    assert config.root_disk_size_gb == 40
+    assert config.os_disk_size_gb is None
+    assert "root_disk_size_gb" in config.model_fields_set
+
+
+def test_legacy_os_disk_size_gb_disagreeing_with_root_disk_size_gb_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="os_disk_size_gb .* and root_disk_size_gb .* disagree"):
+        AzureProviderConfig.model_validate({"os_disk_size_gb": 40, "root_disk_size_gb": 50})

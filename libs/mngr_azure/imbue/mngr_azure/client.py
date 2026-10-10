@@ -49,8 +49,12 @@ from imbue.mngr_azure.errors import AzureVmSizeUnavailableError
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Tag key/value that ``create_instance`` adds to every VM launched while
@@ -227,6 +231,27 @@ def is_sku_unavailable_error(error: HttpResponseError) -> bool:
     if error.error is not None and error.error.code == _SKU_NOT_AVAILABLE_CODE:
         return True
     return _SKU_NOT_AVAILABLE_CODE in (error.message or "")
+
+
+# Azure lists a VM size's memory as whole or fractional GiB (``MemoryGB``); the
+# recorded shape keeps MiB.
+_MIB_PER_GIB: Final[int] = 1024
+
+
+@pure
+def _shape_from_sku_capabilities(
+    capability_by_name: Mapping[str, str], os_disk_gb: VpsDiskGb
+) -> VpsInstanceShape | None:
+    """Build the shape from a resource SKU's ``vCPUs`` / ``MemoryGB`` capabilities, or None when either is absent."""
+    vcpus = capability_by_name.get("vCPUs")
+    memory_gb = capability_by_name.get("MemoryGB")
+    if vcpus is None or memory_gb is None:
+        return None
+    return VpsInstanceShape(
+        vcpu_count=VpsVcpuCount(int(vcpus)),
+        memory_mib=VpsMemoryMib(round(float(memory_gb) * _MIB_PER_GIB)),
+        root_disk_gb=os_disk_gb,
+    )
 
 
 class AzureVpsClient(VpsClientInterface):
@@ -1129,6 +1154,25 @@ class AzureVpsClient(VpsClientInterface):
             raise
         ip_by_name = {pip.name: (pip.ip_address or "") for pip in public_ips}
         return [self._normalize_vm(vm, ip_by_name) for vm in vms]
+
+    def get_instance_shape(self, instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+        """The vCPUs and RAM Azure's SKU catalog lists for VM size ``plan`` in this region, with this client's OS disk size.
+
+        The catalog has no per-SKU read, so the region's virtual-machine SKUs are
+        listed and the one named ``plan`` picked out; None when it is not offered
+        there or lists no vCPU / memory capability.
+        """
+        del instance_id
+        with self._translate_azure_errors():
+            skus = list(self._compute().resource_skus.list(filter=f"location eq '{self.region}'"))
+        for sku in skus:
+            if sku.resource_type != "virtualMachines" or sku.name != plan:
+                continue
+            capability_by_name = {capability.name: capability.value for capability in sku.capabilities or ()}
+            shape = _shape_from_sku_capabilities(capability_by_name, VpsDiskGb(self.os_disk_size_gb))
+            if shape is not None:
+                return shape
+        return None
 
     def list_instances(self, provider_tag: str | None = None) -> list[dict[str, Any]]:
         """List VMs in the resource group. Optionally filtered by ``mngr-provider`` tag.

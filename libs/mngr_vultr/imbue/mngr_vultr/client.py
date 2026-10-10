@@ -11,8 +11,12 @@ from pydantic import SecretStr
 
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
 _VULTR_API_BASE: Final[str] = "https://api.vultr.com/v2"
@@ -157,6 +161,21 @@ class VultrVpsClient(VpsClientInterface):
         if result is None or "instance" not in result:
             raise VpsApiError(404, f"Instance {instance_id} not found")
         return result["instance"]
+
+    def get_instance_shape(self, instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+        """The vCPUs, RAM (Vultr reports MB), and disk the instance object carries; None when any is missing."""
+        del plan
+        info = self.get_instance_info(instance_id)
+        vcpu_count = info.get("vcpu_count")
+        ram_mb = info.get("ram")
+        disk_gb = info.get("disk")
+        if not vcpu_count or not ram_mb:
+            return None
+        return VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(int(vcpu_count)),
+            memory_mib=VpsMemoryMib(int(ram_mb)),
+            root_disk_gb=VpsDiskGb(int(disk_gb)) if disk_gb else None,
+        )
 
     def list_instances(self, tag: str | None = None) -> list[dict[str, Any]]:
         """List all instances, optionally filtered by tag."""

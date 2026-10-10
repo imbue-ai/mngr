@@ -43,6 +43,8 @@ from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import resolve_dockerfile_paths
 from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.errors import BareIsolationNotSupportedError
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsHostSizeUnknownError
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.host_setup import MEM_TOTAL_PROBE_COMMAND
 from imbue.mngr_vps.host_store import VpsHostConfig
@@ -55,8 +57,12 @@ from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import IsolationMode
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
 from imbue.mngr_vps.primitives import isolation_from_marker
+from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
@@ -1016,3 +1022,118 @@ def test_minimal_vps_provider_never_caps_container_memory(temp_mngr_ctx: MngrCon
     outer, stub = _scripted_outer(lambda command: CommandResult(stdout="", stderr="", success=True))
     _minimal_provider(temp_mngr_ctx)._apply_container_memory_cap(outer, "mngr-my-host")
     assert stub.call_count == 0
+
+
+# Host size reporting
+
+
+_RECORDED_SHAPE = VpsInstanceShape(
+    vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(4096), root_disk_gb=VpsDiskGb(80)
+)
+
+
+def _record_with_shape(host_id: HostId, shape: VpsInstanceShape | None, plan: str = "p") -> VpsHostRecord:
+    now = datetime.now(timezone.utc)
+    return VpsHostRecord(
+        certified_host_data=CertifiedHostData(host_id=str(host_id), host_name="h", created_at=now, updated_at=now),
+        vps_ip="10.0.0.1",
+        config=VpsHostConfig(
+            vps_instance_id=VpsInstanceId("i-1"), region="r", plan=plan, shape=shape, container_name="c"
+        ),
+    )
+
+
+class _PlanTableProvider(MinimalVpsProvider):
+    """A provider whose legacy plan table knows exactly one plan."""
+
+    def _legacy_shape_for_plan(self, plan: str) -> VpsInstanceShape | None:
+        if plan == "known-plan":
+            return VpsInstanceShape(vcpu_count=VpsVcpuCount(1), memory_mib=VpsMemoryMib(2048), root_disk_gb=None)
+        return None
+
+
+def test_get_host_resources_reports_the_shape_recorded_at_create(temp_mngr_ctx: MngrContext) -> None:
+    provider = _minimal_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    record = _record_with_shape(host_id, _RECORDED_SHAPE)
+    provider._host_record_cache[host_id] = record
+    host = provider._create_offline_host(record, observed_state=None)
+
+    resources = provider.get_host_resources(host)
+
+    assert resources.cpu.count == 2
+    assert resources.memory_gb == 4.0
+    assert resources.disk_gb == 80.0
+
+
+def test_get_host_resources_falls_back_to_the_plan_table_for_a_record_without_a_shape(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    provider = _PlanTableProvider(
+        name=ProviderInstanceName("test-vps-docker"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=VpsProviderConfig(backend=ProviderBackendName("test-vps-docker")),
+        vps_client=ExternallyManagedVpsClient(),
+    )
+    host_id = HostId.generate()
+    record = _record_with_shape(host_id, None, plan="known-plan")
+    provider._host_record_cache[host_id] = record
+    host = provider._create_offline_host(record, observed_state=None)
+
+    resources = provider.get_host_resources(host)
+
+    assert resources.cpu.count == 1
+    assert resources.memory_gb == 2.0
+    assert resources.disk_gb is None
+
+
+def test_get_host_resources_raises_rather_than_invent_a_size_for_an_unknown_plan(temp_mngr_ctx: MngrContext) -> None:
+    provider = _minimal_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    record = _record_with_shape(host_id, None, plan="never-seen-plan")
+    provider._host_record_cache[host_id] = record
+    host = provider._create_offline_host(record, observed_state=None)
+
+    with pytest.raises(VpsHostSizeUnknownError, match="never-seen-plan"):
+        provider.get_host_resources(host)
+
+
+def test_recorded_resources_or_none_reports_an_unknown_size_as_none(temp_mngr_ctx: MngrContext) -> None:
+    provider = _minimal_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    record = _record_with_shape(host_id, None, plan="never-seen-plan")
+    provider._host_record_cache[host_id] = record
+    host = provider._create_offline_host(record, observed_state=None)
+
+    with capture_loguru() as captured:
+        assert provider._recorded_resources_or_none(host) is None
+    assert any("Could not determine the size of host" in line for line in captured.getvalue().splitlines())
+
+
+class _ShapeDescribingVpsClient(ExternallyManagedVpsClient):
+    """Client whose shape describe answers from a canned value or raises an API error."""
+
+    shape: VpsInstanceShape | None = Field(default=None)
+    api_error_message: str | None = Field(default=None)
+
+    def get_instance_shape(self, instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+        if self.api_error_message is not None:
+            raise VpsApiError(500, self.api_error_message)
+        return self.shape
+
+
+def test_describe_instance_shape_returns_what_the_client_reports(temp_mngr_ctx: MngrContext) -> None:
+    provider = _minimal_provider(temp_mngr_ctx, vps_client=_ShapeDescribingVpsClient(shape=_RECORDED_SHAPE))
+
+    assert provider._describe_instance_shape(VpsInstanceId("i-1"), "p") == _RECORDED_SHAPE
+
+
+def test_describe_instance_shape_tolerates_an_api_error_so_the_create_still_finishes(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    provider = _minimal_provider(temp_mngr_ctx, vps_client=_ShapeDescribingVpsClient(api_error_message="throttled"))
+
+    with capture_loguru() as captured:
+        assert provider._describe_instance_shape(VpsInstanceId("i-1"), "p") is None
+    assert any("throttled" in line for line in captured.getvalue().splitlines())

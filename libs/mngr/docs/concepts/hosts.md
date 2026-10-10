@@ -185,6 +185,8 @@ There is deliberately no generic resize operation: on most providers whatever a 
 
 The recorded size is reported for stopped hosts as well as running ones, so a provider derives it from its own records rather than from a connection to the host.
 
+The cloud VPS providers (aws, gcp, azure, vultr, ovh) record the instance shape the cloud reports right after the instance is created, and report that; a host whose size the record cannot answer lists it as unknown rather than as a placeholder.
+
 ## Properties
 
 See [host spec](../../future_specs/host.md) for the properties of hosts and their storage locations.

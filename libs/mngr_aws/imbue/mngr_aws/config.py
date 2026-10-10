@@ -13,6 +13,7 @@ from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
+from pydantic import model_validator
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
@@ -22,6 +23,7 @@ from imbue.mngr_aws.boto_config import AWS_BOTO_CONFIG
 from imbue.mngr_aws.boto_config import IMDS_CREDENTIAL_PROVIDER_NAME
 from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_vps.config import PublicIpVpsProviderConfig
+from imbue.mngr_vps.config import fold_legacy_root_disk_size_key
 
 
 class AwsConfigError(MngrError, ValueError):
@@ -161,9 +163,9 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
         default=None,
         description="VPC ID. Only used to scope auto-created security group lookups.",
     )
-    root_volume_size_gb: int = Field(
-        default=30,
-        description="Size of the root EBS volume in GB.",
+    root_volume_size_gb: int | None = Field(
+        default=None,
+        description="Deprecated alias of root_disk_size_gb (the root EBS volume size in GB); set root_disk_size_gb instead.",
     )
     root_volume_type: str = Field(
         default="gp3",
@@ -227,6 +229,11 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
             "aws_access_key_id / aws_secret_access_key are set."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_legacy_root_volume_size(cls, raw_config: Any) -> Any:
+        return fold_legacy_root_disk_size_key(raw_config, "root_volume_size_gb")
 
     def get_session(self) -> boto3.Session:
         """Build a boto3 Session that resolves credentials via boto3's default chain.

@@ -2,6 +2,7 @@ import os
 from collections.abc import Mapping
 from collections.abc import Sequence
 from functools import cached_property
+from types import MappingProxyType
 from typing import Any
 from typing import Final
 
@@ -36,7 +37,12 @@ from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
+from imbue.mngr_vps.sizing import legacy_shape_with_root_disk
 
 # EC2 states in which the host OS is down (so the SSH-based sweep can't see the
 # host) but the instance still exists and must be reconstructed offline.
@@ -86,6 +92,24 @@ class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
             "agents, risky for long-lived ones."
         ),
     )
+
+
+# CLEANUP: drop this table, and the provider's ``_legacy_shape_for_plan``, once
+# no host record predates shape recording (the shape is recorded at create).
+# The plans in use before shapes were recorded: the provider default plus the
+# sizes the Imbue Studio create form offers.
+_LEGACY_AWS_INSTANCE_TYPE_SHAPES: Final[Mapping[str, VpsInstanceShape]] = MappingProxyType(
+    {
+        "t3.small": VpsInstanceShape(vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(2048), root_disk_gb=None),
+        "t3.medium": VpsInstanceShape(vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(4096), root_disk_gb=None),
+        "t3.large": VpsInstanceShape(vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(8192), root_disk_gb=None),
+        "t3a.large": VpsInstanceShape(vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(8192), root_disk_gb=None),
+        "m6i.large": VpsInstanceShape(vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(8192), root_disk_gb=None),
+        "t3.xlarge": VpsInstanceShape(vcpu_count=VpsVcpuCount(4), memory_mib=VpsMemoryMib(16384), root_disk_gb=None),
+        "m6i.xlarge": VpsInstanceShape(vcpu_count=VpsVcpuCount(4), memory_mib=VpsMemoryMib(16384), root_disk_gb=None),
+        "t3.2xlarge": VpsInstanceShape(vcpu_count=VpsVcpuCount(8), memory_mib=VpsMemoryMib(32768), root_disk_gb=None),
+    }
+)
 
 
 class AwsProvider(OfflineCapableVpsProvider):
@@ -186,6 +210,11 @@ class AwsProvider(OfflineCapableVpsProvider):
                 "stopped per terminate_on_shutdown) even if pytest is killed."
             )
 
+    def _legacy_shape_for_plan(self, plan: str) -> VpsInstanceShape | None:
+        return legacy_shape_with_root_disk(
+            _LEGACY_AWS_INSTANCE_TYPE_SHAPES, plan, VpsDiskGb(self.aws_config.root_disk_size_gb)
+        )
+
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedAwsBuildOptions:
         """Parse AWS-prefixed build args.
 
@@ -214,7 +243,7 @@ class AwsProvider(OfflineCapableVpsProvider):
         #   --aws-security-group=    (security_group; existing id or auto-create name)
         #   --aws-ssh-cidr=          (allowed_ssh_cidrs; repeatable)
         #   --aws-iam-profile=       (iam_instance_profile)
-        #   --aws-root-volume-size=  (root_volume_size_gb)
+        #   --aws-root-disk-size=    (root_disk_size_gb)
         #   --aws-root-volume-type=  (root_volume_type)
         #   --aws-associate-public-ip / --aws-no-associate-public-ip (associate_public_ip)
         #   --aws-eip                (planned, when the destroy-path lifecycle work lands)
@@ -428,7 +457,7 @@ class AwsProviderBackend(ProviderBackendInterface):
             vpc_id=config.vpc_id,
             allowed_ssh_cidrs=config.allowed_ssh_cidrs,
             associate_public_ip=config.associate_public_ip,
-            root_volume_size_gb=config.root_volume_size_gb,
+            root_volume_size_gb=config.root_disk_size_gb,
             root_volume_type=config.root_volume_type,
             iam_instance_profile=config.iam_instance_profile,
             terminate_on_shutdown=config.terminate_on_shutdown,

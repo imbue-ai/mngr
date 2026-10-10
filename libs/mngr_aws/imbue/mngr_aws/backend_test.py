@@ -12,6 +12,7 @@ from botocore.stub import ANY
 from botocore.stub import Stubber
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -39,7 +40,11 @@ from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.testing import seed_stopped_host_record
 
 
@@ -947,3 +952,53 @@ def test_create_vps_instance_raises_when_ec2_has_no_debian_ami_to_resolve(
             parsed=_build_default_parsed_options(provider), label="test", user_data="", ssh_key_ids=(), tags={}
         )
     stubber.assert_no_pending_responses()
+
+
+def test_legacy_shape_for_plan_fills_the_configured_root_disk_into_the_default_instance_type(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=None)
+
+    shape = provider._legacy_shape_for_plan(provider.aws_config.default_instance_type)
+
+    assert shape is not None
+    assert shape.vcpu_count == 2
+    assert shape.memory_mib == 2048
+    assert shape.root_disk_gb == provider.aws_config.root_disk_size_gb
+
+
+def test_legacy_shape_for_plan_is_none_for_an_instance_type_outside_the_table(temp_mngr_ctx: MngrContext) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=None)
+
+    assert provider._legacy_shape_for_plan("p5.48xlarge") is None
+
+
+def test_get_host_resources_answers_a_stopped_host_from_its_mirrored_record_without_any_ec2_call(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A stopped host's size comes from the state-store mirror: no instance listing, no SSH sweep."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    record = VpsHostRecord.model_validate_json(_stopped_host_record_json(host_id, vps_ssh_key_id="key-1"))
+    assert record.config is not None
+    shaped_config = record.config.model_copy_update(
+        to_update(
+            record.config.field_ref().shape,
+            VpsInstanceShape(vcpu_count=VpsVcpuCount(2), memory_mib=VpsMemoryMib(2048), root_disk_gb=VpsDiskGb(30)),
+        )
+    )
+    shaped_record = record.model_copy_update(to_update(record.field_ref().config, shaped_config))
+    _seed_state_store_bucket(provider, record_json=shaped_record.model_dump_json())
+    offline_host = provider._create_offline_host(shaped_record, observed_state=None)
+    provider._host_record_cache.clear()
+
+    # No describe_instances response is queued: any EC2 call here fails the Stubber.
+    stubber.activate()
+    try:
+        resources = provider.get_host_resources(offline_host)
+    finally:
+        stubber.deactivate()
+
+    assert resources.cpu.count == 2
+    assert resources.memory_gb == 2.0
+    assert resources.disk_gb == 30.0

@@ -9,7 +9,10 @@ from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr_vps.config import OfflineCapableVpsProviderConfig
 from imbue.mngr_vps.config import VpsProviderConfig
+from imbue.mngr_vps.config import fold_legacy_root_disk_size_key
+from imbue.mngr_vps.errors import VpsConfigError
 
 
 def test_default_config_values() -> None:
@@ -60,3 +63,46 @@ def test_volume_home_path_accepted_with_host_dir_inside() -> None:
 
 def test_volume_home_path_defaults_to_none() -> None:
     assert VpsProviderConfig(backend=ProviderBackendName("test-backend")).volume_home_path is None
+
+
+def test_fold_legacy_root_disk_size_key_moves_the_legacy_value_onto_the_unified_key() -> None:
+    folded = fold_legacy_root_disk_size_key({"backend": "aws", "root_volume_size_gb": 40}, "root_volume_size_gb")
+
+    assert folded == {"backend": "aws", "root_disk_size_gb": 40}
+
+
+def test_fold_legacy_root_disk_size_key_leaves_a_config_without_the_legacy_key_alone() -> None:
+    raw_config = {"backend": "aws", "root_disk_size_gb": 40}
+
+    assert fold_legacy_root_disk_size_key(raw_config, "root_volume_size_gb") is raw_config
+
+
+def test_fold_legacy_root_disk_size_key_ignores_a_none_legacy_value() -> None:
+    folded = fold_legacy_root_disk_size_key(
+        {"root_volume_size_gb": None, "root_disk_size_gb": 50}, "root_volume_size_gb"
+    )
+
+    assert folded == {"root_volume_size_gb": None, "root_disk_size_gb": 50}
+
+
+def test_fold_legacy_root_disk_size_key_accepts_both_keys_when_they_agree() -> None:
+    folded = fold_legacy_root_disk_size_key(
+        {"root_volume_size_gb": 40, "root_disk_size_gb": 40}, "root_volume_size_gb"
+    )
+
+    assert folded == {"root_disk_size_gb": 40}
+
+
+def test_fold_legacy_root_disk_size_key_rejects_disagreeing_keys() -> None:
+    with pytest.raises(VpsConfigError, match="root_volume_size_gb .* and root_disk_size_gb .* disagree"):
+        fold_legacy_root_disk_size_key({"root_volume_size_gb": 40, "root_disk_size_gb": 50}, "root_volume_size_gb")
+
+
+def test_fold_legacy_root_disk_size_key_passes_a_non_mapping_through() -> None:
+    config = VpsProviderConfig(backend=ProviderBackendName("test-backend"))
+
+    assert fold_legacy_root_disk_size_key(config, "root_volume_size_gb") is config
+
+
+def test_offline_capable_config_defaults_the_root_disk_to_thirty_gb() -> None:
+    assert OfflineCapableVpsProviderConfig(backend=ProviderBackendName("test-backend")).root_disk_size_gb == 30

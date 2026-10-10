@@ -51,7 +51,6 @@ from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
-from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -124,6 +123,7 @@ from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.errors import BareIsolationNotSupportedError
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.errors import VpsError
+from imbue.mngr_vps.errors import VpsHostSizeUnknownError
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.host_setup import CONTAINER_MEMORY_CAP_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr_vps.host_setup import MEM_TOTAL_PROBE_COMMAND
@@ -146,6 +146,8 @@ from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import isolation_marker_value
 from imbue.mngr_vps.primitives import load_or_create_per_host_host_keypair
 from imbue.mngr_vps.primitives import per_host_key_dir
+from imbue.mngr_vps.sizing import VpsInstanceShape
+from imbue.mngr_vps.sizing import host_resources_for_shape
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
 ParsedVpsBuildOptionsT = TypeVar("ParsedVpsBuildOptionsT", bound=ParsedVpsBuildOptions)
@@ -787,6 +789,8 @@ class VpsProvider(BaseProviderInstance):
                 vps_public_key=vps_public_key,
             )
 
+            shape = self._describe_instance_shape(vps_instance_id, parsed.plan)
+
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 host = self.create_host_on_existing_vps(
                     outer=outer,
@@ -798,6 +802,7 @@ class VpsProvider(BaseProviderInstance):
                     vps_host_public_key=vps_host_public_key,
                     region=parsed.region,
                     plan=parsed.plan,
+                    shape=shape,
                     image=image,
                     tags=tags,
                     build_args=build_args,
@@ -857,6 +862,10 @@ class VpsProvider(BaseProviderInstance):
         lifecycle: HostLifecycleOptions | None,
         known_hosts: Sequence[str] | None,
         authorized_keys: Sequence[str] | None,
+        # The instance shape the cloud reported, recorded on the host record so
+        # the host's size is answered from the record; None when the caller has
+        # no cloud to ask (an externally provisioned VPS).
+        shape: VpsInstanceShape | None = None,
         allow_local_image: bool = False,
         # Files installed in the agent container before its sshd starts (an
         # sshd_config.d drop-in plus the CA material it names, for certificate
@@ -930,6 +939,7 @@ class VpsProvider(BaseProviderInstance):
             lifecycle=lifecycle,
             region=region,
             plan=plan,
+            shape=shape,
             vps_instance_id=vps_instance_id,
             vps_ssh_key_id=vps_ssh_key_id,
             vps_host_public_key=vps_host_public_key,
@@ -1177,6 +1187,32 @@ class VpsProvider(BaseProviderInstance):
                 "Failed to destroy VPS instance {} that never became ready: {}", vps_instance_id, cleanup_err
             )
 
+    def _describe_instance_shape(self, vps_instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+        """Ask the cloud for the created instance's shape, or None when it cannot say.
+
+        The instance is already running and billing by now, so a failed describe
+        is logged rather than failing the create: the host then lists with an
+        unknown size instead of not existing at all.
+        """
+        with log_span("Describing the shape of VPS instance {}", vps_instance_id):
+            try:
+                shape = self.vps_client.get_instance_shape(vps_instance_id, plan)
+            except VpsApiError as e:
+                logger.warning(
+                    "Could not describe the shape of VPS instance {} (plan {}); its size will list as unknown: {}",
+                    vps_instance_id,
+                    plan,
+                    e,
+                )
+                return None
+        if shape is None:
+            logger.warning(
+                "The cloud reports no shape for VPS instance {} (plan {}); its size will list as unknown",
+                vps_instance_id,
+                plan,
+            )
+        return shape
+
     def _finalize_host_creation(
         self,
         host_id: HostId,
@@ -1190,6 +1226,7 @@ class VpsProvider(BaseProviderInstance):
         lifecycle: HostLifecycleOptions | None,
         region: str,
         plan: str,
+        shape: VpsInstanceShape | None,
         vps_instance_id: VpsInstanceId,
         vps_ssh_key_id: str,
         vps_host_public_key: str,
@@ -1235,6 +1272,7 @@ class VpsProvider(BaseProviderInstance):
                 vps_instance_id=vps_instance_id,
                 region=region,
                 plan=plan,
+                shape=shape,
                 start_args=effective_start_args,
                 image=base_image,
                 container_name=handle.container_name,
@@ -2176,7 +2214,7 @@ class VpsProvider(BaseProviderInstance):
 
         boot_time = timestamp_to_datetime(raw.get("btime"))
         uptime_seconds = raw.get("uptime_seconds")
-        resource = self.get_host_resources(host)
+        resource = self._recorded_resources_or_none(host)
 
         lock_mtime = raw.get("lock_mtime")
         # The lock file persists after release (its inode must stay stable across
@@ -2504,12 +2542,53 @@ class VpsProvider(BaseProviderInstance):
     # Resources
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
-        return HostResources(
-            cpu=CpuResources(count=1, frequency_ghz=None),
-            memory_gb=1.0,
-            disk_gb=None,
-            gpu=None,
-        )
+        """The size the host record holds, whether the host is running or stopped.
+
+        Reads only the record: the shape the cloud reported at create, or for a
+        record written before shapes were recorded, the provider's static table
+        for its plan. Raises ``VpsHostSizeUnknownError`` when neither answers
+        rather than invent a size; the listing then shows the size as unknown.
+        """
+        host_record = self._host_record_for_sizing(host.id)
+        if host_record is None or host_record.config is None:
+            raise HostNotFoundError(self.name, host.id)
+        # CLEANUP: drop the plan-table fallback once no host record predates
+        # shape recording.
+        shape = host_record.config.shape or self._legacy_shape_for_plan(host_record.config.plan)
+        if shape is None:
+            raise VpsHostSizeUnknownError(
+                f"Host {host.id} has no recorded instance shape and its plan {host_record.config.plan!r} is not "
+                f"in the {self.config.backend} plan table"
+            )
+        return host_resources_for_shape(shape)
+
+    def _host_record_for_sizing(self, host_id: HostId) -> VpsHostRecord | None:
+        """The host record to answer the host's size from: the one discovery cached, else a fresh lookup.
+
+        Providers that mirror records to an external store override this to
+        read the mirror for a host that is not cached (a stopped host the
+        listing reconstructed from the cloud's instance list) instead of
+        sweeping every VPS over SSH.
+        """
+        return self._find_host_record(host_id)
+
+    def _recorded_resources_or_none(self, host: HostInterface) -> HostResources | None:
+        """The host's recorded size for a listing row, or None (size unknown) when the record cannot answer."""
+        try:
+            return self.get_host_resources(host)
+        except VpsError as e:
+            logger.warning("Could not determine the size of host {}: {}", host.id, e)
+            return None
+
+    def _legacy_shape_for_plan(self, plan: str) -> VpsInstanceShape | None:
+        """The shape of ``plan`` for a host record that predates shape recording, or None if unknown.
+
+        Only the handful of plans in use before shapes were recorded need an
+        answer, so each provider keeps a small static table; the default knows
+        no plan at all.
+        """
+        del plan
+        return None
 
     # Connector
 

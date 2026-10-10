@@ -30,8 +30,12 @@ from imbue.mngr_aws.config import pick_ami_architecture
 from imbue.mngr_aws.config import pick_newest_ami_id
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Tag that ``create_instance`` adds to every EC2 instance launched while
@@ -174,6 +178,25 @@ class AwsVpsClient(VpsClientInterface):
         logger.debug("Resolved the default Debian 13 {} AMI for region {} to {}", architecture, self.region, ami_id)
         self._cached_default_ami_id_by_architecture[architecture] = ami_id
         return ami_id
+
+    def get_instance_shape(self, instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+        """The vCPUs and RAM EC2 reports for instance type ``plan``, with this client's root volume size."""
+        del instance_id
+        with self._translate_aws_errors():
+            response = self._ec2().describe_instance_types(InstanceTypes=[plan])
+        described_types = response.get("InstanceTypes", [])
+        if not described_types:
+            return None
+        described = described_types[0]
+        vcpu_count = described.get("VCpuInfo", {}).get("DefaultVCpus")
+        memory_mib = described.get("MemoryInfo", {}).get("SizeInMiB")
+        if vcpu_count is None or memory_mib is None:
+            return None
+        return VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(int(vcpu_count)),
+            memory_mib=VpsMemoryMib(int(memory_mib)),
+            root_disk_gb=VpsDiskGb(self.root_volume_size_gb),
+        )
 
     def _resolve_instance_type_architecture(self, instance_type: str) -> str:
         """The EC2 architecture (``x86_64`` or ``arm64``) Debian images exist for that ``instance_type`` runs."""

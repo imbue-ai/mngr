@@ -742,7 +742,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         config_cls=AwsProviderConfig,
         field_header="Field",
         description_header="Description",
-        extra_fields=("allowed_ssh_cidrs", "associate_public_ip", "auto_shutdown_seconds"),
+        extra_fields=("root_disk_size_gb", "allowed_ssh_cidrs", "associate_public_ip", "auto_shutdown_seconds"),
         default_overrides={
             "default_ami_id": "`None` (newest Debian 13 AMI for the instance type's architecture, resolved at create)",
             "security_group": '`AutoCreateSecurityGroup(name="mngr-aws")`',
@@ -755,7 +755,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         config_cls=GcpProviderConfig,
         field_header="Field",
         description_header="Description",
-        extra_fields=("allowed_ssh_cidrs", "auto_shutdown_seconds"),
+        extra_fields=("root_disk_size_gb", "allowed_ssh_cidrs", "auto_shutdown_seconds"),
         default_overrides={
             "project_id": "gcloud/ADC default",
             "default_region": "derived from zone",

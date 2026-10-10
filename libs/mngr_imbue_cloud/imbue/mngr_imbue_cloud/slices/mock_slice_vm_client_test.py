@@ -13,6 +13,7 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_DISK_SUFFIX
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import SliceInstanceObservation
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.sizing import VpsInstanceShape
 
 
 class MockSliceVmClient(SliceVmClientInterface):
@@ -124,6 +125,9 @@ class MockSliceVmClient(SliceVmClientInterface):
         raise NotImplementedError
 
     def get_instance_ip(self, instance_id: VpsInstanceId) -> str:
+        raise NotImplementedError
+
+    def get_instance_shape(self, instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
         raise NotImplementedError
 
     def upload_ssh_key(self, name: str, public_key: str) -> str:

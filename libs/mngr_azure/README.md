@@ -42,7 +42,7 @@ state_storage_account_name = "mngrstmyteam"
 allowed_ssh_cidrs = ["203.0.113.4/32"]
 
 # Optional OS disk sizing
-os_disk_size_gb = 30
+root_disk_size_gb = 30
 os_disk_type = "StandardSSD_LRS"
 ```
 

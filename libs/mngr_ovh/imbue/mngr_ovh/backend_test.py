@@ -17,6 +17,7 @@ from imbue.mngr_ovh import backend as backend_module
 from imbue.mngr_ovh.backend import OVH_BACKEND_NAME
 from imbue.mngr_ovh.backend import OvhProvider
 from imbue.mngr_ovh.backend import OvhProviderBackend
+from imbue.mngr_ovh.backend import _LEGACY_OVH_PLAN_SHAPES
 from imbue.mngr_ovh.backend import register_provider_backend
 from imbue.mngr_ovh.config import OvhProviderConfig
 
@@ -214,3 +215,11 @@ def test_provision_vps_writes_marker_on_delivery_timeout() -> None:
     assert timeout_except_pos < marker_write_pos < len(body), (
         "write_pending_order_marker must appear inside the OvhOrderDeliveryTimeoutError except block"
     )
+
+
+def test_legacy_plan_table_covers_the_default_plan_with_its_bundled_disk() -> None:
+    shape = _LEGACY_OVH_PLAN_SHAPES[OvhProviderConfig().default_plan]
+
+    assert shape.vcpu_count == 1
+    assert shape.memory_mib == 8192
+    assert shape.root_disk_gb == 80

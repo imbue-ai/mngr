@@ -53,6 +53,7 @@ from imbue.mngr.providers.provider_release_testing import run_provider_release_t
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
 from imbue.mngr_gcp.client import GCP_PYTEST_LAUNCHED_LABEL
 from imbue.mngr_gcp.client import GcpVpsClient
+from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.testing import GCP_DEFAULT_REGION
 from imbue.mngr_gcp.testing import GCP_DEFAULT_ZONE
 from imbue.mngr_gcp.testing import GCP_RELEASE_TESTS_OPT_IN
@@ -197,12 +198,10 @@ def _gcp_release_test_firewall_prepared(
     )
 
 
-# =============================================================================
 # Trip 1 -- the shared provider release lifecycle (create -> stop/start ->
 # sketchy kill -> gc), parametrized over isolation mode. See
 # `imbue.mngr.providers.provider_release_testing` and
 # `specs/provider-release-tests.md`.
-# =============================================================================
 
 
 class _GcpReleaseProfile(VpsCloudReleaseProfile):
@@ -220,7 +219,8 @@ class _GcpReleaseProfile(VpsCloudReleaseProfile):
     supports_offline_host_dir = True
 
     def __init__(self, client: GcpVpsClient, isolation: IsolationMode, project: str) -> None:
-        super().__init__(client, isolation)
+        # The release settings pin no machine type, so the trip's host gets the config default.
+        super().__init__(client, isolation, GcpProviderConfig().default_machine_type)
         self._gcp_client = client
         self._project = project
 
@@ -347,9 +347,7 @@ def test_provider_release_trip4(
     )
 
 
-# =============================================================================
 # API client smoke tests (real network calls, read-only)
-# =============================================================================
 
 
 @pytest.fixture()

@@ -3,6 +3,7 @@ import uuid
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 import click
@@ -55,11 +56,27 @@ from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import parse_vps_build_args
 from imbue.mngr_vps.host_setup import apply_host_setup_on_outer
 from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
 
 OVH_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("ovh")
 
 _OVH_REBUILD_TASK_TIMEOUT_SECONDS: Final[float] = 1800.0
+
+
+# CLEANUP: drop this table, and the provider's ``_legacy_shape_for_plan``, once
+# no host record predates shape recording (the shape is recorded at create).
+# The one plan in use before shapes were recorded (the provider default).
+_LEGACY_OVH_PLAN_SHAPES: Final[Mapping[str, VpsInstanceShape]] = MappingProxyType(
+    {
+        "vps-2025-model1": VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(1), memory_mib=VpsMemoryMib(8192), root_disk_gb=VpsDiskGb(80)
+        ),
+    }
+)
 
 
 class OvhProvider(VpsProvider):
@@ -83,6 +100,9 @@ class OvhProvider(VpsProvider):
         self._vps_iam_cache = None
 
     # Build-args parsing -- OVH uses --ovh-datacenter (alias for --ovh-region)
+
+    def _legacy_shape_for_plan(self, plan: str) -> VpsInstanceShape | None:
+        return _LEGACY_OVH_PLAN_SHAPES.get(plan)
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         """Parse OVH-prefixed build args. ``--ovh-datacenter=`` is an alias for ``--ovh-region=``."""

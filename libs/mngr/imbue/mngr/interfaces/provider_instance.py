@@ -109,18 +109,23 @@ def _ssh_info_from_host(host: HostInterface) -> SSHInfo | None:
     )
 
 
-def _read_offline_provider_resources(host: HostInterface) -> HostResources | None:
-    """The size a provider recorded for a host that is not online, or None when that read itself fails.
+def _read_recorded_provider_resources(host: HostInterface) -> HostResources | None:
+    """The size a provider records for a host, or None when that read itself fails.
 
-    This runs for every host the listing sees offline: an ordinarily stopped
-    host, and the fallback for one that could not be reached. Either way the
-    listing must degrade to "size unknown" rather than fail because a
-    provider's record could not be read (e.g. a store that is itself remote).
+    This runs for every host the listing builds details for, online or not: a
+    running host, an ordinarily stopped one, and the fallback for one that
+    could not be reached. Either way the listing must degrade to "size unknown"
+    rather than fail because a provider's record could not answer (a record
+    that predates size recording, or a store that is itself remote). A
+    connection failure is not a size answer, so it propagates to the caller's
+    offline fallback for the whole host.
     """
     try:
         return host.get_provider_resources()
+    except HostConnectionError:
+        raise
     except (MngrError, OSError) as e:
-        logger.warning("Could not read the recorded size of offline host {}: {}", host.id, e)
+        logger.warning("Could not read the recorded size of host {}: {}", host.id, e)
         return None
 
 
@@ -142,7 +147,7 @@ def _build_host_details_from_host(
         boot_info = host.read_boot_info()
         boot_time = boot_info.boot_time
         uptime_seconds = boot_info.uptime_seconds
-        resource = host.get_provider_resources()
+        resource = _read_recorded_provider_resources(host)
         is_locked = host.is_lock_held()
         # Only fetch locked_time when the lock is held to avoid a redundant
         # SSH stat command on remote hosts (is_lock_held already checked existence).
@@ -150,7 +155,7 @@ def _build_host_details_from_host(
     else:
         boot_time = None
         uptime_seconds = None
-        resource = _read_offline_provider_resources(host)
+        resource = _read_recorded_provider_resources(host)
 
     certified_data = host.get_certified_data()
     host_plugin_data = certified_data.plugin

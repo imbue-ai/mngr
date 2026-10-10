@@ -28,8 +28,12 @@ from imbue.mngr_gcp.errors import InvalidGceIdentifierError
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Label key stamped on every mngr-managed instance (the provider-instance name
@@ -247,6 +251,7 @@ class GcpVpsClient(VpsClientInterface):
     _ssh_public_keys_by_id: dict[str, str] = PrivateAttr(default_factory=dict)
     _cached_instances_client: Any = PrivateAttr(default=None)
     _cached_firewalls_client: Any = PrivateAttr(default=None)
+    _cached_machine_types_client: Any = PrivateAttr(default=None)
 
     # Lazily-built compute clients (overridden in tests to inject fakes)
 
@@ -259,6 +264,11 @@ class GcpVpsClient(VpsClientInterface):
         if self._cached_firewalls_client is None:
             self._cached_firewalls_client = compute_v1.FirewallsClient(credentials=self.credentials)
         return self._cached_firewalls_client
+
+    def _machine_types(self) -> Any:
+        if self._cached_machine_types_client is None:
+            self._cached_machine_types_client = compute_v1.MachineTypesClient(credentials=self.credentials)
+        return self._cached_machine_types_client
 
     @contextmanager
     def _translate_gcp_errors(self) -> Iterator[None]:
@@ -747,6 +757,19 @@ class GcpVpsClient(VpsClientInterface):
                 if access_config.nat_i_p:
                     return access_config.nat_i_p
         raise VpsProvisioningError(f"Instance {instance_id} does not have an external IP yet")
+
+    def get_instance_shape(self, instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+        """The vCPUs and RAM GCE reports for machine type ``plan`` in this zone, with this client's boot disk size."""
+        del instance_id
+        with self._translate_gcp_errors():
+            machine_type = self._machine_types().get(project=self.project_id, zone=self.zone, machine_type=plan)
+        if not machine_type.guest_cpus or not machine_type.memory_mb:
+            return None
+        return VpsInstanceShape(
+            vcpu_count=VpsVcpuCount(int(machine_type.guest_cpus)),
+            memory_mib=VpsMemoryMib(int(machine_type.memory_mb)),
+            root_disk_gb=VpsDiskGb(self.boot_disk_size_gb),
+        )
 
     def list_instances(self, provider_tag: str | None = None) -> list[dict[str, Any]]:
         """List instances in this zone. Optionally filtered by the ``mngr-provider`` label.

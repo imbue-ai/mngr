@@ -359,7 +359,7 @@ class _AzureReleaseProfile(VpsCloudReleaseProfile):
     supports_offline_host_dir = True
 
     def __init__(self, client: AzureVpsClient, isolation: IsolationMode, subscription_id: str) -> None:
-        super().__init__(client, isolation)
+        super().__init__(client, isolation, AZURE_TEST_VM_SIZE)
         self._azure_client = client
         self._subscription_id = subscription_id
 
