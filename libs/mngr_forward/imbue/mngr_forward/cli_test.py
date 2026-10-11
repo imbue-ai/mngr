@@ -2,8 +2,9 @@
 
 Drives the helpers directly rather than through a CLI process: option
 validation, listen-socket binding and fallback, snapshot filtering, and the
-hypercorn serving layer's TLS teardown behavior (serve-loop exception handling
-plus an end-to-end abandoned-connection repro over a loopback socket).
+hypercorn serving layer's behavior over a loopback socket (serve-loop exception
+handling, an end-to-end abandoned-TLS-connection teardown repro, and an HTTP/2
+connection carrying more requests than hypercorn's default per-connection cap).
 """
 
 # asyncio is normally banned, but this file tests the event-loop-level TLS
@@ -14,9 +15,16 @@ import os
 import socket
 import ssl
 import threading
+from collections.abc import Iterator
+from collections.abc import Sequence
+from contextlib import contextmanager
 from typing import Any
+from typing import Final
 
 import click
+import h2.config
+import h2.connection
+import h2.events
 import pytest
 from hypercorn.config import Config
 from hypercorn.typing import ASGIReceiveCallable
@@ -490,8 +498,12 @@ class _FastSSLShutdownEventLoop(_BoundedSSLShutdownEventLoop):
     ssl_shutdown_timeout_seconds: float = 0.4
 
 
-async def _lifespan_only_asgi_app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
-    """Minimal ASGI app for serving-layer tests; no HTTP request is ever made."""
+async def _minimal_asgi_app(scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
+    """Minimal ASGI app for serving-layer tests: completes the lifespan handshake and answers every HTTP request with an empty 204."""
+    if scope["type"] == "http":
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+        return
     assert scope["type"] == "lifespan"
     await receive()
     await send({"type": "lifespan.startup.complete"})
@@ -500,22 +512,53 @@ async def _lifespan_only_asgi_app(scope: Scope, receive: ASGIReceiveCallable, se
 
 
 def _run_tls_server_until_stopped(config: Config, stop_serving: threading.Event) -> None:
-    """Serve the dummy app through the production serve loop until the event is set."""
+    """Serve the minimal app through the production serve loop until the event is set."""
 
     async def _stop_trigger() -> None:
         while not stop_serving.is_set():
             await asyncio.sleep(0.05)
 
-    _run_serve_loop(
-        _lifespan_only_asgi_app, config, loop_factory=_FastSSLShutdownEventLoop, shutdown_trigger=_stop_trigger
+    _run_serve_loop(_minimal_asgi_app, config, loop_factory=_FastSSLShutdownEventLoop, shutdown_trigger=_stop_trigger)
+
+
+@contextmanager
+def _bound_tls_test_listener() -> Iterator[tuple[int, Config]]:
+    """Bind a loopback listen socket and build the forward's TLS config for it, yielding the port and the config.
+
+    The config is yielded before anything serves on it, so a test can still
+    adjust it; the socket is closed on exit.
+    """
+    listen_socket = _bind_listen_socket("127.0.0.1", 0)
+    try:
+        config = _build_hypercorn_config(listen_socket, ca=make_in_memory_test_ca())
+        yield listen_socket.getsockname()[1], config
+    finally:
+        listen_socket.close()
+
+
+@contextmanager
+def _serving_in_background(config: Config, thread_name: str) -> Iterator[None]:
+    """Run the minimal app on ``config`` through the production serve loop on a daemon thread for the block's duration."""
+    stop_serving = threading.Event()
+    server_thread = threading.Thread(
+        target=_run_tls_server_until_stopped, args=(config, stop_serving), name=thread_name, daemon=True
     )
+    server_thread.start()
+    try:
+        yield
+    finally:
+        stop_serving.set()
+        server_thread.join(timeout=10.0)
+    assert not server_thread.is_alive()
 
 
-def _connect_tls_client_when_listening(port: int) -> ssl.SSLSocket:
+def _connect_tls_client_when_listening(port: int, alpn_protocols: Sequence[str] | None = None) -> ssl.SSLSocket:
     """Open a TLS client connection (cert checks off), retrying until the server listens."""
     client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     client_context.check_hostname = False
     client_context.verify_mode = ssl.CERT_NONE
+    if alpn_protocols is not None:
+        client_context.set_alpn_protocols(alpn_protocols)
 
     def _try_connect() -> ssl.SSLSocket | None:
         try:
@@ -538,47 +581,131 @@ def test_abandoned_tls_connection_is_torn_down_quickly_and_quietly(caplog: pytes
     escaping TimeoutError must be dropped instead of surfacing as an
     "Unhandled exception in client_connected_cb" traceback.
     """
-    listen_socket = _bind_listen_socket("127.0.0.1", 0)
-    listen_port = listen_socket.getsockname()[1]
-    config = _build_hypercorn_config(listen_socket, ca=make_in_memory_test_ca())
-    # Shrink the keep-alive so the server initiates the close (and thereby the
-    # TLS shutdown) shortly after the client goes idle.
-    config.keep_alive_timeout = 0.25
-
-    stop_serving = threading.Event()
     suppressed_messages: list[str] = []
     sink_id = logger.add(suppressed_messages.append, level="DEBUG")
-    server_thread = threading.Thread(
-        target=_run_tls_server_until_stopped,
-        args=(config, stop_serving),
-        name="forward-tls-teardown-test-server",
-        daemon=True,
-    )
 
     def _is_teardown_suppressed() -> bool:
         return any(_SSL_SHUTDOWN_TIMED_OUT_MESSAGE in message for message in tuple(suppressed_messages))
 
-    with caplog.at_level("ERROR", logger="asyncio"):
-        server_thread.start()
-        try:
-            client_socket = _connect_tls_client_when_listening(listen_port)
-            try:
-                # If the 30s stdlib shutdown timeout were still in effect, or
-                # the teardown error were not routed through the suppression
-                # path, this wait would time out.
-                wait_for(
-                    condition=_is_teardown_suppressed,
-                    timeout=10.0,
-                    poll_interval=0.05,
-                    error_message="the abandoned TLS connection was not torn down within the bounded wait",
-                )
-            finally:
-                client_socket.close()
-        finally:
-            stop_serving.set()
-            server_thread.join(timeout=10.0)
-            logger.remove(sink_id)
-            listen_socket.close()
+    try:
+        with caplog.at_level("ERROR", logger="asyncio"), _bound_tls_test_listener() as (listen_port, config):
+            # Shrink the keep-alive so the server initiates the close (and thereby the
+            # TLS shutdown) shortly after the client goes idle.
+            config.keep_alive_timeout = 0.25
+            with _serving_in_background(config, "forward-tls-teardown-test-server"):
+                with _connect_tls_client_when_listening(listen_port):
+                    # If the 30s stdlib shutdown timeout were still in effect, or
+                    # the teardown error were not routed through the suppression
+                    # path, this wait would time out.
+                    wait_for(
+                        condition=_is_teardown_suppressed,
+                        timeout=10.0,
+                        poll_interval=0.05,
+                        error_message="the abandoned TLS connection was not torn down within the bounded wait",
+                    )
+    finally:
+        logger.remove(sink_id)
 
-    assert not server_thread.is_alive()
     assert _asyncio_error_records(caplog) == []
+
+
+# Two past hypercorn's default per-connection request cap (1000): the first request
+# over the cap is what makes hypercorn queue the GOAWAY, and crossing it by one more
+# leaves no doubt that the connection was drained rather than merely full.
+_REQUESTS_PAST_HYPERCORN_DEFAULT_CAP: Final[int] = 1002
+
+
+def _receive_h2_frames(connection: h2.connection.H2Connection, tls_socket: ssl.SSLSocket) -> list[h2.events.Event]:
+    """Read one chunk from the socket, feed it to ``connection``, flush the acks it owes, and return the events."""
+    data = tls_socket.recv(65536)
+    assert data, "the server closed the HTTP/2 connection"
+    events = connection.receive_data(data)
+    tls_socket.sendall(connection.data_to_send())
+    return events
+
+
+def _receive_h2_server_settings(connection: h2.connection.H2Connection, tls_socket: ssl.SSLSocket) -> None:
+    """Read until the server's SETTINGS arrive.
+
+    Until then h2 treats the peer's concurrent-stream limit as unbounded, so a
+    client that opened streams first would exceed hypercorn's real limit and
+    have the excess refused.
+    """
+    events: list[h2.events.Event] = []
+    while not any(isinstance(event, h2.events.RemoteSettingsChanged) for event in events):
+        events = _receive_h2_frames(connection, tls_socket)
+
+
+def _send_h2_gets_up_to_stream_limit(
+    connection: h2.connection.H2Connection, tls_socket: ssl.SSLSocket, remaining: int
+) -> list[int]:
+    """Open as many GET streams as the server's concurrent-stream limit allows (at most ``remaining``) in one write."""
+    stream_ids: list[int] = []
+    while (
+        len(stream_ids) < remaining
+        and connection.open_outbound_streams < connection.remote_settings.max_concurrent_streams
+    ):
+        stream_id = connection.get_next_available_stream_id()
+        connection.send_headers(
+            stream_id,
+            [(":method", "GET"), (":path", "/"), (":scheme", "https"), (":authority", "localhost")],
+            end_stream=True,
+        )
+        stream_ids.append(stream_id)
+    tls_socket.sendall(connection.data_to_send())
+    return stream_ids
+
+
+def _receive_h2_until_streams_end(
+    connection: h2.connection.H2Connection, tls_socket: ssl.SSLSocket, stream_ids: Sequence[int]
+) -> list[h2.events.Event]:
+    """Read frames until every stream in ``stream_ids`` ends (or the server sends GOAWAY), returning every event seen."""
+    pending = set(stream_ids)
+    seen: list[h2.events.Event] = []
+    while pending:
+        events = _receive_h2_frames(connection, tls_socket)
+        seen.extend(events)
+        for event in events:
+            if isinstance(event, h2.events.StreamEnded):
+                pending.discard(event.stream_id)
+            if isinstance(event, h2.events.ConnectionTerminated):
+                pending.clear()
+    return seen
+
+
+def test_http2_connection_is_not_drained_after_a_thousand_requests() -> None:
+    """A browser multiplexes a whole origin over one HTTP/2 connection, so a server-initiated
+    GOAWAY strands every stream open on it (the chat transcripts' EventSources went silent
+    after hypercorn's default 1000-request cap). The forward's config must let a connection
+    carry more requests than that cap without a GOAWAY.
+
+    The requests are opened as concurrent streams, a batch of up to the server's
+    concurrent-stream limit at a time as a browser multiplexes them, which keeps the test
+    to a handful of round-trips.
+    """
+    with _bound_tls_test_listener() as (listen_port, config):
+        with _serving_in_background(config, "forward-h2-request-cap-test-server"):
+            with _connect_tls_client_when_listening(listen_port, alpn_protocols=["h2"]) as tls_socket:
+                assert tls_socket.selected_alpn_protocol() == "h2"
+                tls_socket.settimeout(10.0)
+                connection = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=True))
+                connection.initiate_connection()
+                tls_socket.sendall(connection.data_to_send())
+                _receive_h2_server_settings(connection, tls_socket)
+                answered_count = 0
+                while answered_count < _REQUESTS_PAST_HYPERCORN_DEFAULT_CAP:
+                    stream_ids = _send_h2_gets_up_to_stream_limit(
+                        connection, tls_socket, _REQUESTS_PAST_HYPERCORN_DEFAULT_CAP - answered_count
+                    )
+                    events = _receive_h2_until_streams_end(connection, tls_socket, stream_ids)
+                    goaways = [event for event in events if isinstance(event, h2.events.ConnectionTerminated)]
+                    assert goaways == [], (
+                        f"the server sent GOAWAY within requests {answered_count + 1}-{answered_count + len(stream_ids)}"
+                    )
+                    statuses = {
+                        event.stream_id: dict(event.headers)[b":status"]
+                        for event in events
+                        if isinstance(event, h2.events.ResponseReceived)
+                    }
+                    assert statuses == {stream_id: b"204" for stream_id in stream_ids}
+                    answered_count += len(stream_ids)

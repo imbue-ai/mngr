@@ -7,6 +7,7 @@ import signal
 import socket
 import ssl
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -466,6 +467,12 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         envelope_writer.close()
 
 
+# hypercorn has no "off" value for its per-connection request cap (it compares the
+# request count against this number, so 0 would close every connection after its
+# first request); the largest int is the way to never reach it.
+_UNLIMITED_KEEP_ALIVE_REQUESTS: Final[int] = sys.maxsize
+
+
 def _build_hypercorn_config(listen_socket: socket.socket, ca: LocalCertificateAuthority | None) -> Config:
     """Build the hypercorn ``Config`` for serving over the already-bound socket.
 
@@ -501,6 +508,11 @@ def _build_hypercorn_config(listen_socket: socket.socket, ca: LocalCertificateAu
     # suppressed).
     config.graceful_timeout = 1.0
     config.loglevel = "WARNING"
+    # hypercorn's default per-connection request cap (1000) ends an HTTP/2
+    # connection with a GOAWAY, which silently strands the server-sent-event
+    # streams still open on the one connection a browser multiplexes an origin
+    # over. Nothing here needs connections recycled, so the cap is lifted.
+    config.keep_alive_max_requests = _UNLIMITED_KEEP_ALIVE_REQUESTS
     return config
 
 
