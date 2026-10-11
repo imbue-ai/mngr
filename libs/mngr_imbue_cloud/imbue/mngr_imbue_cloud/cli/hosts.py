@@ -26,7 +26,10 @@ from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_active_profile_dir
 from imbue.mngr_imbue_cloud.config import get_provider_state_dir
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
+from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
+from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.errors import HostKeyDriftError
+from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.providers.adoption import AdoptionEndpointKind
 from imbue.mngr_imbue_cloud.providers.adoption import ParamikoSliceVmAccess
 from imbue.mngr_imbue_cloud.providers.adoption import SliceAdoptionTarget
@@ -80,14 +83,20 @@ def list_hosts(account: str | None, connector_url: str | None) -> None:
 @handle_imbue_cloud_errors
 def release_host(host_db_id: str, account: str | None, connector_url: str | None) -> None:
     """Release a leased host back to the pool."""
-    client = make_connector_client(connector_url)
     store = make_session_store()
-    parsed_account = resolve_account_or_active(store, account)
-    token = get_active_token(store, client, parsed_account)
-    is_released = client.release_host(token, host_db_id)
-    if not is_released:
-        fail_with_json("Connector returned non-success on release", error_class="ReleaseFailed")
-    emit_json({"released": True, "host_db_id": host_db_id})
+    emit_json(
+        _release_lease(
+            make_connector_client(connector_url), store, resolve_account_or_active(store, account), host_db_id
+        )
+    )
+
+
+def _release_lease(
+    client: ImbueCloudConnectorClient, store: ImbueCloudSessionStore, account: ImbueCloudAccount, host_db_id: str
+) -> dict[str, object]:
+    """Release one lease; a failed release raises ``ImbueCloudConnectorError``, which the command reports."""
+    client.release_host(get_active_token(store, client, account), host_db_id)
+    return {"released": True, "host_db_id": host_db_id}
 
 
 def _find_lease_by_ref(leases: list[LeasedHostInfo], host_ref: str) -> LeasedHostInfo | None:

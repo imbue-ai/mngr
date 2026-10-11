@@ -712,11 +712,11 @@ class ImbueCloudConnectorClient(MutableModel):
         create-rollback path) catch this explicitly.
         """
         try:
-            response = httpx.post(
+            response = self._http_call(
+                "POST",
                 self._url(f"/hosts/{host_db_id}/release"),
                 headers=self._bearer(access_token),
                 timeout=self.timeout_seconds,
-                follow_redirects=True,
             )
         except httpx.HTTPError as exc:
             raise ImbueCloudConnectorError(

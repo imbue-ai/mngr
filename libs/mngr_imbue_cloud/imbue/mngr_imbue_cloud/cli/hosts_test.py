@@ -1,12 +1,21 @@
 from pathlib import Path
 
+import httpx
 import pytest
 from click.testing import CliRunner
+from pydantic import AnyUrl
 
 from imbue.mngr_imbue_cloud.cli.hosts import _find_host_state_dirs
 from imbue.mngr_imbue_cloud.cli.hosts import _find_lease_by_ref
+from imbue.mngr_imbue_cloud.cli.hosts import _release_lease
 from imbue.mngr_imbue_cloud.cli.hosts import hosts
+from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
+from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
+from imbue.mngr_imbue_cloud.connector.session_store import make_session_from_tokens
+from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
+from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 
 _HOST_ID = "host-" + "a" * 32
@@ -75,3 +84,51 @@ def test_find_host_state_dirs_scans_provider_instances(tmp_path: Path, monkeypat
     found = _find_host_state_dirs(_HOST_ID)
 
     assert found == [with_key]
+
+
+_LEASE_ID = "11111111-2222-3333-4444-555555555555"
+
+
+def _signed_in_store(tmp_path: Path) -> tuple[ImbueCloudSessionStore, ImbueCloudAccount]:
+    store = ImbueCloudSessionStore(sessions_dir=tmp_path / "sessions")
+    account = ImbueCloudAccount("alice@example.com")
+    store.save(
+        make_session_from_tokens(
+            user_id=SuperTokensUserId("user-1"),
+            email=account,
+            display_name=None,
+            access_token="stale-at",
+            refresh_token="rt-1",
+            profile_picture_url=None,
+        )
+    )
+    return store, account
+
+
+def _connector(release_status_code: int, released_paths: list[str]) -> ImbueCloudConnectorClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/auth/session/refresh":
+            return httpx.Response(
+                200, json={"status": "OK", "tokens": {"access_token": "at", "refresh_token": "rt-2"}}
+            )
+        released_paths.append(request.url.path)
+        return httpx.Response(release_status_code, json={"status": "released"})
+
+    return ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+
+
+def test_a_release_the_connector_accepts_is_reported_as_released(tmp_path: Path) -> None:
+    store, account = _signed_in_store(tmp_path)
+    released_paths: list[str] = []
+
+    result = _release_lease(_connector(200, released_paths), store, account, _LEASE_ID)
+
+    assert result == {"released": True, "host_db_id": _LEASE_ID}
+    assert released_paths == [f"/hosts/{_LEASE_ID}/release"]
+
+
+def test_a_release_the_connector_refuses_raises(tmp_path: Path) -> None:
+    store, account = _signed_in_store(tmp_path)
+
+    with pytest.raises(ImbueCloudConnectorError, match="returned 503"):
+        _release_lease(_connector(503, []), store, account, _LEASE_ID)
