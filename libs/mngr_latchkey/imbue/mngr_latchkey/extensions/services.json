@@ -3,19 +3,19 @@
     {
       "scope": "slack-api",
       "display_name": "Slack",
-      "description": "Any interaction with the Slack API, including downloading file content and thumbnails from Slack's file-storage host.",
+      "description": "Any interaction with Slack, including file downloads.",
       "permissions": [
         {
           "name": "slack-read-all",
-          "description": "All read operations across the entire Slack API, including messages, users, files, reactions, search, pins, bookmarks, reminders, thread subscriptions, unread counts, and downloading file content and thumbnails."
+          "description": "All read operations across Slack: messages, conversations, users, files, reactions, search, pins, bookmarks, and the Later view."
         },
         {
           "name": "slack-write-all",
-          "description": "All write operations across the entire Slack API, including sending messages, managing conversations, updating profiles, uploading files, marking thread subscriptions, and modifying pins, bookmarks, and reminders."
+          "description": "All write operations across Slack: sending messages, managing conversations, updating profiles, uploading files, and modifying reactions, pins, bookmarks, and the Later view. Does not include deleting channels or inviting and deactivating users."
         },
         {
           "name": "slack-auth-read",
-          "description": "Check authentication status and list teams."
+          "description": "Check authentication status and read basic workspace info."
         },
         {
           "name": "slack-auth-write",
@@ -23,39 +23,39 @@
         },
         {
           "name": "slack-chat-read",
-          "description": "Get message permalinks and list scheduled messages."
+          "description": "Get message permalinks and list scheduled messages and drafts."
         },
         {
           "name": "slack-chat-write",
-          "description": "Send, update, delete, and schedule messages."
+          "description": "Send, update, delete, schedule, and draft messages, and run slash commands."
         },
         {
           "name": "slack-conversations-read",
-          "description": "Read conversation history, details, members, and replies."
+          "description": "Read conversations: history, details, members, threads, and unread counts."
         },
         {
           "name": "slack-conversations-write",
-          "description": "Create, archive, rename, and manage conversations, including membership, invitations, topics, and purposes."
+          "description": "Create, archive, rename, and manage conversations, including membership, topics, read markers, and followed threads."
         },
         {
           "name": "slack-users-read",
-          "description": "Read user profiles, presence, identity, and look up users by email."
+          "description": "Read user profiles, presence, preferences, and user groups, and look up users."
         },
         {
           "name": "slack-users-write",
-          "description": "Update user presence and profile information."
+          "description": "Update user profiles, presence, preferences, and user groups."
         },
         {
           "name": "slack-files-read",
-          "description": "List and inspect files, including remote files, and download file content and thumbnails."
+          "description": "List, inspect, and download files and canvases."
         },
         {
           "name": "slack-files-write",
-          "description": "Upload, delete, and share files, including remote files."
+          "description": "Upload, edit, delete, and share files and canvases."
         },
         {
           "name": "slack-reactions-read",
-          "description": "List and inspect emoji reactions on messages."
+          "description": "List emoji reactions and custom emoji."
         },
         {
           "name": "slack-reactions-write",
@@ -63,7 +63,7 @@
         },
         {
           "name": "slack-search",
-          "description": "Search messages, files, and all content."
+          "description": "Search messages, files, channels, and people."
         },
         {
           "name": "slack-pins-read",
@@ -83,11 +83,19 @@
         },
         {
           "name": "slack-reminders-read",
-          "description": "List and inspect reminders."
+          "description": "List and inspect reminders. A subset of slack-later-read."
         },
         {
           "name": "slack-reminders-write",
-          "description": "Create, complete, or delete reminders."
+          "description": "Create, complete, or delete reminders. A subset of slack-later-write."
+        },
+        {
+          "name": "slack-later-read",
+          "description": "List and inspect reminders and saved items (the Later view)."
+        },
+        {
+          "name": "slack-later-write",
+          "description": "Create, update, complete, or delete reminders and saved items (the Later view)."
         }
       ]
     }
