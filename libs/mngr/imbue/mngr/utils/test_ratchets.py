@@ -60,7 +60,11 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(35), excluded_patterns=("_kqueue_tty_test_script.py",))
+    rc.check_bare_print(
+        _DIR,
+        snapshot(35),
+        excluded_patterns=("_kqueue_tty_test_script.py", "_bracketed_paste_reader_script.py"),
+    )
 
 
 # --- Exception handling ---

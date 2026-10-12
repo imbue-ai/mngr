@@ -4,12 +4,14 @@ import shlex
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Final
 
 import pydantic
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.mock_host_test import ScriptedHost
+from imbue.mngr.agents.tui_utils import SubmissionConfirmationOutcome
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
 from imbue.mngr.agents.tui_utils import _check_paste_content
 from imbue.mngr.agents.tui_utils import _normalize_for_match
@@ -33,9 +35,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
-# =========================================================================
 # Paste-detection helpers
-# =========================================================================
 
 
 def test_normalize_for_match_strips_non_alnum_and_lowercases() -> None:
@@ -90,9 +90,7 @@ def test_is_slash_command_message() -> None:
     assert is_slash_command_message("hello") is False
 
 
-# =========================================================================
 # Probe constructors
-# =========================================================================
 
 
 def test_build_changed_token_probe_uses_same_command_for_baseline_and_poll() -> None:
@@ -108,9 +106,7 @@ def test_build_file_mtime_token_command_covers_gnu_and_bsd_stat() -> None:
     assert 'stat -f %Fm "$MARKER"' in command
 
 
-# =========================================================================
 # Confirmation-command generation
-# =========================================================================
 
 
 _FAKE_TARGET = TmuxWindowTarget(session_name="probe-target", window=0)
@@ -183,9 +179,7 @@ def test_confirmation_command_retries_unconditionally_without_pane_probe() -> No
     assert "capture-pane" not in command
 
 
-# =========================================================================
 # Output parsing
-# =========================================================================
 
 
 def test_parse_confirmation_output_reads_confirming_probe() -> None:
@@ -214,9 +208,7 @@ def test_parse_confirmation_output_handles_empty_output() -> None:
     assert outcome.confirming_probe_name is None
 
 
-# =========================================================================
 # submit_message_and_confirm via in-memory probe agent
-# =========================================================================
 
 
 class _ProbeAgent(BaseAgent[AgentTypeConfig]):
@@ -364,9 +356,7 @@ def test_raise_for_unconfirmed_submission_includes_diagnostics() -> None:
     assert "pane still shows the typed message" in error_text
 
 
-# =========================================================================
 # Real-tmux engine tests
-# =========================================================================
 
 
 @pytest.fixture
@@ -427,6 +417,66 @@ def test_engine_confirms_when_enter_actually_executes(tmux_probe_agent: _ProbeAg
         tmux_probe_agent.host.execute_idempotent_command(
             f"tmux kill-session -t '={session_name}' 2>/dev/null", timeout_seconds=5.0
         )
+
+
+_SWALLOWED_MESSAGE: Final[str] = "a long brief for the agent 36284"
+
+
+def _submit_to_enter_swallowing_pane(
+    agent: _ProbeAgent, tmp_path: Path, screen: str, timeout_seconds: float
+) -> SubmissionConfirmationOutcome:
+    """Submit ``_SWALLOWED_MESSAGE`` to a pane that shows ``screen`` and swallows the first Enter.
+
+    The pane writes the evidence file only on a second Enter, so the submission confirms if and only if the
+    engine retried Enter.
+    """
+    session_name = f"{agent.mngr_ctx.config.prefix}{agent.name}"
+    evidence_path = tmp_path / "evidence-token"
+    pane_script = f"printf '%s\\n' {shlex.quote(screen)}; read -r _; read -r _; echo retried > {shlex.quote(str(evidence_path))}; sleep 60"
+    agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' -x 200 -y 24 {shlex.quote(f'sh -c {shlex.quote(pane_script)}')}",
+        timeout_seconds=5.0,
+    )
+    try:
+        return submit_message_and_confirm(
+            agent=agent,
+            tmux_target=TmuxWindowTarget(session_name=session_name, window=0),
+            message=_SWALLOWED_MESSAGE,
+            probes=(build_changed_token_probe("evidence-file", f"cat '{evidence_path}' 2>/dev/null"),),
+            timeout_seconds=timeout_seconds,
+        )
+    finally:
+        agent.host.execute_idempotent_command(
+            f"tmux kill-session -t '={session_name}' 2>/dev/null", timeout_seconds=5.0
+        )
+
+
+@pytest.mark.tmux
+@pytest.mark.parametrize(
+    "screen",
+    [
+        # Claude Code and agy show a long pasted message as a placeholder, so its text is never on screen.
+        pytest.param("> [Pasted text #1 +20 lines]", id="paste_placeholder"),
+        pytest.param(f"> {_SWALLOWED_MESSAGE}", id="message_text"),
+    ],
+)
+def test_engine_retries_enter_while_the_message_is_pending(
+    tmux_probe_agent: _ProbeAgent, tmp_path: Path, screen: str
+) -> None:
+    """A swallowed Enter is retried while the input box still holds the unsubmitted message."""
+    outcome = _submit_to_enter_swallowing_pane(tmux_probe_agent, tmp_path, screen, timeout_seconds=10.0)
+    assert outcome.is_confirmed is True
+    assert len(outcome.enter_retry_offsets) == 1
+
+
+@pytest.mark.tmux
+def test_engine_withholds_the_enter_retry_when_nothing_is_pending(
+    tmux_probe_agent: _ProbeAgent, tmp_path: Path
+) -> None:
+    """With neither the message nor a paste placeholder on screen, Enter is not re-sent."""
+    outcome = _submit_to_enter_swallowing_pane(tmux_probe_agent, tmp_path, "> ", timeout_seconds=5.0)
+    assert outcome.is_confirmed is False
+    assert outcome.enter_retry_offsets == ()
 
 
 @pytest.mark.tmux

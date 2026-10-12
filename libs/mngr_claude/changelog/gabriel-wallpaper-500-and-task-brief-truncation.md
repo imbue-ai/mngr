@@ -1,0 +1,1 @@
+The claude message-delivery release test no longer fails its unknown-slash-command step when Claude is still busy with an earlier turn. Claude queued the command, and the enqueue confirmed the send before Claude rejected it, so no rejection event was recorded; the step now waits for Claude to finish its earlier turns before sending the command. The test is also marked flaky.

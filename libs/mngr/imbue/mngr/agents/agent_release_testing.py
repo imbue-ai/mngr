@@ -696,16 +696,23 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
             )
 
         # 4. Long message: crosses the send-keys length threshold, so it takes
-        #    the tmux load-buffer/paste-buffer path.
+        #    the tmux load-buffer/paste-buffer path. It spans several pty reads, and a
+        #    TUI that takes an unbracketed paste as keystrokes keeps only the last
+        #    read, so a token at each end catches a message that lost its head.
+        long_head_token = f"LONGHEAD-{run_id}"
         long_token = f"LONG-{run_id}"
-        filler = "The quick brown fox jumps over the lazy dog. " * 30
+        filler = "The quick brown fox jumps over the lazy dog. " * 220
         _send_expecting_success(
             profile,
             ctx,
             agent_name,
-            f"{filler}\nEnd of filler. Remember this exact value: {long_token}. Reply with just OK.",
+            f"Start of filler: {long_head_token}.\n{filler}\n"
+            f"End of filler. Remember this exact value: {long_token}. Reply with just OK.",
         )
         _wait_for_delivery(profile, host_dir, subdir, long_token, description="long message was not captured")
+        _wait_for_delivery(
+            profile, host_dir, subdir, long_head_token, description="long message arrived without its start"
+        )
 
         # 5. Relaxed slash command: TUI-local, so confirmation is best-effort --
         #    but the send must still exit 0.
@@ -714,8 +721,13 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
 
         # 6. Unknown slash command: the send still exits 0 (delivery semantics),
         #    and the rejection probe must catch the TUI's structured rejection
-        #    record and record a send_rejected_by_agent event.
+        #    record and record a send_rejected_by_agent event. A busy TUI queues the
+        #    command, and that enqueue confirms the send before the rejection lands,
+        #    so it is sent only once the earlier turns have finished.
         if profile.unknown_slash_command is not None:
+            assert poll_until(lambda: not profile.is_reporting_running(host_dir), timeout=_RESPONSE_TIMEOUT_SECONDS), (
+                "agent was still running a turn before the unknown slash command"
+            )
             _send_expecting_success(profile, ctx, agent_name, profile.unknown_slash_command)
             _wait_for_rejection_event(host_dir, profile.unknown_slash_command)
 
@@ -724,7 +736,7 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
         # broken). A queued message the TUI injected into the running turn has
         # no user step at all; one injected delivery counts instead.
         final_records = _read_common_records(host_dir, subdir)
-        for token in [idle_token, busy_token, *rapid_tokens, long_token]:
+        for token in [idle_token, busy_token, *rapid_tokens, long_head_token, long_token]:
             count = _count_user_steps_containing(final_records, token)
             assert count <= 1, f"expected at most one user-step delivery of {token}, found {count}"
             if count == 0:

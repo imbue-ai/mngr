@@ -188,9 +188,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         # Persist agent data to external storage (e.g., Modal volume)
         self.host.save_agent_data(self.id, data)
 
-    # =========================================================================
     # Certified Field Getters/Setters
-    # =========================================================================
 
     def get_command(self) -> CommandString:
         data = self._read_data()
@@ -227,9 +225,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         data["start_on_boot"] = value
         self._write_data(data)
 
-    # =========================================================================
     # Interaction
-    # =========================================================================
 
     def is_running(self) -> bool:
         """Check if the agent is currently running by checking lifecycle state."""
@@ -527,9 +523,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         found = content is not None and text in content
         return found
 
-    # =========================================================================
     # Status (Reported)
-    # =========================================================================
 
     def get_reported_url(self) -> str | None:
         status_path = self._get_agent_dir() / "status" / "url"
@@ -546,9 +540,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         except FileNotFoundError:
             return None
 
-    # =========================================================================
     # Activity
-    # =========================================================================
 
     def get_reported_activity_time(self, activity_type: ActivitySource) -> datetime | None:
         """Return the last activity time using file modification time.
@@ -627,9 +619,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         except FileNotFoundError:
             return None
 
-    # =========================================================================
     # Plugin Data (Certified)
-    # =========================================================================
 
     def get_plugin_data(self, plugin_name: str) -> dict[str, Any]:
         data = self._read_data()
@@ -643,9 +633,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         agent_data["plugin"][plugin_name] = data
         self._write_data(agent_data)
 
-    # =========================================================================
     # Plugin Data (Reported)
-    # =========================================================================
 
     def get_reported_plugin_file(self, plugin_name: str, filename: str) -> str:
         plugin_path = self._get_agent_dir() / "plugin" / plugin_name / filename
@@ -665,9 +653,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         except (OSError, HostConnectionError):
             return []
 
-    # =========================================================================
     # Environment
-    # =========================================================================
 
     def get_env_vars(self) -> dict[str, str]:
         env_path = self._get_agent_dir() / "env"
@@ -692,9 +678,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         env[key] = value
         self.set_env_vars(env)
 
-    # =========================================================================
     # Computed Properties
-    # =========================================================================
 
     @property
     def runtime_seconds(self) -> float | None:
@@ -704,9 +688,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         now = datetime.now(timezone.utc)
         return (now - start_time).total_seconds()
 
-    # =========================================================================
     # Provisioning Lifecycle
-    # =========================================================================
 
     def on_before_provisioning(
         self,
@@ -753,9 +735,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         Subclasses can override to perform finalization after provisioning.
         """
 
-    # =========================================================================
     # Destruction Lifecycle
-    # =========================================================================
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Default implementation: no-op.
@@ -831,6 +811,15 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         For long messages (>= 1024 chars), writes the text to a temp file on
         the host and uses ``tmux load-buffer`` + ``tmux paste-buffer`` to avoid
         the tmux "command too long" error.
+
+        The paste carries ``-p``, so tmux wraps it in the bracketed-paste markers that tell the
+        pane's program one paste begins and ends. A TUI reads its pty in chunks of a few
+        kilobytes; without those markers it sees a large message as unrelated keystrokes and
+        keeps only the final chunk, leaving the agent to act on the tail of its instructions.
+        tmux emits the markers only for a program that has turned bracketed-paste mode on. A
+        shell pane counts: readline and zle both enable it by default, so a ``CommandAgent``
+        running a shell takes a multi-line message as one line-buffer edit that the Enter after
+        it runs, rather than running each of its lines as the LF-turned-CR arrived.
         """
         target_arg = self._send_target_arg(tmux_target)
         self._clear_pane_modes(target_arg)
@@ -851,7 +840,7 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
                     raise SendMessageError(
                         str(self.name), f"tmux load-buffer failed: {result.stderr or result.stdout}"
                     )
-                paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t {target_arg}"
+                paste_cmd = f"tmux paste-buffer -p -b {quoted_buffer} -t {target_arg}"
                 result = self.host.execute_stateful_command(paste_cmd)
                 if not result.success:
                     raise SendMessageError(

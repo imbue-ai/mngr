@@ -231,6 +231,7 @@ def test_claude_agent_full_lifecycle(tmp_path: Path) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
+@pytest.mark.flaky
 @pytest.mark.timeout(1500)
 def test_claude_message_delivery_journey(tmp_path: Path) -> None:
     """Drive the evidence-confirmed send pipeline through its racey delivery scenarios.

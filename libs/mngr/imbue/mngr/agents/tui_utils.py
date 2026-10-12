@@ -53,13 +53,17 @@ RELAXED_CONFIRMATION_TIMEOUT_SECONDS: Final[float] = 15.0
 # How often the remote confirmation loop re-polls the evidence probes.
 _CONFIRMATION_POLL_INTERVAL_SECONDS: Final[float] = 0.5
 # Seconds into the confirmation window at which Enter is re-sent when no
-# evidence has appeared AND the pane still shows the pasted text (a swallowed
-# Enter). Enter is the only thing ever retried -- the text is never re-pasted,
-# so mngr's own retries can never duplicate a message.
+# evidence has appeared AND the pane still shows the unsubmitted message (a
+# swallowed Enter). Enter is the only thing ever retried -- the text is never
+# re-pasted, so mngr's own retries can never duplicate a message.
 _ENTER_RETRY_OFFSETS_SECONDS: Final[tuple[int, ...]] = (3, 10, 30)
 # Length of the normalized message tail used to gate Enter retries on pane
 # content (and, by convention, used by content probes such as Claude's).
 NORMALIZED_PROBE_MAX_LENGTH: Final[int] = 60
+# What Claude Code and agy show in their input box in place of a pasted message
+# (e.g. ``[Pasted text #2 +20 lines]``), so the message's own text is not on
+# screen until it is submitted, when the full text replaces it in the scrollback.
+_PASTE_PLACEHOLDER_PREFIX: Final[str] = "[Pasted text "
 # How long to keep observing the pane after a send has been confirmed delivered before
 # concluding that no blocking dialog appeared -- a selector (e.g. Claude's /model
 # confirmation) can render a beat after the input is accepted. Also used as the per-accept
@@ -175,10 +179,10 @@ def build_normalized_message_probe(message: str) -> str:
 def _check_paste_content(pane_content: str, message: str) -> bool:
     """Check whether pasted message content is visible in pane text.
 
-    Returns True if the tmux paste indicator is present OR if a
+    Returns True if the TUI's paste placeholder is present OR if a
     normalized tail of the message matches the normalized pane content.
     """
-    if "[Pasted text " in pane_content:
+    if _PASTE_PLACEHOLDER_PREFIX in pane_content:
         return True
 
     normalized_pane = _normalize_for_match(pane_content)
@@ -255,7 +259,7 @@ def wait_for_tui_ready(
 def wait_for_paste_visible(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, message: str) -> None:
     """Wait until pasted content is confirmed visible in the tmux pane.
 
-    Raises ``SendMessageError`` on timeout. Either the tmux paste indicator
+    Raises ``SendMessageError`` on timeout. Either the TUI's paste placeholder
     or a fuzzy content match on the last chunk of the message is sufficient
     -- see ``_check_paste_content`` for the details.
     """
@@ -300,9 +304,7 @@ def send_enter_keystroke(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget) -
     send_key_keystroke(agent, tmux_target, "Enter")
 
 
-# ---------------------------------------------------------------------------
 # Submit-and-confirm engine
-# ---------------------------------------------------------------------------
 
 
 @pure
@@ -339,7 +341,8 @@ def _build_enter_retry_lines(
 
     One statically generated check per offset, sequenced by ``retry_count``,
     so each slot fires at most once. Retries are gated on the pane still
-    showing the pasted text (normalized the same way as the probe) so a retry
+    showing the unsubmitted message -- its text (normalized the same way as
+    the probe) or the TUI's paste placeholder (matched verbatim) -- so a retry
     never types into a turn that already consumed the message. When the
     message normalizes to nothing (so the gate cannot recognize it), retries
     fire unconditionally on schedule instead -- a stray Enter on an empty
@@ -347,17 +350,15 @@ def _build_enter_retry_lines(
     or not Enter was re-sent, bounding the pane captures to one per slot.
     """
     target_arg = tmux_target if isinstance(tmux_target, str) else tmux_target.as_shell_arg()
+    send_retry = f"tmux send-keys -t {target_arg} Enter 2>/dev/null; printf '%s %s\\n' {_RETRY_MARKER} \"$elapsed\""
     if normalized_pane_probe == "":
-        retry_action = (
-            f"tmux send-keys -t {target_arg} Enter 2>/dev/null; printf '%s %s\\n' {_RETRY_MARKER} \"$elapsed\""
-        )
+        retry_action = send_retry
     else:
         retry_action = (
-            f'pane="$( tmux capture-pane -p -t {target_arg} 2>/dev/null '
-            "| tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]' )\"; "
-            f'case "$pane" in *{shlex.quote(normalized_pane_probe)}*) '
-            f"tmux send-keys -t {target_arg} Enter 2>/dev/null; "
-            f"printf '%s %s\\n' {_RETRY_MARKER} \"$elapsed\" ;; *) : ;; esac"
+            f'raw_pane="$( tmux capture-pane -p -t {target_arg} 2>/dev/null )"; '
+            "pane=\"$( printf '%s' \"$raw_pane\" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]' )\"; "
+            f'case "$raw_pane" in *{shlex.quote(_PASTE_PLACEHOLDER_PREFIX)}*) {send_retry} ;; '
+            f'*) case "$pane" in *{shlex.quote(normalized_pane_probe)}*) {send_retry} ;; *) : ;; esac ;; esac'
         )
     return [
         f'if [ "$retry_count" -eq {slot_idx} ] && [ "$elapsed" -ge {offset} ]; then '

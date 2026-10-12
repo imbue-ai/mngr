@@ -3,10 +3,12 @@
 import json
 import shlex
 import subprocess
+import sys
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 import psutil
 import pytest
@@ -37,6 +39,16 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import poll_until_file_contains
+
+# What a terminal wraps a paste in, so the program reading the pty can tell a paste from typing.
+PASTE_START_MARKER: Final[bytes] = b"\x1b[200~"
+PASTE_END_MARKER: Final[bytes] = b"\x1b[201~"
+# How much of a paste a pty hands over in one read; a longer message spans several of them.
+PTY_READ_CHUNK_BYTES: Final[int] = 4096
+
+# A pane program that asks for bracketed paste and records every byte it is handed, up to the
+# end of the first paste. Run with the path it writes what it received to.
+BRACKETED_PASTE_READER_SCRIPT: Final[Path] = Path(__file__).with_name("_bracketed_paste_reader_script.py")
 
 
 @pytest.fixture
@@ -491,9 +503,57 @@ def test_send_tmux_literal_keys_short_message_with_leading_dash(
         cleanup_tmux_session(session_name)
 
 
-# =========================================================================
+@pytest.mark.tmux
+def test_send_tmux_literal_keys_long_message_arrives_as_one_bracketed_paste(
+    test_agent: BaseAgent,
+    tmp_path: Path,
+) -> None:
+    """A long message must reach the pane wrapped in bracketed-paste markers.
+
+    Agent TUIs read their pty a few kilobytes at a time, and the markers are what tell one
+    that those chunks are a single paste. A message delivered without them is read as loose
+    keystrokes: Claude Code keeps only the final chunk, so an agent handed a brief larger
+    than a read chunk acts on its tail and never sees the instructions it opens with.
+    """
+    # The fixture builds a SendKeysAgent; narrow so the send-keys method is in view.
+    assert isinstance(test_agent, SendKeysAgent)
+    send_keys_agent: SendKeysAgent = test_agent
+    session_name = f"{send_keys_agent.mngr_ctx.config.prefix}{send_keys_agent.name}"
+    tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
+    received_path = tmp_path / "received_from_pane"
+    message = "brief-" + "z" * (PTY_READ_CHUNK_BYTES * 2)
+
+    # Only a program that asks for bracketed paste is sent the markers, so the pane runs one
+    # that does, and records every byte it is handed.
+    reader_command = (
+        f"{sys.executable} {shlex.quote(str(BRACKETED_PASTE_READER_SCRIPT))} {shlex.quote(str(received_path))}"
+    )
+    send_keys_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' -x 200 -y 24 {shlex.quote(reader_command)}",
+        timeout_seconds=5.0,
+    )
+
+    try:
+        wait_for(
+            received_path.exists,
+            error_message=f"Expected the pane's reader to start and create {received_path}",
+        )
+        send_keys_agent._send_tmux_literal_keys(tmux_target, message)
+
+        def _paste_finished() -> bool:
+            return PASTE_END_MARKER in received_path.read_bytes()
+
+        wait_for(_paste_finished, error_message="Expected the pane to receive a bracketed-paste end marker")
+
+        received = received_path.read_bytes()
+        assert received.startswith(PASTE_START_MARKER)
+        assert received.endswith(PASTE_END_MARKER)
+        assert message.encode() in received
+    finally:
+        cleanup_tmux_session(session_name)
+
+
 # assemble_command tests
-# =========================================================================
 
 
 def test_assemble_command_uses_command_override(
@@ -691,9 +751,7 @@ def test_assemble_command_appends_both_cli_and_agent_args(
     assert result == CommandString("my-cmd --cli-flag --agent-flag")
 
 
-# =========================================================================
 # _read_data tests
-# =========================================================================
 
 
 def test_read_data_returns_empty_dict_when_no_data_file(
@@ -709,9 +767,7 @@ def test_read_data_returns_empty_dict_when_no_data_file(
     assert result == {}
 
 
-# =========================================================================
 # get_command tests
-# =========================================================================
 
 
 def test_get_command_returns_command_from_data(
@@ -736,9 +792,7 @@ def test_get_command_returns_bash_when_no_command(
     assert test_agent.get_command() == CommandString("bash")
 
 
-# =========================================================================
 # get_labels / set_labels tests
-# =========================================================================
 
 
 def test_get_labels_returns_empty_dict_by_default(
@@ -759,9 +813,7 @@ def test_set_and_get_labels(
     assert result == labels
 
 
-# =========================================================================
 # get_created_branch_name tests
-# =========================================================================
 
 
 def test_get_created_branch_name_returns_none_by_default(
@@ -784,9 +836,7 @@ def test_get_created_branch_name_returns_value_when_set(
     assert test_agent.get_created_branch_name() == "feature/my-branch"
 
 
-# =========================================================================
 # get_checked_out_branch_name tests
-# =========================================================================
 
 
 def test_get_checked_out_branch_name_reports_a_branch_we_did_not_create(
@@ -822,9 +872,7 @@ def test_get_checked_out_branch_name_falls_back_for_a_record_written_before_the_
     assert test_agent.get_checked_out_branch_name() == "mngr/legacy-agent"
 
 
-# =========================================================================
 # get_is_start_on_boot / set_is_start_on_boot tests
-# =========================================================================
 
 
 def test_get_is_start_on_boot_returns_false_by_default(
@@ -845,9 +893,7 @@ def test_set_and_get_is_start_on_boot(
     assert test_agent.get_is_start_on_boot() is False
 
 
-# =========================================================================
 # get_reported_url tests
-# =========================================================================
 
 
 def test_get_reported_url_returns_none_when_not_set(
@@ -869,9 +915,7 @@ def test_get_reported_url_returns_url_when_set(
     assert test_agent.get_reported_url() == "https://example.com/agent"
 
 
-# =========================================================================
 # get_reported_start_time tests
-# =========================================================================
 
 
 def test_get_reported_start_time_returns_none_when_not_set(
@@ -896,9 +940,7 @@ def test_get_reported_start_time_returns_datetime_when_set(
     assert result == start_time
 
 
-# =========================================================================
 # get_reported_activity_time / record_activity tests
-# =========================================================================
 
 
 def test_get_reported_activity_time_returns_none_when_no_activity(
@@ -937,9 +979,7 @@ def test_record_activity_writes_json_with_expected_fields(
     assert isinstance(content["time"], int)
 
 
-# =========================================================================
 # get_plugin_data / set_plugin_data tests
-# =========================================================================
 
 
 def test_get_plugin_data_returns_empty_dict_when_not_set(
@@ -972,9 +1012,7 @@ def test_plugin_data_is_isolated_per_plugin(
     assert test_agent.get_plugin_data("plugin-c") == {}
 
 
-# =========================================================================
 # get_reported_plugin_file / set_reported_plugin_file / list_reported_plugin_files tests
-# =========================================================================
 
 
 def test_set_and_get_reported_plugin_file(
@@ -1013,9 +1051,7 @@ def test_list_reported_plugin_files_returns_filenames(
     assert result == ["file1.txt", "file2.json"]
 
 
-# =========================================================================
 # get_env_vars / set_env_vars / get_env_var / set_env_var tests
-# =========================================================================
 
 
 def test_get_env_vars_returns_empty_dict_when_not_set(
@@ -1074,9 +1110,7 @@ def test_set_env_var_overwrites_existing_key(
     assert test_agent.get_env_var("KEY") == "new"
 
 
-# =========================================================================
 # runtime_seconds tests
-# =========================================================================
 
 
 def test_runtime_seconds_returns_none_when_no_start_time(
@@ -1103,9 +1137,7 @@ def test_runtime_seconds_returns_positive_value_when_start_time_set(
     assert result > 100_000
 
 
-# =========================================================================
 # _send_tmux_literal_keys tests
-# =========================================================================
 
 
 class _StubHost:
@@ -1244,6 +1276,7 @@ def test_send_tmux_literal_keys_long_message_uses_load_buffer(
     assert "-b" in stub.sent_commands[0]
     assert "paste-buffer" in stub.sent_commands[1]
     assert "-b" in stub.sent_commands[1]
+    assert "-p" in stub.sent_commands[1]
     assert "delete-buffer" in stub.sent_commands[2]
     assert "rm -f" in stub.sent_commands[2]
 
@@ -1295,9 +1328,7 @@ def test_send_tmux_literal_keys_short_message_raises_on_send_keys_failure(
         agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
 
 
-# =========================================================================
 # Unnamed-primary-window migration tests (pre-upgrade in-flight agents)
-# =========================================================================
 
 
 def test_migrate_unnamed_primary_window_renames_lowest_index_window(
@@ -1372,9 +1403,7 @@ def test_agent_name_rejects_slash() -> None:
         AgentName("foo/bar")
 
 
-# =========================================================================
 # _send_message_simple tests
-# =========================================================================
 
 
 def test_send_message_simple_sends_keys_and_enter(
@@ -1408,9 +1437,7 @@ def test_send_message_simple_raises_on_enter_failure(
         agent._send_message_simple(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
 
 
-# =========================================================================
 # press_key_chord tests
-# =========================================================================
 
 
 def test_send_targets_the_recorded_pane_and_leaves_copy_mode(
@@ -1496,9 +1523,7 @@ def test_press_key_chord_holds_message_lock(
     assert "send-keys" in stub.sent_commands[0]
 
 
-# =========================================================================
 # _get_command_basename tests
-# =========================================================================
 
 
 def test_get_command_basename_full_path(
@@ -1541,9 +1566,7 @@ def test_get_command_basename_strips_leading_subshell_syntax(
     assert agent._get_command_basename(CommandString("( /usr/bin/script.sh session ) &")) == "script.sh"
 
 
-# =========================================================================
 # get_reported_activity_record tests
-# =========================================================================
 
 
 def test_get_reported_activity_record_returns_none_when_no_activity(
@@ -1566,9 +1589,7 @@ def test_get_reported_activity_record_returns_json_after_recording(
     assert data["agent_name"] == str(test_agent.name)
 
 
-# =========================================================================
 # _write_data tests
-# =========================================================================
 
 
 def test_write_data_persists_to_file(
