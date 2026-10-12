@@ -161,6 +161,11 @@ export function createFormDefaults(overrides: Partial<CreateFormDefaults> = {}):
     region_selected_by_launch_mode: { IMBUE_CLOUD: "US-WEST-OR" },
     instance_types_by_backend: {},
     default_instance_type_by_backend: {},
+    machine_size_defaults_by_launch_mode: {
+      DOCKER: { cpu_count: 4, memory_gb: 8, disk_gb: null },
+      LIMA: { cpu_count: 2, memory_gb: 4, disk_gb: 100 },
+      MODAL: { cpu_count: 2, memory_gb: 4, disk_gb: null },
+    },
     cloud_accounts: [],
     byok_clouds_enabled: false,
     git_url: "https://github.com/imbue-ai/default-workspace-template.git",

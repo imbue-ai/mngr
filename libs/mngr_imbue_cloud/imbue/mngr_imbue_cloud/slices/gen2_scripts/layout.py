@@ -211,7 +211,10 @@ GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
 # container's memory headroom as its memory cgroup sees it, for the earlyoom
 # inside to read at ``/mngr-vol/.host-meminfo`` (``--host-meminfo``): under
 # gVisor the container's own /proc/meminfo cannot see the runtime's share of
-# the limit.
+# the limit. A workspace running under runc writes the same file for itself
+# from its own cgroup (the template's publish_cgroup_meminfo program, which
+# mirrors the formula of the VM-side publisher in ``guest.py`` and exits under
+# gVisor).
 GEN2_CONTAINER_HOST_MEMINFO_FILE_NAME: Final[str] = ".host-meminfo"
 
 

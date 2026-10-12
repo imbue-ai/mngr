@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from pydantic import Field
 
 from imbue.imbue_common.model_update import to_update
@@ -22,6 +23,7 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -376,9 +378,12 @@ def test_machine_size_rejects_malformed_agent_ids(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
-def test_machine_size_is_unavailable_for_a_non_leased_workspace(tmp_path: Path) -> None:
-    # The seeded resolver reports provider "local", so no connector lookup is
-    # even attempted -- the section simply stays hidden.
+@pytest.mark.witnesses(
+    "machine-size.unknown-size-hidden", partial="the page's rendering is covered by the frontend tests"
+)
+def test_machine_size_is_unavailable_when_discovery_recorded_no_size(tmp_path: Path) -> None:
+    # The seeded resolver carries no size for the workspace's host, so the
+    # section simply stays hidden.
     client, _app, _auth_store = build_desktop_client_for_test(
         tmp_path, is_authenticated=True, backend_resolver=_seeded_resolver()
     )
@@ -388,7 +393,39 @@ def test_machine_size_is_unavailable_for_a_non_leased_workspace(tmp_path: Path) 
     assert response.status_code == 200
     body = json.loads(response.data)
     assert body["is_available"] is False
-    assert body["memory_units"] is None
+    assert body["memory_gb"] is None
+
+
+@pytest.mark.witnesses("machine-size.recorded-size-shown")
+@pytest.mark.parametrize(
+    ("provider_name", "is_resizable", "is_disk_resizable"),
+    [("docker", True, False), ("lima", True, True), ("modal", False, False), ("byok-aws-team", False, False)],
+)
+def test_machine_size_reports_the_size_discovery_recorded_for_any_provider(
+    tmp_path: Path, provider_name: str, is_resizable: bool, is_disk_resizable: bool
+) -> None:
+    resolver = _OptionsSeededResolver(
+        url_by_agent_and_service={_AGENT_ID: {}},
+        display_info_by_agent_id={
+            _AGENT_ID: AgentDisplayInfo(agent_name="sized", host_id=_HOST_ID, provider_name=provider_name)
+        },
+        host_size_by_host_id={_HOST_ID: DiscoveredHostSize(cpu_count=4, memory_gb=8.0, disk_gb=100.0)},
+    )
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, backend_resolver=resolver
+    )
+
+    response = client.get(f"/ui/api/workspaces/{_AGENT_ID}/machine-size")
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["is_available"] is True
+    assert body["cpu_count"] == 4
+    assert body["memory_gb"] == 8.0
+    assert body["disk_gb"] == 100.0
+    assert body["is_resizable"] is is_resizable
+    assert body["is_disk_resizable"] is is_disk_resizable
+    assert body["is_restart_needed_to_apply"] is False
 
 
 class _MachineSizeStubCli(FakeImbueCloudCli):
@@ -407,6 +444,9 @@ class _MachineSizeStubCli(FakeImbueCloudCli):
         return self.machine_to_return
 
 
+@pytest.mark.witnesses(
+    "machine-size.imbue-cloud-size-and-pending-change", partial="the page's rendering is covered by the frontend tests"
+)
 def test_machine_size_reports_the_leased_machines_sizes(tmp_path: Path) -> None:
     resolver = _OptionsSeededResolver(
         url_by_agent_and_service={_AGENT_ID: {}},
@@ -447,10 +487,13 @@ def test_machine_size_reports_the_leased_machines_sizes(tmp_path: Path) -> None:
     assert response.status_code == 200
     body = json.loads(response.data)
     assert body["is_available"] is True
-    assert body["memory_units"] == 8
-    assert body["target_memory_units"] == 16
+    # One unit is one GiB; the bake-time vCPU count is not shown since it does not follow a resize.
+    assert body["cpu_count"] is None
+    assert body["memory_gb"] == 8
+    assert body["target_memory_gb"] == 16
     assert body["disk_gb"] == 28
     assert body["target_disk_gb"] is None
+    assert body["is_resizable"] is False
     assert body["is_restart_needed_to_apply"] is True
     # The lookup keys the connector by the associated account and the
     # machine's host coordinate (not the agent id).

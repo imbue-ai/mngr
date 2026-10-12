@@ -106,6 +106,8 @@ from imbue.minds.desktop_client.api_models import InvitationResultResponse
 from imbue.minds.desktop_client.api_models import InviteGranteeRequest
 from imbue.minds.desktop_client.api_models import MachineSharingRequest
 from imbue.minds.desktop_client.api_models import MachineSharingResponse
+from imbue.minds.desktop_client.api_models import MachineSizeChangeRequest
+from imbue.minds.desktop_client.api_models import MachineSizeChangeResponse
 from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
@@ -143,6 +145,7 @@ from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
 from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
 from imbue.minds.desktop_client.create_status import status_text_for
+from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.host_names import normalize_host_name_slug
 from imbue.minds.desktop_client.host_names import resolve_create_host_name
 from imbue.minds.desktop_client.host_timezone import read_host_timezone
@@ -150,6 +153,11 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCli
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
 from imbue.minds.desktop_client.labeled_hosts import find_host_by_create_attempt_id_label
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
+from imbue.minds.desktop_client.machine_size import is_machine_disk_resizable_provider
+from imbue.minds.desktop_client.machine_size import is_machine_resizable_provider
+from imbue.minds.desktop_client.machine_size import machine_size_resize_args
+from imbue.minds.desktop_client.machine_size import narrow_machine_size_to_launch_mode
+from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_streaming_response
@@ -217,6 +225,7 @@ from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import InvalidName
 
 # Cap for a short blocking ``mngr`` command run via ``_run_mngr_blocking``
@@ -1039,6 +1048,14 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         else:
             # A known size for a sized mode: passes through to the create command.
             pass
+    # The size of a DOCKER / LIMA / MODAL machine, in the dimensions that mode
+    # takes (a stray dimension for another mode is dropped, like instance_type).
+    machine_size = narrow_machine_size_to_launch_mode(
+        MachineSizeSelection(
+            cpu_count=body.get("cpu_count"), memory_gb=body.get("memory_gb"), disk_gb=body.get("disk_gb")
+        ),
+        launch_mode,
+    )
     cloud_account = str(body.get("cloud_account", "")).strip()
     if launch_mode in (LaunchMode.AWS, LaunchMode.GCP, LaunchMode.AZURE) and not cloud_account:
         # BYOK-only modes (all three clouds): without an account the create
@@ -1167,6 +1184,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
             region=region,
             cloud_account=cloud_account,
             instance_type=instance_type,
+            machine_size=machine_size,
             on_created=on_created,
             backup_request=backup_request,
             color=color,
@@ -1493,15 +1511,33 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     # tracker reports default-HEALTHY for never-probed workspaces (a host
     # offline since before this process started), so it would silently drop the
     # cold-boot those workspaces need.
-    registry = state.workspace_operation_registry
     # A manual restart keeps the stop step, since it may target a running but
     # wedged container that only a bounce fixes.
     kind = HostRecoveryKind.START if bool(body.get("start_only", False)) else HostRecoveryKind.RESTART
 
+    refusal = _dispatch_host_recovery_or_refusal(parsed_id, kind, tracker, parent_cg, state)
+    if refusal is not None:
+        return refusal
+    return handle, 202
+
+
+def _dispatch_host_recovery_or_refusal(
+    parsed_id: AgentId,
+    kind: HostRecoveryKind,
+    tracker: SystemInterfaceHealthTracker,
+    parent_cg: ConcurrencyGroup,
+    state: DesktopClientState,
+) -> Response | None:
+    """Dispatch a host recovery for the workspace: None once it is under way, else the response refusing it.
+
+    A recovery already in flight is deduped onto the same handle rather than
+    stacking a second worker, so it reads as accepted too.
+    """
+    registry = state.workspace_operation_registry
     outcome = dispatch_host_recovery(
         workspace_agent_id=parsed_id,
         tracker=tracker,
-        backend_resolver=backend_resolver,
+        backend_resolver=state.backend_resolver,
         registry=registry,
         concurrency_group=parent_cg,
         mngr_binary=state.mngr_binary,
@@ -1523,12 +1559,111 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
             failed_operation = registry.get(parsed_id)
             reason = None if failed_operation is None else failed_operation.error
             return _json_error(reason if reason is not None else "Could not start the recovery worker", 503)
-        # A recovery already in flight is deduped onto the same handle rather
-        # than stacking a second worker, so both read as accepted.
         case RecoveryDispatchOutcome.DISPATCHED | RecoveryDispatchOutcome.ALREADY_RUNNING:
-            return handle, 202
+            return None
         case _ as unreachable:
             assert_never(unreachable)
+
+
+# How long the provider's resize command gets: it rewrites a record and, for a
+# docker host, applies it with ``docker update``; neither reaches the network.
+_MACHINE_RESIZE_TIMEOUT_SECONDS: Final[float] = 60.0
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(json=MachineSizeChangeRequest, resp=json_response_model(MachineSizeChangeResponse))
+def _handle_workspace_machine_size_change(agent_id: str) -> MachineSizeChangeResponse | Response:
+    """Change the size of a workspace's machine, and restart it so the size takes effect.
+
+    Body: ``{cpu_count?, memory_gb?, disk_gb?}``, each a whole number; a
+    dimension left out keeps its current value. Only the providers whose
+    substrate can change size after creation take this -- local docker
+    (CPUs, memory) and lima (CPUs, memory, and the data disk, which only
+    grows); every other machine is refused with a 409. The provider's own
+    resize command (``mngr docker resize`` / ``mngr lima resize``) records
+    and applies the size, and a running machine is then restarted through
+    the same host recovery the restart route dispatches (``operation_id``
+    in the answer, to poll like a restart); a stopped machine is left
+    stopped, its recorded size applying on its next start. Refused with a
+    409 while another operation runs on the workspace, and with a 502
+    carrying mngr's own words when the provider refuses the size.
+    """
+    parsed_id = AgentId(agent_id)
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    if parsed_id not in backend_resolver.list_known_workspace_ids():
+        return _json_error(f"Unknown workspace {agent_id}", 404)
+    info = backend_resolver.get_agent_display_info(parsed_id)
+    provider_name = info.provider_name if info is not None else None
+    if info is None or provider_name is None or not is_machine_resizable_provider(provider_name):
+        return _json_error("This workspace's machine cannot be resized after it was created.", 409)
+    try:
+        host_id = HostId(info.host_id)
+    except ValueError:
+        return _json_error(f"Cannot resolve a host to resize for {agent_id}", 409)
+
+    body = request.get_json(silent=True, force=True) or {}
+    is_disk_resizable = is_machine_disk_resizable_provider(provider_name)
+    selection = MachineSizeSelection(
+        cpu_count=body.get("cpu_count"),
+        memory_gb=body.get("memory_gb"),
+        disk_gb=body.get("disk_gb") if is_disk_resizable else None,
+    )
+    if selection.is_empty:
+        accepted = "cpu_count, memory_gb, or disk_gb" if is_disk_resizable else "cpu_count or memory_gb"
+        return _json_error(f"Nothing to resize: pass {accepted}.", 400)
+
+    # Refuse up front rather than resizing under a running operation: the
+    # restart below claims the slot itself, but the resize command runs first.
+    registry = state.workspace_operation_registry
+    existing_operation = registry.get(parsed_id)
+    if existing_operation is not None and existing_operation.status == WorkspaceOperationStatus.RUNNING:
+        return _operation_conflict_error(existing_operation)
+
+    refusal = _resize_machine_through_provider_or_refusal(agent_id, provider_name, host_id, selection, state)
+    if refusal is not None:
+        return refusal
+
+    # A stopped machine picks the size up on its next start; a running one is
+    # bounced now so what it reports about itself matches the record.
+    if backend_resolver.get_host_state(host_id) is not HostState.RUNNING:
+        return MachineSizeChangeResponse(is_restart_dispatched=False, operation_id=None)
+    tracker = state.system_interface_health_tracker
+    parent_cg = state.root_concurrency_group
+    if tracker is None or parent_cg is None:
+        return _json_error(
+            "The new size is recorded, but workspace restarts are unavailable in this configuration", 503
+        )
+    refusal = _dispatch_host_recovery_or_refusal(parsed_id, HostRecoveryKind.RESTART, tracker, parent_cg, state)
+    if refusal is not None:
+        return refusal
+    return MachineSizeChangeResponse(is_restart_dispatched=True, operation_id=str(parsed_id))
+
+
+def _resize_machine_through_provider_or_refusal(
+    agent_id: str,
+    provider_name: str,
+    host_id: HostId,
+    selection: MachineSizeSelection,
+    state: DesktopClientState,
+) -> Response | None:
+    """Record ``selection`` through the provider's own resize command: None once recorded, else the 502 refusing it."""
+    mngr_caller = state.mngr_caller or get_default_mngr_caller()
+    result = mngr_caller.call(
+        machine_size_resize_args(provider_name, str(host_id), selection), timeout=_MACHINE_RESIZE_TIMEOUT_SECONDS
+    )
+    if result.is_timed_out:
+        return _json_error("The machine's provider did not apply the new size in time.", 502)
+    if result.returncode != 0:
+        if not result.is_mngr_output:
+            # The stderr is MngrCaller's account of a call that returned nothing, not the provider's verdict.
+            logger.error("Resizing the machine of {} returned no result: {}", agent_id, result.stderr.strip())
+            return _json_error("mngr returned no result for the resize, so the new size was not recorded.", 502)
+        verdict = mngr_failure_verdict(result.stderr) or f"mngr exited with code {result.returncode}"
+        logger.warning("Resizing the machine of {} failed (rc={}): {}", agent_id, result.returncode, verdict)
+        return _json_error(f"The machine's provider refused the new size: {verdict}", 502)
+    logger.info("Recorded a new machine size for {} on {}: {}", agent_id, provider_name, selection.model_dump())
+    return None
 
 
 # Operation polling is segmented by type -- ``/operations/<type>/<id>`` -- so the
@@ -3487,6 +3622,13 @@ def create_api_v1_blueprint() -> Blueprint:
     # Workspace recovery (start / restart). Gated by ``minds-workspaces-recover``
     # at the gateway.
     blueprint.add_url_rule("/workspaces/<agent_id>/restart", view_func=_handle_workspace_restart, methods=["POST"])
+    # A machine resize ends in that same host recovery, so the recover verb's
+    # catalog suffix (workspace_permissions.json) admits this path too.
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/machine-size",
+        view_func=_handle_workspace_machine_size_change,
+        methods=["POST"],
+    )
 
     # Backup service verification + management. The per-workspace health read
     # (the ``/workspaces/<agent_id>/backup-check`` route above) rides the

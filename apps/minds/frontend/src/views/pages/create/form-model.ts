@@ -4,6 +4,12 @@
 
 import type { CloudAccountOption, CreateFormDefaults, LocalBackendPrerequisite } from "../../../models/create";
 import { hostNameFormatError } from "../../../models/create";
+import type { MachineSizeDimension, MachineSizeDraft, MachineSizeNumbers } from "../../../models/machineSize";
+import {
+  MACHINE_SIZE_DIMENSIONS,
+  machineSizeDraftFor,
+  parseMachineSizeNumber,
+} from "../../../models/machineSize";
 
 export type PresetName = "remote" | "local";
 
@@ -55,6 +61,9 @@ export interface CreateSubmitBody {
   instance_type: string;
   enable_web_access: boolean;
   runtime?: string;
+  cpu_count?: number;
+  memory_gb?: number;
+  disk_gb?: number;
 }
 
 export interface NormalizedApiError {
@@ -104,6 +113,11 @@ export class CreateFormModel {
   // explicit pick survives unrelated changes but rebuilds on provider switch.
   private regionByLaunchValue = new Map<string, string>();
   private instanceTypeByLaunchValue = new Map<string, string>();
+  // The numeric size fields (DOCKER / LIMA / MODAL), keyed the same way; a
+  // mode starts from the defaults the server offers for it.
+  private machineSizeByLaunchValue = new Map<string, MachineSizeDraft>();
+  // One-shot pre-fill (a retry) for whichever mode the retry targeted.
+  private machineSizePreselect: MachineSizeDraft | null = null;
   // One-shot pre-fill (a retry): honored by the first populate, then cleared.
   private instanceTypePreselect = "";
 
@@ -146,6 +160,9 @@ export class CreateFormModel {
       this.launchValue = prefill.cloud_account !== "" ? `BYOK:${prefill.cloud_account}` : prefill.launch_mode;
       if (prefill.region !== "") this.regionByLaunchValue.set(this.launchValue, prefill.region);
       this.instanceTypePreselect = prefill.instance_type;
+      if (prefill.cpu_count !== null || prefill.memory_gb !== null || prefill.disk_gb !== null) {
+        this.machineSizePreselect = machineSizeDraftFor(prefill);
+      }
       this.isAdvancedOpen = true;
       this.selectedPreset = null;
     }
@@ -308,6 +325,50 @@ export class CreateFormModel {
     this.instanceTypeByLaunchValue.set(this.launchValue, instanceType);
   }
 
+  /** The numeric size the selected mode takes (its defaults, as offered), or null for a mode sized another way. */
+  machineSizeDefaults(): MachineSizeNumbers | null {
+    return this.defaults?.machine_size_defaults_by_launch_mode[this.launchSelection().mode] ?? null;
+  }
+
+  /** The size fields as currently shown for the selected mode; null when the mode has none. */
+  machineSizeDraft(): MachineSizeDraft | null {
+    const defaults = this.machineSizeDefaults();
+    if (defaults === null) return null;
+    const remembered = this.machineSizeByLaunchValue.get(this.launchValue);
+    if (remembered !== undefined) return remembered;
+    if (this.machineSizePreselect !== null) {
+      // A retry pre-fill names the dimensions its mode took; the mode keeps only those.
+      const preselect: MachineSizeDraft = {
+        cpu_count: defaults.cpu_count === null ? "" : this.machineSizePreselect.cpu_count,
+        memory_gb: defaults.memory_gb === null ? "" : this.machineSizePreselect.memory_gb,
+        disk_gb: defaults.disk_gb === null ? "" : this.machineSizePreselect.disk_gb,
+      };
+      this.machineSizePreselect = null;
+      this.machineSizeByLaunchValue.set(this.launchValue, preselect);
+      return preselect;
+    }
+    return machineSizeDraftFor(defaults);
+  }
+
+  setMachineSizeField(dimension: MachineSizeDimension, text: string): void {
+    const current = this.machineSizeDraft();
+    if (current === null) return;
+    this.machineSizeByLaunchValue.set(this.launchValue, { ...current, [dimension]: text });
+  }
+
+  /**
+   * Which size fields hold something other than a whole positive number, for
+   * the dimensions the selected mode takes. Submit is refused while any does.
+   */
+  invalidMachineSizeDimensions(): MachineSizeDimension[] {
+    const defaults = this.machineSizeDefaults();
+    const draft = this.machineSizeDraft();
+    if (defaults === null || draft === null) return [];
+    return MACHINE_SIZE_DIMENSIONS.filter(
+      (dimension) => defaults[dimension] !== null && parseMachineSizeNumber(draft[dimension]) === null,
+    );
+  }
+
   isRuntimeShown(): boolean {
     return this.launchValue === "DOCKER";
   }
@@ -387,6 +448,15 @@ export class CreateFormModel {
       enable_web_access: this.enableWebAccess,
     };
     if (this.isRuntimeShown()) body.runtime = this.runtime;
+    const sizeDefaults = this.machineSizeDefaults();
+    const sizeDraft = this.machineSizeDraft();
+    if (sizeDefaults !== null && sizeDraft !== null) {
+      for (const dimension of MACHINE_SIZE_DIMENSIONS) {
+        if (sizeDefaults[dimension] === null) continue;
+        const value = parseMachineSizeNumber(sizeDraft[dimension]);
+        if (value !== null) body[dimension] = value;
+      }
+    }
     return body;
   }
 }

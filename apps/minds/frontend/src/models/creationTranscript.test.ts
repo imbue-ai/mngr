@@ -19,6 +19,9 @@ function request(overrides: Partial<CreateAttemptRequestSummary> = {}): CreateAt
     backup_provider: "IMBUE_CLOUD",
     region: "US-EAST-VA",
     instance_type: "",
+    cpu_count: null,
+    memory_gb: null,
+    disk_gb: null,
     repository: "https://github.com/imbue-ai/default-workspace-template.git",
     branch: "minds-v0.6.1",
     ...overrides,
@@ -79,6 +82,16 @@ describe("summaryLines", () => {
     );
     expect(lines).toContain("Compute — byok-aws-team");
     expect(lines).toContain("Machine size — t3.large");
+  });
+});
+
+describe("summaryLines machine size in numbers", () => {
+  it("restates a size chosen in numbers the way the settings page reads it", () => {
+    const lines = summaryLines(
+      request({ launch_mode: "LIMA", region: "", cpu_count: 2, memory_gb: 4, disk_gb: 100 }),
+      false,
+    );
+    expect(lines).toContain("Machine size — 2 CPUs · 4 GB RAM · 100 GB disk");
   });
 });
 

@@ -183,7 +183,7 @@ A host's size (CPUs, memory, disk) is chosen when it is created, through the pro
 
 There is deliberately no generic resize operation: on most providers whatever a host was created with is what it has for life. The few providers whose substrate can change size after creation expose that through their own provider-specific command, which rewrites the size that provider recorded and applies it: imbue_cloud via `mngr imbue_cloud machines resize` (applied on the machine's next start), docker via `mngr docker resize` (applied to the container at once and re-applied on every start), and lima via `mngr lima resize` (applied to a stopped VM at once, else on its next start; the data disk only grows).
 
-The recorded size is reported for stopped hosts as well as running ones, so a provider derives it from its own records rather than from a connection to the host.
+The recorded size is reported for stopped hosts as well as running ones, so a provider derives it from its own records rather than from a connection to the host. Discovery carries the same recorded size as `DiscoveredHost.size` on the `mngr observe` stream for the providers whose discovery can read it off their records (docker, lima, modal, and the cloud VPS providers); a provider that cannot leaves it unset, and a consumer of the stream that needs the size then falls back to `mngr list`.
 
 The cloud VPS providers (aws, gcp, azure, vultr, ovh) record the instance shape the cloud reports right after the instance is created, and report that; a host whose size the record cannot answer lists it as unknown rather than as a placeholder.
 

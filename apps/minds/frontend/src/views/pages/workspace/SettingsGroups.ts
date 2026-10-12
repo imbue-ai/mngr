@@ -19,13 +19,16 @@ import { TextInput } from "../../components/FormControls";
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
 import type {
   SettingsGroup,
+  WorkspaceMachineSizeData,
   WorkspaceOptionsModel,
 } from "../../../models/workspaceOptions";
 import {
-  formatMachineSize,
   formatPendingMachineSize,
   normalizeWorkspaceColorHex,
 } from "../../../models/workspaceOptions";
+import type { MachineSizeDimension, MachineSizeDraft } from "../../../models/machineSize";
+import { formatMachineSizeNumbers, machineSizeDraftFor } from "../../../models/machineSize";
+import { MachineSizeInput } from "../../components/MachineSizeInput";
 import {
   devOverridePrefill,
   isRecreationRequired,
@@ -83,6 +86,8 @@ interface SettingsGroupsLocalState {
   } | null;
   /** The last dispatch's refusal and the machine it was refused for, or null. */
   updateError: { agentId: string; message: string; detail: string } | null;
+  /** The resize fields as typed, and the machine they were typed for; null until edited. */
+  sizeDraft: { agentId: string; draft: MachineSizeDraft } | null;
 }
 
 /** The piece of update state only when it belongs to the machine being drawn:
@@ -107,6 +112,7 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
     pendingSchedule: null,
     noBackupConfirm: null,
     updateError: null,
+    sizeDraft: null,
   };
   // ?override=1 is the update modal's "Update to a different version…" deep
   // link. Watched per render because route changes preserve this instance, and
@@ -640,7 +646,7 @@ function renderGeneralGroup(
         : null,
     ]),
 
-    renderMachineSizeSection(model),
+    renderMachineSizeSection(model, local),
 
     m(SectionHeader, "ID"),
     m(
@@ -690,13 +696,18 @@ function renderGeneralGroup(
   ]);
 }
 
-/** Read-only machine size for leased machines (specs/slice-fleet): current
- * size plus a passive restart-to-apply note when a resize is pending. Hidden
- * entirely (null) until the lazy size fetch succeeds. */
-function renderMachineSizeSection(model: WorkspaceOptionsModel): m.Children {
+/** The machine's size: what its provider recorded, plus, for a local docker or
+ * lima machine, the fields and the action that change it (the machine is
+ * restarted to apply the change), and for an Imbue Cloud machine a passive
+ * restart-to-apply note when a resize is pending. Hidden entirely (null)
+ * until the lazy size fetch succeeds. */
+function renderMachineSizeSection(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+): m.Children {
   const size = model.machineSize;
   if (size === null || !size.is_available) return null;
-  const currentLabel = formatMachineSize(size);
+  const currentLabel = formatMachineSizeNumbers(size);
   if (!currentLabel) return null;
   const pendingLabel = formatPendingMachineSize(size);
   return [
@@ -710,8 +721,85 @@ function renderMachineSizeSection(model: WorkspaceOptionsModel): m.Children {
             `A new size is pending (${pendingLabel}). Restart this workspace's machine to apply it.`,
           )
         : null,
+      size.is_resizable ? renderMachineResize(model, local) : null,
     ]),
   ];
+}
+
+/** The resize fields as typed for this machine, or its current size until they are edited. */
+function currentSizeDraft(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+  size: WorkspaceMachineSizeData,
+): MachineSizeDraft {
+  return forMachine(local.sizeDraft, model.agentId)?.draft ?? machineSizeDraftFor(size);
+}
+
+/** One resize field, keyed to the machine it is typed for. */
+function machineResizeField(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+  size: WorkspaceMachineSizeData,
+  dimension: MachineSizeDimension,
+  label: string,
+): m.Children {
+  const draft = currentSizeDraft(model, local, size);
+  return m(MachineSizeInput, {
+    dimension,
+    label,
+    value: draft[dimension],
+    disabled: model.isResizeBusy,
+    oninput: (text: string) => {
+      local.sizeDraft = { agentId: model.agentId, draft: { ...draft, [dimension]: text } };
+    },
+  });
+}
+
+/** The resize fields and the action that records the size and restarts the machine. */
+function renderMachineResize(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+): m.Children {
+  const size = model.machineSize;
+  if (size === null) return null;
+  return m("div", { id: "machine-resize", class: "mt-3" }, [
+    m(
+      "p",
+      { class: "type-helper text-tertiary mb-2" },
+      size.is_disk_resizable
+        ? "Change the CPUs, memory, or disk (the disk only grows), then apply. The machine restarts to pick the new size up."
+        : "Change the CPUs or memory, then apply. The machine restarts to pick the new size up.",
+    ),
+    m("div", { class: "flex flex-wrap items-center gap-3" }, [
+      machineResizeField(model, local, size, "cpu_count", "CPUs"),
+      machineResizeField(model, local, size, "memory_gb", "GB RAM"),
+      size.is_disk_resizable ? machineResizeField(model, local, size, "disk_gb", "GB disk") : null,
+      m(
+        Button,
+        {
+          variant: "secondary",
+          id: "machine-resize-btn",
+          disabled: model.isResizeBusy,
+          // The draft is kept on success: it is the size that was recorded,
+          // which discovery reports back only on its next pass.
+          onclick: () => {
+            void model.resizeMachine(currentSizeDraft(model, local, size));
+          },
+        },
+        model.isResizeBusy ? m(Spinner, { size: "sm" }) : "Apply and restart",
+      ),
+    ]),
+    model.resizeErrorMessage
+      ? m(
+          "p",
+          { id: "machine-resize-error", class: "type-helper text-important mt-2", role: "alert" },
+          model.resizeErrorMessage,
+        )
+      : null,
+    model.resizeNotice
+      ? m(Notice, { variant: "info", extra: "mt-2", id: "machine-resize-notice" }, model.resizeNotice)
+      : null,
+  ]);
 }
 
 function commitHexDraft(

@@ -12,6 +12,7 @@ that inspect the returncode and output of an unclean exit themselves.
 """
 
 import json
+import shlex
 from typing import Final
 
 from loguru import logger
@@ -36,6 +37,16 @@ OUTPUT_TAIL_MAX_CHARS: Final[int] = 4000
 # ``logger.error`` prefix. Neither carries ANSI escapes here -- mngr colors only
 # when its stderr is a terminal, and this one is a capture pipe.
 _MNGR_VERDICT_PREFIXES: Final[tuple[str, ...]] = ("Error:", "ERROR:")
+
+
+def shell_quoted_create_flag(flag: str, value: str) -> list[str]:
+    """``<flag> <value>`` for ``mngr create``, shell-quoted.
+
+    ``mngr create`` shell-tokenizes every ``-b`` / ``-s`` value (so ``-b "--cpu 16"`` reaches the provider as two
+    args), so a value holding a space -- a template checkout under "Imbue Dropbox", say -- must be quoted to arrive
+    whole.
+    """
+    return [flag, shlex.quote(value)]
 
 
 def format_output_tail(stdout: str, stderr: str) -> str | None:

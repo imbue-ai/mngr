@@ -9,6 +9,7 @@ import { createEmptyStores } from "../../../models/boot";
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
 import type {
   SettingsGroup,
+  WorkspaceMachineSizeData,
   WorkspaceOptionsData,
 } from "../../../models/workspaceOptions";
 import { WorkspaceOptionsModel } from "../../../models/workspaceOptions";
@@ -48,6 +49,8 @@ interface Harness {
     data?: Partial<WorkspaceOptionsData>,
   ) => m.Children;
   requests: string[];
+  /** The per-machine model the pane draws against, keyed by agent id. */
+  models: Map<string, WorkspaceOptionsModel>;
 }
 
 /** The Updates group of one drawn pane; the destroy and unlink dialogs carry a
@@ -177,7 +180,7 @@ function harness(
       vnode,
     );
   }
-  return { draw, requests };
+  return { draw, requests, models };
 }
 
 /** A dispatch answers over several promise hops: the request, its body parse,
@@ -572,5 +575,148 @@ describe("the General settings group's SSH command", () => {
       "Connect over SSH",
     );
     expect(copyValues(draw(UNBACKED, "general"))).toEqual([]);
+  });
+});
+
+describe("the General settings group's Machine size section", () => {
+  const RECORDED: WorkspaceMachineSizeData = {
+    is_available: true,
+    cpu_count: 4,
+    memory_gb: 8,
+    disk_gb: null,
+    is_resizable: false,
+    is_disk_resizable: false,
+    target_memory_gb: null,
+    target_disk_gb: null,
+    is_restart_needed_to_apply: false,
+  };
+
+  /** Draw the General group for one machine whose size has loaded as `size`. */
+  function drawWithSize(
+    h: Harness,
+    agentId: string,
+    size: WorkspaceMachineSizeData | null,
+  ): m.Children {
+    h.draw(agentId, "general");
+    const model = h.models.get(agentId);
+    if (model === undefined) throw new Error("the machine's model was not built");
+    model.machineSize = size;
+    return h.draw(agentId, "general");
+  }
+
+  function machineSizeSection(root: m.Children): AnyVnode | undefined {
+    return collectVnodes(root).find(
+      (vnode) => attrsOf(vnode).id === "machine-size-section",
+    );
+  }
+
+  /** The dimensions of the resize fields drawn in the section, in order. */
+  function sizeFields(section: AnyVnode): AnyVnode[] {
+    return collectVnodes(section).filter(
+      (vnode) => attrsOf(vnode).dimension !== undefined,
+    );
+  }
+
+  function typeSize(section: AnyVnode, dimension: string, value: string): void {
+    const field = sizeFields(section).find(
+      (vnode) => attrsOf(vnode).dimension === dimension,
+    );
+    if (field === undefined) throw new Error(`no ${dimension} field to type into`);
+    (attrsOf(field).oninput as (text: string) => void)(value);
+  }
+
+  it("is left out until a size is known, and read-only for a machine that cannot be resized", () => {
+    const h = harness();
+
+    expect(machineSizeSection(drawWithSize(h, UNBACKED, null))).toBeUndefined();
+
+    const section = machineSizeSection(drawWithSize(h, UNBACKED, RECORDED));
+    if (section === undefined) throw new Error("the section was not drawn");
+    expect(allText(section)).toContain("4 CPUs · 8 GB RAM");
+    expect(sizeFields(section)).toEqual([]);
+    expect(pressableWithLabel(section, "Apply and restart")).toBeUndefined();
+  });
+
+  it("notes an Imbue Cloud machine's pending size and the restart that applies it", () => {
+    const section = machineSizeSection(
+      drawWithSize(harness(), UNBACKED, {
+        ...RECORDED,
+        cpu_count: null,
+        disk_gb: 28,
+        target_memory_gb: 16,
+        is_restart_needed_to_apply: true,
+      }),
+    );
+    if (section === undefined) throw new Error("the section was not drawn");
+
+    expect(allText(section)).toContain("8 GB RAM · 28 GB disk");
+    expect(allText(section)).toContain(
+      "A new size is pending (16 GB RAM · 28 GB disk). Restart this workspace's machine to apply it.",
+    );
+  });
+
+  it("offers CPUs and memory for a docker machine, and the disk too for a lima machine", () => {
+    const h = harness();
+
+    const docker = machineSizeSection(
+      drawWithSize(h, UNBACKED, { ...RECORDED, is_resizable: true }),
+    );
+    if (docker === undefined) throw new Error("the docker section was not drawn");
+    expect(sizeFields(docker).map((field) => attrsOf(field).dimension)).toEqual([
+      "cpu_count",
+      "memory_gb",
+    ]);
+    expect(pressableWithLabel(docker, "Apply and restart")).toBeDefined();
+
+    const lima = machineSizeSection(
+      drawWithSize(h, BACKED, {
+        ...RECORDED,
+        disk_gb: 100,
+        is_resizable: true,
+        is_disk_resizable: true,
+      }),
+    );
+    if (lima === undefined) throw new Error("the lima section was not drawn");
+    expect(sizeFields(lima).map((field) => attrsOf(field).dimension)).toEqual([
+      "cpu_count",
+      "memory_gb",
+      "disk_gb",
+    ]);
+  });
+
+  it("posts the typed size on Apply and keeps the draft while the machine restarts", async () => {
+    const docker = { ...RECORDED, is_resizable: true };
+    const posted: unknown[] = [];
+    const h = harness((url, init) => {
+      if (url.startsWith("/api/v1/")) {
+        posted.push(JSON.parse(String(init?.body)));
+        return Promise.resolve(
+          jsonResponse({ is_restart_dispatched: true, operation_id: UNBACKED }),
+        );
+      }
+      // Discovery has not caught up: the re-read still reports the old size.
+      return Promise.resolve(jsonResponse(docker));
+    });
+    const section = machineSizeSection(drawWithSize(h, UNBACKED, docker));
+    if (section === undefined) throw new Error("the section was not drawn");
+
+    typeSize(section, "memory_gb", "16");
+    const typed = machineSizeSection(h.draw(UNBACKED, "general"));
+    if (typed === undefined) throw new Error("the section was not redrawn");
+    press(typed, "Apply and restart");
+    await settleDispatch();
+    const after = machineSizeSection(h.draw(UNBACKED, "general"));
+    if (after === undefined) throw new Error("the section was not redrawn");
+
+    expect(posted).toEqual([{ memory_gb: 16 }]);
+    expect(h.requests).toEqual([
+      `/api/v1/workspaces/${UNBACKED}/machine-size`,
+      `/ui/api/workspaces/${UNBACKED}/machine-size`,
+    ]);
+    expect(allText(after)).toContain("The machine is restarting to apply it.");
+    const memoryField = sizeFields(after).find(
+      (field) => attrsOf(field).dimension === "memory_gb",
+    );
+    expect(memoryField === undefined ? undefined : attrsOf(memoryField).value).toBe("16");
   });
 });

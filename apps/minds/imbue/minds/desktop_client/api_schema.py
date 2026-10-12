@@ -66,6 +66,8 @@ from imbue.minds.desktop_client.api_models import InvitationResultResponse
 from imbue.minds.desktop_client.api_models import InviteGranteeRequest
 from imbue.minds.desktop_client.api_models import MachineSharingRequest
 from imbue.minds.desktop_client.api_models import MachineSharingResponse
+from imbue.minds.desktop_client.api_models import MachineSizeChangeRequest
+from imbue.minds.desktop_client.api_models import MachineSizeChangeResponse
 from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
@@ -151,6 +153,9 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ),
     ("POST", "/api/v1/workspaces/{agent_id}/restart"): _RouteModels(
         request_model=RestartWorkspaceRequest, response_model=OperationHandleResponse, success_status=202
+    ),
+    ("POST", "/api/v1/workspaces/{agent_id}/machine-size"): _RouteModels(
+        request_model=MachineSizeChangeRequest, response_model=MachineSizeChangeResponse
     ),
     ("POST", "/api/v1/workspaces/{agent_id}/start"): _RouteModels(response_model=WorkspaceLifecycleResponse),
     ("POST", "/api/v1/workspaces/{agent_id}/stop"): _RouteModels(response_model=WorkspaceLifecycleResponse),

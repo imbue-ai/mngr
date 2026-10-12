@@ -67,11 +67,14 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import AgentNotFoundError
+from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
@@ -266,6 +269,18 @@ def test_discovered_host_from_agent_details_preserves_key_fields() -> None:
     assert host.host_id == host_id
     assert host.host_name == HostName("test-host")
     assert host.provider_name == provider_name
+
+
+def test_discovered_host_from_agent_details_carries_the_recorded_size() -> None:
+    resources = HostResources(cpu=CpuResources(count=4), memory_gb=8.0, disk_gb=None)
+    details = make_test_agent_details(provider_name=ProviderInstanceName("docker"), resource=resources)
+    host = discovered_host_from_agent_details(details)
+    assert host.size == DiscoveredHostSize(cpu_count=4, memory_gb=8.0, disk_gb=None)
+
+
+def test_discovered_host_from_agent_details_has_no_size_when_the_listing_reported_none() -> None:
+    details = make_test_agent_details(provider_name=ProviderInstanceName("docker"))
+    assert discovered_host_from_agent_details(details).size is None
 
 
 def test_extract_agents_and_hosts_returns_ssh_info() -> None:

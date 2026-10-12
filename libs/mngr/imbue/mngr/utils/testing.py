@@ -56,6 +56,7 @@ from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import HostDetails
+from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentId
@@ -997,6 +998,7 @@ def make_test_agent_details(
     pid: int | None = None,
     user_activity_time: datetime | None = None,
     idle_seconds: float | None = None,
+    resource: HostResources | None = None,
 ) -> AgentDetails:
     """Create a real AgentDetails for testing.
 
@@ -1012,6 +1014,7 @@ def make_test_agent_details(
         plugin=host_plugin or {},
         tags=host_tags or {},
         ssh=ssh,
+        resource=resource,
     )
     return AgentDetails(
         id=AgentId.generate(),

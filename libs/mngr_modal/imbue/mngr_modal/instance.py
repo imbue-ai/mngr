@@ -74,6 +74,7 @@ from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
+from imbue.mngr.interfaces.data_types import discovered_host_size_from_resources
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
@@ -86,6 +87,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -2561,6 +2563,9 @@ log "=== Shutdown script completed ==="
         # Track host names from records / sandbox tags so we don't need to call
         # h.get_name() (which would SSH into the host to read certified data) at the end.
         host_name_by_id: dict[HostId, HostName] = {}
+        # The size each record answers, so the DiscoveredHost carries it without a
+        # second read of the record.
+        size_by_host_id: dict[HostId, DiscoveredHostSize] = {}
         processed_host_ids: set[HostId] = set()
 
         # Fetch sandboxes and host records in parallel since they are independent.
@@ -2599,6 +2604,9 @@ log "=== Shutdown script completed ==="
                 # Records always carry the canonical mngr-assigned name; prefer
                 # this over sandbox tags (which can be stale) when both exist.
                 host_name_by_id[host_id] = HostName(host_record.certified_host_data.host_name)
+                size = discovered_host_size_from_resources(self._recorded_resources(host_record))
+                if size is not None:
+                    size_by_host_id[host_id] = size
                 host_futures_with_records.append(
                     executor.submit(
                         self._construct_host_from_record_for_discovery,
@@ -2651,6 +2659,7 @@ log "=== Shutdown script completed ==="
                 host_name=host_name_by_id.get(h.id) or h.get_name(),
                 provider_name=self.name,
                 host_state=discovery_state.get(h.id),
+                size=size_by_host_id.get(h.id),
             )
             for h in hosts
         ]
@@ -2881,9 +2890,9 @@ log "=== Shutdown script completed ==="
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         """Get resource information for a Modal sandbox."""
-        # Read host record from volume
         host_record = self._read_host_record(host.id)
-        if host_record is None or host_record.config is None:
+        resources = None if host_record is None else self._recorded_resources(host_record)
+        if resources is None:
             # No config available (e.g., failed host that never started)
             return HostResources(
                 cpu=CpuResources(count=1, frequency_ghz=None),
@@ -2891,15 +2900,17 @@ log "=== Shutdown script completed ==="
                 disk_gb=None,
                 gpu=None,
             )
+        return resources
 
-        cpu = host_record.config.cpu
-        memory = host_record.config.memory
-
+    def _recorded_resources(self, host_record: HostRecord) -> HostResources | None:
+        """The size a host record's sandbox config describes, or None for a record without one."""
+        if host_record.config is None:
+            return None
         return HostResources(
             # Modal allows fractional CPUs (e.g., 0.5), but count must be at least 1.
             # All Modal sandboxes run on the same CPU at ~1.85 GHz.
-            cpu=CpuResources(count=max(1, int(cpu)), frequency_ghz=1.85),
-            memory_gb=memory,
+            cpu=CpuResources(count=max(1, int(host_record.config.cpu)), frequency_ghz=1.85),
+            memory_gb=host_record.config.memory,
             disk_gb=None,
             gpu=None,
         )

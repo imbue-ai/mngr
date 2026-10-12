@@ -60,9 +60,9 @@
     {
       "permission": "minds-workspaces-recover",
       "method": ["GET", "POST"],
-      "path": { "kind": "targeted", "suffix": "/(health|restart)$" },
+      "path": { "kind": "targeted", "suffix": "/(health|restart|machine-size)$" },
       "display_name": "Recover a workspace",
-      "description": "Check the selected workspace's health and restart its services or host."
+      "description": "Check the selected workspace's health, restart its services or host, or resize its machine and restart it."
     }
   ]
 }

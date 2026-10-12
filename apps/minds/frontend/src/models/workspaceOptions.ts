@@ -3,6 +3,8 @@
 // and the share panel's own model, which this load constructs.
 
 import m from "mithril";
+import type { MachineSizeDraft, MachineSizeNumbers } from "./machineSize";
+import { parseMachineSizeNumber } from "./machineSize";
 import { SharePanelModel } from "./sharePanel";
 import type { SharePanelModelOptions } from "./sharePanel";
 
@@ -42,21 +44,30 @@ export interface WorkspaceOptionsData {
 }
 
 /** Response shape of GET /ui/api/workspaces/<id>/machine-size (ui_api_options.py). */
-export interface WorkspaceMachineSizeData {
+export interface WorkspaceMachineSizeData extends MachineSizeNumbers {
   is_available: boolean;
-  memory_units: number | null;
-  target_memory_units: number | null;
-  disk_gb: number | null;
+  /** CPUs; null when unknown, or not shown (Imbue Cloud, whose count does not follow a resize). */
+  cpu_count: number | null;
+  /** Whether this page can change the machine's size (local docker and lima machines). */
+  is_resizable: boolean;
+  /** Whether the data disk can be grown from this page (lima only). */
+  is_disk_resizable: boolean;
+  target_memory_gb: number | null;
   target_disk_gb: number | null;
   is_restart_needed_to_apply: boolean;
 }
 
-/** "8 GB RAM · 28 GB disk" for the current size; "" when nothing is known (1 unit = 1 GiB RAM). */
-export function formatMachineSize(size: WorkspaceMachineSizeData): string {
-  const parts: string[] = [];
-  if (size.memory_units !== null) parts.push(`${size.memory_units} GB RAM`);
-  if (size.disk_gb !== null) parts.push(`${size.disk_gb} GB disk`);
-  return parts.join(" · ");
+/** Body of POST /api/v1/workspaces/<id>/machine-size. */
+export interface MachineSizeChangeBody {
+  cpu_count?: number;
+  memory_gb?: number;
+  disk_gb?: number;
+}
+
+/** Response shape of POST /api/v1/workspaces/<id>/machine-size. */
+export interface MachineSizeChangeResponse {
+  is_restart_dispatched: boolean;
+  operation_id: string | null;
 }
 
 /** The pending size a restart would apply ("16 GB RAM · 56 GB disk"), falling
@@ -66,12 +77,37 @@ export function formatPendingMachineSize(
   size: WorkspaceMachineSizeData,
 ): string {
   if (!size.is_restart_needed_to_apply) return "";
-  const pendingUnits = size.target_memory_units ?? size.memory_units;
+  const pendingMemory = size.target_memory_gb ?? size.memory_gb;
   const pendingDisk = size.target_disk_gb ?? size.disk_gb;
   const parts: string[] = [];
-  if (pendingUnits !== null) parts.push(`${pendingUnits} GB RAM`);
+  if (pendingMemory !== null) parts.push(`${pendingMemory} GB RAM`);
   if (pendingDisk !== null) parts.push(`${pendingDisk} GB disk`);
   return parts.join(" · ");
+}
+
+/**
+ * The resize request a draft asks for: only the dimensions the machine can
+ * change, each a whole positive number; a dimension left empty keeps its
+ * current value. Null when a filled field is not such a number, or when
+ * nothing differs from the current size.
+ */
+export function machineSizeChangeBody(
+  size: WorkspaceMachineSizeData,
+  draft: MachineSizeDraft,
+): MachineSizeChangeBody | null {
+  const body: MachineSizeChangeBody = {};
+  const dimensions: Array<keyof MachineSizeDraft> = size.is_disk_resizable
+    ? ["cpu_count", "memory_gb", "disk_gb"]
+    : ["cpu_count", "memory_gb"];
+  for (const dimension of dimensions) {
+    if (draft[dimension].trim() === "") continue;
+    const value = parseMachineSizeNumber(draft[dimension]);
+    if (value === null) return null;
+    const current = size[dimension];
+    if (current !== null && Math.round(current) === value) continue;
+    body[dimension] = value;
+  }
+  return Object.keys(body).length === 0 ? null : body;
 }
 
 /** One user's identity record as the connector serves it (email only when verified). */
@@ -239,9 +275,13 @@ export class WorkspaceOptionsModel {
   status: "loading" | "load_failed" | "ready" = "loading";
   data: WorkspaceOptionsData | null = null;
   share: SharePanelModel | null = null;
-  /** Read-only machine size for leased machines; null until (and unless) it loads. */
+  /** The machine's size as last read; null until (and unless) it loads. */
   machineSize: WorkspaceMachineSizeData | null = null;
   loadErrorMessage = "";
+  resizeErrorMessage = "";
+  /** What the last resize did: a restart under way, or a size recorded for the next start; "" when none. */
+  resizeNotice = "";
+  isResizeBusy = false;
 
   renameErrorMessage = "";
   isRenameSaving = false;
@@ -311,10 +351,10 @@ export class WorkspaceOptionsModel {
     this.status = "ready";
     this.redrawImpl();
     void this.share.load();
-    if (data.is_leased_imbue_cloud) void this.loadMachineSize();
+    void this.loadMachineSize();
   }
 
-  /** Fetch the machine's read-only size lazily; failures just leave the section hidden. */
+  /** Fetch the machine's size lazily; failures just leave the section hidden. */
   async loadMachineSize(): Promise<void> {
     const result = await this.fetchJsonImpl(
       `/ui/api/workspaces/${encodeURIComponent(this.agentId)}/machine-size`,
@@ -324,6 +364,52 @@ export class WorkspaceOptionsModel {
     if (!size.is_available) return;
     this.machineSize = size;
     this.redrawImpl();
+  }
+
+  /**
+   * Resize the machine to the draft and restart it. Resolves to whether the
+   * size was recorded; the notice says whether a restart is under way (the
+   * machine was running) or the size waits for the next start (it was stopped).
+   */
+  async resizeMachine(draft: MachineSizeDraft): Promise<boolean> {
+    const size = this.machineSize;
+    if (size === null) return false;
+    const body = machineSizeChangeBody(size, draft);
+    this.resizeErrorMessage = "";
+    this.resizeNotice = "";
+    if (body === null) {
+      this.resizeErrorMessage = "Enter a new size as whole numbers of at least 1.";
+      this.redrawImpl();
+      return false;
+    }
+    this.isResizeBusy = true;
+    this.redrawImpl();
+    const result = await this.fetchJsonImpl(
+      `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/machine-size`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    this.isResizeBusy = false;
+    if (!result.ok) {
+      this.resizeErrorMessage = errorMessageFromBody(
+        result.body,
+        `Resize failed (HTTP ${result.status})`,
+      );
+      this.redrawImpl();
+      return false;
+    }
+    const outcome = result.body as MachineSizeChangeResponse;
+    this.resizeNotice = outcome.is_restart_dispatched
+      ? "The new size is recorded. The machine is restarting to apply it."
+      : "The new size is recorded. It applies when the machine next starts.";
+    // What the page shows is what discovery reports, which follows the record
+    // on its next pass; re-read rather than trusting the draft.
+    await this.loadMachineSize();
+    this.redrawImpl();
+    return true;
   }
 
   dispose(): void {

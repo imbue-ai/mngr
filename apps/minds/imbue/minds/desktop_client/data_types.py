@@ -113,3 +113,15 @@ class WorkspaceProbeOutcome(FrozenModel):
         if self.status_code is not None:
             return f"HTTP {self.status_code}"
         return self.failure or "no response"
+
+
+class MachineSizeSelection(FrozenModel):
+    """The size a user picked for a machine, in the three numbers every sized provider is told; a None dimension is unset."""
+
+    cpu_count: int | None = Field(default=None, description="Whole CPUs, None when not chosen")
+    memory_gb: int | None = Field(default=None, description="Memory in whole GB, None when not chosen")
+    disk_gb: int | None = Field(default=None, description="Data disk in whole GB, None when not chosen")
+
+    @property
+    def is_empty(self) -> bool:
+        return self.cpu_count is None and self.memory_gb is None and self.disk_gb is None

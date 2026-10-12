@@ -1188,9 +1188,10 @@ def test_post_creates_workspace_request_multi_method_verb(
     assert perm_schema["properties"]["method"] == {"enum": ["GET", "POST"]}
     path_pattern = re.compile(perm_schema["properties"]["path"]["pattern"])
     prefix = "/minds-api-proxy/api/v1/workspaces"
-    # The suffix admits both the health and restart sub-paths for this target.
+    # The suffix admits the health, restart, and machine-size sub-paths for this target.
     assert path_pattern.fullmatch(f"{prefix}/{target_id}/health")
     assert path_pattern.fullmatch(f"{prefix}/{target_id}/restart")
+    assert path_pattern.fullmatch(f"{prefix}/{target_id}/machine-size")
     # A different workspace id is not covered by the single-target grant.
     assert not path_pattern.fullmatch(f"{prefix}/{AgentId.generate()}/health")
 

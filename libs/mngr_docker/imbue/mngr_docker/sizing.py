@@ -125,6 +125,22 @@ def render_size_start_args(request: ContainerSizeRequest) -> tuple[str, ...]:
 
 
 @pure
+def swap_cap_for_caller_memory(start_args: Sequence[str]) -> tuple[str, ...]:
+    """The ``--memory-swap`` flag that brings a caller's bare ``--memory`` under the no-swap policy; empty otherwise.
+
+    The configured defaults render memory and swap together, and docker keeps
+    the last spelling of a repeated flag, so a caller's ``--memory`` alone would
+    leave the defaults' smaller swap cap in place, which docker refuses. A
+    caller that set the swap cap itself (or asked for unlimited swap) is left as
+    it is.
+    """
+    caller_size = parse_container_size(start_args)
+    if caller_size.memory is None or caller_size.memory_swap is not None or caller_size.is_swap_unlimited:
+        return ()
+    return (f"{_MEMORY_SWAP_FLAG}={caller_size.memory}",)
+
+
+@pure
 def apply_size_request(start_args: Sequence[str], request: ContainerSizeRequest) -> tuple[str, ...]:
     """``start_args`` with each dimension ``request`` sets replaced by its new value; unset dimensions are untouched."""
     stripped = strip_size_start_args(

@@ -57,6 +57,7 @@ from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
+from imbue.mngr.interfaces.data_types import discovered_host_size_from_resources
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
@@ -115,6 +116,7 @@ from imbue.mngr_docker.sizing import docker_update_args
 from imbue.mngr_docker.sizing import host_resources_for_container
 from imbue.mngr_docker.sizing import parse_container_size
 from imbue.mngr_docker.sizing import render_size_start_args
+from imbue.mngr_docker.sizing import swap_cap_for_caller_memory
 from imbue.mngr_docker.volume import DockerVolume
 from imbue.mngr_docker.volume import LABEL_PREFIX
 from imbue.mngr_docker.volume import LABEL_PROVIDER
@@ -1499,7 +1501,10 @@ kill -TERM 1
         # Docker keeps the last spelling of a repeated flag, so the configured
         # size caps go first and any explicit start arg overrides them.
         effective_start_args = (
-            self._default_size_start_args() + tuple(self.config.default_start_args) + tuple(start_args or ())
+            self._default_size_start_args()
+            + tuple(self.config.default_start_args)
+            + tuple(start_args or ())
+            + swap_cap_for_caller_memory(start_args or ())
         )
 
         # Detect whether we're falling through to the default with no user customization
@@ -2174,6 +2179,7 @@ kill -TERM 1
             all_host_records = self._host_store.list_all_host_records()
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
+        record_by_host_id = {HostId(record.certified_host_data.host_id): record for record in all_host_records}
 
         # Map running containers by host_id, and harvest host names from labels.
         # We use this map below instead of h.get_name() so building DiscoveredHosts
@@ -2257,13 +2263,15 @@ kill -TERM 1
             self._evict_cached_host(h.id, replacement=h)
 
         # Use names collected from records / labels so building the DiscoveredHost
-        # list does not trigger an SSH read of data.json per running host.
+        # list does not trigger an SSH read of data.json per running host; the
+        # size likewise comes from the records already in hand.
         return [
             DiscoveredHost(
                 host_id=h.id,
                 host_name=host_name_by_id.get(h.id) or h.get_name(),
                 provider_name=self.name,
                 host_state=state,
+                size=discovered_host_size_from_resources(self._recorded_resources(record_by_host_id.get(h.id))),
             )
             for h, state in hosts_with_state
         ]
@@ -2275,7 +2283,10 @@ kill -TERM 1
         dimension with no recorded cap, never the container, so it answers the
         same for a stopped host and on the unreachable-host listing fallback.
         """
-        host_record = self._host_store.read_host_record(host.id)
+        return self._recorded_resources(self._host_store.read_host_record(host.id))
+
+    def _recorded_resources(self, host_record: HostRecord | None) -> HostResources:
+        """The size a host record's caps describe, with the daemon's totals standing in for an uncapped dimension."""
         if host_record is None or host_record.config is None:
             recorded_size = ContainerSize()
         else:

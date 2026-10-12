@@ -5,10 +5,11 @@ import {
   colorErrorMessageFor,
   defaultFetchJson,
   errorMessageFromBody,
-  formatMachineSize,
   formatPendingMachineSize,
+  machineSizeChangeBody,
   normalizeWorkspaceColorHex,
 } from "./workspaceOptions";
+import type { WorkspaceMachineSizeData } from "./workspaceOptions";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -286,26 +287,18 @@ describe("pure helpers", () => {
   });
 });
 
-describe("machine size formatting", () => {
-  const baseSize = {
+describe("machine size pending change and resize body", () => {
+  const baseSize: WorkspaceMachineSizeData = {
     is_available: true,
-    memory_units: 8,
-    target_memory_units: null,
+    cpu_count: 4,
+    memory_gb: 8,
     disk_gb: 28,
+    is_resizable: false,
+    is_disk_resizable: false,
+    target_memory_gb: null,
     target_disk_gb: null,
     is_restart_needed_to_apply: false,
   };
-
-  it("renders the current size from units and disk", () => {
-    expect(formatMachineSize(baseSize)).toBe("8 GB RAM · 28 GB disk");
-  });
-
-  it("omits the factors it does not know", () => {
-    expect(formatMachineSize({ ...baseSize, disk_gb: null })).toBe("8 GB RAM");
-    expect(
-      formatMachineSize({ ...baseSize, memory_units: null, disk_gb: null }),
-    ).toBe("");
-  });
 
   it("renders nothing pending when no restart is needed", () => {
     expect(formatPendingMachineSize(baseSize)).toBe("");
@@ -314,10 +307,31 @@ describe("machine size formatting", () => {
   it("falls back to the current value for the factor without a pending target", () => {
     const pending = {
       ...baseSize,
-      target_memory_units: 16,
+      target_memory_gb: 16,
       is_restart_needed_to_apply: true,
     };
     expect(formatPendingMachineSize(pending)).toBe("16 GB RAM · 28 GB disk");
+  });
+
+  it("asks only for the dimensions that changed, and only those the machine can change", () => {
+    const docker = { ...baseSize, is_resizable: true, disk_gb: null };
+    expect(machineSizeChangeBody(docker, { cpu_count: "4", memory_gb: "16", disk_gb: "" })).toEqual({
+      memory_gb: 16,
+    });
+    // The disk is typed but a docker machine has none to grow.
+    expect(machineSizeChangeBody(docker, { cpu_count: "4", memory_gb: "8", disk_gb: "200" })).toBeNull();
+    const lima = { ...baseSize, is_resizable: true, is_disk_resizable: true };
+    expect(machineSizeChangeBody(lima, { cpu_count: "6", memory_gb: "8", disk_gb: "200" })).toEqual({
+      cpu_count: 6,
+      disk_gb: 200,
+    });
+  });
+
+  it("refuses a resize that is not whole numbers of at least 1", () => {
+    const lima = { ...baseSize, is_resizable: true, is_disk_resizable: true };
+    expect(machineSizeChangeBody(lima, { cpu_count: "0", memory_gb: "8", disk_gb: "28" })).toBeNull();
+    expect(machineSizeChangeBody(lima, { cpu_count: "4", memory_gb: "8.5", disk_gb: "28" })).toBeNull();
+    expect(machineSizeChangeBody(lima, { cpu_count: "four", memory_gb: "8", disk_gb: "28" })).toBeNull();
   });
 });
 
@@ -329,9 +343,12 @@ describe("WorkspaceOptionsModel machine size load", () => {
         status: 200,
         body: {
           is_available: true,
-          memory_units: 16,
-          target_memory_units: null,
+          cpu_count: 4,
+          memory_gb: 16,
           disk_gb: 56,
+          is_resizable: true,
+          is_disk_resizable: false,
+          target_memory_gb: null,
           target_disk_gb: null,
           is_restart_needed_to_apply: false,
         },
@@ -339,7 +356,7 @@ describe("WorkspaceOptionsModel machine size load", () => {
       redraw: () => undefined,
     });
     await availableModel.loadMachineSize();
-    expect(availableModel.machineSize?.memory_units).toBe(16);
+    expect(availableModel.machineSize?.memory_gb).toBe(16);
 
     const unavailableModel = new WorkspaceOptionsModel("agent-2", {
       fetchJson: async () => ({
@@ -351,5 +368,78 @@ describe("WorkspaceOptionsModel machine size load", () => {
     });
     await unavailableModel.loadMachineSize();
     expect(unavailableModel.machineSize).toBe(null);
+  });
+});
+
+describe("WorkspaceOptionsModel machine resize", () => {
+  const resizable: WorkspaceMachineSizeData = {
+    is_available: true,
+    cpu_count: 4,
+    memory_gb: 8,
+    disk_gb: null,
+    is_resizable: true,
+    is_disk_resizable: false,
+    target_memory_gb: null,
+    target_disk_gb: null,
+    is_restart_needed_to_apply: false,
+  };
+
+  function resizingModel(
+    respond: (url: string, init?: RequestInit) => { ok: boolean; status: number; body: unknown },
+  ): { model: WorkspaceOptionsModel; requests: Array<{ url: string; body: unknown }> } {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const model = new WorkspaceOptionsModel("agent-1", {
+      fetchJson: async (url, init) => {
+        requests.push({ url, body: init?.body === undefined ? null : JSON.parse(String(init.body)) });
+        return respond(url, init);
+      },
+      redraw: () => undefined,
+    });
+    model.machineSize = resizable;
+    return { model, requests };
+  }
+
+  it("posts the changed dimensions, reports the restart, and re-reads the size", async () => {
+    const { model, requests } = resizingModel((url) =>
+      url.endsWith("/machine-size") && url.startsWith("/api/v1/")
+        ? { ok: true, status: 200, body: { is_restart_dispatched: true, operation_id: "agent-1" } }
+        : { ok: true, status: 200, body: { ...resizable, memory_gb: 16 } },
+    );
+
+    const isRecorded = await model.resizeMachine({ cpu_count: "4", memory_gb: "16", disk_gb: "" });
+
+    expect(isRecorded).toBe(true);
+    expect(requests[0]).toEqual({ url: "/api/v1/workspaces/agent-1/machine-size", body: { memory_gb: 16 } });
+    expect(requests[1]?.url).toBe("/ui/api/workspaces/agent-1/machine-size");
+    expect(model.resizeNotice).toContain("restarting");
+    expect(model.machineSize?.memory_gb).toBe(16);
+    expect(model.resizeErrorMessage).toBe("");
+  });
+
+  it("says the size waits for the next start when the machine was stopped", async () => {
+    const { model } = resizingModel((url) =>
+      url.startsWith("/api/v1/")
+        ? { ok: true, status: 200, body: { is_restart_dispatched: false, operation_id: null } }
+        : { ok: true, status: 200, body: resizable },
+    );
+
+    await model.resizeMachine({ cpu_count: "2", memory_gb: "8", disk_gb: "" });
+
+    expect(model.resizeNotice).toContain("next starts");
+  });
+
+  it("keeps the provider's refusal as the error and sends nothing for an unchanged size", async () => {
+    const { model, requests } = resizingModel(() => ({
+      ok: false,
+      status: 502,
+      body: { error: "The machine's provider refused the new size: docker has only 4 CPUs" },
+    }));
+
+    expect(await model.resizeMachine({ cpu_count: "4", memory_gb: "8", disk_gb: "" })).toBe(false);
+    expect(requests).toEqual([]);
+    expect(model.resizeErrorMessage).toContain("whole numbers");
+
+    expect(await model.resizeMachine({ cpu_count: "64", memory_gb: "8", disk_gb: "" })).toBe(false);
+    expect(model.resizeErrorMessage).toContain("docker has only 4 CPUs");
   });
 });

@@ -63,6 +63,7 @@ from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clon
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
+from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -783,6 +784,35 @@ def test_build_mngr_create_command_docker_runc_omits_gvisor_overlay() -> None:
     )
     assert "docker" in command
     assert "docker_runsc" not in command
+
+
+@pytest.mark.witnesses("machine-size.create-size-reaches-the-provider")
+@pytest.mark.parametrize(
+    ("launch_mode", "expected_args"),
+    [
+        (LaunchMode.DOCKER, ["-s", "--cpus=4", "-s", "--memory=16g"]),
+        (LaunchMode.LIMA, ["-s", "--cpus=4", "-s", "--memory=16", "-S", "providers.lima.host_data_disk_size=200GiB"]),
+        (LaunchMode.MODAL, ["-b", "cpu=4", "-b", "memory=16"]),
+    ],
+)
+def test_build_mngr_create_command_passes_the_machine_size_in_the_providers_own_flags(
+    launch_mode: LaunchMode, expected_args: list[str]
+) -> None:
+    command = _build_mngr_create_command(
+        launch_mode=launch_mode,
+        host_name=HostName("hello"),
+        machine_size=MachineSizeSelection(cpu_count=4, memory_gb=16, disk_gb=200),
+    )
+    rendered = " ".join(command)
+    assert " ".join(expected_args) in rendered
+    # The size follows the templates, so it is what docker and lima keep as the last spelling of each flag.
+    assert rendered.index("--template") < rendered.index(expected_args[1])
+
+
+def test_build_mngr_create_command_passes_no_size_flags_when_none_was_chosen() -> None:
+    command = _build_mngr_create_command(launch_mode=LaunchMode.DOCKER, host_name=HostName("hello"))
+    assert "-s" not in command
+    assert not any(token.startswith("--cpus") or token.startswith("--memory") for token in command)
 
 
 @pytest.mark.parametrize("docker_runtime", [DockerRuntime.RUNC, DockerRuntime.RUNSC])

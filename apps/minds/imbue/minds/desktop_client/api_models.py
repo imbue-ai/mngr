@@ -293,6 +293,21 @@ class CreateWorkspaceRequest(ApiRequestModel):
         default=None,
         description="Machine size for the cloud-VM modes (AWS/GCP/Azure); must be one of the form's offered types",
     )
+    cpu_count: int | None = Field(
+        default=None,
+        ge=1,
+        description="Whole CPUs for the DOCKER / LIMA / MODAL modes; ignored by the other modes, which size themselves",
+    )
+    memory_gb: int | None = Field(
+        default=None,
+        ge=1,
+        description="Memory in whole GB for the DOCKER / LIMA / MODAL modes; ignored by the other modes",
+    )
+    disk_gb: int | None = Field(
+        default=None,
+        ge=1,
+        description="Data disk in whole GB for the LIMA mode (the btrfs disk the workspace's data lives on); ignored elsewhere",
+    )
     cloud_account: str | None = Field(
         default=None,
         description=(
@@ -313,6 +328,33 @@ class CreateWorkspaceRequest(ApiRequestModel):
             "imbue_cloud and local docker/lima alike -- runs the desktop publish flow, which "
             "grants nobody."
         ),
+    )
+
+
+class MachineSizeChangeRequest(ApiRequestModel):
+    """Body for resizing a workspace's machine; a dimension left out keeps its current value."""
+
+    cpu_count: int | None = Field(default=None, ge=1, description="Whole CPUs to give the machine")
+    memory_gb: int | None = Field(default=None, ge=1, description="Memory in whole GB to give the machine")
+    disk_gb: int | None = Field(
+        default=None,
+        ge=1,
+        description="Data disk in whole GB to grow the machine's disk to (lima only; never shrinks)",
+    )
+
+
+class MachineSizeChangeResponse(FrozenModel):
+    """Result of a machine resize: the size is recorded, and the restart that applies it was dispatched or not."""
+
+    is_restart_dispatched: bool = Field(
+        description=(
+            "True when the machine was running and its restart was dispatched to apply the size; False when it "
+            "was stopped, so the recorded size applies on its next start"
+        )
+    )
+    operation_id: str | None = Field(
+        default=None,
+        description="The restart operation to poll at /api/v1/workspaces/operations/restart/<id>, when dispatched",
     )
 
 

@@ -26,6 +26,9 @@ const REQUEST: CreateAttemptRequestSummary = {
   backup_provider: "IMBUE_CLOUD",
   region: "US-EAST-VA",
   instance_type: "",
+  cpu_count: null,
+  memory_gb: null,
+  disk_gb: null,
   repository: "https://github.com/imbue-ai/default-workspace-template.git",
   branch: "",
 };

@@ -14,6 +14,7 @@ from imbue.mngr_docker.sizing import host_resources_for_container
 from imbue.mngr_docker.sizing import parse_container_size
 from imbue.mngr_docker.sizing import render_size_start_args
 from imbue.mngr_docker.sizing import strip_size_start_args
+from imbue.mngr_docker.sizing import swap_cap_for_caller_memory
 
 _DAEMON_TOTALS = DockerDaemonTotals(cpu_count=8, memory_bytes=32 * 1024**3)
 
@@ -106,6 +107,24 @@ def test_apply_size_request_replaces_the_requested_dimension_and_keeps_the_rest(
 def test_apply_size_request_adds_caps_to_an_uncapped_container() -> None:
     resized = apply_size_request(("--workdir=/",), ContainerSizeRequest(cpus=DockerCpuCount(1)))
     assert resized == ("--workdir=/", "--cpus=1")
+
+
+@pytest.mark.parametrize(
+    ("start_args", "expected"),
+    [
+        ((), ()),
+        (("--workdir=/",), ()),
+        (("--memory=16g",), ("--memory-swap=16g",)),
+        (("-m", "512m", "--cpus=2"), ("--memory-swap=512m",)),
+        (("--memory=16g", "--memory-swap=32g"), ()),
+        (("--memory=16g", "--memory-swap=-1"), ()),
+        (("--memory=4g", "--memory=16g"), ("--memory-swap=16g",)),
+    ],
+)
+def test_swap_cap_for_caller_memory_follows_a_bare_memory_cap_only(
+    start_args: tuple[str, ...], expected: tuple[str, ...]
+) -> None:
+    assert swap_cap_for_caller_memory(start_args) == expected
 
 
 def test_docker_update_args_always_sends_memory_and_swap_together() -> None:

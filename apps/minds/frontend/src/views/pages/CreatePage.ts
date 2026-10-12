@@ -14,6 +14,7 @@ import { getAppContext } from "../../app-context";
 import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults, LocalBackendPrerequisite } from "../../models/create";
 import type { ResendOutcome } from "../../models/emailVerification";
+import type { MachineSizeDimension } from "../../models/machineSize";
 import {
   backupProviderLabel,
   fetchCreateFormDefaults,
@@ -26,6 +27,7 @@ import { Button, ButtonSubmit } from "../components/Button";
 import { FormLabel, Select, TextInput, Textarea } from "../components/FormControls";
 import { Link } from "../components/Link";
 import { PageNarrowContainer } from "../components/Layout";
+import { MachineSizeInput } from "../components/MachineSizeInput";
 import { DialogCloseButton, Modal } from "../components/Modal";
 import { Notice } from "../components/Notice";
 import { CloudAccountsModal, CloudAccountsModalState } from "./create/CloudAccountsModal";
@@ -232,6 +234,12 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
       model.isAdvancedOpen = true;
       return;
     }
+    // A size that is not a whole number is refused here, where the field can
+    // say so, rather than by the server as a bare 422.
+    if (model.invalidMachineSizeDimensions().length > 0) {
+      model.isAdvancedOpen = true;
+      return;
+    }
     if (model.imbueCloudNeedsAccount()) {
       if ((model.defaults?.accounts.length ?? 0) > 0) {
         model.isAccountErrorShown = true;
@@ -326,6 +334,44 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
 
   function fieldRing(fieldId: string): string {
     return model.submitErrorField === fieldId ? " !ring-1 ring-important" : "";
+  }
+
+  /** The CPUs / memory / disk fields for a mode sized by numbers (DOCKER, LIMA, MODAL); nothing for the others. */
+  function machineSizeRow(): m.Children {
+    const defaults = model.machineSizeDefaults();
+    const draft = model.machineSizeDraft();
+    if (defaults === null || draft === null) return null;
+    const invalid = new Set(model.invalidMachineSizeDimensions());
+    const machineSizeField = (dimension: MachineSizeDimension, label: string): m.Children =>
+      m(MachineSizeInput, {
+        dimension,
+        label,
+        value: draft[dimension],
+        isInvalid: invalid.has(dimension),
+        oninput: (text: string) => model.setMachineSizeField(dimension, text),
+      });
+    return m("div", { id: "machine-size-row" }, [
+      m("div", { class: "flex items-start justify-between gap-3" }, [
+        m("div", [
+          m(FormLabel, { target: "machine-size-cpu_count", inline: true }, "Machine size"),
+          m(
+            "p",
+            { class: "mt-1 type-helper text-tertiary" },
+            defaults.disk_gb === null
+              ? "CPUs and memory the machine is capped at. Whole numbers."
+              : "CPUs and memory the machine boots with, and the disk its data lives on. Whole numbers.",
+          ),
+        ]),
+        m("div", { class: "flex flex-wrap items-center justify-end gap-3" }, [
+          defaults.cpu_count === null ? null : machineSizeField("cpu_count", "CPUs"),
+          defaults.memory_gb === null ? null : machineSizeField("memory_gb", "GB RAM"),
+          defaults.disk_gb === null ? null : machineSizeField("disk_gb", "GB disk"),
+        ]),
+      ]),
+      invalid.size > 0
+        ? m("p", { id: "machine-size-error", class: "mt-1 type-helper text-important", role: "alert" }, "Each size must be a whole number of at least 1.")
+        : null,
+    ]);
   }
 
   function advancedView(defaults: CreateFormDefaults): m.Children {
@@ -582,6 +628,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
               ]),
             ])
           : null,
+        machineSizeRow(),
         model.isRuntimeShown()
           ? m("div", { id: "runtime-row" }, [
               m("div", { class: "flex items-center justify-between gap-3" }, [

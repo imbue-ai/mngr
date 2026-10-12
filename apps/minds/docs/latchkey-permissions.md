@@ -684,7 +684,8 @@ Imbue Studio exposes a cross-workspace management API (`/api/v1/workspaces/...`)
 that lets an agent in one workspace act on *other* workspaces -- listing,
 reading detail/version/backups, creating, destroying, starting/stopping,
 exporting and managing backups, establishing SSH access, updating settings,
-and recovering (health check / restart). It is
+and recovering (health check / restart, and a machine resize, which ends in
+a restart). It is
 reached through the same `minds-api-proxy` extension and gated by a single
 `minds-workspaces` detent scope with one named permission per verb
 (`minds-workspaces-read`, `-create`, `-destroy`, `-lifecycle`,

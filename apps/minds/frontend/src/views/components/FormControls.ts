@@ -6,6 +6,7 @@ import { splitAttrs } from "./attrs";
 interface TextInputAttrs extends m.Attributes {
   name: string;
   radius?: "md" | "lg";
+  width?: string;
   extra?: string;
 }
 
@@ -17,18 +18,19 @@ interface TextInputAttrs extends m.Attributes {
 export function TextInput(): m.Component<TextInputAttrs> {
   return {
     view(vnode) {
-      const { name, radius = "md", extra = "" } = vnode.attrs;
+      const { name, radius = "md", width = "w-full", extra = "" } = vnode.attrs;
       return m("input", {
         type: "text",
         name,
         class:
-          "w-full leading-tight " +
+          width +
+          " leading-tight " +
           INPUT_BASE +
           " rounded-" +
           radius +
           " " +
           extra,
-        ...splitAttrs(vnode.attrs, ["name", "radius", "extra"]),
+        ...splitAttrs(vnode.attrs, ["name", "radius", "width", "extra"]),
       });
     },
   };

@@ -45,6 +45,7 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import discovered_host_size_from_resources
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
@@ -353,6 +354,7 @@ def discovered_host_from_agent_details(agent_details: AgentDetails) -> Discovere
         host_name=HostName(agent_details.host.name),
         provider_name=agent_details.host.provider_name,
         host_state=agent_details.host.state,
+        size=discovered_host_size_from_resources(agent_details.host.resource),
     )
 
 

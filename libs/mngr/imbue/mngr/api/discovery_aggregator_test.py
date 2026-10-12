@@ -19,6 +19,7 @@ from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
@@ -28,6 +29,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -51,12 +53,19 @@ def _make_agent(provider: str, name: str, host_id: HostId | None = None) -> Disc
     )
 
 
-def _make_host(provider: str, name: str, host_id: HostId | None = None) -> DiscoveredHost:
+def _make_host(
+    provider: str,
+    name: str,
+    host_id: HostId | None = None,
+    host_state: HostState = HostState.RUNNING,
+    size: DiscoveredHostSize | None = None,
+) -> DiscoveredHost:
     return DiscoveredHost(
         host_id=host_id or HostId.generate(),
         host_name=HostName(name),
         provider_name=ProviderInstanceName(provider),
-        host_state=HostState.RUNNING,
+        host_state=host_state,
+        size=size,
     )
 
 
@@ -88,6 +97,15 @@ def _agent_discovered(agent: DiscoveredAgent, at: datetime) -> AgentDiscoveryEve
         event_id=EventId(generate_log_event_id()),
         source=DISCOVERY_EVENT_SOURCE,
         agent=agent,
+    )
+
+
+def _host_discovered(host: DiscoveredHost, at: datetime) -> HostDiscoveryEvent:
+    return HostDiscoveryEvent(
+        timestamp=_iso(at),
+        event_id=EventId(generate_log_event_id()),
+        source=DISCOVERY_EVENT_SOURCE,
+        host=host,
     )
 
 
@@ -319,6 +337,26 @@ def test_state_change_during_span_is_not_clobbered_by_in_flight_snapshot() -> No
 
     current = aggregator.get_agent_by_instance()[fresh_agent.instance_key]
     assert current.certified_data["work_dir"] == "/new"
+
+
+def test_host_discovered_event_without_a_size_keeps_the_snapshots_recorded_size() -> None:
+    """The host event a create / start emits does not know the size; the snapshot's stays until one reports it."""
+    aggregator = DiscoveryStateAggregator()
+    recorded_size = DiscoveredHostSize(cpu_count=4, memory_gb=8.0, disk_gb=None)
+    sized_host = _make_host("docker", "h1", size=recorded_size)
+    aggregator.apply_event(_snapshot("docker", (), (sized_host,), started_at=_BASE_TIME))
+
+    stopped_host = _make_host("docker", "h1", host_id=sized_host.host_id, host_state=HostState.STOPPED)
+    aggregator.apply_event(_host_discovered(stopped_host, at=_BASE_TIME + timedelta(seconds=10)))
+    current = aggregator.get_host_by_id()[str(sized_host.host_id)]
+    assert current.host_state is HostState.STOPPED
+    assert current.size == recorded_size
+
+    # A host event that does report a size replaces the recorded one.
+    resized = DiscoveredHostSize(cpu_count=8, memory_gb=16.0, disk_gb=None)
+    resized_host = _make_host("docker", "h1", host_id=sized_host.host_id, size=resized)
+    aggregator.apply_event(_host_discovered(resized_host, at=_BASE_TIME + timedelta(seconds=20)))
+    assert aggregator.get_host_by_id()[str(sized_host.host_id)].size == resized
 
 
 def test_host_destroyed_event_tombstones_host_and_removes_its_agents() -> None:

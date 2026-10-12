@@ -24,6 +24,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -356,8 +357,9 @@ def _make_host_record(
     host_name: str = "test-host",
     snapshots: list[SnapshotRecord] | None = None,
     failure_reason: str | None = None,
+    config: SandboxConfig | None = None,
 ) -> HostRecord:
-    """Create a HostRecord for testing."""
+    """Create a HostRecord for testing; ``config`` defaults to a 1 CPU / 1 GB sandbox."""
     now = datetime.now(timezone.utc)
     certified_data = CertifiedHostData(
         host_id=str(host_id),
@@ -372,7 +374,7 @@ def _make_host_record(
         ssh_host="test.host",
         ssh_port=22,
         ssh_host_public_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQ...",
-        config=SandboxConfig(cpu=1.0, memory=1.0),
+        config=config if config is not None else SandboxConfig(cpu=1.0, memory=1.0),
         certified_host_data=certified_data,
     )
 
@@ -588,6 +590,40 @@ def test_discover_hosts_prefers_running_sandbox_over_host_record(
     # Should use sandbox, not host record
     mock_from_sandbox.assert_called_once()
     mock_from_record.assert_not_called()
+
+
+def test_discover_hosts_carries_each_recorded_hosts_size(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    """A host record's sandbox config is the size discovery carries; a sandbox without a record has none."""
+    recorded_host_id = HostId.generate()
+    recorded_record = _make_host_record(
+        recorded_host_id, snapshots=[_make_snapshot_record("initial")], config=SandboxConfig(cpu=2.0, memory=4.0)
+    )
+    recorded_host = MagicMock()
+    recorded_host.id = recorded_host_id
+    recorded_host.get_name.return_value = HostName("test-host")
+
+    unrecorded_host_id = HostId.generate()
+    unrecorded_sandbox = MagicMock()
+    unrecorded_sandbox.get_tags.return_value = {TAG_HOST_ID: str(unrecorded_host_id), TAG_HOST_NAME: "fresh"}
+    unrecorded_host = MagicMock()
+    unrecorded_host.id = unrecorded_host_id
+    unrecorded_host.get_name.return_value = HostName("fresh")
+
+    with (
+        patch.object(modal_provider, "_list_sandboxes", return_value=[unrecorded_sandbox]),
+        patch.object(modal_provider, "_list_all_host_records", return_value=[recorded_record]),
+        patch.object(modal_provider, "_create_host_from_host_record", return_value=recorded_host),
+        patch.object(modal_provider, "_create_host_from_sandbox", return_value=unrecorded_host),
+    ):
+        hosts = modal_provider.discover_hosts(cg=modal_provider.mngr_ctx.concurrency_group)
+
+    size_by_host_id = {host.host_id: host.size for host in hosts}
+    assert size_by_host_id == {
+        recorded_host_id: DiscoveredHostSize(cpu_count=2, memory_gb=4.0, disk_gb=None),
+        unrecorded_host_id: None,
+    }
 
 
 def test_parse_build_args_empty(modal_provider: ModalProviderInstance) -> None:

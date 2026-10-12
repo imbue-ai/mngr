@@ -12,7 +12,6 @@ via get_log_sink().
 import json
 import os
 import re
-import shlex
 import shutil
 import tempfile
 import threading
@@ -53,6 +52,7 @@ from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
+from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.data_types import WorkspaceProbeOutcome
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -65,8 +65,10 @@ from imbue.minds.desktop_client.labeled_hosts import find_host_by_create_attempt
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
+from imbue.minds.desktop_client.machine_size import machine_size_create_args
 from imbue.minds.desktop_client.mngr_command import format_output_tail
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
+from imbue.minds.desktop_client.mngr_command import shell_quoted_create_flag
 from imbue.minds.desktop_client.pending_create_attempts import CREATE_ATTEMPT_ID_HOST_LABEL
 from imbue.minds.desktop_client.pending_create_attempts import FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
@@ -1031,12 +1033,8 @@ def latchkey_gateway_location_for_launch(launch_mode: LaunchMode) -> LatchkeyGat
 
 
 def _build_arg_flag(value: str) -> list[str]:
-    """``-b <value>`` for ``mngr create``, shell-quoted.
-
-    ``mngr create`` shell-tokenizes every ``-b`` value (so ``-b "--cpu 16"`` reaches the provider as two args), so a
-    value holding a space -- a template checkout under "Imbue Dropbox", say -- must be quoted to arrive whole.
-    """
-    return ["-b", shlex.quote(value)]
+    """``-b <value>`` for ``mngr create``, shell-quoted (see ``shell_quoted_create_flag``)."""
+    return shell_quoted_create_flag("-b", value)
 
 
 def _build_mngr_create_command(
@@ -1050,6 +1048,7 @@ def _build_mngr_create_command(
     region: str | None = None,
     cloud_account: str | None = None,
     instance_type: str | None = None,
+    machine_size: MachineSizeSelection | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
     docker_runtime: DockerRuntime = DockerRuntime.RUNC,
@@ -1240,6 +1239,10 @@ def _build_mngr_create_command(
     if create_attempt_id_label:
         create_attempt_host_label_args = ["--host-label", f"{CREATE_ATTEMPT_ID_HOST_LABEL}={create_attempt_id_label}"]
 
+    # The machine's size, in whichever flags this mode's provider takes it (none
+    # for the modes sized by a named instance shape or by the connector).
+    size_args = machine_size_create_args(launch_mode, machine_size) if machine_size is not None else []
+
     match launch_mode:
         case LaunchMode.DOCKER:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
@@ -1250,10 +1253,12 @@ def _build_mngr_create_command(
                 mngr_command.extend(["--template", "docker_runsc"])
             mngr_command.extend(_remote_host_env_flags())
             mngr_command.extend(create_attempt_host_label_args)
+            mngr_command.extend(size_args)
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
             mngr_command.extend(create_attempt_host_label_args)
+            mngr_command.extend(size_args)
             # Point Lima at the baked raw image via the provider's existing per-arch
             # image-url override, so the VM boots the baked toolchain instead of building it.
             if prebaked_lima_image_raw_path is not None:
@@ -1318,6 +1323,7 @@ def _build_mngr_create_command(
             if extra_modal_template:
                 mngr_command.extend(["--template", extra_modal_template])
             mngr_command.extend(_remote_host_env_flags())
+            mngr_command.extend(size_args)
         case LaunchMode.GCP:
             # Same shape as aws; the address already selects the ``byok-gcp-<slug>``
             # account block. GCE is zonal, so the placement flag is ``--gcp-zone``
@@ -1550,6 +1556,7 @@ def run_mngr_create(
     region: str | None = None,
     cloud_account: str | None = None,
     instance_type: str | None = None,
+    machine_size: MachineSizeSelection | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
     docker_runtime: DockerRuntime = DockerRuntime.RUNC,
@@ -1599,6 +1606,7 @@ def run_mngr_create(
         region=region,
         cloud_account=cloud_account,
         instance_type=instance_type,
+        machine_size=machine_size,
         latchkey_env=latchkey_env,
         color=color,
         docker_runtime=docker_runtime,
@@ -1802,6 +1810,8 @@ class _MngrCreateAttemptParams(FrozenModel):
     cloud_account: str | None
     # Per-create EC2 machine size (AWS modes only), or None for the block default.
     instance_type: str | None
+    # Per-create size for the modes sized by numbers (DOCKER / LIMA / MODAL), or None for the template default.
+    machine_size: MachineSizeSelection | None
     parent_cg: ConcurrencyGroup | None
     color: str | None
     docker_runtime: DockerRuntime
@@ -1845,6 +1855,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         region=(params.region or None),
         cloud_account=params.cloud_account,
         instance_type=params.instance_type,
+        machine_size=params.machine_size,
         color=params.color,
         docker_runtime=params.docker_runtime,
         original_minds_version=params.original_minds_version,
@@ -2083,6 +2094,7 @@ class AgentCreator(MutableModel):
         region: str = "",
         cloud_account: str = "",
         instance_type: str = "",
+        machine_size: MachineSizeSelection | None = None,
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
@@ -2206,6 +2218,7 @@ class AgentCreator(MutableModel):
             region=region,
             cloud_account=cloud_account,
             instance_type=instance_type,
+            machine_size=machine_size,
             color=color,
             docker_runtime=docker_runtime,
             original_minds_version=original_minds_version,
@@ -2227,6 +2240,7 @@ class AgentCreator(MutableModel):
                 region,
                 cloud_account,
                 instance_type,
+                machine_size,
                 on_created,
                 backup_request,
                 color,
@@ -2310,6 +2324,7 @@ class AgentCreator(MutableModel):
         region: str,
         cloud_account: str,
         instance_type: str,
+        machine_size: MachineSizeSelection | None,
         color: str | None,
         docker_runtime: DockerRuntime,
         original_minds_version: str,
@@ -2342,6 +2357,9 @@ class AgentCreator(MutableModel):
                 region=region,
                 cloud_account=cloud_account,
                 instance_type=instance_type,
+                cpu_count=machine_size.cpu_count if machine_size is not None else None,
+                memory_gb=machine_size.memory_gb if machine_size is not None else None,
+                disk_gb=machine_size.disk_gb if machine_size is not None else None,
                 color=color,
                 docker_runtime=docker_runtime,
                 original_minds_version=original_minds_version,
@@ -2479,6 +2497,7 @@ class AgentCreator(MutableModel):
         region: str = "",
         cloud_account: str = "",
         instance_type: str = "",
+        machine_size: MachineSizeSelection | None = None,
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
@@ -2728,6 +2747,7 @@ class AgentCreator(MutableModel):
                     region=region,
                     cloud_account=cloud_account or None,
                     instance_type=instance_type or None,
+                    machine_size=machine_size,
                     parent_cg=self.root_concurrency_group,
                     color=color,
                     docker_runtime=docker_runtime,

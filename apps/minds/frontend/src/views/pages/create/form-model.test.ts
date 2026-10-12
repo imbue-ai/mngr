@@ -25,6 +25,11 @@ function buildDefaults(overrides: Partial<CreateFormDefaults> = {}): CreateFormD
       ],
     },
     default_instance_type_by_backend: { AWS: "t3.large" },
+    machine_size_defaults_by_launch_mode: {
+      DOCKER: { cpu_count: 4, memory_gb: 8, disk_gb: null },
+      LIMA: { cpu_count: 2, memory_gb: 4, disk_gb: 100 },
+      MODAL: { cpu_count: 2, memory_gb: 4, disk_gb: null },
+    },
     cloud_accounts: [{ name: "aws_acct", alias: "team aws", backend: "aws", region: "us-west-2" }],
     byok_clouds_enabled: true,
     git_url: "https://github.com/imbue-ai/default-workspace-template.git",
@@ -324,6 +329,9 @@ describe("CreateFormModel", () => {
       region: "",
       cloud_account: "",
       instance_type: "",
+      cpu_count: null,
+      memory_gb: null,
+      disk_gb: null,
       color: "#123456",
     };
     model.applyDefaults(buildDefaults({ prefill }));
@@ -346,6 +354,9 @@ describe("CreateFormModel", () => {
           region: "us-east-1",
           cloud_account: "aws_acct",
           instance_type: "t3.xlarge",
+          cpu_count: null,
+          memory_gb: null,
+          disk_gb: null,
           color: "#123456",
         },
       }),
@@ -354,6 +365,81 @@ describe("CreateFormModel", () => {
     expect(model.isAdvancedOpen).toBe(true);
     expect(model.selectedInstanceType()).toBe("t3.xlarge");
     expect(model.submitBody().cloud_account).toBe("aws_acct");
+  });
+});
+
+describe("CreateFormModel machine size", () => {
+  it("offers the numeric size fields only for the modes sized by numbers, pre-filled with their defaults", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.launchValue = "IMBUE_CLOUD";
+    expect(model.machineSizeDraft()).toBeNull();
+    expect(model.submitBody().cpu_count).toBeUndefined();
+    model.launchValue = "DOCKER";
+    expect(model.machineSizeDraft()).toEqual({ cpu_count: "4", memory_gb: "8", disk_gb: "" });
+    model.launchValue = "LIMA";
+    expect(model.machineSizeDraft()).toEqual({ cpu_count: "2", memory_gb: "4", disk_gb: "100" });
+  });
+
+  it("sends the typed size as whole numbers, keeping a pick per mode", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.launchValue = "DOCKER";
+    model.setMachineSizeField("memory_gb", "16");
+    let body = model.submitBody();
+    expect(body.cpu_count).toBe(4);
+    expect(body.memory_gb).toBe(16);
+    expect(body.disk_gb).toBeUndefined();
+    // Lima starts from its own defaults; the docker edit is remembered on return.
+    model.launchValue = "LIMA";
+    body = model.submitBody();
+    expect(body.cpu_count).toBe(2);
+    expect(body.memory_gb).toBe(4);
+    expect(body.disk_gb).toBe(100);
+    model.launchValue = "DOCKER";
+    expect(model.submitBody().memory_gb).toBe(16);
+  });
+
+  it("refuses a size that is not a whole number of at least 1", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.launchValue = "DOCKER";
+    expect(model.invalidMachineSizeDimensions()).toEqual([]);
+    model.setMachineSizeField("cpu_count", "0");
+    model.setMachineSizeField("memory_gb", "1.5");
+    expect(model.invalidMachineSizeDimensions()).toEqual(["cpu_count", "memory_gb"]);
+    model.setMachineSizeField("cpu_count", " 2 ");
+    model.setMachineSizeField("memory_gb", "");
+    expect(model.invalidMachineSizeDimensions()).toEqual(["memory_gb"]);
+  });
+
+  it("restores a retry prefill's size for the mode it was chosen for", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(
+      buildDefaults({
+        prefill: {
+          git_url: "https://example.com/repo.git",
+          branch: "",
+          host_name: "",
+          launch_mode: "LIMA",
+          docker_runtime: "RUNC",
+          backup_provider: "CONFIGURE_LATER",
+          backup_api_key_env: "",
+          account_id: "",
+          region: "",
+          cloud_account: "",
+          instance_type: "",
+          cpu_count: 6,
+          memory_gb: 12,
+          disk_gb: 250,
+          color: "#123456",
+        },
+      }),
+    );
+    expect(model.launchValue).toBe("LIMA");
+    expect(model.machineSizeDraft()).toEqual({ cpu_count: "6", memory_gb: "12", disk_gb: "250" });
+    const body = model.submitBody();
+    expect([body.cpu_count, body.memory_gb, body.disk_gb]).toEqual([6, 12, 250]);
   });
 });
 

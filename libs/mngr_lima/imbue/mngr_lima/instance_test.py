@@ -15,6 +15,7 @@ from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -679,6 +680,43 @@ def test_discover_hosts_reports_building_for_reservation_record(
     states_by_id = {host.host_id: host.host_state for host in discovered}
     assert states_by_id[building_id] == HostState.BUILDING
     assert states_by_id[destroyed_id] == HostState.DESTROYED
+
+
+def test_discover_hosts_carries_each_recorded_hosts_size(
+    lima_provider: LimaProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    lima_provider._host_store.write_host_record(
+        HostRecord(
+            certified_host_data=CertifiedHostData(
+                host_id=str(host_id),
+                host_name="sized-host",
+                stop_reason=HostState.STOPPED.value,
+                created_at=now,
+                updated_at=now,
+            ),
+            config=LimaHostConfig(
+                instance_name=f"mngr-{host_id.get_uuid().hex}",
+                start_args=("--cpus=4", "--memory=8", "--disk=20"),
+                host_data_disk_name="data",
+                host_data_disk_size=LimaDiskSize("200GiB"),
+            ),
+        )
+    )
+    install_fake_limactl(
+        tmp_path / "bin",
+        'if [ "$1" = "--version" ]; then echo "limactl version 2.0.3"; exit 0; fi\nexit 0\n',
+        monkeypatch,
+    )
+
+    discovered = lima_provider.discover_hosts(lima_provider.mngr_ctx.concurrency_group)
+
+    size_by_host_id = {host.host_id: host.size for host in discovered}
+    # The disk is the data disk that backs the host's data, not the VM's boot disk.
+    assert size_by_host_id[host_id] == DiscoveredHostSize(cpu_count=4, memory_gb=8.0, disk_gb=200.0)
 
 
 def test_delete_host_deletes_vm_definition_and_record(

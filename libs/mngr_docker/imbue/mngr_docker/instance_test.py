@@ -29,6 +29,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostFileWriteInterface
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import DockerCpuCount
 from imbue.mngr.primitives import DockerMemorySize
@@ -1015,6 +1016,43 @@ def test_resize_host_rewrites_the_recorded_start_args_and_reports_the_new_size(
     rewritten = provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False)
     assert rewritten is not None and rewritten.config is not None
     assert rewritten.config.start_args == ("--cpus=1", "--workdir=/", "--memory=4g", "--memory-swap=4g")
+
+
+class _DockerProviderWithoutDaemonListing(_DockerProviderWithoutContainers):
+    """A docker provider whose daemon lists no containers, so discovery is driven by the host records alone."""
+
+    def _list_containers(self) -> list[docker.models.containers.Container]:
+        return []
+
+
+def test_discover_hosts_carries_each_recorded_hosts_size(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    provider = make_docker_provider_with_local_volume(
+        temp_mngr_ctx, tmp_path, daemon_totals=_DAEMON_TOTALS, provider_class=_DockerProviderWithoutDaemonListing
+    )
+    now = datetime.now(timezone.utc)
+    provider._host_store.write_host_record(
+        HostRecord(
+            certified_host_data=CertifiedHostData(
+                host_id=HOST_ID_A, host_name="capped", created_at=now, updated_at=now, stop_reason="STOPPED"
+            ),
+            config=ContainerConfig(start_args=("--cpus=2", "--memory=4g", "--memory-swap=4g")),
+        )
+    )
+    provider._host_store.write_host_record(
+        HostRecord(
+            certified_host_data=CertifiedHostData(
+                host_id=HOST_ID_B, host_name="uncapped", created_at=now, updated_at=now, stop_reason="STOPPED"
+            ),
+            config=ContainerConfig(start_args=("--workdir=/",)),
+        )
+    )
+
+    discovered = provider.discover_hosts(temp_mngr_ctx.concurrency_group, include_destroyed=True)
+
+    size_by_host_id = {host.host_id: host.size for host in discovered}
+    assert size_by_host_id[HostId(HOST_ID_A)] == DiscoveredHostSize(cpu_count=2, memory_gb=4.0, disk_gb=None)
+    # An uncapped dimension reads as the daemon machine's total, as get_host_resources reports it.
+    assert size_by_host_id[HostId(HOST_ID_B)] == DiscoveredHostSize(cpu_count=4, memory_gb=16.0, disk_gb=None)
 
 
 def test_resize_host_refuses_a_host_without_a_container_config(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:

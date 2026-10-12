@@ -812,12 +812,14 @@ class EnvelopeStreamConsumer(MutableModel):
         # is known) so the resolver's display-name fallback and host-name collision
         # checks have it.
         host_name_by_host_id = {str(host.host_id): str(host.host_name) for host in hosts}
+        host_size_by_host_id = {str(host.host_id): host.size for host in hosts if host.size is not None}
         return ParsedAgentsResult(
             agent_ids=tuple(agent.agent_id for agent in agents),
             discovered_agents=tuple(agents),
             ssh_info_by_agent_id=ssh_info_by_agent_id,
             host_state_by_host_id=host_state_by_host_id,
             host_name_by_host_id=host_name_by_host_id,
+            host_size_by_host_id=host_size_by_host_id,
         )
 
     def _push_agents_view(self) -> None:

@@ -762,6 +762,19 @@ class SSHInfo(FrozenModel):
     command: str = Field(description="Full SSH command to connect")
 
 
+class DiscoveredHostSize(FrozenModel):
+    """The size a provider has recorded for a host, as discovery carries it without connecting to the host."""
+
+    # Parsed from persisted discovery event streams that newer program versions
+    # also write, so unknown (future, additive) fields are ignored rather than
+    # rejected -- see EventEnvelope for the full rationale.
+    model_config = ConfigDict(extra="ignore")
+
+    cpu_count: int | None = Field(default=None, description="CPUs allocated to the host, None when unknown")
+    memory_gb: float | None = Field(default=None, description="Allocated memory in GB, None when unknown")
+    disk_gb: float | None = Field(default=None, description="Allocated disk in GB, None when unknown or uncapped")
+
+
 class DiscoveredHost(FrozenModel):
     """Lightweight host data collected during discovery (without connecting to the host)."""
 
@@ -775,6 +788,13 @@ class DiscoveredHost(FrozenModel):
     provider_name: ProviderInstanceName = Field(description="Name of the provider instance that owns the host")
     host_state: "HostState | None" = Field(
         default=None, description="Host lifecycle state, if known at discovery time"
+    )
+    size: DiscoveredHostSize | None = Field(
+        default=None,
+        description=(
+            "The size the provider recorded for the host (see HostResources), when the provider's discovery "
+            "could read it without connecting to the host; None when the provider does not report one here"
+        ),
     )
 
 

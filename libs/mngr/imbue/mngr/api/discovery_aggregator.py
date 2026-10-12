@@ -260,7 +260,13 @@ class DiscoveryStateAggregator(MutableModel):
         host = event.host
         host_id_str = str(host.host_id)
         with self._lock:
-            was_present = host_id_str in self._host_by_id
+            known_host = self._host_by_id.get(host_id_str)
+            was_present = known_host is not None
+            # A host event emitted after a create / start / restart is built from
+            # the live host and does not know the size its provider recorded;
+            # only a snapshot reports that, so keep the last one it reported.
+            if host.size is None and known_host is not None and known_host.size is not None:
+                host = host.model_copy_update(to_update(host.field_ref().size, known_host.size))
             self._host_by_id[host_id_str] = host
             self._provider_name_by_host_id[host_id_str] = str(host.provider_name)
             self._unknown_host_ids.discard(host_id_str)

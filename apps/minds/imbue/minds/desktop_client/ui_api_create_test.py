@@ -76,6 +76,14 @@ def test_form_defaults_exclude_byok_only_launch_modes_and_carry_region_context(t
     assert set(payload["region_options_by_launch_mode"]) >= {"IMBUE_CLOUD", "VULTR", "AWS", "GCP", "AZURE"}
     assert payload["region_selected_by_launch_mode"]["AWS"] in payload["region_options_by_launch_mode"]["AWS"]
     assert payload["default_instance_type_by_backend"]["AWS"]
+    # The modes sized by numbers each offer a default size; the others offer none.
+    assert set(payload["machine_size_defaults_by_launch_mode"]) == {"DOCKER", "LIMA", "MODAL"}
+    assert payload["machine_size_defaults_by_launch_mode"]["DOCKER"] == {
+        "cpu_count": 4,
+        "memory_gb": 8,
+        "disk_gb": None,
+    }
+    assert payload["machine_size_defaults_by_launch_mode"]["LIMA"]["disk_gb"] == 100
     assert payload["color"].startswith("#")
     assert payload["prefill"] is None
     assert payload["accounts"] == []
@@ -283,6 +291,9 @@ def _record(
     cloud_account: str = "",
     instance_type: str = "",
     account_id: str = "",
+    cpu_count: int | None = None,
+    memory_gb: int | None = None,
+    disk_gb: int | None = None,
 ) -> PendingCreateAttemptRecord:
     now = datetime.now(timezone.utc)
     return PendingCreateAttemptRecord(
@@ -305,6 +316,9 @@ def _record(
             cloud_account=cloud_account,
             instance_type=instance_type,
             account_id=account_id,
+            cpu_count=cpu_count,
+            memory_gb=memory_gb,
+            disk_gb=disk_gb,
         ),
     )
 
@@ -360,6 +374,9 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
             cloud_account="byok-gcp-ghost",
             instance_type="e2-standard-4",
             account_id="user-signed-out",
+            cpu_count=6,
+            memory_gb=12,
+            disk_gb=250,
         )
     )
 
@@ -374,6 +391,7 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
     assert prefill["launch_mode"] == "LIMA"
     assert prefill["color"] == "#a1b2c3"
     assert prefill["instance_type"] == "e2-standard-4"
+    assert (prefill["cpu_count"], prefill["memory_gb"], prefill["disk_gb"]) == (6, 12, 250)
     # The ghost accounts are not offered, so they must not be pre-selected either.
     assert prefill["cloud_account"] == ""
     assert prefill["account_id"] == ""
@@ -481,6 +499,9 @@ def test_create_attempt_detail_carries_the_request_summary_for_a_live_attempt(
         "backup_provider": "CONFIGURE_LATER",
         "region": "",
         "instance_type": "",
+        "cpu_count": None,
+        "memory_gb": None,
+        "disk_gb": None,
         "repository": "file:///nonexistent-repo-for-request-summary-test",
         "branch": "v9.9.9-summary",
     }
@@ -493,7 +514,15 @@ def test_create_attempt_detail_carries_the_request_summary_for_a_record(
     client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group)
     create_attempt_id = str(CreateAttemptId.generate())
     store.write_record(
-        _record(create_attempt_id, PendingCreateAttemptState.FAILED, error="boom", instance_type="t3.large")
+        _record(
+            create_attempt_id,
+            PendingCreateAttemptState.FAILED,
+            error="boom",
+            instance_type="t3.large",
+            cpu_count=2,
+            memory_gb=4,
+            disk_gb=100,
+        )
     )
 
     response = client.get(f"/ui/api/create/attempts/{create_attempt_id}")
@@ -506,6 +535,9 @@ def test_create_attempt_detail_carries_the_request_summary_for_a_record(
         "backup_provider": "CONFIGURE_LATER",
         "region": "",
         "instance_type": "t3.large",
+        "cpu_count": 2,
+        "memory_gb": 4,
+        "disk_gb": 100,
         "repository": "https://example.com/some-repo.git",
         "branch": "feature-branch-7",
     }

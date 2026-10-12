@@ -3,6 +3,7 @@
 // everything testable lives here.
 
 import m from "mithril";
+import type { MachineSizeNumbers } from "./machineSize";
 import type { OnboardingProgress } from "./onboarding";
 import { onboardingProgress } from "./onboarding";
 
@@ -34,6 +35,9 @@ export interface CreateRetryPrefill {
   region: string;
   cloud_account: string;
   instance_type: string;
+  cpu_count: number | null;
+  memory_gb: number | null;
+  disk_gb: number | null;
   color: string;
 }
 
@@ -60,6 +64,8 @@ export interface CreateFormDefaults {
   region_selected_by_launch_mode: Record<string, string>;
   instance_types_by_backend: Record<string, [string, string][]>;
   default_instance_type_by_backend: Record<string, string>;
+  /** The size offered per compute mode sized by numbers; a null dimension is one the mode does not take. */
+  machine_size_defaults_by_launch_mode: Record<string, MachineSizeNumbers>;
   cloud_accounts: CloudAccountOption[];
   byok_clouds_enabled: boolean;
   git_url: string;
@@ -93,6 +99,9 @@ export interface CreateAttemptRequestSummary {
   backup_provider: string;
   region: string;
   instance_type: string;
+  cpu_count: number | null;
+  memory_gb: number | null;
+  disk_gb: number | null;
   repository: string;
   branch: string;
 }

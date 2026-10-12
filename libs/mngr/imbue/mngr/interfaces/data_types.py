@@ -22,6 +22,7 @@ from pyinfra.api import Host as PyinfraHost
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import InvalidRelativePathError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import ActivitySource
@@ -32,6 +33,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -274,6 +276,14 @@ class HostResources(FrozenModel):
         default=None,
         description="GPU resources (None if no GPU allocated)",
     )
+
+
+@pure
+def discovered_host_size_from_resources(resources: HostResources | None) -> DiscoveredHostSize | None:
+    """The size discovery carries for a host whose provider recorded ``resources``; None when it recorded none."""
+    if resources is None:
+        return None
+    return DiscoveredHostSize(cpu_count=resources.cpu.count, memory_gb=resources.memory_gb, disk_gb=resources.disk_gb)
 
 
 class HostBootInfo(FrozenModel):

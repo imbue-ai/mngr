@@ -6,6 +6,7 @@
 
 import type { CreateAttemptRequestSummary } from "./create";
 import { backupProviderLabel, launchModeLabel } from "./create";
+import { formatMachineSizeNumbers } from "./machineSize";
 import type { DisclosurePoint } from "./startFlow";
 
 export const SETUP_LINE =
@@ -148,7 +149,7 @@ export function summaryLines(request: CreateAttemptRequestSummary, isCloudPreset
     ["Compute", compute],
     ["Backup", backupProviderLabel(request.backup_provider)],
     ["Region", request.region],
-    ["Machine size", request.instance_type],
+    ["Machine size", request.instance_type !== "" ? request.instance_type : formatMachineSizeNumbers(request)],
     ["Template repository", shortRepository(request.repository)],
     ["Branch", request.branch !== "" ? request.branch : "latest"],
   ];

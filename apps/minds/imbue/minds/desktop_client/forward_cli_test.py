@@ -47,6 +47,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -59,6 +60,7 @@ from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 _TIMESTAMP = IsoTimestamp("2026-05-03T00:00:00.000000000+00:00")
 _EVENT_SOURCE = EventSource("mngr/discovery")
 _HOST_ID_1 = HostId("host-" + "0" * 31 + "1")
+_HOST_ID_2 = HostId.generate()
 _AGENT_ID_1: AgentId = AgentId("agent-" + "0" * 31 + "1")
 _AGENT_ID_2: AgentId = AgentId("agent-" + "0" * 31 + "2")
 _SERVICE_WEB: ServiceName = ServiceName("web")
@@ -314,6 +316,32 @@ def test_provider_snapshot_populates_resolver_and_fires_discovered_callbacks(
     assert all(entry[1] is None for entry in discovered)
     # Provider name passthrough.
     assert all(entry[2] == "local" for entry in discovered)
+
+
+@pytest.mark.witnesses("machine-size.recorded-size-shown")
+def test_provider_snapshot_carries_each_hosts_recorded_size_into_the_resolver(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    sized_host = DiscoveredHost(
+        host_id=_HOST_ID_1,
+        host_name=HostName("sized"),
+        provider_name=ProviderInstanceName("docker"),
+        host_state=HostState.RUNNING,
+        size=DiscoveredHostSize(cpu_count=4, memory_gb=8.0, disk_gb=None),
+    )
+    unsized_host = _make_host(_HOST_ID_2, HostState.RUNNING)
+    _dispatch(
+        consumer,
+        _observe_envelope(
+            _provider_snapshot(
+                (_make_agent(_AGENT_ID_1), _make_agent(_AGENT_ID_2, _HOST_ID_2)), hosts=(sized_host, unsized_host)
+            )
+        ),
+    )
+
+    resolver = consumer.resolver
+    assert resolver.get_host_size(_HOST_ID_1) == DiscoveredHostSize(cpu_count=4, memory_gb=8.0, disk_gb=None)
+    assert resolver.get_host_size(_HOST_ID_2) is None
 
 
 def test_provider_snapshot_freshness_uses_discovery_finished_at(consumer: EnvelopeStreamConsumer) -> None:

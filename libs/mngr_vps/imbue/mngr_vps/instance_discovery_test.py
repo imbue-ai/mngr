@@ -45,6 +45,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -67,8 +68,11 @@ from imbue.mngr_vps.host_store_test import _LocalFakeOuter
 from imbue.mngr_vps.host_store_test import _make_local_connector
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.instance import _VpsDiscoveryData
+from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.primitives import VpsMemoryMib
+from imbue.mngr_vps.primitives import VpsVcpuCount
 from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
@@ -703,6 +707,42 @@ def test_discover_hosts_caches_a_reachable_stopped_container_host_as_stopped(
 
     assert [host.host_id for host in discovered] == [host_id]
     assert provider.get_host(host_id).get_state() == HostState.STOPPED
+
+
+def test_discover_carries_the_recorded_shape_as_each_hosts_size(
+    provider: _DiscoveryTestProvider,
+) -> None:
+    """A record's instance shape is the size discovery carries; a record without one carries no size."""
+    shaped_id = HostId.generate()
+    shaped_record = VpsHostRecord(
+        certified_host_data=_make_certified_data(shaped_id, "host-shaped"),
+        vps_ip="10.0.0.20",
+        config=VpsHostConfig(
+            vps_instance_id=VpsInstanceId("i-shaped"),
+            region="r",
+            plan="p",
+            shape=VpsInstanceShape(
+                vcpu_count=VpsVcpuCount(4), memory_mib=VpsMemoryMib(8192), root_disk_gb=VpsDiskGb(30)
+            ),
+            container_name="mngr-agent-shaped",
+            volume_name=host_volume_name_for(shaped_id),
+        ),
+    )
+    unshaped_id = HostId.generate()
+    unshaped_record = _make_record(unshaped_id, "host-unshaped", vps_ip="10.0.0.21")
+    provider.hostnames = ["10.0.0.20", "10.0.0.21"]
+    provider.per_vps_records = {
+        "10.0.0.20": _VpsDiscoveryData(records=(shaped_record,), is_running_by_host_id={shaped_id: False}),
+        "10.0.0.21": _VpsDiscoveryData(records=(unshaped_record,), is_running_by_host_id={unshaped_id: False}),
+    }
+
+    result = provider.discover_hosts_and_agents(cg=provider.mngr_ctx.concurrency_group, include_destroyed=True)
+
+    size_by_host_id = {host.host_id: host.size for host in result}
+    assert size_by_host_id == {
+        shaped_id: DiscoveredHostSize(cpu_count=4, memory_gb=8.0, disk_gb=30.0),
+        unshaped_id: None,
+    }
 
 
 def test_discover_hides_unreachable_vps_host_when_not_including_destroyed(

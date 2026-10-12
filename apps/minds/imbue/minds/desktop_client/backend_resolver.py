@@ -29,6 +29,7 @@ from imbue.mngr.api.discovery_events import PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYP
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
@@ -195,6 +196,13 @@ class BackendResolverInterface(MutableModel, ABC):
         Subclasses fed by discovery should override this. Implementations may
         return a short-lived optimistic override set via
         :meth:`set_host_state_override` ahead of discovery catching up.
+        """
+        return None
+
+    def get_host_size(self, host_id: HostId) -> DiscoveredHostSize | None:
+        """The size the host's provider recorded for it, as discovery last reported it; None when unknown.
+
+        Default implementation has no size data and returns None.
         """
         return None
 
@@ -442,6 +450,11 @@ class StaticBackendResolver(BackendResolverInterface):
         frozen=True,
         description="Optional SSH info keyed by agent ID string, for static/remote agents.",
     )
+    host_size_by_host_id: Mapping[str, DiscoveredHostSize] = Field(
+        default_factory=dict,
+        frozen=True,
+        description="Optional recorded size keyed by host ID string, for tests of the size surfaces.",
+    )
 
     def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
         services = self.url_by_agent_and_service.get(str(agent_id))
@@ -460,6 +473,9 @@ class StaticBackendResolver(BackendResolverInterface):
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         return self.ssh_info_by_agent_id.get(str(agent_id))
+
+    def get_host_size(self, host_id: HostId) -> DiscoveredHostSize | None:
+        return self.host_size_by_host_id.get(str(host_id))
 
 
 # Parsing helpers
@@ -483,6 +499,10 @@ class ParsedAgentsResult(FrozenModel):
     host_name_by_host_id: Mapping[str, str] = Field(
         default_factory=dict,
         description="Normalized host name (slug) keyed by host ID string, for hosts whose name is known",
+    )
+    host_size_by_host_id: Mapping[str, DiscoveredHostSize] = Field(
+        default_factory=dict,
+        description="The recorded size keyed by host ID string, for hosts whose provider reported one",
     )
 
 
@@ -1524,6 +1544,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """
         with self._lock:
             return self._resolve_host_state_locked(str(host_id))
+
+    def get_host_size(self, host_id: HostId) -> DiscoveredHostSize | None:
+        with self._lock:
+            return self._agents_result.host_size_by_host_id.get(str(host_id))
 
     def _resolve_host_state_locked(self, host_id_str: str) -> HostState | None:
         """The state of one host, override-aware. Must hold ``self._lock``."""

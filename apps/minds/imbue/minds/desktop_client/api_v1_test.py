@@ -42,6 +42,7 @@ from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
@@ -62,6 +63,7 @@ from imbue.minds.desktop_client.conftest import make_share_probe_result
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_status import status_text_for
+from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
@@ -75,6 +77,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import ChatInWorkspaceResolver
+from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.testing import restic_backup_a_file
@@ -91,9 +94,12 @@ from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _TEST_KEY = "test-minds-api-key"
@@ -148,6 +154,7 @@ class _RecordingAgentCreator(AgentCreator):
         region: str = "",
         cloud_account: str = "",
         instance_type: str = "",
+        machine_size: MachineSizeSelection | None = None,
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
@@ -166,6 +173,7 @@ class _RecordingAgentCreator(AgentCreator):
             "region": region,
             "cloud_account": cloud_account,
             "instance_type": instance_type,
+            "machine_size": machine_size,
             "color": color,
             "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
@@ -1154,6 +1162,64 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
     assert creator.last_call["docker_runtime"] == DockerRuntime.RUNSC
 
 
+@pytest.mark.witnesses("machine-size.create-size-reaches-the-provider")
+def test_create_workspace_threads_the_machine_size_the_mode_takes(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={
+            "git_url": "https://example/repo",
+            "launch_mode": "DOCKER",
+            "cpu_count": 2,
+            "memory_gb": 16,
+            # A docker machine has no data disk to size; a stray value is dropped.
+            "disk_gb": 500,
+        },
+    )
+
+    assert response.status_code == 202
+    assert creator.last_call["machine_size"] == MachineSizeSelection(cpu_count=2, memory_gb=16)
+
+
+def test_create_workspace_passes_no_machine_size_for_a_mode_sized_another_way(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "launch_mode": "VULTR", "cpu_count": 2, "memory_gb": 16},
+    )
+
+    assert response.status_code == 202
+    assert creator.last_call["machine_size"] is None
+
+
+def test_create_workspace_rejects_a_machine_size_below_one(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "launch_mode": "DOCKER", "cpu_count": 0},
+    )
+
+    assert response.status_code == 422
+
+
 def test_timezone_returns_valid_iana_name_or_empty(tmp_path: Path) -> None:
     # The endpoint reports the machine's own timezone, so the value is
     # host-dependent: assert the contract (a loadable IANA name, or "" when
@@ -1702,6 +1768,7 @@ def _build_client(
     http_client: httpx.Client | None = None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
     client_env_config: ClientEnvConfig | None = None,
+    mngr_caller: MngrCaller | None = None,
 ) -> FlaskClient:
     """Build a desktop-client test client with the /api/v1 surface and the given deps."""
     app = create_desktop_client(
@@ -1716,7 +1783,7 @@ def _build_client(
         imbue_cloud_cli=imbue_cloud_cli,
         session_store=session_store,
         system_interface_health_tracker=system_interface_health_tracker,
-        mngr_caller=RecordingMngrCaller(),
+        mngr_caller=mngr_caller if mngr_caller is not None else RecordingMngrCaller(),
         client_env_config=client_env_config,
     )
     return app.test_client()
@@ -3320,6 +3387,230 @@ def test_workspace_restart_spawn_failure_returns_503_and_logs_error(tmp_path: Pa
     assert len(error_records) == 1, error_records
 
 
+_MACHINE_RESIZE_HOST_ID = "host-" + "b" * 32
+
+
+def _resolver_for_machine_resize(
+    agent_id: AgentId, services_id: AgentId, provider_name: str, host_state: HostState
+) -> MngrCliBackendResolver:
+    """A resolver reporting one workspace (with its services peer) on a host of ``provider_name`` in ``host_state``."""
+    return build_resolver_with_system_services(
+        agent_id,
+        services_id,
+        host_id=HostId(_MACHINE_RESIZE_HOST_ID),
+        host_state=host_state,
+        provider_name=ProviderInstanceName(provider_name),
+        workspace_certified_data={"labels": {"is_primary": "true"}},
+    )
+
+
+@pytest.mark.witnesses("machine-size.resize-restarts-a-running-machine")
+def test_machine_size_change_resizes_through_the_provider_and_restarts_a_running_machine(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = _resolver_for_machine_resize(agent_id, AgentId(), "docker", HostState.RUNNING)
+    caller = RecordingMngrCaller()
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=_write_fake_mngr(tmp_path / "bin"),
+        mngr_host_dir=tmp_path / "host",
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        mngr_caller=caller,
+    )
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size",
+        headers=_auth_header(),
+        json={"cpu_count": 2, "memory_gb": 16, "disk_gb": 500},
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {"is_restart_dispatched": True, "operation_id": str(agent_id)}
+    # The provider's own command records the size; a docker machine has no disk to grow.
+    assert caller.calls == [["docker", "resize", _MACHINE_RESIZE_HOST_ID, "--cpus", "2", "--memory", "16g"]]
+    assert _wait_for_restart_worker_and_get_status(client, agent_id)["kind"] == "restart"
+
+
+@pytest.mark.witnesses("machine-size.resize-of-a-stopped-machine-waits")
+def test_machine_size_change_leaves_a_stopped_machine_stopped(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = _resolver_for_machine_resize(agent_id, AgentId(), "lima", HostState.STOPPED)
+    caller = RecordingMngrCaller()
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        mngr_caller=caller,
+    )
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"disk_gb": 200}
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {"is_restart_dispatched": False, "operation_id": None}
+    assert caller.calls == [["lima", "resize", _MACHINE_RESIZE_HOST_ID, "--disk", "200"]]
+    # No restart was dispatched, so no operation record exists to poll.
+    assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
+
+
+@pytest.mark.witnesses("machine-size.unresizable-machines-refuse")
+def test_machine_size_change_refuses_a_machine_its_provider_cannot_resize(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = _resolver_for_machine_resize(agent_id, AgentId(), "modal", HostState.RUNNING)
+    caller = RecordingMngrCaller()
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group, mngr_caller=caller)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"cpu_count": 2}
+    )
+
+    assert response.status_code == 409
+    assert "cannot be resized" in json.loads(response.data)["error"]
+    assert caller.calls == []
+
+
+@pytest.mark.witnesses("machine-size.provider-refusal-is-quoted")
+def test_machine_size_change_quotes_the_providers_refusal(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = _resolver_for_machine_resize(agent_id, AgentId(), "docker", HostState.RUNNING)
+    # A verbose run logs its timeline before the verdict; only the verdict is quoted.
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=1,
+            stderr="DEBUG | Reading the host record\nERROR: Docker refused the size: only 4 CPUs are available",
+            is_mngr_output=True,
+        )
+    )
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        mngr_caller=caller,
+    )
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"cpu_count": 64}
+    )
+
+    assert response.status_code == 502
+    error = json.loads(response.data)["error"]
+    assert (
+        error
+        == "The machine's provider refused the new size: ERROR: Docker refused the size: only 4 CPUs are available"
+    )
+    assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
+
+
+def test_machine_size_change_does_not_quote_the_callers_own_account_as_a_refusal(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = _resolver_for_machine_resize(agent_id, AgentId(), "docker", HostState.RUNNING)
+    # What MngrCaller answers when the warm process died: its own words, not mngr's.
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=1, stderr="mngr warm process exited without returning a result")
+    )
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        mngr_caller=caller,
+    )
+
+    with capture_error_logs() as error_records:
+        response = client.post(
+            f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"cpu_count": 2}
+        )
+
+    assert response.status_code == 502
+    error = json.loads(response.data)["error"]
+    assert "refused" not in error
+    assert "not recorded" in error
+    assert len(error_records) == 1, error_records
+    assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
+
+
+def test_machine_size_change_with_nothing_to_change_is_refused(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = _resolver_for_machine_resize(agent_id, AgentId(), "docker", HostState.RUNNING)
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    # A docker machine takes no disk, so a disk-only request names nothing it can change.
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"disk_gb": 200}
+    )
+
+    assert response.status_code == 400
+    # The refusal names only the dimensions this machine takes.
+    assert json.loads(response.data)["error"] == "Nothing to resize: pass cpu_count or memory_gb."
+
+
+@pytest.mark.witnesses("machine-size.no-resize-under-another-operation")
+def test_machine_size_change_is_refused_under_a_running_operation(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = _resolver_for_machine_resize(agent_id, AgentId(), "docker", HostState.RUNNING)
+    caller = RecordingMngrCaller()
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group, mngr_caller=caller)
+    registry = get_state(client.application).workspace_operation_registry
+    assert registry.start_if_idle(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc), None)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"cpu_count": 2}
+    )
+
+    assert response.status_code == 409
+    assert caller.calls == []
+
+
+class _ResizableWorkspaceOnAnUnparseableHost(StaticBackendResolver):
+    """Static resolver placing every known agent on a docker host whose id is the interface's placeholder."""
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        return AgentDisplayInfo(agent_name=str(agent_id), host_id="localhost", provider_name="docker")
+
+
+def test_machine_size_change_refuses_a_workspace_without_a_host_coordinate(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    resolver = _ResizableWorkspaceOnAnUnparseableHost(url_by_agent_and_service={str(agent_id): {}})
+    caller = RecordingMngrCaller()
+    client = _build_client(tmp_path, resolver, mngr_caller=caller)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"cpu_count": 2}
+    )
+
+    assert response.status_code == 409
+    assert "Cannot resolve a host" in json.loads(response.data)["error"]
+    assert caller.calls == []
+
+
+def test_machine_size_change_requires_bearer(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    resolver = _resolver_for_machine_resize(agent_id, AgentId(), "docker", HostState.RUNNING)
+    client = _build_client(tmp_path, resolver)
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/machine-size", json={"cpu_count": 2})
+
+    assert response.status_code == 401
+
+
 def _wait_for_restart_worker_and_get_status(client: FlaskClient, agent_id: AgentId) -> dict[str, Any]:
     """Tail the restart worker's stored log to its terminal chunk, then fetch the status.
 
@@ -4109,6 +4400,7 @@ class _NameConflictAgentCreator(_RecordingAgentCreator):
         region: str = "",
         cloud_account: str = "",
         instance_type: str = "",
+        machine_size: MachineSizeSelection | None = None,
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,

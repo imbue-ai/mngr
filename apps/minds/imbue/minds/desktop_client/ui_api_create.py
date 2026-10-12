@@ -54,6 +54,7 @@ from imbue.minds.desktop_client.local_prerequisites import LocalBackendPrerequis
 from imbue.minds.desktop_client.local_prerequisites import host_platform_from_system
 from imbue.minds.desktop_client.local_prerequisites import local_launch_mode_for
 from imbue.minds.desktop_client.local_prerequisites import probe_local_prerequisites
+from imbue.minds.desktop_client.machine_size import DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE
 from imbue.minds.desktop_client.minds_config import settle_default_account_id
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
@@ -130,7 +131,18 @@ class CreateRetryPrefill(FrozenModel):
     region: str = Field(description="Chosen region, empty when not applicable")
     cloud_account: str = Field(description="BYOK account name; empty unless the retry targeted one that still exists")
     instance_type: str = Field(description="Chosen machine size, empty when not applicable")
+    cpu_count: int | None = Field(default=None, description="Chosen CPU count, for the modes sized by numbers")
+    memory_gb: int | None = Field(default=None, description="Chosen memory in GB, for the modes sized by numbers")
+    disk_gb: int | None = Field(default=None, description="Chosen data disk in GB, for the modes sized by numbers")
     color: str = Field(description="Accent color of the interrupted attempt")
+
+
+class MachineSizeDefaults(FrozenModel):
+    """The size the create form offers for one compute mode; a None dimension is one the mode does not take."""
+
+    cpu_count: int | None = Field(default=None, description="Default CPU count")
+    memory_gb: int | None = Field(default=None, description="Default memory in GB")
+    disk_gb: int | None = Field(default=None, description="Default data disk in GB")
 
 
 class CreateFormDefaultsResponse(FrozenModel):
@@ -154,6 +166,9 @@ class CreateFormDefaultsResponse(FrozenModel):
         description="Machine-size (value, label) pairs per cloud backend"
     )
     default_instance_type_by_backend: dict[str, str] = Field(description="Default machine size per cloud backend")
+    machine_size_defaults_by_launch_mode: dict[str, MachineSizeDefaults] = Field(
+        description="Default CPUs / memory / disk per compute mode sized by numbers (DOCKER, LIMA, MODAL)"
+    )
     cloud_accounts: tuple[CloudAccountOption, ...] = Field(description="Configured BYOK accounts")
     byok_clouds_enabled: bool = Field(description="Whether the BYOK cloud-accounts feature is enabled")
     git_url: str = Field(description="Default template repository the form is seeded with")
@@ -197,6 +212,9 @@ class CreateAttemptRequestSummary(FrozenModel):
     backup_provider: str = Field(description="Backup provider value")
     region: str = Field(description="Region, empty when the mode has none")
     instance_type: str = Field(description="Machine size, empty when the mode has none")
+    cpu_count: int | None = Field(default=None, description="Chosen CPU count, for the modes sized by numbers")
+    memory_gb: int | None = Field(default=None, description="Chosen memory in GB, for the modes sized by numbers")
+    disk_gb: int | None = Field(default=None, description="Chosen data disk in GB, for the modes sized by numbers")
     repository: str = Field(description="Template repository URL or local path")
     branch: str = Field(description="Requested branch/tag, empty for the repo default")
 
@@ -320,6 +338,9 @@ def _read_retry_prefill(
         region=retry_request.region or "",
         cloud_account=retained_cloud_account,
         instance_type=retry_request.instance_type or "",
+        cpu_count=retry_request.cpu_count,
+        memory_gb=retry_request.memory_gb,
+        disk_gb=retry_request.disk_gb,
         color=retry_request.color or DEFAULT_WORKSPACE_COLOR,
     )
 
@@ -368,6 +389,12 @@ def _handle_create_form_defaults() -> Response:
             "AWS": DEFAULT_AWS_INSTANCE_TYPE,
             "GCP": DEFAULT_GCP_MACHINE_TYPE,
             "AZURE": DEFAULT_AZURE_VM_SIZE,
+        },
+        machine_size_defaults_by_launch_mode={
+            launch_mode.value: MachineSizeDefaults(
+                cpu_count=default_size.cpu_count, memory_gb=default_size.memory_gb, disk_gb=default_size.disk_gb
+            )
+            for launch_mode, default_size in DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE.items()
         },
         cloud_accounts=cloud_accounts,
         byok_clouds_enabled=is_bring_your_own_cloud_enabled(),
@@ -472,6 +499,9 @@ def _request_summary(request_record: PendingCreateAttemptRequest) -> CreateAttem
         backup_provider=request_record.backup_provider.value,
         region=request_record.region,
         instance_type=request_record.instance_type,
+        cpu_count=request_record.cpu_count,
+        memory_gb=request_record.memory_gb,
+        disk_gb=request_record.disk_gb,
         repository=request_record.repo_source,
         branch=request_record.branch,
     )

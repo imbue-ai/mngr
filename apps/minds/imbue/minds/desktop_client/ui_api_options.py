@@ -30,6 +30,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.machine_size import is_machine_disk_resizable_provider
+from imbue.minds.desktop_client.machine_size import is_machine_resizable_provider
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -37,6 +39,7 @@ from imbue.minds.desktop_client.share_grant_validation import PUBLIC_EMAIL_DOMAI
 from imbue.minds.desktop_client.share_targets import resolve_share_target_display_names
 from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
 from imbue.minds.desktop_client.share_targets import split_share_targets
+from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_api_lifecycle import build_ssh_command
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
@@ -45,6 +48,7 @@ from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 
 # App icons are SVG markup authored inside the workspace -- untrusted content
 # headed for the trusted shell's DOM. This is the server-side backstop
@@ -134,22 +138,24 @@ class WorkspaceOptionsData(FrozenModel):
 
 
 class WorkspaceMachineSizeData(FrozenModel):
-    """The read-only machine-size facts the settings page renders for a leased machine.
+    """The machine-size facts the settings page renders for a workspace, whatever its provider.
 
-    ``is_available`` is False when the size cannot be shown (not an
-    imbue_cloud lease, no associated account, or the connector lookup
-    failed); every other field is then absent/None and the page hides the
-    section rather than rendering an error.
+    ``is_available`` is False when the size cannot be shown (the provider
+    reported none, or the imbue_cloud connector lookup failed); every other
+    field is then absent/None and the page hides the section rather than
+    rendering an error. The pending ``target_*`` facts exist only for
+    imbue_cloud, whose resize applies at the machine's next restart.
     """
 
-    is_available: bool = Field(description="Whether machine-size facts could be fetched for this workspace")
-    memory_units: int | None = Field(
-        default=None, description="Current size in units (1 unit = 1GiB machine RAM); None when unknown"
+    is_available: bool = Field(description="Whether machine-size facts could be read for this workspace")
+    cpu_count: int | None = Field(default=None, description="CPUs the machine has; None when unknown or not shown")
+    memory_gb: float | None = Field(default=None, description="Memory in GB; None when unknown")
+    disk_gb: float | None = Field(default=None, description="Data-disk size in GB; None when unknown or uncapped")
+    is_resizable: bool = Field(default=False, description="Whether the settings page can change the machine's size")
+    is_disk_resizable: bool = Field(default=False, description="Whether the data disk can be grown from the page")
+    target_memory_gb: int | None = Field(
+        default=None, description="Pending resize's memory target (applied at the next restart); None when none"
     )
-    target_memory_units: int | None = Field(
-        default=None, description="Pending resize's unit target (applied at the next restart); None when none"
-    )
-    disk_gb: int | None = Field(default=None, description="Current data-disk size in GB; None when unknown")
     target_disk_gb: int | None = Field(
         default=None, description="Pending disk grow's GB target (applied at the next restart); None when none"
     )
@@ -281,11 +287,14 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
 
 
 def _handle_workspace_machine_size(agent_id: str) -> Response:
-    """The read-only machine-size facts for a leased imbue_cloud workspace (specs/slice-fleet).
+    """The machine-size facts for a workspace on any provider.
 
     Served separately from the options data so the settings page renders
-    immediately and the size loads lazily -- fetching it costs a
-    ``mngr imbue_cloud machines show`` round trip to the connector.
+    immediately and the size loads lazily. A local or cloud-VM machine's size
+    is what its provider recorded, as discovery carries it; an imbue_cloud
+    machine's comes from ``mngr imbue_cloud machines show`` (a connector round
+    trip), which also knows about a resize pending its next restart. The
+    imbue_cloud vCPU count does not follow a resize, so it is not shown there.
     """
     if not is_ui_request_authenticated():
         return _json_error_response(401, "Not authenticated")
@@ -296,28 +305,56 @@ def _handle_workspace_machine_size(agent_id: str) -> Response:
 
     unavailable = WorkspaceMachineSizeData(is_available=False)
     state = get_state()
-    session_store = state.session_store
-    imbue_cloud_cli = state.imbue_cloud_cli
     backend_resolver = state.backend_resolver
     info = backend_resolver.get_agent_display_info(parsed_agent_id)
-    is_leased = info is not None and (info.provider_name or "").startswith(_IMBUE_CLOUD_PROVIDER_PREFIX)
-    account = session_store.get_account_for_workspace(agent_id) if session_store else None
-    host_id = _workspace_host_coordinate_for_options(backend_resolver, session_store, agent_id)
-    if not is_leased or account is None or imbue_cloud_cli is None or not host_id:
+    host_id = _workspace_host_coordinate_for_options(backend_resolver, state.session_store, agent_id)
+    if info is None or not host_id:
         return make_response(content=unavailable.model_dump_json(), status_code=200, media_type="application/json")
+    provider_name = info.provider_name or ""
+    if provider_name.startswith(_IMBUE_CLOUD_PROVIDER_PREFIX):
+        data = _imbue_cloud_machine_size(state, agent_id, host_id)
+    else:
+        data = _recorded_machine_size(backend_resolver, HostId(host_id), provider_name)
+    return make_response(content=data.model_dump_json(), status_code=200, media_type="application/json")
 
+
+def _recorded_machine_size(
+    backend_resolver: BackendResolverInterface, host_id: HostId, provider_name: str
+) -> WorkspaceMachineSizeData:
+    """The size discovery carries for the machine's host, with whether this page can change it."""
+    size = backend_resolver.get_host_size(host_id)
+    if size is None:
+        return WorkspaceMachineSizeData(is_available=False)
+    return WorkspaceMachineSizeData(
+        is_available=True,
+        cpu_count=size.cpu_count,
+        memory_gb=size.memory_gb,
+        disk_gb=size.disk_gb,
+        is_resizable=is_machine_resizable_provider(provider_name),
+        is_disk_resizable=is_machine_disk_resizable_provider(provider_name),
+    )
+
+
+def _imbue_cloud_machine_size(state: DesktopClientState, agent_id: str, host_id: str) -> WorkspaceMachineSizeData:
+    """The connector's size facts for the leased machine at ``host_id``, read through the plugin (specs/slice-fleet)."""
+    unavailable = WorkspaceMachineSizeData(is_available=False)
+    session_store = state.session_store
+    imbue_cloud_cli = state.imbue_cloud_cli
+    account = session_store.get_account_for_workspace(agent_id) if session_store else None
+    if account is None or imbue_cloud_cli is None:
+        return unavailable
     machine = imbue_cloud_cli.show_machine(account.email, host_id)
     if machine is None:
-        return make_response(content=unavailable.model_dump_json(), status_code=200, media_type="application/json")
-    data = WorkspaceMachineSizeData(
+        return unavailable
+    # One unit is one GiB of machine RAM.
+    return WorkspaceMachineSizeData(
         is_available=True,
-        memory_units=machine.memory_units,
-        target_memory_units=machine.target_memory_units,
+        memory_gb=machine.memory_units,
         disk_gb=machine.disk_gb,
+        target_memory_gb=machine.target_memory_units,
         target_disk_gb=machine.target_disk_gb,
         is_restart_needed_to_apply=machine.is_restart_needed_to_apply,
     )
-    return make_response(content=data.model_dump_json(), status_code=200, media_type="application/json")
 
 
 def register_options_routes(blueprint: Blueprint) -> None:

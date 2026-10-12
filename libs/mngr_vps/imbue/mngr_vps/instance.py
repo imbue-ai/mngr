@@ -58,6 +58,7 @@ from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
+from imbue.mngr.interfaces.data_types import discovered_host_size_from_resources
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -70,6 +71,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -1767,6 +1769,7 @@ class VpsProvider(BaseProviderInstance):
                     host_id=host_id,
                     host_name=host_name,
                     provider_name=self.name,
+                    size=self._recorded_size(record),
                 )
             )
             # Cache the host object
@@ -1883,6 +1886,7 @@ class VpsProvider(BaseProviderInstance):
                 host_name=host_name,
                 provider_name=self.name,
                 host_state=host_state,
+                size=self._recorded_size(record),
             )
 
             # Build agent refs from live agent data
@@ -2552,15 +2556,26 @@ class VpsProvider(BaseProviderInstance):
         host_record = self._host_record_for_sizing(host.id)
         if host_record is None or host_record.config is None:
             raise HostNotFoundError(self.name, host.id)
-        # CLEANUP: drop the plan-table fallback once no host record predates
-        # shape recording.
-        shape = host_record.config.shape or self._legacy_shape_for_plan(host_record.config.plan)
+        shape = self._recorded_shape(host_record)
         if shape is None:
             raise VpsHostSizeUnknownError(
                 f"Host {host.id} has no recorded instance shape and its plan {host_record.config.plan!r} is not "
                 f"in the {self.config.backend} plan table"
             )
         return host_resources_for_shape(shape)
+
+    def _recorded_shape(self, host_record: VpsHostRecord) -> VpsInstanceShape | None:
+        """The instance shape a host record answers the host's size from, or None when it cannot."""
+        if host_record.config is None:
+            return None
+        # CLEANUP: drop the plan-table fallback once no host record predates
+        # shape recording.
+        return host_record.config.shape or self._legacy_shape_for_plan(host_record.config.plan)
+
+    def _recorded_size(self, host_record: VpsHostRecord) -> DiscoveredHostSize | None:
+        """The size discovery carries for a host record, or None when the record cannot answer it."""
+        shape = self._recorded_shape(host_record)
+        return None if shape is None else discovered_host_size_from_resources(host_resources_for_shape(shape))
 
     def _host_record_for_sizing(self, host_id: HostId) -> VpsHostRecord | None:
         """The host record to answer the host's size from: the one discovery cached, else a fresh lookup.

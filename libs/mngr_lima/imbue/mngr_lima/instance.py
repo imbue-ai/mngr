@@ -43,6 +43,7 @@ from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
+from imbue.mngr.interfaces.data_types import discovered_host_size_from_resources
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
@@ -1400,6 +1401,7 @@ sudo poweroff
                     host_name=host_name,
                     provider_name=self.name,
                     host_state=host_state,
+                    size=discovered_host_size_from_resources(self._recorded_resources(record)),
                 )
             )
 
