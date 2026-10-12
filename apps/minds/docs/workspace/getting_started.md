@@ -51,9 +51,12 @@ minds run
 2. Runs `mngr create` with templates from the repo's `.mngr/settings.toml`
 3. The agent starts in a tmux session with its apps and background services
 
-Nothing sharing-related happens at create time. Publishing is
-workspace-level and you start it later, from the share panel described
-under [Publishing a workspace](#publishing-a-workspace).
+Nothing sharing-related happens at create time unless you tick "Enable
+sharing and web access" in the form's advanced view, which publishes the new
+workspace the moment it exists, exactly as the share panel's switch of the
+same name would. Publishing is workspace-level and you can start or stop it
+later, from the share panel described under
+[Publishing a workspace](#publishing-a-workspace).
 
 ## Accessing your agent
 
@@ -64,9 +67,9 @@ After creation, the agent is accessible at:
 
 ## Publishing a workspace
 
-Publishing is one switch, "Enable sharing", for the whole workspace. It
-lives in the workspace options, in the panel headed "Share" followed by
-the workspace's name. Open that panel from the share button in the titlebar,
+Publishing is one switch, "Enable sharing and web access", for the whole
+workspace. It lives in the workspace options, in the panel headed "Share"
+followed by the workspace's name. Open that panel from the share button in the titlebar,
 or from the Share button inside the workspace. Publishing gives the workspace an address on
 the internet. It admits nobody by itself. The account that published
 the workspace can always open it, with or without a grant.

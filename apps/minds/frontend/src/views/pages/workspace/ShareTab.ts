@@ -23,14 +23,24 @@ import type {
 import { GRANT_ADD_KINDS, toGrantAddKind } from "../../../models/sharePanel";
 import { formatRelativeAgo } from "../../../models/backups";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
+import {
+  renderSwitch,
+  renderSwitchPlaceholder,
+  renderSwitchWord,
+} from "../../components/Switch";
 
 const JUST_ADDED_MS = 6000;
 
 const COPY_FLASH_MS = 1200;
 
-const SHARING_SENTENCE =
-  "Sharing gives this workspace an address on the internet. " +
-  "Only people granted access can open it.";
+// Exported for the create form's toggle, which throws this same switch for a
+// just-created workspace: the two must read alike.
+export const ENABLE_SHARING_LABEL = "Enable sharing and web access";
+
+export const SHARING_SENTENCE =
+  "Sharing gives this workspace an address on the internet, which allows you " +
+  "to access it over the web and on mobile. No one else will get access to " +
+  "your workspace unless you explicitly grant them access.";
 
 const PROVISIONING_SENTENCE =
   "Generating a secure link. This takes a while because we want to protect " +
@@ -112,12 +122,6 @@ const COUNT_BADGE_CLASS =
 const ROW_LEAD_CLASS =
   "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-full";
 
-// The word beside the switch keeps the width of its wider value in every
-// state, so the switch stands still when the word comes or goes.
-const PUBLISH_WORD_CLASS =
-  "type-body text-secondary after:invisible after:block after:h-0 " +
-  "after:content-['Yes']";
-
 export interface ShareTabAttrs {
   share: SharePanelModel;
   workspaceName: string;
@@ -181,16 +185,15 @@ function renderPublishWidget(
     { id: "ws-share-publish", class: "shrink-0 flex flex-col gap-2" },
     [
       m("div", { class: "flex items-center justify-between gap-4" }, [
-        m("h2", { class: "type-heading text-primary" }, "Enable sharing"),
+        m("h2", { class: "type-heading text-primary" }, ENABLE_SHARING_LABEL),
         m("span", { class: "flex shrink-0 items-center gap-2" }, [
           share.isPublicationKnown
             ? renderPublishSwitch(share, local)
             : renderPublishPlaceholder(share),
-          m(
-            "span",
-            { class: PUBLISH_WORD_CLASS },
-            share.isPublicationKnown ? (share.isPublished ? "Yes" : "No") : "",
-          ),
+          renderSwitchWord({
+            id: "ws-share-publish-word",
+            isOn: share.isPublicationKnown ? share.isPublished : null,
+          }),
         ]),
       ]),
       m("p", { class: "type-body text-secondary" }, SHARING_SENTENCE),
@@ -230,39 +233,26 @@ function renderPublishSwitch(
     share.isRevalidating ||
     publishWrite.state === "publishing" ||
     publishWrite.state === "unpublishing";
-  return m("button", {
+  return renderSwitch({
     id: "ws-share-publish-switch",
-    type: "button",
-    role: "switch",
-    "aria-checked": share.isPublished ? "true" : "false",
-    "aria-label": "Enable sharing",
-    ...(isSettling ? { "aria-busy": "true" } : {}),
-    class: isSettling
-      ? "perm-switch shrink-0 is-settling"
-      : "perm-switch shrink-0",
-    onclick: () => {
-      if (share.isPublished) void share.unpublish();
-      else local.isConfirmOpen = true;
+    isOn: share.isPublished,
+    label: ENABLE_SHARING_LABEL,
+    wait: isSettling ? "settling" : null,
+    onFlip: (isOn) => {
+      if (isOn) local.isConfirmOpen = true;
+      else void share.unpublish();
     },
   });
 }
 
-/** What stands where the switch will, while nothing says which way it should
- * point: a switch drawn off before the answer would be read as the answer. The
- * wait spins at the off side with no knob under it; a read that failed with
- * nothing to show leaves the bare track greyed out. */
 function renderPublishPlaceholder(share: SharePanelModel): m.Children {
   const isChecking = share.isCheckingPublication;
-  return m("span", {
+  return renderSwitchPlaceholder({
     id: "ws-share-publish-unknown",
-    role: "status",
-    "aria-label": isChecking
+    isChecking,
+    label: isChecking
       ? "Checking whether sharing is enabled"
       : "Sharing status unknown",
-    ...(isChecking ? { "aria-busy": "true" } : {}),
-    class: isChecking
-      ? "perm-switch shrink-0 is-checking"
-      : "perm-switch shrink-0 is-unknown",
   });
 }
 

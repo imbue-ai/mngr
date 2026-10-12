@@ -308,9 +308,10 @@ class CreateWorkspaceRequest(ApiRequestModel):
     enable_web_access: bool | None = Field(
         default=None,
         description=(
-            "Bring sharing up post-create so the workspace is reachable from the hosted web "
-            "client (default off). Requires an account: every row -- imbue_cloud and local "
-            "docker/lima alike -- runs the desktop share flow with the owner granted."
+            "Publish the workspace right after its create, as the share panel's 'Enable sharing "
+            "and web access' switch would (default off). Requires an account: every row -- "
+            "imbue_cloud and local docker/lima alike -- runs the desktop publish flow, which "
+            "grants nobody."
         ),
     )
 

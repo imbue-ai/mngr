@@ -147,25 +147,28 @@ function pressAdd(root: unknown): void {
 }
 
 describe("ShareTab publish widget", () => {
-  it("heads the switch Enable sharing, reading No, over the sharing sentence", async () => {
+  it("heads the switch Enable sharing and web access, reading No, over the sharing sentence", async () => {
     const share = await readyPanel();
 
     const widget = byId(renderTab(share), "ws-share-publish");
 
     expect(widget).toBeDefined();
-    expect(allText(widget)).toContain("Enable sharing");
+    expect(allText(widget)).toContain("Enable sharing and web access");
     expect(allText(widget)).not.toMatch(/publish/i);
     expect(allText(widget)).toContain(
-      "Sharing gives this workspace an address on the internet. " +
-        "Only people granted access can open it.",
+      "Sharing gives this workspace an address on the internet, which allows you " +
+        "to access it over the web and on mobile. No one else will get access to " +
+        "your workspace unless you explicitly grant them access.",
     );
     const control = byId(widget, "ws-share-publish-switch");
     expect(attrsOf(control as AnyVnode).role).toBe("switch");
-    expect(attrsOf(control as AnyVnode)["aria-label"]).toBe("Enable sharing");
+    expect(attrsOf(control as AnyVnode)["aria-label"]).toBe(
+      "Enable sharing and web access",
+    );
     expect(attrsOf(control as AnyVnode)["aria-checked"]).toBe("false");
     expect(attrsOf(control as AnyVnode)["aria-busy"]).toBeUndefined();
     expect(classTokensOf(control as AnyVnode)).not.toContain("is-settling");
-    expect(allText(widget)).toContain("No");
+    expect(allText(byId(widget, "ws-share-publish-word"))).toBe("No");
   });
 
   it("reads Yes and keeps the sharing sentence once the workspace is published", async () => {
@@ -178,10 +181,11 @@ describe("ShareTab publish widget", () => {
         "aria-checked"
       ],
     ).toBe("true");
-    expect(allText(widget)).toContain("Yes");
+    expect(allText(byId(widget, "ws-share-publish-word"))).toBe("Yes");
     expect(allText(widget)).toContain(
-      "Sharing gives this workspace an address on the internet. " +
-        "Only people granted access can open it.",
+      "Sharing gives this workspace an address on the internet, which allows you " +
+        "to access it over the web and on mobile. No one else will get access to " +
+        "your workspace unless you explicitly grant them access.",
     );
   });
 
@@ -205,7 +209,8 @@ describe("ShareTab publish widget", () => {
       "Checking whether sharing is enabled",
     );
     // The wait is the switch's own: no word beside it and no second spinner.
-    expect(allText(widget)).not.toMatch(/\b(No|Yes|Checking)\b/);
+    expect(allText(byId(widget, "ws-share-publish-word"))).toBe("");
+    expect(allText(widget)).not.toMatch(/\bChecking\b/);
     expect(collectVnodes(widget).some((vnode) => vnode.tag === Spinner)).toBe(
       false,
     );
@@ -237,7 +242,8 @@ describe("ShareTab publish widget", () => {
     expect(classTokensOf(placeholder)).not.toContain("is-checking");
     expect(attrsOf(placeholder)["aria-busy"]).toBeUndefined();
     expect(attrsOf(placeholder)["aria-label"]).toBe("Sharing status unknown");
-    expect(allText(widget)).not.toMatch(/\b(No|Yes|Checking|Unknown)\b/);
+    expect(allText(byId(widget, "ws-share-publish-word"))).toBe("");
+    expect(allText(widget)).not.toMatch(/\b(Checking|Unknown)\b/);
     expect(allText(widget)).toContain("relay down");
     expect(collectVnodes(widget).some((vnode) => vnode.tag === Spinner)).toBe(
       false,
@@ -553,7 +559,9 @@ describe("ShareTab loading skeleton", () => {
     expect(byId(root, "ws-share-empty")).toBeUndefined();
     expect(byId(root, "ws-share-mobile-link")).toBeUndefined();
     expect(allText(root)).not.toContain("Nobody has been granted access yet");
-    expect(allText(root)).not.toContain("Enable sharing and web access");
+    expect(allText(root)).not.toContain(
+      "Enable sharing and web access to access this link on mobile",
+    );
   });
 
   it("skeletons an app's pane on the same terms as the whole workspace's", () => {

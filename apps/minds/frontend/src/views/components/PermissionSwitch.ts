@@ -1,5 +1,6 @@
 import m from "mithril";
 import { Spinner } from "./Spinner";
+import { renderSwitch } from "./Switch";
 
 export interface PermissionSwitchAttrs {
   isOn: boolean;
@@ -27,23 +28,19 @@ export interface PermissionSwitchAttrs {
 export function renderPermissionSwitch(
   attrs: PermissionSwitchAttrs,
 ): m.Children {
-  const { isOn, isBusy, title } = attrs;
+  const { isBusy } = attrs;
   return m("span", { class: "flex shrink-0 items-center gap-2" }, [
     isBusy ? m(Spinner, { size: "sm" }) : null,
     attrs.badge ?? null,
-    m("button", {
-      type: "button",
-      role: "switch",
-      "aria-checked": isOn ? "true" : "false",
-      "aria-label": attrs.label,
-      ...(attrs.describedBy === undefined
-        ? {}
-        : { "aria-describedby": attrs.describedBy }),
-      "data-perm-permission": attrs.permission,
-      class: isBusy ? "perm-switch shrink-0 is-busy" : "perm-switch shrink-0",
-      disabled: isBusy || attrs.isDisabled,
-      ...(title === null ? {} : { title }),
-      onclick: () => attrs.onFlip(!isOn),
+    renderSwitch({
+      isOn: attrs.isOn,
+      label: attrs.label,
+      onFlip: attrs.onFlip,
+      wait: isBusy ? "busy" : null,
+      isDisabled: attrs.isDisabled,
+      title: attrs.title,
+      describedBy: attrs.describedBy,
+      data: { "data-perm-permission": attrs.permission },
     }),
   ]);
 }

@@ -94,8 +94,8 @@ export class CreateFormModel {
   backupApiKeyEnv = "";
   accountId = "";
   runtime = "";
-  // "Enable web access" (default off): bring sharing up post-create so the
-  // workspace is reachable from the hosted web client.
+  // The share panel's "Enable sharing and web access" switch, thrown for the
+  // new workspace right after its create.
   enableWebAccess = false;
   selectedPreset: PresetName | null = "remote";
   isAdvancedOpen = false;

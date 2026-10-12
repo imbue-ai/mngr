@@ -1024,9 +1024,9 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     account_id = str(body.get("account_id", "")).strip()
     is_web_access_enabled = bool(body.get("enable_web_access", False))
     if is_web_access_enabled and not account_id:
-        # Web access is "shared with yourself": without an owning account there
-        # is nobody to grant, so fail fast instead of silently skipping later.
-        return _json_field_error("Web access requires a selected account.", "enable_web_access")
+        # A share is registered under the owning account, so without one there
+        # is nothing to publish.
+        return _json_field_error("Sharing requires a selected account.", "enable_web_access")
     submitted_region = str(body.get("region", "")).strip()
     instance_type = str(body.get("instance_type", "")).strip()
     if instance_type:

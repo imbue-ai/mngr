@@ -837,7 +837,7 @@ def enable_web_access_for_workspace(
 ) -> None:
     """Publish a just-created workspace so it is reachable from /web.
 
-    The create form's "enable web access" toggle: every row -- cloud and local
+    The create form's "Enable sharing and web access" toggle: every row -- cloud and local
     alike -- runs the desktop publish flow, which grants nobody. The owner can
     open what they just created regardless: the in-workspace gateway admits the
     owning account without consulting the grants document at all. (The

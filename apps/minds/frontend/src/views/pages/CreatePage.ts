@@ -34,6 +34,8 @@ import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
 import type { CreateSubmitBody, PresetName } from "./create/form-model";
 import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
 import { VerificationWait } from "./create/verification-wait";
+import { renderSwitch, renderSwitchWord } from "../components/Switch";
+import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
 
 export interface CreatePageAttrs {
   /** `page` (the default) is the routed /create page; `embedded` is the form inside a modal. */
@@ -497,28 +499,26 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
             : null,
         ]),
         m("div", { id: "web-access-row" }, [
-          m("label", { class: "flex items-center gap-2 type-body text-primary cursor-pointer" }, [
-            m("input", {
-              id: "enable_web_access",
-              name: "enable_web_access",
-              type: "checkbox",
-              checked: model.enableWebAccess,
-              onchange: (event: Event) => {
-                model.enableWebAccess = (event.target as HTMLInputElement).checked;
-              },
-            }),
-            "Enable web access",
+          m("div", { class: "flex items-center justify-between gap-3" }, [
+            m(FormLabel, { target: "enable_web_access", inline: true }, ENABLE_SHARING_LABEL),
+            m("span", { class: "flex shrink-0 items-center gap-2" }, [
+              renderSwitch({
+                id: "enable_web_access",
+                isOn: model.enableWebAccess,
+                label: ENABLE_SHARING_LABEL,
+                onFlip: (isOn) => {
+                  model.enableWebAccess = isOn;
+                },
+              }),
+              renderSwitchWord({ id: "web-access-word", isOn: model.enableWebAccess }),
+            ]),
           ]),
-          m(
-            "p",
-            { class: "mt-1 type-helper text-tertiary" },
-            "Make the workspace reachable from the Imbue Studio web client (only you are granted). Requires an account.",
-          ),
+          m("p", { class: "mt-1 type-helper text-tertiary" }, SHARING_SENTENCE),
           model.enableWebAccess && model.accountId === ""
             ? m(
                 "p",
                 { id: "web-access-account-error", class: "mt-1 type-helper text-warning" },
-                "Web access requires a selected account.",
+                "Sharing requires a selected account.",
               )
             : null,
         ]),
