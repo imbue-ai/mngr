@@ -113,7 +113,13 @@ def _clone_agent_to_modal(
     target_agent_name: str,
     env: ModalSubprocessTestEnv,
 ) -> subprocess.CompletedProcess[str]:
-    """Clone an existing agent to a fresh Modal host (different host id from source)."""
+    """Clone an existing agent to a fresh Modal host (different host id from source).
+
+    ``clone`` forwards its arguments to ``create``, which resolves the agent type
+    from an explicit flag, a positional, or a config default -- it does not read
+    the type off the source agent. This sandbox sets no default, so the type is
+    passed explicitly, matching the create helpers above.
+    """
     return subprocess.run(
         [
             "uv",
@@ -122,6 +128,8 @@ def _clone_agent_to_modal(
             "clone",
             source_agent_name,
             f"{target_agent_name}@.modal",
+            "--type",
+            "claude",
             "--yes",
             "--no-connect",
             "--no-ensure-clean",
@@ -285,8 +293,9 @@ def test_claude_agent_provisioning_on_modal(
     # Secondary sanity check: provisioning installed claude. This is an
     # implementation-detail log string (a reword would break it), so it is
     # deliberately not the primary assertion.
+    # The message interpolates the binary name, so it reads "claude", not "Claude".
     combined_output = result.stdout + result.stderr
-    assert "Claude installed successfully" in combined_output or "Claude is already installed" in combined_output, (
+    assert "claude installed successfully" in combined_output or "claude is already installed" in combined_output, (
         f"Expected Claude installation message in output.\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
