@@ -38,7 +38,7 @@ mngr create my-agent@.modal -b --gpu=h100 -b --cpu=2
 | `file` | Path to a Dockerfile for building a custom image | None |
 | `offline` | Block all outbound network access from the sandbox | off |
 | `volume` | Mount a persistent Modal Volume (format: `name:/path`, can be specified multiple times) | None |
-| `docker-build-arg` | Override a Dockerfile ARG default value (format: `KEY=VALUE`, can be specified multiple times) | None |
+| `docker-build-arg` | Set the value of a Dockerfile ARG (format: `KEY=VALUE`, can be specified multiple times) | None |
 
 ### Examples
 

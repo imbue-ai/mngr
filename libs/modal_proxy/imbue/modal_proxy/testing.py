@@ -118,6 +118,12 @@ class FakeImage(ImageInterface):
     streaming_capture_buffer: StringIO | None = Field(
         default=None, description="Where build() streams streamed_build_logs, if anywhere"
     )
+    applied_command_batches: tuple[tuple[str, ...], ...] = Field(
+        default=(), description="The command batches dockerfile_commands() has been called with, in order"
+    )
+    applied_build_args: tuple[Mapping[str, str], ...] = Field(
+        default=(), description="The build args each dockerfile_commands() batch was given, in order"
+    )
 
     def get_object_id(self) -> str:
         return self.image_id
@@ -132,9 +138,17 @@ class FakeImage(ImageInterface):
         *,
         context_dir: Path | None = None,
         secrets: Sequence[SecretInterface] = (),
+        build_args: Mapping[str, str] = {},
     ) -> "ImageInterface":
-        # No-op -- return a new image with a fresh ID to simulate layer caching
-        return self._derive(f"img-{uuid.uuid4().hex}")
+        # No-op apart from the fresh ID, which simulates layer caching.
+        return self.model_copy_update(
+            to_update(self.field_ref().image_id, f"img-{uuid.uuid4().hex}"),
+            to_update(
+                self.field_ref().applied_command_batches,
+                (*self.applied_command_batches, tuple(commands)),
+            ),
+            to_update(self.field_ref().applied_build_args, (*self.applied_build_args, dict(build_args))),
+        )
 
     def build(self, app: AppInterface) -> None:
         if self.streaming_capture_buffer is not None:

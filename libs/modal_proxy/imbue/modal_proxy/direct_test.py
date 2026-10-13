@@ -112,6 +112,7 @@ class _FakeImage(ImageInterface):
         *,
         context_dir: Path | None = None,
         secrets: Sequence[SecretInterface] = (),
+        build_args: Mapping[str, str] = {},
     ) -> "ImageInterface":
         raise NotImplementedError
 

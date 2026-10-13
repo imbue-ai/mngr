@@ -308,7 +308,7 @@ Provider: modal
                           volume name on Modal (created if it doesn't exist). Can be specified
                           multiple times.
     --docker-build-arg KEY=VALUE
-                          Override a Dockerfile ARG default value. For example,
+                          Set the value of a Dockerfile ARG. For example,
                           --docker-build-arg=CLAUDE_CODE_VERSION=2.1.50 sets the CLAUDE_CODE_VERSION
                           ARG during the image build. Can be specified multiple times.
   No start arguments are supported for the modal provider.

@@ -374,6 +374,9 @@ apps/minds/package-lock.json
 # Playwright MCP scratch artifacts (mock screenshots, page snapshots)
 **/.playwright-mcp/
 
+# Playwright's downloaded browser binaries, when PLAYWRIGHT_BROWSERS_PATH points here
+**/.ms-playwright/
+
 # tmr (task-runner) orchestration scratch report
 **/tmr-report/
 

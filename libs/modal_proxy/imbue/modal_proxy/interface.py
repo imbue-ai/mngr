@@ -86,8 +86,14 @@ class ImageInterface(MutableModel, ABC):
         *,
         context_dir: Path | None = None,
         secrets: Sequence[SecretInterface] = (),
+        build_args: Mapping[str, str] = {},
     ) -> "ImageInterface":
-        """Apply Dockerfile commands to this image."""
+        """Apply Dockerfile commands to this image.
+
+        The build_args supply values for the ARG instructions these commands declare,
+        as ``docker build --build-arg`` does. An ARG the commands do not declare is
+        ignored, so every batch of a multi-layer build can be given the same mapping.
+        """
         ...
 
     @abstractmethod

@@ -46,8 +46,8 @@ from imbue.mngr_modal.instance import TAG_HOST_ID
 from imbue.mngr_modal.instance import TAG_HOST_NAME
 from imbue.mngr_modal.instance import TAG_USER_PREFIX
 from imbue.mngr_modal.instance import _build_modal_secrets_from_env
+from imbue.mngr_modal.instance import _parse_dockerfile_build_args
 from imbue.mngr_modal.instance import _parse_volume_spec
-from imbue.mngr_modal.instance import _substitute_dockerfile_build_args
 from imbue.mngr_modal.instance import await_snapshot_endpoint_url
 from imbue.mngr_modal.instance import build_sandbox_tags
 from imbue.mngr_modal.instance import check_host_name_is_unique
@@ -1832,33 +1832,32 @@ def test_parse_build_args_docker_build_arg_default_empty(modal_provider: ModalPr
     assert config.docker_build_args == ()
 
 
-def test_substitute_dockerfile_build_args_replaces_default() -> None:
-    """_substitute_dockerfile_build_args should replace ARG defaults."""
-    dockerfile = 'FROM python:3.11-slim\nARG CLAUDE_CODE_VERSION=""\nRUN echo $CLAUDE_CODE_VERSION'
-    result = _substitute_dockerfile_build_args(dockerfile, ("CLAUDE_CODE_VERSION=2.1.50",))
-    assert 'ARG CLAUDE_CODE_VERSION="2.1.50"' in result
-    assert 'ARG CLAUDE_CODE_VERSION=""' not in result
+def test_parse_dockerfile_build_args_reads_an_arg_whatever_default_it_declares() -> None:
+    """Declaring the key is all the Dockerfile has to do: the ARG's default is never read."""
+    dockerfile = (
+        "FROM python:3.11-slim\n"
+        'ARG CLAUDE_CODE_VERSION=""\n'
+        'ARG NODE_VERSION="24.15.0"\n'
+        "ARG BARE_ARG\n"
+        "RUN echo $CLAUDE_CODE_VERSION $NODE_VERSION $BARE_ARG\n"
+    )
+    assert _parse_dockerfile_build_args(
+        dockerfile, ("CLAUDE_CODE_VERSION=2.1.50", "NODE_VERSION=22.0.0", "BARE_ARG=set")
+    ) == {"CLAUDE_CODE_VERSION": "2.1.50", "NODE_VERSION": "22.0.0", "BARE_ARG": "set"}
 
 
-def test_substitute_dockerfile_build_args_replaces_non_empty_default() -> None:
-    """_substitute_dockerfile_build_args should replace non-empty ARG defaults."""
-    dockerfile = 'FROM python:3.11\nARG MY_VERSION="1.0.0"\n'
-    result = _substitute_dockerfile_build_args(dockerfile, ("MY_VERSION=2.0.0",))
-    assert 'ARG MY_VERSION="2.0.0"' in result
-
-
-def test_substitute_dockerfile_build_args_raises_for_missing_arg() -> None:
-    """_substitute_dockerfile_build_args should raise if ARG is not found."""
+def test_parse_dockerfile_build_args_raises_for_missing_arg() -> None:
+    """_parse_dockerfile_build_args should raise if ARG is not found."""
     dockerfile = "FROM python:3.11-slim\nRUN echo hello\n"
     with pytest.raises(MngrError, match="not found as an ARG instruction"):
-        _substitute_dockerfile_build_args(dockerfile, ("NONEXISTENT_ARG=value",))
+        _parse_dockerfile_build_args(dockerfile, ("NONEXISTENT_ARG=value",))
 
 
-def test_substitute_dockerfile_build_args_raises_for_bad_format() -> None:
-    """_substitute_dockerfile_build_args should raise for non KEY=VALUE format."""
+def test_parse_dockerfile_build_args_raises_for_bad_format() -> None:
+    """_parse_dockerfile_build_args should raise for non KEY=VALUE format."""
     dockerfile = 'FROM python:3.11-slim\nARG FOO=""\n'
     with pytest.raises(MngrError, match="KEY=VALUE format"):
-        _substitute_dockerfile_build_args(dockerfile, ("no-equals-sign",))
+        _parse_dockerfile_build_args(dockerfile, ("no-equals-sign",))
 
 
 _TEST_PROVIDER_NAME = ProviderInstanceName("modal-test")

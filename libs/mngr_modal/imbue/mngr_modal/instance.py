@@ -224,6 +224,10 @@ _SANDBOX_LIVENESS_PROBE_COMMAND: Final[str] = ":"
 
 _SANDBOX_CREATE_ATTEMPT_COUNT: Final[int] = 3
 
+# Dockerfile instructions that write to the image filesystem, and so are the ones worth
+# giving a cached layer of their own.
+_FILESYSTEM_INSTRUCTIONS: Final[frozenset[str]] = frozenset({"RUN", "COPY", "ADD"})
+
 P = ParamSpec("P")
 T = TypeVar("T")
 
@@ -381,7 +385,7 @@ class SandboxConfig(HostConfig):
     )
     docker_build_args: tuple[str, ...] = Field(
         default_factory=tuple,
-        description="Docker build args as KEY=VALUE pairs to substitute into Dockerfile ARG defaults",
+        description="Docker build args as KEY=VALUE pairs, supplied to the image build as docker build --build-arg does",
     )
 
     @property
@@ -1075,8 +1079,10 @@ class ModalProviderInstance(BaseProviderInstance):
         """Build a Modal image.
 
         If dockerfile is provided, builds from that Dockerfile with per-layer caching.
-        Each instruction is applied separately, so if a build fails at step N,
-        steps 1 through N-1 are cached and don't need to be re-run.
+        Instructions are applied in batches, each ending at the instruction that makes
+        its layer worth caching -- or at the end of the Dockerfile, for whatever trails
+        the last such instruction -- so a failed build re-runs from that batch rather
+        than from the start.
 
         Elif base_image is provided (e.g., "python:3.12-slim"), uses that as the
         base. Otherwise uses debian:bookworm-slim.
@@ -1088,9 +1094,9 @@ class ModalProviderInstance(BaseProviderInstance):
         will be read from the current environment and passed to the Modal image build
         process. These are available during Dockerfile RUN commands via --mount=type=secret.
 
-        The docker_build_args parameter is a sequence of KEY=VALUE strings that override
-        ARG defaults in the Dockerfile. For example, passing 'CLAUDE_CODE_VERSION=2.1.50'
-        substitutes the default value of ARG CLAUDE_CODE_VERSION in the Dockerfile.
+        The docker_build_args parameter is a sequence of KEY=VALUE strings supplying values
+        for the Dockerfile's ARG instructions, as docker build --build-arg does. For example,
+        passing 'CLAUDE_CODE_VERSION=2.1.50' builds with that value for ARG CLAUDE_CODE_VERSION.
 
         SSH and tmux setup is handled at runtime in _start_sshd_in_sandbox to
         allow warning if these tools are not pre-installed in the base image.
@@ -1101,9 +1107,6 @@ class ModalProviderInstance(BaseProviderInstance):
 
         if dockerfile is not None:
             dockerfile_contents = dockerfile.read_text()
-            # Substitute docker build args into ARG defaults
-            if docker_build_args:
-                dockerfile_contents = _substitute_dockerfile_build_args(dockerfile_contents, docker_build_args)
             effective_context_dir = context_dir if context_dir is not None else dockerfile.parent
             image = _build_image_from_dockerfile_contents(
                 dockerfile_contents,
@@ -1111,6 +1114,7 @@ class ModalProviderInstance(BaseProviderInstance):
                 context_dir=effective_context_dir,
                 is_each_layer_cached=True,
                 secrets=modal_secrets,
+                build_args=_parse_dockerfile_build_args(dockerfile_contents, docker_build_args),
             )
         elif base_image:
             image = modal_interface.image_from_registry(base_image)
@@ -3702,43 +3706,60 @@ def _build_modal_secrets_from_env(
 
 
 @pure
-def _substitute_dockerfile_build_args(dockerfile_contents: str, build_args: Sequence[str]) -> str:
-    """Substitute Docker build arg defaults in Dockerfile contents.
+def _parse_dockerfile_build_args(dockerfile_contents: str, build_args: Sequence[str]) -> dict[str, str]:
+    """Parse KEY=VALUE build args into the mapping Modal's builder takes.
 
-    Parses KEY=VALUE pairs from build_args and replaces the default values of
-    matching ARG instructions in the Dockerfile. For example, if build_args
-    contains 'CLAUDE_CODE_VERSION=2.1.50', then 'ARG CLAUDE_CODE_VERSION=""'
-    becomes 'ARG CLAUDE_CODE_VERSION="2.1.50"'.
+    Each key must be declared by an ARG instruction in the Dockerfile, since Docker
+    ignores a build arg no stage declares and the override would silently do nothing.
 
-    Raises MngrError if a build arg is not in KEY=VALUE format or if the ARG
-    is not found in the Dockerfile.
+    Raises MngrError if a build arg is not in KEY=VALUE format or if the ARG is not
+    found in the Dockerfile.
     """
-    result = dockerfile_contents
+    build_args_by_key: dict[str, str] = {}
     for arg_spec in build_args:
         if "=" not in arg_spec:
             raise MngrError(f"Docker build arg must be in KEY=VALUE format, got: {arg_spec}")
         key, value = arg_spec.split("=", 1)
-        # Replace ARG <key>=<anything> or ARG <key> (no default) with ARG <key>="<value>"
-        # Use a lambda replacement to avoid re.sub interpreting backslash sequences in value.
-        # Bind value via default arg to avoid B023 (closure over loop variable).
-        new_result = re.sub(
-            rf"^(ARG\s+{re.escape(key)})\b.*$",
-            lambda m, v=value: f'{m.group(1)}="{v}"',
-            result,
-            flags=re.MULTILINE,
-        )
-        if new_result == result:
+        if not re.search(rf"^ARG\s+{re.escape(key)}\b", dockerfile_contents, flags=re.MULTILINE):
             raise MngrError(
                 f"Docker build arg {key!r} not found as an ARG instruction in the Dockerfile. "
                 "Ensure the Dockerfile contains a matching ARG instruction."
             )
-        result = new_result
-    return result
+        build_args_by_key[key] = value
+    return build_args_by_key
 
 
-# FIXME: this code that breaks dockefiles up into layers really only needs to chunk the layer when we run into a COPY or RUN command (or when we're finished parsing the commands from the file).
-#  Doing that should make things quite a bit faster, but without really sacrificing any debuggability (since commands like ENV and ARG don't really do much)
-#  Specifically, we should execute the dockerfile commands together in modal, where each batch ends with a RUN or COPY command (or the end of the file), rather than doing *EVERY* command separately
+@pure
+def _batch_dockerfile_instructions(instructions: Sequence[Mapping[str, Any]]) -> list[list[str]]:
+    """Group parsed Dockerfile instructions into one batch per cached layer.
+
+    Each batch ends at the ``_FILESYSTEM_INSTRUCTIONS`` member that makes it worth
+    caching, so a failed build re-runs from that step rather than from the start, or at
+    the end of the Dockerfile for whatever trails the last of them.
+
+    Modal applies a batch as its own build stage -- ``FROM <previous layer>`` followed by
+    the batch -- and Docker scopes an ``ARG`` to the stage that declares it. Each ``ARG``
+    is therefore repeated at the head of every later batch, so that a build arg stays in
+    scope for the rest of the build. ``ENV`` needs no such repetition: it is image config,
+    which the next stage inherits.
+    """
+    batches: list[list[str]] = []
+    carried_args: list[str] = []
+    current: list[Mapping[str, Any]] = []
+    for instr in instructions:
+        if instr["instruction"] == "COMMENT":
+            continue
+        current.append(instr)
+        if instr["instruction"] in _FILESYSTEM_INSTRUCTIONS:
+            batches.append([*carried_args, *(x["content"] for x in current)])
+            carried_args = [*carried_args, *(x["content"] for x in current if x["instruction"] == "ARG")]
+            current = []
+    # A trailing run of nothing but ARGs has no instruction left to supply.
+    if any(x["instruction"] != "ARG" for x in current):
+        batches.append([*carried_args, *(x["content"] for x in current)])
+    return batches
+
+
 def _build_image_from_dockerfile_contents(
     dockerfile_contents: str,
     *,
@@ -3747,25 +3768,33 @@ def _build_image_from_dockerfile_contents(
     context_dir: Path | None = None,
     # starting image; if not provided, uses FROM instruction in the dockerfile
     initial_image: ImageInterface | None = None,
-    # if True, apply each instruction separately for per-layer caching; if False, apply
+    # if True, apply the instructions in batches for per-layer caching; if False, apply
     # all instructions at once (faster but no intermediate caching on failure)
     is_each_layer_cached: bool = True,
     # Secrets to make available during Dockerfile RUN commands
     secrets: Sequence[SecretInterface] = (),
+    # Values for the Dockerfile's ARG instructions, as docker build --build-arg supplies them
+    build_args: Mapping[str, str] = {},
 ) -> ImageInterface:
     """Build a Modal image from Dockerfile contents with optional per-layer caching.
 
-    When is_each_layer_cached=True (the default), each instruction is applied separately,
-    allowing Modal to cache intermediate layers. This means if a build fails at step N,
-    steps 1 through N-1 don't need to be re-run. Multistage dockerfiles are not supported.
+    When is_each_layer_cached=True (the default), the instructions are applied in the
+    batches ``_batch_dockerfile_instructions`` groups them into, allowing Modal to cache
+    intermediate layers. This means a failed build re-runs from the batch that failed
+    rather than from the start. Multistage dockerfiles are not supported.
 
     Secrets are passed to dockerfile_commands and are available during RUN commands
     via --mount=type=secret,id=<env_var_name>.
+
+    The build_args go to every batch, since Docker ignores a build arg the batch does not
+    declare and an ARG in scope can be declared by any of them. They also go to the parser,
+    which is what resolves an ARG the ``FROM`` line interpolates: that one selects the base
+    image rather than appearing in any batch.
     """
     # DockerfileParser writes to a file, so use a temp directory to avoid conflicts
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpfile = Path(tmpdir) / "Dockerfile"
-        dfp = DockerfileParser(str(tmpfile))
+        dfp = DockerfileParser(str(tmpfile), build_args=dict(build_args))
         dfp.content = dockerfile_contents
 
         assert not dfp.is_multistage, "Multistage Dockerfiles are not supported yet"
@@ -3788,13 +3817,12 @@ def _build_image_from_dockerfile_contents(
             secrets_list = list(secrets)
             expanded_context_dir = context_dir.expanduser() if context_dir is not None else None
             if is_each_layer_cached:
-                for instr in instructions:
-                    if instr["instruction"] == "COMMENT":
-                        continue
+                for batch in _batch_dockerfile_instructions(instructions):
                     modal_image = modal_image.dockerfile_commands(
-                        [instr["content"]],
+                        batch,
                         context_dir=expanded_context_dir,
                         secrets=secrets_list,
+                        build_args=build_args,
                     )
             else:
                 # The downside of doing them all at once is that if any one fails,
@@ -3803,6 +3831,7 @@ def _build_image_from_dockerfile_contents(
                     [x["content"] for x in instructions if x["instruction"] != "COMMENT"],
                     context_dir=expanded_context_dir,
                     secrets=secrets_list,
+                    build_args=build_args,
                 )
 
         return modal_image

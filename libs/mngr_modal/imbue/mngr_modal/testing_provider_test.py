@@ -85,7 +85,6 @@ from imbue.mngr_modal.instance import _build_image_from_dockerfile_contents
 from imbue.mngr_modal.instance import _build_modal_secrets_from_env
 from imbue.mngr_modal.instance import _build_modal_volumes
 from imbue.mngr_modal.instance import _parse_volume_spec
-from imbue.mngr_modal.instance import _substitute_dockerfile_build_args
 from imbue.mngr_modal.plugin import register_provider_backend
 from imbue.mngr_modal.routes.deployment import deploy_function
 from imbue.mngr_modal.routes.deployment import ensure_function_deployed
@@ -2766,26 +2765,6 @@ def test_build_modal_secrets_from_env_missing_var(testing_modal: FakeModalInterf
         _build_modal_secrets_from_env(["DEFINITELY_NOT_SET_VAR_12345"], testing_modal)
 
 
-# _substitute_dockerfile_build_args Tests
-
-
-def test_substitute_dockerfile_build_args() -> None:
-    dockerfile = 'FROM debian\nARG VERSION="1.0"\nRUN echo $VERSION\n'
-    result = _substitute_dockerfile_build_args(dockerfile, ["VERSION=2.0"])
-    assert 'ARG VERSION="2.0"' in result
-
-
-def test_substitute_dockerfile_build_args_not_found() -> None:
-    dockerfile = "FROM debian\nRUN echo hello\n"
-    with pytest.raises(MngrError, match="not found as an ARG"):
-        _substitute_dockerfile_build_args(dockerfile, ["MISSING_ARG=value"])
-
-
-def test_substitute_dockerfile_build_args_bad_format() -> None:
-    with pytest.raises(MngrError, match="KEY=VALUE"):
-        _substitute_dockerfile_build_args("FROM debian", ["bad_format"])
-
-
 # _build_image_from_dockerfile_contents Tests
 
 
@@ -2798,19 +2777,140 @@ def test_build_image_from_dockerfile_contents(
         modal_interface=testing_provider._modal_interface,
         is_each_layer_cached=True,
     )
-    assert image.get_object_id() is not None
+    assert isinstance(image, FakeImage)
+    assert image.applied_command_batches == (("RUN echo hello\n",), ("RUN echo world\n",))
+
+
+def test_build_image_from_dockerfile_batches_each_layer_up_to_a_filesystem_instruction(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    """Instructions that touch no files ride along with the next RUN, COPY or ADD."""
+    dockerfile_contents = (
+        "FROM debian:bookworm-slim\n"
+        'ENV PATH="/opt/bin:$PATH"\n'
+        "WORKDIR /code\n"
+        "RUN echo first\n"
+        "RUN echo second\n"
+        "LABEL stage=sources\n"
+        "COPY . /code/\n"
+        "ADD payload.tar.gz /opt/\n"
+        'CMD ["sleep", "1"]\n'
+    )
+    image = _build_image_from_dockerfile_contents(
+        dockerfile_contents,
+        modal_interface=testing_provider._modal_interface,
+        is_each_layer_cached=True,
+    )
+    assert isinstance(image, FakeImage)
+    assert image.applied_command_batches == (
+        ('ENV PATH="/opt/bin:$PATH"\n', "WORKDIR /code\n", "RUN echo first\n"),
+        ("RUN echo second\n",),
+        ("LABEL stage=sources\n", "COPY . /code/\n"),
+        ("ADD payload.tar.gz /opt/\n",),
+        ('CMD ["sleep", "1"]\n',),
+    )
+
+
+def test_build_image_from_dockerfile_keeps_a_build_arg_in_scope_for_later_layers(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    """Modal builds each batch as its own stage, which drops an ARG unless it is redeclared."""
+    dockerfile_contents = (
+        "FROM debian:bookworm-slim\n"
+        'ARG NODE_VERSION="24.15.0"\n'
+        "RUN echo $NODE_VERSION\n"
+        "RUN echo again $NODE_VERSION\n"
+        "ENV NODE_VERSION=${NODE_VERSION}\n"
+    )
+    image = _build_image_from_dockerfile_contents(
+        dockerfile_contents,
+        modal_interface=testing_provider._modal_interface,
+        is_each_layer_cached=True,
+    )
+    assert isinstance(image, FakeImage)
+    assert image.applied_command_batches == (
+        ('ARG NODE_VERSION="24.15.0"\n', "RUN echo $NODE_VERSION\n"),
+        ('ARG NODE_VERSION="24.15.0"\n', "RUN echo again $NODE_VERSION\n"),
+        ('ARG NODE_VERSION="24.15.0"\n', "ENV NODE_VERSION=${NODE_VERSION}\n"),
+    )
+
+
+def test_build_image_from_dockerfile_gives_every_layer_the_build_args(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    """Any batch can be the one declaring an ARG, so each is built with the same values."""
+    dockerfile_contents = 'FROM debian:bookworm-slim\nARG V="1.0"\nRUN echo $V\nRUN echo again\n'
+    image = _build_image_from_dockerfile_contents(
+        dockerfile_contents,
+        modal_interface=testing_provider._modal_interface,
+        is_each_layer_cached=True,
+        build_args={"V": "2.0"},
+    )
+    assert isinstance(image, FakeImage)
+    assert image.applied_build_args == ({"V": "2.0"}, {"V": "2.0"})
+
+
+def test_get_modal_image_definition_builds_with_the_requested_docker_build_args(
+    testing_provider: ModalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """A docker-build-arg reaches the build as a build arg, leaving the Dockerfile text alone."""
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text('FROM debian:bookworm-slim\nARG V="1.0"\nRUN echo $V\n')
+    image = testing_provider._get_modal_image_definition(dockerfile=dockerfile, docker_build_args=("V=2.0",))
+    assert isinstance(image, FakeImage)
+    assert image.applied_build_args == ({"V": "2.0"},)
+    assert image.applied_command_batches == (('ARG V="1.0"\n', "RUN echo $V\n"),)
+
+
+def test_build_image_from_dockerfile_resolves_a_build_arg_the_from_line_interpolates(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    """A build arg that selects the base image is consumed by the parser, not by any batch."""
+    dockerfile_contents = 'ARG BASE="debian:bookworm-slim"\nFROM ${BASE}\n'
+    image = _build_image_from_dockerfile_contents(
+        dockerfile_contents,
+        modal_interface=testing_provider._modal_interface,
+        build_args={"BASE": "ubuntu:24.04"},
+    )
+    assert image.get_object_id().startswith("img-reg-ubuntu-24.04")
+
+
+def test_build_image_from_dockerfile_keeps_the_from_line_default_without_a_build_arg(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    dockerfile_contents = 'ARG BASE="debian:bookworm-slim"\nFROM ${BASE}\n'
+    image = _build_image_from_dockerfile_contents(
+        dockerfile_contents,
+        modal_interface=testing_provider._modal_interface,
+    )
+    assert image.get_object_id().startswith("img-reg-debian-bookworm-slim")
+
+
+def test_build_image_from_dockerfile_spends_no_layer_on_a_trailing_build_arg(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    dockerfile_contents = "FROM debian:bookworm-slim\nRUN echo hello\nARG UNUSED=1\n"
+    image = _build_image_from_dockerfile_contents(
+        dockerfile_contents,
+        modal_interface=testing_provider._modal_interface,
+        is_each_layer_cached=True,
+    )
+    assert isinstance(image, FakeImage)
+    assert image.applied_command_batches == (("RUN echo hello\n",),)
 
 
 def test_build_image_from_dockerfile_no_layer_caching(
     testing_provider: ModalProviderInstance,
 ) -> None:
-    dockerfile_contents = "FROM debian:bookworm-slim\nRUN echo hello\n"
+    dockerfile_contents = "FROM debian:bookworm-slim\nARG V=1\nRUN echo hello\n"
     image = _build_image_from_dockerfile_contents(
         dockerfile_contents,
         modal_interface=testing_provider._modal_interface,
         is_each_layer_cached=False,
     )
-    assert image.get_object_id() is not None
+    assert isinstance(image, FakeImage)
+    assert image.applied_command_batches == (("ARG V=1\n", "RUN echo hello\n"),)
 
 
 # SandboxConfig Tests
@@ -3162,22 +3262,6 @@ def test_get_host_resources_missing_record(
     assert resources.cpu.count == 1
     assert resources.memory_gb == 1.0
     assert resources.cpu.frequency_ghz is None
-
-
-# _get_modal_image_definition with docker_build_args Test
-
-
-def test_get_modal_image_definition_from_dockerfile_with_build_args(
-    testing_provider: ModalProviderInstance,
-    tmp_path: Path,
-) -> None:
-    dockerfile = tmp_path / "Dockerfile"
-    dockerfile.write_text('FROM debian:bookworm-slim\nARG VERSION="1.0"\nRUN echo $VERSION\n')
-    image = testing_provider._get_modal_image_definition(
-        dockerfile=dockerfile,
-        docker_build_args=["VERSION=2.0"],
-    )
-    assert image.get_object_id() is not None
 
 
 # discover_hosts with Empty Result Test

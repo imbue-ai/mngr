@@ -42,10 +42,7 @@ RUN git config --system --add safe.directory '*'
 # and predates flags the minds backup code relies on (e.g.
 # --insecure-no-password, added in 0.17). This is the same restic end users get
 # from the bundled binary, so tests exercise production behavior. Keep the
-# version + SHA256s in sync with download-binaries.js. RESTIC_VERSION is set
-# inline (not a Dockerfile ARG) for the same reason OFFLOAD_VERSION is below:
-# mngr_modal ships each instruction as its own dockerfile_commands call, so an
-# ARG here would expand to empty in the RUN.
+# version + SHA256s in sync with download-binaries.js.
 RUN export RESTIC_VERSION=0.18.1 && \
     ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
     case "$ARCH" in \
@@ -156,11 +153,6 @@ ENV UV_LINK_MODE=copy
 # only cargo-installed tool in the image, so the toolchain has no further
 # purpose. If a future tool needs to be cargo-installed, install it in
 # this same RUN before the cleanup line.
-# OFFLOAD_VERSION is exported inline (not a Dockerfile ARG) because mngr_modal
-# ships each Dockerfile instruction to Modal as its own `dockerfile_commands`
-# call (per-layer caching, see `_build_image_from_dockerfile_contents`). ARGs
-# don't carry across separate calls, so an ARG above would expand to empty in
-# the RUN below and `cargo install offload@` would error.
 RUN export OFFLOAD_VERSION=0.9.14 \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
@@ -209,14 +201,6 @@ RUN if [ -f /code/mngr/current.tar.gz ]; then \
 # the same image state as a from-scratch Dockerfile build. Adding any
 # other RUN step below this line causes drift between the two paths.
 # Don't.
-#
-# The script path is absolute so this RUN works regardless of WORKDIR
-# inheritance. mngr_modal's `_build_image_from_dockerfile_contents`
-# ships each Dockerfile instruction to Modal as its own per-layer
-# `dockerfile_commands` call (FROM base + instruction), and WORKDIR
-# set in an earlier layer does NOT carry through into the next
-# layer's RUN cwd -- it defaults to /. The script itself `cd`s into
-# /code/mngr first thing, so this only matters for finding the script.
 RUN bash /code/mngr/scripts/post-source-setup.sh
 
 # Run idly forever while being responsive to SIGTERM.

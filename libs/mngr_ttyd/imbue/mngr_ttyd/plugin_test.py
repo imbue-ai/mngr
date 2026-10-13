@@ -449,11 +449,8 @@ def test_ensure_command_downloads_the_pinned_version_from_github() -> None:
 def test_dockerfile_pins_the_same_ttyd_version_as_the_plugin() -> None:
     """mngr's image preinstalls ttyd, and its pin must not drift from the one installed here.
 
-    The Dockerfile cannot read TTYD_VERSION. mngr_modal ships each instruction to Modal as its
-    own dockerfile_commands call, so a build ARG expands to empty in the RUN that would use it
-    -- which is why the restic and offload pins next to it are inline literals too. Asserting
-    the two agree is the sync mechanism, as it is for CLAUDE_CODE_VERSION in
-    apps/minds/imbue/minds/test_claude_version_alignment.py.
+    The Dockerfile cannot read TTYD_VERSION, so asserting the two agree is the sync mechanism,
+    as it is for CLAUDE_CODE_VERSION in apps/minds/imbue/minds/test_claude_version_alignment.py.
     """
     dockerfile = importlib.resources.files(mngr_resources).joinpath("Dockerfile").read_text()
 
