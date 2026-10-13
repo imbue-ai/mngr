@@ -9,6 +9,7 @@ import click
 import pytest
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.host_dir import read_root_name
 from imbue.mngr_schedule.plugin import get_files_for_deploy
 from imbue.mngr_schedule.plugin import modify_env_vars_for_deploy
 from imbue.mngr_schedule.plugin import register_cli_commands
@@ -41,11 +42,6 @@ def test_register_cli_commands_returns_schedule_command() -> None:
     assert len(result) == 1
     assert isinstance(result[0], click.Command)
     assert result[0].name == "schedule"
-
-
-# =============================================================================
-# get_files_for_deploy Tests
-# =============================================================================
 
 
 def _make_mngr_ctx_with_profile(profile_dir: Path, default_host_dir: Path) -> MngrContext:
@@ -194,12 +190,55 @@ def test_get_files_for_deploy_returns_empty_when_user_settings_excluded(tmp_path
         mngr_ctx=mngr_ctx, include_user_settings=False, include_project_settings=True, repo_root=repo_root
     )
 
-    # User settings excluded, but project settings has no .mngr/settings.local.toml
     assert result == {}
 
 
-def test_get_files_for_deploy_includes_project_local_settings(tmp_path: Path) -> None:
-    """get_files_for_deploy includes .mngr/settings.local.toml from the repo root."""
+def test_get_files_for_deploy_stages_project_settings_from_a_non_default_root_name_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-default MNGR_ROOT_NAME puts project settings under `.{root_name}`, and they still stage."""
+    monkeypatch.setenv("MNGR_ROOT_NAME", "mngr-changelog-schedule")
+    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile", Path.home() / ".mngr")
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    local_mngr_dir = repo_root / ".mngr-changelog-schedule"
+    local_mngr_dir.mkdir()
+    local_config = local_mngr_dir / "settings.local.toml"
+    local_config.write_text("[local]\noverride = true\n")
+
+    result = get_files_for_deploy(
+        mngr_ctx=mngr_ctx, include_user_settings=False, include_project_settings=True, repo_root=repo_root
+    )
+
+    staged_path = Path(".mngr-changelog-schedule") / "settings.local.toml"
+    assert staged_path in result
+    assert result[staged_path] == local_config
+
+
+def test_get_files_for_deploy_does_not_read_dot_mngr_under_a_non_default_root_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stray `.mngr` directory is not the project config dir once the root name differs."""
+    monkeypatch.setenv("MNGR_ROOT_NAME", "mngr-changelog-schedule")
+    mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile", Path.home() / ".mngr")
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    stray_dir = repo_root / ".mngr"
+    stray_dir.mkdir()
+    (stray_dir / "settings.local.toml").write_text("[local]\nstray = true\n")
+
+    result = get_files_for_deploy(
+        mngr_ctx=mngr_ctx, include_user_settings=False, include_project_settings=True, repo_root=repo_root
+    )
+
+    assert result == {}
+
+
+def test_get_files_for_deploy_stages_project_settings_from_dot_mngr_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no MNGR_ROOT_NAME the project config dir is `.mngr`, which is the common case."""
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
     mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile", Path.home() / ".mngr")
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
@@ -212,8 +251,9 @@ def test_get_files_for_deploy_includes_project_local_settings(tmp_path: Path) ->
         mngr_ctx=mngr_ctx, include_user_settings=False, include_project_settings=True, repo_root=repo_root
     )
 
-    assert Path(".mngr/settings.local.toml") in result
-    assert result[Path(".mngr/settings.local.toml")] == local_config
+    staged_path = Path(".mngr") / "settings.local.toml"
+    assert staged_path in result
+    assert result[staged_path] == local_config
 
 
 def test_get_files_for_deploy_excludes_project_settings_when_flag_false(tmp_path: Path) -> None:
@@ -221,7 +261,7 @@ def test_get_files_for_deploy_excludes_project_settings_when_flag_false(tmp_path
     mngr_ctx = _make_mngr_ctx_with_profile(tmp_path / "nonexistent-profile", Path.home() / ".mngr")
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    local_mngr_dir = repo_root / ".mngr"
+    local_mngr_dir = repo_root / f".{read_root_name()}"
     local_mngr_dir.mkdir()
     (local_mngr_dir / "settings.local.toml").write_text("[local]\noverride = true\n")
 
@@ -230,11 +270,6 @@ def test_get_files_for_deploy_excludes_project_settings_when_flag_false(tmp_path
     )
 
     assert result == {}
-
-
-# =============================================================================
-# modify_env_vars_for_deploy Tests
-# =============================================================================
 
 
 def test_modify_env_vars_for_deploy_propagates_non_default_root_name(

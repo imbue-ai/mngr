@@ -7,6 +7,8 @@ import click
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.host_dir import deploy_dest_host_dir
+from imbue.mngr.config.host_dir import read_root_name
+from imbue.mngr.config.pre_readers import get_local_config_name
 from imbue.mngr_schedule.cli.commands import schedule
 
 
@@ -29,7 +31,7 @@ def get_files_for_deploy(
     but not provider subdirectories -- those are handled by provider plugins
     via their own get_files_for_deploy implementations.
 
-    Also includes project-local settings (.mngr/settings.local.toml) when
+    Also includes the deployer's project-local settings when
     include_project_settings is True.
     """
     files: dict[Path, Path | str] = {}
@@ -63,12 +65,12 @@ def get_files_for_deploy(
                     files[dest_host_dir / file_path.relative_to(deployer_host_dir)] = file_path
 
     if include_project_settings:
-        # Include unversioned project-local mngr settings.
-        # This file is typically gitignored and contains local overrides.
-        local_config = repo_root / ".mngr" / "settings.local.toml"
+        # MNGR_ROOT_NAME is propagated to the container, so the staged path and the
+        # container's project config dir agree.
+        local_config_name = get_local_config_name(read_root_name())
+        local_config = repo_root / local_config_name
         if local_config.is_file():
-            relative = local_config.relative_to(repo_root)
-            files[Path(str(relative))] = local_config
+            files[local_config_name] = local_config
 
     return files
 
