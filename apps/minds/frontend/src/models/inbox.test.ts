@@ -5,7 +5,7 @@ import { forgetWarmedRequestDetails, warmRequestDetail } from "./requestDetailPr
 import {
   InboxModel,
   expandSharePathHome,
-  isPermissionCheckboxDisabled,
+  isPermissionRowDisabled,
   isSharePathWithinRoots,
   submittedPermissions,
 } from "./inbox";
@@ -165,12 +165,12 @@ describe("share path helpers", () => {
 describe("wildcard exclusivity", () => {
   it("disables specific permissions while the wildcard is checked", () => {
     const checked = new Set(["any"]);
-    expect(isPermissionCheckboxDisabled("slack-read-all", "any", checked)).toBe(
+    expect(isPermissionRowDisabled("slack-read-all", "any", checked)).toBe(
       true,
     );
-    expect(isPermissionCheckboxDisabled("any", "any", checked)).toBe(false);
+    expect(isPermissionRowDisabled("any", "any", checked)).toBe(false);
     expect(
-      isPermissionCheckboxDisabled(
+      isPermissionRowDisabled(
         "slack-read-all",
         "any",
         new Set(["slack-read-all"]),

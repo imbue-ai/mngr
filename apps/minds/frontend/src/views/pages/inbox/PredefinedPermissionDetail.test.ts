@@ -6,7 +6,7 @@ import { DESKTOPS } from "../../../models/workspacePermissions.testing";
 import { Select } from "../../components/FormControls";
 import { PredefinedPermissionDetailView } from "./PredefinedPermissionDetail";
 import type { AnyVnode } from "../../../testing";
-import { classesOf, collectText, collectVnodes, withAttr } from "../../../testing";
+import { attrsOf, classesOf, collectText, collectVnodes, withAttr } from "../../../testing";
 
 const DETAIL: PredefinedPermissionDetail = {
   kind: "predefined",
@@ -125,9 +125,9 @@ function findById(node: unknown, id: string): AnyVnode | undefined {
   return collectVnodes(node).find((vnode) => (vnode.attrs ?? {}).id === id);
 }
 
-function switchInputs(node: unknown): AnyVnode[] {
-  return collectVnodes(node).filter((vnode) =>
-    classesOf(vnode).includes("perm-switch-input"),
+function editorSwitches(node: unknown): AnyVnode[] {
+  return collectVnodes(node).filter(
+    (vnode) => attrsOf(vnode)["data-grant-permission"] !== undefined,
   );
 }
 
@@ -174,7 +174,7 @@ describe("PredefinedPermissionDetailView summary", () => {
 
     expect(findById(body, "permissions-simple-view")).toBeDefined();
     expect(findById(body, "permissions-editor-view")).toBeUndefined();
-    expect(switchInputs(body)).toHaveLength(0);
+    expect(editorSwitches(body)).toHaveLength(0);
     expect(collectText(body)).not.toContain("Extras");
   });
 
@@ -192,7 +192,7 @@ describe("PredefinedPermissionDetailView summary", () => {
     expect(findById(body, "permissions-editor-view")).toBeDefined();
     expect(findById(body, "permissions-simple-view")).toBeUndefined();
     // Every offered permission is now a switch, under its group heading.
-    expect(switchInputs(body)).toHaveLength(SCHEMA_NAMES.length);
+    expect(editorSwitches(body)).toHaveLength(SCHEMA_NAMES.length);
     const text = collectText(body);
     expect(text).toContain("Full access");
     expect(text).toContain("Chat");
@@ -368,11 +368,11 @@ describe("PredefinedPermissionDetailView editor", () => {
       expect(editorText).not.toContain(schema);
     }
     // The wildcard reads as its label, and its schema name survives only as
-    // the checkbox value the grant submits.
+    // the attribute that keys its switch.
     expect(editorText).toContain("Everything (unrestricted)");
     expect(
-      switchInputs(renderEditor(model)).map(
-        (input) => (input.attrs ?? {}).value,
+      editorSwitches(renderEditor(model)).map(
+        (control) => attrsOf(control)["data-grant-permission"],
       ),
     ).toContain("any");
   });
@@ -397,20 +397,20 @@ describe("PredefinedPermissionDetailView editor", () => {
   it("flips a permission through the model and disables the specific rows under the wildcard", () => {
     const model = makeModel();
     const body = renderEditor(model);
-    const readAll = switchInputs(body).find(
-      (input) => (input.attrs ?? {}).value === "slack-read-all",
+    const readAll = editorSwitches(body).find(
+      (control) => attrsOf(control)["data-grant-permission"] === "slack-read-all",
     );
+    expect(attrsOf(readAll as AnyVnode).role).toBe("switch");
+    expect(attrsOf(readAll as AnyVnode)["aria-checked"]).toBe("false");
 
-    ((readAll?.attrs ?? {}).onchange as (event: Event) => void)({
-      target: { checked: true },
-    } as unknown as Event);
+    (attrsOf(readAll as AnyVnode).onclick as () => void)();
     expect(model.checkedPermissions.has("slack-read-all")).toBe(true);
 
     model.checkedPermissions.add("any");
-    const disabled = switchInputs(renderEditor(model)).filter(
-      (input) => (input.attrs ?? {}).disabled === true,
+    const disabled = editorSwitches(renderEditor(model)).filter(
+      (control) => attrsOf(control).disabled === true,
     );
-    expect(disabled.map((input) => (input.attrs ?? {}).value)).toEqual([
+    expect(disabled.map((control) => attrsOf(control)["data-grant-permission"])).toEqual([
       "slack-read-all",
       "slack-chat-read",
       "slack-chat-write",

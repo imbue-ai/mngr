@@ -597,9 +597,9 @@ body:has(#notice-band) .workspace-surface {
 }
 
 /*
- * Toggle switch (the Permissions tab's per-permission control). Drawn
- * entirely in CSS from one state attribute, so the view only flips
- * ``aria-checked`` / ``checked`` and never touches classes: a 44x24 pill
+ * Toggle switch (every on/off control in the app; drawn by
+ * frontend/src/views/components/Switch.ts). Drawn entirely in CSS from one
+ * state attribute, so the view only flips ``aria-checked``: a 44x24 pill
  * whose 20px white knob carries a small accent check when on (empty when
  * off), the track filling with the accent in the on state. The knob is the
  * ::after pseudo-element; the check is a ::before masked to a check glyph so
@@ -607,8 +607,7 @@ body:has(#notice-band) .workspace-surface {
  * knob. Disabled switches fade rather than disappear, so a grant that can't
  * be restored from here is still legible.
  */
-.perm-switch,
-.perm-switch-input {
+.perm-switch {
   position: relative;
   display: inline-block;
   width: 44px;
@@ -620,8 +619,7 @@ body:has(#notice-band) .workspace-surface {
   cursor: pointer;
   transition: background-color 150ms ease;
 }
-.perm-switch::after,
-.perm-switch-input::after {
+.perm-switch::after {
   content: "";
   position: absolute;
   top: 2px;
@@ -636,8 +634,7 @@ body:has(#notice-band) .workspace-surface {
 /* The knob's check glyph: masked so it takes the accent color, sitting over
    the knob (::before paints after ::after here thanks to the explicit
    z-index) and moving with it. Hidden until the switch is on. */
-.perm-switch::before,
-.perm-switch-input::before {
+.perm-switch::before {
   content: "";
   position: absolute;
   z-index: 1;
@@ -655,23 +652,19 @@ body:has(#notice-band) .workspace-surface {
     translate 150ms ease,
     opacity 150ms ease;
 }
-.perm-switch[aria-checked="true"],
-.perm-switch-input:checked {
+.perm-switch[aria-checked="true"] {
   background: var(--c-accent);
 }
 /* The individual ``translate`` property rather than ``transform``, which the
    nested wait below needs free for its rotation. */
-.perm-switch[aria-checked="true"]::after,
-.perm-switch-input:checked::after {
+.perm-switch[aria-checked="true"]::after {
   translate: 20px 0;
 }
-.perm-switch[aria-checked="true"]::before,
-.perm-switch-input:checked::before {
+.perm-switch[aria-checked="true"]::before {
   translate: 20px 0;
   opacity: 1;
 }
-.perm-switch:disabled,
-.perm-switch-input:disabled {
+.perm-switch:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -731,20 +724,10 @@ body:has(#notice-band) .workspace-surface {
 .perm-switch.is-settling[aria-checked="true"] {
   --switch-ring-arc: var(--c-accent);
 }
-.perm-switch:focus-visible,
-.perm-switch-input:focus-visible {
+.perm-switch:focus-visible {
   outline: 2px solid var(--c-accent);
   outline-offset: 2px;
 }
-/* ``.perm-switch-input`` is the checkbox-backed variant for form controls
-   (the grant dialog's Adjust editor): a real ``<input type="checkbox">`` so
-   form semantics -- name/value/checked, and disabled inputs being omitted
-   from submission -- are untouched. */
-.perm-switch-input {
-  appearance: none;
-  -webkit-appearance: none;
-}
-
 /*
  * A permission scope row (Permissions tab and the grant dialog's Adjust
  * editor). On hover the fill is widened 8px past the row's box on both sides

@@ -13,6 +13,7 @@ import {
   FOLDER_SYNC_CONFLICTS,
   folderSyncConflictLabel,
 } from "../../models/workspacePermissions";
+import { renderSwitch } from "./Switch";
 
 /** The right-aligned control on a shared path's setting row.
  *
@@ -155,19 +156,14 @@ export function renderFolderSyncSetting(
       ),
       m("span", { class: "flex shrink-0 items-center gap-2" }, [
         attrs.status ?? null,
-        m("input", {
-          type: "checkbox",
-          role: "switch",
-          class: isBusy
-            ? "perm-switch-input shrink-0 is-busy"
-            : "perm-switch-input shrink-0",
-          checked: attrs.isOn,
-          disabled: isBusy || isUnavailable || lockedTitle !== null,
-          ...(lockedTitle === null ? {} : { title: lockedTitle }),
-          "data-sync-path": attrs.path,
-          "aria-label": `Keep a synchronized copy of ${attrs.path} in the workspace`,
-          onchange: (event: Event) =>
-            attrs.onToggle((event.target as HTMLInputElement).checked),
+        renderSwitch({
+          isOn: attrs.isOn,
+          label: `Keep a synchronized copy of ${attrs.path} in the workspace`,
+          onFlip: attrs.onToggle,
+          wait: isBusy ? "busy" : null,
+          isDisabled: isUnavailable || lockedTitle !== null,
+          title: lockedTitle,
+          data: { "data-sync-path": attrs.path },
         }),
       ]),
     ]),

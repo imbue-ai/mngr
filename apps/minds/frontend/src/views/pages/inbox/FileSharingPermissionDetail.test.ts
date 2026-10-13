@@ -62,7 +62,7 @@ describe("FileSharingPermissionDetailView sync option", () => {
   it("offers the same sync setting the Local files card draws, switched on when the agent asked", () => {
     const body = renderBody(DETAIL);
     expect(syncSwitches(body)).toHaveLength(1);
-    expect(attrsOf(syncSwitches(body)[0]).checked).toBe(true);
+    expect(attrsOf(syncSwitches(body)[0])["aria-checked"]).toBe("true");
     const text = allText(body);
     expect(text).toContain("Keep a synchronized copy in the workspace");
     expect(text).toContain("The agent asked for this.");
@@ -72,7 +72,7 @@ describe("FileSharingPermissionDetailView sync option", () => {
 
   it("says nothing about the agent when the sync was the user's idea", () => {
     const body = renderBody({ ...DETAIL, is_sync_requested: false });
-    expect(attrsOf(syncSwitches(body)[0]).checked).toBe(false);
+    expect(attrsOf(syncSwitches(body)[0])["aria-checked"]).toBe("false");
     expect(allText(body)).not.toContain("The agent asked for this.");
     // Off, so nothing more to configure yet.
     expect(conflictSelects(body)).toHaveLength(0);
@@ -80,7 +80,7 @@ describe("FileSharingPermissionDetailView sync option", () => {
 
   it("drops the clash question from a read-only request, which syncs one way", () => {
     const body = renderBody({ ...DETAIL, access: "READ" });
-    expect(attrsOf(syncSwitches(body)[0]).checked).toBe(true);
+    expect(attrsOf(syncSwitches(body)[0])["aria-checked"]).toBe("true");
     expect(conflictSelects(body)).toHaveLength(0);
     expect(allText(body)).toContain("in one direction");
   });
@@ -91,7 +91,7 @@ describe("FileSharingPermissionDetailView sync option", () => {
     const body = renderBody({ ...DETAIL, sync_unavailable_reason: reason });
     const [toggle] = syncSwitches(body);
     expect(attrsOf(toggle).disabled).toBe(true);
-    expect(attrsOf(toggle).checked).toBe(false);
+    expect(attrsOf(toggle)["aria-checked"]).toBe("false");
     expect(allText(body)).toContain(reason);
   });
 
@@ -104,10 +104,7 @@ describe("FileSharingPermissionDetailView sync option", () => {
   it("carries a flip and a clash choice back to the model", () => {
     const model = makeModel(DETAIL);
     const body = renderBody(DETAIL, model);
-    const flip = attrsOf(syncSwitches(body)[0]).onchange as (
-      event: Event,
-    ) => void;
-    flip({ target: { checked: false } } as unknown as Event);
+    (attrsOf(syncSwitches(body)[0]).onclick as () => void)();
     expect(model.isSharePathSynced).toBe(false);
     const pick = attrsOf(conflictSelects(body)[0]).onchange as (
       event: Event,

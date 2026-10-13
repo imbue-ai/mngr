@@ -13,6 +13,7 @@ import { Notice } from "../../components/Notice";
 import { routeLinkAttrs } from "../../components/route-link";
 import { Select } from "../../components/FormControls";
 import { Spinner } from "../../components/Spinner";
+import { renderSwitch, renderSwitchWord } from "../../components/Switch";
 import { StatusBadge } from "../../components/StatusBadge";
 
 interface AccountCardAttrs {
@@ -297,6 +298,8 @@ function planSection(
   ]);
 }
 
+const EMAIL_NOTIFICATIONS_LABEL = "Receive email notifications?";
+
 /** The account's notification email, on or off. Invitations to shared
  * workspaces ride this switch; the email an account needs, such as a password
  * reset, never does. */
@@ -320,7 +323,11 @@ function notificationSection(
   const isEnabled = preferences.channels.email_enabled;
   return m("div", { class: "flex items-center justify-between gap-4" }, [
     m("div", [
-      m("div", { class: "type-label text-secondary" }, "Email notifications"),
+      m(
+        "div",
+        { class: "type-label text-secondary" },
+        EMAIL_NOTIFICATIONS_LABEL,
+      ),
       m(
         "div",
         { class: "type-helper text-tertiary" },
@@ -330,24 +337,14 @@ function notificationSection(
     ]),
     m("span", { class: "flex shrink-0 items-center gap-2" }, [
       preferences.isWriting ? m(Spinner, { size: "sm" }) : null,
-      m("button", {
-        type: "button",
-        role: "switch",
-        "aria-checked": isEnabled ? "true" : "false",
-        "aria-label": "Email notifications",
-        "data-email-notifications": account.user_id,
-        class: preferences.isWriting
-          ? "perm-switch shrink-0 is-busy"
-          : "perm-switch shrink-0",
-        disabled: preferences.isWriting,
-        onclick: () =>
-          void model.setEmailNotifications(account.user_id, !isEnabled),
+      renderSwitch({
+        isOn: isEnabled,
+        label: EMAIL_NOTIFICATIONS_LABEL,
+        wait: preferences.isWriting ? "busy" : null,
+        data: { "data-email-notifications": account.user_id },
+        onFlip: (isOn) => void model.setEmailNotifications(account.user_id, isOn),
       }),
-      m(
-        "span",
-        { class: "type-body text-secondary" },
-        isEnabled ? "On" : "Off",
-      ),
+      renderSwitchWord({ isOn: isEnabled }),
     ]),
   ]);
 }

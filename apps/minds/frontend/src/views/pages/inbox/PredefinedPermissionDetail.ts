@@ -17,7 +17,7 @@ import type {
 } from "../../../models/inbox";
 import {
   hasNoStoredAccount,
-  isPermissionCheckboxDisabled,
+  isPermissionRowDisabled,
   submittedPermissions,
 } from "../../../models/inbox";
 import {
@@ -28,6 +28,7 @@ import { Select } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
 import { renderPermissionSwitch } from "../../components/PermissionSwitch";
 import { serviceMark } from "../../components/ServiceMark";
+import { renderSwitch } from "../../components/Switch";
 import { PermissionsShell } from "./PermissionsShell";
 
 export interface PredefinedPermissionDetailAttrs {
@@ -154,7 +155,7 @@ function editorRow(
   row: UiPermissionGrantRow,
 ): m.Children {
   const checked = model.checkedPermissions;
-  const isDisabled = isPermissionCheckboxDisabled(
+  const isDisabled = isPermissionRowDisabled(
     row.permission,
     detail.wildcard_permission,
     checked,
@@ -183,16 +184,13 @@ function editorRow(
             )
           : null,
       ]),
-      m("input", {
-        type: "checkbox",
-        name: "permissions",
-        value: row.permission,
-        class: "perm-switch-input shrink-0",
-        checked: checked.has(row.permission),
-        disabled: isDisabled,
-        onchange: (event: Event) => {
-          const target = event.target as HTMLInputElement;
-          if (target.checked) checked.add(row.permission);
+      renderSwitch({
+        isOn: checked.has(row.permission),
+        label: row.label,
+        isDisabled,
+        data: { "data-grant-permission": row.permission },
+        onFlip: (isOn) => {
+          if (isOn) checked.add(row.permission);
           else checked.delete(row.permission);
         },
       }),

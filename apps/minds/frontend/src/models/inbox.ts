@@ -231,7 +231,7 @@ export function isSharePathWithinRoots(
 /** While the wildcard permission is checked, the specific boxes are disabled.
  * They keep their own state, so unticking the wildcard restores the earlier
  * selection; `submittedPermissions` is what keeps that state off the wire. */
-export function isPermissionCheckboxDisabled(
+export function isPermissionRowDisabled(
   permission: string,
   wildcardPermission: string,
   checked: ReadonlySet<string>,
@@ -240,7 +240,7 @@ export function isPermissionCheckboxDisabled(
 }
 
 /** The permissions a predefined grant actually submits. The wildcard is
- * mutually exclusive with the specific ones, and disabling a checkbox does
+ * mutually exclusive with the specific ones, and disabling a row does
  * not unset it: a permission ticked BEFORE the wildcard would otherwise ride
  * along and grant more than the dialog shows. Enforced here, at the only
  * place the set leaves the client, so no click order (and no server-seeded

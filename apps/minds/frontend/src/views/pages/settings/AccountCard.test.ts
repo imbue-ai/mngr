@@ -260,10 +260,37 @@ describe("the email notifications switch", () => {
     const toggle = emailSwitch(root);
     expect(toggle).toBeDefined();
     expect(attrsOf(toggle as AnyVnode)["aria-checked"]).toBe("true");
-    expect(collectText(root).join(" ")).toContain("Email notifications");
+    expect(attrsOf(toggle as AnyVnode)["aria-label"]).toBe(
+      "Receive email notifications?",
+    );
+    expect(collectText(root)).toContain("Receive email notifications?");
+    expect(collectText(root)).toContain("Yes");
+    expect(collectText(root)).not.toContain("On");
     (attrsOf(toggle as AnyVnode).onclick as () => void)();
 
     expect(flips).toEqual([false]);
+  });
+
+  it("reads No beside a switch that is off, and asks for it on when pressed", () => {
+    const model = modelWithChannels({
+      email_enabled: false,
+      in_app_enabled: true,
+    });
+    const flips: boolean[] = [];
+    vi.spyOn(model, "setEmailNotifications").mockImplementation(
+      async (_userId, isEnabled) => {
+        flips.push(isEnabled);
+      },
+    );
+    const root = mountCard(model)();
+
+    const toggle = emailSwitch(root) as AnyVnode;
+    expect(attrsOf(toggle)["aria-checked"]).toBe("false");
+    expect(collectText(root)).toContain("No");
+    expect(collectText(root)).not.toContain("Off");
+    (attrsOf(toggle).onclick as () => void)();
+
+    expect(flips).toEqual([true]);
   });
 
   it("says the settings are unavailable rather than drawing a switch", () => {

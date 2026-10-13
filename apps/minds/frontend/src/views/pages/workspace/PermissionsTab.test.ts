@@ -1679,7 +1679,7 @@ describe("PermissionsTab shared paths", () => {
     expect(text).toContain("Agent directory does not exist");
     // The user still wants this folder synced; the failure is news about it,
     // not a reason to move the switch they set.
-    expect(syncBoxes(root)[0].attrs?.checked).toBe(true);
+    expect(syncBoxes(root)[0].attrs?.["aria-checked"]).toBe("true");
     remove();
   });
 
@@ -1698,8 +1698,7 @@ describe("PermissionsTab shared paths", () => {
   it("posts the path when its sync switch is flipped on", async () => {
     const row = sharedPath();
     const { root, requests, remove } = await renderLocalFiles(permissionsView({ shared_paths: [row] }));
-    const onchange = syncBoxes(root)[0].attrs?.onchange as (event: Event) => void;
-    onchange({ target: { checked: true } } as unknown as Event);
+    (syncBoxes(root)[0].attrs?.onclick as () => void)();
     await settle();
     expect(requests[requests.length - 1]).toEqual({
       url: `/ui/api/workspaces/${AGENT_ID}/folder-syncs/toggle`,
