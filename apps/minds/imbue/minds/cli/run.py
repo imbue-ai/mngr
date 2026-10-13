@@ -663,9 +663,9 @@ def run(
     if mngr_forward_port is None:
         consumer.terminate()
         raise click.ClickException(
-            "`mngr forward` did not report a listening port within "
-            f"{_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS:.0f}s; the plugin likely failed to start. "
-            "Check the logs above for its stderr and retry."
+            "`mngr forward` did not report a listening port (it exited first, or did not report one within "
+            f"{_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS:.0f}s); the plugin likely failed to start. "
+            "Check the logs above for its exit code or stderr and retry."
         )
     logger.info("  mngr forward: https://127.0.0.1:{}", mngr_forward_port)
 

@@ -27,9 +27,13 @@ the fresh snapshot automatically, so this consumer no longer sends ``SIGHUP``.
 
 import json
 import os
+import re
 import secrets
+import signal
 import subprocess
 import threading
+import time
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
@@ -45,6 +49,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
@@ -53,7 +58,9 @@ from imbue.minds.desktop_client.backend_resolver import ServiceDeregisteredRecor
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.errors import EnvelopeStreamConsumerError
+from imbue.minds.utils.secret_redaction import REDACTED_PLACEHOLDER
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
+from imbue.minds.utils.secret_redaction import redact_url_credentials_in_text
 from imbue.mngr.api.discovery_aggregator import AggregatorDelta
 from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -268,6 +275,63 @@ _STDERR_TRACEBACK_CONTINUATION_PREFIXES: Final[tuple[str, ...]] = (
 )
 
 
+# How many relayed stderr messages the unexpected-exit report quotes. A
+# startup failure is one folded traceback plus the few lines before it, so this
+# covers it with room to spare while keeping the report a readable size.
+_STDERR_TAIL_LINE_COUNT: Final[int] = 20
+# A folded report can still be a long line; the exit report only needs enough
+# of each to name the failing step. The whole tail travels as one Sentry value,
+# which `setup_sentry` caps in length, so a full tail must fit under that cap or
+# the newest line -- the one that matters most -- is the one cut.
+_STDERR_TAIL_MAX_LINE_LENGTH: Final[int] = 400
+# Once the process has exited its stdout and stderr reach EOF almost at once;
+# the bound only matters when something else (a grandchild) still holds a pipe
+# open.
+_PIPE_DRAIN_TIMEOUT_SECONDS: Final[float] = 2.0
+_EMAIL_RE: Final[re.Pattern[str]] = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+@pure
+def _scrub_stderr_line(line: str, home_dir: str) -> str:
+    """Strip what a relayed stderr line may carry about the user before it is quoted in an error report.
+
+    The exit report lands in Sentry, so the tail it quotes drops secret flag
+    values the plugin may echo from its argv, URL credentials, email addresses,
+    and the home directory (whose path embeds the username).
+    """
+    secret_flags = "|".join(re.escape(flag) for flag in _SECRET_BEARING_FLAGS)
+    scrubbed = re.sub(rf"({secret_flags})(=|\s+)\S+", rf"\1\2{REDACTED_PLACEHOLDER}", line)
+    scrubbed = redact_url_credentials_in_text(scrubbed)
+    scrubbed = _EMAIL_RE.sub("<email>", scrubbed)
+    if home_dir:
+        scrubbed = scrubbed.replace(home_dir, "~")
+    if len(scrubbed) <= _STDERR_TAIL_MAX_LINE_LENGTH:
+        return scrubbed
+    # Keep both ends: a folded traceback's exception line is at its end.
+    kept_length_per_end = _STDERR_TAIL_MAX_LINE_LENGTH // 2
+    return f"{scrubbed[:kept_length_per_end]}...{scrubbed[-kept_length_per_end:]}"
+
+
+@pure
+def _signal_name_of_exit_code(exit_code: int) -> str | None:
+    """Name the signal that killed a process from its (negative) ``Popen`` exit code; None for an ordinary exit."""
+    if exit_code >= 0:
+        return None
+    try:
+        return signal.Signals(-exit_code).name
+    except ValueError:
+        return str(-exit_code)
+
+
+@pure
+def _describe_exit_code(exit_code: int) -> str:
+    """Render an exit code, naming the signal when the process was killed by one."""
+    signal_name = _signal_name_of_exit_code(exit_code)
+    if signal_name is None:
+        return str(exit_code)
+    return f"{exit_code} (signal={signal_name})"
+
+
 class _ForwardStderrCollapser(MutableModel):
     """Relays the forward's stderr one message per log line, folding tracebacks and counting repeats.
 
@@ -290,6 +354,10 @@ class _ForwardStderrCollapser(MutableModel):
     to wait behind and is relayed at its own exception line, so a non-fatal one
     from a plugin that then goes quiet does not wait on a message that may
     never come.
+
+    The last few relayed messages are also kept, scrubbed, so the
+    unexpected-exit report can quote what the plugin said before it died: the
+    relay itself is at DEBUG and never reaches an error report.
     """
 
     _open_report: list[str] = PrivateAttr(default_factory=list)
@@ -297,6 +365,15 @@ class _ForwardStderrCollapser(MutableModel):
     _is_previous_report_line_indented: bool = PrivateAttr(default=False)
     _last_relayed_report_key: tuple[str, str] | None = PrivateAttr(default=None)
     _suppressed_repeat_count: int = PrivateAttr(default=0)
+    _home_dir: str = PrivateAttr(default_factory=lambda: str(Path.home()))
+    # Appended by the stderr reader thread, read by the lifecycle watcher.
+    _tail_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _tail: deque[str] = PrivateAttr(default_factory=lambda: deque(maxlen=_STDERR_TAIL_LINE_COUNT))
+
+    def get_tail(self) -> tuple[str, ...]:
+        """The last relayed messages, oldest first, scrubbed for quoting in an error report."""
+        with self._tail_lock:
+            return tuple(self._tail)
 
     def feed(self, raw_line: str) -> None:
         """Take one stderr line, relaying or folding it."""
@@ -320,7 +397,7 @@ class _ForwardStderrCollapser(MutableModel):
         # Only consecutive identical reports are counted: a report that recurs
         # after something else was said is news again.
         self._last_relayed_report_key = None
-        logger.debug("mngr forward stderr: {}", stripped)
+        self._relay(stripped)
 
     def flush(self) -> None:
         """Relay whatever is still folded: the stream ended (or the caller is done) and nothing more will close it."""
@@ -361,20 +438,22 @@ class _ForwardStderrCollapser(MutableModel):
         self._relay_suppressed_repeat_count()
         self._last_relayed_report_key = key
         if len(report) == 1:
-            logger.debug("mngr forward stderr: {}", report[0])
+            self._relay(report[0])
         else:
-            logger.debug(
-                "mngr forward stderr: {} [{} lines folded, ending: {}]", report[0], len(report) - 1, report[-1]
-            )
+            self._relay(f"{report[0]} [{len(report) - 1} lines folded, ending: {report[-1]}]")
 
     def _relay_suppressed_repeat_count(self) -> None:
         if self._suppressed_repeat_count == 0:
             return
-        logger.debug(
-            "mngr forward stderr: the previous report repeated {} more time(s)", self._suppressed_repeat_count
-        )
+        self._relay(f"the previous report repeated {self._suppressed_repeat_count} more time(s)")
         self._suppressed_repeat_count = 0
         self._last_relayed_report_key = None
+
+    def _relay(self, message: str) -> None:
+        logger.debug("mngr forward stderr: {}", message)
+        scrubbed = _scrub_stderr_line(message, self._home_dir)
+        with self._tail_lock:
+            self._tail.append(scrubbed)
 
 
 class EnvelopeStreamConsumer(MutableModel):
@@ -453,11 +532,22 @@ class EnvelopeStreamConsumer(MutableModel):
     _process: subprocess.Popen[bytes] | None = PrivateAttr(default=None)
     _has_reported_exit: bool = PrivateAttr(default=False)
     _intentional_shutdown: bool = PrivateAttr(default=False)
-    # Set once the plugin emits its `listening` envelope; `_listening_port`
-    # then holds the port the plugin actually bound. `wait_for_listening`
-    # blocks on the event so `minds run` can learn the port at startup.
-    _listening_event: threading.Event = PrivateAttr(default_factory=threading.Event)
+    # Set once the plugin's port report is settled: it emitted its `listening`
+    # envelope (`_listening_port` then holds the port it actually bound), or
+    # the lifecycle watcher has logged its exit (`_exit_code` then holds the
+    # code), so no port can ever come. `wait_for_listening` blocks on the event
+    # so `minds run` can learn the port at startup.
+    _listening_settled_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _listening_port: int | None = PrivateAttr(default=None)
+    _exit_code: int | None = PrivateAttr(default=None)
+    # When `attach` was handed the freshly-spawned subprocess (monotonic clock).
+    _attached_at_monotonic: float | None = PrivateAttr(default=None)
+    _stderr_collapser: _ForwardStderrCollapser = PrivateAttr(default_factory=_ForwardStderrCollapser)
+    # Set once each reader has hit EOF (the stderr one after flushing), so the
+    # exit report sees a `listening` envelope and the stderr lines the plugin
+    # wrote just before it died.
+    _stdout_drained_event: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _stderr_drained_event: threading.Event = PrivateAttr(default_factory=threading.Event)
 
     def add_on_agent_discovered_callback(self, callback: OnAgentDiscoveredCallback) -> None:
         """Register a callback fired for every observe-stream agent discovery."""
@@ -523,6 +613,7 @@ class EnvelopeStreamConsumer(MutableModel):
         if self._process is not None:
             raise EnvelopeStreamConsumerError("EnvelopeStreamConsumer.attach already called")
         self._process = process
+        self._attached_at_monotonic = time.monotonic()
 
     def start(self, concurrency_group: ConcurrencyGroup) -> None:
         """Start the reader / lifecycle threads for the attached subprocess.
@@ -558,15 +649,29 @@ class EnvelopeStreamConsumer(MutableModel):
         is ready, carrying the port it actually bound (which differs from the
         default when that port was already in use). Returns that port, or
         ``None`` if no ``listening`` envelope arrived within ``timeout``
-        seconds -- e.g. the subprocess died during startup.
+        seconds. A subprocess that exits first (it died during startup) can
+        never report a port, so this returns ``None``, logging the exit code,
+        as soon as the lifecycle watcher has reported the exit rather than
+        waiting out the rest of ``timeout``. Returning only after that report
+        means a caller that then calls ``terminate()`` cannot turn it into an
+        intentional shutdown.
 
         Must be called after ``start()``; otherwise the reader thread that
         consumes the envelope stream is not running and this always times out.
         """
-        if not self._listening_event.wait(timeout=timeout):
+        if not self._listening_settled_event.wait(timeout=timeout):
             return None
         with self._lock:
-            return self._listening_port
+            port = self._listening_port
+        exit_code = self._exit_code
+        if port is None and exit_code is not None:
+            logger.warning(
+                "mngr forward exited with code {} before reporting a listening port; not waiting out "
+                "the rest of the {:.0f}s listen timeout",
+                _describe_exit_code(exit_code),
+                timeout,
+            )
+        return port
 
     def terminate(self) -> None:
         """Stop the plugin subprocess (SIGTERM, then SIGKILL on timeout).
@@ -599,33 +704,43 @@ class EnvelopeStreamConsumer(MutableModel):
         for raw in process.stdout:
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
             self._handle_envelope_line(line)
+        self._stdout_drained_event.set()
 
     def _read_stderr_loop(self) -> None:
         process = self._process
         if process is None or process.stderr is None:
             return
-        collapser = _ForwardStderrCollapser()
+        collapser = self._stderr_collapser
         for raw in process.stderr:
             collapser.feed(raw.decode("utf-8", errors="replace").rstrip("\n"))
         collapser.flush()
+        self._stderr_drained_event.set()
 
     def _wait_and_report_exit(self) -> None:
         process = self._process
         if process is None:
             return
         exit_code = process.wait()
-        # If Imbue Studio asked the subprocess to stop (lifespan shutdown), the exit is
-        # expected -- not a dead pipeline.
-        if self._intentional_shutdown:
-            logger.debug("mngr forward exited with code {} after intentional shutdown", exit_code)
-            return
-        # Any unasked-for exit means the consumer (and thus the discovery
-        # pipeline + traffic proxy) is down. Report it once to the watchdog,
-        # which owns the user-facing surfacing (the app-global BLOCKED screen).
-        if self._has_reported_exit:
-            return
-        self._has_reported_exit = True
-        logger.error("mngr forward exited unexpectedly with code {}", exit_code)
+        self._exit_code = exit_code
+        # The pipes can still hold a `listening` envelope or the traceback
+        # naming the failing step when `wait()` returns; let the readers finish.
+        is_stdout_drained = process.stdout is None or self._stdout_drained_event.wait(_PIPE_DRAIN_TIMEOUT_SECONDS)
+        is_stderr_drained = process.stderr is None or self._stderr_drained_event.wait(_PIPE_DRAIN_TIMEOUT_SECONDS)
+        try:
+            # If Imbue Studio asked the subprocess to stop (lifespan shutdown), the exit is
+            # expected -- not a dead pipeline.
+            if self._intentional_shutdown:
+                logger.debug("mngr forward exited with code {} after intentional shutdown", exit_code)
+                return
+            # Any unasked-for exit means the consumer (and thus the discovery
+            # pipeline + traffic proxy) is down. Report it once to the watchdog,
+            # which owns the user-facing surfacing (the app-global BLOCKED screen).
+            if self._has_reported_exit:
+                return
+            self._has_reported_exit = True
+            self._log_unexpected_exit(exit_code, is_stdout_drained, is_stderr_drained)
+        finally:
+            self._listening_settled_event.set()
         with self._lock:
             callbacks = list(self._on_unexpected_exit_callbacks)
         for callback in callbacks:
@@ -633,6 +748,36 @@ class EnvelopeStreamConsumer(MutableModel):
                 callback(exit_code)
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_unexpected_exit callback failed: {}", e)
+
+    def _log_unexpected_exit(self, exit_code: int, is_stdout_drained: bool, is_stderr_drained: bool) -> None:
+        """Report an unasked-for exit with enough context to tell a startup failure from a runtime crash.
+
+        The classifying facts go in the message itself, which is all a Sentry
+        breadcrumb keeps; the stderr tail travels only as a structured field,
+        because the plugin's lines are free text that would otherwise mangle
+        the event's message.
+        """
+        attached_at = self._attached_at_monotonic
+        seconds_since_spawn = round(time.monotonic() - attached_at, 1) if attached_at is not None else None
+        with self._lock:
+            had_reported_listening = self._listening_port is not None
+        stderr_tail = self._stderr_collapser.get_tail()
+        logger.bind(
+            exit_code=exit_code,
+            signal=_signal_name_of_exit_code(exit_code),
+            had_reported_listening=had_reported_listening,
+            seconds_since_spawn=seconds_since_spawn,
+            is_stdout_drained=is_stdout_drained,
+            is_stderr_drained=is_stderr_drained,
+            stderr_tail="\n".join(stderr_tail),
+        ).error(
+            "mngr forward exited unexpectedly with code {}; had_reported_listening={} seconds_since_spawn={} "
+            "stderr_tail_lines={}",
+            _describe_exit_code(exit_code),
+            had_reported_listening,
+            seconds_since_spawn,
+            len(stderr_tail),
+        )
 
     def _handle_envelope_line(self, line: str) -> None:
         stripped = line.strip()
@@ -990,8 +1135,8 @@ class EnvelopeStreamConsumer(MutableModel):
     def _handle_listening(self, payload: dict[str, Any]) -> None:
         """Record the plugin's bound port from a ``listening`` envelope.
 
-        Fires ``_listening_event`` so a ``wait_for_listening`` caller unblocks.
-        A malformed payload is logged and dropped -- the waiter then times out
+        Fires ``_listening_settled_event`` so a ``wait_for_listening`` caller unblocks.
+        A malformed payload is logged and dropped -- the waiter keeps waiting
         rather than proceeding with a bogus port.
         """
         raw_port = payload.get("port")
@@ -1005,7 +1150,7 @@ class EnvelopeStreamConsumer(MutableModel):
             return
         with self._lock:
             self._listening_port = port
-        self._listening_event.set()
+        self._listening_settled_event.set()
         logger.info("`mngr forward` is listening on port {}", port)
 
 

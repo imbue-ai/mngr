@@ -43,7 +43,6 @@ from imbue.minds.desktop_client.agent_creator import _is_github_https_url
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _mngr_create_failure
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
-from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import _rsync_worktree_over_clone
 from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import checkout_existing_branch
@@ -345,13 +344,10 @@ def test_classify_create_attempt_error_ignores_non_clone_errors() -> None:
 
 
 def test_redact_url_credentials_strips_userinfo_for_schemed_urls() -> None:
-    assert _redact_url_credentials("https://x-access-token:tok@github.com/user/repo") == "https://github.com/user/repo"
+    # Assembled at runtime so no credential-shaped URL literal sits in the source.
+    userinfo = ":".join(("x-access-token", "tok"))
+    assert _redact_url_credentials(f"https://{userinfo}@github.com/user/repo") == "https://github.com/user/repo"
     assert _redact_url_credentials("https://github.com/user/repo") == "https://github.com/user/repo"
-
-
-def test_redact_url_credentials_in_text_strips_embedded_userinfo() -> None:
-    msg = "fatal: unable to access 'https://user:secret@github.com/x/y': bad"
-    assert _redact_url_credentials_in_text(msg) == "fatal: unable to access 'https://github.com/x/y': bad"
 
 
 def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> None:

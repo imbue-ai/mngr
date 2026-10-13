@@ -1,3 +1,4 @@
+import re
 from collections.abc import Collection
 from collections.abc import Sequence
 from typing import Final
@@ -7,6 +8,24 @@ from imbue.imbue_common.pure import pure
 # Placeholder substituted for a secret-bearing flag's value when a command is
 # rendered for logging.
 REDACTED_PLACEHOLDER: Final[str] = "***"
+
+# Matches the userinfo prefix of a schemed URL (the scheme, then a user name
+# with an optional password, then an at sign) embedded anywhere in a free-form
+# string, e.g. a line of git's stderr quoting the remote URL it failed on.
+# Userinfo stops at the first ``/``, ``@``, whitespace, or quote, which are all
+# invalid in the unencoded userinfo and reliably terminate it.
+_URL_CREDENTIALS_IN_TEXT_RE: Final[re.Pattern[str]] = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s'\"]+@")
+
+
+@pure
+def redact_url_credentials_in_text(text: str) -> str:
+    """Strip ``user[:password]@`` userinfo from any ``scheme://...`` URL inside a string.
+
+    The input is arbitrary text (a line of subprocess output, an error
+    message), not a valid URL, so it can't just be urlsplit. SCP-style SSH
+    URLs (``git@host:path``, no scheme) are left alone.
+    """
+    return _URL_CREDENTIALS_IN_TEXT_RE.sub(r"\1", text)
 
 
 @pure

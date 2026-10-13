@@ -1,6 +1,7 @@
 from imbue.minds.utils.secret_redaction import REDACTED_PLACEHOLDER
 from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
+from imbue.minds.utils.secret_redaction import redact_url_credentials_in_text
 
 
 def test_redact_secret_flag_values_masks_space_separated_value() -> None:
@@ -178,3 +179,15 @@ def test_redact_secret_env_assignments_defaults_to_noop() -> None:
     command = ["cmd", "KEY=value"]
 
     assert redact_secret_env_assignments(command) == command
+
+
+def test_redact_url_credentials_in_text_strips_embedded_userinfo() -> None:
+    # Assembled at runtime so no credential-shaped URL literal sits in the source.
+    userinfo = ":".join(("user", "pw"))
+    msg = f"fatal: unable to access 'https://{userinfo}@github.com/x/y': bad"
+    assert redact_url_credentials_in_text(msg) == "fatal: unable to access 'https://github.com/x/y': bad"
+
+
+def test_redact_url_credentials_in_text_leaves_scp_style_ssh_urls_alone() -> None:
+    msg = "cloning git@github.com:x/y.git"
+    assert redact_url_credentials_in_text(msg) == msg

@@ -99,6 +99,7 @@ from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
+from imbue.minds.utils.secret_redaction import redact_url_credentials_in_text
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
@@ -589,26 +590,6 @@ def _redact_url_credentials(url: str) -> str:
     return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
 
 
-# Matches the ``scheme://user[:password]@`` prefix of a URL embedded anywhere
-# in a free-form string (e.g. a line of git's stderr like
-# ``fatal: unable to access 'https://x-access-token:TOKEN@github.com/...': ...``).
-# Userinfo stops at the first ``/``, ``@``, whitespace, or quote, which are all
-# invalid in the unencoded userinfo and reliably terminate it.
-_URL_CREDENTIALS_IN_TEXT_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s'\"]+@")
-
-
-def _redact_url_credentials_in_text(text: str) -> str:
-    """Strip ``user[:password]@`` userinfo from any ``scheme://...`` URL inside a string.
-
-    Used to redact credentials from git's streamed stdout/stderr and from
-    error messages, which often echo the full URL the user passed in. The
-    input is arbitrary text (not a valid URL), so we can't just urlsplit it.
-    SCP-style SSH URLs (``git@host:path``, no scheme) are left alone, matching
-    :func:`_redact_url_credentials`.
-    """
-    return _URL_CREDENTIALS_IN_TEXT_RE.sub(r"\1", text)
-
-
 class _RedactingOutputCallback(FrozenModel):
     """OutputCallback wrapper that scrubs embedded credentials from each line.
 
@@ -620,7 +601,7 @@ class _RedactingOutputCallback(FrozenModel):
     inner: OutputCallback
 
     def __call__(self, line: str, is_stdout: bool) -> None:
-        self.inner(_redact_url_credentials_in_text(line), is_stdout)
+        self.inner(redact_url_credentials_in_text(line), is_stdout)
 
 
 def _is_git_worktree(repo_dir: Path) -> bool:
@@ -749,7 +730,7 @@ def clone_git_repo(
                 break
     if failed is not None:
         step_name, output = failed
-        raise GitCloneError("git {} failed:\n{}".format(step_name, _redact_url_credentials_in_text(output)))
+        raise GitCloneError("git {} failed:\n{}".format(step_name, redact_url_credentials_in_text(output)))
 
 
 _FULL_SHA_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")

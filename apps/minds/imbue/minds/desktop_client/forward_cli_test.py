@@ -8,10 +8,14 @@ internal envelope-line dispatcher to assert dispatching, callback firing,
 and lifecycle gating.
 """
 
+import io
 import json
 import subprocess
 import threading
+import time
+from collections.abc import Iterator
 from collections.abc import Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -20,6 +24,7 @@ from typing import Any
 from typing import cast
 
 import pytest
+from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventId
@@ -31,6 +36,7 @@ from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import _ForwardStderrCollapser
 from imbue.minds.desktop_client.forward_cli import _build_forward_command
 from imbue.minds.desktop_client.forward_cli import _redact_secrets
+from imbue.minds.desktop_client.forward_cli import _scrub_stderr_line
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import make_sleep_tracker
@@ -235,10 +241,10 @@ class _FakeProcess:
     its private ``_process`` attr; we expose just those.
     """
 
-    def __init__(self, pid: int = 12345) -> None:
+    def __init__(self, pid: int = 12345, stderr: bytes | None = None) -> None:
         self.pid = pid
-        self.stdout = None
-        self.stderr = None
+        self.stdout: io.BytesIO | None = None
+        self.stderr = io.BytesIO(stderr) if stderr is not None else None
         self.returncode: int | None = None
         self.terminate_calls = 0
         self.kill_calls = 0
@@ -1376,6 +1382,191 @@ def test_unintentional_subprocess_exit_reports_to_callback() -> None:
     consumer._wait_and_report_exit()
 
     assert reported == [17]
+
+
+@contextmanager
+def _captured_error_records() -> Iterator[list[Any]]:
+    """Collect the loguru ERROR records logged inside the block."""
+    records: list[Any] = []
+    with capture_loguru(level="ERROR"):
+        sink_id = logger.add(lambda message: records.append(message.record), level="ERROR")
+        try:
+            yield records
+        finally:
+            logger.remove(sink_id)
+
+
+def _unexpected_exit_records(consumer: EnvelopeStreamConsumer) -> list[Any]:
+    """Drive the lifecycle watcher synchronously and return the ERROR records it logged."""
+    with _captured_error_records() as records:
+        consumer._wait_and_report_exit()
+    return records
+
+
+def test_unexpected_exit_report_carries_startup_context_and_stderr_tail() -> None:
+    """A plugin that dies during startup is reported as such, quoting the traceback that names the failing step.
+
+    The stderr is read off a real pipe-like stream through the reader loop, so
+    the drain the report waits on is the one production waits on.
+    """
+    consumer = EnvelopeStreamConsumer(resolver=MngrCliBackendResolver())
+    fake = _FakeProcess(
+        stderr=b"".join(
+            line.encode() + b"\n"
+            for line in (
+                "Starting mngr forward",
+                "Traceback (most recent call last):",
+                '  File "x.py"',
+                "OSError: bind",
+            )
+        )
+    )
+    fake.returncode = 1
+    _attach_fake(consumer, fake)
+
+    consumer._read_stderr_loop()
+    records = _unexpected_exit_records(consumer)
+
+    assert len(records) == 1
+    record = records[0]
+    assert record["message"].startswith(
+        "mngr forward exited unexpectedly with code 1; had_reported_listening=False seconds_since_spawn="
+    )
+    assert record["message"].endswith("stderr_tail_lines=2")
+    extra = record["extra"]
+    assert extra["exit_code"] == 1
+    assert extra["signal"] is None
+    assert extra["had_reported_listening"] is False
+    assert extra["seconds_since_spawn"] >= 0.0
+    assert extra["is_stdout_drained"] is True
+    assert extra["is_stderr_drained"] is True
+    assert extra["stderr_tail"] == (
+        "Starting mngr forward\nTraceback (most recent call last): [2 lines folded, ending: OSError: bind]"
+    )
+
+
+def test_unexpected_exit_report_names_the_signal_and_a_prior_listening_report(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """A runtime death by signal reads differently from a startup failure: the signal is named, listening is True."""
+    fake = _FakeProcess()
+    fake.returncode = -9
+    _attach_fake(consumer, fake)
+    _dispatch(consumer, _forward_envelope({"type": "listening", "host": "127.0.0.1", "port": 9137}))
+
+    records = _unexpected_exit_records(consumer)
+
+    assert len(records) == 1
+    assert "with code -9 (signal=SIGKILL); had_reported_listening=True" in records[0]["message"]
+    assert records[0]["extra"]["signal"] == "SIGKILL"
+    assert records[0]["extra"]["had_reported_listening"] is True
+
+
+def test_stderr_tail_keeps_only_the_most_recent_messages() -> None:
+    collapser = _ForwardStderrCollapser()
+    for index in range(30):
+        collapser.feed(f"line {index}")
+
+    assert collapser.get_tail() == tuple(f"line {index}" for index in range(10, 30))
+
+
+def test_stderr_tail_lines_are_scrubbed_of_user_data() -> None:
+    """The tail is quoted into Sentry, so secret flag values, credentials, emails and the home path are dropped."""
+    # Assembled at runtime so no credential-shaped URL literal sits in the source.
+    userinfo = ":".join(("user", "pw"))
+    scrubbed = _scrub_stderr_line(
+        f"Error at /home/someone/.mngr/state for user@example.com via https://{userinfo}@example.com/x "
+        "argv: --preauth-cookie abc123 --browser-bridge-token=def456",
+        home_dir="/home/someone",
+    )
+
+    assert scrubbed == (
+        "Error at ~/.mngr/state for <email> via https://example.com/x "
+        "argv: --preauth-cookie *** --browser-bridge-token=***"
+    )
+
+
+def test_stderr_tail_lines_are_capped_in_length_keeping_both_ends() -> None:
+    """A long folded traceback keeps its headline and the exception line it ends on."""
+    scrubbed = _scrub_stderr_line("Traceback " + "x" * 1000 + " OSError: bind", home_dir="/home/someone")
+
+    assert len(scrubbed) == 403
+    assert scrubbed.startswith("Traceback x")
+    assert scrubbed.endswith("x OSError: bind")
+
+
+def test_wait_for_listening_stops_waiting_once_the_process_has_exited(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """A plugin that died during startup cannot report a port, so the wait ends at the exit, logging its code."""
+    fake = _FakeProcess()
+    fake.returncode = 1
+    fake.stdout = io.BytesIO(b"")
+    _attach_fake(consumer, fake)
+    consumer._read_stdout_loop()
+    _unexpected_exit_records(consumer)
+
+    started = time.monotonic()
+    with capture_loguru(level="WARNING") as log_output:
+        port = consumer.wait_for_listening(timeout=60.0)
+
+    assert port is None
+    assert time.monotonic() - started < 30.0
+    assert "mngr forward exited with code 1 before reporting a listening port" in log_output.getvalue()
+
+
+def test_terminate_after_a_portless_wait_does_not_suppress_the_exit_report(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """`minds run` terminates right after a portless wait; the startup exit must still be reported as unexpected.
+
+    The lifecycle watcher is held in ``wait()`` until after the stdout reader
+    has hit EOF; the wait must still end only once the watcher has reported the
+    exit, or ``terminate()`` would mark it intentional before the watcher saw it.
+    """
+    fake = _FakeProcess()
+    fake.returncode = 1
+    fake.stdout = io.BytesIO(b"")
+    fake.wait_event.clear()
+    _attach_fake(consumer, fake)
+    with _captured_error_records() as records:
+        watcher = threading.Thread(target=consumer._wait_and_report_exit)
+        watcher.start()
+        consumer._read_stdout_loop()
+        threading.Timer(0.2, fake.wait_event.set).start()
+        port = consumer.wait_for_listening(timeout=60.0)
+        consumer.terminate()
+        watcher.join(timeout=10.0)
+
+    assert port is None
+    assert len(records) == 1
+    assert records[0]["message"].startswith("mngr forward exited unexpectedly with code 1;")
+
+
+def test_wait_for_listening_returns_a_port_reported_just_before_the_process_exited(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """An exit seen before the reader has dispatched the `listening` line must not hide the port.
+
+    The watcher starts first and sees the exit at once; it waits for the stdout
+    reader, so both the port and the report's ``had_reported_listening`` reflect
+    the envelope the plugin wrote before dying.
+    """
+    fake = _FakeProcess()
+    fake.returncode = 1
+    fake.stdout = io.BytesIO(
+        _forward_envelope({"type": "listening", "host": "127.0.0.1", "port": 9137}).encode() + b"\n"
+    )
+    _attach_fake(consumer, fake)
+    with _captured_error_records() as records:
+        watcher = threading.Thread(target=consumer._wait_and_report_exit)
+        watcher.start()
+        consumer._read_stdout_loop()
+        watcher.join(timeout=10.0)
+
+    assert consumer.wait_for_listening(timeout=60.0) == 9137
+    assert len(records) == 1
+    assert records[0]["extra"]["had_reported_listening"] is True
 
 
 def test_attach_twice_raises(consumer: EnvelopeStreamConsumer) -> None:
