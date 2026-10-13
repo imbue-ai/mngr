@@ -121,6 +121,7 @@ from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_co
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import complete_onboarding
+from imbue.mngr_claude.claude_config import disable_lsp_recommendations
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import ensure_chat_cancel_tap_keybinding
@@ -369,8 +370,9 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
     auto_dismiss_dialogs_at_startup: bool = Field(
         default=False,
-        description="Automatically dismiss all Claude startup dialogs (trust, effort callout, onboarding) "
-        "before startup. When False, the interactive flow prompts.",
+        description="Automatically dismiss all Claude startup dialogs (trust, effort callout, onboarding) before "
+        "startup. When False, the interactive flow prompts. The cost threshold and the LSP plugin offer are "
+        "switched off regardless of this flag.",
     )
 
     auto_allow_permissions: bool = Field(
@@ -433,8 +435,9 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "isolated and mngr never has to touch your default Claude config. When False, share the user's "
         "$CLAUDE_CONFIG_DIR across all claude agents instead of provisioning a per-agent config dir. In shared "
         "mode mngr still writes to your default Claude config to dismiss the cosmetic startup dialogs (trust, "
-        "onboarding, effort callout, cost threshold) -- honoring auto_dismiss_dialogs_at_startup -- so they don't intercept "
-        "automated input; it never accepts bypass-permissions mode there (that is handled via settings.json). "
+        "onboarding, effort callout) -- honoring auto_dismiss_dialogs_at_startup -- and to switch off the cost "
+        "threshold and the LSP plugin offer, so none of them intercept automated input; it never accepts "
+        "bypass-permissions mode there (that is handled via settings.json). "
         "Credentials stay in sync (which is what Claude subscriptions on macOS need). Only meaningful for local "
         "hosts: a non-local agent always uses an isolated config dir (the user's config and keychain live on the "
         "local machine), so this flag is ignored for remote agents. See the imbue-mngr-claude README for the "
@@ -556,7 +559,13 @@ class ProvisioningContext(FrozenModel):
 
 # Claude Code auto-opens the diff sidebar in wide terminals inside a git repo; a persisted
 # diffSidebarOpen=false is the opt-out, so every agent keeps the transcript at full width.
-_ALWAYS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {"hasAcknowledgedCostThreshold": True, "diffSidebarOpen": False}
+# lspRecommendationDisabled turns off the offer to install a language-server plugin (see
+# claude_config.disable_lsp_recommendations).
+_ALWAYS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {
+    "hasAcknowledgedCostThreshold": True,
+    "diffSidebarOpen": False,
+    "lspRecommendationDisabled": True,
+}
 # First-run *dialog* dismissals (cosmetic startup prompts). Dismissed for an unattended agent
 # OR when the human auto-approved mngr's prompts (--yes) -- neither changes tool permissions.
 _DIALOG_DISMISS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {
@@ -1678,9 +1687,10 @@ class ClaudeCoreAgent(
         """Return the global ``.claude.json`` whose startup-dialog state this agent dismisses.
 
         Both modes record dialog dismissals (trust, onboarding, effort callout, cost
-        threshold) in the user's *global* config -- these are cosmetic first-run prompts,
-        never tool-permission grants (``bypassPermissionsModeAccepted`` is deliberately
-        left untouched; see ``auto_dismiss_claude_dialogs``).
+        threshold) and the LSP plugin offer opt-out in the user's *global* config --
+        these are cosmetic prompts, never tool-permission grants
+        (``bypassPermissionsModeAccepted`` is deliberately left untouched; see
+        ``auto_dismiss_claude_dialogs``).
 
         Isolated mode writes to ``find_user_config_in_isolated_mode`` (the per-agent config dir is
         built from it via ``sync_local``, so it inherits the dismissals). Shared mode
@@ -2052,10 +2062,11 @@ class ClaudeCoreAgent(
 
         In shared mode (``isolate_local_config_dir=False``): mngr still dismisses
         the cosmetic startup dialogs (trust, onboarding, effort callout, cost
-        threshold) directly in the user's global config so they don't intercept
-        tmux input -- writing there is the whole point of shared mode, and these
-        are not tool-permission grants. It still skips per-agent-only work: plugin
-        path sentinel resolution and per-agent config dir setup.
+        threshold) and switches off the LSP plugin offer directly in the user's
+        global config so they don't intercept tmux input -- writing there is the
+        whole point of shared mode, and these are not tool-permission grants. It
+        still skips per-agent-only work: plugin path sentinel resolution and
+        per-agent config dir setup.
         """
         config = self.agent_config
 
@@ -2117,6 +2128,9 @@ class ClaudeCoreAgent(
             # shared mode this targets the user's global config (the file claude
             # actually reads); in isolated mode the per-agent config inherits it.
             acknowledge_cost_threshold(self._dialog_dismissal_config_path())
+            # Likewise the LSP plugin offer: it can only be answered by a
+            # person, and a yes puts a language server behind every session.
+            disable_lsp_recommendations(self._dialog_dismissal_config_path())
 
             # Seed the live model state from the launch settings so the chat
             # model bar is populatable the moment readiness fires (the

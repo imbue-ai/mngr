@@ -16,6 +16,7 @@ from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_co
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import check_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import check_source_directory_trusted
+from imbue.mngr_claude.claude_config import disable_lsp_recommendations
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import ensure_chat_cancel_tap_keybinding
@@ -552,6 +553,42 @@ def test_acknowledge_cost_threshold_handles_empty_config() -> None:
     assert config["hasAcknowledgedCostThreshold"] is True
 
 
+# Tests for disable_lsp_recommendations
+
+
+def test_disable_lsp_recommendations_sets_field() -> None:
+    config_file = find_user_config_in_isolated_mode()
+    config_file.write_text(json.dumps({"projects": {}}, indent=2))
+
+    disable_lsp_recommendations(config_file)
+
+    updated = json.loads(config_file.read_text())
+    assert updated["lspRecommendationDisabled"] is True
+    assert updated["projects"] == {}
+
+
+def test_disable_lsp_recommendations_is_noop_when_already_set() -> None:
+    config_file = find_user_config_in_isolated_mode()
+    backup_file = config_file.with_suffix(".json.bak")
+    config = {"lspRecommendationDisabled": True, "projects": {}}
+    config_file.write_text(json.dumps(config, indent=2))
+    content_before = config_file.read_text()
+
+    disable_lsp_recommendations(config_file)
+
+    assert config_file.read_text() == content_before
+    assert not backup_file.exists()
+
+
+def test_disable_lsp_recommendations_creates_config_when_none_exists() -> None:
+    config_file = find_user_config_in_isolated_mode()
+    assert not config_file.exists()
+
+    disable_lsp_recommendations(config_file)
+
+    assert json.loads(config_file.read_text())["lspRecommendationDisabled"] is True
+
+
 # Tests for check_claude_dialogs_dismissed / auto_dismiss_claude_dialogs
 
 
@@ -625,6 +662,7 @@ def test_auto_dismiss_claude_dialogs_sets_all(tmp_path: Path) -> None:
     assert updated["effortCalloutDismissed"] is True
     assert updated["hasCompletedOnboarding"] is True
     assert updated["hasAcknowledgedCostThreshold"] is True
+    assert updated["lspRecommendationDisabled"] is True
     assert updated["projects"][str(source_path)]["hasTrustDialogAccepted"] is True
     # bypassPermissionsModeAccepted is NOT set (Claude Code resets it;
     # skipDangerousModePermissionPrompt in settings.json handles this instead)

@@ -27,12 +27,14 @@ When isolation is disabled (shared mode):
   `~/.claude` when unset) and is injected into the agent environment so claude
   reads the user's real config.
 - mngr still writes to the user's Claude config to dismiss the cosmetic startup
-  dialogs (trust the work_dir, onboarding, effort callout, cost threshold) so they
-  don't intercept automated input -- prompting interactively, or silently when
-  `auto_dismiss_dialogs_at_startup` is set. It writes these into the file claude actually
-  reads (`$CLAUDE_CONFIG_DIR/.claude.json`, or `~/.claude.json` when unset). It
-  does **not** accept bypass-permissions mode there (that is governed by
-  settings.json), and it does no per-agent settings.json or keychain provisioning.
+  dialogs (trust the work_dir, onboarding, effort callout) so they don't intercept
+  automated input -- prompting interactively, or silently when
+  `auto_dismiss_dialogs_at_startup` is set -- and, whatever that flag says, to
+  switch off the cost threshold and the LSP plugin offer. It writes these into the
+  file claude actually reads (`$CLAUDE_CONFIG_DIR/.claude.json`, or
+  `~/.claude.json` when unset). It does **not** accept bypass-permissions mode
+  there (that is governed by settings.json), and it does no per-agent
+  settings.json or keychain provisioning.
   The user is still responsible for logging in (credentials).
 - The repo-settings sync fields (`sync_repo_settings`, `override_settings_folder`)
   are silently ignored since shared mode has no per-agent dir to write into.

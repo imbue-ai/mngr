@@ -2660,6 +2660,7 @@ def test_provision_shared_mode_dismisses_dialogs_in_global_config_but_not_permis
     assert shared_config["hasCompletedOnboarding"] is True
     assert shared_config["effortCalloutDismissed"] is True
     assert shared_config["hasAcknowledgedCostThreshold"] is True
+    assert shared_config["lspRecommendationDisabled"] is True
     assert shared_config["projects"][str(agent.work_dir.resolve())]["hasTrustDialogAccepted"] is True
 
     # The bypass-permissions grant is never written to the global config.
@@ -6219,7 +6220,11 @@ def test_compute_claude_json_flags_unattended_also_accepts_permission_mode() -> 
 def test_compute_claude_json_flags_attended_no_auto_approve_only_always_on_flags() -> None:
     """An attended agent without --yes gets only the always-on flags: no dialog dismissals, no permission mode."""
     flags = compute_claude_json_flags(ProvisioningContext(is_unattended=False, is_auto_approve=False))
-    assert flags == {"hasAcknowledgedCostThreshold": True, "diffSidebarOpen": False}
+    assert flags == {
+        "hasAcknowledgedCostThreshold": True,
+        "diffSidebarOpen": False,
+        "lspRecommendationDisabled": True,
+    }
 
 
 def test_compute_settings_json_flags_auto_approve_does_not_change_permissions() -> None:

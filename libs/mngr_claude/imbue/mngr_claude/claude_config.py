@@ -427,6 +427,21 @@ def acknowledge_cost_threshold(config_path: Path) -> None:
         logger.trace("Acknowledged cost threshold in Claude config")
 
 
+def disable_lsp_recommendations(config_path: Path) -> None:
+    """Set lspRecommendationDisabled=true in the given config file. No-op if already set.
+
+    Claude Code offers to install a language-server plugin whenever it edits a
+    file whose server binary it finds on PATH. A yes installs the plugin at user
+    scope, so every later session sharing the config dir starts a server that
+    indexes the whole project (pyright holds several hundred MB per session). A
+    tmux-driven agent cannot answer the prompt, and a person answering it in one
+    chat reaches every agent sharing the config, so the recommendation is
+    switched off outright.
+    """
+    if _set_boolean_flag(config_path, "lspRecommendationDisabled"):
+        logger.trace("Disabled LSP plugin recommendations in Claude config")
+
+
 def check_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> None:
     """Check that all known Claude startup dialogs have been dismissed.
 
@@ -454,6 +469,7 @@ def auto_dismiss_claude_dialogs(config_path: Path, source_path: Path) -> None:
     dismiss_effort_callout(config_path)
     complete_onboarding(config_path)
     acknowledge_cost_threshold(config_path)
+    disable_lsp_recommendations(config_path)
     # bypassPermissionsModeAccepted: not set here (Claude Code resets it).
     # skipDangerousModePermissionPrompt in settings.json handles this instead.
 
