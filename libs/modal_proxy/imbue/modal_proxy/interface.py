@@ -394,9 +394,9 @@ class ModalInterface(MutableModel, ABC):
         ``extra_env`` is added to the environment the script is deployed
         under, for scripts that read their configuration from the environment.
 
-        One attempt: a deploy refused because another deploy of the same app
-        held Modal's per-app lock raises ``ModalProxyAppLockedError``, and
-        retrying it is the caller's to decide.
+        One attempt: a deploy that failed in a way another attempt could clear
+        raises a ``ModalProxyDeployRetryableError``, and retrying it is the
+        caller's to decide.
         """
         ...
 

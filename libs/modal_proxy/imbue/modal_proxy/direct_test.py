@@ -1,4 +1,5 @@
 import os
+import subprocess
 from collections.abc import Callable
 from collections.abc import Generator
 from pathlib import Path
@@ -52,8 +53,11 @@ from imbue.modal_proxy.direct import _unwrap_volume
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyConnectionError
+from imbue.modal_proxy.errors import ModalProxyDeployRetryableError
+from imbue.modal_proxy.errors import ModalProxyDeployTimeoutError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyImageBuildError
+from imbue.modal_proxy.errors import ModalProxyImageBuilderLostError
 from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
@@ -65,6 +69,7 @@ from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
 from imbue.modal_proxy.errors import is_deploy_function_vanished_error
+from imbue.modal_proxy.errors import is_image_builder_lost_error
 from imbue.modal_proxy.errors import is_sandbox_gone_error
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ImageInterface
@@ -437,6 +442,33 @@ def test_is_deploy_function_vanished_error(message: str, expected: bool) -> None
     ("message", "expected"),
     [
         pytest.param(
+            "╭─ Error ───╮\n"
+            "│ Image build for im-OzMGSSVv2KSkeN0c2SUsJB failed with the exception: │\n"
+            "│ Worker disappeared, image build failed.                              │\n"
+            "╰───╯",
+            True,
+            id="real_modal_message_inside_its_error_box",
+        ),
+        pytest.param("WORKER DISAPPEARED, IMAGE BUILD FAILED.", True, id="case_insensitive"),
+        # A broken Dockerfile is a verdict on what was asked, not a lost builder.
+        pytest.param(
+            "Error: Image build for im-abc123 failed with the exception:\n"
+            "The command '/bin/sh -c apt-get install nope' returned a non-zero code: 100",
+            False,
+            id="genuine_build_failure",
+        ),
+        pytest.param("Failed to deploy snapshot.py: some other error", False, id="unrelated_error"),
+        pytest.param("", False, id="empty"),
+    ],
+)
+def test_is_image_builder_lost_error(message: str, expected: bool) -> None:
+    assert is_image_builder_lost_error(message) is expected
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        pytest.param(
             "Modal Sandbox with container ID ta-01M4A0RGC9WY1BPH7DJHYHPAVV not found. "
             "This means this Sandbox has already shut down. (Error code: XVXGVQN4)",
             True,
@@ -456,6 +488,10 @@ def test_is_sandbox_gone_error(message: str, expected: bool) -> None:
 
 # The real Modal message; deploy must classify this as retryable.
 _LOCKED_APP_MESSAGE = "Error: The selected app is locked - probably due to a concurrent modification"
+
+# Modal's own wording for a build whose worker went away; deploy must classify
+# it as retryable too.
+_IMAGE_BUILDER_LOST_MESSAGE = "Worker disappeared, image build failed."
 
 
 def _write_fake_modal(bin_dir: Path, counter_file: Path, *, fail_times: int, error_message: str) -> None:
@@ -480,6 +516,20 @@ def _write_fake_modal(bin_dir: Path, counter_file: Path, *, fail_times: int, err
         "fi\n"
         "exit 0\n"
     )
+    script.chmod(0o755)
+
+
+def _write_hanging_fake_modal(bin_dir: Path) -> None:
+    """Install a fake ``modal`` executable on PATH that does not return in time.
+
+    A deploy that outruns its attempt is the one failure whose elapsed real
+    time *is* the condition, so the fake has to hang rather than report. It
+    execs the sleep so that the process ``subprocess`` kills on the timeout is
+    the sleep itself, rather than a shell whose child outlives the test.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    script = bin_dir / "modal"
+    script.write_text("#!/usr/bin/env bash\nexec sleep 60\n")
     script.chmod(0o755)
 
 
@@ -513,6 +563,39 @@ def test_deploy_reports_a_vanished_function_as_contention(tmp_path: Path, monkey
     assert counter.read_text().strip() == "1"
 
 
+def test_deploy_reports_a_lost_image_builder_as_retryable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A build whose worker went away never reached a verdict, so another attempt gets a fresh one."""
+    bin_dir = tmp_path / "bin"
+    counter = tmp_path / "count"
+    _write_fake_modal(bin_dir, counter, fail_times=1, error_message=_IMAGE_BUILDER_LOST_MESSAGE)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    with pytest.raises(ModalProxyImageBuilderLostError):
+        DirectModalInterface().deploy(tmp_path / "snapshot.py", app_name="my-app")
+
+    assert counter.read_text().strip() == "1"
+
+
+def test_deploy_reports_a_hung_deploy_as_retryable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deploy cut off for outrunning its attempt is classified here, not leaked as a subprocess error.
+
+    Callers of this boundary are promised they only ever see
+    ``ModalProxy*``, so a ``subprocess.TimeoutExpired`` in front of them is
+    both a broken promise and a failure no retry predicate can name.
+    """
+    bin_dir = tmp_path / "bin"
+    _write_hanging_fake_modal(bin_dir)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    interface = DirectModalInterface(deploy_attempt_timeout_seconds=0.5)
+
+    with pytest.raises(ModalProxyDeployTimeoutError) as exc_info:
+        interface.deploy(tmp_path / "snapshot.py", app_name="my-app")
+
+    assert isinstance(exc_info.value.__cause__, subprocess.TimeoutExpired), (
+        "the subprocess failure belongs in the chain, not in front of the caller"
+    )
+
+
 def test_deploy_reports_any_other_failure_as_a_plain_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failure that is not contention must not be classified as retryable."""
     bin_dir = tmp_path / "bin"
@@ -523,7 +606,7 @@ def test_deploy_reports_any_other_failure_as_a_plain_error(tmp_path: Path, monke
     with pytest.raises(ModalProxyError) as exc_info:
         DirectModalInterface().deploy(tmp_path / "snapshot.py", app_name="my-app")
 
-    assert not isinstance(exc_info.value, ModalProxyAppLockedError)
+    assert not isinstance(exc_info.value, ModalProxyDeployRetryableError)
     assert counter.read_text().strip() == "1"
 
 
@@ -782,10 +865,11 @@ _IS_RETRIED_BY_BOUNDARY_CALL: Final[Mapping[FunctionType, bool]] = {
     DirectImage.dockerfile_commands: False,
     DirectApp.get_app_id: False,
     DirectApp.get_name: False,
-    # These carry retries of their own, sized for a different failure.
-    DirectModalInterface.deploy: False,
+    # Retried, but for a failure of their own rather than a transient one.
     DirectFunction.get_web_url: False,
     DirectImage.fetch_build_logs: False,
+    # Classifies its own failures and leaves retrying to its caller.
+    DirectModalInterface.deploy: False,
 }
 
 _BOUNDARY_CLASSES: Final[Sequence[type]] = (

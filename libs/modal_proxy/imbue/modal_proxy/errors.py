@@ -38,6 +38,24 @@ def is_deploy_function_vanished_error(message: str) -> bool:
     return _DEPLOY_FUNCTION_VANISHED_RE.search(message) is not None
 
 
+# Modal's image builder runs each build on a worker it allocates; when that
+# worker goes away mid-build, the build is reported as failed with this
+# wording, having never run to a verdict.
+_IMAGE_BUILDER_LOST_RE = re.compile(r"Worker disappeared, image build failed", re.IGNORECASE)
+
+
+def is_image_builder_lost_error(message: str) -> bool:
+    """Check whether a Modal error message says an image build lost the worker running it.
+
+    Matches only the builder's own infrastructure wording, so a genuine build
+    failure -- a command in the image exiting non-zero -- stays terminal. No
+    test holds Modal to this wording the way :func:`is_sandbox_gone_error`'s
+    does, because the condition cannot be provoked on demand: a rewording goes
+    unrecognized, and the deploy fails terminally.
+    """
+    return _IMAGE_BUILDER_LOST_RE.search(message) is not None
+
+
 # Modal ends a sandbox's task of its own accord -- a worker lost on the way up,
 # an idle or lifetime limit reached -- and then answers every call against it under
 # whichever gRPC status its teardown has got to. Those statuses carry genuinely
@@ -142,7 +160,26 @@ class ModalProxyConnectionError(ModalProxyError):
     """
 
 
-class ModalProxyAppLockedError(ModalProxyError):
+class ModalProxyDeployRetryableError(ModalProxyError):
+    """Raised when a ``modal deploy`` failed in a way that another attempt can clear.
+
+    The single statement of which deploy failures warrant re-attempting, so
+    consumers catch this base rather than each restating a tuple of concrete
+    classes.
+
+    Subclasses share the one property callers act on: the deploy did not
+    establish the function, and nothing about why it failed is a verdict on
+    what was asked, so deploying the same script again is the right response.
+
+    Distinct from ``ModalProxyTransientError``, which is about re-issuing one
+    control-plane call within this package's own budget. These are about
+    re-attempting a whole deploy, which takes minutes and re-checks between
+    attempts whether a concurrent deploy has published this source in the
+    meantime.
+    """
+
+
+class ModalProxyAppLockedError(ModalProxyDeployRetryableError):
     """Raised when a Modal operation fails due to a concurrent modification of the same app.
 
     Modal serializes mutations to a single app, so concurrent operations on the
@@ -153,4 +190,20 @@ class ModalProxyAppLockedError(ModalProxyError):
     finalizes a new app version (see ``is_deploy_function_vanished_error``).
     Both clear once the conflicting operation completes, so callers should
     retry with backoff.
+    """
+
+
+class ModalProxyImageBuilderLostError(ModalProxyDeployRetryableError):
+    """Raised when a deploy's image build lost the worker Modal was building it on.
+
+    See ``is_image_builder_lost_error`` for the wording this is recognized by,
+    and for why a build that failed on its own contents is not this.
+    """
+
+
+class ModalProxyDeployTimeoutError(ModalProxyDeployRetryableError):
+    """Raised when a ``modal deploy`` outran the time one attempt is given.
+
+    Whether the deploy landed before it was cut off is unknown. Deploying the
+    same script twice is idempotent either way.
     """

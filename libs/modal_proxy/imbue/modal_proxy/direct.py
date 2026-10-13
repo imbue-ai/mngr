@@ -52,8 +52,10 @@ from imbue.modal_proxy.data_types import TunnelInfo
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyConnectionError
+from imbue.modal_proxy.errors import ModalProxyDeployTimeoutError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyImageBuildError
+from imbue.modal_proxy.errors import ModalProxyImageBuilderLostError
 from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
@@ -65,6 +67,7 @@ from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
 from imbue.modal_proxy.errors import is_deploy_function_vanished_error
+from imbue.modal_proxy.errors import is_image_builder_lost_error
 from imbue.modal_proxy.errors import is_sandbox_gone_error
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecOutput
@@ -260,8 +263,9 @@ _retry_transient = retry(
 
 
 # How long one `modal deploy` subprocess may run before it is considered hung.
-# Contention for an app's lock is reported as ModalProxyAppLockedError and left
-# at that; `mngr_modal.routes.deployment` owns the retry, and states why there.
+# Every deploy failure another attempt could clear is reported as a
+# ModalProxyDeployRetryableError and left at that; `mngr_modal.routes.deployment`
+# owns the retry, and states why there.
 DEPLOY_ATTEMPT_TIMEOUT_SECONDS: Final[int] = 180
 
 
@@ -563,6 +567,17 @@ class DirectModalInterface(ModalInterface):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    deploy_attempt_timeout_seconds: float = Field(
+        default=DEPLOY_ATTEMPT_TIMEOUT_SECONDS,
+        gt=0,
+        le=DEPLOY_ATTEMPT_TIMEOUT_SECONDS,
+        description=(
+            "How long one `modal deploy` subprocess may run before it is cut off as hung. "
+            "Only shortening it is allowed, because mngr_modal.routes.deployment sizes "
+            "DEPLOY_MAX_DURATION_SECONDS from the default."
+        ),
+    )
+
     def model_post_init(self, context: Any) -> None:
         # Opt every real Modal Sandbox operation into Modal's V2 Sandbox backend. Modal
         # reads MODAL_SANDBOX_V2 from the environment live on each Sandbox call,
@@ -761,7 +776,7 @@ class DirectModalInterface(ModalInterface):
             try:
                 result = subprocess.run(
                     cmd,
-                    timeout=DEPLOY_ATTEMPT_TIMEOUT_SECONDS,
+                    timeout=self.deploy_attempt_timeout_seconds,
                     check=False,
                     capture_output=True,
                     text=True,
@@ -774,6 +789,10 @@ class DirectModalInterface(ModalInterface):
                 )
             except FileNotFoundError as e:
                 _translate_modal_cli_not_found(e)
+            except subprocess.TimeoutExpired as e:
+                raise ModalProxyDeployTimeoutError(
+                    f"Deploying {script_path} outran the {self.deploy_attempt_timeout_seconds}s one attempt is given"
+                ) from e
         if result.returncode != 0:
             output = (result.stdout + "\n" + result.stderr).strip()
             # A concurrent modification to the same app is transient: the lock
@@ -783,6 +802,10 @@ class DirectModalInterface(ModalInterface):
             # when the winner finalizes a new version.
             if is_app_locked_error(output) or is_deploy_function_vanished_error(output):
                 raise ModalProxyAppLockedError(f"Failed to deploy {script_path} (concurrent modification): {output}")
+            if is_image_builder_lost_error(output):
+                raise ModalProxyImageBuilderLostError(
+                    f"Failed to deploy {script_path} (image build lost its worker): {output}"
+                )
             raise ModalProxyError(f"Failed to deploy {script_path}: {output}")
 
     def enable_output_capture(

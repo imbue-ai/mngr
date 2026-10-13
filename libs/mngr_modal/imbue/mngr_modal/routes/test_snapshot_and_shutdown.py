@@ -32,7 +32,6 @@ from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import register_modal_test_app
 from imbue.mngr.utils.testing import register_modal_test_volume
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
-from imbue.mngr_modal.routes.deployment import deploy_function
 from imbue.mngr_modal.routes.deployment import ensure_function_deployed
 from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.errors import ModalProxyError
@@ -91,7 +90,8 @@ def _is_modal_permission_propagation_error(exc: BaseException) -> bool:
 def _deploy_snapshot_function_with_propagation_retry(
     modal_interface: ModalInterface, app_name: str, environment_name: str
 ) -> str:
-    return deploy_function("snapshot_and_shutdown", app_name, environment_name, modal_interface)
+    """Deploy through the entry point a create uses, so this fixture rides its retries too."""
+    return ensure_function_deployed("snapshot_and_shutdown", app_name, environment_name, modal_interface)
 
 
 # Substrings in Modal CLI output that mean the resource is already gone,

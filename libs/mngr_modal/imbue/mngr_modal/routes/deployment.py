@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from tenacity import RetryCallState
 from tenacity import Retrying
 from tenacity import retry
 from tenacity import retry_if_exception_type
@@ -13,7 +14,7 @@ from tenacity import wait_exponential
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import MngrError
 from imbue.modal_proxy.direct import DEPLOY_ATTEMPT_TIMEOUT_SECONDS
-from imbue.modal_proxy.errors import ModalProxyAppLockedError
+from imbue.modal_proxy.errors import ModalProxyDeployRetryableError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import ModalInterface
@@ -27,26 +28,43 @@ _SOURCE_MARKER_FUNCTION_PREFIX: Final[str] = "deployed_source_"
 # implausible, while keeping the deployed function name readable.
 _SOURCE_MARKER_DIGEST_LENGTH: Final[int] = 16
 
-# Modal locks an app for the duration of a mutation, so concurrent deploys of
-# one app name race and the losers are refused. The lock clears as soon as the
-# winner finishes, so retry, bounded by elapsed time rather than by attempts:
-# contention is a queue, and CI fans dozens of creates out against one shared
-# app name while several CI runs do the same, so the lock can stay held for
-# minutes while the queue drains. A deploy that is merely queued must keep
-# waiting rather than fail.
-DEPLOY_LOCK_RETRY_BUDGET_SECONDS: Final[float] = 300.0
+# How long to keep re-attempting a deploy Modal failed without judging it.
+# Bounded by elapsed time rather than by attempts, because the longest-running
+# of these failures is contention: Modal locks an app for the duration of a
+# mutation, so concurrent deploys of one app name race and the losers are
+# refused, and CI fans dozens of creates out against one shared app name while
+# several CI runs do the same. The lock can therefore stay held for minutes
+# while the queue drains, and a deploy that is merely queued must keep waiting
+# rather than fail.
+DEPLOY_RETRY_BUDGET_SECONDS: Final[float] = 300.0
 # A deploy takes several seconds, so retrying sooner than this just wastes
-# attempts -- and each wasted attempt holds the lock against the rest of the
-# queue.
-DEPLOY_LOCK_MIN_BACKOFF_SECONDS: Final[float] = 2.0
-DEPLOY_LOCK_MAX_BACKOFF_SECONDS: Final[float] = 15.0
+# attempts -- and a wasted attempt against a locked app holds the lock against
+# the rest of the queue.
+DEPLOY_RETRY_MIN_BACKOFF_SECONDS: Final[float] = 2.0
+DEPLOY_RETRY_MAX_BACKOFF_SECONDS: Final[float] = 15.0
 # Upper bound on how long ensure_function_deployed can block. The budget only
 # gates whether another attempt starts, so the last attempt can begin just
 # under it (after a full backoff) and still run to the deploy subprocess's own
 # timeout.
 DEPLOY_MAX_DURATION_SECONDS: Final[float] = (
-    DEPLOY_LOCK_RETRY_BUDGET_SECONDS + DEPLOY_LOCK_MAX_BACKOFF_SECONDS + DEPLOY_ATTEMPT_TIMEOUT_SECONDS
+    DEPLOY_RETRY_BUDGET_SECONDS + DEPLOY_RETRY_MAX_BACKOFF_SECONDS + DEPLOY_ATTEMPT_TIMEOUT_SECONDS
 )
+
+
+def _log_deploy_retry(retry_state: RetryCallState) -> None:
+    """Name the failure each re-attempt is waiting out.
+
+    A create blocks here for minutes without touching the host it is building,
+    and the wait is reported from the other side (``await_snapshot_endpoint_url``)
+    without knowing which of these failures is behind it.
+    """
+    outcome = retry_state.outcome
+    logger.warning(
+        "Modal failed the deploy ({}); re-attempting (attempt {}, {:.0f}s spent)",
+        outcome.exception() if outcome is not None else "unknown",
+        retry_state.attempt_number,
+        retry_state.seconds_since_start or 0.0,
+    )
 
 
 def get_route_script_path(function: str) -> Path:
@@ -98,10 +116,14 @@ def ensure_function_deployed(
     environment_name: str | None,
     modal_interface: ModalInterface,
     *,
-    lock_retry_budget_seconds: float = DEPLOY_LOCK_RETRY_BUDGET_SECONDS,
-    max_backoff_seconds: float = DEPLOY_LOCK_MAX_BACKOFF_SECONDS,
+    retry_budget_seconds: float = DEPLOY_RETRY_BUDGET_SECONDS,
+    max_backoff_seconds: float = DEPLOY_RETRY_MAX_BACKOFF_SECONDS,
 ) -> str:
     """Make sure an app publishes the current version of a route function, and return its URL.
+
+    Owns the one retry over deploying: every failure Modal produced without
+    judging the script -- see ``ModalProxyDeployRetryableError`` -- is
+    re-attempted here under one budget.
 
     The endpoint belongs to the app, not to whatever is being created, so
     deploying it unconditionally takes Modal's per-app deploy lock for no
@@ -117,13 +139,14 @@ def ensure_function_deployed(
     source and making every caller still queued behind it wait for that too.
     """
     retrying = Retrying(
-        retry=retry_if_exception_type(ModalProxyAppLockedError),
-        stop=stop_after_delay(lock_retry_budget_seconds),
+        retry=retry_if_exception_type(ModalProxyDeployRetryableError),
+        stop=stop_after_delay(retry_budget_seconds),
         wait=wait_exponential(
             multiplier=1,
-            min=min(DEPLOY_LOCK_MIN_BACKOFF_SECONDS, max_backoff_seconds),
+            min=min(DEPLOY_RETRY_MIN_BACKOFF_SECONDS, max_backoff_seconds),
             max=max_backoff_seconds,
         ),
+        before_sleep=_log_deploy_retry,
         reraise=True,
     )
     try:
@@ -134,10 +157,10 @@ def ensure_function_deployed(
             environment_name,
             modal_interface,
         )
-    except ModalProxyAppLockedError as e:
+    except ModalProxyDeployRetryableError as e:
         raise MngrError(
-            f"Failed to deploy {function} function: app {app_name!r} stayed locked by concurrent "
-            f"deploys for {lock_retry_budget_seconds}s"
+            f"Failed to deploy {function} function: Modal kept failing the deploy into app "
+            f"{app_name!r} for {retry_budget_seconds}s, last with: {e}"
         ) from e
 
 
@@ -162,10 +185,10 @@ def deploy_function(
 ) -> str:
     """Deploy a Function to Modal with the given app name and return the URL.
 
-    Raises MngrError if deployment fails, except when the deploy was refused
-    because another deploy of the same app held Modal's lock: that propagates
-    as ``ModalProxyAppLockedError`` so ``ensure_function_deployed``'s retry can
-    see it.
+    Raises MngrError if deployment fails, except when Modal failed the deploy
+    in a way another attempt could clear: that propagates as a
+    ``ModalProxyDeployRetryableError`` so ``ensure_function_deployed``'s retry
+    can see it.
     """
     script_path = get_route_script_path(function)
 
@@ -177,10 +200,11 @@ def deploy_function(
                 environment_name=environment_name,
                 extra_env={"MNGR_MODAL_SOURCE_MARKER_NAME": get_source_marker_function_name(function)},
             )
-        except ModalProxyAppLockedError:
+        except ModalProxyDeployRetryableError:
             # Propagate unwrapped: ensure_function_deployed's retry needs to
-            # see it, so it can re-check whether the deploy that beat us to the
-            # lock published this very source.
+            # see it, so it can re-check whether a deploy that beat us to this
+            # app published this very source -- including one of our own
+            # attempts that Modal cut off after it had landed.
             raise
         except ModalProxyError as e:
             raise MngrError(f"Failed to deploy {function} function: {e}") from e

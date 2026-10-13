@@ -9,7 +9,10 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr_modal.routes.deployment import ensure_function_deployed
 from imbue.mngr_modal.routes.deployment import get_source_marker_function_name
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
+from imbue.modal_proxy.errors import ModalProxyDeployRetryableError
+from imbue.modal_proxy.errors import ModalProxyDeployTimeoutError
 from imbue.modal_proxy.errors import ModalProxyError
+from imbue.modal_proxy.errors import ModalProxyImageBuilderLostError
 from imbue.modal_proxy.testing import FakeModalInterface
 
 _FUNCTION = "snapshot_and_shutdown"
@@ -66,8 +69,34 @@ class _PermanentlyAppLockedInterface(FakeModalInterface):
         raise ModalProxyAppLockedError("The selected app is locked")
 
 
+class _TransientlyFailingDeployInterface(FakeModalInterface):
+    """Fails its first deploy with a Modal-side failure another attempt can clear, then succeeds.
+
+    Stands in for Modal failing a deploy of its own accord, as opposed to
+    reaching a verdict on the script being deployed.
+    """
+
+    deploy_attempts: int = Field(default=0, description="How many deploys this interface was asked to perform")
+    failure_type: type[ModalProxyDeployRetryableError] = Field(
+        description="The retryable failure the first deploy raises"
+    )
+
+    def deploy(
+        self,
+        script_path: Path,
+        *,
+        app_name: str,
+        environment_name: str | None = None,
+        extra_env: Mapping[str, str] = {},
+    ) -> None:
+        self.deploy_attempts = self.deploy_attempts + 1
+        if self.deploy_attempts == 1:
+            raise self.failure_type("Modal failed this deploy without judging it")
+        super().deploy(script_path, app_name=app_name, environment_name=environment_name, extra_env=extra_env)
+
+
 class _FailingDeployInterface(FakeModalInterface):
-    """Fails every deploy for a reason that is not a concurrent modification."""
+    """Fails every deploy for a reason another attempt cannot clear."""
 
     deploy_attempts: int = Field(default=0, description="How many deploys this interface was asked to perform")
 
@@ -116,11 +145,27 @@ def test_a_deploy_refused_the_app_lock_without_a_winner_is_retried(tmp_path: Pat
     interface = _PermanentlyAppLockedInterface(root_dir=tmp_path / "modal", concurrency_group=cg)
 
     with pytest.raises(MngrError):
-        ensure_function_deployed(
-            _FUNCTION, _APP, None, interface, lock_retry_budget_seconds=0.2, max_backoff_seconds=0.05
-        )
+        ensure_function_deployed(_FUNCTION, _APP, None, interface, retry_budget_seconds=0.2, max_backoff_seconds=0.05)
 
     assert interface.deploy_attempts > 1, "app-lock contention is transient and must be retried"
+
+
+@pytest.mark.parametrize(
+    "failure_type",
+    [ModalProxyImageBuilderLostError, ModalProxyDeployTimeoutError],
+)
+def test_a_deploy_modal_failed_without_judging_it_is_retried(
+    failure_type: type[ModalProxyDeployRetryableError], tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """Modal failing a deploy of its own accord is not a verdict on the script, so deploy it again."""
+    interface = _TransientlyFailingDeployInterface(
+        root_dir=tmp_path / "modal", concurrency_group=cg, failure_type=failure_type
+    )
+
+    url = ensure_function_deployed(_FUNCTION, _APP, None, interface, max_backoff_seconds=0.05)
+
+    assert url.endswith(f"/{_APP}/{_FUNCTION}")
+    assert interface.deploy_attempts == 2
 
 
 def test_a_deploy_that_fails_for_any_other_reason_is_not_retried(tmp_path: Path, cg: ConcurrencyGroup) -> None:
