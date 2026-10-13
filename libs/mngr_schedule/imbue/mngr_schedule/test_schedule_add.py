@@ -44,7 +44,7 @@ def test_schedule_add_deploys_to_modal(monorepo_root: Path) -> None:
                 "--command",
                 "create",
                 "--args",
-                "test-agent echo --no-connect --no-ensure-clean -- hello-from-schedule",
+                "test-agent --type command --no-connect --no-ensure-clean -- echo hello-from-schedule",
                 "--schedule",
                 "0 3 * * *",
                 "--provider",
@@ -105,7 +105,7 @@ def test_schedule_add_with_verification(monorepo_root: Path) -> None:
                 "--command",
                 "create",
                 "--args",
-                "test-agent echo --no-connect --no-ensure-clean -- hello-verify",
+                "test-agent --type command --no-connect --no-ensure-clean -- echo hello-verify",
                 "--schedule",
                 "0 3 * * *",
                 "--provider",
@@ -147,8 +147,8 @@ def test_schedule_add_with_full_verification(monorepo_root: Path) -> None:
     different code path from quick-verify (which destroys the agent
     immediately): it exercises `_poll_until_done` and `mngr list` polling.
 
-    The trigger creates an `echo` agent that finishes immediately, so the
-    poll loop should exit on its first iteration with state == DONE.
+    The triggered agent finishes immediately, so the poll loop should exit on
+    its first iteration.
     """
     trigger_name = "test-schedule-full-verify"
     app_name = get_modal_app_name(trigger_name)
@@ -167,7 +167,7 @@ def test_schedule_add_with_full_verification(monorepo_root: Path) -> None:
                 "--command",
                 "create",
                 "--args",
-                "test-agent echo --no-connect --no-ensure-clean -- hello-full-verify",
+                "test-agent --type command --no-connect --no-ensure-clean -- echo hello-full-verify",
                 "--schedule",
                 "0 3 * * *",
                 "--provider",
@@ -227,7 +227,7 @@ def test_schedule_list_shows_deployed_schedule(monorepo_root: Path) -> None:
                 "--command",
                 "create",
                 "--args",
-                "test-agent echo --no-connect --no-ensure-clean -- hello-list-test",
+                "test-agent --type command --no-connect --no-ensure-clean -- echo hello-list-test",
                 "--schedule",
                 "0 4 * * *",
                 "--provider",
