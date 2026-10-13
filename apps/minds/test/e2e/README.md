@@ -29,7 +29,7 @@ pnpm exec playwright test --config=test/e2e/playwright.config.js macos-launch.sp
 pnpm test:e2e
 ```
 
-`macos-launch.spec.js` is currently the only Playwright spec. The legacy
+`macos-launch.spec.js` and `macos-lifecycle.spec.js` launch the installed app. The legacy
 renderer-contract specs (`embed-flow`, `local-swap`, `recovery-redirect`,
 `landing-stopped-mind-restart`) drove the pre-SPA shell scripts (chrome.js,
 overlay_layer.js) against a local harness server; they were deleted with
@@ -37,6 +37,16 @@ those scripts in the Mithril SPA migration, along with the harness, and no
 SPA-shell Playwright equivalents exist yet (the SPA's own logic is covered
 by the vitest suites in `frontend/src/**/*.test.ts`). Set
 `MINDS_E2E_NO_VIDEO=1` if ffmpeg is missing on the host.
+
+`link-routing.spec.js` (popup routing) and `context-menu.spec.js` need no
+installed app: each launches this checkout's own Electron
+(`node_modules/.bin/electron`) on a small harness entry
+(`link-routing-app.js`, `context-menu-app.js`) that wires the shipped
+`electron/` modules, with no backend. Neither runs in CI.
+
+```
+pnpm exec playwright test --config=test/e2e/playwright.config.js link-routing.spec.js
+```
 
 Default target is `/Applications/Imbue Studio.app/Contents/MacOS/Imbue Studio`. Override via `MINDS_APP_PATH` to point at a downloaded pre-release build:
 

@@ -223,6 +223,7 @@ function main(): void {
     m.redraw();
   });
   electronBridge.onTearOut((report) => shell.handleTearOut(report));
+  electronBridge.onOpenLink((url) => shell.handleOpenLink(url));
   // Main-process asks that target exactly ONE window (main picks it): the
   // deduped open_help routing sends {kind:'help'} to the window showing the
   // affected workspace (else the most recent one).
