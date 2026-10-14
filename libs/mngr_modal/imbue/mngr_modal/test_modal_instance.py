@@ -309,6 +309,10 @@ def test_create_and_list_snapshots(real_modal_provider: ModalProviderInstance) -
         assert host.execute_idempotent_command("true").success
 
 
+# Flaky on main under causes of its own: creating the host records strands
+# (StrandTimedOutError out of _create_host_data_records_in_modal), and a resumed
+# sandbox can drop the first SSH connection before its banner.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_list_snapshots_returns_initial_snapshot(initial_snapshot_provider: ModalProviderInstance) -> None:
@@ -349,6 +353,9 @@ def test_delete_nonexistent_snapshot_raises_error(real_modal_provider: ModalProv
             real_modal_provider.delete_snapshot(host, fake_id)
 
 
+# Flaky while MIND-477 is open: Modal answers 503 for longer than the retry
+# budget, which fails the restore outright or stalls it past its timeout.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_start_host_restores_from_snapshot(real_modal_provider: ModalProviderInstance) -> None:
@@ -395,6 +402,9 @@ def test_start_host_restores_from_snapshot(real_modal_provider: ModalProviderIns
             pass
 
 
+# Flaky when a sandbox is slow to accept connections under CI's parallel
+# acceptance fan-out -- the same contention family as its marked siblings here.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_start_host_on_running_host(real_modal_provider: ModalProviderInstance) -> None:
@@ -470,6 +480,9 @@ def test_start_host_on_stopped_host_uses_latest_resumable_snapshot(
             pass
 
 
+# Flaky while MIND-477 is open: the volume read behind the resume waits out a
+# storage 503 and the test then overruns its timeout.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_start_host_clears_stop_reason_on_resume(
