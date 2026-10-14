@@ -668,23 +668,15 @@ body:has(#notice-band) .workspace-surface {
   opacity: 0.5;
   cursor: not-allowed;
 }
-/* A flip whose write is still in flight: it reads as "wait", not as "broken".
-   A pane that disables its switch while the write lands still gets this look,
-   hence the doubled selector out-specifying the :disabled rule above. */
-.perm-switch.is-busy,
-.perm-switch.is-busy:disabled {
-  opacity: 0.6;
-  cursor: progress;
-}
 /*
- * A wait nested in the switch itself: the glyph pseudo redrawn as a 16px ring
- * (2px stroke) concentric with the focus the knob sits on. It rides the knob's
- * translate, so the last known value picks its side, and inside the knob it
- * keeps the knob's own 2px step from the cap. ``is-checking`` is the wait
- * before any value is known: no knob, so nothing reads as off, and the ring
- * stands at the off focus. ``is-settling`` is a known value being re-read or
- * written. ``is-unknown`` is a read that failed with nothing to show: the bare
- * track, greyed out.
+ * The wait, nested in the switch itself: the glyph pseudo redrawn as a 16px
+ * ring (2px stroke) concentric with the focus the knob sits on. It rides the
+ * knob's translate, so the last known value picks its side, and inside the
+ * knob it keeps the knob's own 2px step from the cap. ``is-checking`` is the
+ * wait before any value is known: no knob, so nothing reads as off, and the
+ * ring stands at the off focus. ``is-settling`` is a known value being re-read
+ * or written. ``is-unknown`` is a read that failed with nothing to show: the
+ * bare track, greyed out.
  */
 .perm-switch.is-checking,
 .perm-switch.is-unknown {
@@ -723,6 +715,13 @@ body:has(#notice-band) .workspace-surface {
 }
 .perm-switch.is-settling[aria-checked="true"] {
   --switch-ring-arc: var(--c-accent);
+}
+/* A pane that locks its switches while a write lands holds the writing one
+   inert too: it reads as "wait", not as "broken", hence out-specifying the
+   :disabled rule above. */
+.perm-switch.is-settling:disabled {
+  opacity: 0.6;
+  cursor: progress;
 }
 .perm-switch:focus-visible {
   outline: 2px solid var(--c-accent);

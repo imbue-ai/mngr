@@ -336,11 +336,11 @@ function notificationSection(
       ),
     ]),
     m("span", { class: "flex shrink-0 items-center gap-2" }, [
-      preferences.isWriting ? m(Spinner, { size: "sm" }) : null,
       renderSwitch({
         isOn: isEnabled,
         label: EMAIL_NOTIFICATIONS_LABEL,
-        wait: preferences.isWriting ? "busy" : null,
+        isWaiting: preferences.isWriting,
+        isDisabled: preferences.isWriting,
         data: { "data-email-notifications": account.user_id },
         onFlip: (isOn) => void model.setEmailNotifications(account.user_id, isOn),
       }),

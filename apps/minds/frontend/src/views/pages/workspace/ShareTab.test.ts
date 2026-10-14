@@ -279,7 +279,6 @@ describe("ShareTab publish widget", () => {
     expect(attrsOf(control)["aria-checked"]).toBe("true");
     expect(attrsOf(control)["aria-busy"]).toBe("true");
     expect(classTokensOf(control)).toContain("is-settling");
-    expect(classTokensOf(control)).not.toContain("is-busy");
     expect(allText(widget)).toContain("Yes");
   });
 
@@ -304,7 +303,6 @@ describe("ShareTab publish widget", () => {
     expect(attrsOf(control)["aria-checked"]).toBe("true");
     expect(attrsOf(control)["aria-busy"]).toBe("true");
     expect(classTokensOf(control)).toContain("is-settling");
-    expect(classTokensOf(control)).not.toContain("is-busy");
     expect(allText(widget)).toContain("Yes");
     expect(byId(widget, "ws-share-publish-unknown")).toBeUndefined();
     expect(collectVnodes(widget).some((vnode) => vnode.tag === Spinner)).toBe(

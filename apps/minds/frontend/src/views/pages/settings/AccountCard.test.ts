@@ -15,6 +15,7 @@ import {
   collectText,
   collectVnodes,
 } from "../../../testing";
+import { Spinner } from "../../components/Spinner";
 import { AccountCard } from "./AccountCard";
 
 const ACCOUNT = accountEntry({ email: "person@example.com" });
@@ -291,6 +292,29 @@ describe("the email notifications switch", () => {
     (attrsOf(toggle).onclick as () => void)();
 
     expect(flips).toEqual([true]);
+  });
+
+  it("spins in the switch's knob while the preference is written, and holds it", () => {
+    const model = modelWithChannels({
+      email_enabled: true,
+      in_app_enabled: true,
+    });
+    const spinnersBefore = collectVnodes(mountCard(model)()).filter(
+      (node) => node.tag === Spinner,
+    ).length;
+    model.notificationPreferencesFor(ACCOUNT.user_id).isWriting = true;
+
+    const root = mountCard(model)();
+
+    const toggle = emailSwitch(root) as AnyVnode;
+    expect(attrsOf(toggle)["aria-busy"]).toBe("true");
+    expect(attrsOf(toggle).disabled).toBe(true);
+    expect(
+      String(attrsOf(toggle).className ?? attrsOf(toggle).class),
+    ).toContain("is-settling");
+    expect(
+      collectVnodes(root).filter((node) => node.tag === Spinner),
+    ).toHaveLength(spinnersBefore);
   });
 
   it("says the settings are unavailable rather than drawing a switch", () => {
