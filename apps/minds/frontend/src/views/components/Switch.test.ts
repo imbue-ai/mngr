@@ -7,21 +7,19 @@ import {
   renderSwitchWord,
 } from "./Switch";
 
-function switchOn(
-  state: { isWaiting?: boolean; isDisabled?: boolean } = {},
-): AnyVnode {
+function switchOn(wait: "settling" | "busy" | null): AnyVnode {
   return renderSwitch({
     id: "the-switch",
     isOn: true,
     label: "Lights",
-    ...state,
+    wait,
     onFlip: () => undefined,
   }) as AnyVnode;
 }
 
 describe("renderSwitch", () => {
   it("draws a live switch that reads its value and name", () => {
-    const control = switchOn();
+    const control = switchOn(null);
 
     expect(control.tag).toBe("button");
     expect(attrsOf(control).type).toBe("button");
@@ -48,24 +46,20 @@ describe("renderSwitch", () => {
     expect(attrsOf(control).id).toBeUndefined();
   });
 
-  it("spins in its own knob while a write lands, and stays live", () => {
-    const control = switchOn({ isWaiting: true });
+  it("stays live while settling, with the wait marked on the switch itself", () => {
+    const control = switchOn("settling");
 
     expect(attrsOf(control)["aria-busy"]).toBe("true");
     expect(attrsOf(control).disabled).toBe(false);
-    expect(classTokensOf(control)).toEqual([
-      "perm-switch",
-      "shrink-0",
-      "is-settling",
-    ]);
+    expect(classTokensOf(control)).toContain("is-settling");
   });
 
-  it("keeps the ring while a pane that locks during writes holds it inert", () => {
-    const control = switchOn({ isWaiting: true, isDisabled: true });
+  it("goes inert while busy, leaving the wait to the caller", () => {
+    const control = switchOn("busy");
 
-    expect(attrsOf(control)["aria-busy"]).toBe("true");
+    expect(attrsOf(control)["aria-busy"]).toBeUndefined();
     expect(attrsOf(control).disabled).toBe(true);
-    expect(classTokensOf(control)).toContain("is-settling");
+    expect(classTokensOf(control)).toContain("is-busy");
   });
 
   it("carries the caller's reason, description, and data attributes", () => {

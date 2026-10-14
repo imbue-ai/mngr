@@ -738,10 +738,8 @@ describe("PermissionsTab connection panel", () => {
     await settle();
     const after = rerender();
 
-    expect(classesOf(switches(after)[0])).toContain("is-settling");
-    expect(attrsOf(switches(after)[0]).disabled).toBe(true);
-    // The wait is the switch's own ring; nothing spins beside it.
-    expect(spinners(after)).toHaveLength(0);
+    expect(classesOf(switches(after)[0])).toContain("is-busy");
+    expect(spinners(after)).toHaveLength(1);
     expect(attrsOf(withAttr(after, "data-desktop-egress-adjust")[0]).disabled).toBe(true);
     expect(attrsOf(switches(after)[1]).disabled).toBe(true);
     expect(attrsOf(switches(after)[1]).title).toBe("Waiting for the last change to reach this workspace.");
@@ -770,11 +768,11 @@ describe("PermissionsTab connection panel", () => {
     await settle();
     const after = rerender();
 
-    expect(classesOf(switches(after)[0])).toContain("is-settling");
-    expect(classesOf(switches(after)[1])).not.toContain("is-settling");
-    // The acting switch spins in its own knob; it and every other switch and
-    // the panel's other actions are inert until the machine has answered.
-    expect(spinners(after)).toHaveLength(0);
+    expect(classesOf(switches(after)[0])).toContain("is-busy");
+    expect(classesOf(switches(after)[1])).not.toContain("is-busy");
+    // The acting row spins; every other switch and the panel's other actions
+    // are inert until the machine has answered.
+    expect(spinners(after)).toHaveLength(1);
     expect(attrsOf(switches(after)[0]).disabled).toBe(true);
     expect(attrsOf(switches(after)[1]).disabled).toBe(true);
     expect(attrsOf(switches(after)[1]).title).toBe("Waiting for the last change to reach this workspace.");
