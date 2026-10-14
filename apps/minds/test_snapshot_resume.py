@@ -28,6 +28,7 @@ import subprocess
 import zipfile
 from collections.abc import Iterable
 from collections.abc import Iterator
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -91,6 +92,7 @@ from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOpe
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.primitives import BackupProvider
+from imbue.minds.utils.snapshot_container_states import DockerContainerState
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.testing import get_short_random_string
@@ -158,6 +160,11 @@ class _ResumedWorkspace(FrozenModel):
 
     container_name: str
     services_agent_id: str
+
+
+def _format_container_states(states: Mapping[str, DockerContainerState]) -> str:
+    """Render container states for an assertion message, sorted so the text is stable."""
+    return ", ".join(f"{name}={state.value}" for name, state in sorted(states.items()))
 
 
 def _run_docker(args: list[str], *, timeout: int = 30) -> str:
@@ -354,8 +361,8 @@ def _ensure_dockerd_after_snapshot_resume(snapshot_sandbox_dockerd: None) -> Non
 
 
 # @pytest.mark.docker tells the host-side pytest resource guard that this
-# test invokes the `docker` CLI -- so the guard's PATH wrapper expects
-# (and tolerates) the call. The guard isn't actually installed inside
+# test's fixture chain invokes the `docker` CLI -- so the guard's PATH wrapper
+# expects (and tolerates) the call. The guard isn't actually installed inside
 # the snapshot-resumed offload sandbox where this test runs, but the
 # mark also satisfies the `test_prevent_hardcoded_guarded_binary`
 # ratchet, which inspects this test file's source from the local host
@@ -381,18 +388,19 @@ def _baked_mngr_host_dir(root_name: str, real_home: Path) -> Path:
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(60)
-# The "every workspace container is exited" assertion only holds before any
-# other test in the same offload sandbox has `docker start`ed one (the
-# running_workspace fixture and the Electron create test both do), and the
-# batch order is not fixed; seen failing with the forever-* and docker-state
-# containers running on 2026-09-13. The durable fix is to take this reading in
-# the session fixture before anything starts a container.
-@pytest.mark.flaky
-def test_workspace_docker_container_is_present_and_stopped() -> None:
+def test_workspace_docker_container_is_present_and_stopped(
+    snapshot_container_states: Mapping[str, DockerContainerState],
+) -> None:
     """The snapshot captured a stopped DEFAULT_WORKSPACE_TEMPLATE workspace Docker container.
 
+    Reads the states this sandbox's dockerd restored from the snapshot, which the
+    ``snapshot_container_states`` fixture recorded before any test body could
+    ``docker start`` one of them. Reading the daemon here instead would report
+    whatever the sandbox looks like now: offload reuses a sandbox across
+    batches, and a batch that ran a resume test leaves these containers running.
+
     Asserts:
-    - dockerd sees at least one container (``docker ps -a`` non-empty)
+    - dockerd restored at least one container from the snapshot
     - at least one of those is a minds workspace container (name prefix
       ``minds-`` -- mngr_modal names workspace containers
       ``{mngr_prefix}-{host_name}`` and minds defaults to the
@@ -401,31 +409,23 @@ def test_workspace_docker_container_is_present_and_stopped() -> None:
       snapshot script's clean-shutdown step ``docker stop``ped them
       before ``snapshot_filesystem``)
     """
-    result = subprocess.run(
-        ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.State}}"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    rows = [line.split("\t", maxsplit=1) for line in result.stdout.strip().splitlines() if line]
-    assert rows, (
-        "`docker ps -a` returned no containers; /var/lib/docker did not survive the snapshot "
+    assert snapshot_container_states, (
+        "dockerd restored no containers from the snapshot; /var/lib/docker did not survive it "
         "or dockerd is reading from the wrong root."
     )
 
-    workspace_rows = [(name, state) for name, state in rows if name.startswith("minds-")]
-    assert workspace_rows, (
+    workspace_states = {name: state for name, state in snapshot_container_states.items() if name.startswith("minds-")}
+    assert workspace_states, (
         "No `minds-*` workspace containers in the snapshot. All containers seen: "
-        f"{rows!r}. The snapshot script's docker-stop pass must have run against "
-        "the wrong container set, or the snapshot was taken before mngr_modal "
+        f"{_format_container_states(snapshot_container_states)}. The snapshot script's docker-stop pass "
+        "must have run against the wrong container set, or the snapshot was taken before mngr_modal "
         "created the workspace container."
     )
 
-    not_stopped = [(name, state) for name, state in workspace_rows if state != "exited"]
+    not_stopped = {name: state for name, state in workspace_states.items() if state is not DockerContainerState.EXITED}
     assert not not_stopped, (
         "Expected every minds workspace container to be in the `exited` state after "
-        f"snapshot resume; got states: {dict(workspace_rows)!r}. The snapshot script "
+        f"snapshot resume; got states: {_format_container_states(workspace_states)}. The snapshot script "
         "should have `docker stop`ped them before calling snapshot_filesystem."
     )
 

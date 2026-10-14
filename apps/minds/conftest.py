@@ -21,6 +21,7 @@ both recognize.
 import os
 import subprocess
 from collections.abc import Iterator
+from collections.abc import Mapping
 from pathlib import Path
 from uuid import uuid4
 
@@ -42,6 +43,9 @@ from imbue.minds.testing import SYNC_E2E_SUPERTOKENS_API_KEY_ENV
 from imbue.minds.testing import SYNC_E2E_SUPERTOKENS_URI_ENV
 from imbue.minds.testing import SyncE2EAccount
 from imbue.minds.testing import SyncE2EEnv
+from imbue.minds.utils.snapshot_container_states import DockerContainerState
+from imbue.minds.utils.snapshot_container_states import read_snapshot_container_states
+from imbue.minds.utils.snapshot_container_states import record_snapshot_container_states
 from imbue.mngr.utils.logging import suppress_warnings
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import generate_test_environment_name
@@ -133,11 +137,45 @@ def mngr_test_prefix() -> str:
 
 _SNAPSHOT_START_DOCKERD_SCRIPT = Path("/code/mngr/libs/mngr/imbue/mngr/resources/start-dockerd.sh")
 _SNAPSHOT_DOCKERD_STARTUP_TIMEOUT_SECONDS = 180
+# Outside the snapshot image and outside any pytest process, because the reading
+# belongs to the sandbox: offload runs several batches, each its own pytest
+# process, inside one sandbox, and the reading has to reach the batch that checks
+# it from whichever batch brought dockerd up.
+_SNAPSHOT_CONTAINER_STATES_PATH = Path("/run/minds-snapshot-container-states.json")
+
+
+def _read_container_states_from_dockerd() -> Mapping[str, str]:
+    """Read every container dockerd knows about, mapping container name to its raw state string.
+
+    Left unparsed here: ``read_snapshot_container_states`` resolves the strings
+    to ``DockerContainerState``, so a state Docker adds fails the tests that read
+    the states rather than this fixture, which every test in the module needs.
+    """
+    listing = subprocess.run(
+        ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.State}}"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout
+    rows = [line.split("\t", maxsplit=1) for line in listing.strip().splitlines() if line]
+    return {name: state for name, state in rows}
+
+
+@pytest.fixture(scope="session")
+def snapshot_container_states(snapshot_sandbox_dockerd: None) -> Mapping[str, DockerContainerState]:
+    """The container states this sandbox's dockerd restored from the minds snapshot.
+
+    Recorded by ``snapshot_sandbox_dockerd`` before any test body could
+    ``docker start`` one of them, so this is what the snapshot captured rather
+    than what the sandbox happens to look like by the time a test asks.
+    """
+    return read_snapshot_container_states(_SNAPSHOT_CONTAINER_STATES_PATH)
 
 
 @pytest.fixture(scope="session")
 def snapshot_sandbox_dockerd() -> None:
-    """Bring ``dockerd`` back up in a snapshot-resumed sandbox.
+    """Bring ``dockerd`` back up in a snapshot-resumed sandbox, and record what it restored.
 
     ``sandbox.snapshot_filesystem`` only captures the disk, not running
     processes -- so a sandbox booted from the minds-workspace snapshot has
@@ -150,7 +188,18 @@ def snapshot_sandbox_dockerd() -> None:
     ``test_sync_e2e.py`` (requested explicitly). Mirrors
     ``_ensure_dockerd_for_release`` in ``libs/mngr/imbue/mngr/conftest.py``
     but for the snapshot's in-tree script location.
+
+    The restored container states are recorded here because every path that can
+    ``docker start`` one of them needs this fixture first: this is the last point
+    in the sandbox at which the daemon still holds only what the snapshot
+    captured.
     """
+    _ensure_snapshot_sandbox_dockerd_up()
+    record_snapshot_container_states(_SNAPSHOT_CONTAINER_STATES_PATH, _read_container_states_from_dockerd)
+
+
+def _ensure_snapshot_sandbox_dockerd_up() -> None:
+    """Start the snapshot sandbox's ``dockerd`` unless it is already answering."""
     docker_info = subprocess.run(["docker", "info"], capture_output=True)
     if docker_info.returncode == 0:
         return

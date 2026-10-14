@@ -284,3 +284,9 @@ class FolderSyncStoreError(MindError):
     """Raised when the record of which folders to keep synced cannot be written."""
 
     ...
+
+
+class SnapshotContainerStatesError(MindError):
+    """Raised when the container states a snapshot sandbox was resumed into cannot be read."""
+
+    ...
