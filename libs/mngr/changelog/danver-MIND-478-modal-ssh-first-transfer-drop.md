@@ -1,0 +1,7 @@
+`mngr create` against a Modal host no longer fails when the sandbox's tunnel closes the first bulk transfer's connection.
+
+A freshly created Modal sandbox is reached through a tunnel that sometimes closes a brand-new SSH connection before the key exchange finishes -- seconds after the readiness probe has already opened and authenticated a session through the very same endpoint, and while connections opened earlier keep working straight through the window. Create's first rsync or `git push` landed in that window and took the whole command down with `rsync failed: Connection closed by <address> port <port>` or `kex_exchange_identification: read: Connection reset by peer`.
+
+Every rsync and git transfer that reaches a host over SSH now rides that out: a failure whose stderr says the peer closed the connection is re-run from the start for up to 30 seconds, which is safe because these transfers (`rsync`, and `git fetch`/`git push` with explicit forced refspecs) reach the same end state whether they run once or twice. A refused connection, a host-key mismatch, and any failure of the command itself are deliberately excluded, so a host that is genuinely down or mispinned still fails on the first attempt.
+
+The same window also times out the TCP connect of the paramiko connection a host is opened with, so that shape (`Could not connect (timed out)`) joins the handshake failures the connect already retries. Matched on the timeout specifically, not on the shared `Could not connect` prefix, which also carries refusals.

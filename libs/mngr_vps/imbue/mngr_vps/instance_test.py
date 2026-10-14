@@ -306,8 +306,9 @@ def test_redact_secret_env_no_op_when_no_match() -> None:
     assert redact_secret_env(cmd) == "docker build ."
 
 
-# One representative stderr string per entry in _RETRYABLE_RSYNC_PATTERNS, so every
-# retryable branch is exercised (a dropped pattern flips exactly one case to failing).
+# One representative stderr string per retryable pattern, so every retryable branch is
+# exercised (a dropped pattern flips exactly one case to failing). The last case comes
+# from mngr's shared classifier rather than from this project's own list.
 @pytest.mark.parametrize(
     "stderr",
     [
@@ -317,8 +318,8 @@ def test_redact_secret_env_no_op_when_no_match() -> None:
         "rsync: [sender] failed: Connection timed out",
         "client_loop: send disconnect: Broken pipe",
         "ssh: connect to host 1.2.3.4 port 22: No route",
-        "kex_exchange_identification: read: Connection reset by peer",
         "connect to address 1.2.3.4: Network is unreachable",
+        "kex_exchange_identification: read: Connection reset by peer",
     ],
 )
 def test_is_retryable_rsync_error_true_for_each_connection_class_pattern(stderr: str) -> None:

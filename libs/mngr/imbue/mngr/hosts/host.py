@@ -33,6 +33,7 @@ from pyinfra.connectors.util import CommandOutput
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.logging import log_span
@@ -110,6 +111,9 @@ from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr.utils.name_generator import GENERIC_AGENT_NAME_HINT
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.read_deadline import remaining_read_timeout
+from imbue.mngr.utils.ssh_transport import SSH_CONNECT_HANDSHAKE_RETRY_BACKOFF_SECONDS
+from imbue.mngr.utils.ssh_transport import SSH_CONNECT_HANDSHAKE_RETRY_DEADLINE_SECONDS
+from imbue.mngr.utils.ssh_transport import run_process_retrying_closed_ssh_connections
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 
@@ -2013,7 +2017,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             self.mngr_ctx.concurrency_group.run_process_to_completion(
                 ["git", "init", "--bare", str(dest_git_dir)],
             )
-            self.mngr_ctx.concurrency_group.run_process_to_completion(
+            self._run_process_over_ssh(
                 [
                     "git",
                     "-C",
@@ -2023,7 +2027,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     remote_url,
                     *GIT_MIRROR_PUSH_REFSPECS,
                 ],
-                env={**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd},
+                {**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd},
             )
         except ProcessError as e:
             raise MngrError(f"Failed to fetch from remote source: {e}") from e
@@ -2083,9 +2087,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         *GIT_MIRROR_PUSH_REFSPECS,
                     ]
                     try:
-                        self.mngr_ctx.concurrency_group.run_process_to_completion(
+                        self._run_process_over_ssh(
                             command_args,
-                            env={**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd, "GIT_LFS_SKIP_PUSH": "1"},
+                            {**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd, "GIT_LFS_SKIP_PUSH": "1"},
                         )
                     except ProcessError as e:
                         raise MngrError(f"Failed to push git repo to remote target: {e}") from e
@@ -2137,10 +2141,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     *GIT_MIRROR_PUSH_REFSPECS,
                 ]
                 try:
-                    self.mngr_ctx.concurrency_group.run_process_to_completion(
-                        command_args,
-                        env={**os.environ, **env},
-                    )
+                    self._run_process_over_ssh(command_args, {**os.environ, **env})
                 except ProcessError as e:
                     raise MngrError(f"Failed to push git repo: {e}") from e
                 logger.trace("Ran git mirror push from local source to target: {}", " ".join(command_args))
@@ -2401,9 +2402,25 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         rsync_args.extend([source_str, f"{user}@{hostname}:{target_str}"])
         with log_span("rsync: local dir -> {}@{}:{}", user, hostname, port):
             try:
-                self.mngr_ctx.concurrency_group.run_process_to_completion(rsync_args)
+                self._run_process_over_ssh(rsync_args, None)
             except ProcessError as e:
                 raise MngrError(f"rsync failed (push to {hostname}): {e.stderr}") from e
+
+    def _run_process_over_ssh(self, command: Sequence[str], env: Mapping[str, str] | None) -> FinishedProcess:
+        """Run an rsync or git subprocess that reaches a host over ssh, riding out closed connections.
+
+        The single seam for bulk transfers, which borrow the ssh binary rather than the
+        paramiko transport the command methods reconnect: a freshly created host's
+        endpoint can close a brand-new connection seconds after a readiness probe has
+        already authenticated through it, and nothing here would otherwise notice.
+        """
+        return run_process_retrying_closed_ssh_connections(
+            self.mngr_ctx.concurrency_group,
+            command,
+            env,
+            SSH_CONNECT_HANDSHAKE_RETRY_DEADLINE_SECONDS,
+            SSH_CONNECT_HANDSHAKE_RETRY_BACKOFF_SECONDS,
+        )
 
     def _rsync_files(
         self,
@@ -2523,7 +2540,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     pull_args.extend(["-e", build_ssh_transport_command(src_key_path, src_port, src_known_hosts)])
                     pull_args.extend([f"{src_user}@{src_hostname}:{source_path_str}", temp_path_str])
                     try:
-                        self.mngr_ctx.concurrency_group.run_process_to_completion(pull_args)
+                        self._run_process_over_ssh(pull_args, None)
                     except ProcessError as e:
                         raise MngrError(f"rsync failed (pull from source): {e.stderr}") from e
                     logger.trace("Ran rsync pull command: {}", " ".join(pull_args))
@@ -2539,7 +2556,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     push_args.extend(["-e", build_ssh_transport_command(tgt_key_path, tgt_port, tgt_known_hosts)])
                     push_args.extend([temp_path_str, f"{tgt_user}@{tgt_hostname}:{target_path_str}"])
                     try:
-                        self.mngr_ctx.concurrency_group.run_process_to_completion(push_args)
+                        self._run_process_over_ssh(push_args, None)
                     except ProcessError as e:
                         raise MngrError(f"rsync failed (push to target): {e.stderr}") from e
                     logger.trace("Ran rsync push command: {}", " ".join(push_args))
@@ -2548,7 +2565,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
         with log_span("{}", rsync_description):
             try:
-                self.mngr_ctx.concurrency_group.run_process_to_completion(rsync_args)
+                self._run_process_over_ssh(rsync_args, None)
             except ProcessError as e:
                 raise MngrError(f"rsync failed: {e.stderr}") from e
             logger.trace("Ran rsync command: {}", " ".join(rsync_args))

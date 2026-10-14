@@ -36,6 +36,7 @@ from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr.utils.ssh import quote_ssh_option_value_for_shell
+from imbue.mngr.utils.ssh_transport import is_closed_ssh_connection_stderr
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr_vps.data_types import ContainerFile
 from imbue.mngr_vps.errors import ContainerSetupError
@@ -306,6 +307,9 @@ _UPLOAD_MAX_ATTEMPTS: Final[int] = len(_UPLOAD_RETRY_BACKOFF_SECONDS) + 1
 # own catch-all exit 255 with these messages is what fresh Vultr VPSes
 # produce in the first 30-60s of life. Other rsync errors (permission,
 # protocol mismatch, vanished source) are non-transient and we fail fast.
+# Only the shapes a fresh VPS adds are listed here; the shapes where the peer
+# closed the connection outright live in mngr's shared classifier, which this
+# list is read alongside.
 _RETRYABLE_RSYNC_PATTERNS: Final[tuple[str, ...]] = (
     "Broken pipe",
     "Connection reset by peer",
@@ -313,7 +317,6 @@ _RETRYABLE_RSYNC_PATTERNS: Final[tuple[str, ...]] = (
     "Connection timed out",
     "client_loop",
     "ssh: connect to host",
-    "kex_exchange_identification",
     "Network is unreachable",
 )
 
@@ -330,7 +333,7 @@ def redact_secret_env(remote_command: str) -> str:
 
 def is_retryable_rsync_error(stderr: str) -> bool:
     """Return True iff stderr looks like a connection-class rsync failure."""
-    return any(pattern in stderr for pattern in _RETRYABLE_RSYNC_PATTERNS)
+    return is_closed_ssh_connection_stderr(stderr) or any(pattern in stderr for pattern in _RETRYABLE_RSYNC_PATTERNS)
 
 
 def host_volume_name_for(host_id: HostId) -> str:

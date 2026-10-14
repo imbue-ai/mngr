@@ -745,6 +745,7 @@ def test_ensure_connected_does_not_retry_non_transient_connect_failures(temp_mng
     [
         (ConnectError("SSH error (Error reading SSH protocol banner)"), True),
         (ConnectError("SSH error (No existing session)"), True),
+        (ConnectError("Could not connect (timed out)"), True),
         (ConnectError("Could not connect (Connection refused)"), False),
         (ConnectError("Authentication error (username=alice): bad password"), False),
         (SSHException("Error reading SSH protocol banner"), False),
@@ -753,6 +754,7 @@ def test_ensure_connected_does_not_retry_non_transient_connect_failures(temp_mng
     ids=[
         "banner-read",
         "no-existing-session",
+        "connect-timed-out",
         "refused",
         "auth",
         "raw-banner-ssh-exception",
@@ -766,7 +768,9 @@ def test_is_transient_ssh_connect_error_matches_transient_handshake_connect_erro
 
     The raw ``SSHException`` cases must stay False: at connect time pyinfra always
     wraps such errors in ``ConnectError``, and mid-command handshake problems are
-    handled by the separate ``is_transient_ssh_error`` classifier.
+    handled by the separate ``is_transient_ssh_error`` classifier. The timed-out and
+    refused cases share a message prefix and must still split apart, so a tunnel that
+    answers nothing is ridden out while a host that answers "no" fails at once.
     """
     assert _is_transient_ssh_connect_error(exception) is expected
 

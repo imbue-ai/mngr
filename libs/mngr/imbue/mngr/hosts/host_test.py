@@ -122,6 +122,7 @@ from imbue.mngr.utils.testing import HostSubclassT
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import get_cleanup_failures
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import make_command_failing_n_times
 from imbue.mngr.utils.testing import make_local_host_of_class
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import make_test_agent_details
@@ -5239,3 +5240,21 @@ class _FakeSftpAttrForStat:
 
     def __init__(self, st_mode: int | None) -> None:
         self.st_mode = st_mode
+
+
+def test_a_transfer_whose_ssh_connection_the_peer_closed_is_run_again(
+    local_host: Host,
+    tmp_path: Path,
+) -> None:
+    """The MIND-478 pin: the seam every rsync and git transfer runs through rides out a closed connection.
+
+    A freshly created Modal host closes the brand-new connection of the first bulk
+    transfer seconds after a readiness probe has already authenticated through the same
+    endpoint, and the whole create used to go down with it.
+    """
+    command, attempt_file = make_command_failing_n_times(tmp_path, 1, "Connection closed by 203.0.113.7 port 39649")
+
+    finished = local_host._run_process_over_ssh(command, None)
+
+    assert finished.returncode == 0
+    assert attempt_file.read_text().strip() == "2"

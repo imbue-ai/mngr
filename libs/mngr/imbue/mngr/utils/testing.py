@@ -1039,6 +1039,37 @@ def get_short_random_string() -> str:
     return uuid4().hex[:8]
 
 
+# Writes the caller's message to stderr and exits 255 for its first N invocations, then
+# succeeds, counting every invocation in a file. Lets a test drive a retrying runner with
+# a real subprocess and a real non-zero exit rather than a stand-in for one.
+_COUNTING_COMMAND_SCRIPT: Final[str] = """\
+attempt_file="$1"
+failure_count="$2"
+message="$3"
+attempt=$(cat "$attempt_file")
+echo "$((attempt + 1))" > "$attempt_file"
+if [ "$attempt" -lt "$failure_count" ]; then
+  printf '%s\\n' "$message" >&2
+  exit 255
+fi
+exit 0
+"""
+
+
+def make_command_failing_n_times(
+    tmp_path: Path,
+    failure_count: int,
+    stderr_message: str,
+) -> tuple[list[str], Path]:
+    """A shell command failing with ``stderr_message`` that many times, and the file counting its runs."""
+    script_path = tmp_path / f"counting-{uuid4().hex}.sh"
+    script_path.write_text(_COUNTING_COMMAND_SCRIPT)
+    attempt_file = tmp_path / f"attempts-{uuid4().hex}.txt"
+    attempt_file.write_text("0")
+    command = ["sh", str(script_path), str(attempt_file), str(failure_count), stderr_message]
+    return command, attempt_file
+
+
 # Stack of opt-out frames for the autouse "no unexpected loguru warnings"
 # check. Each frame is either None (allow any warning) or a compiled regex
 # (allow only warnings whose message matches it; non-matching ones still fail

@@ -81,6 +81,8 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.utils.command_logging import loggable_command
 from imbue.mngr.utils.command_logging import withheld_command_label
 from imbue.mngr.utils.read_deadline import remaining_read_timeout
+from imbue.mngr.utils.ssh_transport import SSH_CONNECT_HANDSHAKE_RETRY_BACKOFF_SECONDS
+from imbue.mngr.utils.ssh_transport import SSH_CONNECT_HANDSHAKE_RETRY_DEADLINE_SECONDS
 
 
 def create_local_pyinfra_host() -> PyinfraHost:
@@ -366,11 +368,16 @@ retry_on_transient_ssh_error = retry(
 #   - "no existing session": the transport was torn down mid-handshake, so paramiko's
 #     ``get_remote_server_key`` finds no active session -- a tunnel blip during key
 #     exchange, which can strike even after a readiness probe has already succeeded.
+#   - "could not connect (timed out)": the TCP connect got no answer at all from an
+#     endpoint a readiness probe has already authenticated through -- the same window as
+#     the two above. Matched on the timeout specifically rather than on the shared
+#     "could not connect" prefix, which also carries refusals.
 # Refused/unreachable/auth/host-key failures are deliberately excluded (they carry other
 # messages) so a genuinely-down host still fails fast.
 _TRANSIENT_SSH_HANDSHAKE_CONNECT_ERROR_MESSAGES: Final[tuple[str, ...]] = (
     "error reading ssh protocol banner",
     "no existing session",
+    "could not connect (timed out)",
 )
 
 
@@ -384,15 +391,6 @@ def _is_transient_ssh_connect_error(exception: BaseException) -> bool:
         return False
     message = str(exception).lower()
     return any(known in message for known in _TRANSIENT_SSH_HANDSHAKE_CONNECT_ERROR_MESSAGES)
-
-
-# A transient handshake failure surfaces either immediately or only after paramiko's full
-# banner timeout, so a fixed count of zero-wait retries can burn every attempt in
-# milliseconds before sshd is ready. Ride the race out over a wall-clock deadline with a
-# fixed pause between attempts instead, so the ride-out window does not depend on how each
-# individual attempt happens to fail.
-SSH_CONNECT_HANDSHAKE_RETRY_DEADLINE_SECONDS: Final[float] = 30.0
-SSH_CONNECT_HANDSHAKE_RETRY_BACKOFF_SECONDS: Final[float] = 0.5
 
 
 def _connect_pyinfra_host_retrying_transient_handshake_failures(
