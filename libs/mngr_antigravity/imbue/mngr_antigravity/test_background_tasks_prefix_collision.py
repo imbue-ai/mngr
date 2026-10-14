@@ -6,15 +6,14 @@ see that file for the design rationale.
 """
 
 import importlib.resources
-import os
-import shutil
 import subprocess
 from collections.abc import Generator
 from pathlib import Path
 
 import pytest
 
-from imbue.mngr import resources as _mngr_resources
+from imbue.mngr.utils.testing import build_background_tasks_supervisor_env
+from imbue.mngr.utils.testing import create_background_tasks_state_dir
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr_antigravity import resources as _antigravity_resources
 
@@ -38,17 +37,7 @@ def colliding_session_pair() -> Generator[tuple[str, str], None, None]:
 
 @pytest.fixture
 def state_dir_with_log_lib(tmp_path: Path) -> Path:
-    """Lay out a minimal MNGR_AGENT_STATE_DIR the antigravity background script needs."""
-    state_dir = tmp_path / "state"
-    (state_dir / "commands").mkdir(parents=True)
-    (state_dir / "activity").mkdir()
-    (state_dir / "events" / "logs" / "antigravity_background_tasks").mkdir(parents=True)
-    (state_dir / "logs").mkdir()
-
-    log_lib = importlib.resources.files(_mngr_resources) / "mngr_log.sh"
-    with importlib.resources.as_file(log_lib) as src:
-        shutil.copy(src, state_dir / "commands" / "mngr_log.sh")
-    return state_dir
+    return create_background_tasks_state_dir(tmp_path / "state")
 
 
 @pytest.mark.tmux
@@ -62,13 +51,7 @@ def test_antigravity_background_tasks_exits_when_target_session_is_gone_despite_
     """
     stopped, _alive = colliding_session_pair
 
-    # TMUX_TMPDIR comes from mngr's per-test isolated tmux server fixture
-    # (autouse). We pass only what the script needs rather than the full env.
-    env = {
-        "PATH": os.environ["PATH"],
-        "TMUX_TMPDIR": os.environ["TMUX_TMPDIR"],
-        "MNGR_AGENT_STATE_DIR": str(state_dir_with_log_lib),
-    }
+    env = build_background_tasks_supervisor_env(state_dir_with_log_lib, None)
 
     # With the fix the script exits in <1s. Without it, the script enters the
     # main loop (whose inner sleep is 15s) and never exits -- subprocess.run

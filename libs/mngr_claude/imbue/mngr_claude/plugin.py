@@ -75,7 +75,9 @@ from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.host import write_json_dict_via_host
+from imbue.mngr.hosts.tmux import PANE_SESSION_NAME_SHELL_EXPRESSION
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
+from imbue.mngr.hosts.tmux import upgrade_literal_session_name_argument
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
@@ -1427,6 +1429,8 @@ _CLAUDE_COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME: Final[str] = "common_transcript_c
 # so the streamer must keep running even when the common transcript is disabled.
 _CLAUDE_RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
 
+_CLAUDE_BACKGROUND_TASKS_SCRIPT_NAME: Final[str] = "claude_background_tasks.sh"
+
 # Claude-specific scripts that are always provisioned regardless of
 # emit_common_transcript:
 #   - claude_background_tasks.sh is the long-running orchestrator launched
@@ -1441,7 +1445,7 @@ _CLAUDE_RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
 # but is provisioned via :func:`provision_raw_transcript_scripts` because it
 # satisfies the :class:`HasTranscriptMixin` contract.
 _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES: Final[tuple[str, ...]] = (
-    "claude_background_tasks.sh",
+    _CLAUDE_BACKGROUND_TASKS_SCRIPT_NAME,
     "wait_for_stop_hook.sh",
     "sync_keychain_credentials.py",
 )
@@ -2840,7 +2844,7 @@ class ClaudeAgent(
         """Return the datetime when the Claude agent entered idle state, or None."""
         return get_agent_idle_since(self)
 
-    def _build_background_tasks_command(self, session_name: str, primary_window_name: str) -> str:
+    def _build_background_tasks_command(self, primary_window_name: str) -> str:
         """Build a shell command that starts the background tasks script.
 
         The background tasks script (provisioned to $MNGR_AGENT_STATE_DIR/commands/)
@@ -2849,8 +2853,15 @@ class ClaudeAgent(
         passed through so the response-streaming watcher captures the agent pane
         by window name rather than the literal :0 index (base-index agnostic).
         """
-        script_path = "$MNGR_AGENT_STATE_DIR/commands/claude_background_tasks.sh"
-        return f"( {script_path} {shlex.quote(session_name)} {shlex.quote(primary_window_name)} ) &"
+        script_path = f"$MNGR_AGENT_STATE_DIR/commands/{_CLAUDE_BACKGROUND_TASKS_SCRIPT_NAME}"
+        return f"( {script_path} {PANE_SESSION_NAME_SHELL_EXPRESSION} {shlex.quote(primary_window_name)} ) &"
+
+    def upgrade_stored_command(self, command: CommandString) -> CommandString:
+        return CommandString(
+            upgrade_literal_session_name_argument(
+                command, f"( $MNGR_AGENT_STATE_DIR/commands/{_CLAUDE_BACKGROUND_TASKS_SCRIPT_NAME}"
+            )
+        )
 
     def _build_append_system_prompt_args(self) -> tuple[str, ...]:
         """Turn this agent type's ``append_system_prompt`` blocks into claude's own flag.
@@ -2991,10 +3002,7 @@ class ClaudeAgent(
         env_exports = f"export IS_SANDBOX=1 && {sid_export}" if not host.is_local else sid_export
 
         # Build the background tasks command (activity tracking + transcript export)
-        session_name = self.session_name
-        background_cmd = self._build_background_tasks_command(
-            session_name, self.mngr_ctx.config.tmux.primary_window_name
-        )
+        background_cmd = self._build_background_tasks_command(self.mngr_ctx.config.tmux.primary_window_name)
 
         # Combine: start background tasks, export env (including session ID), then run the main command (and make sure we get rid of the session started marker on each run so that wait_for_ready_signal works correctly for both new and resumed sessions).
         # claude_main_pid is cleared alongside it: whenever this chain runs, any

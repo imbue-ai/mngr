@@ -1,3 +1,4 @@
+import importlib.resources
 import inspect
 import json
 import os
@@ -43,6 +44,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr import resources as _mngr_resources
 from imbue.mngr.cli.create import create as create_command
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
@@ -807,6 +809,136 @@ def tmux_session_exists(session_name: str) -> bool:
         capture_output=True,
     )
     return result.returncode == 0
+
+
+@contextmanager
+def renamed_tmux_session() -> Generator[tuple[str, str, str], None, None]:
+    """Create a tmux session, rename it, and yield ``(old_name, new_name, pane_id)``.
+
+    ``pane_id`` is the session's pane (``%N``), i.e. what ``$TMUX_PANE`` holds for a
+    process launched in it. The session is killed on exit. As with a real rename, the
+    new name does not extend the old one: tmux would otherwise prefix-match an
+    unanchored old-name target onto the renamed session and hide a stale-name failure.
+    """
+    old_name = f"mngr-renamed-from-{get_short_random_string()}"
+    new_name = f"mngr-renamed-to-{get_short_random_string()}"
+    subprocess.run(["tmux", "new-session", "-d", "-s", old_name, "sleep", "48217"], check=True)
+    try:
+        subprocess.run(["tmux", "rename-session", "-t", f"={old_name}", new_name], check=True)
+        pane_id = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", f"={new_name}:", "#{pane_id}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        yield (old_name, new_name, pane_id)
+    finally:
+        subprocess.run(["tmux", "kill-session", "-t", f"={new_name}"], check=False)
+
+
+@contextmanager
+def terminal_tmux_server(command: Sequence[str], width: int, height: int) -> Generator[str, None, None]:
+    """Run ``command`` in a ``width`` x ``height`` session named ``terminal`` on a tmux server of its own.
+
+    The session stands in for the user's terminal (e.g. one running ``tmux attach`` or the
+    ``mngr connect`` SSH wrapper). A single-element ``command`` is run through the shell, as
+    tmux does for ``new-session``. Yields the server's socket name (for ``tmux -L``); the
+    session is killed on exit.
+    """
+    terminal_socket = f"terminal-{uuid4().hex}"
+    subprocess.run(
+        ["tmux", "-L", terminal_socket, "new-session", "-d", "-s", "terminal", "-x", str(width), "-y", str(height)]
+        + list(command),
+        check=True,
+    )
+    try:
+        yield terminal_socket
+    finally:
+        subprocess.run(["tmux", "-L", terminal_socket, "kill-session", "-t", "=terminal"], check=False)
+
+
+def create_background_tasks_state_dir(state_dir: Path) -> Path:
+    """Lay out the minimal ``MNGR_AGENT_STATE_DIR`` a plugin's background-tasks supervisor needs.
+
+    The supervisors source ``commands/mngr_log.sh`` and write under ``activity/``,
+    ``events/`` and ``logs/``; no child scripts are installed, so the supervisor runs
+    only its own poll loop.
+    """
+    (state_dir / "commands").mkdir(parents=True)
+    (state_dir / "activity").mkdir()
+    (state_dir / "events").mkdir()
+    (state_dir / "logs").mkdir()
+    log_lib = importlib.resources.files(_mngr_resources) / "mngr_log.sh"
+    with importlib.resources.as_file(log_lib) as src:
+        shutil.copy(src, state_dir / "commands" / "mngr_log.sh")
+    return state_dir
+
+
+def build_background_tasks_supervisor_env(state_dir: Path, pane_id: str | None) -> dict[str, str]:
+    """Build the minimal environment a background-tasks supervisor runs with, under a fresh agent id.
+
+    ``pane_id`` becomes ``TMUX_PANE`` (as tmux sets it inside the agent's pane); ``None``
+    models a launch from outside the pane. ``TMUX_TMPDIR`` routes tmux to the test's
+    isolated server.
+    """
+    env = {
+        "PATH": os.environ["PATH"],
+        "TMUX_TMPDIR": os.environ["TMUX_TMPDIR"],
+        "MNGR_AGENT_STATE_DIR": str(state_dir),
+        "MNGR_AGENT_ID": f"agent-{uuid4().hex}",
+    }
+    if pane_id is not None:
+        env["TMUX_PANE"] = pane_id
+    return env
+
+
+def _list_sleep_children(pid: int) -> list[int]:
+    result = subprocess.run(["pgrep", "-P", str(pid), "-x", "sleep"], capture_output=True, text=True)
+    return [int(line) for line in result.stdout.split()]
+
+
+def is_background_tasks_supervisor_polling(process: subprocess.Popen[str], timeout: float = 10.0) -> bool:
+    """Return whether a background-tasks supervisor reaches its poll loop before exiting.
+
+    Every supervisor ends each poll-loop iteration in ``sleep``, so a ``sleep`` child
+    is proof the loop's session-liveness check passed; a supervisor that decided the
+    session is gone exits instead.
+    """
+    poll_until(
+        lambda: process.poll() is not None or len(_list_sleep_children(process.pid)) > 0,
+        timeout=timeout,
+    )
+    return process.poll() is None and len(_list_sleep_children(process.pid)) > 0
+
+
+@contextmanager
+def running_background_tasks_supervisor(
+    script_path: Path, args: Sequence[str], env: dict[str, str]
+) -> Generator[subprocess.Popen[str], None, None]:
+    """Run a background-tasks supervisor script, stopping it (and its poll ``sleep``) on exit.
+
+    SIGTERM ends the supervisor (running its EXIT trap, which removes its pidfile) but
+    orphans the ``sleep`` it was waiting on, so that ``sleep`` is killed separately.
+    """
+    process = subprocess.Popen(
+        ["bash", str(script_path), *args],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        yield process
+    finally:
+        if process.poll() is None:
+            sleep_pids = _list_sleep_children(process.pid)
+            process.terminate()
+            process.wait(timeout=10)
+            for sleep_pid in sleep_pids:
+                try:
+                    os.kill(sleep_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 def create_test_agent_via_cli(

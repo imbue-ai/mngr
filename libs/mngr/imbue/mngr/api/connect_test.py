@@ -17,6 +17,7 @@ from pyinfra.api.inventory import Inventory
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.api.address_parsers import parse_agent_address
 from imbue.mngr.api.connect import SIGNAL_EXIT_CODE_DESTROY
 from imbue.mngr.api.connect import SIGNAL_EXIT_CODE_STOP
 from imbue.mngr.api.connect import _build_ssh_activity_wrapper_script
@@ -35,31 +36,36 @@ from imbue.mngr.errors import NestedTmuxError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.interfaces.data_types import PyinfraConnector
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
+_TEST_AGENT_ID = AgentId("agent-6f1c3d9a2b8e4f7a9c0d1e2f3a4b5c6d")
+_TEST_HOST_ID = HostId("host-0a1b2c3d4e5f60718293a4b5c6d7e8f9")
+
 
 def test_build_ssh_activity_wrapper_script_creates_activity_directory() -> None:
     """Test that the wrapper script creates the activity directory."""
-    script = _build_ssh_activity_wrapper_script("mngr-test-session", Path("/home/user/.mngr"))
+    script = _build_ssh_activity_wrapper_script("mngr-test-session", _TEST_AGENT_ID, Path("/home/user/.mngr"))
 
     assert "mkdir -p '/home/user/.mngr/activity'" in script
 
 
 def test_build_ssh_activity_wrapper_script_writes_to_activity_file() -> None:
     """Test that the wrapper script writes to the activity/ssh file."""
-    script = _build_ssh_activity_wrapper_script("mngr-test-session", Path("/home/user/.mngr"))
+    script = _build_ssh_activity_wrapper_script("mngr-test-session", _TEST_AGENT_ID, Path("/home/user/.mngr"))
 
     assert "'/home/user/.mngr/activity/ssh'" in script
 
 
 def test_build_ssh_activity_wrapper_script_attaches_to_tmux_session() -> None:
     """Test that the wrapper script attaches to the correct tmux session."""
-    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", _TEST_AGENT_ID, Path("/home/user/.mngr"))
 
     # The attach command is built via build_attach_argv (raw `=name` from
     # TmuxSessionTarget.as_target_arg) and rendered with shlex.join, which quotes a
@@ -70,14 +76,16 @@ def test_build_ssh_activity_wrapper_script_attaches_to_tmux_session() -> None:
 
 def test_build_ssh_activity_wrapper_script_without_attach_args_is_plain_attach() -> None:
     """With no attach_args the attach command is the plain `tmux attach` (no client flags)."""
-    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", _TEST_AGENT_ID, Path("/home/user/.mngr"))
     assert "tmux attach -t =mngr-my-agent" in script
 
 
 def test_build_ssh_activity_wrapper_script_inserts_attach_args_before_subcommand() -> None:
     """attach_args are tmux client flags and must appear before the `attach` subcommand,
     e.g. `tmux -CC attach` for iTerm2 control mode."""
-    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"), attach_args=("-CC",))
+    script = _build_ssh_activity_wrapper_script(
+        "mngr-my-agent", _TEST_AGENT_ID, Path("/home/user/.mngr"), attach_args=("-CC",)
+    )
     assert "tmux -CC attach -t =mngr-my-agent" in script
 
 
@@ -85,7 +93,7 @@ def test_build_ssh_activity_wrapper_script_no_longer_sends_sigwinch() -> None:
     """The post-attach SIGWINCH nudge has moved to a per-session tmux client-attached
     hook (set at session creation), so the connect wrapper must no longer send it.
     This guards against reintroducing a redundant second nudge on `mngr connect`."""
-    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", _TEST_AGENT_ID, Path("/home/user/.mngr"))
 
     assert "kill -WINCH" not in script
     assert "window-size" not in script
@@ -93,14 +101,14 @@ def test_build_ssh_activity_wrapper_script_no_longer_sends_sigwinch() -> None:
 
 def test_build_ssh_activity_wrapper_script_kills_activity_tracker_on_exit() -> None:
     """Test that the wrapper script kills the activity tracker when tmux exits."""
-    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
+    script = _build_ssh_activity_wrapper_script("mngr-test", _TEST_AGENT_ID, Path("/tmp/.mngr"))
 
     assert "kill $MNGR_ACTIVITY_PID" in script
 
 
 def test_build_ssh_activity_wrapper_script_writes_json_with_time_and_pid() -> None:
     """Test that the activity file contains JSON with time and ssh_pid."""
-    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
+    script = _build_ssh_activity_wrapper_script("mngr-test", _TEST_AGENT_ID, Path("/tmp/.mngr"))
 
     # The script should write JSON with time and ssh_pid fields
     assert "time" in script
@@ -110,7 +118,7 @@ def test_build_ssh_activity_wrapper_script_writes_json_with_time_and_pid() -> No
 
 def test_build_ssh_activity_wrapper_script_handles_paths_with_spaces() -> None:
     """Test that the wrapper script handles paths with spaces correctly."""
-    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/home/user/my dir/.mngr"))
+    script = _build_ssh_activity_wrapper_script("mngr-test", _TEST_AGENT_ID, Path("/home/user/my dir/.mngr"))
 
     # Paths should be quoted to handle spaces
     assert "'/home/user/my dir/.mngr/activity'" in script
@@ -118,16 +126,18 @@ def test_build_ssh_activity_wrapper_script_handles_paths_with_spaces() -> None:
 
 
 def test_build_ssh_activity_wrapper_script_checks_for_signal_file() -> None:
-    """Test that the wrapper script checks for the session-specific signal file."""
-    script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
+    """Test that the wrapper script checks the agent's signal file, then the legacy session-named one."""
+    script = _build_ssh_activity_wrapper_script("mngr-my-agent", _TEST_AGENT_ID, Path("/home/user/.mngr"))
 
-    assert "'/home/user/.mngr/signals/mngr-my-agent'" in script
-    assert "SIGNAL_FILE=" in script
+    assert (
+        f"for SIGNAL_FILE in /home/user/.mngr/signals/{_TEST_AGENT_ID} /home/user/.mngr/signals/mngr-my-agent;"
+        in script
+    )
 
 
 def test_build_ssh_activity_wrapper_script_exits_with_destroy_code_on_destroy_signal() -> None:
     """Test that the wrapper script exits with SIGNAL_EXIT_CODE_DESTROY when signal is 'destroy'."""
-    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
+    script = _build_ssh_activity_wrapper_script("mngr-test", _TEST_AGENT_ID, Path("/tmp/.mngr"))
 
     assert f"exit {SIGNAL_EXIT_CODE_DESTROY}" in script
     assert '"destroy"' in script
@@ -135,7 +145,7 @@ def test_build_ssh_activity_wrapper_script_exits_with_destroy_code_on_destroy_si
 
 def test_build_ssh_activity_wrapper_script_exits_with_stop_code_on_stop_signal() -> None:
     """Test that the wrapper script exits with SIGNAL_EXIT_CODE_STOP when signal is 'stop'."""
-    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
+    script = _build_ssh_activity_wrapper_script("mngr-test", _TEST_AGENT_ID, Path("/tmp/.mngr"))
 
     assert f"exit {SIGNAL_EXIT_CODE_STOP}" in script
     assert '"stop"' in script
@@ -143,21 +153,20 @@ def test_build_ssh_activity_wrapper_script_exits_with_stop_code_on_stop_signal()
 
 def test_build_ssh_activity_wrapper_script_removes_signal_file_after_reading() -> None:
     """Test that the wrapper script removes the signal file after reading it."""
-    script = _build_ssh_activity_wrapper_script("mngr-test", Path("/tmp/.mngr"))
+    script = _build_ssh_activity_wrapper_script("mngr-test", _TEST_AGENT_ID, Path("/tmp/.mngr"))
 
     assert 'rm -f "$SIGNAL_FILE"' in script
 
 
-def test_build_ssh_activity_wrapper_script_signal_file_uses_session_name() -> None:
-    """Test that the signal file path includes the session name for per-session signals."""
-    script = _build_ssh_activity_wrapper_script("mngr-unique-session", Path("/data/.mngr"))
+def test_build_ssh_activity_wrapper_script_clears_stale_signal_files_before_attaching() -> None:
+    """A signal file left by an earlier connect must not turn this connect's plain detach into a stop."""
+    script = _build_ssh_activity_wrapper_script("mngr-unique-session", _TEST_AGENT_ID, Path("/data/.mngr"))
 
-    assert "'/data/.mngr/signals/mngr-unique-session'" in script
+    clear_command = f"rm -f /data/.mngr/signals/{_TEST_AGENT_ID} /data/.mngr/signals/mngr-unique-session;"
+    assert script.index(clear_command) < script.index("tmux attach")
 
 
-# =========================================================================
 # Tests for _build_ssh_args
-# =========================================================================
 
 
 def _create_pyinfra_ssh_host(
@@ -354,65 +363,54 @@ def test_build_ssh_args_known_hosts_dev_null_treated_as_missing(
     assert "StrictHostKeyChecking=no" in " ".join(args)
 
 
-# =========================================================================
 # Tests for _determine_post_disconnect_action
-# =========================================================================
 
 
 def test_determine_post_disconnect_action_destroy_signal() -> None:
-    """Test that SIGNAL_EXIT_CODE_DESTROY maps to a mngr destroy action."""
-    action = _determine_post_disconnect_action(SIGNAL_EXIT_CODE_DESTROY, "mngr-test-agent")
+    """SIGNAL_EXIT_CODE_DESTROY maps to a mngr destroy of this one instance (a same-id agent on another host is spared)."""
+    action = _determine_post_disconnect_action(SIGNAL_EXIT_CODE_DESTROY, _TEST_AGENT_ID, _TEST_HOST_ID)
 
     assert action is not None
     executable, argv = action
     assert executable == "mngr"
-    assert argv == ["mngr", "destroy", "--session", "mngr-test-agent", "-f"]
+    assert argv == ["mngr", "destroy", f"{_TEST_AGENT_ID}@{_TEST_HOST_ID}", "-f"]
+    assert parse_agent_address(argv[2]) == AgentAddress(agent=_TEST_AGENT_ID, host=HostAddress(host=_TEST_HOST_ID))
 
 
 def test_determine_post_disconnect_action_stop_signal() -> None:
     """Test that SIGNAL_EXIT_CODE_STOP maps to a mngr stop action."""
-    action = _determine_post_disconnect_action(SIGNAL_EXIT_CODE_STOP, "mngr-test-agent")
+    action = _determine_post_disconnect_action(SIGNAL_EXIT_CODE_STOP, _TEST_AGENT_ID, _TEST_HOST_ID)
 
     assert action is not None
     executable, argv = action
     assert executable == "mngr"
-    assert argv == ["mngr", "stop", "--session", "mngr-test-agent"]
+    assert argv == ["mngr", "stop", f"{_TEST_AGENT_ID}@{_TEST_HOST_ID}"]
 
 
 def test_determine_post_disconnect_action_normal_exit_returns_none() -> None:
     """Test that a normal exit (code 0) returns no action."""
-    action = _determine_post_disconnect_action(0, "mngr-test-agent")
+    action = _determine_post_disconnect_action(0, _TEST_AGENT_ID, _TEST_HOST_ID)
 
     assert action is None
 
 
 def test_determine_post_disconnect_action_unknown_exit_code_returns_none() -> None:
     """Test that an unexpected exit code returns no action."""
-    action = _determine_post_disconnect_action(255, "mngr-test-agent")
+    action = _determine_post_disconnect_action(255, _TEST_AGENT_ID, _TEST_HOST_ID)
 
     assert action is None
 
 
-def test_determine_post_disconnect_action_uses_session_name_in_args() -> None:
-    """Test that the session name is correctly embedded in the action args."""
-    action = _determine_post_disconnect_action(SIGNAL_EXIT_CODE_DESTROY, "custom-my-agent")
-
-    assert action is not None
-    _, argv = action
-    assert argv == ["mngr", "destroy", "--session", "custom-my-agent", "-f"]
-
-
-# =========================================================================
 # Tests for connect_to_agent remote exit code handling
-# =========================================================================
 
 
 class _ConnectTestResult:
     """Captures the results of a connect_to_agent call with intercepted system calls."""
 
-    def __init__(self) -> None:
+    def __init__(self, agent_address: str) -> None:
         self.execvp_calls: list[tuple[str, list[str]]] = []
         self.subprocess_call_args: list[list[str]] = []
+        self.agent_address = agent_address
 
 
 def _run_connect_with_retries(
@@ -432,7 +430,7 @@ def _run_connect_with_retries(
     agent = _make_remote_agent(host, mngr_ctx, agent_name=agent_name)
     opts = ConnectionOptions(is_unknown_host_allowed=False, retry_count=retry_count, retry_delay="1s")
 
-    result = _ConnectTestResult()
+    result = _ConnectTestResult(agent_address=f"{agent.id}@{host.id}")
     call_index = 0
 
     def fake_run_interactive(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
@@ -482,9 +480,8 @@ def test_connect_to_agent_remote_destroy_signal(
     """Test that connect_to_agent exec's into mngr destroy when SSH exits with SIGNAL_EXIT_CODE_DESTROY."""
     result = _run_connect_to_agent(local_provider, temp_mngr_ctx, monkeypatch, SIGNAL_EXIT_CODE_DESTROY)
 
-    expected_session = f"{temp_mngr_ctx.config.prefix}test-agent"
     assert len(result.execvp_calls) == 1
-    assert result.execvp_calls[0] == ("mngr", ["mngr", "destroy", "--session", expected_session, "-f"])
+    assert result.execvp_calls[0] == ("mngr", ["mngr", "destroy", result.agent_address, "-f"])
 
 
 def test_connect_to_agent_remote_stop_signal(
@@ -495,9 +492,8 @@ def test_connect_to_agent_remote_stop_signal(
     """Test that connect_to_agent exec's into mngr stop when SSH exits with SIGNAL_EXIT_CODE_STOP."""
     result = _run_connect_to_agent(local_provider, temp_mngr_ctx, monkeypatch, SIGNAL_EXIT_CODE_STOP)
 
-    expected_session = f"{temp_mngr_ctx.config.prefix}test-agent"
     assert len(result.execvp_calls) == 1
-    assert result.execvp_calls[0] == ("mngr", ["mngr", "stop", "--session", expected_session])
+    assert result.execvp_calls[0] == ("mngr", ["mngr", "stop", result.agent_address])
 
 
 def test_connect_to_agent_remote_normal_exit_no_action(
@@ -522,9 +518,7 @@ def test_connect_to_agent_remote_unknown_exit_code_no_action(
     assert len(result.execvp_calls) == 0
 
 
-# =========================================================================
 # Tests for connect_to_agent retry behavior
-# =========================================================================
 
 
 @pytest.mark.allow_warnings(match=r"^SSH connection failed")
@@ -610,7 +604,7 @@ def test_connect_to_agent_remote_uses_correct_session_name(
     plugin_manager: pluggy.PluginManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test that connect_to_agent constructs the session name from prefix + agent name."""
+    """Test that connect_to_agent attaches to the session named from the context's prefix + agent name."""
     # Use a custom prefix (different from the default fixture prefix) to verify the code
     # reads the prefix from the context rather than using a hardcoded value
     custom_config = MngrConfig(default_host_dir=temp_host_dir, prefix="custom-")
@@ -620,8 +614,8 @@ def test_connect_to_agent_remote_uses_correct_session_name(
         local_provider, custom_ctx, monkeypatch, SIGNAL_EXIT_CODE_DESTROY, agent_name="my-agent"
     )
 
-    assert len(result.execvp_calls) == 1
-    assert result.execvp_calls[0] == ("mngr", ["mngr", "destroy", "--session", "custom-my-agent", "-f"])
+    assert len(result.subprocess_call_args) == 1
+    assert "tmux attach -t =custom-my-agent" in result.subprocess_call_args[0][-1]
 
 
 def test_ssh_wrapper_script_is_correctly_quoted_for_bash_c() -> None:
@@ -632,7 +626,7 @@ def test_ssh_wrapper_script_is_correctly_quoted_for_bash_c() -> None:
     bash -c only receives the first word (e.g. 'mkdir'), causing errors like
     'mkdir: missing operand'.
     """
-    wrapper_script = _build_ssh_activity_wrapper_script("mngr-test", Path("/mngr"))
+    wrapper_script = _build_ssh_activity_wrapper_script("mngr-test", _TEST_AGENT_ID, Path("/mngr"))
     remote_command = "bash -c " + shlex.quote(wrapper_script)
 
     # When the remote shell parses this command, bash should receive
@@ -641,9 +635,7 @@ def test_ssh_wrapper_script_is_correctly_quoted_for_bash_c() -> None:
     assert parsed == ["bash", "-c", wrapper_script]
 
 
-# =========================================================================
 # Tests for nested tmux detection in connect_to_agent (local host)
-# =========================================================================
 
 
 def _make_local_host_and_agent(
@@ -695,9 +687,7 @@ def test_connect_to_agent_local_raises_nested_tmux_error_when_tmux_is_set(
     assert "is_nested_tmux_allowed" in exc_info.value.user_help_text
 
 
-# =========================================================================
 # Tests for run_connect_command
-# =========================================================================
 
 
 def test_run_connect_command_sets_env_vars_and_execs(tmp_path: Path) -> None:
@@ -740,9 +730,7 @@ def test_run_connect_command_sets_host_is_local_false_for_remote(tmp_path: Path)
         assert content == "false"
 
 
-# =============================================================================
 # resolve_connect_command tests
-# =============================================================================
 
 
 def test_resolve_connect_command_prefers_cli_option(temp_mngr_ctx: MngrContext) -> None:

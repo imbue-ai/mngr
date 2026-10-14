@@ -98,6 +98,7 @@ from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -3088,6 +3089,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             dest=host_commands / _SIGWINCH_PANES_SCRIPT_NAME,
         )
 
+    def _upgrade_stored_command_before_start(self, agent: AgentInterface, stored_command: str) -> str:
+        """Rewrite the agent's stored launch command, written once at create, for this mngr, and return it."""
+        upgraded_command = agent.upgrade_stored_command(CommandString(stored_command))
+        if upgraded_command != stored_command:
+            with log_span("Upgrading the stored launch command of agent {}", agent.name):
+                agent.set_command(upgraded_command)
+        return upgraded_command
+
     def _execute_agent_file_transfers(
         self,
         agent: AgentInterface,
@@ -3291,84 +3300,27 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         3. Adds a Ctrl-q binding that detaches and destroys the current agent
         4. Adds a Ctrl-t binding that detaches and stops the current agent
 
-        This uses the tmux session_name format variable in the commands,
-        which expands to the current session name at runtime. This approach
-        works correctly even when multiple agents share a tmux server, because
-        each session's binding correctly references its own session name.
+        The bindings read tmux format variables when the key is pressed, so each
+        one acts on the session it is pressed in, even when multiple agents share
+        a tmux server, and a rename never leaves them naming a gone session.
 
         For local hosts, the bindings directly exec into `mngr destroy`/`mngr stop`
-        via `tmux detach-client -E`. For remote hosts, the bindings write a signal
-        file (containing "destroy" or "stop") and detach normally. The SSH wrapper
-        script checks for these signal files after tmux exits and returns an exit
-        code that the local mngr process uses to run the appropriate command.
+        for the session's current name via `tmux detach-client -E`. For remote
+        hosts, the bindings write a signal file (containing "destroy" or "stop")
+        named for the agent id the session carries (else its name) and detach
+        normally. The SSH wrapper script checks for these signal files after tmux
+        exits and returns an exit code that the local mngr process uses to run the
+        appropriate command.
 
         Returns the path to the created config file.
         """
         config_path = self._get_host_tmux_config_path()
 
-        # Build the config content
-        # The session_name variable is a tmux format that gets expanded at runtime
-        # Yes, it has to get passed through in this weird way
-        lines = [
-            "# Mngr host tmux config",
-            "# Auto-generated - do not edit",
-            "",
-            "# Widen status-left to show more session name, i.e. '[mngr-<agent_name>]'",
-            f"set -g status-left-length {_TMUX_STATUS_LEFT_LENGTH}",
-            "",
-            "# Forward the agent's title to the outer terminal tab (tmux default is off)",
-            "set -g set-titles on",
-            f'set -g set-titles-string "{_TMUX_SET_TITLES_STRING}"',
-            "",
-        ]
-
-        # Source the user's extra mngr-specific tmux config if one is configured.
-        # Unlike this auto-generated file, that path is never overwritten by mngr,
-        # so it is a stable place for users to add their own session config. (This
-        # is distinct from ~/.tmux.conf, which tmux loads itself at server start;
-        # mngr does not re-source that, to avoid re-running non-idempotent user
-        # config on every agent creation.) The path is interpolated unquoted so a
-        # leading ~ is expanded by the host's shell and tmux; additional_config_path
-        # is expected to be an absolute or ~-relative path without shell-special
-        # characters.
-        additional_config_path = self.mngr_ctx.config.tmux.additional_config_path
-        if additional_config_path is not None:
-            additional_config_str = str(additional_config_path)
-            lines.extend(
-                [
-                    "# Source the user's extra mngr tmux config if it exists",
-                    f"if-shell 'test -f {additional_config_str}' 'source-file {additional_config_str}'",
-                    "",
-                ]
-            )
-
-        if self.is_local:
-            # Local hosts: detach and exec into mngr destroy/stop directly
-            lines.extend(
-                [
-                    "# Ctrl-q: Detach and destroy the agent whose session this is",
-                    """bind -n C-q run-shell 'SESSION=$(tmux display-message -p "#{session_name}"); tmux detach-client -E "mngr destroy --session $SESSION -f"'""",
-                    "",
-                    "# Ctrl-t: Detach and stop the agent whose session this is",
-                    """bind -n C-t run-shell 'SESSION=$(tmux display-message -p "#{session_name}"); tmux detach-client -E "mngr stop --session $SESSION"'""",
-                ]
-            )
-        else:
-            # Remote hosts: write a signal file and detach. The SSH wrapper script
-            # reads the signal file after tmux exits and returns an exit code that
-            # the local mngr process uses to run the appropriate command.
-            signals_dir = self.host_dir / "signals"
-            lines.extend(
-                [
-                    "# Ctrl-q: Write destroy signal and detach (handled by local mngr after SSH exits)",
-                    f"""bind -n C-q run-shell 'SESSION=$(tmux display-message -p "#{{session_name}}"); mkdir -p {shlex.quote(str(signals_dir))}; echo destroy > {shlex.quote(str(signals_dir))}/"$SESSION"; tmux detach-client'""",
-                    "",
-                    "# Ctrl-t: Write stop signal and detach (handled by local mngr after SSH exits)",
-                    f"""bind -n C-t run-shell 'SESSION=$(tmux display-message -p "#{{session_name}}"); mkdir -p {shlex.quote(str(signals_dir))}; echo stop > {shlex.quote(str(signals_dir))}/"$SESSION"; tmux detach-client'""",
-                ]
-            )
-
-        config_content = "\n".join(lines)
+        config_content = build_host_tmux_config(
+            is_local=self.is_local,
+            host_dir=self.host_dir,
+            additional_config_path=self.mngr_ctx.config.tmux.additional_config_path,
+        )
 
         self.write_text_file(config_path, config_content)
         logger.debug("Created host tmux config at {}", config_path)
@@ -3383,6 +3335,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         directly). This allows the user to hit ctrl-c and then up arrow to restart the
         command, and leaves the exact command that ran readable on disk. Commands for
         additional windows are still typed in directly.
+
+        For an agent with no session up, the stored command first goes through the
+        agent's upgrade_stored_command, and a rewritten command is saved back to the
+        agent's data before it is launched.
 
         If additional_commands are configured, creates new tmux windows in the
         same session for each additional command.
@@ -3417,6 +3373,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 if agent is None:
                     raise AgentNotFoundOnHostError(agent_id, self.id)
 
+                command = self._get_agent_command(agent)
+
                 # Before launching, reap any stale process tree from a prior incarnation
                 # of this agent id -- but only on a definitive "no session" answer, so an
                 # idempotent start never tears down a live agent (the probe raises on a
@@ -3431,10 +3389,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                             agent.name,
                             reap_failure,
                         )
+                    command = self._upgrade_stored_command_before_start(agent, command)
 
                 self._ensure_work_dir_exists(agent)
 
-                command = self._get_agent_command(agent)
                 additional_commands = self._get_agent_additional_commands(agent)
 
                 onboarding_text: str | None = None
@@ -4098,6 +4056,75 @@ def _build_agent_launch_steps(
 
 
 @pure
+def build_host_tmux_config(is_local: bool, host_dir: Path, additional_config_path: Path | None) -> str:
+    """Return the contents of the host-level tmux config ``Host._create_host_tmux_config`` writes."""
+    lines = [
+        "# Mngr host tmux config",
+        "# Auto-generated - do not edit",
+        "",
+        "# Widen status-left to show more session name, i.e. '[mngr-<agent_name>]'",
+        f"set -g status-left-length {_TMUX_STATUS_LEFT_LENGTH}",
+        "",
+        "# Forward the agent's title to the outer terminal tab (tmux default is off)",
+        "set -g set-titles on",
+        f'set -g set-titles-string "{_TMUX_SET_TITLES_STRING}"',
+        "",
+    ]
+
+    # Source the user's extra mngr-specific tmux config if one is configured.
+    # Unlike this auto-generated file, that path is never overwritten by mngr,
+    # so it is a stable place for users to add their own session config. (This
+    # is distinct from ~/.tmux.conf, which tmux loads itself at server start;
+    # mngr does not re-source that, to avoid re-running non-idempotent user
+    # config on every agent creation.) The path is interpolated unquoted so a
+    # leading ~ is expanded by the host's shell and tmux; additional_config_path
+    # is expected to be an absolute or ~-relative path without shell-special
+    # characters.
+    if additional_config_path is not None:
+        additional_config_str = str(additional_config_path)
+        lines.extend(
+            [
+                "# Source the user's extra mngr tmux config if it exists",
+                f"if-shell 'test -f {additional_config_str}' 'source-file {additional_config_str}'",
+                "",
+            ]
+        )
+
+    if is_local:
+        # Local hosts: detach and exec into mngr destroy/stop directly
+        lines.extend(
+            [
+                "# Ctrl-q: Detach and destroy the agent whose session this is",
+                """bind -n C-q run-shell 'SESSION=$(tmux display-message -p "#{session_name}"); tmux detach-client -E "mngr destroy --session $SESSION -f"'""",
+                "",
+                "# Ctrl-t: Detach and stop the agent whose session this is",
+                """bind -n C-t run-shell 'SESSION=$(tmux display-message -p "#{session_name}"); tmux detach-client -E "mngr stop --session $SESSION"'""",
+            ]
+        )
+    else:
+        # Remote hosts: write a signal file and detach. The SSH wrapper script
+        # reads the signal file after tmux exits and returns an exit code that
+        # the local mngr process uses to run the appropriate command. The file is
+        # named for the agent id the session carries, which a rename leaves alone,
+        # else (a session started before the id was stamped on it) the session name.
+        signals_dir = host_dir / "signals"
+        # CLEANUP: drop the session-name fallback once no running session predates the
+        # AGENT_ID_OPTION stamp (the same condition as BaseAgent._build_lifecycle_probe_command's).
+        signal_key = f'$(tmux display-message -p "#{{?{AGENT_ID_OPTION},#{{{AGENT_ID_OPTION}}},#{{session_name}}}}")'
+        lines.extend(
+            [
+                "# Ctrl-q: Write destroy signal and detach (handled by local mngr after SSH exits)",
+                f"""bind -n C-q run-shell 'KEY={signal_key}; mkdir -p {shlex.quote(str(signals_dir))}; echo destroy > {shlex.quote(str(signals_dir))}/"$KEY"; tmux detach-client'""",
+                "",
+                "# Ctrl-t: Write stop signal and detach (handled by local mngr after SSH exits)",
+                f"""bind -n C-t run-shell 'KEY={signal_key}; mkdir -p {shlex.quote(str(signals_dir))}; echo stop > {shlex.quote(str(signals_dir))}/"$KEY"; tmux detach-client'""",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+@pure
 def _build_start_agent_shell_command(
     agent: AgentInterface,
     session_name: str,
@@ -4246,8 +4273,13 @@ def _build_start_agent_shell_command(
     # it so the attach is never blocked, and the script delays before signaling so the
     # window has settled first. This uses a distinct hook slot ([98]) from the onboarding
     # hook ([99]) and, unlike that one-shot hook, is persistent (no `set-hook -u`).
+    # The session is passed as #{session_name}, which tmux expands when the hook fires, so a
+    # rename (which moves the session but keeps its hooks) never leaves the hook naming a gone session.
     sigwinch_script_path = host_dir / "commands" / _SIGWINCH_PANES_SCRIPT_NAME
-    sigwinch_argv = shlex.join(["bash", str(sigwinch_script_path), session_name, primary_window_name, sigwinch_mode])
+    sigwinch_argv = (
+        f"{shlex.join(['bash', str(sigwinch_script_path)])} '#{{session_name}}' "
+        f"{shlex.join([primary_window_name, sigwinch_mode])}"
+    )
     if sigwinch_mode == _SIGWINCH_MODE_FIT:
         # Appended raw (not shlex-quoted) so tmux expands the format tokens at hook-fire.
         sigwinch_argv += " #{client_width} #{client_height}"

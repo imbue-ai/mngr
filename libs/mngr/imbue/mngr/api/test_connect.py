@@ -2,14 +2,26 @@
 
 import importlib.resources
 import os
+import shlex
 import subprocess
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from imbue.mngr import resources as mngr_resources
+from imbue.mngr.api.connect import SIGNAL_EXIT_CODE_STOP
+from imbue.mngr.api.connect import _build_ssh_activity_wrapper_script
+from imbue.mngr.hosts.host import build_host_tmux_config
+from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
+from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import terminal_tmux_server
+from imbue.mngr.utils.testing import tmux_session_cleanup
 
 # Path to the shipped SIGWINCH repaint script, resolved from package resources so the
 # test exercises exactly what gets installed onto hosts.
@@ -260,3 +272,88 @@ def test_sigwinch_panes_script_fit_mode_resizes_pinned_window_to_client(
 
     finally:
         cleanup_tmux_session(session_name)
+
+
+@contextmanager
+def _remote_agent_session(session_name: str, agent_id: AgentId, host_dir: Path) -> Generator[None, None, None]:
+    """A session set up the way a remote host's mngr leaves one: stamped with its agent id, under mngr's remote-host config."""
+    config_path = host_dir / "tmux.conf"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(build_host_tmux_config(is_local=False, host_dir=host_dir, additional_config_path=None))
+    subprocess.run(["tmux", "new-session", "-d", "-s", session_name, "-n", "agent", "sleep 73914"], check=True)
+    try:
+        subprocess.run(["tmux", "set-option", "-t", f"={session_name}:", AGENT_ID_OPTION, str(agent_id)], check=True)
+        subprocess.run(["tmux", "source-file", str(config_path)], check=True)
+        yield
+    finally:
+        cleanup_tmux_session(session_name)
+
+
+@contextmanager
+def _ssh_terminal_running_connect_wrapper(
+    session_name: str, agent_id: AgentId, host_dir: Path, exit_code_file: Path
+) -> Generator[str, None, None]:
+    """Run ``mngr connect``'s remote wrapper attached to ``session_name`` in a terminal of its own.
+
+    The terminal is a session on a second tmux server, standing in for the user's SSH terminal; it
+    records the wrapper's exit code (what tells the local mngr to stop or destroy the agent).
+    Yields the tmux socket name of that server.
+    """
+    wrapper = _build_ssh_activity_wrapper_script(session_name, agent_id, host_dir)
+    terminal_command = (
+        f"env -u TMUX bash -c {shlex.quote(wrapper)}; echo $? > {shlex.quote(str(exit_code_file))}; sleep 73915"
+    )
+    with terminal_tmux_server([terminal_command], width=120, height=40) as terminal_socket:
+        wait_for(
+            lambda: subprocess.run(
+                ["tmux", "list-clients", "-t", f"={session_name}"], capture_output=True, text=True
+            ).stdout.strip()
+            != "",
+            timeout=10.0,
+            error_message="the connect wrapper never attached to the agent session",
+        )
+        yield terminal_socket
+
+
+def _type_into_terminal(terminal_socket: str, *keys: str) -> None:
+    subprocess.run(["tmux", "-L", terminal_socket, "send-keys", "-t", "=terminal:", *keys], check=True)
+
+
+@pytest.mark.tmux
+def test_remote_ctrl_t_stops_an_agent_renamed_while_attached(mngr_test_prefix: str, tmp_path: Path) -> None:
+    """Ctrl-t on a remote attach must still tell the local mngr to stop the agent after the session was renamed under it."""
+    session_name = f"{mngr_test_prefix}connect-{get_short_random_string()}"
+    agent_id = AgentId(f"agent-{uuid4().hex}")
+    host_dir = tmp_path / "host"
+    exit_code_file = tmp_path / "wrapper_exit_code"
+    renamed_session_name = f"{session_name}-renamed"
+
+    with tmux_session_cleanup(renamed_session_name), _remote_agent_session(session_name, agent_id, host_dir):
+        with _ssh_terminal_running_connect_wrapper(session_name, agent_id, host_dir, exit_code_file) as terminal:
+            subprocess.run(["tmux", "rename-session", "-t", f"={session_name}", renamed_session_name], check=True)
+            _type_into_terminal(terminal, "C-t")
+            wait_for(lambda: exit_code_file.exists(), timeout=10.0, error_message="the connect wrapper did not exit")
+
+    assert exit_code_file.read_text().strip() == str(SIGNAL_EXIT_CODE_STOP)
+
+
+@pytest.mark.tmux
+def test_a_signal_file_left_by_an_earlier_connect_does_not_stop_the_agent_on_a_plain_detach(
+    mngr_test_prefix: str, tmp_path: Path
+) -> None:
+    """A stop signal an earlier connect never consumed (its wrapper looked under another name) must not fire later."""
+    session_name = f"{mngr_test_prefix}connect-{get_short_random_string()}"
+    agent_id = AgentId(f"agent-{uuid4().hex}")
+    host_dir = tmp_path / "host"
+    exit_code_file = tmp_path / "wrapper_exit_code"
+    (host_dir / "signals").mkdir(parents=True)
+    for leftover_key in (str(agent_id), session_name):
+        (host_dir / "signals" / leftover_key).write_text("stop\n")
+
+    with _remote_agent_session(session_name, agent_id, host_dir):
+        with _ssh_terminal_running_connect_wrapper(session_name, agent_id, host_dir, exit_code_file) as terminal:
+            _type_into_terminal(terminal, "C-b", "d")
+            wait_for(lambda: exit_code_file.exists(), timeout=10.0, error_message="the connect wrapper did not exit")
+
+    assert exit_code_file.read_text().strip() == "0"
+    assert list((host_dir / "signals").iterdir()) == []

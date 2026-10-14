@@ -52,6 +52,7 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
+from imbue.mngr.hosts.tmux import PANE_SESSION_NAME_SHELL_EXPRESSION
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -710,9 +711,7 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     command = agent.assemble_command(host=non_local_host, agent_args=(), command_override=None)
 
     uuid = agent.id.get_uuid()
-    prefix = temp_mngr_ctx.config.prefix
-    session_name = f"{prefix}test-agent"
-    background_cmd = agent._build_background_tasks_command(session_name, temp_mngr_ctx.config.tmux.primary_window_name)
+    background_cmd = agent._build_background_tasks_command(temp_mngr_ctx.config.tmux.primary_window_name)
     sid_export = _sid_export_for(uuid)
     encoded = encode_claude_project_dir_name(Path(os.path.realpath(agent.work_dir)))
     projects = '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"'
@@ -1009,9 +1008,7 @@ def test_build_background_tasks_command(
     """_build_background_tasks_command should launch the provisioned background script."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
-    prefix = temp_mngr_ctx.config.prefix
-    session_name = f"{prefix}test-agent"
-    cmd = agent._build_background_tasks_command(session_name, "agent")
+    cmd = agent._build_background_tasks_command("agent")
 
     # Should be a background subshell
     assert cmd.startswith("(")
@@ -1020,9 +1017,10 @@ def test_build_background_tasks_command(
     # Should reference the provisioned script
     assert "claude_background_tasks.sh" in cmd
 
-    # Should pass the session name and the primary window name as arguments so the
-    # response-streaming watcher captures the agent pane by window name (not :0).
-    assert f"claude_background_tasks.sh {session_name} agent " in cmd
+    # Should pass the session (read when the command runs, so a rename cannot leave it stale) and the
+    # primary window name, so the response-streaming watcher captures the agent pane by window name (not :0).
+    assert f"claude_background_tasks.sh {PANE_SESSION_NAME_SHELL_EXPRESSION} agent " in cmd
+    assert f"{temp_mngr_ctx.config.prefix}test-agent" not in cmd
 
 
 def test_build_background_tasks_command_passes_custom_primary_window_name(
@@ -1031,9 +1029,23 @@ def test_build_background_tasks_command_passes_custom_primary_window_name(
     """A custom primary window name is forwarded to claude_background_tasks.sh."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
-    cmd = agent._build_background_tasks_command("mngr-test-agent", "primary")
+    cmd = agent._build_background_tasks_command("primary")
 
-    assert "claude_background_tasks.sh mngr-test-agent primary " in cmd
+    assert f"claude_background_tasks.sh {PANE_SESSION_NAME_SHELL_EXPRESSION} primary " in cmd
+
+
+def test_upgrade_stored_command_rewrites_the_session_name_an_older_mngr_stored(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    current = agent.assemble_command(host=host, agent_args=(), command_override=None)
+    stored_by_older_mngr = CommandString(
+        current.replace(PANE_SESSION_NAME_SHELL_EXPRESSION, shlex.quote(agent.session_name))
+    )
+    assert stored_by_older_mngr != current
+
+    assert agent.upgrade_stored_command(stored_by_older_mngr) == current
+    assert agent.upgrade_stored_command(current) == current
 
 
 # Provisioning Lifecycle Tests

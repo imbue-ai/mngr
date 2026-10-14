@@ -89,9 +89,12 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """
         ...
 
-    # =========================================================================
+    @abstractmethod
+    def upgrade_stored_command(self, command: CommandString) -> CommandString:
+        """Return the stored launch ``command`` rewritten for this mngr, or ``command`` itself if it needs no rewrite."""
+        ...
+
     # Certified Field Getters/Setters
-    # =========================================================================
 
     @abstractmethod
     def get_command(self) -> CommandString:
@@ -148,9 +151,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Set whether this agent should start automatically on host boot."""
         ...
 
-    # =========================================================================
     # Interaction
-    # =========================================================================
 
     @abstractmethod
     def is_running(self) -> bool:
@@ -226,9 +227,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """
         start_action()
 
-    # =========================================================================
     # Status (Reported)
-    # =========================================================================
 
     @abstractmethod
     def get_reported_url(self) -> str | None:
@@ -240,9 +239,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Return the agent's self-reported start time, or None if not set."""
         ...
 
-    # =========================================================================
     # Activity
-    # =========================================================================
 
     @abstractmethod
     def get_reported_activity_time(self, activity_type: ActivitySource) -> datetime | None:
@@ -259,9 +256,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Return the raw activity record for a given type, or None if not found."""
         ...
 
-    # =========================================================================
     # Plugin Data (Certified)
-    # =========================================================================
 
     @abstractmethod
     def get_plugin_data(self, plugin_name: str) -> dict[str, Any]:
@@ -273,9 +268,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Set certified plugin data for a given plugin."""
         ...
 
-    # =========================================================================
     # Plugin Data (Reported)
-    # =========================================================================
 
     @abstractmethod
     def get_reported_plugin_file(self, plugin_name: str, filename: str) -> str:
@@ -292,9 +285,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Return a list of all reported file names for a given plugin."""
         ...
 
-    # =========================================================================
     # Environment
-    # =========================================================================
 
     @abstractmethod
     def get_env_vars(self) -> dict[str, str]:
@@ -316,9 +307,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Set a single environment variable for this agent."""
         ...
 
-    # =========================================================================
     # Computed Properties
-    # =========================================================================
 
     @property
     @abstractmethod
@@ -326,9 +315,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Return how many seconds the agent has been running, or None if not started."""
         ...
 
-    # =========================================================================
     # Preflight Checks (before host creation)
-    # =========================================================================
 
     @classmethod
     def preflight_check(
@@ -356,9 +343,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """
         ...
 
-    # =========================================================================
     # Provisioning Lifecycle
-    # =========================================================================
 
     @abstractmethod
     def on_before_provisioning(
@@ -464,9 +449,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """
         ...
 
-    # =========================================================================
     # Destruction Lifecycle
-    # =========================================================================
 
     @abstractmethod
     def on_destroy(self, host: OnlineHostInterface) -> None:

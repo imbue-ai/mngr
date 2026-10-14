@@ -26,7 +26,13 @@
 # Requires environment variables:
 #   MNGR_AGENT_STATE_DIR  - the agent's state directory (contains commands/)
 #
-# Uses a pidfile to prevent duplicate instances for the same session.
+# Optional environment variables:
+#   MNGR_AGENT_ID         - the agent's id; keys the pidfile, since the session
+#                           name argument can name another agent's session after
+#                           a rename (falls back to the session name when unset)
+#   TMUX_PANE             - set by tmux in the agent's pane; identifies the session
+#
+# Uses a pidfile to prevent duplicate instances for the same agent.
 
 set -euo pipefail
 
@@ -40,7 +46,7 @@ if [ -z "$SESSION_NAME" ]; then
 fi
 
 # Prevent duplicate instances using a pidfile
-_MNGR_ACT_LOCK="/tmp/mngr_act_${SESSION_NAME}.pid"
+_MNGR_ACT_LOCK="/tmp/mngr_act_${MNGR_AGENT_ID:-$SESSION_NAME}.pid"
 
 if [ -f "$_MNGR_ACT_LOCK" ] && kill -0 "$(cat "$_MNGR_ACT_LOCK" 2>/dev/null)" 2>/dev/null; then
     exit 0
@@ -58,6 +64,19 @@ _MNGR_LOG_SOURCE="logs/claude_background_tasks"
 _MNGR_LOG_FILE="$MNGR_AGENT_STATE_DIR/events/logs/claude_background_tasks/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
+
+# Liveness is keyed on the tmux session id rather than its name: renaming an agent
+# renames its session but leaves the id unchanged. The pane this supervisor runs in
+# ($TMUX_PANE) is the agent's own pane, so it identifies the session without trusting
+# the name argument; the exact-match (`=`) name lookup covers a launch from outside that
+# pane. An empty id means the session is already gone.
+SESSION_ID=""
+if [ -n "${TMUX_PANE:-}" ]; then
+    SESSION_ID=$(tmux display-message -p -t "$TMUX_PANE" '#{session_id}' 2>/dev/null || true)
+fi
+if [ -z "$SESSION_ID" ]; then
+    SESSION_ID=$(tmux display-message -p -t "=$SESSION_NAME:" '#{session_id}' 2>/dev/null || true)
+fi
 
 # Start transcript streaming in the background
 STREAM_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/stream_transcript.sh"
@@ -88,7 +107,7 @@ fi
 STREAM_SNAPSHOT_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/stream_snapshot.py"
 _STREAM_SNAPSHOT_PID=""
 if [ -f "$STREAM_SNAPSHOT_SCRIPT" ]; then
-    python3 "$STREAM_SNAPSHOT_SCRIPT" "$SESSION_NAME" "$PRIMARY_WINDOW_NAME" &
+    python3 "$STREAM_SNAPSHOT_SCRIPT" "$SESSION_ID" "$PRIMARY_WINDOW_NAME" &
     _STREAM_SNAPSHOT_PID=$!
     log_info "Started response stream snapshot watcher (PID: $_STREAM_SNAPSHOT_PID)"
 fi
@@ -115,9 +134,7 @@ trap _cleanup EXIT
 
 log_info "Background tasks started for session $SESSION_NAME"
 
-# `=` is tmux's exact-match prefix; without it the loop would never exit when
-# our session is gone but a prefix-collision sibling is alive.
-while tmux has-session -t "=$SESSION_NAME" 2>/dev/null; do
+while [ -n "$SESSION_ID" ] && tmux has-session -t "$SESSION_ID" 2>/dev/null; do
     # Update activity timestamp if agent is actively processing
     if [ -f "$MNGR_AGENT_STATE_DIR/active" ]; then
         printf '{"time": %d, "source": "activity_updater"}' \
@@ -148,7 +165,7 @@ while tmux has-session -t "=$SESSION_NAME" 2>/dev/null; do
     if [ -n "$_STREAM_SNAPSHOT_PID" ] && ! kill -0 "$_STREAM_SNAPSHOT_PID" 2>/dev/null; then
         log_warn "Response stream snapshot watcher died, restarting"
         if [ -f "$STREAM_SNAPSHOT_SCRIPT" ]; then
-            python3 "$STREAM_SNAPSHOT_SCRIPT" "$SESSION_NAME" "$PRIMARY_WINDOW_NAME" &
+            python3 "$STREAM_SNAPSHOT_SCRIPT" "$SESSION_ID" "$PRIMARY_WINDOW_NAME" &
             _STREAM_SNAPSHOT_PID=$!
             log_info "Restarted response stream snapshot watcher (PID: $_STREAM_SNAPSHOT_PID)"
         fi

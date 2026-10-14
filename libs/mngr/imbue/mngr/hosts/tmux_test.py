@@ -10,9 +10,11 @@ regression tests:
 import pydantic
 import pytest
 
+from imbue.mngr.hosts.tmux import PANE_SESSION_NAME_SHELL_EXPRESSION
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
+from imbue.mngr.hosts.tmux import upgrade_literal_session_name_argument
 
 
 def test_tmux_session_target_renders_with_exact_match_prefix() -> None:
@@ -65,3 +67,28 @@ def test_build_tmux_capture_pane_command_visible_only() -> None:
 def test_build_tmux_capture_pane_command_with_scrollback() -> None:
     result = build_tmux_capture_pane_command(TmuxWindowTarget(session_name="mngr-my-agent"), include_scrollback=True)
     assert result == "tmux capture-pane -t =mngr-my-agent:0 -S - -p"
+
+
+_SUPERVISOR_LAUNCH = "( bash $MNGR_AGENT_STATE_DIR/commands/supervisor.sh"
+
+
+@pytest.mark.parametrize(
+    "stored_session_argument",
+    [
+        pytest.param("minds-Chat-6", id="bare"),
+        pytest.param("'mngr-odd name'", id="quoted"),
+    ],
+)
+@pytest.mark.parametrize("rest", [" agent ) & claude", " ) & claude"], ids=["more-arguments", "last-argument"])
+def test_upgrade_literal_session_name_argument_rewrites_the_session_an_older_launch_named(
+    stored_session_argument: str, rest: str
+) -> None:
+    stored = f"{_SUPERVISOR_LAUNCH} {stored_session_argument}{rest}"
+    assert upgrade_literal_session_name_argument(stored, _SUPERVISOR_LAUNCH) == (
+        f"{_SUPERVISOR_LAUNCH} {PANE_SESSION_NAME_SHELL_EXPRESSION}{rest}"
+    )
+
+
+def test_upgrade_literal_session_name_argument_leaves_other_invocations_and_upgraded_launches_alone() -> None:
+    upgraded = f"{_SUPERVISOR_LAUNCH} {PANE_SESSION_NAME_SHELL_EXPRESSION} ) & other.sh minds-Chat-6"
+    assert upgrade_literal_session_name_argument(upgraded, _SUPERVISOR_LAUNCH) == upgraded
