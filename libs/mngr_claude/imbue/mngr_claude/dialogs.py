@@ -139,6 +139,20 @@ def is_shell_command_message(message: str) -> bool:
     return message.lstrip().startswith("!")
 
 
+# The command Claude Code puts back into the input box when a compaction is cancelled.
+COMPACT_COMMAND: Final[str] = "/compact"
+
+
+@pure
+def is_restored_compact_command(input_text: str) -> bool:
+    """Whether input-box text is a ``/compact`` command, bare or with arguments.
+
+    Cancelling a ``/compact`` restores ``/compact`` (followed by the dim argument hint when it
+    had no instructions) or ``/compact <instructions>`` to the input box.
+    """
+    return input_text == COMPACT_COMMAND or input_text.startswith(COMPACT_COMMAND + " ")
+
+
 @pure
 def is_stranded_in_empty_shell_mode(pane_content: str) -> bool:
     """Whether the pane is stranded in Claude's shell mode on an empty command line -- the state a bare ``!`` submission leaves behind.

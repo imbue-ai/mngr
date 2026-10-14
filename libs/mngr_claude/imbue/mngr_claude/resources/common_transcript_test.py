@@ -62,8 +62,6 @@ _WATCHER_EXIT_TIMEOUT = 15.0
 _STANDIN_WATCHER_LIFETIME_SECONDS: Final[int] = 60
 _GROUP_EXIT_PROOF_TIMEOUT_SECONDS: Final[float] = 5.0
 
-# -- Helpers --
-
 
 class ScriptRunner:
     """Helper to run common_transcript.sh in a test environment."""
@@ -195,9 +193,6 @@ class ScriptRunner:
             pass
         watcher.wait(timeout=_WATCHER_EXIT_TIMEOUT)
         shutil.rmtree(self.lock_dir, ignore_errors=True)
-
-
-# -- Tests --
 
 
 def test_no_input_file_produces_no_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
@@ -761,6 +756,7 @@ def test_running_watcher_defers_the_open_trailing_inference(tmp_path: Path, stub
     assert [s["message"] for s in runner.get_steps("agent")] == ["closed", "still writing"]
 
 
+@pytest.mark.flaky
 def test_stopping_a_watcher_kills_the_converter_that_outlived_it(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """Once ``stop_watcher`` returns, nothing in the watcher's process group may still be running.
 

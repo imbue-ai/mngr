@@ -290,13 +290,7 @@ def send_key_keystroke(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, key
     """
     # The agent's pane, not the window's active one: a split would otherwise send this keystroke
     # into whatever shell the user just opened.
-    send_cmd = f"tmux send-keys -t {agent._send_target_arg(tmux_target)} {key}"
-    result = agent.host.execute_stateful_command(send_cmd)
-    if not result.success:
-        raise SendMessageError(
-            str(agent.name),
-            f"tmux send-keys {key} failed: {result.stderr or result.stdout}",
-        )
+    agent._run_send_command(f"tmux send-keys -t {agent._send_target_arg(tmux_target)} {key}", f"tmux send-keys {key}")
 
 
 def send_enter_keystroke(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget) -> None:

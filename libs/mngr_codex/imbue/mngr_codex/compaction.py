@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+from collections.abc import Set as AbstractSet
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -8,8 +8,12 @@ from typing import Any
 from typing import Final
 
 from loguru import logger
+from pydantic import Field
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.compaction_transcript import COMPACTION_TRANSCRIPT_CACHE
+from imbue.mngr.agents.compaction_transcript import CompactionTranscriptReading
+from imbue.mngr.agents.compaction_transcript import CompactionTranscriptScanner
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentLifecycleState
 from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_OUTPUT_RELATIVE
@@ -33,25 +37,108 @@ def parse_iso_timestamp(timestamp_str: str) -> datetime | None:
         return None
 
 
-def extract_latest_assistant_timestamp_from_jsonl(raw_text: str) -> datetime | None:
-    """Extract timestamp of the most recent assistant turn/activity in a JSONL transcript."""
-    if not raw_text:
+def _extract_assistant_activity_timestamp(
+    record: dict[str, Any], payload: dict[str, Any], compaction_turn_ids: AbstractSet[str]
+) -> datetime | None:
+    """Return a record's timestamp if it is assistant activity other than a compaction turn's completion."""
+    event_type = record.get("type")
+    is_assistant_activity = False
+    if event_type == "event_msg":
+        ptype = payload.get("type")
+        if ptype == "agent_message":
+            is_assistant_activity = True
+        elif ptype == "task_complete":
+            turn_id = payload.get("turn_id")
+            if turn_id and str(turn_id) in compaction_turn_ids:
+                is_assistant_activity = False
+            elif "last_agent_message" in payload and payload["last_agent_message"] is None:
+                is_assistant_activity = False
+            else:
+                is_assistant_activity = True
+        else:
+            is_assistant_activity = False
+    elif event_type == "response_item":
+        ptype = payload.get("type")
+        role = payload.get("role")
+        if role == "assistant" or (
+            role != "user" and ptype in ("message", "reasoning", "function_call", "custom_tool_call")
+        ):
+            is_assistant_activity = True
+        else:
+            is_assistant_activity = False
+    elif event_type in ("assistant", "assistant_message"):
+        is_assistant_activity = True
+    elif event_type == "step":
+        if record.get("source") in ("agent", "assistant"):
+            is_assistant_activity = True
+        else:
+            is_assistant_activity = False
+    elif event_type == "observation":
+        is_assistant_activity = True
+    else:
+        is_assistant_activity = False
+
+    if not is_assistant_activity:
         return None
-    lines = raw_text.strip().splitlines()
-    compaction_turn_ids: set[str] = set()
 
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
+    completed_at = payload.get("completed_at")
+    if isinstance(completed_at, (int, float)):
         try:
-            record = json.loads(line)
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
-            logger.warning("Failed to parse JSONL line when extracting assistant timestamp: {}", e)
-            continue
-        if not isinstance(record, dict):
-            continue
+            return datetime.fromtimestamp(completed_at, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            pass
 
+    ts_str = record.get("timestamp") or payload.get("timestamp")
+    return parse_iso_timestamp(ts_str) if isinstance(ts_str, str) else None
+
+
+def extract_context_tokens_from_record(record: dict[str, Any]) -> int | None:
+    """Return the prompt context token count of a token_count record, or None for any other record."""
+    raw_payload = record.get("payload")
+    payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+    if payload.get("type") != "token_count":
+        return None
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+    last_usage = info.get("last_token_usage")
+    if isinstance(last_usage, dict):
+        inp = last_usage.get("input_tokens")
+        if isinstance(inp, int) and inp > 0:
+            return inp
+        tot = last_usage.get("total_tokens")
+        if isinstance(tot, int) and tot > 0:
+            return tot
+    total_usage = info.get("total_token_usage")
+    if isinstance(total_usage, dict):
+        inp = total_usage.get("input_tokens")
+        if isinstance(inp, int) and inp > 0:
+            return inp
+    return None
+
+
+class CodexCompactionTranscriptScanner(CompactionTranscriptScanner):
+    """Finds the newest assistant activity timestamp and context token count in a Codex transcript.
+
+    A compaction turn ends with a task completion that is not assistant activity. The compaction
+    records naming that turn are collected as the scan passes them, so the timestamp match for an
+    older record depends on the newer records already visited.
+    """
+
+    compaction_turn_ids: set[str] = Field(
+        default_factory=set, description="Turns that newer records showed to be compactions"
+    )
+
+    def visit_older_record(self, record: dict[str, Any]) -> None:
+        if self.latest_assistant_timestamp is None:
+            self._visit_record_for_assistant_timestamp(record)
+        if self.latest_context_tokens is None:
+            self.latest_context_tokens = extract_context_tokens_from_record(record)
+
+    def carries_state_into_older_records(self) -> bool:
+        return self.latest_assistant_timestamp is None and len(self.compaction_turn_ids) > 0
+
+    def _visit_record_for_assistant_timestamp(self, record: dict[str, Any]) -> None:
         event_type = record.get("type")
         raw_payload = record.get("payload")
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
@@ -61,108 +148,29 @@ def extract_latest_assistant_timestamp_from_jsonl(raw_text: str) -> datetime | N
             if isinstance(raw_payload, dict):
                 tur = raw_payload.get("latest_token_usage_record")
                 if isinstance(tur, dict) and tur.get("turn_id"):
-                    compaction_turn_ids.add(str(tur["turn_id"]))
-            continue
-
-        if event_type in ("token_usage_record", "token_count"):
-            continue
-
-        if payload.get("type") == "item_completed":
+                    self.compaction_turn_ids.add(str(tur["turn_id"]))
+        elif event_type in ("token_usage_record", "token_count"):
+            pass
+        elif payload.get("type") == "item_completed":
             item = payload.get("item")
             if isinstance(item, dict) and item.get("type") == "ContextCompaction":
                 tid = payload.get("turn_id")
                 if tid:
-                    compaction_turn_ids.add(str(tid))
-            continue
-
-        is_assistant_activity = False
-        if event_type == "event_msg":
-            ptype = payload.get("type")
-            if ptype == "agent_message":
-                is_assistant_activity = True
-            elif ptype == "task_complete":
-                turn_id = payload.get("turn_id")
-                if turn_id and str(turn_id) in compaction_turn_ids:
-                    is_assistant_activity = False
-                elif "last_agent_message" in payload and payload["last_agent_message"] is None:
-                    is_assistant_activity = False
-                else:
-                    is_assistant_activity = True
-            else:
-                is_assistant_activity = False
-        elif event_type == "response_item":
-            ptype = payload.get("type")
-            role = payload.get("role")
-            if role == "assistant" or (
-                role != "user" and ptype in ("message", "reasoning", "function_call", "custom_tool_call")
-            ):
-                is_assistant_activity = True
-            else:
-                is_assistant_activity = False
-        elif event_type in ("assistant", "assistant_message"):
-            is_assistant_activity = True
-        elif event_type == "step":
-            if record.get("source") in ("agent", "assistant"):
-                is_assistant_activity = True
-            else:
-                is_assistant_activity = False
-        elif event_type == "observation":
-            is_assistant_activity = True
+                    self.compaction_turn_ids.add(str(tid))
         else:
-            is_assistant_activity = False
-
-        if is_assistant_activity:
-            completed_at = payload.get("completed_at")
-            if isinstance(completed_at, (int, float)):
-                try:
-                    return datetime.fromtimestamp(completed_at, tz=timezone.utc)
-                except (ValueError, OverflowError, OSError):
-                    pass
-
-            ts_str = record.get("timestamp") or payload.get("timestamp")
-            if isinstance(ts_str, str):
-                dt = parse_iso_timestamp(ts_str)
-                if dt is not None:
-                    return dt
-    return None
+            self.latest_assistant_timestamp = _extract_assistant_activity_timestamp(
+                record, payload, self.compaction_turn_ids
+            )
 
 
-def extract_context_tokens_from_jsonl(raw_text: str) -> int | None:
-    """Extract prompt context token count from the most recent turn in a JSONL transcript."""
-    if not raw_text:
-        return None
-    lines = raw_text.strip().splitlines()
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
-            logger.warning("Failed parsing line in JSONL transcript: {}", e)
-            continue
-        if not isinstance(record, dict):
-            continue
-
-        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
-        if payload.get("type") == "token_count":
-            info = payload.get("info")
-            if isinstance(info, dict):
-                last_usage = info.get("last_token_usage")
-                if isinstance(last_usage, dict):
-                    inp = last_usage.get("input_tokens")
-                    if isinstance(inp, int) and inp > 0:
-                        return inp
-                    tot = last_usage.get("total_tokens")
-                    if isinstance(tot, int) and tot > 0:
-                        return tot
-                total_usage = info.get("total_token_usage")
-                if isinstance(total_usage, dict):
-                    inp = total_usage.get("input_tokens")
-                    if isinstance(inp, int) and inp > 0:
-                        return inp
-
-    return None
+def _read_codex_transcript(agent: BaseAgent[Any], transcript_path: Path) -> CompactionTranscriptReading | None:
+    return COMPACTION_TRANSCRIPT_CACHE.read_transcript(
+        host=agent.host,
+        host_id=agent.host_id,
+        agent_id=agent.id,
+        transcript_path=transcript_path,
+        scanner_factory=CodexCompactionTranscriptScanner,
+    )
 
 
 def get_agent_last_compacted_idle_since(agent: BaseAgent[Any]) -> datetime | None:
@@ -221,12 +229,10 @@ def get_agent_idle_since(agent: BaseAgent[Any]) -> datetime | None:
         )
 
         for path in transcript_candidates:
-            if agent.host.path_exists(path):
-                content = agent.host.read_text_file(path)
-                ts = extract_latest_assistant_timestamp_from_jsonl(content)
-                if ts is not None:
-                    idle_since_dt = ts
-                    break
+            reading = _read_codex_transcript(agent, path)
+            if reading is not None and reading.latest_assistant_timestamp is not None:
+                idle_since_dt = reading.latest_assistant_timestamp
+                break
 
         if idle_since_dt is None:
             idle_since_path = agent_dir / IDLE_SINCE_FILENAME
@@ -284,11 +290,9 @@ def get_agent_context_tokens(agent: BaseAgent[Any]) -> int | None:
         )
 
         for path in candidates:
-            if agent.host.path_exists(path):
-                content = agent.host.read_text_file(path)
-                tokens = extract_context_tokens_from_jsonl(content)
-                if tokens is not None:
-                    return tokens
+            reading = _read_codex_transcript(agent, path)
+            if reading is not None and reading.latest_context_tokens is not None:
+                return reading.latest_context_tokens
         return None
     except (MngrError, OSError, ValueError, KeyError, AttributeError) as e:
         logger.debug("Failed resolving context token count for agent {}: {}", agent.name, e)

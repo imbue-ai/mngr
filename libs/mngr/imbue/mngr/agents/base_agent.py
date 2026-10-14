@@ -21,9 +21,11 @@ from tenacity import stop_after_attempt
 from tenacity import wait_fixed
 
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import CorruptedAgentDataError
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import MessageLockTimeoutError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
@@ -39,6 +41,7 @@ from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.agent import SupportsKeyChordMixin
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -48,8 +51,31 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import LifecycleProbeResult
 from imbue.mngr.primitives import read_checked_out_branch
 from imbue.mngr.utils.env_utils import parse_env_file
+from imbue.mngr.utils.polling import poll_until
 
 _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 10.0
+
+# Bound on each command a send runs while holding the message lock (the tmux calls, the delivery
+# event append). Each answers in milliseconds when healthy; under gVisor a process spawn alone is
+# several times slower, so this leaves wide headroom while still turning a wedged tmux server into
+# a failed send instead of a lock held forever.
+SEND_COMMAND_TIMEOUT_SECONDS: Final[float] = 15.0
+
+_MESSAGE_LOCK_POLL_INTERVAL_SECONDS: Final[float] = 0.05
+
+
+@pure
+def describe_failed_send_command(result: CommandResult, timeout_seconds: float) -> str:
+    """Why a send command failed; a local command killed by its timeout leaves no output, so say so."""
+    return result.stderr or result.stdout or f"no output (it may have hit the {timeout_seconds:.0f}s timeout)"
+
+
+def _try_acquire_exclusive_flock(file_descriptor: int) -> bool:
+    try:
+        fcntl.flock(file_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
 
 
 def quote_agent_args(agent_args: tuple[str, ...]) -> tuple[str, ...]:
@@ -99,6 +125,10 @@ class BaseAgent(AgentInterface[AgentConfigT]):
     """Concrete agent implementation that stores data on the host filesystem."""
 
     host: OnlineHostInterface = Field(description="The host this agent runs on (must be online)")
+    send_command_timeout_seconds: float = Field(
+        default=SEND_COMMAND_TIMEOUT_SECONDS,
+        description="Bound on each command a send runs while holding the message lock",
+    )
 
     def get_host(self) -> OnlineHostInterface:
         return self.host
@@ -406,12 +436,15 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         return TmuxWindowTarget(session_name=self.session_name, window=self.mngr_ctx.config.tmux.primary_window_name)
 
     @contextmanager
-    def _message_lock(self) -> Generator[None, None, None]:
+    def _message_lock(self, timeout_seconds: float | None = None) -> Generator[None, None, None]:
         """Acquire an exclusive file lock to serialize concurrent message sends.
 
         Multiple processes (e.g., telegram bot, bootstrap, cron scripts) may call
         ``mngr message`` for the same agent concurrently. Without serialization,
         their tmux send-keys calls can interleave, corrupting the message.
+
+        With ``timeout_seconds`` set, raises ``MessageLockTimeoutError`` if another holder still
+        has the lock when it expires; None waits as long as it takes.
 
         Uses ``flock`` on a lock file in the agent's state directory. Only locks
         for local hosts (where the lock file is on the local filesystem). For
@@ -428,7 +461,16 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         lock_path = self._get_agent_dir() / "message.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with open(lock_path, "w") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if timeout_seconds is None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            else:
+                is_acquired = poll_until(
+                    lambda: _try_acquire_exclusive_flock(lock_file.fileno()),
+                    timeout=timeout_seconds,
+                    poll_interval=_MESSAGE_LOCK_POLL_INTERVAL_SECONDS,
+                )
+                if not is_acquired:
+                    raise MessageLockTimeoutError(str(self.name), timeout_seconds)
             try:
                 yield
             finally:
@@ -489,7 +531,10 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         and pass the result down, rather than paying this per iteration.
         """
         session_arg = shlex.quote(f"={tmux_target.session_name}:")
-        result = self.host.execute_stateful_command(f"tmux show-options -v -t {session_arg} {AGENT_PANE_ID_OPTION}")
+        result = self.host.execute_stateful_command(
+            f"tmux show-options -v -t {session_arg} {AGENT_PANE_ID_OPTION}",
+            timeout_seconds=self.send_command_timeout_seconds,
+        )
         pane_id = result.stdout.strip() if result.success else ""
         return shlex.quote(pane_id) if pane_id else tmux_target.as_shell_arg()
 
@@ -506,7 +551,18 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         silent no-op when the pane is in none, so it needs no ``#{pane_in_mode}`` check. Best
         effort: if it fails, the send that follows will report the real problem.
         """
-        self.host.execute_stateful_command(f"tmux copy-mode -q -t {target_arg}")
+        self.host.execute_stateful_command(
+            f"tmux copy-mode -q -t {target_arg}", timeout_seconds=self.send_command_timeout_seconds
+        )
+
+    def _run_send_command(self, command: str, failed_step: str) -> None:
+        """Run one command of a send, bounded by ``send_command_timeout_seconds``; raise SendMessageError if it fails."""
+        result = self.host.execute_stateful_command(command, timeout_seconds=self.send_command_timeout_seconds)
+        if not result.success:
+            raise SendMessageError(
+                str(self.name),
+                f"{failed_step} failed: {describe_failed_send_command(result, self.send_command_timeout_seconds)}",
+            )
 
     def _capture_pane_content(
         self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False
@@ -613,7 +669,9 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             f"printf '%s\\n' {shlex.quote(event_line)} >> {shlex.quote(str(events_path))}"
         )
         try:
-            result = self.host.execute_stateful_command(append_command)
+            result = self.host.execute_stateful_command(
+                append_command, timeout_seconds=self.send_command_timeout_seconds
+            )
         except (HostConnectionError, TimeoutError) as e:
             # TimeoutError: the remote SSH layer re-raises its socket timeout
             # as-is (see Host.execute_idempotent_command).
@@ -782,12 +840,7 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         with self._message_lock(), log_span("Pressing key chord {} to agent {}", key, self.name):
             target_arg = self._send_target_arg(self.tmux_target)
             self._clear_pane_modes(target_arg)
-            send_cmd = f"tmux send-keys -t {target_arg} {shlex.quote(key)}"
-            result = self.host.execute_stateful_command(send_cmd)
-            if not result.success:
-                raise SendMessageError(
-                    str(self.name), f"tmux send-keys {key} failed: {result.stderr or result.stdout}"
-                )
+            self._run_send_command(f"tmux send-keys -t {target_arg} {shlex.quote(key)}", f"tmux send-keys {key}")
 
     def send_message(self, message: str) -> None:
         """Send a message to the running agent.
@@ -799,9 +852,19 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
 
         This is the simple send (literal text + Enter). Interactive TUI agents
         subclass ``InteractiveTuiAgent`` (itself a ``SendKeysAgent``), which
-        overrides this with the paste-detection / submission-signal pipeline.
+        overrides ``_send_message_holding_lock`` with the paste-detection /
+        submission-signal pipeline.
         """
-        with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
+        with self._message_lock():
+            self._send_message_holding_lock(message)
+
+    def _send_message_holding_lock(self, message: str) -> None:
+        """Deliver a message; the caller must already hold the message lock.
+
+        Separate from ``send_message`` so a caller can take the lock itself, to bound the wait or
+        to re-check the agent before sending.
+        """
+        with log_span("Sending message to agent {} (length={})", self.name, len(message)):
             self._preflight_send_message(self.tmux_target)
             self._send_message_simple(self.tmux_target, message)
 
@@ -836,31 +899,19 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         target_arg = self._send_target_arg(tmux_target)
         self._clear_pane_modes(target_arg)
         if len(message) < LONG_MESSAGE_THRESHOLD:
-            send_msg_cmd = f"tmux send-keys -t {target_arg} -l -- {shlex.quote(message)}"
-            result = self.host.execute_stateful_command(send_msg_cmd)
-            if not result.success:
-                raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
+            self._run_send_command(f"tmux send-keys -t {target_arg} -l -- {shlex.quote(message)}", "tmux send-keys")
         else:
             tmp_path = Path(f"/tmp/mngr-msg-buffer-{self.session_name}.txt")
             quoted_buffer = shlex.quote(f"mngr-{self.session_name}")
             quoted_path = shlex.quote(str(tmp_path))
             try:
                 self.host.write_text_file(tmp_path, message)
-                load_cmd = f"tmux load-buffer -b {quoted_buffer} {quoted_path}"
-                result = self.host.execute_stateful_command(load_cmd)
-                if not result.success:
-                    raise SendMessageError(
-                        str(self.name), f"tmux load-buffer failed: {result.stderr or result.stdout}"
-                    )
-                paste_cmd = f"tmux paste-buffer -p -b {quoted_buffer} -t {target_arg}"
-                result = self.host.execute_stateful_command(paste_cmd)
-                if not result.success:
-                    raise SendMessageError(
-                        str(self.name), f"tmux paste-buffer failed: {result.stderr or result.stdout}"
-                    )
+                self._run_send_command(f"tmux load-buffer -b {quoted_buffer} {quoted_path}", "tmux load-buffer")
+                self._run_send_command(f"tmux paste-buffer -p -b {quoted_buffer} -t {target_arg}", "tmux paste-buffer")
             finally:
                 self.host.execute_idempotent_command(
-                    f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}"
+                    f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}",
+                    timeout_seconds=self.send_command_timeout_seconds,
                 )
         return target_arg
 
@@ -870,7 +921,4 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
 
         # Reuses that target rather than resolving again: the literal keys immediately above
         # cleared the modes too, and nothing between them can have put the pane back into one.
-        send_enter_cmd = f"tmux send-keys -t {target_arg} Enter"
-        result = self.host.execute_stateful_command(send_enter_cmd)
-        if not result.success:
-            raise SendMessageError(str(self.name), f"tmux send-keys Enter failed: {result.stderr or result.stdout}")
+        self._run_send_command(f"tmux send-keys -t {target_arg} Enter", "tmux send-keys Enter")

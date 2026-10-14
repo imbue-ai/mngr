@@ -62,7 +62,12 @@ class _TestAgent(HasCompactionMixin):
     def is_running(self) -> bool:
         return self.running
 
-    def request_compaction(self, instructions: str | None = None) -> None:
+    def request_compaction(
+        self,
+        instructions: str | None = None,
+        message_lock_timeout_seconds: float | None = None,
+        expected_idle_since: datetime | None = None,
+    ) -> None:
         self.compaction_count += 1
         self.idle_since_dt = None
 

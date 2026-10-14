@@ -23,7 +23,12 @@ class DummyCompactionAgent(HasCompactionMixin):
         self.compaction_requested = False
         self.last_instructions: str | None = None
 
-    def request_compaction(self, instructions: str | None = None) -> None:
+    def request_compaction(
+        self,
+        instructions: str | None = None,
+        message_lock_timeout_seconds: float | None = None,
+        expected_idle_since: datetime | None = None,
+    ) -> None:
         self.compaction_requested = True
         self.last_instructions = instructions
 
@@ -41,7 +46,12 @@ class DummyDefaultCompactionAgent(HasCompactionMixin):
     name = "dummy-default"
     agent_type = "dummy"
 
-    def request_compaction(self, instructions: str | None = None) -> None:
+    def request_compaction(
+        self,
+        instructions: str | None = None,
+        message_lock_timeout_seconds: float | None = None,
+        expected_idle_since: datetime | None = None,
+    ) -> None:
         pass
 
 

@@ -12,6 +12,7 @@ from typing import Any
 from typing import ClassVar
 
 import pytest
+from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
@@ -105,9 +106,7 @@ def test_register_agent_type_returns_opencode_class_and_config() -> None:
     assert config_class is OpenCodeAgentConfig
 
 
-# =============================================================================
 # Capability-mixin contract methods (install / unattended / permission policy)
-# =============================================================================
 
 
 def test_get_install_binary_name_is_opencode() -> None:
@@ -430,7 +429,7 @@ def test_provision_skips_auth_copy_when_no_shared_auth(local_provider: LocalProv
     assert not auth_path.exists()
 
 
-# --- API-based send_message (POST to the agent's opencode server) ---
+# API-based send_message (POST to the agent's opencode server)
 
 
 def test_build_prompt_post_command_targets_prompt_async_with_json_part() -> None:
@@ -539,7 +538,44 @@ def test_post_prompt_raises_when_server_unreachable(local_provider: LocalProvide
         agent._post_prompt("1", "ses_nope", "hello")
 
 
-# --- Readiness sentinel ---
+class _SilentlyFailingCurlHost(FakeHost):
+    """FakeHost on which every curl fails with no output (as a timed-out command does), recording its timeout."""
+
+    curl_timeout_seconds: list[float | None] = Field(default_factory=list)
+
+    def _execute_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        if command.startswith("curl "):
+            self.curl_timeout_seconds.append(timeout_seconds)
+            return CommandResult(stdout="", stderr="", success=False)
+        return super()._execute_command(command, user, cwd, env, timeout_seconds)
+
+
+def test_post_prompt_is_bounded_by_the_send_command_timeout(tmp_path: Path) -> None:
+    host = _SilentlyFailingCurlHost(host_dir=tmp_path)
+    agent = OpenCodeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("oc"),
+        agent_type=AgentTypeName("opencode"),
+        work_dir=tmp_path,
+        agent_config=OpenCodeAgentConfig(),
+        host=host,
+        send_command_timeout_seconds=6.0,
+    )
+
+    with pytest.raises(SendMessageError, match=r"no output \(it may have hit the 6s timeout\)"):
+        agent._post_prompt("4096", "ses_bounded", "hello")
+
+    assert host.curl_timeout_seconds == [6.0]
+
+
+# Readiness sentinel
 
 
 def _noop_start() -> None:
@@ -572,9 +608,7 @@ def test_wait_for_ready_signal_raises_when_sentinel_never_appears(
         agent.wait_for_ready_signal(is_readiness_awaited=True, start_action=_noop_start, timeout=0.2)
 
 
-# =============================================================================
 # Preservation on destroy
-# =============================================================================
 
 
 def test_opencode_config_preserves_on_destroy_by_default() -> None:
@@ -618,9 +652,7 @@ def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProvid
     assert not dest_dir.exists()
 
 
-# =============================================================================
 # Session adoption (--adopt / --from), driven against the real local host
-# =============================================================================
 
 
 def _dest_db_sessions(agent: OpenCodeAgent) -> set[str]:
@@ -782,9 +814,7 @@ def test_adopt_cloned_session_from_remote_source_pulls_db_locally(
     assert agent._get_root_session_file_path().read_text() == "ses_remote"
 
 
-# =============================================================================
 # Lifecycle state + waiting_reason field generator
-# =============================================================================
 
 
 @pytest.mark.tmux
