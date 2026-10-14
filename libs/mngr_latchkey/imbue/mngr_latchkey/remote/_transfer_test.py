@@ -8,6 +8,8 @@ from pydantic import SecretStr
 
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
+from imbue.mngr_latchkey.baseline_permissions import SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
 from imbue.mngr_latchkey.core import PERMISSIONS_CONFIG_FILENAME
@@ -47,9 +49,11 @@ from imbue.mngr_latchkey.remote.package import REMOTE_EXTENSIONS_DIR_NAME
 from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
 from imbue.mngr_latchkey.store import PERMISSIONS_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
+from imbue.mngr_latchkey.store import dump_permissions_text
 from imbue.mngr_latchkey.store import permissions_format_version_path
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import read_permissions_format_version
+from imbue.mngr_latchkey.testing import rule_keys_of_permissions_json
 
 _SLACK_ANY = '{"rules": [{"slack-api": ["any"]}]}'
 _SLACK_ROUTED = '{\n  "slack": true\n}\n'
@@ -206,6 +210,20 @@ def test_a_permissions_snapshot_needs_no_key_at_all(tmp_path: Path) -> None:
     assert stat.S_IMODE(permissions_path.stat().st_mode) == 0o600
     assert vps.latchkey_dir_entries() == [REMOTE_EXTENSIONS_DIR_NAME, PERMISSIONS_CONFIG_FILENAME]
     assert vps.secrets_dir_entries() == []
+
+
+def test_a_pushed_host_policy_lands_without_the_per_agent_gate_and_reads_back_with_it(tmp_path: Path) -> None:
+    """The machine forwards the per-agent routes to a desktop that runs the gate; its own copy carries none."""
+    vps = as_vps(fake_vps(tmp_path))
+    policy = dump_permissions_text(AGENT_BASELINE_PERMISSIONS)
+
+    push_permissions_snapshot(cast(OuterHostInterface, vps), HostId.generate(), policy, PermissionsFormatVersion(1))
+
+    machine_policy = vps.machine_permissions()
+    assert SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED not in rule_keys_of_permissions_json(machine_policy)
+    assert machine_policy is not None
+    assert SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED in json.loads(machine_policy)["schemas"]
+    assert _read(vps, RemoteStateRequest()).permissions_json == policy
 
 
 def test_a_grant_accepts_a_key_file_with_a_trailing_newline(tmp_path: Path) -> None:

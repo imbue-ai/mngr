@@ -38,6 +38,11 @@ everything else, and a machine that lost it to a reboot is handed it back
 inside the same document rather than in a second round trip. Nothing of this
 computer's own key material ever travels to the machine: a store read back is
 re-encrypted here, not there.
+
+A policy crosses the wire in the machine's projection of it, in both
+directions (:mod:`imbue.mngr_latchkey.remote._machine_policy`): what an update
+carries is projected as its document is built, and what a read answers with is
+restored before anything else sees it.
 """
 
 import base64
@@ -64,6 +69,8 @@ from imbue.mngr_latchkey.filed_permission_requests import FiledPermissionRequest
 from imbue.mngr_latchkey.filed_permission_requests import FiledPermissionRequestsError
 from imbue.mngr_latchkey.filed_permission_requests import parse_filed_permission_requests
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
+from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
+from imbue.mngr_latchkey.remote._machine_policy import restore_policy_from_machine
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 
 # Name of the latchkey directory on the machine, under the remote user's home.
@@ -250,7 +257,10 @@ class RemoteMachineState(FrozenModel):
         description="The machine's latchkey ``config.json``, or ``None`` when it has none."
     )
     permissions_json: str | None = Field(
-        description="The policy the machine's gateway enforces, or ``None`` when it has none yet."
+        description=(
+            "The policy the machine's gateway enforces, restored to the form this computer keeps (see "
+            "``_machine_policy``), or ``None`` when it has none yet."
+        )
     )
     desktop_egress_rules_json: str | None = Field(
         description="The desktop egress rules the machine's curl router reads, or ``None`` when it has no rules file."
@@ -337,7 +347,13 @@ class RemoteStateUpdate(FrozenModel):
     desktop_egress_rules_json: str | None = Field(
         default=None, description="The desktop egress rules the machine's curl router is to read."
     )
-    permissions_json: str | None = Field(default=None, description="The policy the gateway is to enforce.")
+    permissions_json: str | None = Field(
+        default=None,
+        description=(
+            "The policy the gateway is to enforce, as this computer keeps it; the machine's projection of it is "
+            "what travels (see ``_machine_policy``)."
+        ),
+    )
     permissions_format_version: PermissionsFormatVersion | None = Field(
         default=None,
         description="The format the policy this update carries is written in, installed after it.",
@@ -471,7 +487,7 @@ def _update_document(update: RemoteStateUpdate) -> dict[str, bytes]:
     if update.desktop_egress_rules_json is not None:
         document[_ENTRY_DESKTOP_EGRESS_RULES_JSON] = update.desktop_egress_rules_json.encode("utf-8")
     if update.permissions_json is not None:
-        document[_ENTRY_PERMISSIONS_JSON] = update.permissions_json.encode("utf-8")
+        document[_ENTRY_PERMISSIONS_JSON] = project_policy_for_machine(update.permissions_json).encode("utf-8")
     if update.permissions_format_version is not None:
         document[_ENTRY_PERMISSIONS_FORMAT_VERSION] = str(update.permissions_format_version).encode("utf-8")
     if update.gateway_listen_host is not None:
@@ -606,7 +622,10 @@ def _machine_state_from_answers(
     encryption_key = _optional_text(answers, _ANSWER_ENCRYPTION_KEY, host, failure_description)
     listen_password = _optional_text(answers, _ANSWER_LISTEN_PASSWORD, host, failure_description)
     config_json = _optional_text(answers, _ANSWER_CONFIG_JSON, host, failure_description)
-    permissions_json = _optional_text(answers, _ANSWER_PERMISSIONS_JSON, host, failure_description)
+    machine_permissions_json = _optional_text(answers, _ANSWER_PERMISSIONS_JSON, host, failure_description)
+    permissions_json = (
+        restore_policy_from_machine(machine_permissions_json) if machine_permissions_json is not None else None
+    )
     desktop_egress_rules_json = _optional_text(answers, _ANSWER_DESKTOP_EGRESS_RULES_JSON, host, failure_description)
     permissions_format_version = _permissions_format_version(answers, host, failure_description)
     credentials = answers.get(_ANSWER_CREDENTIALS)

@@ -9,6 +9,7 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.devices import DeviceRecord
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
@@ -22,8 +23,10 @@ from imbue.mngr_latchkey.remote._machine import _remote_command
 from imbue.mngr_latchkey.remote._machine import _request_document
 from imbue.mngr_latchkey.remote._machine import _update_document
 from imbue.mngr_latchkey.remote._machine import read_remote_state
+from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.mock_outer_host_test import AnsweringVps
+from imbue.mngr_latchkey.store import dump_permissions_text
 
 
 def test_an_update_document_carries_only_what_the_update_sets() -> None:
@@ -40,6 +43,16 @@ def test_an_update_document_carries_only_what_the_update_sets() -> None:
         "permissions_json": b'{"rules": []}',
         "restart_gateway": b"1",
     }
+
+
+def test_an_update_document_carries_the_policy_as_the_machine_is_to_hold_it() -> None:
+    """The projection is applied as the document is built, so no caller of a push has to remember it."""
+    policy = dump_permissions_text(AGENT_BASELINE_PERMISSIONS)
+
+    document = _update_document(RemoteStateUpdate(permissions_json=policy))
+
+    assert document == {"permissions_json": project_policy_for_machine(policy).encode("utf-8")}
+    assert document["permissions_json"] != policy.encode("utf-8")
 
 
 def test_an_update_document_spells_the_whole_service_as_no_account_entry() -> None:

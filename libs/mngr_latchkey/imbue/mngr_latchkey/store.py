@@ -620,14 +620,8 @@ def point_opaque_handle_at_host(
     logger.debug("Pointed opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
 
 
-def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
-    """Atomically write the permissions config to disk with mode 0o600.
-
-    Used by the pre-gateway-startup write paths (deny-all default,
-    admin file, per-agent opaque baseline) and by the host-allowed-agent
-    editor (:func:`imbue.mngr_latchkey.agent_setup.register_agent_for_host`).
-    User-driven per-service grants still go through the gateway's
-    ``permissions`` extension instead.
+def dump_permissions_text(config: LatchkeyPermissionsConfig) -> str:
+    """Serialize a permissions config the way every file this plugin writes is serialized.
 
     An empty ``schemas`` dict is omitted from the output (detent accepts
     both shapes); ``rules`` is always emitted, even when empty.
@@ -638,10 +632,19 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     exclude: set[str] = set()
     if not config.schemas:
         exclude.add("schemas")
-    # ``atomic_write`` uses a uniquely-named temp file, so concurrent writers
-    # (e.g. the minds auto-register callback firing from two threads) cannot
-    # steal each other's temp file the way a fixed ``.tmp`` name allowed.
-    atomic_write(path, config.model_dump_json(indent=2, exclude=exclude))
+    return config.model_dump_json(indent=2, exclude=exclude)
+
+
+def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
+    """Atomically write the permissions config to disk with mode 0o600.
+
+    Used by the pre-gateway-startup write paths (deny-all default,
+    admin file, per-agent opaque baseline) and by the host-allowed-agent
+    editor (:func:`imbue.mngr_latchkey.agent_setup.register_agent_for_host`).
+    User-driven per-service grants still go through the gateway's
+    ``permissions`` extension instead.
+    """
+    atomic_write(path, dump_permissions_text(config))
     logger.debug("Wrote permissions config to {} ({} rule(s))", path, len(config.rules))
 
 

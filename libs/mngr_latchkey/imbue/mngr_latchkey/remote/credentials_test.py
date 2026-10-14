@@ -7,7 +7,10 @@ import pytest
 from pydantic import SecretStr
 
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.agent_setup import register_agent_for_host
+from imbue.mngr_latchkey.baseline_permissions import SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
@@ -17,6 +20,7 @@ from imbue.mngr_latchkey.migrations.mock_permissions_migration_test import RuleA
 from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote._mirror import machine_credentials_path
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
@@ -393,6 +397,26 @@ def test_a_read_adopts_a_policy_this_computer_disagrees_with(tmp_path: Path) -> 
         SLACK_GRANTED
     )
     assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+
+
+def test_a_read_keeps_the_gate_this_computer_runs_while_the_machine_holds_none(tmp_path: Path) -> None:
+    """Adopting the machine's copy must not strip the per-agent gate here: the machine's copy is a projection."""
+    host_id = HostId.generate()
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    data_dir = plugin_data_dir(latchkey.latchkey_directory)
+    register_agent_for_host(data_dir, host_id, AgentId.generate())
+    write_permissions_format_version(data_dir, host_id, CURRENT_PERMISSIONS_FORMAT_VERSION)
+    policy = permissions_path_for_host(data_dir, host_id).read_text()
+    outer = fake_vps(tmp_path, machine_permissions=project_policy_for_machine(policy))
+    as_vps(outer).hold_permissions_format_version(CURRENT_PERMISSIONS_FORMAT_VERSION)
+
+    fetched = MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh(MIGRATION_CONTEXT)
+
+    assert fetched.permissions_json == policy
+    assert permissions_path_for_host(data_dir, host_id).read_text() == policy
+    assert SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED not in rule_keys_of_permissions_json(
+        as_vps(outer).machine_permissions()
+    )
 
 
 def test_a_read_adopts_the_policy_of_a_host_this_computer_has_none_for(tmp_path: Path) -> None:

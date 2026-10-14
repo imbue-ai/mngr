@@ -666,6 +666,25 @@ list B's agent id at all. Within a host the allowlist is shared, which
 is what lets a sub-agent address its workspace's primary agent id (as
 the refresh call does).
 
+The gate runs on the *desktop* gateway only. A remote workspace's machine
+enforces its own copy of the host's policy (pushed as a whole snapshot on
+every edit and adopted back on every read, see
+[Per-machine credentials](#per-machine-credentials)), and the copy that
+crosses the wire is the policy minus the
+`minds-api-proxy-per-agent-unauthorized` rule, in both directions
+(`libs/mngr_latchkey/imbue/mngr_latchkey/remote/_machine_policy.py`); the
+scope schema, with its registered-agent list, travels with the rest of the
+policy as before. The machine never serves a per-agent route itself: its
+forwarding extension carries each one to a desktop whose gateway checks the
+same gate against the same per-host policy, so a copy of the gate on the
+machine rejected nothing the desktop would not, except when no desktop was
+reachable, where it answered an unregistered agent with a 403 "not permitted
+by the user" instead of the forwarder's 502. An agent created while every
+desktop is away is now told the desktop is unreachable until one is back and
+its discovery registers the agent; one created while a desktop is running is
+still rejected by that desktop until its discovery registers it, which can
+take up to one discovery poll.
+
 The gateway's *default* permissions config
 (`~/.minds/latchkey_default_permissions.json`) is materialized with
 empty `rules` too, so any request that somehow bypasses the JWT

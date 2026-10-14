@@ -138,6 +138,7 @@ from imbue.mngr_latchkey.remote.package import remote_package_context
 from imbue.mngr_latchkey.remote.package import render_bootstrap_script
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import dump_permissions_text
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import read_permissions_format_version
@@ -499,14 +500,8 @@ def _policy_to_seed(latchkey_directory: Path, host_id: HostId, state: RemoteMach
 
 
 def _default_permissions_json() -> str:
-    """Serialize the deny-all default permissions config (matches ``save_permissions`` output)."""
-    config = LatchkeyPermissionsConfig()
-    # ``save_permissions`` omits an empty ``schemas`` block; mirror it so the
-    # remote file is byte-for-byte the same shape the plugin writes locally.
-    exclude: set[str] = set()
-    if not config.schemas:
-        exclude.add("schemas")
-    return config.model_dump_json(indent=2, exclude=exclude)
+    """Serialize the deny-all default permissions config, in the shape the plugin writes locally."""
+    return dump_permissions_text(LatchkeyPermissionsConfig())
 
 
 def _recorded_machine_encryption_key(latchkey_directory: Path, host_id: HostId) -> SecretStr | None:

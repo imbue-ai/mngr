@@ -75,8 +75,11 @@ mngr latchkey link-permissions --host-id "$HOST_ID" --opaque-path "$OPAQUE_PATH"
 # every agent that wants to call the Minds API must be registered
 # here. Idempotent: re-running for an already-registered agent is a no-op.
 # A host with a machine of its own (a remote workspace whose gateway was
-# provisioned from this computer) is also handed the updated file, since
-# its gateway enforces its own copy; the command fails if it cannot be.
+# provisioned from this computer) is also handed the updated file: the
+# machine owns the policy, and a registration its copy lacks is lost on the
+# next read. The command fails if it cannot be. The machine's copy carries
+# the registered-agent list but not the gate rule itself, which only the
+# desktop gateway runs (the machine forwards every per-agent route there).
 mngr latchkey register-agent --host-id "$HOST_ID" --agent-id "$AGENT_ID"
 ```
 
