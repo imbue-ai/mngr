@@ -241,7 +241,7 @@ function renderPublishSwitch(
     id: "ws-share-publish-switch",
     isOn: share.isPublished,
     label: ENABLE_SHARING_LABEL,
-    wait: isSettling ? "settling" : null,
+    isWaiting: isSettling,
     onFlip: (isOn) => {
       if (isOn) local.isConfirmOpen = true;
       else void share.unpublish();

@@ -5,13 +5,6 @@
 
 import m from "mithril";
 
-/** How a switch shows a write, or a re-read of its value, in flight. */
-export type SwitchWait =
-  /** The wait spins in the knob and the switch stays live. */
-  | "settling"
-  /** The switch dims and is inert; the caller draws the wait beside it. */
-  | "busy";
-
 export interface SwitchAttrs {
   id?: string;
   isOn: boolean;
@@ -19,8 +12,10 @@ export interface SwitchAttrs {
   label: string;
   /** Carries the state the flip asks for. */
   onFlip: (isOn: boolean) => void;
-  wait?: SwitchWait | null;
-  /** Inert for a reason other than its own write. */
+  /** A write, or a re-read of the value, is in flight: a ring spins in the
+   * knob, which stays at the last known value. The switch stays live unless
+   * the caller also disables it. */
+  isWaiting?: boolean;
   isDisabled?: boolean;
   /** Why it is inert, shown on hover. */
   title?: string | null;
@@ -31,7 +26,7 @@ export interface SwitchAttrs {
 }
 
 export function renderSwitch(attrs: SwitchAttrs): m.Children {
-  const wait = attrs.wait ?? null;
+  const isWaiting = attrs.isWaiting === true;
   return m("button", {
     ...(attrs.id === undefined ? {} : { id: attrs.id }),
     type: "button",
@@ -41,13 +36,12 @@ export function renderSwitch(attrs: SwitchAttrs): m.Children {
     ...(attrs.describedBy === undefined
       ? {}
       : { "aria-describedby": attrs.describedBy }),
-    ...(wait === "settling" ? { "aria-busy": "true" } : {}),
+    ...(isWaiting ? { "aria-busy": "true" } : {}),
     ...(attrs.data ?? {}),
-    class:
-      wait === null
-        ? "perm-switch shrink-0"
-        : `perm-switch shrink-0 is-${wait}`,
-    disabled: wait === "busy" || attrs.isDisabled === true,
+    class: isWaiting
+      ? "perm-switch shrink-0 is-settling"
+      : "perm-switch shrink-0",
+    disabled: attrs.isDisabled === true,
     ...(attrs.title ? { title: attrs.title } : {}),
     onclick: () => attrs.onFlip(!attrs.isOn),
   });
