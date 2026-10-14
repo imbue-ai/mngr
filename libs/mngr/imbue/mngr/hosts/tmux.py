@@ -58,6 +58,12 @@ class TmuxSessionTarget(FrozenModel):
 # so it describes exactly as long as the thing it describes exists.
 AGENT_PANE_ID_OPTION: Final[str] = "@mngr_agent_pane"
 
+# The tmux session user-option holding the agent's id. A session is named after its agent, but a
+# rename moves the session before it rewrites the agent's data.json, so whoever loaded the name
+# just before can find no session by it; the id never changes, and the option travels with the
+# session through `rename-session`.
+AGENT_ID_OPTION: Final[str] = "@mngr_agent_id"
+
 
 class TmuxWindowTarget(FrozenModel):
     """Structured tmux ``-t`` target for commands whose target resolves as a window or pane.

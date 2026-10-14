@@ -29,6 +29,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
 from imbue.mngr.hosts.tmux import AGENT_PANE_ID_OPTION
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
@@ -305,9 +306,20 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             return LifecycleProbeResult(state=AgentLifecycleState.STOPPED)
 
     def _build_lifecycle_probe_command(self) -> str:
-        """Build the command that probes the agent's primary window for lifecycle state."""
+        """Build the command that probes the agent's primary window for lifecycle state.
+
+        The session is found by the agent id it carries, falling back to the session named after
+        this agent: a rename moves the session before it rewrites data.json, so the name this
+        agent was loaded with can already be gone while the agent runs on.
+        """
+        # CLEANUP: drop the name fallback once no running session predates the AGENT_ID_OPTION
+        # stamp, i.e. once every host has restarted its agents on an mngr that sets it.
+        id_filter = shlex.quote(f"id={self.id}")
         return (
-            f"tmux list-panes -t {self.tmux_target.as_shell_arg()} "
+            f"session=$(tmux list-sessions -F '#{{{AGENT_ID_OPTION}}}|#{{session_name}}' 2>/dev/null"
+            f" | awk -F'|' -v {id_filter} '$1 == id {{print $2; exit}}'); "
+            f'[ -n "$session" ] || session={shlex.quote(self.session_name)}; '
+            f'tmux list-panes -t "=$session:"{shlex.quote(str(self.tmux_target.window))} '
             f"-F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1"
         )
 

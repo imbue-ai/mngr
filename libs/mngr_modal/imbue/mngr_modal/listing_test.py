@@ -75,7 +75,7 @@ def test_parse_listing_output_extracts_agent_data() -> None:
         "TMUX_SESSION_PREFIX=mngr-\n"
         "TMUX_WINDOW_NAME=agent\n"
         "---MNGR_TMUX_PANES_START---\n"
-        "mngr-test-agent::MNGR::agent::MNGR::0|claude|456\n"
+        "mngr-test-agent::MNGR::::MNGR::agent::MNGR::0|claude|456\n"
         "---MNGR_TMUX_PANES_END---\n"
         "---MNGR_AGENT_MTIMES_START---\n"
         "1700000100 /mngr/agents/agent-123/activity/user\n"

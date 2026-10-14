@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
 from imbue.mngr.providers.listing_utils import SEP_AGENT_END
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
@@ -240,15 +241,18 @@ def test_listing_script_reports_the_pane_of_each_agents_named_window_on_a_real_t
     """tmux's own rendering of the pane listing joins to the agent whose session holds the configured window.
 
     The session of an agent whose window has another name reports no pane, so the window name
-    passed to the script is what the join matches on.
+    passed to the script is what the join matches on; tmux renders the session's agent id option,
+    so a session carrying an agent's id is that agent's even when its name no longer matches.
     """
     host_dir = tmp_path / "mngr"
-    for agent_id, agent_name in (("agent-busy", "busy"), ("agent-renamed", "renamed")):
+    for agent_id, agent_name in (("agent-busy", "busy"), ("agent-renamed", "renamed"), ("agent-moved", "stale")):
         (host_dir / "agents" / agent_id).mkdir(parents=True)
         (host_dir / "agents" / agent_id / "data.json").write_text(json.dumps({"id": agent_id, "name": agent_name}))
     (host_dir / "data.json").write_text(json.dumps({"host_id": "host-abc"}))
     subprocess.run(["tmux", "new-session", "-d", "-s", "mngr-busy", "-n", "primary", "sleep 600"], check=True)
     subprocess.run(["tmux", "new-session", "-d", "-s", "mngr-renamed", "-n", "agent", "sleep 600"], check=True)
+    subprocess.run(["tmux", "new-session", "-d", "-s", "mngr-mid-rename", "-n", "primary", "sleep 600"], check=True)
+    subprocess.run(["tmux", "set-option", "-t", "=mngr-mid-rename:", AGENT_ID_OPTION, "agent-moved"], check=True)
     busy_pane_pid = subprocess.run(
         ["tmux", "display-message", "-p", "-t", "=mngr-busy:primary", "#{pane_pid}"],
         capture_output=True,
@@ -263,6 +267,7 @@ def test_listing_script_reports_the_pane_of_each_agents_named_window_on_a_real_t
     assert (pane_dead, pane_pid) == ("0", busy_pane_pid)
     assert pane_command
     assert agents_by_id["agent-renamed"]["tmux_info"] is None
+    assert agents_by_id["agent-moved"]["tmux_info"] is not None
 
 
 @pytest.mark.parametrize(
@@ -278,10 +283,10 @@ def test_parse_listing_collection_output_joins_each_agent_to_its_primary_windows
             "TMUX_SESSION_PREFIX=mngr-",
             f"TMUX_WINDOW_NAME={window_name}",
             "---MNGR_TMUX_PANES_START---",
-            "mngr-other::MNGR::agent::MNGR::0|vim|11",
-            "mngr-test-agent::MNGR::agent::MNGR::0|claude|42",
-            "mngr-test-agent::MNGR::agent::MNGR::0|bash|43",
-            "mngr-test-agent::MNGR::primary::MNGR::0|bash|77",
+            "mngr-other::MNGR::::MNGR::agent::MNGR::0|vim|11",
+            "mngr-test-agent::MNGR::::MNGR::agent::MNGR::0|claude|42",
+            "mngr-test-agent::MNGR::::MNGR::agent::MNGR::0|bash|43",
+            "mngr-test-agent::MNGR::::MNGR::primary::MNGR::0|bash|77",
             "---MNGR_TMUX_PANES_END---",
             "---MNGR_AGENT_START:agent-123---",
             "---MNGR_AGENT_DATA_START---",
@@ -300,6 +305,30 @@ def test_parse_listing_collection_output_joins_each_agent_to_its_primary_windows
 
     assert agents_by_id["agent-123"]["tmux_info"] == expected_tmux_info
     assert agents_by_id["agent-456"]["tmux_info"] is None
+
+
+def test_parse_listing_collection_output_joins_an_agent_to_the_session_carrying_its_id_over_its_name() -> None:
+    """A rename moves the session before it rewrites data.json, so the name a listing reads can name no session
+    (or, for a swap, another agent's); the session stamped with the agent's id is the agent's whatever its name."""
+    output = "\n".join(
+        [
+            "TMUX_SESSION_PREFIX=mngr-",
+            "TMUX_WINDOW_NAME=agent",
+            "---MNGR_TMUX_PANES_START---",
+            "mngr-new-name::MNGR::agent-123::MNGR::agent::MNGR::0|claude|42",
+            "mngr-old-name::MNGR::agent-456::MNGR::agent::MNGR::0|vim|11",
+            "---MNGR_TMUX_PANES_END---",
+            "---MNGR_AGENT_START:agent-123---",
+            "---MNGR_AGENT_DATA_START---",
+            json.dumps({"id": "agent-123", "name": "old-name"}),
+            "---MNGR_AGENT_DATA_END---",
+            "---MNGR_AGENT_END---",
+        ]
+    )
+
+    (agent,) = parse_listing_collection_output(output)["agents"]
+
+    assert agent["tmux_info"] == "0|claude|42"
 
 
 def test_parse_listing_collection_output_reads_no_tmux_info_from_a_listing_without_panes() -> None:
