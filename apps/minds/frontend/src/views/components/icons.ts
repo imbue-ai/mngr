@@ -1,8 +1,52 @@
-// 16x16 and 12x12 icon path data, ported VERBATIM from the legacy
-// templates.py _ICONS_16 / _ICONS_12 maps (Figma node 857-5091). The
-// Icon16 / Icon12 components wrap these in their svg shells; each glyph
-// inherits currentColor. The maps are the single source of truth -- to
-// add or swap an icon, edit one entry here.
+/*!
+ * @license
+ * The ICONS_16 path data below is lucide icon artwork, used unchanged or
+ * outlined into filled paths. Source: https://lucide.dev
+ * (ICONS_12, the window-control chrome, is drawn here and is not lucide's.)
+ *
+ * ISC License
+ *
+ * Copyright (c) 2026 Lucide Icons and Contributors
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ *
+ * Part of lucide descends from Feather and is additionally covered by
+ * Feather's MIT license; lucide's own LICENSE lists which icons those are,
+ * and is reproduced in full beside the built bundle at
+ * imbue/minds/desktop_client/static/ATTRIBUTION.md.
+ *
+ * The MIT License (MIT) (for the Feather-derived icons)
+ *
+ * Copyright (c) 2013-present Cole Bemis
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
+ */
 
 export const ICONS_16 = {
   menu: '<path d="M13.3337 11.4004C13.6649 11.4006 13.9333 11.6687 13.9333 12C13.9333 12.3313 13.6649 12.5994 13.3337 12.5996H2.66667C2.3353 12.5996 2.06706 12.3314 2.06706 12C2.06706 11.6686 2.3353 11.4004 2.66667 11.4004H13.3337ZM13.3337 7.40039C13.6649 7.40057 13.9333 7.66874 13.9333 8C13.9333 8.33126 13.6649 8.59943 13.3337 8.59961H2.66667C2.3353 8.59961 2.06706 8.33137 2.06706 8C2.06706 7.66863 2.3353 7.40039 2.66667 7.40039H13.3337ZM13.3337 3.40039C13.6649 3.40057 13.9333 3.66874 13.9333 4C13.9333 4.33126 13.6649 4.59943 13.3337 4.59961H2.66667C2.3353 4.59961 2.06706 4.33137 2.06706 4C2.06706 3.66863 2.3353 3.40039 2.66667 3.40039H13.3337Z"/>',
