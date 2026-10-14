@@ -51,6 +51,7 @@ from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.data_types import TunnelInfo
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
+from imbue.modal_proxy.errors import ModalProxyBlockStorageError
 from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyDeployTimeoutError
 from imbue.modal_proxy.errors import ModalProxyError
@@ -66,6 +67,7 @@ from imbue.modal_proxy.errors import ModalProxyServiceError
 from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
+from imbue.modal_proxy.errors import is_block_storage_server_error
 from imbue.modal_proxy.errors import is_deploy_function_vanished_error
 from imbue.modal_proxy.errors import is_image_builder_lost_error
 from imbue.modal_proxy.errors import is_sandbox_gone_error
@@ -107,6 +109,10 @@ def _translate_modal_error(e: modal.exception.Error) -> ModalProxyError:
         return ModalProxyServiceError(str(e))
     if isinstance(e, modal.exception.ResourceExhaustedError):
         return ModalProxyRateLimitError(str(e))
+    # ExecutionError is also Modal's class for programming errors, so only the wording tells
+    # a block-storage failure from one of those.
+    if isinstance(e, modal.exception.ExecutionError) and is_block_storage_server_error(str(e)):
+        return ModalProxyBlockStorageError(str(e))
     # Checked before RemoteError, which it subclasses.
     if isinstance(e, modal.exception.ImageBuildError):
         return ModalProxyImageBuildError(str(e))

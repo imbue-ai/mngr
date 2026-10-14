@@ -75,6 +75,30 @@ def is_sandbox_gone_error(message: str) -> bool:
     return _SANDBOX_GONE_RE.search(message) is not None
 
 
+# The blocks behind a volume live on object storage that Modal reaches over plain HTTP, and
+# modal.volume._raise_on_block_response_error turns every failed status from it into an
+# exception. 503 goes to ServiceError, which is already transient here; every other status,
+# whatever it means, goes to ExecutionError, so the status in the message is all that tells
+# storage failing a request from storage answering it.
+_BLOCK_STORAGE_SERVER_ERROR_RE = re.compile(r"request failed with status 5\d\d\b", re.IGNORECASE)
+
+
+def is_block_storage_server_error(message: str) -> bool:
+    """Check whether a Modal error message reports a server error from a volume's block storage.
+
+    A 5xx means the storage tier failed the read or write rather than performing it, so the
+    volume still holds whatever it held and the call can be re-issued. Every other failed
+    status is an answer: a 404 names a block that is not there, and waiting out a retry budget
+    only delays that verdict (see MIND-345). So only the server-error range counts.
+
+    A standing bet on Modal's prose, settled by
+    ``test_modal_still_reports_a_failed_block_request_in_the_words_we_read_as_transient``: if
+    Modal rewords the failure, that test fails and names this regex rather than the condition
+    going silently unrecognized.
+    """
+    return _BLOCK_STORAGE_SERVER_ERROR_RE.search(message) is not None
+
+
 class ModalProxyError(Exception):
     """Base error for modal_proxy operations."""
 
@@ -127,6 +151,16 @@ class ModalProxyServiceError(ModalProxyTransientError):
     the statuses Modal's own client retries. Modal never processed the request,
     so this is the "Modal is erroring" shape rather than a verdict on what was
     asked.
+    """
+
+
+class ModalProxyBlockStorageError(ModalProxyTransientError):
+    """Raised when the object storage behind a Modal volume failed to serve a read or write.
+
+    The data-plane counterpart to ``ModalProxyServiceError``: a volume's blocks are fetched
+    and written over HTTP rather than through the control plane, and a server error from that
+    tier says the request was never served. The volume still holds what it held, so the read
+    or write is safe to re-issue.
     """
 
 

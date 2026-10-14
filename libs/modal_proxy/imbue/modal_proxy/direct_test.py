@@ -1,3 +1,4 @@
+import inspect
 import os
 import subprocess
 from collections.abc import Callable
@@ -21,6 +22,7 @@ from modal._utils.grpc_utils import RETRYABLE_GRPC_STATUS_CODES
 from modal.config import config
 from modal.stream_type import StreamType as ModalStreamType
 from modal.types import FileEntryType as ModalFileEntryType
+from modal.volume import _raise_on_block_response_error
 from pydantic import BaseModel
 from tenacity import RetryCallState
 from tenacity import Retrying
@@ -52,6 +54,7 @@ from imbue.modal_proxy.direct import _unwrap_secret
 from imbue.modal_proxy.direct import _unwrap_volume
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
+from imbue.modal_proxy.errors import ModalProxyBlockStorageError
 from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyDeployRetryableError
 from imbue.modal_proxy.errors import ModalProxyDeployTimeoutError
@@ -68,6 +71,7 @@ from imbue.modal_proxy.errors import ModalProxyServiceError
 from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
+from imbue.modal_proxy.errors import is_block_storage_server_error
 from imbue.modal_proxy.errors import is_deploy_function_vanished_error
 from imbue.modal_proxy.errors import is_image_builder_lost_error
 from imbue.modal_proxy.errors import is_sandbox_gone_error
@@ -75,6 +79,16 @@ from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ImageInterface
 from imbue.modal_proxy.interface import SecretInterface
 from imbue.modal_proxy.interface import VolumeInterface
+
+# Verbatim from Modal, the 500's Cloudflare error page cut down to the lines that identify it.
+_BLOCK_STORAGE_500_MESSAGE: Final[str] = (
+    "Request failed with status 500 Internal Server Error: <!DOCTYPE html>\n"
+    "<head>\n"
+    "<title>Worker threw exception | clobber.modal-storage.com | Cloudflare</title>\n"
+    '<span class="cf-error-code">1101</span>\n'
+)
+_BLOCK_STORAGE_404_MESSAGE: Final[str] = "Request failed with status 404 Not Found: block not found"
+
 
 # These are deliberately local concrete stubs used only by
 # `test_unwrap_rejects_non_direct` to supply a non-`Direct*` instance of each
@@ -298,6 +312,17 @@ def test_translate_modal_cli_not_found_reraises_for_other() -> None:
             ModalProxyServiceError,
             id="sandbox_gone_wording_under_a_transient_status",
         ),
+        # Both arrive under the same Modal class, so the status in the message is what routes them.
+        pytest.param(
+            modal.exception.ExecutionError(_BLOCK_STORAGE_500_MESSAGE),
+            ModalProxyBlockStorageError,
+            id="block_storage_server_error",
+        ),
+        pytest.param(
+            modal.exception.ExecutionError(_BLOCK_STORAGE_404_MESSAGE),
+            ModalProxyError,
+            id="block_storage_not_found",
+        ),
         # A bare modal.exception.Error that matches none of the specific branches
         # must fall through to the generic ModalProxyError.
         pytest.param(modal.exception.Error("generic"), ModalProxyError, id="fallback_generic"),
@@ -323,6 +348,7 @@ def test_translate_modal_error_maps_each_branch_to_its_proxy_type(
         pytest.param(ModalProxyInternalError("server error"), True, id="internal_error"),
         pytest.param(ModalProxyServiceError("deadline exceeded"), True, id="service_error"),
         pytest.param(ModalProxyRateLimitError("rate limit"), True, id="rate_limit"),
+        pytest.param(ModalProxyBlockStorageError(_BLOCK_STORAGE_500_MESSAGE), True, id="block_storage_error"),
         # grpclib raises these below the SDK, so they are not modal.exception.Error
         # and reach the predicate untranslated.
         pytest.param(StreamTerminatedError("stream dropped"), True, id="stream_terminated"),
@@ -485,6 +511,23 @@ def test_is_image_builder_lost_error(message: str, expected: bool) -> None:
 )
 def test_is_sandbox_gone_error(message: str, expected: bool) -> None:
     assert is_sandbox_gone_error(message) is expected
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        pytest.param(_BLOCK_STORAGE_500_MESSAGE, True, id="real_modal_500_message"),
+        pytest.param("Request failed with status 502 Bad Gateway: <html>", True, id="bad_gateway"),
+        pytest.param("Request failed with status 504 Gateway Timeout: <html>", True, id="gateway_timeout"),
+        pytest.param(_BLOCK_STORAGE_404_MESSAGE, False, id="real_modal_404_message"),
+        pytest.param("Request failed with status 403 Forbidden: <html>", False, id="forbidden"),
+        # The programming errors ExecutionError also covers carry no status at all.
+        pytest.param("Class is not hydrated - this is probably a bug in the Modal client", False, id="unrelated"),
+        pytest.param("", False, id="empty"),
+    ],
+)
+def test_is_block_storage_server_error(message: str, expected: bool) -> None:
+    assert is_block_storage_server_error(message) is expected
 
 
 # The real Modal message; deploy must classify this as retryable.
@@ -669,6 +712,28 @@ def test_direct_modal_interface_respects_explicit_sandbox_v2_opt_out(monkeypatch
     assert config.get("sandbox_v2") is False
 
 
+class _FakeModalVolume:
+    """Minimal stand-in for modal.Volume that streams a file back a block at a time.
+
+    Raises ``error`` from partway through the stream until ``fail_times`` reads have been
+    made, which is where a block-storage failure actually surfaces: Modal fetches each block
+    as the caller consumes the generator, not when it hands the generator over.
+    """
+
+    def __init__(self, blocks: Sequence[bytes], error: modal.exception.Error, fail_times: int) -> None:
+        self._blocks = tuple(blocks)
+        self._error = error
+        self._fail_times = fail_times
+        self.read_count = 0
+
+    def read_file(self, path: str) -> Generator[bytes, None, None]:
+        self.read_count += 1
+        for index, block in enumerate(self._blocks):
+            if self.read_count <= self._fail_times and index > 0:
+                raise self._error
+            yield block
+
+
 class _FakeModalSandbox:
     """Minimal stand-in for modal.Sandbox.
 
@@ -804,6 +869,41 @@ def test_get_tags_does_not_retry_a_missing_environment() -> None:
         sandbox.get_tags()
 
     assert fake.call_count == 1, "a missing environment must not be retried"
+
+
+def test_read_file_rides_out_a_block_storage_server_error() -> None:
+    """A host-record read must survive one 5xx from the storage behind the volume.
+
+    Modal fetches a volume's blocks over HTTP and reports a failed status as an
+    ExecutionError -- the class it otherwise uses for programming errors -- so without
+    the wording check this arrives as a plain ModalProxyError and fails on its first blip.
+    """
+    fake = _FakeModalVolume(
+        blocks=(b'{"host_id":', b' "host-1"}'),
+        error=modal.exception.ExecutionError(_BLOCK_STORAGE_500_MESSAGE),
+        fail_times=1,
+    )
+    volume = DirectVolume.model_construct(volume=fake)
+
+    assert volume.read_file("/hosts/host-1.json") == b'{"host_id": "host-1"}'
+    assert fake.read_count == 2, "expected one failed read followed by a successful retry"
+
+
+def test_modal_still_reports_a_failed_block_request_in_the_words_we_read_as_transient() -> None:
+    """Modal still raises ExecutionError carrying the status when block storage fails.
+
+    A standing bet on an upstream string, and the only place it can be settled: a 5xx from
+    Cloudflare cannot be provoked, so no test can reach this condition for real. Reading the
+    raise site is what keeps a reword from silently turning the retry off again.
+    """
+    raise_site_source = inspect.getsource(_raise_on_block_response_error)
+
+    assert 'ExecutionError(f"Request failed with status {response.status}' in raise_site_source, (
+        "Modal no longer reports a failed block-storage request in the words "
+        "is_block_storage_server_error recognizes, so a volume read or write will fail on its "
+        "first 5xx again. Update _BLOCK_STORAGE_SERVER_ERROR_RE in modal_proxy/errors.py to "
+        f"match what Modal now raises:\n{raise_site_source}"
+    )
 
 
 def test_transient_retry_gives_up_on_elapsed_time_not_attempt_count() -> None:
