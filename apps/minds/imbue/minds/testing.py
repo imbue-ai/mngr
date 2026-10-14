@@ -22,23 +22,32 @@ from imbue.mngr_vps.host_setup import expected_container_memory_cap_bytes
 DEFAULT_WORKSPACE_TEMPLATE_OWNER_REPO: Final[str] = "imbue-ai/default-workspace-template"
 
 
+def _github_api_headers() -> dict[str, str]:
+    """The contents-API headers, authenticated when the shell carries a GitHub token.
+
+    The repo is public, so the token adds no access; it lifts the request out of
+    the anonymous per-IP rate limit that GitHub-hosted runners share, which is
+    what makes an unauthenticated fetch fail there.
+    """
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "mngr-template-alignment-test"}
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        return {**headers, "Authorization": f"Bearer {token}"}
+    return headers
+
+
 def fetch_default_workspace_template_file(repo_relative_path: str) -> str | None:
     """Fetch a file from default-workspace-template's default branch via the GitHub contents API.
 
-    The repo is public, so no token is needed. Returns None on any fetch or
-    decode failure, so the caller can surface a single "could not fetch" assertion.
+    Returns None on any fetch or decode failure, so the caller can surface a
+    single "could not fetch" assertion.
     """
     url = f"https://api.github.com/repos/{DEFAULT_WORKSPACE_TEMPLATE_OWNER_REPO}/contents/{repo_relative_path}"
     try:
-        response = httpx.get(
-            url,
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "mngr-template-alignment-test"},
-            timeout=30.0,
-            follow_redirects=True,
-        )
+        response = httpx.get(url, headers=_github_api_headers(), timeout=30.0, follow_redirects=True)
         response.raise_for_status()
     except httpx.HTTPError as e:
-        logger.trace("fetch of {} failed: {}", url, e)
+        logger.warning("Failed to fetch {}: {}", url, e)
         return None
     try:
         payload = response.json()
