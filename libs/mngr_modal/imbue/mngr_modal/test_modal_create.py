@@ -22,6 +22,7 @@ import pytest
 from imbue.mngr import resources
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr_modal.testing import run_mngr_against_modal
 
 
 @pytest.mark.acceptance
@@ -51,28 +52,21 @@ def test_mngr_create_echo_command_on_modal(
     # Run mngr create with echo command on modal
     # Using --no-connect to create without attaching
     # Using --no-ensure-clean since temp dir won't be a git repo
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "create",
-            f"{agent_name}@{agent_name}.modal",
-            "--type",
-            "command",
-            "--new-host",
-            "--no-connect",
-            "--no-ensure-clean",
-            "--source",
-            str(temp_source_dir),
-            "--",
-            "echo",
-            expected_output,
-        ],
-        capture_output=True,
-        text=True,
+    result = run_mngr_against_modal(
+        "create",
+        f"{agent_name}@{agent_name}.modal",
+        "--type",
+        "command",
+        "--new-host",
+        "--no-connect",
+        "--no-ensure-clean",
+        "--source",
+        str(temp_source_dir),
+        "--",
+        "echo",
+        expected_output,
+        modal_subprocess_env=modal_subprocess_env,
         timeout=300,
-        env=modal_subprocess_env.env,
     )
 
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
@@ -109,29 +103,22 @@ def test_mngr_create_with_transfer_git_worktree_on_modal_raises_error(
     """
     agent_name = f"test-modal-worktree-{get_short_random_string()}"
 
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "create",
-            f"{agent_name}@{agent_name}.modal",
-            "--type",
-            "command",
-            "--new-host",
-            "--transfer=git-worktree",
-            "--no-connect",
-            "--no-ensure-clean",
-            "--source",
-            str(temp_source_dir),
-            "--",
-            "echo",
-            "hello",
-        ],
-        capture_output=True,
-        text=True,
+    result = run_mngr_against_modal(
+        "create",
+        f"{agent_name}@{agent_name}.modal",
+        "--type",
+        "command",
+        "--new-host",
+        "--transfer=git-worktree",
+        "--no-connect",
+        "--no-ensure-clean",
+        "--source",
+        str(temp_source_dir),
+        "--",
+        "echo",
+        "hello",
+        modal_subprocess_env=modal_subprocess_env,
         timeout=300,
-        env=modal_subprocess_env.env,
     )
 
     # Should fail with an error about git-worktree transfer mode
@@ -156,28 +143,21 @@ def test_mngr_create_with_invalid_snapshot_id_fails(
     """
     agent_name = f"test-modal-bad-snapshot-{get_short_random_string()}"
 
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "create",
-            agent_name,
-            "--type",
-            "command",
-            "--provider",
-            "modal",
-            "--snapshot",
-            "snap-123abc",
-            "--no-connect",
-            "--no-ensure-clean",
-            "--source",
-            str(temp_source_dir),
-        ],
-        capture_output=True,
-        text=True,
+    result = run_mngr_against_modal(
+        "create",
+        agent_name,
+        "--type",
+        "command",
+        "--provider",
+        "modal",
+        "--snapshot",
+        "snap-123abc",
+        "--no-connect",
+        "--no-ensure-clean",
+        "--source",
+        str(temp_source_dir),
+        modal_subprocess_env=modal_subprocess_env,
         timeout=120,
-        env=modal_subprocess_env.env,
     )
 
     assert result.returncode != 0, "Expected create with invalid snapshot ID to fail"
@@ -204,36 +184,29 @@ def test_mngr_create_with_build_args_on_modal(
     agent_name = f"test-modal-build-{get_short_random_string()}"
     expected_output = f"build-test-{get_short_random_string()}"
 
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "create",
-            f"{agent_name}@{agent_name}.modal",
-            "--type",
-            "command",
-            "--new-host",
-            "--no-connect",
-            "--no-ensure-clean",
-            "--source",
-            str(temp_source_dir),
-            "-b",
-            "--cpu",
-            "-b",
-            "0.5",
-            "-b",
-            "--memory",
-            "-b",
-            "0.5",
-            "--",
-            "echo",
-            expected_output,
-        ],
-        capture_output=True,
-        text=True,
+    result = run_mngr_against_modal(
+        "create",
+        f"{agent_name}@{agent_name}.modal",
+        "--type",
+        "command",
+        "--new-host",
+        "--no-connect",
+        "--no-ensure-clean",
+        "--source",
+        str(temp_source_dir),
+        "-b",
+        "--cpu",
+        "-b",
+        "0.5",
+        "-b",
+        "--memory",
+        "-b",
+        "0.5",
+        "--",
+        "echo",
+        expected_output,
+        modal_subprocess_env=modal_subprocess_env,
         timeout=300,
-        env=modal_subprocess_env.env,
     )
 
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
@@ -276,30 +249,23 @@ RUN echo "custom-dockerfile-marker" > /dockerfile-marker.txt
 """
     dockerfile_path.write_text(dockerfile_content)
 
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "create",
-            f"{agent_name}@{agent_name}.modal",
-            "--type",
-            "command",
-            "--new-host",
-            "--no-connect",
-            "--no-ensure-clean",
-            "--source",
-            str(temp_source_dir),
-            "-b",
-            f"--file={dockerfile_path}",
-            "--",
-            "echo",
-            expected_output,
-        ],
-        capture_output=True,
-        text=True,
+    result = run_mngr_against_modal(
+        "create",
+        f"{agent_name}@{agent_name}.modal",
+        "--type",
+        "command",
+        "--new-host",
+        "--no-connect",
+        "--no-ensure-clean",
+        "--source",
+        str(temp_source_dir),
+        "-b",
+        f"--file={dockerfile_path}",
+        "--",
+        "echo",
+        expected_output,
+        modal_subprocess_env=modal_subprocess_env,
         timeout=300,
-        env=modal_subprocess_env.env,
     )
 
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
@@ -334,30 +300,23 @@ RUN echo "About to fail with marker: {unique_failure_marker}" && exit 1
 """
     dockerfile_path.write_text(dockerfile_content)
 
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "create",
-            f"{agent_name}@{agent_name}.modal",
-            "--type",
-            "command",
-            "--new-host",
-            "--no-connect",
-            "--no-ensure-clean",
-            "--source",
-            str(temp_source_dir),
-            "-b",
-            f"--file={dockerfile_path}",
-            "--",
-            "echo",
-            "should-not-reach-here",
-        ],
-        capture_output=True,
-        text=True,
+    result = run_mngr_against_modal(
+        "create",
+        f"{agent_name}@{agent_name}.modal",
+        "--type",
+        "command",
+        "--new-host",
+        "--no-connect",
+        "--no-ensure-clean",
+        "--source",
+        str(temp_source_dir),
+        "-b",
+        f"--file={dockerfile_path}",
+        "--",
+        "echo",
+        "should-not-reach-here",
+        modal_subprocess_env=modal_subprocess_env,
         timeout=300,
-        env=modal_subprocess_env.env,
     )
 
     # The command should fail because the Dockerfile build fails
@@ -407,28 +366,21 @@ def test_mngr_create_transfers_git_repo_with_untracked_files(
     (temp_git_repo / "marker.txt").write_text(unique_marker)
 
     # Create agent - if file transfer fails, this will fail
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "create",
-            f"{agent_name}@{agent_name}.modal",
-            "--type",
-            "command",
-            "--new-host",
-            "--no-connect",
-            "--no-ensure-clean",
-            "--source",
-            str(temp_git_repo),
-            "--",
-            "sleep",
-            "100310",
-        ],
-        capture_output=True,
-        text=True,
+    result = run_mngr_against_modal(
+        "create",
+        f"{agent_name}@{agent_name}.modal",
+        "--type",
+        "command",
+        "--new-host",
+        "--no-connect",
+        "--no-ensure-clean",
+        "--source",
+        str(temp_git_repo),
+        "--",
+        "sleep",
+        "100310",
+        modal_subprocess_env=modal_subprocess_env,
         timeout=300,
-        env=modal_subprocess_env.env,
     )
 
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
@@ -451,28 +403,21 @@ def test_mngr_create_transfers_git_repo_with_new_branch(
     """
     agent_name = f"test-modal-branch-{get_short_random_string()}"
 
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "create",
-            f"{agent_name}@{agent_name}.modal",
-            "--type",
-            "command",
-            "--new-host",
-            "--no-connect",
-            "--no-ensure-clean",
-            "--source",
-            str(temp_git_repo),
-            "--",
-            "sleep",
-            "100311",
-        ],
-        capture_output=True,
-        text=True,
+    result = run_mngr_against_modal(
+        "create",
+        f"{agent_name}@{agent_name}.modal",
+        "--type",
+        "command",
+        "--new-host",
+        "--no-connect",
+        "--no-ensure-clean",
+        "--source",
+        str(temp_git_repo),
+        "--",
+        "sleep",
+        "100311",
+        modal_subprocess_env=modal_subprocess_env,
         timeout=300,
-        env=modal_subprocess_env.env,
     )
 
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
@@ -549,32 +494,25 @@ def test_mngr_create_with_default_dockerfile_on_modal(
         tf.extractall(context_dir, filter="data")
 
     # now we can try making the agent
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "create",
-            f"{agent_name}@{agent_name}.modal:/code/mngr",
-            "--type",
-            "command",
-            "--new-host",
-            "--no-connect",
-            "--no-ensure-clean",
-            "--source",
-            str(temp_source_dir),
-            "-b",
-            f"--file={dockerfile_path}",
-            "-b",
-            f"context-dir={context_dir}",
-            "--",
-            "sleep",
-            "100312",
-        ],
-        capture_output=True,
-        text=True,
+    result = run_mngr_against_modal(
+        "create",
+        f"{agent_name}@{agent_name}.modal:/code/mngr",
+        "--type",
+        "command",
+        "--new-host",
+        "--no-connect",
+        "--no-ensure-clean",
+        "--source",
+        str(temp_source_dir),
+        "-b",
+        f"--file={dockerfile_path}",
+        "-b",
+        f"context-dir={context_dir}",
+        "--",
+        "sleep",
+        "100312",
+        modal_subprocess_env=modal_subprocess_env,
         timeout=600,
-        env=modal_subprocess_env.env,
     )
 
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"

@@ -57,6 +57,7 @@ from imbue.mngr.providers.ssh_host_setup import SSHD_START_OPTIONS
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.utils.testing import SHARED_MODAL_ENV_NAME_VAR
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr.utils.testing import read_shared_modal_env_name
 from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
@@ -1519,6 +1520,48 @@ def test_create_host_restores_the_sticky_bit_on_tmp_before_sshd_starts(
     ]
     assert _RESTORE_TMP_STICKY_BIT_COMMAND in ssh_setup_command
     assert not any("sshd -D" in command for sandbox in fake_modal.sandboxes_built for command in sandbox.commands)
+
+
+def test_create_host_names_the_sandbox_tunnel_and_host_record_waits(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """Each Modal call a create can stall on announces itself before it blocks.
+
+    A create that overruns is killed where it stands, so a blocking call that
+    announces nothing is indistinguishable from the step before it.
+    """
+    fake_modal = _SshSetupFailingFakeModalInterface(root_dir=tmp_path / "modal_testing", concurrency_group=cg)
+    provider = make_testing_provider(temp_mngr_ctx, fake_modal)
+    try:
+        with capture_loguru("DEBUG") as log_output, pytest.raises(ConcurrencyExceptionGroup):
+            provider.create_host(HostName("stage-logging"))
+    finally:
+        fake_modal.cleanup()
+
+    logged = log_output.getvalue()
+    assert "Waiting for the new Modal sandbox to run a command" in logged
+    assert "Waiting for the Modal sandbox's SSH tunnel" in logged
+    assert "Writing the host record to the state volume" in logged
+
+
+def test_read_host_record_names_the_state_volume_read(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    """Reading a host record announces itself, like the write beside it.
+
+    The read runs after `create_host` returns, from the initial snapshot
+    `on_agent_created` takes, so a create killed inside it has already returned
+    as far as its own logging is concerned.
+    """
+    record = make_host_record()
+    testing_provider._write_host_record(record)
+
+    with capture_loguru("DEBUG") as log_output:
+        testing_provider._read_host_record(HostId(record.certified_host_data.host_id), use_cache=False)
+
+    assert "Reading the host record from the state volume" in log_output.getvalue()
 
 
 @pytest.mark.parametrize(

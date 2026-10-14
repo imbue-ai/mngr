@@ -686,8 +686,9 @@ class ModalProviderInstance(BaseProviderInstance):
             )
         logger.trace("Created Modal sandbox", sandbox_id=sandbox.get_object_id())
 
-        if _is_sandbox_running_commands(sandbox):
-            return sandbox
+        with log_span("Waiting for the new Modal sandbox to run a command"):
+            if _is_sandbox_running_commands(sandbox):
+                return sandbox
         # Terminating the dud keeps it from lingering and billing, but it is already
         # unusable, so a failure to terminate must not mask why we are discarding it.
         try:
@@ -805,7 +806,8 @@ class ModalProviderInstance(BaseProviderInstance):
         # FIXME: we need to make sure that this is the same in both places that this is called. This logic should move to a method on host_record, and we should update this and Host::set_certified_data to use that method as well, to ensure consistency.
         data = host_record.model_dump_json(by_alias=True, indent=2)
 
-        volume.write_files({path: data.encode("utf-8")})
+        with log_span("Writing the host record to the state volume", path=path):
+            volume.write_files({path: data.encode("utf-8")})
         logger.trace("Wrote host record to volume: {}", path, host_data=data)
 
         # Update the cache with the new host record
@@ -859,7 +861,8 @@ class ModalProviderInstance(BaseProviderInstance):
         path = self._get_host_record_path(host_id)
 
         try:
-            data = volume.read_file(path)
+            with log_span("Reading the host record from the state volume", path=path):
+                data = volume.read_file(path)
             try:
                 host_record = HostRecord.model_validate_json(data)
             except ValidationError as e:
@@ -1244,7 +1247,8 @@ class ModalProviderInstance(BaseProviderInstance):
         Retries on ModalProxyError to absorb cold-start latency.
         """
         try:
-            tunnels = sandbox.tunnels(timeout=tunnel_timeout)
+            with log_span("Waiting for the Modal sandbox's SSH tunnel", tunnel_timeout_seconds=tunnel_timeout):
+                tunnels = sandbox.tunnels(timeout=tunnel_timeout)
         except ModalProxyError as e:
             if _is_sandbox_timeout(e):
                 raise ModalSandboxTimeoutMngrError("Sandbox failed to come online fast enough") from e

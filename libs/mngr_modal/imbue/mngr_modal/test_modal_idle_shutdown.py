@@ -25,6 +25,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr_modal.testing import run_mngr_against_modal
 
 
 class MngrListError(Exception):
@@ -33,26 +34,19 @@ class MngrListError(Exception):
     pass
 
 
-def _run_mngr_list_json(env: dict[str, str], provider: str) -> dict:
+def _run_mngr_list_json(modal_subprocess_env: ModalSubprocessTestEnv, provider: str) -> dict:
     """Run mngr list with JSON output and return the parsed result.
 
     Raises MngrListError if the command fails.
     """
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "list",
-            "--provider",
-            provider,
-            "--format",
-            "json",
-        ],
-        capture_output=True,
-        text=True,
+    result = run_mngr_against_modal(
+        "list",
+        "--provider",
+        provider,
+        "--format",
+        "json",
+        modal_subprocess_env=modal_subprocess_env,
         timeout=60,
-        env=env,
     )
     if result.returncode != 0:
         raise MngrListError(f"mngr list failed: {result.stderr}\n{result.stdout}")
@@ -60,7 +54,7 @@ def _run_mngr_list_json(env: dict[str, str], provider: str) -> dict:
 
 
 def _get_host_snapshots(
-    env: dict[str, str],
+    modal_subprocess_env: ModalSubprocessTestEnv,
     provider: str,
     host_name: str,
     *,
@@ -71,7 +65,7 @@ def _get_host_snapshots(
     If tolerate_errors is True, returns empty list on listing errors (useful for polling).
     """
     try:
-        list_result = _run_mngr_list_json(env, provider)
+        list_result = _run_mngr_list_json(modal_subprocess_env, provider)
     except MngrListError:
         if tolerate_errors:
             return []
@@ -84,7 +78,7 @@ def _get_host_snapshots(
 
 
 def _get_host_state(
-    env: dict[str, str],
+    modal_subprocess_env: ModalSubprocessTestEnv,
     provider: str,
     host_name: str,
     *,
@@ -95,7 +89,7 @@ def _get_host_state(
     If tolerate_errors is True, returns None on listing errors (useful for polling during transitions).
     """
     try:
-        list_result = _run_mngr_list_json(env, provider)
+        list_result = _run_mngr_list_json(modal_subprocess_env, provider)
     except MngrListError:
         if tolerate_errors:
             # During host transitions (e.g., sandbox terminating), SSH/SFTP errors
@@ -164,49 +158,37 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
     #   off once the host finishes booting, so the sleep running indefinitely
     #   does not keep the host looking busy. The default PROCESS mode would
     #   keep updating while the tmux bash shell is alive and mask idleness.
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "create",
-            f"{agent_name}@.modal",
-            "--type",
-            "command",
-            "--no-connect",
-            "--no-ensure-clean",
-            "--source",
-            str(source_dir),
-            # Set idle timeout to 15 seconds
-            "--idle-timeout",
-            "15",
-            # Use boot idle mode so only BOOT activity is checked
-            # (the default IO mode includes PROCESS which keeps getting
-            # updated while the tmux bash shell is alive)
-            "--idle-mode",
-            "boot",
-            # Set sandbox timeout to 120 seconds via build args
-            "-b",
-            "--timeout=120",
-            # use our dockerfile since it should end up being cached and faster
-            "-b",
-            "--file=libs/mngr/imbue/mngr/resources/Dockerfile",
-            "-b",
-            "context-dir=.mngr/dev/build/",
-            "--",
-            "sleep",
-            "100313",
-        ],
-        capture_output=True,
-        text=True,
+    result = run_mngr_against_modal(
+        "create",
+        f"{agent_name}@.modal",
+        "--type",
+        "command",
+        "--no-connect",
+        "--no-ensure-clean",
+        "--source",
+        str(source_dir),
+        "--idle-timeout",
+        "15",
+        "--idle-mode",
+        "boot",
+        "-b",
+        "--timeout=120",
+        # use our dockerfile since it should end up being cached and faster
+        "-b",
+        "--file=libs/mngr/imbue/mngr/resources/Dockerfile",
+        "-b",
+        "context-dir=.mngr/dev/build/",
+        "--",
+        "sleep",
+        "100313",
+        modal_subprocess_env=modal_subprocess_env,
         timeout=300,
-        env=modal_subprocess_env.env,
     )
 
     assert result.returncode == 0, f"Agent creation failed: {result.stderr}\n{result.stdout}"
 
     # Get the host name from the agent (should match agent name for Modal)
-    list_result = _run_mngr_list_json(modal_subprocess_env.env, "modal")
+    list_result = _run_mngr_list_json(modal_subprocess_env, "modal")
     host_name = None
     for agent in list_result.get("agents", []):
         if agent.get("name") == agent_name:
@@ -216,7 +198,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
     assert host_name is not None, f"Could not find host for agent {agent_name}"
 
     # Verify initial snapshot was created (should happen during agent creation)
-    initial_snapshots = _get_host_snapshots(modal_subprocess_env.env, "modal", host_name)
+    initial_snapshots = _get_host_snapshots(modal_subprocess_env, "modal", host_name)
     assert len(initial_snapshots) >= 1, (
         f"Expected at least 1 snapshot (initial) after agent creation, "
         f"but found {len(initial_snapshots)}: {initial_snapshots}"
@@ -241,7 +223,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
         # Use tolerate_errors=True during polling because SSH/SFTP errors
         # can occur during the transition period when the sandbox is terminating.
         # We keep polling until we can successfully query the host state.
-        state = _get_host_state(modal_subprocess_env.env, "modal", host_name, tolerate_errors=True)
+        state = _get_host_state(modal_subprocess_env, "modal", host_name, tolerate_errors=True)
         # Host should be in a non-running state (STOPPED, PAUSED, DESTROYED, etc.)
         # If state is None, we couldn't query it (transient error), so keep polling.
         return state is not None and state not in (
@@ -258,7 +240,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
     )
 
     # Verify the offline host has both snapshots
-    final_snapshots = _get_host_snapshots(modal_subprocess_env.env, "modal", host_name)
+    final_snapshots = _get_host_snapshots(modal_subprocess_env, "modal", host_name)
     assert len(final_snapshots) >= 2, (
         f"Expected at least 2 snapshots (initial + idle), but found {len(final_snapshots)}: {final_snapshots}"
     )
@@ -276,7 +258,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
     )
 
     # Verify the host state is 'paused' (idle shutdown sets stop_reason=PAUSED)
-    final_state = _get_host_state(modal_subprocess_env.env, "modal", host_name)
+    final_state = _get_host_state(modal_subprocess_env, "modal", host_name)
     assert final_state == HostState.PAUSED.value, (
         f"Expected host state to be '{HostState.PAUSED.value}' after idle shutdown, but got: {final_state}"
     )

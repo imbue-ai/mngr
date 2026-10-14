@@ -7,6 +7,7 @@ import pytest
 
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr_modal.testing import run_mngr_against_modal
 
 
 def _create_modal_agent(
@@ -16,26 +17,19 @@ def _create_modal_agent(
     agent_command: str,
 ) -> None:
     """Create a long-running agent on Modal for exec testing."""
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "mngr",
-            "create",
-            f"{agent_name}@.modal",
-            "--type",
-            "command",
-            "--no-connect",
-            "--no-ensure-clean",
-            "--source",
-            str(temp_source_dir),
-            "--",
-            *shlex.split(agent_command),
-        ],
-        capture_output=True,
-        text=True,
+    result = run_mngr_against_modal(
+        "create",
+        f"{agent_name}@.modal",
+        "--type",
+        "command",
+        "--no-connect",
+        "--no-ensure-clean",
+        "--source",
+        str(temp_source_dir),
+        "--",
+        *shlex.split(agent_command),
+        modal_subprocess_env=modal_subprocess_env,
         timeout=300,
-        env=modal_subprocess_env.env,
     )
     assert result.returncode == 0, f"Failed to create agent: {result.stderr}\n{result.stdout}"
 
@@ -47,7 +41,7 @@ def _exec_on_agent(
     extra_args: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run mngr exec on a Modal agent and return the result."""
-    args = ["uv", "run", "mngr", "exec", agent_name, command]
+    args = ["exec", agent_name, command]
     if extra_args:
         args.extend(extra_args)
     # The first exec after create establishes the SSH connection, and a fresh
@@ -55,13 +49,7 @@ def _exec_on_agent(
     # mngr's bounded banner-retry rides out the common case but can outlast a
     # tight bound, so give a valid-but-slow exec generous headroom -- still well
     # under the per-test 300s pytest timeout, which remains the hang backstop.
-    return subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env=modal_subprocess_env.env,
-    )
+    return run_mngr_against_modal(*args, modal_subprocess_env=modal_subprocess_env, timeout=120)
 
 
 @pytest.mark.acceptance

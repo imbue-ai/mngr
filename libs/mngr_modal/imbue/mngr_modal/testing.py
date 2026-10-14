@@ -4,11 +4,16 @@ Non-fixture helpers for creating test objects. Fixtures that use these
 helpers live in conftest.py.
 """
 
+import json
 import os
+import subprocess
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 from typing import Final
+
+from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
@@ -19,6 +24,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
+from imbue.mngr.utils.logging import get_default_cli_events_log_dir
+from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr_modal.backend import ModalProviderBackend
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.instance import HostRecord
@@ -37,6 +44,87 @@ from imbue.modal_proxy.testing import FakeModalInterface
 MODAL_RELEASE_TESTS_OPT_IN: Final[bool] = os.environ.get("MNGR_MODAL_RELEASE_TESTS") == "1"
 
 _DEFAULT_SANDBOX_CONFIG = SandboxConfig()
+
+_MNGR_EVENT_LOG_NAME: Final[str] = "events.jsonl"
+
+
+def _format_logged_event(raw_event: str) -> str:
+    """One recorded event as ``timestamp LEVEL message context``.
+
+    An event that does not parse is passed through verbatim: it is still the
+    only account there is of what the subprocess was doing.
+    """
+    try:
+        event: dict[str, Any] = json.loads(raw_event)
+    except json.JSONDecodeError:
+        return raw_event
+    context = event.get("extra", "")
+    return f"{event['timestamp']} {event['level']} {event['message']} {context}".rstrip()
+
+
+class MngrSubprocessTimeoutError(Exception):
+    """A ``mngr`` command in a Modal test overran its timeout, with the steps it had reached."""
+
+
+def _format_steps_of_killed_mngr_subprocess(event_log_path: Path, start_offset: int) -> str:
+    """The steps a ``mngr`` subprocess had reached, read back from its own event log.
+
+    A ``mngr`` subprocess killed before it returns takes its captured stdout and
+    stderr with it, whichever budget ran out first: ``subprocess.run`` hands the
+    partial capture to a ``TimeoutExpired`` that says only how long it waited,
+    and pytest-timeout's signal abandons the call mid-wait. The event log is on
+    disk and flushed per line, so it still holds every step the subprocess had
+    entered, each with the time it started.
+    """
+    if not event_log_path.exists():
+        return f"Found no mngr event log at {event_log_path}, so there is no step timeline to report."
+    with event_log_path.open("rb") as event_log:
+        event_log.seek(start_offset)
+        appended_events = event_log.read().decode("utf-8", errors="replace")
+    steps = "\n".join(_format_logged_event(raw_event) for raw_event in appended_events.splitlines())
+    return f"Steps from the killed mngr subprocess's event log {event_log_path}:\n{steps}"
+
+
+def run_mngr_against_modal(
+    *args: str,
+    modal_subprocess_env: ModalSubprocessTestEnv,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    """Run one ``mngr`` command against real Modal, naming the step it reached if it is killed.
+
+    Use this for every ``mngr`` command a Modal acceptance test runs. Modal
+    bring-up has several steps that can each outlast the enclosing test on their
+    own, so which one was running is the first thing such a failure has to say --
+    and a plain ``subprocess.run`` cannot say it (MIND-487).
+
+    A command that overruns its own timeout is reported by raising, so the steps
+    land in the failure's message: that is what reaches junit, and so the flake
+    sweeps and the GitHub annotation, neither of which reads a test's captured
+    output. The raised message keeps ``TimeoutExpired``'s own wording as its
+    first line, which is what those sweeps key their display header on. When
+    something else does the killing there is no message to carry, so the steps
+    go to the log instead.
+    """
+    event_log_path = get_default_cli_events_log_dir(modal_subprocess_env.host_dir) / _MNGR_EVENT_LOG_NAME
+    start_offset = event_log_path.stat().st_size if event_log_path.exists() else 0
+    is_accounted_for = False
+    try:
+        result = subprocess.run(
+            ["uv", "run", "mngr", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=modal_subprocess_env.env,
+        )
+        is_accounted_for = True
+        return result
+    except subprocess.TimeoutExpired as timeout_error:
+        is_accounted_for = True
+        steps = _format_steps_of_killed_mngr_subprocess(event_log_path, start_offset)
+        raise MngrSubprocessTimeoutError(f"{timeout_error}\n{steps}") from timeout_error
+    finally:
+        if not is_accounted_for:
+            logger.info("{}", _format_steps_of_killed_mngr_subprocess(event_log_path, start_offset))
 
 
 def make_testing_modal_interface(tmp_path: Path, cg: ConcurrencyGroup) -> FakeModalInterface:

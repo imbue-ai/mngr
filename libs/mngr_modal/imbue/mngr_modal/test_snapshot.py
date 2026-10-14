@@ -2,7 +2,6 @@
 
 import json
 import shlex
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +10,7 @@ import pytest
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr_modal.testing import run_mngr_against_modal
 
 
 def _extract_json(output: str) -> dict[str, Any]:
@@ -29,46 +29,39 @@ def _extract_json(output: str) -> dict[str, Any]:
 def _create_modal_agent(
     agent_name: str,
     source_dir: Path,
-    env: dict[str, str],
+    modal_subprocess_env: ModalSubprocessTestEnv,
     agent_command: str,
 ) -> None:
     """Create a Modal agent via the CLI subprocess."""
     with log_span("Creating Modal agent for snapshot test", agent_name=agent_name):
-        result = subprocess.run(
-            [
-                "uv",
-                "run",
-                "mngr",
-                "create",
-                f"{agent_name}@.modal",
-                "--type",
-                "command",
-                "--no-connect",
-                "--no-ensure-clean",
-                "--source",
-                str(source_dir),
-                "--",
-                *shlex.split(agent_command),
-            ],
-            capture_output=True,
-            text=True,
+        result = run_mngr_against_modal(
+            "create",
+            f"{agent_name}@.modal",
+            "--type",
+            "command",
+            "--no-connect",
+            "--no-ensure-clean",
+            "--source",
+            str(source_dir),
+            "--",
+            *shlex.split(agent_command),
+            modal_subprocess_env=modal_subprocess_env,
             timeout=300,
-            env=env,
         )
         assert result.returncode == 0, f"Create agent failed: {result.stderr}\n{result.stdout}"
 
 
 def _destroy_modal_agent(
     agent_name: str,
-    env: dict[str, str],
+    modal_subprocess_env: ModalSubprocessTestEnv,
 ) -> None:
     """Destroy a Modal agent via the CLI subprocess."""
-    subprocess.run(
-        ["uv", "run", "mngr", "destroy", agent_name, "--force"],
-        capture_output=True,
-        text=True,
+    run_mngr_against_modal(
+        "destroy",
+        agent_name,
+        "--force",
+        modal_subprocess_env=modal_subprocess_env,
         timeout=240,
-        env=env,
     )
 
 
@@ -90,18 +83,19 @@ def test_snapshot_create_then_list_on_modal(
     Creates a real Modal agent, takes a snapshot, lists it to verify it exists
     """
     agent_name = f"test-snap-lifecycle-{get_short_random_string()}"
-    env = modal_subprocess_env.env
 
-    _create_modal_agent(agent_name, temp_source_dir, env, "sleep 400005")
+    _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env, "sleep 400005")
     try:
         # Create a snapshot
         with log_span("Creating snapshot for Modal agent", agent_name=agent_name):
-            create_result = subprocess.run(
-                ["uv", "run", "mngr", "snapshot", "create", agent_name, "--format", "json"],
-                capture_output=True,
-                text=True,
+            create_result = run_mngr_against_modal(
+                "snapshot",
+                "create",
+                agent_name,
+                "--format",
+                "json",
+                modal_subprocess_env=modal_subprocess_env,
                 timeout=120,
-                env=env,
             )
             assert create_result.returncode == 0, (
                 f"snapshot create failed: {create_result.stderr}\n{create_result.stdout}"
@@ -112,12 +106,14 @@ def test_snapshot_create_then_list_on_modal(
 
         # List snapshots and verify the new one appears
         with log_span("Listing snapshots for Modal agent", agent_name=agent_name):
-            list_result = subprocess.run(
-                ["uv", "run", "mngr", "snapshot", "list", agent_name, "--format", "json"],
-                capture_output=True,
-                text=True,
+            list_result = run_mngr_against_modal(
+                "snapshot",
+                "list",
+                agent_name,
+                "--format",
+                "json",
+                modal_subprocess_env=modal_subprocess_env,
                 timeout=120,
-                env=env,
             )
             assert list_result.returncode == 0, f"snapshot list failed: {list_result.stderr}\n{list_result.stdout}"
             list_data = _extract_json(list_result.stdout)
@@ -127,7 +123,7 @@ def test_snapshot_create_then_list_on_modal(
 
     finally:
         with log_span("Destroying Modal agent after snapshot test", agent_name=agent_name):
-            _destroy_modal_agent(agent_name, env)
+            _destroy_modal_agent(agent_name, modal_subprocess_env)
 
 
 @pytest.mark.release
@@ -145,29 +141,21 @@ def test_snapshot_destroy_then_list_on_modal(
     Destroys all original snapshots and verifies they are gone.
     """
     agent_name = f"test-snap-lifecycle-{get_short_random_string()}"
-    env = modal_subprocess_env.env
 
-    _create_modal_agent(agent_name, temp_source_dir, env, "sleep 400006")
+    _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env, "sleep 400006")
     try:
         # Destroy all
         with log_span("Destroying snapshots for Modal agent", agent_name=agent_name):
-            destroy_result = subprocess.run(
-                [
-                    "uv",
-                    "run",
-                    "mngr",
-                    "snapshot",
-                    "destroy",
-                    agent_name,
-                    "--all-snapshots",
-                    "--force",
-                    "--format",
-                    "json",
-                ],
-                capture_output=True,
-                text=True,
+            destroy_result = run_mngr_against_modal(
+                "snapshot",
+                "destroy",
+                agent_name,
+                "--all-snapshots",
+                "--force",
+                "--format",
+                "json",
+                modal_subprocess_env=modal_subprocess_env,
                 timeout=120,
-                env=env,
             )
             assert destroy_result.returncode == 0
             destroy_data = _extract_json(destroy_result.stdout)
@@ -175,16 +163,18 @@ def test_snapshot_destroy_then_list_on_modal(
 
         # Verify none remain
         with log_span("Verifying no snapshots remain for Modal agent", agent_name=agent_name):
-            list_after = subprocess.run(
-                ["uv", "run", "mngr", "snapshot", "list", agent_name, "--format", "json"],
-                capture_output=True,
-                text=True,
+            list_after = run_mngr_against_modal(
+                "snapshot",
+                "list",
+                agent_name,
+                "--format",
+                "json",
+                modal_subprocess_env=modal_subprocess_env,
                 timeout=120,
-                env=env,
             )
             assert list_after.returncode == 0
             assert _extract_json(list_after.stdout)["count"] == 0
 
     finally:
         with log_span("Destroying Modal agent after snapshot test", agent_name=agent_name):
-            _destroy_modal_agent(agent_name, env)
+            _destroy_modal_agent(agent_name, modal_subprocess_env)
