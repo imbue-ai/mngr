@@ -64,6 +64,7 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import describe_failed_send_command
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
@@ -471,12 +472,12 @@ class OpenCodeAgent(
     def _post_prompt(self, port: str, session_id: str, message: str) -> None:
         """POST ``message`` to the agent's server via ``curl`` on the host (prompt_async)."""
         command = _build_prompt_post_command(port, session_id, message)
-        result = self.host.execute_stateful_command(command)
+        result = self.host.execute_stateful_command(command, timeout_seconds=self.send_command_timeout_seconds)
         if not result.success:
             raise SendMessageError(
                 str(self.name),
                 f"Failed to POST message to the OpenCode server (port {port}, session {session_id}): "
-                f"{result.stderr or result.stdout}",
+                f"{describe_failed_send_command(result, self.send_command_timeout_seconds)}",
             )
 
     def _resolve_host_home(self, host: OnlineHostInterface) -> Path:

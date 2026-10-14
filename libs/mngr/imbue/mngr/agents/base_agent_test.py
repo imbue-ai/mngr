@@ -1,26 +1,33 @@
 """Tests for BaseAgent lifecycle state detection and data methods."""
 
+import fcntl
 import json
 import shlex
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
+from uuid import uuid4
 
 import psutil
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import SEND_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.agents.base_agent import build_stderr_tee_redirect
 from imbue.mngr.agents.base_agent import quote_agent_args
+from imbue.mngr.agents.mock_host_test import HangingTmuxHost
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MessageLockTimeoutError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
@@ -38,6 +45,8 @@ from imbue.mngr.primitives import InvalidName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
+from imbue.mngr.utils.testing import file_lock_held_by_another_process
+from imbue.mngr.utils.testing import make_local_host_of_class
 from imbue.mngr.utils.testing import poll_until_file_contains
 
 # What a terminal wraps a paste in, so the program reading the pty can tell a paste from typing.
@@ -1159,6 +1168,7 @@ class _StubHost:
         self._command_results = list(command_results) if command_results else []
         self._default_result = default_result
         self.executed_commands: list[str] = []
+        self.executed_command_timeouts: list[object] = []
         self.written_files: list[tuple[Path, str]] = []
         self.host_dir = Path("/tmp/stub-host")
         self.is_local = is_local
@@ -1170,6 +1180,7 @@ class _StubHost:
 
     def _execute_command(self, command: str, **kwargs: object) -> CommandResult:
         self.executed_commands.append(command)
+        self.executed_command_timeouts.append(kwargs.get("timeout_seconds"))
         if command.startswith("tmux show-options"):
             if self.pane_id is None:
                 return CommandResult(success=False, stdout="", stderr="invalid option: @mngr_agent_pane")
@@ -1604,3 +1615,129 @@ def test_write_data_persists_to_file(
     # Read back and verify
     result = test_agent._read_data()
     assert result["custom_field"] == "custom_value"
+
+
+# Bounded message lock and send commands
+
+
+def _make_local_stub_agent(temp_mngr_ctx: MngrContext, host_dir: Path) -> tuple[SendKeysAgent, Path]:
+    """An agent on a local stub host, with the path of its message lock."""
+    stub = _StubHost(is_local=True)
+    stub.host_dir = host_dir
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+    return agent, get_agent_state_dir_path(host_dir, agent.id) / "message.lock"
+
+
+def _is_flock_free(lock_path: Path) -> bool:
+    with open(lock_path) as probe_handle:
+        try:
+            fcntl.flock(probe_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(probe_handle.fileno(), fcntl.LOCK_UN)
+        return True
+
+
+def test_message_lock_with_a_timeout_takes_a_free_lock_and_releases_it(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    agent, lock_path = _make_local_stub_agent(temp_mngr_ctx, tmp_path)
+
+    with agent._message_lock(timeout_seconds=5.0):
+        is_free_while_held = _is_flock_free(lock_path)
+
+    assert is_free_while_held is False
+    assert _is_flock_free(lock_path) is True
+
+
+def test_message_lock_with_a_timeout_raises_when_another_process_holds_it(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    agent, lock_path = _make_local_stub_agent(temp_mngr_ctx, tmp_path)
+    is_body_entered = False
+
+    with file_lock_held_by_another_process(lock_path, temp_mngr_ctx.concurrency_group):
+        started_at = time.monotonic()
+        with pytest.raises(MessageLockTimeoutError, match="busy"):
+            with agent._message_lock(timeout_seconds=0.5):
+                is_body_entered = True
+        elapsed_seconds = time.monotonic() - started_at
+
+    assert is_body_entered is False
+    assert 0.5 <= elapsed_seconds < 5.0
+
+
+def test_message_lock_without_a_timeout_waits_for_the_holder_to_release_it(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    agent, lock_path = _make_local_stub_agent(temp_mngr_ctx, tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    acquired = threading.Event()
+
+    def enter_lock() -> None:
+        with agent._message_lock():
+            acquired.set()
+
+    with open(lock_path, "w") as holder_handle:
+        fcntl.flock(holder_handle.fileno(), fcntl.LOCK_EX)
+        waiter = threading.Thread(target=enter_lock, daemon=True)
+        waiter.start()
+        is_acquired_while_held = acquired.wait(timeout=1.0)
+        fcntl.flock(holder_handle.fileno(), fcntl.LOCK_UN)
+
+    assert is_acquired_while_held is False
+    assert acquired.wait(timeout=5.0) is True
+    waiter.join(timeout=5.0)
+
+
+@pytest.mark.parametrize("message", ["short message", "x" * 1024], ids=["send_keys", "paste_buffer"])
+def test_send_message_bounds_every_host_command(
+    temp_mngr_ctx: MngrContext,
+    message: str,
+) -> None:
+    stub = _StubHost(is_local=False)
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    agent.send_message(message)
+
+    assert len(stub.executed_command_timeouts) >= 3
+    assert set(stub.executed_command_timeouts) == {SEND_COMMAND_TIMEOUT_SECONDS}
+
+
+def test_press_key_chord_bounds_every_host_command(temp_mngr_ctx: MngrContext) -> None:
+    stub = _StubHost(is_local=False)
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    agent.press_key_chord("M-q")
+
+    assert len(stub.executed_command_timeouts) == 3
+    assert set(stub.executed_command_timeouts) == {SEND_COMMAND_TIMEOUT_SECONDS}
+
+
+def test_send_message_fails_within_its_command_timeouts_when_tmux_hangs(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    host = make_local_host_of_class(local_provider, HangingTmuxHost)
+    agent = SendKeysAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName(f"hanging-tmux-{uuid4().hex}"),
+        agent_type=AgentTypeName("generic"),
+        work_dir=tmp_path,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        host=host,
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=AgentTypeConfig(command=CommandString("sleep 1000")),
+        send_command_timeout_seconds=1.0,
+    )
+
+    started_at = time.monotonic()
+    with pytest.raises(SendMessageError, match="tmux send-keys failed: no output"):
+        agent.send_message("hello")
+
+    assert time.monotonic() - started_at < 15.0

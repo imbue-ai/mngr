@@ -241,6 +241,21 @@ def test_send_enter_keystroke_runs_tmux_send_keys() -> None:
     ]
 
 
+def test_send_enter_keystroke_bounds_every_tmux_command() -> None:
+    host = ScriptedHost()
+    agent = _ProbeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("probe"),
+        agent_type=AgentTypeName("probe"),
+        host=host,
+        captured_commands=host.captured,
+        send_command_timeout_seconds=7.5,
+    )
+    send_enter_keystroke(agent, _FAKE_TARGET)
+    assert len(host.captured) == 2
+    assert host.captured_timeout_seconds == [7.5, 7.5]
+
+
 def test_send_enter_keystroke_raises_on_command_failure() -> None:
     agent = _make_probe_agent(CommandResult(stdout="", stderr="boom", success=False))
     with pytest.raises(SendMessageError, match="tmux send-keys Enter failed"):

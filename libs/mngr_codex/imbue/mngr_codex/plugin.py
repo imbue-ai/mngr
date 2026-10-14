@@ -127,6 +127,7 @@ from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
+from imbue.mngr.interfaces.agent import read_idle_since_for_compaction
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -1180,14 +1181,22 @@ class CodexAgent(
             policy["approval_policy"] = self.agent_config.config_overrides["approval_policy"]
         return policy
 
-    def request_compaction(self, instructions: str | None = None) -> None:
+    def request_compaction(
+        self,
+        instructions: str | None = None,
+        message_lock_timeout_seconds: float | None = None,
+        expected_idle_since: datetime | None = None,
+    ) -> None:
         """Perform context compaction on the Codex agent.
 
         Codex CLI does not accept additional instructions for compaction, so
         ``instructions`` is ignored.
         """
-        current_idle_since = self.get_idle_since()
-        with self._message_lock(), log_span("Requesting context compaction for codex agent {}", self.name):
+        with (
+            self._message_lock(timeout_seconds=message_lock_timeout_seconds),
+            log_span("Requesting context compaction for codex agent {}", self.name),
+        ):
+            current_idle_since = read_idle_since_for_compaction(self, self.name, expected_idle_since)
             try:
                 client = self._open_app_server_client()
                 try:

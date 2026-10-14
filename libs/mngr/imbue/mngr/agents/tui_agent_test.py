@@ -52,7 +52,7 @@ class _RecordingTuiAgent(_ProbeTuiAgent):
         return TmuxWindowTarget(session_name="s", window=0)
 
     @contextlib.contextmanager
-    def _message_lock(self) -> Generator[None, None, None]:
+    def _message_lock(self, timeout_seconds: float | None = None) -> Generator[None, None, None]:
         yield
 
     def _capture_pane_content(
@@ -81,9 +81,10 @@ def _make_recording_agent(
     pane_content: str,
     *scripted_results: CommandResult,
     probes: Sequence[SubmissionEvidenceProbe] = (),
+    agent_class: type[_RecordingTuiAgent] = _RecordingTuiAgent,
 ) -> _RecordingTuiAgent:
     host = ScriptedHost(scripted_results=list(scripted_results))
-    return _RecordingTuiAgent.model_construct(
+    return agent_class.model_construct(
         id=AgentId.generate(),
         name=AgentName("probe"),
         pane_content=pane_content,
@@ -195,21 +196,37 @@ def test_send_message_warns_and_records_event_for_preexisting_input_text() -> No
         def _detect_preexisting_input_text(self, pane_content: str) -> str | None:
             return "previously stranded message"
 
-    host = ScriptedHost()
-    agent = _LeftoverDetectingAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("probe"),
-        pane_content=f"probe-banner {_RESUME_MESSAGE}",
-        steps=[],
-        built_policies=[],
-        probes_to_return=[],
-        host=host,
-    )
+    agent = _make_recording_agent(f"probe-banner {_RESUME_MESSAGE}", agent_class=_LeftoverDetectingAgent)
     agent.send_message(_RESUME_MESSAGE)
+    host = cast(ScriptedHost, agent.host)
     event_commands = [command for command in host.captured if "events/messages" in command]
     assert len(event_commands) == 1
     assert "preexisting_input_text" in event_commands[0]
     # The send still went through (best-effort Enter recorded after the event).
+    assert any(command.endswith("Enter") for command in host.captured)
+
+
+def test_send_message_records_cleared_event_instead_of_warning_when_restored_command_is_cleared() -> None:
+    """A leftover the subclass clears is recorded as cleared, not warned about, and the send proceeds."""
+
+    class _RestoredCommandClearingAgent(_RecordingTuiAgent):
+        def _detect_preexisting_input_text(self, pane_content: str) -> str | None:
+            return "/restored-command-71935"
+
+        def _clear_preexisting_input_text_if_restored_command(
+            self, tmux_target: TmuxWindowTarget, leftover_text: str
+        ) -> bool:
+            self.steps.append(f"clear {leftover_text}")
+            return True
+
+    agent = _make_recording_agent(f"probe-banner {_RESUME_MESSAGE}", agent_class=_RestoredCommandClearingAgent)
+    agent.send_message(_RESUME_MESSAGE)
+    assert agent.steps == ["preflight", "clear /restored-command-71935", "paste"]
+    host = cast(ScriptedHost, agent.host)
+    event_commands = [command for command in host.captured if "events/messages" in command]
+    assert len(event_commands) == 1
+    assert "cleared_restored_input_text" in event_commands[0]
+    assert "/restored-command-71935" in event_commands[0]
     assert any(command.endswith("Enter") for command in host.captured)
 
 

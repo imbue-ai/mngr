@@ -19,6 +19,7 @@ from pydantic import Field
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentNoLongerIdleError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import FileTransferSpec
@@ -89,9 +90,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """
         ...
 
-    # =========================================================================
     # Certified Field Getters/Setters
-    # =========================================================================
 
     @abstractmethod
     def get_command(self) -> CommandString:
@@ -148,9 +147,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Set whether this agent should start automatically on host boot."""
         ...
 
-    # =========================================================================
     # Interaction
-    # =========================================================================
 
     @abstractmethod
     def is_running(self) -> bool:
@@ -226,9 +223,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """
         start_action()
 
-    # =========================================================================
     # Status (Reported)
-    # =========================================================================
 
     @abstractmethod
     def get_reported_url(self) -> str | None:
@@ -240,9 +235,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Return the agent's self-reported start time, or None if not set."""
         ...
 
-    # =========================================================================
     # Activity
-    # =========================================================================
 
     @abstractmethod
     def get_reported_activity_time(self, activity_type: ActivitySource) -> datetime | None:
@@ -259,9 +252,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Return the raw activity record for a given type, or None if not found."""
         ...
 
-    # =========================================================================
     # Plugin Data (Certified)
-    # =========================================================================
 
     @abstractmethod
     def get_plugin_data(self, plugin_name: str) -> dict[str, Any]:
@@ -273,9 +264,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Set certified plugin data for a given plugin."""
         ...
 
-    # =========================================================================
     # Plugin Data (Reported)
-    # =========================================================================
 
     @abstractmethod
     def get_reported_plugin_file(self, plugin_name: str, filename: str) -> str:
@@ -292,9 +281,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Return a list of all reported file names for a given plugin."""
         ...
 
-    # =========================================================================
     # Environment
-    # =========================================================================
 
     @abstractmethod
     def get_env_vars(self) -> dict[str, str]:
@@ -316,9 +303,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Set a single environment variable for this agent."""
         ...
 
-    # =========================================================================
     # Computed Properties
-    # =========================================================================
 
     @property
     @abstractmethod
@@ -326,9 +311,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """Return how many seconds the agent has been running, or None if not started."""
         ...
 
-    # =========================================================================
     # Preflight Checks (before host creation)
-    # =========================================================================
 
     @classmethod
     def preflight_check(
@@ -356,9 +339,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """
         ...
 
-    # =========================================================================
     # Provisioning Lifecycle
-    # =========================================================================
 
     @abstractmethod
     def on_before_provisioning(
@@ -464,9 +445,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """
         ...
 
-    # =========================================================================
     # Destruction Lifecycle
-    # =========================================================================
 
     @abstractmethod
     def on_destroy(self, host: OnlineHostInterface) -> None:
@@ -799,13 +778,24 @@ class HasCompactionMixin(ABC):
     """
 
     @abstractmethod
-    def request_compaction(self, instructions: str | None = None) -> None:
+    def request_compaction(
+        self,
+        instructions: str | None = None,
+        # How long to wait for the agent's message lock; None waits as long as another send holds it.
+        message_lock_timeout_seconds: float | None = None,
+        # When given, compact only if the agent is still idle since this moment once the lock is held.
+        expected_idle_since: datetime | None = None,
+    ) -> None:
         """Request the agent to perform context compaction.
 
         Some agents support passing additional free-form instructions to the
         compaction command. Agents that support additional compaction instructions
         will pass the instructions string on if provided, while agents that don't
         support it will silently ignore it.
+
+        Raises MessageLockTimeoutError when the message lock is not acquired in time, and
+        AgentNoLongerIdleError when the agent left the expected idle period; neither sends
+        anything or records a compaction.
         """
         ...
 
@@ -820,6 +810,21 @@ class HasCompactionMixin(ABC):
     def get_idle_since(self) -> datetime | None:
         """Return the UTC timestamp when the agent last became idle, or None if actively running/unknown."""
         return None
+
+
+def read_idle_since_for_compaction(
+    agent: HasCompactionMixin,
+    agent_name: AgentName,
+    expected_idle_since: datetime | None,
+) -> datetime | None:
+    """Return the agent's current idle start, raising AgentNoLongerIdleError if it differs from an expected one.
+
+    Call it holding the message lock, so a send that raced the decision to compact has finished.
+    """
+    current_idle_since = agent.get_idle_since()
+    if expected_idle_since is not None and current_idle_since != expected_idle_since:
+        raise AgentNoLongerIdleError(str(agent_name), expected_idle_since, current_idle_since)
+    return current_idle_since
 
 
 def require_compaction_agent(agent: AgentInterface[Any]) -> HasCompactionMixin:
