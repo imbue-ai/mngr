@@ -29,6 +29,7 @@ from flask import Flask
 from loguru import logger as loguru_logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from simple_websocket import Client as SimpleWebsocketClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.event_utils import ReadOnlyEvent
@@ -1500,3 +1501,17 @@ def write_template_pyproject_pinning_mngr(
 ) -> None:
     """Give the tree at ``template_dir`` a template-shaped ``pyproject.toml`` pinning mngr from ``repo_url`` at ``rev``."""
     (template_dir / "pyproject.toml").write_text(template_pyproject_pinning_mngr(repo_url, rev=rev))
+
+
+class HandshakeDrainingWebSocketClient(SimpleWebsocketClient):
+    """A ``simple_websocket`` client that also delivers frames read together with the handshake response.
+
+    ``simple_websocket.Client.handshake`` (1.1.0) stops at the first protocol event, the accept. Frames the
+    server sent right after accepting that arrive in the same socket read stay buffered in the protocol
+    state, and the reader thread only processes buffered events once more bytes arrive, so a server that
+    then goes quiet leaves them unread until ``receive`` times out.
+    """
+
+    def handshake(self) -> None:
+        super().handshake()
+        self.connected = self._handle_events()

@@ -465,6 +465,100 @@ describe("ShareTab target nav", () => {
   });
 });
 
+describe("ShareTab System group", () => {
+  const SYSTEM_TRIGGER = "ws-share-system-trigger";
+
+  function listedTargets(root: unknown): unknown[] {
+    return navEntries(root).map((entry) => attrsOf(entry)["data-share-target"]);
+  }
+
+  it("keeps the system apps under a closed group after the apps", async () => {
+    const share = await publishedPanel();
+    const withSystem = await readyPanel(
+      { enabled: true, url: "https://m.relay.example/" },
+      { systemServices: ["chat", "terminal"] },
+    );
+
+    const root = renderTabDeep(withSystem);
+
+    expect(listedTargets(root)).toEqual([WHOLE, "web", "docs"]);
+    const trigger = byId(root, SYSTEM_TRIGGER) as AnyVnode;
+    expect(allText(trigger)).toContain("System apps");
+    expect(attrsOf(trigger)["aria-expanded"]).toBe("false");
+    // A workspace with no system apps draws no group at all.
+    expect(byId(renderTabDeep(share), SYSTEM_TRIGGER)).toBeUndefined();
+  });
+
+  it("lists the system apps once the group is opened", async () => {
+    const share = await readyPanel({}, { systemServices: ["chat"] });
+    const draw = mountedTab(share);
+
+    (
+      attrsOf(byId(renderDeep(draw()), SYSTEM_TRIGGER) as AnyVnode)
+        .onclick as () => void
+    )();
+
+    expect(listedTargets(renderDeep(draw()))).toEqual([
+      WHOLE,
+      "web",
+      "docs",
+      "chat",
+    ]);
+  });
+
+  it("starts open while a system app already admits someone", async () => {
+    const share = await readyPanel(
+      {
+        grants: {
+          workspace: { emails: [], email_domains: [] },
+          services: {
+            chat: { emails: ["pair@example.com"], email_domains: [] },
+          },
+        },
+      },
+      { systemServices: ["chat", "terminal"] },
+    );
+
+    expect(listedTargets(renderTabDeep(share))).toEqual([
+      WHOLE,
+      "web",
+      "docs",
+      "chat",
+      "terminal",
+    ]);
+  });
+
+  it("starts open on a system app the panel was opened at", async () => {
+    const share = await readyPanel({}, { systemServices: ["chat"] });
+
+    share.selectTarget("chat");
+
+    expect(listedTargets(renderTabDeep(share))).toContain("chat");
+  });
+
+  it("stays shut once the reader closes it, even over a system app's grants", async () => {
+    const share = await readyPanel(
+      {
+        grants: {
+          workspace: { emails: [], email_domains: [] },
+          services: {
+            chat: { emails: ["pair@example.com"], email_domains: [] },
+          },
+        },
+      },
+      { systemServices: ["chat"] },
+    );
+    const draw = mountedTab(share);
+
+    (
+      attrsOf(byId(renderDeep(draw()), SYSTEM_TRIGGER) as AnyVnode)
+        .onclick as () => void
+    )();
+
+    expect(listedTargets(renderDeep(draw()))).toEqual([WHOLE, "web", "docs"]);
+  });
+});
+
 describe("ShareTab link section", () => {
   it("shows the target's link and who it opens for while published", async () => {
     const share = await publishedPanel();

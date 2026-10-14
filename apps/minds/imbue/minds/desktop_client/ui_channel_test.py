@@ -30,6 +30,7 @@ from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.testing import HandshakeDrainingWebSocketClient
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiClientStateMessage
@@ -189,7 +190,7 @@ def _receive_frame_of_type(client: WebSocketClient, frame_type: str) -> dict[str
 
 
 def _connect_ws(port: int, cookie: str) -> WebSocketClient:
-    return WebSocketClient.connect(
+    return HandshakeDrainingWebSocketClient.connect(
         f"ws://127.0.0.1:{port}/ui/ws",
         headers={"Cookie": f"{SESSION_COOKIE_NAME}={cookie}"},
     )

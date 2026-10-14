@@ -2653,7 +2653,7 @@ def test_machine_sharing_put_with_user_grants_mirrors_them_to_the_connector(tmp_
 def test_machine_sharing_status_reports_the_share_target_labels(tmp_path: Path) -> None:
     # The share panel builds every link as https://<label>.<domain>/ (the bare
     # domain does not route), so the document carries the label per share
-    # target: the shell and the apps, never interface services.
+    # target: the shell and the apps (system apps included), never internal services.
     agent_id = AgentId()
     cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller())
     client = _sharing_client(
@@ -2664,6 +2664,7 @@ def test_machine_sharing_status_reports_the_share_target_labels(tmp_path: Path) 
             str(agent_id): make_service_log("system_interface", "http://localhost:8000", "system_interface-shl1")
             + make_service_log("web", "http://localhost:8001", "web-w3b1")
             + make_service_log("terminal", "http://localhost:8002", "terminal-t3rm")
+            + make_service_log("terminal-pty", "http://localhost:8003", "terminal-pty-p7y")
         },
     )
 
@@ -2673,6 +2674,7 @@ def test_machine_sharing_status_reports_the_share_target_labels(tmp_path: Path) 
     assert json.loads(response.data)["service_labels"] == {
         "system_interface": "system_interface-shl1",
         "web": "web-w3b1",
+        "terminal": "terminal-t3rm",
     }
 
 

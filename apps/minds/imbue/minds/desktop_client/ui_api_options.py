@@ -38,7 +38,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_grant_validation import PUBLIC_EMAIL_DOMAINS
 from imbue.minds.desktop_client.share_targets import resolve_share_target_display_names
 from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
-from imbue.minds.desktop_client.share_targets import split_share_targets
+from imbue.minds.desktop_client.share_targets import resolve_share_targets
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_api_lifecycle import build_ssh_command
@@ -113,7 +113,11 @@ class WorkspaceOptionsData(FrozenModel):
     )
     current_account: WorkspaceOptionsAccount | None = Field(default=None, description="The associated account, if any")
     accounts: tuple[WorkspaceOptionsAccount, ...] = Field(description="Every signed-in account (Associate prompt)")
-    app_services: tuple[str, ...] = Field(description="Per-app share targets (DNS-safe, non-interface services)")
+    app_services: tuple[str, ...] = Field(description="Per-app share targets: the apps the workspace offers up front")
+    system_services: tuple[str, ...] = Field(
+        default=(),
+        description="Per-app share targets the workspace calls system apps, listed under the Share tab's System group",
+    )
     service_labels: dict[str, str] = Field(description="Public origin label per share target (absent = no label yet)")
     service_icons: dict[str, str] = Field(
         default_factory=dict,
@@ -249,13 +253,14 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
     is_leased = info is not None and (info.provider_name or "").startswith(_IMBUE_CLOUD_PROVIDER_PREFIX)
     stored_color = backend_resolver.get_workspace_color(parsed_agent_id)
 
-    services = [str(service) for service in backend_resolver.list_services_for_agent(parsed_agent_id)]
     icons = {
         str(service): icon for service, icon in backend_resolver.list_service_icons_for_agent(parsed_agent_id).items()
     }
-    app_services, whole_service = split_share_targets(services)
+    share_targets = resolve_share_targets(backend_resolver, parsed_agent_id)
     service_icons = {
-        service: accepted for service in app_services if (accepted := accepted_service_icon(icons.get(service, "")))
+        service: accepted
+        for service in share_targets.per_app_services
+        if (accepted := accepted_service_icon(icons.get(service, "")))
     }
 
     data = WorkspaceOptionsData(
@@ -275,11 +280,12 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         account_profile_picture_url=current_account.profile_picture_url if current_account else None,
         current_account=_account_entry(current_account) if current_account else None,
         accounts=tuple(_account_entry(account) for account in accounts),
-        app_services=tuple(app_services),
+        app_services=share_targets.app_services,
+        system_services=share_targets.system_services,
         service_labels=resolve_share_target_labels(backend_resolver, parsed_agent_id),
         service_icons=service_icons,
         service_display_names=resolve_share_target_display_names(backend_resolver, parsed_agent_id),
-        whole_service=whole_service,
+        whole_service=share_targets.whole_service,
         public_email_domains=tuple(sorted(PUBLIC_EMAIL_DOMAINS)),
         ssh_command=build_ssh_command(backend_resolver, parsed_agent_id),
     )

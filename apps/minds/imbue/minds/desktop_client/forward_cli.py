@@ -55,6 +55,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import SERVICES_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.backend_resolver import ServiceDeregisteredRecord
+from imbue.minds.desktop_client.backend_resolver import ServiceShareKind
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.errors import EnvelopeStreamConsumerError
@@ -512,6 +513,9 @@ class EnvelopeStreamConsumer(MutableModel):
     # Parallel to _services_by_agent: {agent_id_str: {service_name: registered
     # SVG icon markup}}. Untrusted workspace content, sanitized by consumers.
     _icons_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    # Parallel to _services_by_agent: {agent_id_str: {service_name: how the Share
+    # tab offers it}}, for the services whose registration said.
+    _share_kinds_by_agent: dict[str, dict[str, ServiceShareKind]] = PrivateAttr(default_factory=dict)
     # Parallel to _services_by_agent: {agent_id_str: {service_name: origin label}}.
     # Carries each service's public origin hostname label (``<name>-<rand>``) so
     # the resolver -- and thus the Share tab -- can build per-service share links.
@@ -991,6 +995,7 @@ class EnvelopeStreamConsumer(MutableModel):
                 self._services_by_agent.pop(str(agent_id), None)
                 self._labels_by_agent.pop(str(agent_id), None)
                 self._icons_by_agent.pop(str(agent_id), None)
+                self._share_kinds_by_agent.pop(str(agent_id), None)
                 self._display_names_by_agent.pop(str(agent_id), None)
             self.resolver.update_services(agent_id, {})
             self._fire_destroyed(agent_id)
@@ -1061,11 +1066,13 @@ class EnvelopeStreamConsumer(MutableModel):
             services = self._services_by_agent.setdefault(aid_str, {})
             labels = self._labels_by_agent.setdefault(aid_str, {})
             icons = self._icons_by_agent.setdefault(aid_str, {})
+            share_kinds = self._share_kinds_by_agent.setdefault(aid_str, {})
             display_names = self._display_names_by_agent.setdefault(aid_str, {})
             if isinstance(record, ServiceDeregisteredRecord):
                 services.pop(str(record.service), None)
                 labels.pop(str(record.service), None)
                 icons.pop(str(record.service), None)
+                share_kinds.pop(str(record.service), None)
                 display_names.pop(str(record.service), None)
             else:
                 services[str(record.service)] = record.url
@@ -1081,12 +1088,17 @@ class EnvelopeStreamConsumer(MutableModel):
                     display_names[str(record.service)] = record.display_name
                 else:
                     display_names.pop(str(record.service), None)
+                if record.share_kind is not None:
+                    share_kinds[str(record.service)] = record.share_kind
+                else:
+                    share_kinds.pop(str(record.service), None)
             services_snapshot = dict(services)
             labels_snapshot = dict(labels)
             icons_snapshot = dict(icons)
             display_names_snapshot = dict(display_names)
+            share_kinds_snapshot = dict(share_kinds)
         self.resolver.update_services(
-            agent_id, services_snapshot, labels_snapshot, icons_snapshot, display_names_snapshot
+            agent_id, services_snapshot, labels_snapshot, icons_snapshot, display_names_snapshot, share_kinds_snapshot
         )
 
     def _handle_forward_payload(self, payload: dict[str, Any]) -> None:

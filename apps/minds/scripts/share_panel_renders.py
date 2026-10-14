@@ -73,9 +73,10 @@ HOST_ID: Final[str] = "host-00000000000000000000000000000001"
 GRANTER_EMAIL: Final[str] = "alice@example.com"
 
 WHOLE_SERVICE: Final[str] = "system_interface"
-# The mock's third nav entry, chat, is an interface service that
-# split_share_targets excludes, so no options payload can carry it.
 APP_SERVICES: Final[tuple[str, ...]] = ("notes", "kanban")
+# The mock's third nav entry, chat, is a system app: listed under the nav's
+# collapsed System group.
+SYSTEM_SERVICES: Final[tuple[str, ...]] = ("chat",)
 
 SHARE_ORIGIN: Final[str] = "https://wp7k2m8b.us1.minds.example/"
 # kanban is deliberately absent: an app that has never run registered no
@@ -206,6 +207,7 @@ def _options_payload(labels: Mapping[str, str]) -> str:
         ),
         accounts=(WorkspaceOptionsAccount(user_id="user-alice", email=GRANTER_EMAIL, display_name="Alice Nguyen"),),
         app_services=APP_SERVICES,
+        system_services=SYSTEM_SERVICES,
         service_labels=dict(labels),
         whole_service=WHOLE_SERVICE,
         public_email_domains=tuple(sorted(PUBLIC_EMAIL_DOMAINS)),

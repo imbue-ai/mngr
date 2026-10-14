@@ -13,6 +13,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import ServiceLogParseError
 from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
+from imbue.minds.desktop_client.backend_resolver import ServiceShareKind
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
 from imbue.minds.desktop_client.backend_resolver import _read_last_good_agent_topology
@@ -127,6 +128,26 @@ def test_parse_service_log_records_captures_the_registered_icon() -> None:
     bare = parse_service_log_records('{"service": "web", "url": "http://127.0.0.1:9101"}\n')
     assert isinstance(bare[0], ServiceLogRecord)
     assert bare[0].icon == ""
+
+
+def test_parse_service_log_records_reads_the_share_kind_from_system_and_internal() -> None:
+    # Only a bool ``system`` is an announcement, so a string "false" falls back to
+    # the name lists rather than being read as truthy; ``internal`` wins over it.
+    records = parse_service_log_records(
+        '{"service": "notes", "url": "http://127.0.0.1:9100", "system": false, "internal": false}\n'
+        '{"service": "chat", "url": "http://127.0.0.1:9101", "system": true, "internal": false}\n'
+        '{"service": "terminal-pty", "url": "http://127.0.0.1:9102", "system": false, "internal": true}\n'
+        '{"service": "files", "url": "http://127.0.0.1:9103", "system": "false"}\n'
+        '{"service": "web", "url": "http://127.0.0.1:9104"}\n'
+    )
+
+    assert [record.share_kind for record in records if isinstance(record, ServiceLogRecord)] == [
+        ServiceShareKind.APP,
+        ServiceShareKind.SYSTEM,
+        ServiceShareKind.INTERNAL,
+        None,
+        None,
+    ]
 
 
 def test_parse_service_log_records_captures_the_display_name() -> None:

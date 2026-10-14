@@ -131,6 +131,9 @@ interface ShareTabLocalState {
   isConfirmOpen: boolean;
   /** Whether the app pane's inherited-permissions group is expanded. */
   isInheritedOpen: boolean;
+  /** Whether the nav's System group is expanded; null until the reader toggles
+   * it, while it follows `isSystemGroupNeeded`. */
+  isSystemOpen: boolean | null;
   copied: CopiedLink | null;
   copyFlashHandle: ScheduleHandle | null;
 }
@@ -149,6 +152,7 @@ export function ShareTab(): m.Component<ShareTabAttrs> {
   const local: ShareTabLocalState = {
     isConfirmOpen: false,
     isInheritedOpen: false,
+    isSystemOpen: null,
     copied: null,
     copyFlashHandle: null,
   };
@@ -165,7 +169,7 @@ export function ShareTab(): m.Component<ShareTabAttrs> {
         m("hr", { class: "border-t border-default" }),
         splitPane({
           navLabel: "Share targets",
-          nav: renderTargetNav(share),
+          nav: renderTargetNav(share, local),
           content: renderTargetPane(share, local),
           contentExtra: "flex flex-col",
         }),
@@ -357,7 +361,10 @@ function renderGatewayTrouble(share: SharePanelModel): m.Children {
   );
 }
 
-function renderTargetNav(share: SharePanelModel): m.Children {
+function renderTargetNav(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+): m.Children {
   return [
     renderNavEntry(
       share,
@@ -365,15 +372,58 @@ function renderTargetNav(share: SharePanelModel): m.Children {
       "Whole workspace",
       m(Icon16, { name: "panels-top-left", extra: "shrink-0" }),
     ),
-    ...share.appTargets.map((target) =>
-      renderNavEntry(
-        share,
-        target,
-        share.targetDisplayName(target),
-        renderAppIcon(share, target),
-      ),
-    ),
+    ...share.appTargets.map((target) => renderAppNavEntry(share, target)),
+    ...(share.systemTargets.length === 0
+      ? []
+      : [renderSystemGroup(share, local)]),
   ];
+}
+
+function renderAppNavEntry(share: SharePanelModel, target: string): m.Children {
+  return renderNavEntry(
+    share,
+    target,
+    share.targetDisplayName(target),
+    renderAppIcon(share, target),
+  );
+}
+
+/**
+ * The system apps, behind one row that opens them. Each is a target like any
+ * other, but none is meant to be shared on its own by default, so they stay out
+ * of the way of the apps.
+ */
+function renderSystemGroup(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+): m.Children {
+  const isOpen = local.isSystemOpen ?? isSystemGroupNeeded(share);
+  return m(
+    Collapsible,
+    {
+      id: "ws-share-system",
+      isOpen,
+      onToggle: () => {
+        local.isSystemOpen = !isOpen;
+      },
+      extra: "mt-1 flex flex-col",
+      triggerExtra:
+        "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left " +
+        "type-helper text-tertiary hover:text-secondary",
+      panelExtra: "flex flex-col",
+      summary: "System apps",
+    },
+    share.systemTargets.map((target) => renderAppNavEntry(share, target)),
+  );
+}
+
+/** Whether the System group has to start open: a system app is selected (a
+ * deep link to one), or one already admits someone, which a closed group would
+ * keep out of sight. */
+function isSystemGroupNeeded(share: SharePanelModel): boolean {
+  return share.systemTargets.some(
+    (target) => target === share.currentTarget || share.grantCount(target) > 0,
+  );
 }
 
 function renderNavEntry(

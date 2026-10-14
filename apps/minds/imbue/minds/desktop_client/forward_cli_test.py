@@ -37,6 +37,8 @@ from imbue.minds.desktop_client.forward_cli import _ForwardStderrCollapser
 from imbue.minds.desktop_client.forward_cli import _build_forward_command
 from imbue.minds.desktop_client.forward_cli import _redact_secrets
 from imbue.minds.desktop_client.forward_cli import _scrub_stderr_line
+from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
+from imbue.minds.desktop_client.share_targets import resolve_share_targets
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import make_sleep_tracker
@@ -991,6 +993,79 @@ def test_event_services_envelope_carries_the_origin_label_to_the_resolver(
     }
     _dispatch(consumer, _event_envelope(_AGENT_ID_1, deregister_payload))
     assert consumer.resolver.list_service_labels_for_agent(_AGENT_ID_1) == {}
+
+
+def _service_registered(
+    service: str, port: int, event_index: int, is_system: bool | None, is_internal: bool = False
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "timestamp": _TIMESTAMP,
+        "event_id": f"evt-{event_index:032d}",
+        "type": "service_registered",
+        "source": "services",
+        "service": service,
+        "url": f"http://127.0.0.1:{port}",
+        "label": f"{service}-r4nd",
+    }
+    if is_system is not None:
+        payload["system"] = is_system
+        payload["internal"] = is_internal
+    return payload
+
+
+def test_the_share_targets_follow_the_share_kind_each_service_announced(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    # An announced ``system``/``internal`` decides whatever the name; a
+    # registration without them (an older workspace) falls back to the name lists.
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1),))))
+    registrations: tuple[tuple[str, bool | None, bool], ...] = (
+        ("system_interface", None, False),
+        ("metrics-sidecar", False, True),
+        ("chat", False, False),
+        ("files", False, False),
+        ("getting-started", True, False),
+        ("terminal-pty", None, False),
+        ("notes", None, False),
+    )
+    for index, (service, is_system, is_internal) in enumerate(registrations):
+        _dispatch(
+            consumer,
+            _event_envelope(_AGENT_ID_1, _service_registered(service, 9100 + index, index, is_system, is_internal)),
+        )
+
+    targets = resolve_share_targets(consumer.resolver, _AGENT_ID_1)
+    assert targets.app_services == ("chat", "files", "notes")
+    assert targets.system_services == ("getting-started",)
+    assert resolve_share_target_labels(consumer.resolver, _AGENT_ID_1) == {
+        "system_interface": "system_interface-r4nd",
+        "chat": "chat-r4nd",
+        "files": "files-r4nd",
+        "getting-started": "getting-started-r4nd",
+        "notes": "notes-r4nd",
+    }
+
+    _dispatch(consumer, _event_envelope(_AGENT_ID_1, _service_registered("files", 9103, 10, True)))
+
+    assert resolve_share_targets(consumer.resolver, _AGENT_ID_1).system_services == ("files", "getting-started")
+
+    # A shell rolled back to one that predates the fields announces nothing, so
+    # what an earlier shell announced must not outlive it: the chat is a system
+    # app again by its name.
+    _dispatch(consumer, _event_envelope(_AGENT_ID_1, _service_registered("chat", 9102, 11, None)))
+
+    assert "chat" in resolve_share_targets(consumer.resolver, _AGENT_ID_1).system_services
+
+    deregister_files = {
+        "timestamp": _TIMESTAMP,
+        "event_id": f"evt-{12:032d}",
+        "type": "service_deregistered",
+        "source": "services",
+        "service": "files",
+    }
+    _dispatch(consumer, _event_envelope(_AGENT_ID_1, deregister_files))
+
+    assert "files" not in consumer.resolver.list_service_share_kinds_for_agent(_AGENT_ID_1)
 
 
 def test_reverse_tunnel_established_is_silently_ignored(

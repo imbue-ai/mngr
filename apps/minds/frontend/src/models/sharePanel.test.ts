@@ -784,6 +784,34 @@ describe("SharePanelModel document building", () => {
       "other@example.com",
     ]);
   });
+
+  it("grants on a system app as on any other app", async () => {
+    const { model, requests } = makeSharePanel(
+      (url, init) => {
+        if (init?.method === "PUT") return okResult(sharingResponse());
+        return okResult(
+          sharingResponse({
+            grants: grantsDocument(
+              {},
+              { chat: grantList({ emails: ["first@example.com"] }) },
+            ),
+          }),
+        );
+      },
+      { systemServices: ["chat"] },
+    );
+    await model.load();
+
+    expect(model.grantCount("chat")).toBe(1);
+    model.addGrant("chat", "email", "second@example.com");
+    await settle();
+
+    const document = writtenDocument(grantsWrites(requests)[0]);
+    expect(document.services["chat"].emails).toEqual([
+      "first@example.com",
+      "second@example.com",
+    ]);
+  });
 });
 
 describe("SharePanelModel target selection", () => {

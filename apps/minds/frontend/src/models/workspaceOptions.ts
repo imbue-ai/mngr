@@ -32,6 +32,7 @@ export interface WorkspaceOptionsData {
   current_account: WorkspaceOptionsAccount | null;
   accounts: WorkspaceOptionsAccount[];
   app_services: string[];
+  system_services?: string[];
   service_labels: Record<string, string>;
   service_icons?: Record<string, string>;
   service_display_names?: Record<string, string>;
@@ -341,6 +342,7 @@ export class WorkspaceOptionsModel {
       publicEmailDomains: data.public_email_domains,
       wholeService: data.whole_service,
       appServices: data.app_services,
+      systemServices: data.system_services,
       serviceLabels: data.service_labels,
       serviceIcons: data.service_icons,
       serviceDisplayNames: data.service_display_names,

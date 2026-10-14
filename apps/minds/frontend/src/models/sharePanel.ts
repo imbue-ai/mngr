@@ -250,6 +250,9 @@ export interface SharePanelModelOptions {
   granterEmail: string;
   wholeService: string;
   appServices: string[];
+  /** The apps the workspace calls system apps: targets like any other, but not
+   * meant to be shared by default, so the nav keeps them under a closed group. */
+  systemServices?: string[];
   serviceLabels: Record<string, string>;
   /** Registered SVG icon markup per app service. */
   serviceIcons?: Record<string, string>;
@@ -481,9 +484,19 @@ export class SharePanelModel {
     );
   }
 
-  /** The whole workspace first, then each app. */
+  get systemTargets(): string[] {
+    return (this.options.systemServices ?? []).filter(
+      (target) => target !== this.options.wholeService,
+    );
+  }
+
+  get perAppTargets(): string[] {
+    return [...this.appTargets, ...this.systemTargets];
+  }
+
+  /** The whole workspace first, then each app, then each system app. */
   get knownTargets(): string[] {
-    return [this.options.wholeService, ...this.appTargets];
+    return [this.options.wholeService, ...this.perAppTargets];
   }
 
   get granterEmail(): string {
@@ -507,7 +520,7 @@ export class SharePanelModel {
   isDisplayNameAmbiguous(target: string): boolean {
     const shown = this.targetDisplayName(target);
     if (shown === target) return false;
-    return this.appTargets.some(
+    return this.perAppTargets.some(
       (other) => other !== target && this.targetDisplayName(other) === shown,
     );
   }
@@ -1001,7 +1014,7 @@ export class SharePanelModel {
       workspace: this.grantListFor(this.options.wholeService),
       services: {},
     };
-    for (const target of this.appTargets) {
+    for (const target of this.perAppTargets) {
       const grants = this.grantListFor(target);
       if (isGrantListEmpty(grants)) continue;
       document.services[target] = grants;

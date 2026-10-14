@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
+from enum import auto
 from pathlib import Path
 from typing import Final
 
@@ -16,6 +17,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
@@ -74,6 +76,18 @@ class ServiceLogParseError(ValueError):
     """Raised when a service log record cannot be parsed."""
 
 
+class ServiceShareKind(UpperCaseStrEnum):
+    """How the Share tab offers a service, as its workspace announced it."""
+
+    # An app built on the workspace: offered as a share target of its own.
+    APP = auto()
+    # Part of the workspace itself: not meant to be shared on its own by default, so
+    # offered only under the System group.
+    SYSTEM = auto()
+    # Plumbing with no page of its own: never offered on its own.
+    INTERNAL = auto()
+
+
 class ServiceLogRecord(FrozenModel):
     """A record of a service started by an agent, as written to services/events.jsonl.
 
@@ -97,6 +111,13 @@ class ServiceLogRecord(FrozenModel):
             "The app's registered SVG icon markup, verbatim from the workspace's registry. Written by "
             "untrusted workspace content: consumers MUST validate and sanitize before inlining. Empty "
             "when the app registered none."
+        ),
+    )
+    share_kind: ServiceShareKind | None = Field(
+        default=None,
+        description=(
+            "How the Share tab offers the app, from the event's 'system' and 'internal'. None when the "
+            "workspace predates the fields, in which case the Share tab decides by the service name."
         ),
     )
     display_name: str = Field(
@@ -313,6 +334,15 @@ class BackendResolverInterface(MutableModel, ABC):
         workspace content that callers MUST validate and sanitize before
         inlining. Services without an icon are omitted. Default implementation
         returns an empty mapping (resolvers that carry no icons).
+        """
+        return {}
+
+    def list_service_share_kinds_for_agent(self, agent_id: AgentId) -> dict[ServiceName, ServiceShareKind]:
+        """Return how the Share tab offers each known service, keyed by service name.
+
+        Services whose registration did not say (a workspace that predates the
+        fields) are omitted. Default implementation returns an empty mapping
+        (resolvers that carry no share kinds).
         """
         return {}
 
@@ -589,13 +619,26 @@ class ServiceDeregisteredRecord(FrozenModel):
     service: ServiceName = Field(description="Name of the service being deregistered")
 
 
+@pure
+def _announced_share_kind(is_system: object, is_internal: object) -> ServiceShareKind | None:
+    # Only a bool ``system`` is an announcement: anything else (an older workspace) leaves the
+    # Share tab to decide by the service name.
+    if not isinstance(is_system, bool):
+        return None
+    if is_internal is True:
+        return ServiceShareKind.INTERNAL
+    return ServiceShareKind.SYSTEM if is_system else ServiceShareKind.APP
+
+
 def parse_service_log_record(raw: dict[str, object]) -> ServiceLogRecord | ServiceDeregisteredRecord:
     """Parse a single JSON dict into a ServiceLogRecord or ServiceDeregisteredRecord.
 
     Extracts the 'service' field and checks the 'type' field.
     For 'service_deregistered' events, returns a ServiceDeregisteredRecord.
-    For all other events, returns a ServiceLogRecord with 'service', 'url', and
-    an optional 'label' (the service's public origin hostname label).
+    For all other events, returns a ServiceLogRecord with 'service', 'url', an
+    optional 'label' (the service's public origin hostname label), an optional
+    'icon', an optional 'display_name', and an optional 'share_kind' (from the
+    event's 'system' and 'internal'; None unless 'system' is a bool).
     Raises ValueError if required fields are missing.
     """
     event_type = raw.get("type", "service_registered")
@@ -619,12 +662,14 @@ def parse_service_log_record(raw: dict[str, object]) -> ServiceLogRecord | Servi
     label = raw.get("label")
     icon = raw.get("icon")
     display_name = raw.get("display_name")
+    is_system = raw.get("system")
     return ServiceLogRecord(
         service=ServiceName(str(service)),
         url=str(url),
         label=str(label) if label else "",
         icon=str(icon) if icon else "",
         display_name=str(display_name) if display_name else "",
+        share_kind=_announced_share_kind(is_system, raw.get("internal")),
     )
 
 
@@ -921,6 +966,9 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # agent_id_str -> {service_name: registered SVG icon markup}. Parallel to
     # _services_by_agent; untrusted workspace content, sanitized by consumers.
     _icons_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    # agent_id_str -> {service_name: how the Share tab offers it}; a service whose
+    # registration did not say (an older workspace) is absent.
+    _share_kinds_by_agent: dict[str, dict[str, ServiceShareKind]] = PrivateAttr(default_factory=dict)
     # agent_id_str -> {service_name: origin label}. Parallel to _services_by_agent,
     # carrying each service's public origin hostname label (``<name>-<rand>``).
     # A service missing here (a legacy row with no label) falls back to its name.
@@ -1375,8 +1423,11 @@ class MngrCliBackendResolver(BackendResolverInterface):
         labels: dict[str, str] | None = None,
         icons: dict[str, str] | None = None,
         display_names: dict[str, str] | None = None,
+        share_kinds: dict[str, ServiceShareKind] | None = None,
     ) -> None:
-        """Replace the known services (and their origin labels, icons, and display names) for a single agent. Thread-safe.
+        """Replace the known services (and their origin labels, icons, display names, and share kinds) for one agent.
+
+        Thread-safe.
 
         ``labels`` maps each service name to its public origin hostname label
         (``<name>-<rand>``). Services absent from it (legacy rows written before
@@ -1385,12 +1436,15 @@ class MngrCliBackendResolver(BackendResolverInterface):
         services absent from it have none.
         ``display_names`` maps each service name to what users read for it;
         services absent from it have none and are shown by their service name.
+        ``share_kinds`` maps each service name to how the Share tab offers it;
+        services absent from it did not say.
         """
         with self._lock:
             self._services_by_agent[str(agent_id)] = services
             self._labels_by_agent[str(agent_id)] = dict(labels or {})
             self._icons_by_agent[str(agent_id)] = dict(icons or {})
             self._display_names_by_agent[str(agent_id)] = dict(display_names or {})
+            self._share_kinds_by_agent[str(agent_id)] = dict(share_kinds or {})
         self._fire_on_change()
 
     def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
@@ -1412,6 +1466,11 @@ class MngrCliBackendResolver(BackendResolverInterface):
         with self._lock:
             icons = self._icons_by_agent.get(str(agent_id), {})
             return {ServiceName(name): icon for name, icon in icons.items() if icon}
+
+    def list_service_share_kinds_for_agent(self, agent_id: AgentId) -> dict[ServiceName, ServiceShareKind]:
+        with self._lock:
+            share_kinds = self._share_kinds_by_agent.get(str(agent_id), {})
+            return {ServiceName(name): share_kind for name, share_kind in share_kinds.items()}
 
     def list_service_display_names_for_agent(self, agent_id: AgentId) -> dict[ServiceName, str]:
         with self._lock:

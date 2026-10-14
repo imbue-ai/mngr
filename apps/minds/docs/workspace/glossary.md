@@ -87,9 +87,13 @@ Key concepts in the Imbue Studio system:
   The code and older docs say "share" for this; the verb is "publish" from here on, and "share" survives only inside existing names such as share URL, share panel, and share-gateway.
 
 - **grant**: an entry in a workspace's grants document (`data/.secrets/share_grants.toml`) that admits a party to one app of the workspace while it is published.
-  The system interface is an app like the others, with one difference: a grant on it admits the entire workspace, every app included, which the Share tab calls the whole workspace. A grant on any other app admits that app alone.
+  The system interface is an app like the others, with one difference: a grant on it admits the entire workspace, every app included, which the Share tab calls the whole workspace. A grant on any other app admits that app alone, system apps included; an internal service (the terminal's pty, the exec channels) is never a grant's app and is reached only through the whole workspace.
   The party is named by an account id, an email address, or a domain. The share-gateway re-reads the document on every request, so removing a grant takes effect immediately.
   A grant names who may enter and nothing more: it does not notify anyone, and it does not make someone a visitor until they visit.
+
+- **system app**: an app that is part of the workspace itself rather than built on it -- the chat, terminal, browser, and Getting Started -- and so is not meant to be shared on its own by default.
+  An app is one when its manifest declares `system = true`. The Share tab lists system apps after the other apps, under a System group that stays closed unless one is selected or already granted, and a grant on one admits it like any other app's.
+  Not to be confused with the system interface, the shell whose grant admits the whole workspace.
 
 - **visitor**: a person who opens someone else's published workspace in a browser through its share URL.
   A role toward one workspace, not a kind of account: the same person publishes their own workspaces and is a visitor to anyone else's. A visitor needs an imbue account with a verified email, because that is what the grants are checked against; they need no desktop client and no machine.
