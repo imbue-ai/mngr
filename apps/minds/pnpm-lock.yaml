@@ -21,8 +21,8 @@ importers:
         specifier: 6.8.9
         version: 6.8.9
       latchkey:
-        specifier: ^3.18.1
-        version: 3.18.1
+        specifier: ^3.18.3
+        version: 3.18.3
       semver:
         specifier: ^7.6.3
         version: 7.7.4
@@ -1667,8 +1667,8 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  latchkey@3.18.1:
-    resolution: {integrity: sha512-5Op6t8mrT0mdLiow09TyZMVX5+VwkXE28ZpT+1+X5AEtjP2vdYfKcRmNiolhPgD5boUaChtHHJiTZ1/XK2jaJg==}
+  latchkey@3.18.3:
+    resolution: {integrity: sha512-mTkuG2enDgbZZbhHIe3nbGB9e/+FV4lVcJrQJc5qxqJ7EkSgclgv0P56azhGUfw9WWfFRAlkIutfDUwO/lY2yA==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -4439,7 +4439,7 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  latchkey@3.18.1:
+  latchkey@3.18.3:
     dependencies:
       '@imbue-ai/detent': 1.16.0
       '@napi-rs/keyring': 1.2.0
