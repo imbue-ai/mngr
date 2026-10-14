@@ -22,7 +22,7 @@ pytestmark = pytest.mark.xdist_group(name="ratchets")
 _SENTRY_SUBPACKAGE_EXCLUSION: tuple[str, ...] = ("*/sentry/*",)
 
 
-# --- Code safety ---
+# ratchet_group("Code safety")
 
 
 def test_prevent_todos() -> None:
@@ -53,7 +53,7 @@ def test_prevent_bare_print() -> None:
     rc.check_bare_print(_DIR, snapshot(7))
 
 
-# --- Exception handling ---
+# ratchet_group("Exception handling")
 
 
 def test_prevent_bare_except() -> None:
@@ -76,7 +76,7 @@ def test_prevent_silent_decode_error_catches() -> None:
     rc.check_silent_decode_error_catches(_DIR, snapshot(1))
 
 
-# --- Import style ---
+# ratchet_group("Import style")
 
 
 def test_prevent_inline_imports() -> None:
@@ -104,7 +104,7 @@ def test_prevent_setattr() -> None:
     rc.check_setattr(_DIR, snapshot(9))
 
 
-# --- Banned libraries and patterns ---
+# ratchet_group("Banned libraries and patterns")
 
 
 def test_prevent_asyncio_import() -> None:
@@ -143,7 +143,7 @@ def test_prevent_async_await() -> None:
     rc.check_async_await(_DIR, snapshot(2))
 
 
-# --- Hardcoded paths ---
+# ratchet_group("Hardcoded paths")
 
 
 def test_prevent_hardcoded_claude_dir() -> None:
@@ -154,14 +154,14 @@ def test_prevent_hardcoded_guarded_binary() -> None:
     rc.check_hardcoded_guarded_binary(_DIR, snapshot(0))
 
 
-# --- Naming conventions ---
+# ratchet_group("Naming conventions")
 
 
 def test_prevent_num_prefix() -> None:
     rc.check_num_prefix(_DIR, snapshot(1))
 
 
-# --- Documentation ---
+# ratchet_group("Documentation")
 
 
 def test_prevent_trailing_comments() -> None:
@@ -182,7 +182,7 @@ def test_prevent_returns_in_docstrings() -> None:
     rc.check_returns_in_docstrings(_DIR, snapshot(2))
 
 
-# --- Type safety ---
+# ratchet_group("Type safety")
 
 
 def test_prevent_literal_with_multiple_options() -> None:
@@ -201,14 +201,14 @@ def test_prevent_short_uuid_ids() -> None:
     rc.check_short_uuid_ids(_DIR, snapshot(1))
 
 
-# --- Pydantic / models ---
+# ratchet_group("Pydantic / models")
 
 
 def test_prevent_model_copy() -> None:
     rc.check_model_copy(_DIR, snapshot(4))
 
 
-# --- Logging ---
+# ratchet_group("Logging")
 
 
 def test_prevent_fstring_logging() -> None:
@@ -223,7 +223,7 @@ def test_prevent_logger_exception() -> None:
     rc.check_logger_exception(_DIR, snapshot(0))
 
 
-# --- Testing conventions ---
+# ratchet_group("Testing conventions")
 
 
 def test_prevent_unittest_mock_imports() -> None:
@@ -242,7 +242,7 @@ def test_prevent_pytest_mark_integration() -> None:
     rc.check_pytest_mark_integration(_DIR, snapshot(2))
 
 
-# --- Process management ---
+# ratchet_group("Process management")
 
 
 def test_prevent_os_fork() -> None:
@@ -269,7 +269,14 @@ def test_prevent_raw_start_new_thread() -> None:
     rc.check_raw_start_new_thread(_DIR, snapshot(0))
 
 
-# --- AST-based ratchets ---
+# ratchet_group("Modal images")
+
+
+def test_prevent_unpinned_modal_pip_install() -> None:
+    rc.check_unpinned_modal_pip_install(_DIR, snapshot(0))
+
+
+# ratchet_group("AST-based ratchets")
 
 
 def test_prevent_if_elif_without_else() -> None:
@@ -305,15 +312,8 @@ def test_prevent_per_file_host_upload() -> None:
     rc.check_per_file_host_upload(_DIR, snapshot(0))
 
 
-# --- Project-level checks ---
+# ratchet_group("Project-level checks")
 
 
 def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(0))
-
-
-# --- Modal images ---
-
-
-def test_prevent_unpinned_modal_pip_install() -> None:
-    rc.check_unpinned_modal_pip_install(_DIR, snapshot(0))

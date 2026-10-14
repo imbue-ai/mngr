@@ -88,7 +88,7 @@ def assert_ratchet(
     assert len(chunks) <= max_count, rule.format_failure(chunks)
 
 
-# --- Code safety ---
+# ratchet_group("Code safety")
 
 
 def check_todos(source_dir: Path, max_count: int) -> None:
@@ -124,7 +124,7 @@ def check_bare_print(
     assert len(chunks) <= max_count, PREVENT_BARE_PRINT.format_failure(chunks)
 
 
-# --- Exception handling ---
+# ratchet_group("Exception handling")
 
 
 def check_bare_except(source_dir: Path, max_count: int) -> None:
@@ -154,7 +154,7 @@ def check_silent_decode_error_catches(source_dir: Path, max_count: int) -> None:
     assert len(chunks) <= max_count, PREVENT_SILENT_DECODE_ERROR_CATCH.format_failure(chunks)
 
 
-# --- Import style ---
+# ratchet_group("Import style")
 
 
 def check_inline_imports(source_dir: Path, max_count: int) -> None:
@@ -185,7 +185,7 @@ def check_setattr(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_SETATTR, source_dir, max_count)
 
 
-# --- Banned libraries and patterns ---
+# ratchet_group("Banned libraries and patterns")
 
 
 def check_asyncio_import(
@@ -228,7 +228,7 @@ def check_exit_stack(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_EXIT_STACK, source_dir, max_count)
 
 
-# --- Hardcoded paths ---
+# ratchet_group("Hardcoded paths")
 
 
 def check_hardcoded_claude_dir(source_dir: Path, max_count: int) -> None:
@@ -253,14 +253,14 @@ def check_hardcoded_guarded_binary(source_dir: Path, max_count: int) -> None:
     assert len(chunks) <= max_count, PREVENT_HARDCODED_GUARDED_BINARY.format_failure(chunks)
 
 
-# --- Naming conventions ---
+# ratchet_group("Naming conventions")
 
 
 def check_num_prefix(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_NUM_PREFIX, source_dir, max_count)
 
 
-# --- Documentation ---
+# ratchet_group("Documentation")
 
 
 def check_trailing_comments(source_dir: Path, max_count: int) -> None:
@@ -287,7 +287,7 @@ def check_returns_in_docstrings(
     assert_ratchet(PREVENT_RETURNS_IN_DOCSTRINGS, source_dir, max_count, excluded_patterns)
 
 
-# --- Type safety ---
+# ratchet_group("Type safety")
 
 
 def check_literal_with_multiple_options(
@@ -310,14 +310,14 @@ def check_short_uuid_ids(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_SHORT_UUID_IDS, source_dir, max_count)
 
 
-# --- Pydantic / models ---
+# ratchet_group("Pydantic / models")
 
 
 def check_model_copy(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_MODEL_COPY, source_dir, max_count)
 
 
-# --- Logging ---
+# ratchet_group("Logging")
 
 
 def check_fstring_logging(source_dir: Path, max_count: int) -> None:
@@ -334,7 +334,7 @@ def check_click_echo(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_CLICK_ECHO, source_dir, max_count)
 
 
-# --- Testing conventions ---
+# ratchet_group("Testing conventions")
 
 
 def check_unittest_mock_imports(source_dir: Path, max_count: int) -> None:
@@ -355,7 +355,7 @@ def check_pytest_mark_integration(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_PYTEST_MARK_INTEGRATION, source_dir, max_count)
 
 
-# --- Process management ---
+# ratchet_group("Process management")
 
 
 def check_os_fork(source_dir: Path, max_count: int) -> None:
@@ -402,14 +402,14 @@ def check_raw_start_new_thread(source_dir: Path, max_count: int) -> None:
     assert len(chunks) <= max_count, PREVENT_RAW_START_NEW_THREAD.format_failure(chunks)
 
 
-# --- Modal images ---
+# ratchet_group("Modal images")
 
 
 def check_unpinned_modal_pip_install(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_UNPINNED_MODAL_PIP_INSTALL, source_dir, max_count)
 
 
-# --- AST-based ratchets ---
+# ratchet_group("AST-based ratchets")
 
 
 def check_if_elif_without_else(
@@ -451,7 +451,7 @@ def check_assert_isinstance(source_dir: Path, max_count: int) -> None:
     assert len(chunks) <= max_count, PREVENT_ASSERT_ISINSTANCE.format_failure(chunks)
 
 
-# --- Project-level checks ---
+# ratchet_group("Project-level checks")
 
 
 def check_code_in_init_files(
