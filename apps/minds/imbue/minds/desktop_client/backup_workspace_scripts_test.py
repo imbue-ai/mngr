@@ -1498,26 +1498,28 @@ def test_restore_script_succeeds_when_restart_all_fails_but_services_recover(tmp
     partial="one non-critical service (xvfb) down; not the 'however many services down' quantifier",
 )
 def test_restore_script_reports_non_critical_services_down_as_a_warning_not_failure(tmp_path: Path) -> None:
-    # A service outside the restore-critical set that does not come back --
-    # here the crash-looping xvfb, and equally the backup service itself --
+    # A service outside the restore-critical set that does not come back
     # surfaces via services_down (the desktop maps it to a completion
     # warning), never as a failed restore. The tiny
     # --service-verify-timeout-seconds keeps the recovery wait, which polls
-    # to its deadline while any service is down, from holding the test for
-    # the production 60s.
+    # to its deadline while any service it counts is down, from holding the
+    # test for the production timeout.
     host, code, restic_repo = _make_restore_workspace(tmp_path)
     _restic_for_test(restic_repo, "backup", str(host))
     snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
-    roster = (
-        "host-backup RUNNING pid 123, uptime 0:00:01",
-        "system_interface RUNNING pid 124, uptime 0:00:01",
-        "xvfb BACKOFF Exited too quickly (process log may have details)",
-    )
     stub_bin = _stub_bin_with_restic(
         tmp_path,
         restart_ok=False,
-        supervisorctl_status_lines=roster,
-        supervisorctl_status_lines_after_restart=roster,
+        supervisorctl_status_lines=(
+            "host-backup RUNNING pid 123, uptime 0:00:01",
+            "system_interface RUNNING pid 124, uptime 0:00:01",
+            "xvfb RUNNING pid 125, uptime 0:00:01",
+        ),
+        supervisorctl_status_lines_after_restart=(
+            "host-backup RUNNING pid 123, uptime 0:00:01",
+            "system_interface RUNNING pid 124, uptime 0:00:01",
+            "xvfb BACKOFF Exited too quickly (process log may have details)",
+        ),
     )
     run = _run_script(
         code,
@@ -1530,6 +1532,88 @@ def test_restore_script_reports_non_critical_services_down_as_a_warning_not_fail
     assert payload is not None, run
     assert payload["status"] == "ok", payload
     assert payload["services_down"] == ["xvfb"]
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.witnesses(
+    "backup-restore.only-services-that-were-up",
+    partial="only services outside the restore-critical set; not the carve-out for the set itself",
+)
+@pytest.mark.witnesses("backup-restore.down-before-and-after")
+def test_restore_script_ignores_a_service_that_was_already_down_when_it_started(tmp_path: Path) -> None:
+    # supervisord leaves an autostart=false program STOPPED until something
+    # starts it, and the restore's own `restart all` does -- so the state to
+    # model after the restart is BACKOFF, not STOPPED. The large
+    # --service-verify-timeout-seconds is deliberate: a wait still counting
+    # this program would poll to that deadline instead of returning on its
+    # first sample.
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    _restic_for_test(restic_repo, "backup", str(host))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+    call_log = tmp_path / "supervisorctl-calls.log"
+    stub_bin = _stub_bin_with_restic(
+        tmp_path,
+        # `restart all` exits non-zero when any program spawn-errors.
+        restart_ok=False,
+        supervisorctl_call_log=call_log,
+        supervisorctl_status_lines=(
+            "host-backup RUNNING pid 123, uptime 0:00:01",
+            "system_interface RUNNING pid 124, uptime 0:00:01",
+            "dark-launched STOPPED Not started",
+        ),
+        supervisorctl_status_lines_after_restart=(
+            "host-backup RUNNING pid 123, uptime 0:00:01",
+            "system_interface RUNNING pid 124, uptime 0:00:01",
+            "dark-launched BACKOFF Exited too quickly (process log may have details)",
+        ),
+    )
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        _restore_args(restic_repo, snapshot_id, extra=("--service-verify-timeout-seconds", "30")),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert "services_down" not in payload
+    calls = _supervisorctl_calls(call_log)
+    assert "restart all" in calls, calls
+    assert calls[calls.index("restart all") + 1 :].count("status") == 1, calls
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.witnesses(
+    "backup-restore.only-services-that-were-up",
+    partial="only the carve-out for the restore-critical set; not the services outside it",
+)
+def test_restore_script_fails_a_restore_critical_service_that_was_also_down_beforehand(tmp_path: Path) -> None:
+    # The restore-critical set is absolute: its services must be up when the
+    # restore reports, whatever state they were in before.
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    _restic_for_test(restic_repo, "backup", str(host))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+    roster = (
+        "host-backup RUNNING pid 123, uptime 0:00:01",
+        "system_interface BACKOFF Exited too quickly (process log may have details)",
+    )
+    stub_bin = _stub_bin_with_restic(
+        tmp_path,
+        supervisorctl_status_lines=roster,
+        supervisorctl_status_lines_after_restart=roster,
+    )
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        _restore_args(restic_repo, snapshot_id, extra=("--service-verify-timeout-seconds", "0.2")),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "failed", payload
+    assert "system_interface (BACKOFF)" in str(payload["detail"])
 
 
 @pytest.mark.timeout(120)

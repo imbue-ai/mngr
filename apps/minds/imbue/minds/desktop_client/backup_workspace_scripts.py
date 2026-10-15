@@ -811,37 +811,45 @@ def _all_service_states():
     return states
 
 
-def _unhealthy_services(states):
-    # (critical_down, other_down): sorted names not healthy in `states`. A
-    # restore-critical service missing from the roster entirely counts as
-    # down: the verdict is absolute, not relative to what this machine
-    # happens to define.
+def _healthy_service_names(states):
+    return set(name for name, state in states.items() if state in _HEALTHY_SERVICE_STATES)
+
+
+def _unhealthy_services(states, services_up_before):
+    # (critical_down, other_down): sorted names not healthy in `states`.
+    # Critical is absolute -- absent from the roster counts as down, and so
+    # does a critical service that was already down. Every other name is
+    # judged against `services_up_before`, making other_down a difference
+    # rather than an absolute: what this restore took down and did not bring
+    # back.
     critical_down = sorted(
         name for name in _RESTORE_CRITICAL_SERVICES if states.get(name) not in _HEALTHY_SERVICE_STATES
     )
     other_down = sorted(
         name
         for name, state in states.items()
-        if state not in _HEALTHY_SERVICE_STATES and name not in _RESTORE_CRITICAL_SERVICES
+        if state not in _HEALTHY_SERVICE_STATES
+        and name not in _RESTORE_CRITICAL_SERVICES
+        and name in services_up_before
     )
     return critical_down, other_down
 
 
-def _wait_for_service_recovery(timeout_seconds):
-    # Poll until one status sample shows every service healthy, or the
-    # deadline passes; returns the final (states, critical_down, other_down).
-    # Waiting on ALL services -- not just the restore-critical set -- gives
+def _wait_for_service_recovery(timeout_seconds, services_up_before):
+    # Poll until one status sample shows every counted service healthy, or
+    # the deadline passes; returns the final (states, critical_down,
+    # other_down). Waiting on more than the restore-critical set gives
     # stragglers their settle time before the success warning names them,
     # while the all-healthy common case exits on the first sample. Requiring
     # a single all-healthy sample (rather than first-sight-of-RUNNING per
     # service) also catches a service that spawns and promptly crash-loops.
     deadline = _time.time() + timeout_seconds
     states = _all_service_states()
-    critical_down, other_down = _unhealthy_services(states)
+    critical_down, other_down = _unhealthy_services(states, services_up_before)
     while (critical_down or other_down) and _time.time() <= deadline:
         _time.sleep(_SERVICE_SETTLE_POLL_SECONDS)
         states = _all_service_states()
-        critical_down, other_down = _unhealthy_services(states)
+        critical_down, other_down = _unhealthy_services(states, services_up_before)
     return states, critical_down, other_down
 
 
@@ -1193,6 +1201,9 @@ def _main():
         _finish(result, "failed", restic_error)
     excludes = _read_snapshot_excludes(code_dir)
 
+    # Read before anything is stopped: the verdict is relative to this.
+    services_up_before = _healthy_service_names(_all_service_states())
+
     # Quiesce the machine: every supervisord service runs from (and writes
     # into) the backup root this restore rewrites, so a service left running
     # could recreate or hold files mid-restore. Stop them all -- the exec
@@ -1309,7 +1320,9 @@ def _main():
     # restore-critical set below decides the verdict.
     restarted = _run(["supervisorctl", "restart", "all"], timeout=300)
     result["services_restarted"] = restarted.returncode == 0
-    post_states, critical_down, other_down = _wait_for_service_recovery(service_verify_timeout)
+    post_states, critical_down, other_down = _wait_for_service_recovery(
+        service_verify_timeout, services_up_before
+    )
     if critical_down:
         restart_tail = (restarted.stderr or restarted.stdout).strip()[-300:]
         detail = "restored, but the restore-critical service(s) did not come back: %s%s" % (
