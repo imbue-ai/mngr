@@ -8,6 +8,7 @@ from loguru import logger
 from paramiko.pkey import PKey
 
 from imbue.imbue_common.logging import log_span
+from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_vps.errors import VpsProvisioningError
 
@@ -51,6 +52,7 @@ def pin_host_key_via_tofu(
     ssh_user: str,
     private_key_path: Path,
     known_hosts_path: Path,
+    host_id: HostId,
     timeout_seconds: float,
 ) -> str:
     """Open one SSH session with TOFU host-key acceptance, pin the key, return it.
@@ -61,9 +63,10 @@ def pin_host_key_via_tofu(
 
     1. Polls SSH until the daemon accepts our key auth.
     2. Captures the host key the server presented during that handshake.
-    3. Writes a strict ``known_hosts`` entry for ``hostname:port`` so all
+    3. Writes a strict ``known_hosts`` entry for ``hostname:port``,
+       attributed to ``host_id``'s record in the pin store, so all
        subsequent connections via mngr's normal SSH machinery verify
-       strictly against that key.
+       strictly against that key and the pin is removed with the host.
 
     Because key-auth is already enforced (the rebuild pre-installed our
     public key), a MITM during this window can passively read the
@@ -92,6 +95,7 @@ def pin_host_key_via_tofu(
             hostname=hostname,
             port=port,
             public_key=host_key_str,
+            host_id=host_id,
         )
         logger.info("Pinned OVH VPS host key for {}:{} ({})", hostname, port, captured_key.get_name())
         return host_key_str

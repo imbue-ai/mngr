@@ -50,7 +50,7 @@ from imbue.mngr.primitives import HostState
 # Local backends (docker / lima) consume the user's own computer while alive, and
 # the cloud-VM backends (aws / gcp / azure) support real VM-level stop/start via
 # ``mngr stop --stop-host`` (EC2 stop / GCE stop / Azure deallocate) -- for the
-# bring-your-own-key-account flow, stopping is what halts the user's own cloud
+# cloud-connection flow, stopping is what halts the user's own cloud
 # billing, and the provider's offline state bucket keeps a stopped workspace
 # visible in the UI. imbue_cloud workspaces now support full VM-level
 # stop/start too: ``mngr stop`` halts the slice VM and uploads it to the

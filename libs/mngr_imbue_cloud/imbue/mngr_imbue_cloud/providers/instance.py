@@ -106,6 +106,7 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.primitives import read_checked_out_branch
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.providers.host_access_manifest import host_access_per_host_dir
 from imbue.mngr.providers.host_dir_layouts import host_dir_fallbacks
 from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
@@ -142,6 +143,9 @@ from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import FAST_PATH_ADOPTABLE_START_ARGS
 from imbue.mngr_imbue_cloud.primitives import FastMode
+from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_CLIENT_KEY_NAME
+from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_HOST_ACCESS_MANIFEST
+from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_KNOWN_HOSTS_NAME
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import POOL_HOST_SERVICES_AGENT_NAME
 from imbue.mngr_imbue_cloud.primitives import WORKSPACE_PRIMARY_AGENT_LABEL
@@ -562,15 +566,15 @@ class ImbueCloudProvider(BaseProviderInstance):
         return get_provider_data_dir(self.mngr_ctx.profile_dir, str(self.name))
 
     def _host_state_dir(self, host_id: HostId) -> Path:
-        return self._provider_data_dir() / "hosts" / str(host_id)
+        return host_access_per_host_dir(self._provider_data_dir(), IMBUE_CLOUD_HOST_ACCESS_MANIFEST, host_id)
 
     def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
         host_dir = self._host_state_dir(host_id)
         host_dir.mkdir(parents=True, exist_ok=True)
-        return host_dir / "ssh_key", host_dir / "ssh_key.pub"
+        return host_dir / IMBUE_CLOUD_CLIENT_KEY_NAME, host_dir / f"{IMBUE_CLOUD_CLIENT_KEY_NAME}.pub"
 
     def _host_known_hosts_path(self, host_id: HostId) -> Path:
-        return self._host_state_dir(host_id) / "known_hosts"
+        return self._host_state_dir(host_id) / IMBUE_CLOUD_KNOWN_HOSTS_NAME
 
     def _last_known_agents_path(self, host_id: HostId) -> Path:
         return self._host_state_dir(host_id) / "last_known_agents.json"
@@ -748,7 +752,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         Returns the private key path and the public key contents (so the caller
         can send the public key in the lease request).
         """
-        return load_or_create_ssh_keypair(self._host_state_dir(host_id), "ssh_key")
+        return load_or_create_ssh_keypair(self._host_state_dir(host_id), IMBUE_CLOUD_CLIENT_KEY_NAME)
 
     # Discovery
 
@@ -2315,7 +2319,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         leases_dir.mkdir(parents=True, exist_ok=True)
         tmp_key_dir = leases_dir / f"pending-{int(time.time() * 1000)}"
         tmp_key_dir.mkdir(parents=True, exist_ok=True)
-        tmp_private_key, tmp_public_key = save_ssh_keypair(tmp_key_dir, "ssh_key")
+        tmp_private_key, tmp_public_key = save_ssh_keypair(tmp_key_dir, IMBUE_CLOUD_CLIENT_KEY_NAME)
         return tmp_private_key, tmp_public_key, tmp_public_key.read_text().strip()
 
     def _discard_pending_keypair(self, tmp_private_key: Path, tmp_public_key: Path) -> None:
@@ -2337,10 +2341,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         tmp_public_key: Path,
     ) -> tuple[Path, Path]:
         """Move a pending keypair into the canonical ``hosts/<host_id>/`` location."""
-        host_state_dir = self._host_state_dir(host_id)
-        host_state_dir.mkdir(parents=True, exist_ok=True)
-        final_private_key = host_state_dir / "ssh_key"
-        final_public_key = host_state_dir / "ssh_key.pub"
+        final_private_key, final_public_key = self._host_keypair_paths(host_id)
         tmp_private_key.replace(final_private_key)
         tmp_public_key.replace(final_public_key)
         final_private_key.chmod(0o600)

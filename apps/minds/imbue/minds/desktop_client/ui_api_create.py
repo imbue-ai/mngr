@@ -7,7 +7,7 @@ This module serves the page DATA that used to arrive embedded in server-side
 renders:
 
 - ``GET /ui/api/create/form-defaults`` -- everything the create form needs
-  (accounts, providers, regions, machine sizes, BYOK accounts, suggested
+  (accounts, providers, regions, machine sizes, cloud connections, suggested
   color), plus the ``?retry=<create_attempt_id>`` pre-fill from a pending
   record.
 - ``GET /ui/api/create/landing-extras`` -- landing-page facts that do not ride
@@ -31,6 +31,8 @@ surface is deleted, those helpers should collapse into one shared home.
 
 import platform
 from collections.abc import Mapping
+from collections.abc import Sequence
+from typing import Final
 
 from flask import Blueprint
 from flask import Response
@@ -41,41 +43,55 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
-from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.connections.account_lifecycle import account_panel_state
+from imbue.minds.desktop_client.connections.account_lifecycle import is_connection_owner_eligible
+from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
+from imbue.minds.desktop_client.connections.primitives import is_region_pinned_for_backend
+from imbue.minds.desktop_client.connections.primitives import mngr_backend_name
 from imbue.minds.desktop_client.create_status import expected_create_attempt_duration_seconds
+from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.destroying import DestroyingRecord
 from imbue.minds.desktop_client.destroying import DestroyingStatus
 from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import list_destroying
+from imbue.minds.desktop_client.local_prerequisites import HostProbeInterface
+from imbue.minds.desktop_client.local_prerequisites import LocalBackendKey
 from imbue.minds.desktop_client.local_prerequisites import LocalBackendPrerequisite
+from imbue.minds.desktop_client.local_prerequisites import docker_daemon_cpu_count
 from imbue.minds.desktop_client.local_prerequisites import host_platform_from_system
 from imbue.minds.desktop_client.local_prerequisites import local_launch_mode_for
 from imbue.minds.desktop_client.local_prerequisites import probe_local_prerequisites
 from imbue.minds.desktop_client.machine_size import DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE
+from imbue.minds.desktop_client.machine_size import clamp_machine_size_to_cpu_count
 from imbue.minds.desktop_client.minds_config import settle_default_account_id
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
+from imbue.minds.desktop_client.provider_display import connection_backend_label
+from imbue.minds.desktop_client.provider_display import connection_backend_label_for_name
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
+from imbue.minds.desktop_client.region_preference import MODAL_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
 from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
+from imbue.minds.desktop_client.ui_models import AccountPanelState
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatRequest
 from imbue.minds.desktop_client.welcome_chat import seed_welcome_chat
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
+from imbue.minds.desktop_client.workspace_create import CONNECTION_ONLY_LAUNCH_MODES
+from imbue.minds.desktop_client.workspace_create import CloudAccountOption
+from imbue.minds.desktop_client.workspace_create import available_cloud_account_options
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_git_url
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
-from imbue.minds.mngr_settings.byok_accounts import is_bring_your_own_cloud_enabled
-from imbue.minds.mngr_settings.byok_accounts import list_cloud_account_providers
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
 from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
@@ -96,9 +112,7 @@ from imbue.minds.primitives import default_docker_runtime
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 
-# The cloud modes are bring-your-own-key-account only; they never appear as
-# plain compute options in the form (each configured account is its own row).
-_BYOK_ONLY_LAUNCH_MODES: frozenset[str] = frozenset({"AWS", "GCP", "AZURE"})
+RETRY_CONNECTION_REMOVED_REASON: Final[str] = "The connection this attempt used was removed, so it cannot be retried."
 
 
 class CreateAccountOption(FrozenModel):
@@ -106,15 +120,12 @@ class CreateAccountOption(FrozenModel):
 
     user_id: str = Field(description="Account user id (the form's account_id value)")
     email: str = Field(description="Display email")
-
-
-class CloudAccountOption(FrozenModel):
-    """One configured bring-your-own-key cloud account."""
-
-    name: str = Field(description="Provider block name (the create request's cloud_account value)")
-    alias: str = Field(description="User-chosen display alias")
-    backend: str = Field(description="Cloud backend (aws / gcp / azure)")
-    region: str = Field(description="Pinned region / zone for this account entry")
+    state: AccountPanelState = Field(
+        description="Signed in, or locked (its connections need the master password here)"
+    )
+    is_connection_owner_eligible: bool = Field(
+        description="Whether a new synced connection can be added under this account here (unlocked, master password set)"
+    )
 
 
 class CreateRetryPrefill(FrozenModel):
@@ -129,20 +140,39 @@ class CreateRetryPrefill(FrozenModel):
     backup_api_key_env: str = Field(description="restic env block for the manual backup provider")
     account_id: str = Field(description="Associated account id while it is signed in, empty otherwise")
     region: str = Field(description="Chosen region, empty when not applicable")
-    cloud_account: str = Field(description="BYOK account name; empty unless the retry targeted one that still exists")
+    cloud_account: str = Field(description="Connection instance name the attempt targeted, empty for a plain mode")
     instance_type: str = Field(description="Chosen machine size, empty when not applicable")
     cpu_count: int | None = Field(default=None, description="Chosen CPU count, for the modes sized by numbers")
     memory_gb: int | None = Field(default=None, description="Chosen memory in GB, for the modes sized by numbers")
     disk_gb: int | None = Field(default=None, description="Chosen data disk in GB, for the modes sized by numbers")
     color: str = Field(description="Accent color of the interrupted attempt")
+    unavailable_reason: str = Field(
+        description=(
+            "Why the attempt cannot be retried as recorded (its connection was removed), shown instead of "
+            "applying the fields; empty when it can"
+        )
+    )
 
 
-class MachineSizeDefaults(FrozenModel):
-    """The size the create form offers for one compute mode; a None dimension is one the mode does not take."""
+class ConnectionBackendOption(FrozenModel):
+    """One cloud backend a connection can be added for, as the add-connection modal and the create form list it."""
 
-    cpu_count: int | None = Field(default=None, description="Default CPU count")
-    memory_gb: int | None = Field(default=None, description="Default memory in GB")
-    disk_gb: int | None = Field(default=None, description="Default data disk in GB")
+    name: str = Field(description="The lowercase mngr backend name (aws, gcp, azure, modal)")
+    label: str = Field(description="Display label")
+    is_region_pinned: bool = Field(
+        description="Whether the region is fixed when the connection is added (else the create form picks it)"
+    )
+
+
+def connection_backend_options() -> tuple[ConnectionBackendOption, ...]:
+    return tuple(
+        ConnectionBackendOption(
+            name=mngr_backend_name(backend),
+            label=connection_backend_label(backend),
+            is_region_pinned=is_region_pinned_for_backend(backend),
+        )
+        for backend in ConnectionBackend
+    )
 
 
 class CreateFormDefaultsResponse(FrozenModel):
@@ -150,7 +180,7 @@ class CreateFormDefaultsResponse(FrozenModel):
 
     accounts: tuple[CreateAccountOption, ...] = Field(description="Signed-in accounts")
     default_account_id: str = Field(description="Pre-selected account id, empty for none")
-    launch_modes: tuple[str, ...] = Field(description="Selectable compute modes (BYOK-only modes excluded)")
+    launch_modes: tuple[str, ...] = Field(description="Selectable compute modes (connection-only modes excluded)")
     selected_launch_mode: str = Field(description="Pre-selected compute mode")
     docker_runtimes: tuple[str, ...] = Field(description="Container runtime options for the local Docker provider")
     selected_docker_runtime: str = Field(
@@ -159,18 +189,22 @@ class CreateFormDefaultsResponse(FrozenModel):
     backup_providers: tuple[str, ...] = Field(description="Backup provider options")
     selected_backup_provider: str = Field(description="Pre-selected backup provider")
     region_options_by_launch_mode: dict[str, tuple[str, ...]] = Field(
-        description="Region choices per compute mode (BYOK backends merged in)"
+        description="Region choices per compute mode (connection backends merged in)"
     )
     region_selected_by_launch_mode: dict[str, str] = Field(description="Pre-selected region per compute mode")
     instance_types_by_backend: dict[str, tuple[tuple[str, str], ...]] = Field(
         description="Machine-size (value, label) pairs per cloud backend"
     )
     default_instance_type_by_backend: dict[str, str] = Field(description="Default machine size per cloud backend")
-    machine_size_defaults_by_launch_mode: dict[str, MachineSizeDefaults] = Field(
+    machine_size_defaults_by_launch_mode: dict[str, MachineSizeSelection] = Field(
         description="Default CPUs / memory / disk per compute mode sized by numbers (DOCKER, LIMA, MODAL)"
     )
-    cloud_accounts: tuple[CloudAccountOption, ...] = Field(description="Configured BYOK accounts")
-    byok_clouds_enabled: bool = Field(description="Whether the BYOK cloud-accounts feature is enabled")
+    cloud_accounts: tuple[CloudAccountOption, ...] = Field(
+        description="Cloud connections whose credentials are available on this device, every owner included"
+    )
+    connection_backends: tuple[ConnectionBackendOption, ...] = Field(
+        description="The backends a connection can be added for, with their labels and region rule"
+    )
     git_url: str = Field(description="Default template repository the form is seeded with")
     branch: str = Field(description="Default template ref paired with the default repository")
     color: str = Field(description="Suggested accent color for the new workspace")
@@ -208,7 +242,13 @@ class CreateAttemptRequestSummary(FrozenModel):
 
     display_name: str = Field(description="Human-readable workspace name")
     launch_mode: str = Field(description="Compute launch mode value")
-    cloud_account: str = Field(description="Bring-your-own-key account block name, empty for a plain mode")
+    cloud_account: str = Field(description="Connection instance name (``<backend>_<hex>``), empty for a plain mode")
+    cloud_account_alias: str = Field(
+        description="The connection's display alias; empty for a plain mode or when the connection is gone"
+    )
+    cloud_account_backend_label: str = Field(
+        description="The connection's backend display label; empty like the alias"
+    )
     backup_provider: str = Field(description="Backup provider value")
     region: str = Field(description="Region, empty when the mode has none")
     instance_type: str = Field(description="Machine size, empty when the mode has none")
@@ -239,6 +279,9 @@ class RecordCreateAttemptDetail(FrozenModel):
     log_tail: tuple[str, ...] = Field(default=(), description="Persisted tail of the create log")
     provider_label: str = Field(default="", description="Friendly compute-provider label")
     request: CreateAttemptRequestSummary = Field(description="The settings the attempt was submitted with")
+    retry_unavailable_reason: str = Field(
+        description="Why the attempt cannot be retried as recorded (its connection was removed); empty when it can"
+    )
 
 
 class WelcomeChatResponse(FrozenModel):
@@ -273,13 +316,19 @@ def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
 
 
 def _region_form_context() -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:
-    """Region options + pre-selected default per compute mode, BYOK backends merged in."""
+    """Region options + pre-selected default per compute mode.
+
+    The per-create backends (imbue_cloud, vultr, modal) get the picker's
+    options and a geolocated default; the pinned backends' tables feed the
+    add-connection form's region picker instead.
+    """
     state = get_state()
     options: dict[str, tuple[str, ...]] = {}
     selected: dict[str, str] = {}
     for launch_mode, provider_key in (
         (LaunchMode.IMBUE_CLOUD, IMBUE_CLOUD_PROVIDER_KEY),
         (LaunchMode.VULTR, VULTR_PROVIDER_KEY),
+        (LaunchMode.MODAL, MODAL_PROVIDER_KEY),
     ):
         options[launch_mode.value] = tuple(known_regions_for_provider(provider_key))
         selected[launch_mode.value] = default_region_for_provider_with_config(
@@ -321,11 +370,6 @@ def _read_retry_prefill(
     if record is None or record.state is PendingCreateAttemptState.DONE:
         return None
     retry_request = record.request
-    retained_cloud_account = (
-        retry_request.cloud_account
-        if any(account.name == retry_request.cloud_account for account in cloud_accounts)
-        else ""
-    )
     return CreateRetryPrefill(
         git_url=retry_request.repo_source,
         branch=retry_request.branch,
@@ -336,13 +380,24 @@ def _read_retry_prefill(
         backup_api_key_env=retry_request.backup_api_key_env,
         account_id=_signed_in_account_id(retry_request.account_id, accounts),
         region=retry_request.region or "",
-        cloud_account=retained_cloud_account,
+        cloud_account=retry_request.cloud_account,
         instance_type=retry_request.instance_type or "",
         cpu_count=retry_request.cpu_count,
         memory_gb=retry_request.memory_gb,
         disk_gb=retry_request.disk_gb,
         color=retry_request.color or DEFAULT_WORKSPACE_COLOR,
+        unavailable_reason=_retry_unavailable_reason(retry_request.cloud_account, cloud_accounts),
     )
+
+
+def _retry_unavailable_reason(cloud_account: str, cloud_accounts: Sequence[CloudAccountOption]) -> str:
+    """Why an attempt cannot be retried as recorded, or "" when it can.
+
+    A failed create whose connection has since been removed cannot be retried
+    as recorded, and the form does not fall back to another compute for it.
+    """
+    is_connection_gone = bool(cloud_account) and not any(account.name == cloud_account for account in cloud_accounts)
+    return RETRY_CONNECTION_REMOVED_REASON if is_connection_gone else ""
 
 
 def _handle_create_form_defaults() -> Response:
@@ -350,16 +405,19 @@ def _handle_create_form_defaults() -> Response:
         return _unauthenticated_response()
     state = get_state()
     session_store = state.session_store
+    record_store = session_store.record_store if session_store is not None else None
     accounts = tuple(
-        CreateAccountOption(user_id=str(account.user_id), email=str(account.email))
+        CreateAccountOption(
+            user_id=str(account.user_id),
+            email=str(account.email),
+            state=account_panel_state(record_store, str(account.user_id)),
+            is_connection_owner_eligible=is_connection_owner_eligible(state.connection_store, str(account.user_id)),
+        )
         for account in (session_store.list_accounts() if session_store is not None else [])
     )
     default_account_id = settle_default_account_id(state.minds_config, [account.user_id for account in accounts]) or ""
     region_options, region_selected = _region_form_context()
-    cloud_accounts = tuple(
-        CloudAccountOption(name=account.name, alias=account.alias, backend=account.backend, region=account.region)
-        for account in list_cloud_account_providers(root=MindsRoot.from_environment())
-    )
+    cloud_accounts = tuple(available_cloud_account_options(state.connection_store))
     # The probe is injected so tests describe a machine rather than run docker;
     # an app built without one (a minimal test app, with no concurrency group
     # to run probes under) reports nothing rather than reaching for docker.
@@ -372,7 +430,7 @@ def _handle_create_form_defaults() -> Response:
     response = CreateFormDefaultsResponse(
         accounts=accounts,
         default_account_id=default_account_id,
-        launch_modes=tuple(mode.value for mode in LaunchMode if mode.value not in _BYOK_ONLY_LAUNCH_MODES),
+        launch_modes=tuple(mode.value for mode in LaunchMode if mode not in CONNECTION_ONLY_LAUNCH_MODES),
         selected_launch_mode=LaunchMode.IMBUE_CLOUD.value,
         docker_runtimes=tuple(runtime.value for runtime in DockerRuntime),
         selected_docker_runtime=default_docker_runtime().value,
@@ -390,14 +448,11 @@ def _handle_create_form_defaults() -> Response:
             "GCP": DEFAULT_GCP_MACHINE_TYPE,
             "AZURE": DEFAULT_AZURE_VM_SIZE,
         },
-        machine_size_defaults_by_launch_mode={
-            launch_mode.value: MachineSizeDefaults(
-                cpu_count=default_size.cpu_count, memory_gb=default_size.memory_gb, disk_gb=default_size.disk_gb
-            )
-            for launch_mode, default_size in DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE.items()
-        },
+        machine_size_defaults_by_launch_mode=_machine_size_defaults_for_this_machine(
+            state.host_probe, local_prerequisites
+        ),
         cloud_accounts=cloud_accounts,
-        byok_clouds_enabled=is_bring_your_own_cloud_enabled(),
+        connection_backends=connection_backend_options(),
         git_url=default_workspace_git_url(),
         branch=default_workspace_template_ref(),
         color=_suggested_create_color(state.backend_resolver),
@@ -406,6 +461,34 @@ def _handle_create_form_defaults() -> Response:
         local_launch_mode=local_launch_mode_for(host_platform, local_prerequisites).value,
     )
     return _json_response(response)
+
+
+def _machine_size_defaults_for_this_machine(
+    probe: HostProbeInterface | None, local_prerequisites: Sequence[LocalBackendPrerequisite]
+) -> dict[str, MachineSizeSelection]:
+    """The default size per numbered mode, with Docker's CPU count lowered to what the local daemon can give.
+
+    The form submits the default it shows, as an explicit ``--cpus`` cap that
+    the docker provider does not clamp (only its own configured default is),
+    and the daemon refuses a cap above its CPU count. The daemon is asked only
+    once the prerequisite probe found it answering; when the count cannot be
+    read the shipped default stands.
+    """
+    defaults = {
+        launch_mode.value: default_size for launch_mode, default_size in DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE.items()
+    }
+    is_docker_available = any(
+        prerequisite.key is LocalBackendKey.DOCKER and prerequisite.is_available
+        for prerequisite in local_prerequisites
+    )
+    if probe is None or not is_docker_available:
+        return defaults
+    cpu_count = docker_daemon_cpu_count(probe)
+    if cpu_count is not None:
+        defaults[LaunchMode.DOCKER.value] = clamp_machine_size_to_cpu_count(
+            defaults[LaunchMode.DOCKER.value], cpu_count
+        )
+    return defaults
 
 
 def _destroying_statuses(records: Mapping[AgentId, DestroyingRecord]) -> dict[str, str]:
@@ -491,11 +574,26 @@ def _handle_landing_extras() -> Response:
     return _json_response(response)
 
 
+def _connection_display_fields(instance_name: str) -> tuple[str, str]:
+    """``(alias, backend label)`` of the connection an attempt names, both empty when it names none or it is gone."""
+    connection_store = get_state().connection_store
+    if not instance_name or connection_store is None:
+        return "", ""
+    found = connection_store.find_active_connection_by_instance_name(instance_name)
+    view = connection_store.view_for(*found) if found is not None else None
+    if view is None:
+        return "", ""
+    return view.alias, connection_backend_label_for_name(view.backend)
+
+
 def _request_summary(request_record: PendingCreateAttemptRequest) -> CreateAttemptRequestSummary:
+    cloud_account_alias, cloud_account_backend_label = _connection_display_fields(request_record.cloud_account)
     return CreateAttemptRequestSummary(
         display_name=request_record.display_name or request_record.host_name,
         launch_mode=request_record.launch_mode.value,
         cloud_account=request_record.cloud_account,
+        cloud_account_alias=cloud_account_alias,
+        cloud_account_backend_label=cloud_account_backend_label,
         backup_provider=request_record.backup_provider.value,
         region=request_record.region,
         instance_type=request_record.instance_type,
@@ -530,6 +628,8 @@ def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
                 display_name=info.host_name or create_attempt_id,
                 launch_mode=info.launch_mode.value,
                 cloud_account="",
+                cloud_account_alias="",
+                cloud_account_backend_label="",
                 backup_provider="",
                 region="",
                 instance_type="",
@@ -555,6 +655,9 @@ def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
         log_tail=record.log_tail,
         provider_label=friendly_provider_label(record.provider_instance_name or None),
         request=_request_summary(record.request),
+        retry_unavailable_reason=_retry_unavailable_reason(
+            record.request.cloud_account, available_cloud_account_options(get_state().connection_store)
+        ),
     )
     return _json_response(CreateAttemptDetailResponse(kind="record", record=record_detail))
 

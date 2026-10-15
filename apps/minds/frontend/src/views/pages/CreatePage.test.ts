@@ -1,5 +1,7 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { clearAppContextForTests, registerAppContext } from "../../app-context";
+import type { AppContext } from "../../app-context";
 import type { AnyVnode } from "../../testing";
 import {
   allText,
@@ -16,6 +18,7 @@ import { CreatePage, createFormModal, signInOutcome } from "./CreatePage";
 import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
 
 afterEach(() => {
+  clearAppContextForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -29,6 +32,14 @@ async function loadedPage(): Promise<{
   page: m.Component<CreatePageAttrs>;
   vnode: m.Vnode<CreatePageAttrs>;
 }> {
+  // The page reads the accounts store for the sign-in gate and the providers
+  // store for the add-connection owner list; neither matters to these tests.
+  registerAppContext({
+    stores: {
+      accounts: { hasAccounts: false },
+      providers: { connectionOwnerOptions: () => [] },
+    },
+  } as unknown as AppContext);
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   vi.spyOn(m.route, "param").mockImplementation(
     (() => undefined) as typeof m.route.param,

@@ -14,10 +14,8 @@ from typing import Any
 from typing import Final
 
 from loguru import logger
-from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -28,9 +26,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.logging import get_default_cli_events_log_dir
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
-from imbue.mngr.utils.testing import read_shared_modal_env_name
 from imbue.mngr_modal.backend import ModalProviderBackend
-from imbue.mngr_modal.backend import derive_modal_app_name
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.instance import HostRecord
 from imbue.mngr_modal.instance import ModalProviderInstance
@@ -38,7 +34,6 @@ from imbue.mngr_modal.instance import SandboxConfig
 from imbue.mngr_modal.instance import TAG_HOST_ID
 from imbue.mngr_modal.instance import TAG_HOST_NAME
 from imbue.mngr_modal.instance import TAG_USER_PREFIX
-from imbue.mngr_modal.plugin import MODAL_BACKEND_NAME
 from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.testing import FakeModalInterface
 
@@ -261,33 +256,3 @@ def setup_host_with_sandbox(
     offline = testing_provider._create_host_from_host_record(record)
     testing_provider._host_by_id_cache[host_id] = offline
     return host_id, record, sandbox
-
-
-class SharedModalTestRunNames(FrozenModel):
-    """The Modal app and environment that one offload run's hosts all land in.
-
-    A shared-env run points every fanned-out sandbox at one Modal environment,
-    and every ``mngr create`` subprocess in it at one app -- the default app of
-    the ``modal`` provider instance under the run's prefix.
-    """
-
-    app_name: str = Field(description="The Modal app every create in the run shares")
-    environment_name: str = Field(description="The Modal environment every create in the run shares")
-
-
-def get_shared_modal_test_run_names() -> SharedModalTestRunNames | None:
-    """Name the run's shared Modal app and environment, or None outside shared-env mode.
-
-    Lets a setup step that runs before the fan-out address the same app and
-    environment the run's creates will.
-    """
-    shared = read_shared_modal_env_name()
-    if shared is None:
-        return None
-    timestamp_name, user_id_suffix = shared
-    return SharedModalTestRunNames(
-        app_name=derive_modal_app_name(
-            f"{timestamp_name}-", ProviderInstanceName(str(MODAL_BACKEND_NAME)), configured_app_name=None
-        ),
-        environment_name=f"{timestamp_name}-{user_id_suffix}",
-    )

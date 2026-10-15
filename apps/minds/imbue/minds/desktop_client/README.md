@@ -81,6 +81,45 @@ Note this is the *local* session with the desktop client itself. *Imbue account*
     page becomes the record-backed detail view: retry + discard for an interrupted
     create attempt, persisted error + log tail + dismiss for a failed one
 
+`/api/v1/desktop/cloud-accounts` (POST, cookie or bearer auth):
+    registers a cloud connection: body carries the backend (aws / gcp / azure / modal), an alias,
+    the credentials, the region for the pinned backends, and the owner (an account's user id, or
+    "local" for this device only; default: the default account). A this-device-only Modal connection
+    may also name its Modal namespace (``modal_user_id``, the block's ``user_id`` and so the
+    environment name) instead of deriving it from the connection id; 400 under an account owner. The connection is stored,
+    its provider block materialized, the credentials validated against the cloud (rolled back
+    with a 502 on failure), and, for an account owner, the document pushed (a failed push is
+    rolled back the same way and answered 502: adding a synced connection needs the connector).
+    400 for an unknown or signed-out owner; 409 when the owning account is locked here or has no
+    master password; 503 (the row dropped) when the signed-in account listing fails, so the
+    caller retries, and 503 when the connection stores are not wired into the app.
+    Error bodies of the add, update and delete routes carry a ``code`` naming the failure where
+    the status alone is ambiguous: ``master_password_required`` (409), ``connection_in_use``
+    (409, DELETE), ``connection_removed_elsewhere`` (409, PUT), ``credentials_rejected`` (502),
+    ``sync_failed`` (502), ``account_listing_failed`` (503).
+
+`/api/v1/desktop/cloud-accounts/<instance>` (PUT):
+    replaces a connection's credentials (and optionally its alias) in place, keeping its id, instance
+    name, owner, backend, and placement: the body carries the backend (which must be the connection's
+    own, 400 otherwise) and every one of that backend's credential fields. The new credentials are
+    validated the way the add route validates them and, for an account owner, the document is pushed;
+    on a failure the previous credentials come back and the answer is 502, or 409 when the connection
+    was removed on another device meanwhile. An account-owned connection needs the account unlocked
+    here with a master password (409); a this-device-only connection needs nothing. While an update
+    is validating, a second update or a removal of the connection is refused (409, ``connection_in_use``).
+    An app killed mid-update restores the previous credentials on its next start; an account that signs
+    out mid-update drops the row, and the update answers 409 (the connection is no longer on this device).
+
+`/api/v1/desktop/cloud-accounts/<instance>` (DELETE):
+    removes a connection; 409 while any active machine on it exists in local discovery or in
+    any account's synced records, while a workspace is still being created on it, or while an
+    update of its credentials is still validating.
+
+The providers panel on the home screen is fed by the `/ui/ws` channel's ``providers`` frame:
+    one section per signed-in account (its Imbue Cloud instance and its connections, each with
+    a status), a section for an account that is signed out but still hosts local machines,
+    the local profile's section, and the device providers (docker, lima, vultr).
+
 `[<service>.]agent-<hex>.localhost:PORT/*` (workspace-origin catch-all, requires auth):
     a host-header middleware and a catch-all WebSocket route recognize
     `[<service>.]agent-<hex>.localhost(:port)` hosts and byte-forward the

@@ -9,15 +9,24 @@ blueprint factory, which would be a cycle), so this lower-level module is the
 single home both import.
 """
 
+from typing import Final
+
 from loguru import logger
 from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
+from imbue.minds.desktop_client.connections.data_types import ConnectionAvailability
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.connections.primitives import connection_backend_from_name
+from imbue.minds.desktop_client.connections.primitives import is_region_pinned_for_backend
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
@@ -25,6 +34,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
+from imbue.minds.desktop_client.region_preference import MODAL_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import default_region_for_provider
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
@@ -40,20 +50,23 @@ from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 
-# -- Region resolution --
+# Region resolution
 
 
 def region_provider_key_for_launch_mode(launch_mode: LaunchMode) -> str | None:
     """Map a compute launch mode to its region-config provider key, or None if region-less.
 
-    Only ``IMBUE_CLOUD`` and ``VULTR`` offer an ambient region choice at create
-    time; ``DOCKER`` / ``LIMA`` run locally, and the cloud modes (AWS / GCP /
-    AZURE) are bring-your-own-key-account with placement pinned per account entry.
+    ``IMBUE_CLOUD``, ``VULTR``, and ``MODAL`` pick the region per create;
+    ``DOCKER`` / ``LIMA`` run locally, and the pinned-region clouds (AWS / GCP /
+    AZURE) carry their placement on the connection (see
+    ``is_region_pinned_for_backend``).
     """
     if launch_mode is LaunchMode.IMBUE_CLOUD:
         return IMBUE_CLOUD_PROVIDER_KEY
     if launch_mode is LaunchMode.VULTR:
         return VULTR_PROVIDER_KEY
+    if launch_mode is LaunchMode.MODAL:
+        return MODAL_PROVIDER_KEY
     return None
 
 
@@ -113,7 +126,64 @@ def persist_region_for_launch_mode(
         logger.debug("Failed to persist region {} for provider {}: {}", region, provider_key, exc)
 
 
-# -- Post-create-attempt account-association callback --
+# The remote clouds are reachable only through a connection instance
+# (``<backend>_<hex>``): they never appear as plain compute options in the form
+# (each available connection is its own row), and a create in one of these modes
+# must name a connection whose credentials are available here.
+CONNECTION_ONLY_LAUNCH_MODES: Final[frozenset[LaunchMode]] = frozenset(
+    {LaunchMode.AWS, LaunchMode.GCP, LaunchMode.AZURE, LaunchMode.MODAL}
+)
+
+
+class CloudAccountOption(FrozenModel):
+    """One cloud connection whose credentials are available on this device."""
+
+    name: str = Field(description="Connection instance name (the create request's cloud_account value)")
+    alias: str = Field(description="User-chosen display alias")
+    backend: str = Field(description="Cloud backend (aws / gcp / azure / modal)")
+    region: str = Field(description="Pinned region / zone for this connection (empty when the region is per create)")
+    owner_user_id: str = Field(description="The owning account's user id, or 'local' for the local profile")
+    is_region_pinned: bool = Field(
+        description="Whether the region is fixed on the connection (else the create form's region picker applies)"
+    )
+
+
+def available_cloud_account_options(connection_store: ConnectionStore | None) -> list[CloudAccountOption]:
+    """The create form's connection rows: only connections whose credentials are usable here."""
+    if connection_store is None:
+        return []
+    options: list[CloudAccountOption] = []
+    for view in connection_store.list_all_views():
+        if view.availability is not ConnectionAvailability.AVAILABLE:
+            continue
+        backend = connection_backend_from_name(view.backend)
+        options.append(
+            CloudAccountOption(
+                name=view.instance_name,
+                alias=view.alias,
+                backend=view.backend,
+                region=view.region,
+                owner_user_id=view.owner_user_id,
+                is_region_pinned=backend is not None and is_region_pinned_for_backend(backend),
+            )
+        )
+    return options
+
+
+@pure
+def is_cloud_account_owned_by(option: CloudAccountOption, account_id: str) -> bool:
+    """Whether the create's selected account (``""`` for none) may use a connection.
+
+    A local-profile connection is a device provider, like docker and lima: it
+    is offered under every account and under none. An account-owned
+    connection is offered only under its own account.
+    """
+    if option.owner_user_id == LOCAL_PROFILE_USER_ID:
+        return True
+    return option.owner_user_id == account_id
+
+
+# Post-create-attempt account-association callback
 
 
 class OnCreatedCallback(MutableModel):
@@ -158,7 +228,18 @@ class OnCreatedCallback(MutableModel):
     is_cloud_row: bool = Field(
         frozen=True,
         default=False,
-        description="True for imbue_cloud compute: the record carries no hosting device (any device may modify).",
+        description=(
+            "True for an account-synced row (imbue_cloud compute or an account-owned connection): the record "
+            "carries no hosting device (any device may modify)."
+        ),
+    )
+    provider_kind: str | None = Field(
+        frozen=True,
+        default=None,
+        description=(
+            "The provider instance the create addressed, seeded as the record's provider; None leaves the "
+            "association to derive it (the account's Imbue Cloud instance for a cloud row, else discovery)."
+        ),
     )
 
     def __call__(self, agent_id: AgentId, host_id: HostId) -> None:
@@ -177,6 +258,7 @@ class OnCreatedCallback(MutableModel):
                 display_name=self.display_name,
                 color=self.color,
                 is_cloud_row=self.is_cloud_row,
+                provider_kind=self.provider_kind,
             )
         except WorkspaceSyncError as exc:
             logger.warning("Could not record the account association for {}: {}", agent_id, exc)
@@ -341,6 +423,11 @@ def build_create_on_created_callback(
     display_name: str = "",
     color: str | None = None,
     is_web_access_enabled: bool = False,
+    # True when the create targets a connection the selected account owns: like
+    # the account instance, any device that unlocks the account can reach it.
+    is_account_owned_connection: bool = False,
+    # The connection instance the create addresses (None for every other compute).
+    connection_instance_name: str | None = None,
 ) -> CreateOnCreatedCallback:
     """Build the composed post-create-attempt callback (association + web access + region persistence)."""
     return CreateOnCreatedCallback(
@@ -348,7 +435,8 @@ def build_create_on_created_callback(
             account_id,
             display_name=display_name,
             color=color,
-            is_cloud_row=launch_mode is LaunchMode.IMBUE_CLOUD,
+            is_cloud_row=launch_mode is LaunchMode.IMBUE_CLOUD or is_account_owned_connection,
+            provider_kind=connection_instance_name,
         ),
         minds_config=minds_config,
         launch_mode=launch_mode,
@@ -362,6 +450,7 @@ def build_on_created_callback(
     display_name: str = "",
     color: str | None = None,
     is_cloud_row: bool = False,
+    provider_kind: str | None = None,
 ) -> OnCreatedCallback | None:
     """Build a callback that records the account association after an agent create attempt.
 
@@ -383,10 +472,11 @@ def build_on_created_callback(
         display_name=display_name,
         color=color,
         is_cloud_row=is_cloud_row,
+        provider_kind=provider_kind,
     )
 
 
-# -- Backup request --
+# Backup request
 
 
 def build_backup_request_or_error(

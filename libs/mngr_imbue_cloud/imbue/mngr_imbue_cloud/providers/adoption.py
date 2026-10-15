@@ -85,6 +85,7 @@ from imbue.mngr_imbue_cloud.errors import AdoptionError
 from imbue.mngr_imbue_cloud.errors import HostKeyDriftError
 from imbue.mngr_imbue_cloud.interfaces import SliceReconcilerState
 from imbue.mngr_imbue_cloud.interfaces import SliceVmAccessInterface
+from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_CLIENT_KEY_NAME
 
 # In-VM paths owned by adoption. /etc/mngr holds the desired-state copies the
 # reconciler asserts from; the unit + script live at the standard locations.
@@ -112,7 +113,6 @@ BOUND_ENDPOINTS_FILENAME: Final[str] = "bound_endpoints.json"
 _PENDING_HOST_KEY_ROTATION_FILENAME_TEMPLATE: Final[str] = "pending_host_key_rotation_{kind}.json"
 _PENDING_CLIENT_KEY_ROTATION_FILENAME: Final[str] = "pending_client_key_rotation.json"
 _NEXT_CLIENT_KEY_NAME: Final[str] = "ssh_key_next"
-CLIENT_KEY_NAME: Final[str] = "ssh_key"
 
 # Marker lines the read-state / repair commands print (parsed out of stdout so
 # an SSH-level failure stays distinguishable from a negative answer).
@@ -786,8 +786,8 @@ def ensure_client_key_current(access: SliceVmAccessInterface, target: SliceAdopt
     """
     is_rotation_pending = load_pending_client_key_rotation(target.host_state_dir) is not None
     if not is_rotation_pending:
-        private_key_path = target.host_state_dir / CLIENT_KEY_NAME
-        public_key_path = target.host_state_dir / f"{CLIENT_KEY_NAME}.pub"
+        private_key_path = target.host_state_dir / IMBUE_CLOUD_CLIENT_KEY_NAME
+        public_key_path = target.host_state_dir / f"{IMBUE_CLOUD_CLIENT_KEY_NAME}.pub"
         if not private_key_path.is_file() or not public_key_path.is_file():
             return
         try:
@@ -813,7 +813,7 @@ def _has_local_evidence_of_unfinished_key_work(target: SliceAdoptionTarget) -> b
         return True
     if any(load_pending_host_key_rotation(target.host_state_dir, kind) is not None for kind in AdoptionEndpointKind):
         return True
-    private_key_path = target.host_state_dir / CLIENT_KEY_NAME
+    private_key_path = target.host_state_dir / IMBUE_CLOUD_CLIENT_KEY_NAME
     try:
         private_key_text = private_key_path.read_text()
     except OSError:
@@ -1014,7 +1014,7 @@ def rotate_client_key(access: SliceVmAccessInterface, target: SliceAdoptionTarge
     converges from the persisted pending state.
     """
     host_state_dir = target.host_state_dir
-    active_public_key_path = host_state_dir / f"{CLIENT_KEY_NAME}.pub"
+    active_public_key_path = host_state_dir / f"{IMBUE_CLOUD_CLIENT_KEY_NAME}.pub"
     next_private_key_path = host_state_dir / _NEXT_CLIENT_KEY_NAME
     next_public_key_path = host_state_dir / f"{_NEXT_CLIENT_KEY_NAME}.pub"
 
@@ -1067,7 +1067,7 @@ def rotate_client_key(access: SliceVmAccessInterface, target: SliceAdoptionTarge
 
         # Swap the local files: from here on this machine opens the host with
         # the new key.
-        next_private_key_path.replace(host_state_dir / CLIENT_KEY_NAME)
+        next_private_key_path.replace(host_state_dir / IMBUE_CLOUD_CLIENT_KEY_NAME)
         next_public_key_path.replace(active_public_key_path)
 
     # De-authorize the retired key everywhere, then clear the pending state.

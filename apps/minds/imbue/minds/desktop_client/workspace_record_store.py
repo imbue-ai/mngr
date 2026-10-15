@@ -21,7 +21,6 @@ import json
 import shutil
 import socket
 import threading
-import time
 import tomllib
 from base64 import b64decode
 from base64 import b64encode
@@ -31,8 +30,6 @@ from datetime import timezone
 from pathlib import Path
 from typing import Final
 
-from cryptography.exceptions import UnsupportedAlgorithm
-from cryptography.hazmat.primitives import serialization
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -53,7 +50,22 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import full_backup_bucket_name_from_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
+from imbue.minds.desktop_client.connections.data_types import ConnectionAvailability
+from imbue.minds.desktop_client.connections.primitives import IMBUE_CLOUD_PROVIDER_NAME_PREFIX
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.connections.primitives import is_connection_instance_name
+from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_synced_row
 from imbue.minds.desktop_client.destroying import has_destroying_marker
+from imbue.minds.desktop_client.host_access_material import HostAccessLayout
+from imbue.minds.desktop_client.host_access_material import HostAccessMaterial
+from imbue.minds.desktop_client.host_access_material import HostAccessPaths
+from imbue.minds.desktop_client.host_access_material import collect_host_access_material
+from imbue.minds.desktop_client.host_access_material import derive_openssh_public_key_line
+from imbue.minds.desktop_client.host_access_material import host_access_paths
+from imbue.minds.desktop_client.host_access_material import is_host_access_material_missing_locally
+from imbue.minds.desktop_client.host_access_material import materialize_host_access_material
+from imbue.minds.desktop_client.host_access_material import read_optional_text
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudLeaseActiveCliError
@@ -62,17 +74,13 @@ from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import WorkspaceRecordLeaseActiveError
 from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
-from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.minds.primitives import DeviceId
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.providers.host_key_store import HostKeyOrigin
-from imbue.mngr.providers.host_key_store import has_unpinned_bootstrap_drift
 from imbue.mngr.providers.host_key_store import load_current_host_key_pins
-from imbue.mngr.providers.host_key_store import pin_known_hosts_text
 from imbue.mngr.providers.host_key_store import render_pins_as_known_hosts_text
 from imbue.mngr_imbue_cloud.wire_types import SUPPORTED_RECORD_FORMAT
 
@@ -83,17 +91,21 @@ _LEGACY_ASSOCIATIONS_FILENAME = "workspace_associations.json"
 # associations file does not exist (mirroring the retired fallback reader).
 _LEGACY_SESSIONS_FILENAME = "sessions.json"
 _LEGACY_RETIRED_SUFFIX = ".pre-sync"
-# Providers whose hosts any signed-in device can reach/modify; their records
-# carry no hosting_device_id (concurrent writers are resolved by CAS).
-_CLOUD_PROVIDER_PREFIX = "imbue_cloud_"
 
 RECORD_STATE_ACTIVE = "active"
 RECORD_STATE_DESTROYED = "destroyed"
 
 
-def is_cloud_provider_kind(provider_kind: str) -> bool:
-    """True for provider kinds whose hosts any signed-in device can reach (imbue_cloud rows)."""
-    return provider_kind.startswith(_CLOUD_PROVIDER_PREFIX)
+def is_account_synced_provider(provider_kind: str, connection_store: ConnectionStore | None) -> bool:
+    """True for provider instances every device that unlocks the account can reach: the account
+    instance (either spelling) and the account-owned connections; false for docker, lima, vultr,
+    and the local profile's connections, whose rows stay attributed to their hosting device."""
+    if provider_kind.startswith(IMBUE_CLOUD_PROVIDER_NAME_PREFIX):
+        return True
+    if connection_store is None or not is_connection_instance_name(provider_kind):
+        return False
+    found = connection_store.find_active_connection_by_instance_name(provider_kind)
+    return found is not None and found[0] != LOCAL_PROFILE_USER_ID
 
 
 # File names inside an imbue_cloud provider instance's per-host state dir
@@ -104,10 +116,6 @@ _SSH_KEY_FILENAME = "ssh_key"
 _SSH_PUBLIC_KEY_FILENAME = "ssh_key.pub"
 _KNOWN_HOSTS_FILENAME = "known_hosts"
 _LEASE_META_FILENAME = "lease.json"
-# The orphan sweep never touches a per-host dir modified more recently than
-# this: a lease in progress creates the keypair before it writes lease.json,
-# and the sweep (on the scheduler thread) must not win that race.
-_ORPHAN_SWEEP_GRACE_SECONDS = 3600.0
 
 
 class WorkspaceSecretsPayload(FrozenModel):
@@ -127,13 +135,19 @@ class WorkspaceSecretsPayload(FrozenModel):
         ),
     )
     restic_env: str | None = Field(default=None, description="Canonical restic.env text (when backups configured)")
+    # The two imbue_cloud-only fields predate host_access and keep being written
+    # for imbue_cloud rows so a pre-format-2 client can still reach those hosts.
     ssh_private_key: str | None = Field(default=None, description="Private key that grants SSH access to the host")
     ssh_known_hosts: str | None = Field(default=None, description="known_hosts entries pinning the host's public key")
+    host_access: HostAccessMaterial | None = Field(
+        default=None, description="The per-host files and pins that grant access to the host, in its backend's layout"
+    )
 
 
 # The newest encrypted-secrets payload format this app understands; a blob
-# stamped with a higher payload_format is never rewritten here.
-SUPPORTED_PAYLOAD_FORMAT: Final[int] = 1
+# stamped with a higher payload_format is never rewritten here. Format 2 added
+# ``host_access``; a payload without it is still written as format 1.
+SUPPORTED_PAYLOAD_FORMAT: Final[int] = 2
 
 # The user-facing remedy for every record_format / payload_format write-lock.
 RECORD_TOO_NEW_MESSAGE: Final[str] = (
@@ -161,9 +175,26 @@ def secrets_payload_content_hash(payload: WorkspaceSecretsPayload) -> str:
     change?" -- this plaintext digest is what producers track to decide when a
     re-push is warranted.
     """
-    # payload_format is versioning plumbing, not material: excluding it keeps
-    # every pre-existing stamped hash stable (no fleet-wide re-push wave).
-    return hashlib.sha256(payload.model_dump_json(exclude={"payload_format"}).encode("utf-8")).hexdigest()
+    # payload_format is versioning plumbing, not material: excluding it (and an
+    # absent host_access, a field that arrived after those hashes were stamped)
+    # keeps the stamped hash of a row without per-host material stable, so only
+    # rows that gain material are re-pushed once.
+    excluded = {"payload_format"} | ({"host_access"} if payload.host_access is None else set())
+    canonical = payload
+    if payload.host_access is not None:
+        # The blob is written with sorted keys, so a decrypted payload carries
+        # its per-host files and pins sorted while a collected one carries them
+        # in layout order; the digest has to read the same either way.
+        canonical = payload.model_copy_update(
+            to_update(
+                payload.field_ref().host_access,
+                payload.host_access.model_copy_update(
+                    to_update(payload.host_access.field_ref().files, dict(sorted(payload.host_access.files.items()))),
+                    to_update(payload.host_access.field_ref().pins, dict(sorted(payload.host_access.pins.items()))),
+                ),
+            )
+        )
+    return hashlib.sha256(canonical.model_dump_json(exclude=excluded).encode("utf-8")).hexdigest()
 
 
 def encode_encrypted_secrets(dek: bytes, plaintext: bytes) -> str:
@@ -179,7 +210,13 @@ class ReplicaRecord(FrozenModel):
     display_name: str = Field(default="", description="Workspace display name")
     color: str | None = Field(default=None, description="Workspace accent color")
     provider_kind: str = Field(default="", description="mngr provider instance name")
-    hosting_device_id: str | None = Field(default=None, description="Hosting install (None for cloud rows)")
+    hosting_device_id: str | None = Field(
+        default=None,
+        description=(
+            "Hosting install; None for an account-synced row (the account's Imbue Cloud instance or an "
+            "account-owned connection), which any device that unlocks the account may modify"
+        ),
+    )
     device_label: str = Field(default="", description="Human-readable device name")
     state: str = Field(default=RECORD_STATE_ACTIVE, description="'active' or 'destroyed'")
     destroyed_at: str | None = Field(
@@ -217,8 +254,8 @@ class ReplicaRecord(FrozenModel):
     last_applied_secrets_revision: int | None = Field(
         default=None,
         description=(
-            "Local-only: the record revision whose synced SSH pins this device last applied "
-            "to its host-key store (never synced; gates the importer so a record that has "
+            "Local-only: the record revision whose synced host access material (per-host files and "
+            "pins) this device last applied (never synced; gates the importer so a record that has "
             "not advanced can never clobber or re-stamp newer local material)"
         ),
     )
@@ -290,16 +327,6 @@ def resolve_mngr_profile_dir(mngr_host_dir: Path) -> Path | None:
     return mngr_host_dir / "profiles" / profile_id
 
 
-def _read_optional_text(path: Path) -> str | None:
-    if not path.is_file():
-        return None
-    try:
-        return path.read_text()
-    except OSError as e:
-        logger.warning("Could not read SSH material at {}: {}", path, e)
-        return None
-
-
 def collect_ssh_key_material(mngr_host_dir: Path, host_id: str) -> tuple[str | None, str | None]:
     """Best-effort collection of the (private key, known_hosts pins) that grant access to a host.
 
@@ -321,7 +348,7 @@ def collect_ssh_key_material(mngr_host_dir: Path, host_id: str) -> tuple[str | N
     if not providers_dir.is_dir():
         return None, None
     for key_path in sorted(providers_dir.glob(f"*/*/hosts/{host_id}/ssh_key")):
-        private_key = _read_optional_text(key_path)
+        private_key = read_optional_text(key_path)
         if private_key is None:
             continue
         pins = load_current_host_key_pins(key_path.parent / _KNOWN_HOSTS_FILENAME)
@@ -330,67 +357,31 @@ def collect_ssh_key_material(mngr_host_dir: Path, host_id: str) -> tuple[str | N
     return None, None
 
 
-def derive_openssh_public_key_line(private_key_text: str) -> str | None:
-    """Derive the OpenSSH public-key line from a private key, or None when unparseable.
+def host_access_material_from_payload(payload: WorkspaceSecretsPayload) -> HostAccessMaterial | None:
+    """The host access material a payload carries, converting a format-1 imbue_cloud payload's key fields.
 
-    The materializer must write ``ssh_key.pub`` alongside the private key:
-    mngr's ``load_or_create_ssh_keypair`` regenerates the whole pair when
-    either half is missing, which would silently clobber a materialized key.
-
-    Both container formats found in mngr profiles are handled: traditional /
-    PKCS#8 PEM (older mngr installs generated PEM RSA client keys,
-    ``-----BEGIN RSA PRIVATE KEY-----``) and the OpenSSH format that current
-    mngr Ed25519 client keys use (``-----BEGIN OPENSSH PRIVATE KEY-----``) --
-    ``cryptography`` needs a different loader for each.
+    A ``host_access`` whose layout this app does not know is left alone (never
+    guessed at); the imbue_cloud key fields, which a newer client keeps writing
+    for imbue_cloud rows, still apply then. Returns None when nothing applicable
+    remains. The derived ``ssh_key.pub`` is included because mngr regenerates
+    the whole pair when either half is missing, which would clobber a
+    materialized key.
     """
-    key_bytes = private_key_text.encode("utf-8")
-    loader_errors: list[str] = []
-    for load_private_key in (serialization.load_pem_private_key, serialization.load_ssh_private_key):
-        try:
-            private_key = load_private_key(key_bytes, password=None)
-        except (ValueError, TypeError, UnsupportedAlgorithm) as e:
-            loader_errors.append(f"{load_private_key.__name__}: {e}")
-            continue
-        public_bytes = private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH
-        )
-        return public_bytes.decode("utf-8")
-    logger.warning("Could not parse a synced SSH private key: {}", "; ".join(loader_errors))
-    return None
-
-
-def _write_private_text_file(path: Path, content: str) -> None:
-    """Write a secret file atomically (tmp + rename) with owner-only permissions."""
-    tmp_path = path.with_name(path.name + ".tmp")
-    tmp_path.write_text(content)
-    tmp_path.chmod(0o600)
-    tmp_path.rename(path)
-
-
-def _materialize_ssh_key_files(host_dir: Path, payload: WorkspaceSecretsPayload, public_key_line: str) -> bool:
-    """Write the synced private key (+ derived .pub) into ``host_dir``.
-
-    Idempotent compare-and-write: unchanged material touches nothing, so the
-    caller can use the return value to decide whether discovery needs a
-    bounce. Raises OSError on filesystem failures.
-    """
-    assert payload.ssh_private_key is not None, "caller guarantees SSH material is present"
-    host_dir.mkdir(parents=True, exist_ok=True)
-
-    # The private key (and its derived public half -- mngr regenerates the
-    # whole pair when either file is missing, so both must exist together).
-    key_path = host_dir / _SSH_KEY_FILENAME
-    public_key_path = host_dir / _SSH_PUBLIC_KEY_FILENAME
-    if _read_optional_text(key_path) != payload.ssh_private_key:
-        _write_private_text_file(key_path, payload.ssh_private_key)
-        _write_private_text_file(public_key_path, public_key_line)
-        return True
-    elif _read_optional_text(public_key_path) != public_key_line:
-        _write_private_text_file(public_key_path, public_key_line)
-        return True
-    else:
-        # Both halves already match the synced material.
-        return False
+    if payload.host_access is not None:
+        if payload.host_access.layout in {layout.value for layout in HostAccessLayout}:
+            return payload.host_access
+        logger.warning("Leaving host access material of unknown layout {!r} alone", payload.host_access.layout)
+    if payload.ssh_private_key is None:
+        return None
+    public_key_line = derive_openssh_public_key_line(payload.ssh_private_key)
+    if public_key_line is None:
+        return None
+    pins = {_KNOWN_HOSTS_FILENAME: payload.ssh_known_hosts} if payload.ssh_known_hosts is not None else {}
+    return HostAccessMaterial(
+        layout=HostAccessLayout.IMBUE_CLOUD.value,
+        files={_SSH_KEY_FILENAME: payload.ssh_private_key, _SSH_PUBLIC_KEY_FILENAME: public_key_line},
+        pins=pins,
+    )
 
 
 def _record_host_id_or_none(record_host_id: str) -> HostId | None:
@@ -399,7 +390,8 @@ def _record_host_id_or_none(record_host_id: str) -> HostId | None:
         return HostId(record_host_id)
     except InvalidRandomIdError:
         logger.warning(
-            "Synced record host id {!r} is not a valid mngr host id; applying its pins unattributed", record_host_id
+            "Synced record host id {!r} is not a valid mngr host id; its host access material is skipped",
+            record_host_id,
         )
         return None
 
@@ -443,8 +435,20 @@ class WorkspaceRecordStore(MutableModel):
         frozen=True, description="This install's stable device id (record provenance; see device_identity)"
     )
     device_label: str = Field(frozen=True, description="This device's human-readable name")
+    connection_store: ConnectionStore | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Decides which connection instances are account-synced (their rows carry no hosting device) "
+            "and which have usable credentials here (their hosts' material is materialized); None treats "
+            "every connection instance as device-hosted"
+        ),
+    )
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _records_by_user_id: dict[str, dict[str, ReplicaRecord]] = PrivateAttr(default_factory=dict)
+    # The account email each replica was last synced under, kept in the replica
+    # file so a signed-out account's section can still be labeled.
+    _email_by_user_id: dict[str, str] = PrivateAttr(default_factory=dict)
     _is_loaded: bool = PrivateAttr(default=False)
     # Accounts whose server-side key bundle presence was confirmed this
     # process run (see _reconcile_key_bundle). In-memory on purpose: one
@@ -456,8 +460,7 @@ class WorkspaceRecordStore(MutableModel):
     # restart naturally retries.
     _ssh_material_error_by_agent_id: dict[str, str] = PrivateAttr(default_factory=dict)
 
-    # -- Replica persistence -------------------------------------------------
-
+    # Replica persistence
     def _effective_mngr_host_dir(self) -> Path:
         return self.mngr_host_dir if self.mngr_host_dir is not None else self.paths.mngr_host_dir
 
@@ -481,6 +484,9 @@ class WorkspaceRecordStore(MutableModel):
                     logger.warning("Ignoring unreadable workspace-record replica {}: {}", path, e)
                     continue
                 entries = raw.get("records", []) if isinstance(raw, dict) else []
+                email = raw.get("email") if isinstance(raw, dict) else None
+                if isinstance(email, str) and email:
+                    self._email_by_user_id[user_id] = email
                 # Replica files persist a plain record list, so re-keying on
                 # load is what migrates host-keyed replicas from older builds.
                 by_workspace: dict[str, ReplicaRecord] = {}
@@ -511,11 +517,20 @@ class WorkspaceRecordStore(MutableModel):
         records_dir.mkdir(parents=True, exist_ok=True)
         path = self._replica_path(user_id)
         by_workspace = self._records_by_user_id.get(user_id, {})
-        payload = {"records": [record.model_dump(mode="json") for record in by_workspace.values()]}
+        payload: dict[str, object] = {"records": [record.model_dump(mode="json") for record in by_workspace.values()]}
+        email = self._email_by_user_id.get(user_id)
+        if email is not None:
+            payload["email"] = email
         tmp_path = path.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(payload, indent=2))
         tmp_path.chmod(0o600)
         tmp_path.rename(path)
+
+    def account_email_for(self, user_id: str) -> str | None:
+        """The email the account's replica was last synced under, or None when it never synced here."""
+        with self._lock:
+            self._load_unlocked()
+            return self._email_by_user_id.get(user_id)
 
     def _set_record_unlocked(self, user_id: str, record: ReplicaRecord) -> None:
         self._load_unlocked()
@@ -529,8 +544,7 @@ class WorkspaceRecordStore(MutableModel):
             del by_workspace[workspace_id]
             self._save_unlocked(user_id)
 
-    # -- Read API -------------------------------------------------------------
-
+    # Read API
     def list_records(self, user_id: str) -> list[ReplicaRecord]:
         with self._lock:
             self._load_unlocked()
@@ -559,16 +573,31 @@ class WorkspaceRecordStore(MutableModel):
                     return user_id, record
         return None
 
-    # -- Secrets --------------------------------------------------------------
+    # Secrets
+    def _collect_secrets_payload(
+        self, user_id: str, agent_id: str, host_id: str, provider_kind: str
+    ) -> WorkspaceSecretsPayload | None:
+        """Assemble the workspace's plaintext secrets from their local sources, or None when empty.
 
-    def _collect_secrets_payload(self, user_id: str, agent_id: str, host_id: str) -> WorkspaceSecretsPayload | None:
-        """Assemble the workspace's plaintext secrets from their local sources, or None when empty."""
+        The host access material is collected for every provider with a layout,
+        docker and lima included, so a machine's per-host material rides its
+        record from the start; the imbue_cloud-only key fields are kept beside
+        it for pre-format-2 readers.
+        """
         restic_env = read_canonical_env(self.paths, AgentId(agent_id))
         ssh_private_key, ssh_known_hosts = collect_ssh_key_material(self._effective_mngr_host_dir(), host_id)
-        if restic_env is None and ssh_private_key is None:
+        host_access: HostAccessMaterial | None = None
+        access_paths = self._host_access_paths(user_id, provider_kind, host_id)
+        if access_paths is not None:
+            host_access = collect_host_access_material(access_paths)
+        if restic_env is None and ssh_private_key is None and host_access is None:
             return None
         return WorkspaceSecretsPayload(
-            restic_env=restic_env, ssh_private_key=ssh_private_key, ssh_known_hosts=ssh_known_hosts
+            payload_format=SUPPORTED_PAYLOAD_FORMAT if host_access is not None else 1,
+            restic_env=restic_env,
+            ssh_private_key=ssh_private_key,
+            ssh_known_hosts=ssh_known_hosts,
+            host_access=host_access,
         )
 
     def build_encrypted_secrets(
@@ -576,6 +605,7 @@ class WorkspaceRecordStore(MutableModel):
         user_id: str,
         agent_id: str,
         host_id: str,
+        provider_kind: str,
         # The record's current blob, so a rewrite preserves payload keys a
         # newer app version added (None when the record has no blob yet).
         existing_encrypted: str | None,
@@ -595,20 +625,27 @@ class WorkspaceRecordStore(MutableModel):
         dek = dek_store.load_dek(self.paths, user_id)
         if dek is None:
             return None
-        payload = self._collect_secrets_payload(user_id, agent_id, host_id)
+        payload = self._collect_secrets_payload(user_id, agent_id, host_id, provider_kind)
         if payload is None:
             return None
         existing_raw = self._decrypt_secrets_raw(dek, existing_encrypted, agent_id)
-        if existing_raw is not None:
-            raw_format = existing_raw.get("payload_format")
-            if isinstance(raw_format, int) and raw_format > SUPPORTED_PAYLOAD_FORMAT:
-                logger.warning(
-                    "Leaving the secrets blob for machine {} untouched: it was written by a newer app version",
-                    agent_id,
-                )
-                return None
-        own_fields = json.loads(payload.model_dump_json())
+        existing_format = existing_raw.get("payload_format") if existing_raw is not None else None
+        if isinstance(existing_format, int) and existing_format > SUPPORTED_PAYLOAD_FORMAT:
+            logger.warning(
+                "Leaving the secrets blob for machine {} untouched: it was written by a newer app version",
+                agent_id,
+            )
+            return None
+        # An absent host_access is left out rather than written as null, so a
+        # payload this device collects nothing new for keeps a newer client's.
+        own_fields = json.loads(
+            payload.model_dump_json(exclude={"host_access"} if payload.host_access is None else set())
+        )
         merged = {**(existing_raw or {}), **own_fields}
+        # The stamp describes the merged blob: material kept from the existing
+        # payload keeps the format that introduced it.
+        if isinstance(existing_format, int):
+            merged["payload_format"] = max(existing_format, payload.payload_format)
         plaintext = json.dumps(merged, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return BuiltRecordSecrets(
             encrypted=encode_encrypted_secrets(dek, plaintext),
@@ -654,8 +691,7 @@ class WorkspaceRecordStore(MutableModel):
             logger.warning("Malformed decrypted secrets payload for machine {}: {}", record.agent_id, e)
             return None
 
-    # -- Record building ------------------------------------------------------
-
+    # Record building
     def build_record_from_resolver(
         self,
         user_id: str,
@@ -670,12 +706,16 @@ class WorkspaceRecordStore(MutableModel):
         provider_kind = info.provider_name or ""
         display_name = resolver.get_workspace_name(AgentId(agent_id)) or info.agent_name
         color = resolver.get_workspace_color(AgentId(agent_id))
-        is_cloud_row = provider_kind.startswith(_CLOUD_PROVIDER_PREFIX)
+        is_cloud_row = is_account_synced_provider(provider_kind, self.connection_store)
         with self._lock:
             self._load_unlocked()
             previous = self._records_by_user_id.get(user_id, {}).get(str(agent_id))
         built_secrets = self.build_encrypted_secrets(
-            user_id, agent_id, info.host_id, previous.encrypted_secrets if previous is not None else None
+            user_id,
+            agent_id,
+            info.host_id,
+            provider_kind,
+            previous.encrypted_secrets if previous is not None else None,
         )
         # The explicit backup-bucket association rides on the record (the
         # server-side reaper consumes it); derived from the canonical env, the
@@ -698,8 +738,7 @@ class WorkspaceRecordStore(MutableModel):
             secrets_content_hash=built_secrets.content_hash if built_secrets is not None else None,
         )
 
-    # -- Push / pull ----------------------------------------------------------
-
+    # Push / pull
     def _push_record(self, user_id: str, account_email: str, record: ReplicaRecord) -> ReplicaRecord:
         """CAS-push one record; on a revision conflict, rebase once onto the stored revision.
 
@@ -740,6 +779,7 @@ class WorkspaceRecordStore(MutableModel):
             to_update(record.field_ref().is_dirty, False),
         )
         with self._lock:
+            self._email_by_user_id[user_id] = account_email
             self._set_record_unlocked(user_id, acked)
         return acked
 
@@ -873,6 +913,7 @@ class WorkspaceRecordStore(MutableModel):
         wire_records = pulled.records
         with self._lock:
             self._load_unlocked()
+            self._email_by_user_id[user_id] = account_email
             by_workspace = self._records_by_user_id.setdefault(user_id, {})
             server_workspace_ids = set()
             for wire in wire_records:
@@ -947,7 +988,7 @@ class WorkspaceRecordStore(MutableModel):
             if record.encrypted_secrets is not None or is_record_too_new(record):
                 continue
             built_secrets = self.build_encrypted_secrets(
-                user_id, record.agent_id, record.host_id, record.encrypted_secrets
+                user_id, record.agent_id, record.host_id, record.provider_kind, record.encrypted_secrets
             )
             if built_secrets is None:
                 continue
@@ -980,27 +1021,42 @@ class WorkspaceRecordStore(MutableModel):
         logger.info("Materialized the backup env for {} from its synced machine record", agent_id)
         return True
 
-    # -- SSH material consumption ----------------------------------------------
-
-    def imbue_cloud_host_state_dir(self, account_email: str, host_id: str) -> Path | None:
-        """The account's imbue_cloud per-host state dir, or None while mngr is uninitialized.
-
-        The instance name is derived locally from the account email (never
-        trusted from the wire), so materialized files always land where this
-        install's provider will look.
-        """
+    # SSH material consumption
+    def _host_access_paths(self, user_id: str, provider_kind: str, host_id: str) -> HostAccessPaths | None:
+        """Where ``host_id``'s access material lives under this profile, or None while mngr is uninitialized,
+        the provider has no synced layout, or the host id does not parse."""
         profile_dir = resolve_mngr_profile_dir(self._effective_mngr_host_dir())
-        if profile_dir is None:
+        typed_host_id = _record_host_id_or_none(host_id)
+        if profile_dir is None or typed_host_id is None:
             return None
-        instance_name = imbue_cloud_provider_name_for_account(account_email)
-        return profile_dir / "providers" / "imbue_cloud" / instance_name / "hosts" / host_id
+        instance_name = provider_instance_name_for_synced_row(user_id, provider_kind)
+        return host_access_paths(profile_dir, instance_name, typed_host_id)
 
-    def imbue_cloud_host_ssh_key_path(self, account_email: str, host_id: str) -> Path | None:
-        """The materialized (or lease-time) private key path for one cloud host, or None."""
-        host_dir = self.imbue_cloud_host_state_dir(account_email, host_id)
-        if host_dir is None:
+    def _is_host_access_materializable_here(self, provider_kind: str) -> bool:
+        """Whether this device holds a provider block that would read the host's material once written.
+
+        The account instance exists while the account is signed in; a connection
+        instance exists while its credentials are usable here. docker, lima, and
+        vultr hosts live on their hosting device and nothing here could reach
+        them yet, so their material is carried but not laid down.
+        """
+        if provider_kind.startswith(IMBUE_CLOUD_PROVIDER_NAME_PREFIX):
+            return True
+        if self.connection_store is None or not is_connection_instance_name(provider_kind):
+            return False
+        found = self.connection_store.find_active_connection_by_instance_name(provider_kind)
+        if found is None:
+            return False
+        owner_user_id, connection_record = found
+        return self.connection_store.availability(owner_user_id, connection_record) is ConnectionAvailability.AVAILABLE
+
+    def host_access_key_path(self, user_id: str, record: ReplicaRecord) -> Path | None:
+        """The private key that would open the record's host from this device, or None when its provider has no
+        synced layout (or mngr is uninitialized here, or the host id does not parse)."""
+        access_paths = self._host_access_paths(user_id, record.provider_kind, record.host_id)
+        if access_paths is None:
             return None
-        return host_dir / _SSH_KEY_FILENAME
+        return access_paths.per_host_dir / access_paths.agent_key_file_name
 
     def ssh_material_errors(self) -> dict[str, str]:
         """Last materialization failure per workspace agent id (for the tile chips)."""
@@ -1021,14 +1077,15 @@ class WorkspaceRecordStore(MutableModel):
         For every ACTIVE record: eagerly materialize a missing backup env, then
         apply the record's payload when it is new to this device (see
         :meth:`_materialize_record_secrets`) -- converging a drifted backup env
-        for any provider kind, and (for cloud rows) writing the synced SSH key
-        material into the imbue_cloud provider's per-host state dir so
-        discovery can reach hosts leased on another install (and converging
-        hosts leased here whose material another install has since
-        advanced, e.g. by adopting the host). Also sweeps
-        orphaned per-host key dirs. No-op while the account is locked. Returns
-        True when SSH material was created or changed, so the caller can
-        bounce discovery.
+        for any provider kind, and (for rows whose provider instance holds
+        usable credentials here, see :meth:`_is_host_access_materializable_here`)
+        laying the synced host access material down under the provider
+        instance so discovery can reach hosts created on another install (and
+        converging hosts created here whose material another install has since
+        advanced, e.g. by adopting the host). Also sweeps the key dirs of
+        tombstoned rows hosted elsewhere (:meth:`_sweep_orphaned_ssh_key_dirs`).
+        No-op while the account is locked. Returns True when SSH material was
+        created or changed, so the caller can bounce discovery.
         """
         if not dek_store.is_account_unlocked(self.paths, user_id):
             return False
@@ -1041,7 +1098,7 @@ class WorkspaceRecordStore(MutableModel):
             is_ssh_material_changed = (
                 self._materialize_record_secrets(user_id, account_email, record) or is_ssh_material_changed
             )
-        self._sweep_orphaned_ssh_key_dirs(user_id, account_email)
+        self._sweep_orphaned_ssh_key_dirs(user_id)
         return is_ssh_material_changed
 
     def _materialize_record_secrets(self, user_id: str, account_email: str, record: ReplicaRecord) -> bool:
@@ -1065,21 +1122,21 @@ class WorkspaceRecordStore(MutableModel):
           local copy, the only surviving restic credentials, alone). This is
           the convergence path for every provider kind: a device holding a
           stale env picks up the record's rotated one here.
-        - for cloud rows -- leased-here included -- the SSH key files and
-          known_hosts pins are applied: pins go through the host-key store as
-          user-origin material with replace-by-(endpoint, keytype) semantics,
-          so a stale first-ordered pin can never shadow the live key and later
-          local bootstrap writes can never displace what the record
-          established. A lease held here grants no standing authority over
-          the trust material: another install can legitimately advance it
-          (adopting the host rotates its sshd keys, and the synced record is
-          the channel that rotated material arrives through); what protects
-          this install's own newer, not-yet-pushed material is the revision +
-          content-hash gate, not the lease. Missing key or known_hosts files
-          (a swept and re-created host dir) re-open the gate regardless of
-          the revision, as does record known_hosts material whose endpoints
-          still hold only absent-or-bootstrap pins (a device whose earlier
-          client skipped the apply while stamping the revision).
+        - for rows whose provider this device holds -- created here included --
+          the host access material (the per-host files and the host-key pins,
+          in the backend's layout) is applied: pins go through the host-key
+          store as user-origin material with replace-by-(endpoint, keytype)
+          semantics, so a stale first-ordered pin can never shadow the live key
+          and later local bootstrap writes can never displace what the record
+          established. A lease held here grants no standing authority over the
+          trust material: another install can legitimately advance it (adopting
+          the host rotates its sshd keys, and the synced record is the channel
+          that rotated material arrives through); what protects this install's
+          own newer, not-yet-pushed material is the revision + content-hash
+          gate, not the lease. Missing files (a swept and re-created host dir)
+          re-open the gate regardless of the revision, as do record pins whose
+          endpoints still hold only absent-or-bootstrap pins (a device whose
+          earlier client skipped the apply while stamping the revision).
 
         A successful application also stamps ``secrets_content_hash`` with the
         applied payload's digest: local material now mirrors the record, so a
@@ -1093,39 +1150,33 @@ class WorkspaceRecordStore(MutableModel):
         if record.encrypted_secrets is None:
             self._clear_ssh_material_error(record.agent_id)
             return False
-        is_cloud_row = record.provider_kind.startswith(_CLOUD_PROVIDER_PREFIX)
+        is_account_synced_row = is_account_synced_provider(record.provider_kind, self.connection_store)
         payload = self.decrypt_record_secrets(user_id, record)
         if payload is None:
-            if is_cloud_row:
-                self._set_ssh_material_error(
-                    record.agent_id, "Could not decrypt the synced secrets for this workspace."
-                )
+            if is_account_synced_row:
+                self._set_ssh_material_error(record.agent_id, "Could not decrypt the synced secrets for this machine.")
             return False
 
-        # The SSH half applies to every cloud row, leased-here included.
-        host_dir = self.imbue_cloud_host_state_dir(account_email, record.host_id) if is_cloud_row else None
-        is_ssh_applicable = host_dir is not None and payload.ssh_private_key is not None
+        # The host access half applies wherever this device holds the row's provider.
+        access_paths = (
+            self._host_access_paths(user_id, record.provider_kind, record.host_id)
+            if self._is_host_access_materializable_here(record.provider_kind)
+            else None
+        )
+        material = host_access_material_from_payload(payload)
+        if access_paths is not None and payload.ssh_private_key is not None and material is None:
+            self._set_ssh_material_error(record.agent_id, "The synced SSH key for this machine could not be parsed.")
+            return False
+        is_access_applicable = access_paths is not None and material is not None
 
-        # The revision gate (with the SSH escape hatches: missing files, and
-        # record pins the store never absorbed).
+        # The revision gate (with the escape hatches: missing files, and record
+        # pins the store never absorbed).
         payload_content_hash = secrets_payload_content_hash(payload)
         is_payload_new_here = payload_content_hash != record.secrets_content_hash
         is_due = record.revision > (record.last_applied_secrets_revision or 0) and is_payload_new_here
-        if is_ssh_applicable:
-            assert host_dir is not None
-            known_hosts_path = host_dir / _KNOWN_HOSTS_FILENAME
-            is_key_pair_present = (host_dir / _SSH_KEY_FILENAME).is_file() and (
-                host_dir / _SSH_PUBLIC_KEY_FILENAME
-            ).is_file()
-            is_due = (
-                is_due
-                or not is_key_pair_present
-                or (payload.ssh_known_hosts is not None and not known_hosts_path.exists())
-                or (
-                    payload.ssh_known_hosts is not None
-                    and has_unpinned_bootstrap_drift(known_hosts_path, payload.ssh_known_hosts)
-                )
-            )
+        if is_access_applicable:
+            assert access_paths is not None and material is not None
+            is_due = is_due or is_host_access_material_missing_locally(access_paths, material)
         if not is_due:
             self._clear_ssh_material_error(record.agent_id)
             return False
@@ -1141,37 +1192,16 @@ class WorkspaceRecordStore(MutableModel):
                 logger.warning("Could not converge the backup env for machine {}: {}", record.agent_id, e)
                 return False
 
-        # The SSH half: key files, then known_hosts pins through the store.
+        # The host access half: the per-host files, then the pins through the store.
         is_changed = False
-        if is_ssh_applicable:
-            assert host_dir is not None and payload.ssh_private_key is not None
-            public_key_line = derive_openssh_public_key_line(payload.ssh_private_key)
-            if public_key_line is None:
-                self._set_ssh_material_error(
-                    record.agent_id, "The synced SSH key for this workspace could not be parsed."
-                )
-                return False
+        if is_access_applicable:
+            assert access_paths is not None and material is not None
             try:
-                is_changed = _materialize_ssh_key_files(host_dir, payload, public_key_line)
-            except OSError as e:
-                logger.warning("Could not materialize SSH material for machine {}: {}", record.agent_id, e)
-                self._set_ssh_material_error(record.agent_id, f"Could not write the SSH key material: {e}")
+                is_changed = materialize_host_access_material(access_paths, material)
+            except (MngrError, OSError) as e:
+                logger.warning("Could not materialize host access material for machine {}: {}", record.agent_id, e)
+                self._set_ssh_material_error(record.agent_id, f"Could not write the host access material: {e}")
                 return False
-            if payload.ssh_known_hosts is not None:
-                known_hosts_path = host_dir / _KNOWN_HOSTS_FILENAME
-                content_before = _read_optional_text(known_hosts_path)
-                try:
-                    pin_known_hosts_text(
-                        known_hosts_path,
-                        payload.ssh_known_hosts,
-                        host_id=_record_host_id_or_none(record.host_id),
-                        origin=HostKeyOrigin.USER,
-                    )
-                except (MngrError, OSError) as e:
-                    logger.warning("Could not apply synced known_hosts pins for machine {}: {}", record.agent_id, e)
-                    self._set_ssh_material_error(record.agent_id, f"Could not write the synced host-key pins: {e}")
-                    return is_changed
-                is_changed = _read_optional_text(known_hosts_path) != content_before or is_changed
 
         # Stamp the local-only tracking fields: the gate closes at this
         # revision, and -- only when the locally collected payload truly
@@ -1179,7 +1209,7 @@ class WorkspaceRecordStore(MutableModel):
         # material now mirrors it. Without parity (e.g. local material the
         # record has not caught up to), the previous hash state is kept, so a
         # device holding partial material stays ineligible to push its view.
-        local_payload = self._collect_secrets_payload(user_id, record.agent_id, record.host_id)
+        local_payload = self._collect_secrets_payload(user_id, record.agent_id, record.host_id, record.provider_kind)
         is_parity = local_payload is not None and secrets_payload_content_hash(local_payload) == payload_content_hash
         stamped = record.model_copy_update(
             to_update(record.field_ref().last_applied_secrets_revision, record.revision),
@@ -1189,45 +1219,50 @@ class WorkspaceRecordStore(MutableModel):
             with self._lock:
                 self._set_record_unlocked(user_id, stamped)
         if is_changed:
-            logger.info("Materialized synced SSH material for machine {} at {}", record.agent_id, host_dir)
-        if is_ssh_applicable:
+            logger.info(
+                "Materialized synced host access material for machine {} at {}",
+                record.agent_id,
+                access_paths.per_host_dir if access_paths is not None else None,
+            )
+        if is_access_applicable:
             self._clear_ssh_material_error(record.agent_id)
         return is_changed
 
-    def _sweep_orphaned_ssh_key_dirs(self, user_id: str, account_email: str) -> None:
-        """Delete per-host key dirs with no lease.json and no ACTIVE record.
+    def _sweep_orphaned_ssh_key_dirs(self, user_id: str) -> None:
+        """Delete the per-host key dirs of the account's tombstoned rows, in every synced layout.
 
-        Covers workspaces destroyed elsewhere (tombstoned rows), records
-        removed via the UI, and records deleted while this install was closed.
-        A recent-mtime grace protects an in-flight lease whose keypair exists
-        but whose lease.json has not landed yet.
+        Keyed on the record being a tombstone, positive evidence that the
+        workspace is gone, never on the absence of an active record: only the
+        imbue_cloud layout carries a ``lease.json`` liveness signal, and a long
+        cloud create can outlive any modification-time grace. A provider's own
+        destroy removes the per-host dir of a host destroyed here, so this
+        reaches the material of workspaces destroyed on another device: rows
+        this device hosts are skipped, whatever their provider. A lima, docker
+        or vultr dir exists on its hosting device alone and is never re-laid,
+        and a row on a local-profile connection is tombstoned by local
+        discovery alone (``_tombstone_definitively_absent``), which
+        ``_resurrect_locally_hosted_tombstones`` may still overturn on the next
+        pass; sweeping such a dir would cost a live host its only client key.
+        Of the rest, only the material this device lays down from the record
+        is swept (:meth:`_is_host_access_materializable_here`). A dir still
+        holding a lease this device owns is kept; the host's pins in a
+        provider-wide store are left, since they are keyed by endpoint and a
+        later host at that endpoint replaces them.
         """
-        example_dir = self.imbue_cloud_host_state_dir(account_email, "placeholder")
-        if example_dir is None:
-            return
-        hosts_root = example_dir.parent
-        if not hosts_root.is_dir():
-            return
-        active_cloud_host_ids = {
-            record.host_id
-            for record in self.list_records(user_id)
-            if record.state == RECORD_STATE_ACTIVE and record.provider_kind.startswith(_CLOUD_PROVIDER_PREFIX)
-        }
-        for host_dir in hosts_root.iterdir():
-            if not host_dir.is_dir():
+        for record in self.list_records(user_id):
+            if record.state != RECORD_STATE_DESTROYED or record.hosting_device_id == self.device_id:
                 continue
-            if host_dir.name in active_cloud_host_ids:
+            if not self._is_host_access_materializable_here(record.provider_kind):
                 continue
-            if (host_dir / _LEASE_META_FILENAME).is_file():
+            access_paths = self._host_access_paths(user_id, record.provider_kind, record.host_id)
+            if access_paths is None or not access_paths.per_host_dir.is_dir():
                 continue
-            try:
-                is_recently_touched = (time.time() - host_dir.stat().st_mtime) < _ORPHAN_SWEEP_GRACE_SECONDS
-            except OSError:
+            if (access_paths.per_host_dir / _LEASE_META_FILENAME).is_file():
                 continue
-            if is_recently_touched:
-                continue
-            logger.info("Sweeping orphaned imbue_cloud host key dir {} (no lease, no active record)", host_dir)
-            shutil.rmtree(host_dir, ignore_errors=True)
+            logger.info(
+                "Sweeping the {} key dir {} of a destroyed workspace", access_paths.layout, access_paths.per_host_dir
+            )
+            shutil.rmtree(access_paths.per_host_dir, ignore_errors=True)
 
     def find_record_any_state(self, agent_id: str) -> tuple[str, ReplicaRecord] | None:
         """Like :meth:`find_active_record` but tombstoned records count too (backup access)."""
@@ -1246,7 +1281,8 @@ class WorkspaceRecordStore(MutableModel):
 
         These are the accounts the unlock banner prompts for: a bundle exists
         (a non-empty master password was set somewhere) but this device has
-        no DEK file yet.
+        no DEK file yet. An encrypted workspace record or connection is taken
+        as proof of the bundle when no mirror has reached this device.
         """
         locked: list[str] = []
         for user_id in signed_in_user_ids:
@@ -1256,7 +1292,10 @@ class WorkspaceRecordStore(MutableModel):
                 locked.append(user_id)
                 continue
             has_secretful_record = any(record.encrypted_secrets is not None for record in self.list_records(user_id))
-            if has_secretful_record:
+            has_encrypted_connection = (
+                self.connection_store is not None and self.connection_store.has_encrypted_connections(user_id)
+            )
+            if has_secretful_record or has_encrypted_connection:
                 locked.append(user_id)
         return locked
 
@@ -1281,8 +1320,7 @@ class WorkspaceRecordStore(MutableModel):
             return False
         return True
 
-    # -- Legacy conversion + reconcile ----------------------------------------
-
+    # Legacy conversion + reconcile
     def _legacy_associations_path(self) -> Path:
         return self.paths.data_dir / _LEGACY_ASSOCIATIONS_FILENAME
 

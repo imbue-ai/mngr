@@ -10,6 +10,29 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr_vps.host_store import VpsHostRecord
 
 
+class VpsListingEntry(FrozenModel):
+    """One VPS owned by a provider instance, as read from the cloud listing (no SSH).
+
+    Discovery opens each VPS's root sshd with that host's own per-host client
+    key, so the listing must yield the host id alongside the SSH target: the id
+    comes from the ``mngr-host-id`` tag/label/metadata stamped at create.
+    """
+
+    hostname: str = Field(description="SSH target for the VPS root (a public IPv4 or a provider DNS name)")
+    host_id: HostId = Field(description="The mngr host placed on this VPS, from its mngr-host-id marker")
+
+
+class VpsRootKeypair(FrozenModel):
+    """The client keypair a read path resolved for a host's VPS root, and which layout it came from."""
+
+    private_key_path: Path = Field(description="The private key that opens root@vps:22 for the host")
+    public_key: str = Field(description="The OpenSSH public half of that key")
+    is_legacy_provider_key: bool = Field(
+        description="Whether the pair is the retired provider-wide key (the host predates per-host VPS-root keys) "
+        "rather than the host's own"
+    )
+
+
 class AgentEndpoint(FrozenModel):
     """Where (and how) to SSH to the agent placed on a VPS.
 

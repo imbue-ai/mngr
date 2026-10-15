@@ -11,7 +11,6 @@ pattern.
 
 import os
 from pathlib import Path
-from typing import Final
 
 from loguru import logger
 
@@ -20,6 +19,7 @@ from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
@@ -29,15 +29,10 @@ from imbue.minds.desktop_client.share_materials_injection import clear_share_mat
 from imbue.minds.desktop_client.sharing_handler import describe_connector_failure
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
+from imbue.minds.desktop_client.workspace_record_store import is_account_synced_provider
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.mngr.primitives import AgentId
-
-# Leased imbue_cloud hosts surface under a per-account provider instance named
-# ``imbue_cloud_<account-slug>``; the trailing-underscore prefix matches those
-# while excluding the hidden bare ``imbue_cloud`` singleton (which never hosts a
-# user workspace). Mirrors ``app.py``'s ``_IMBUE_CLOUD_PROVIDER_PREFIX``.
-_IMBUE_CLOUD_PROVIDER_PREFIX: Final[str] = "imbue_cloud_"
 
 
 class WorkspaceColorError(RuntimeError):
@@ -67,12 +62,19 @@ def _is_workspace_provider_errored(info: AgentDisplayInfo | None, errored_provid
     return info is not None and info.provider_name is not None and info.provider_name in errored_provider_names
 
 
-def _is_leased_imbue_cloud_workspace(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> bool:
-    """Return True if the workspace runs on a host leased from imbue_cloud (per-account provider)."""
+def _is_account_owned_provider_workspace(
+    backend_resolver: BackendResolverInterface, connection_store: ConnectionStore | None, agent_id: AgentId
+) -> bool:
+    """Whether the workspace runs on an account-owned provider (the account instance or one of its connections).
+
+    Such a workspace is bound to that account for life: the provider is offered
+    only under the account, and its record is what every device's
+    remove-connection gate counts.
+    """
     info = backend_resolver.get_agent_display_info(agent_id)
     if info is None or info.provider_name is None:
         return False
-    return info.provider_name.startswith(_IMBUE_CLOUD_PROVIDER_PREFIX)
+    return is_account_synced_provider(str(info.provider_name), connection_store)
 
 
 def set_workspace_color(
@@ -137,6 +139,7 @@ def associate_workspace_account(
     account_id: str,
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
+    connection_store: ConnectionStore | None,
 ) -> AccountSession:
     """Bind ``agent_id`` to a signed-in account by creating its workspace record; wake the chrome SSE.
 
@@ -145,14 +148,16 @@ def associate_workspace_account(
     :class:`AccountSession` (carrying the resolved ``user_id`` + ``email``) is
     returned so the caller can echo what was actually bound.
 
-    Raises :class:`WorkspaceAssociationError`: 403 for a leased imbue_cloud host
-    (permanently bound to its leasing account), 409 when no session store is
+    Raises :class:`WorkspaceAssociationError`: 403 for a workspace on an
+    account-owned provider (permanently bound to that account), 409 when no session store is
     configured, 404 when no signed-in account matches the given id/email, or
     502 when the record push fails (association requires connectivity -- the
     record is the association, and it lives on the connector).
     """
-    if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
-        raise WorkspaceAssociationError("Cannot change the account link of a host leased from imbue_cloud", 403)
+    if _is_account_owned_provider_workspace(backend_resolver, connection_store, agent_id):
+        raise WorkspaceAssociationError(
+            "Cannot change the account link of a machine on an account-owned provider", 403
+        )
     if session_store is None:
         raise WorkspaceAssociationError("Session store is not configured", 409)
     matched = next(
@@ -181,17 +186,18 @@ def disassociate_workspace_account(
     agent_id: AgentId,
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
+    connection_store: ConnectionStore | None,
     imbue_cloud_cli: ImbueCloudCli | None,
 ) -> None:
     """Unbind ``agent_id`` from its account and tear down its share (if any).
 
     A no-op if no session store is configured or the workspace has no associated
-    account. Raises :class:`WorkspaceAssociationError`: 403 for a leased
-    imbue_cloud host, 502 when the record removal fails (disassociation
+    account. Raises :class:`WorkspaceAssociationError`: 403 for a workspace on
+    an account-owned provider, 502 when the record removal fails (disassociation
     requires connectivity).
     """
-    if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
-        raise WorkspaceAssociationError("Cannot unlink a host leased from imbue_cloud", 403)
+    if _is_account_owned_provider_workspace(backend_resolver, connection_store, agent_id):
+        raise WorkspaceAssociationError("Cannot unlink a machine on an account-owned provider", 403)
     if session_store is None:
         return
     account = session_store.get_account_for_workspace(str(agent_id))

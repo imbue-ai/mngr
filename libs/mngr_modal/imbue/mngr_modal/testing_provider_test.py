@@ -68,6 +68,7 @@ from imbue.mngr_modal.backend import _create_environment
 from imbue.mngr_modal.backend import _enter_ephemeral_app_context_with_env_retry
 from imbue.mngr_modal.backend import _exit_modal_app_context
 from imbue.mngr_modal.backend import _lookup_persistent_app_with_env_retry
+from imbue.mngr_modal.backend import app_registry_key
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import ModalSandboxDiedMngrError
@@ -86,14 +87,12 @@ from imbue.mngr_modal.instance import _build_image_from_dockerfile_contents
 from imbue.mngr_modal.instance import _build_modal_secrets_from_env
 from imbue.mngr_modal.instance import _build_modal_volumes
 from imbue.mngr_modal.instance import _parse_volume_spec
-from imbue.mngr_modal.plugin import MODAL_BACKEND_NAME
 from imbue.mngr_modal.plugin import register_provider_backend
 from imbue.mngr_modal.routes.deployment import deploy_function
 from imbue.mngr_modal.routes.deployment import ensure_function_deployed
 from imbue.mngr_modal.routes.deployment import get_function_url
 from imbue.mngr_modal.routes.deployment import get_route_script_path
 from imbue.mngr_modal.routes.deployment import get_source_marker_function_name
-from imbue.mngr_modal.testing import get_shared_modal_test_run_names
 from imbue.mngr_modal.testing import make_host_record
 from imbue.mngr_modal.testing import make_sandbox_with_tags
 from imbue.mngr_modal.testing import make_snapshot
@@ -675,8 +674,9 @@ def test_discover_hosts_with_running_sandbox(
     make_sandbox_with_tags(testing_modal, host_id, "running-host")
 
     cg = testing_provider.mngr_ctx.concurrency_group
-    # discover_hosts with running sandboxes -- _create_host_from_sandbox will fail
-    # (no SSH) but the host record has snapshots, so it appears as a stopped host
+    # No client key for this sandbox exists on this machine, so the running
+    # sandbox cannot be opened; the host record has snapshots, so it is still
+    # surfaced from the record as a stopped host
     discovered = testing_provider.discover_hosts(cg)
     discovered_ids = {d.host_id for d in discovered}
     assert host_id in discovered_ids
@@ -1173,43 +1173,6 @@ def test_derive_modal_names_reproduces_shared_env_via_prefix_and_user_id(
         shared_ctx,
     )
     assert environment_name == full_name
-
-
-def test_shared_modal_test_run_names_are_absent_outside_a_shared_env_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without a shared env there is no run-wide app, so there is nothing to name."""
-    monkeypatch.delenv(SHARED_MODAL_ENV_NAME_VAR, raising=False)
-    assert get_shared_modal_test_run_names() is None
-
-
-def test_shared_modal_test_run_names_match_the_app_and_env_the_runs_creates_land_in(
-    monkeypatch: pytest.MonkeyPatch,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """A run's setup step must address the very app and environment its creates will.
-
-    Nothing fails loudly if these drift apart: the snapshot endpoint gets
-    published into an app nobody uses, every create deploys it again, and the
-    run goes green with the concurrency the setup step exists to remove.
-    """
-    timestamp_name = "mngr_test-2026-05-20-12-00-00"
-    user_id_suffix = "shared-abc123def456"
-    monkeypatch.setenv(SHARED_MODAL_ENV_NAME_VAR, f"{timestamp_name}-{user_id_suffix}")
-
-    names = get_shared_modal_test_run_names()
-
-    assert names is not None
-    assert names.environment_name == f"{timestamp_name}-{user_id_suffix}"
-    # The provider that a `mngr create <name>@.modal` subprocess in that run builds.
-    shared_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(temp_mngr_ctx.config.field_ref().prefix, f"{timestamp_name}-")
-    )
-    shared_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, shared_config))
-    created_environment_name, created_app_name, _ = ModalProviderBackend._derive_modal_names(
-        ProviderInstanceName(str(MODAL_BACKEND_NAME)),
-        ModalProviderConfig(host_dir=shared_ctx.config.default_host_dir, user_id=UserId(user_id_suffix)),
-        shared_ctx,
-    )
-    assert (names.app_name, names.environment_name) == (created_app_name, created_environment_name)
 
 
 def test_construct_modal_provider_accepts_injected_modal_interface(
@@ -2730,7 +2693,7 @@ def test_deploy_function_retries_transient_post_deploy_not_found(
     interface = _TransientNotFoundModalInterface(
         root_dir=tmp_path / "modal_transient", concurrency_group=cg, not_found_remaining=1
     )
-    url = deploy_function("snapshot_and_shutdown", f"test-app-{uuid4().hex}", f"test-env-{uuid4().hex}", interface)
+    url = deploy_function("snapshot_and_shutdown", f"test-app-{uuid4().hex}", None, interface)
 
     assert "snapshot_and_shutdown" in url
     assert interface.not_found_remaining == 0
@@ -2744,7 +2707,7 @@ def test_get_function_url_without_deploy_fails_fast_on_not_found(
         root_dir=tmp_path / "modal_transient", concurrency_group=cg, not_found_remaining=5
     )
     with pytest.raises(ModalProxyNotFoundError):
-        get_function_url("snapshot_and_shutdown", f"test-app-{uuid4().hex}", f"test-env-{uuid4().hex}", interface)
+        get_function_url("snapshot_and_shutdown", f"test-app-{uuid4().hex}", None, interface)
 
     # Exactly one lookup happened: the bare (non-post-deploy) path never retries.
     assert interface.not_found_remaining == 4
@@ -3627,13 +3590,12 @@ def test_ensure_function_deployed_does_not_redeploy_an_app_already_carrying_this
     """An app already carrying this source must not be deployed to again."""
     interface = FakeModalInterface(root_dir=tmp_path / "modal_deployed", concurrency_group=cg)
     app_name = f"test-app-{uuid4().hex}"
-    environment_name = f"test-env-{uuid4().hex}"
     interface.register_deployed_function(get_source_marker_function_name("snapshot_and_shutdown"), app_name=app_name)
     interface.register_deployed_function(
         "snapshot_and_shutdown", app_name=app_name, url="https://testing.modal.run/snapshot_and_shutdown"
     )
 
-    url = ensure_function_deployed("snapshot_and_shutdown", app_name, environment_name, interface)
+    url = ensure_function_deployed("snapshot_and_shutdown", app_name, None, interface)
 
     assert url == "https://testing.modal.run/snapshot_and_shutdown"
     assert interface.get_deployments() == ()
@@ -3645,9 +3607,8 @@ def test_ensure_function_deployed_deploys_into_an_app_that_has_no_deployment(
 ) -> None:
     interface = FakeModalInterface(root_dir=tmp_path / "modal_empty", concurrency_group=cg)
     app_name = f"test-app-{uuid4().hex}"
-    environment_name = f"test-env-{uuid4().hex}"
 
-    url = ensure_function_deployed("snapshot_and_shutdown", app_name, environment_name, interface)
+    url = ensure_function_deployed("snapshot_and_shutdown", app_name, None, interface)
 
     assert "snapshot_and_shutdown" in url
     deployments = interface.get_deployments()
@@ -3664,13 +3625,12 @@ def test_ensure_function_deployed_redeploys_when_the_app_carries_other_source(
     """A marker for different source means the deployed endpoint is stale, so redeploy."""
     interface = FakeModalInterface(root_dir=tmp_path / "modal_stale", concurrency_group=cg)
     app_name = f"test-app-{uuid4().hex}"
-    environment_name = f"test-env-{uuid4().hex}"
     interface.register_deployed_function("deployed_source_0123456789abcdef", app_name=app_name)
     interface.register_deployed_function(
         "snapshot_and_shutdown", app_name=app_name, url="https://testing.modal.run/stale"
     )
 
-    url = ensure_function_deployed("snapshot_and_shutdown", app_name, environment_name, interface)
+    url = ensure_function_deployed("snapshot_and_shutdown", app_name, None, interface)
 
     assert url != "https://testing.modal.run/stale"
     assert len(interface.get_deployments()) == 1
@@ -3683,10 +3643,9 @@ def test_ensure_function_deployed_deploys_when_the_endpoint_does_not_resolve(
     """The gate fails closed: a marker without a resolvable endpoint still deploys."""
     interface = FakeModalInterface(root_dir=tmp_path / "modal_marker_only", concurrency_group=cg)
     app_name = f"test-app-{uuid4().hex}"
-    environment_name = f"test-env-{uuid4().hex}"
     interface.register_deployed_function(get_source_marker_function_name("snapshot_and_shutdown"), app_name=app_name)
 
-    url = ensure_function_deployed("snapshot_and_shutdown", app_name, environment_name, interface)
+    url = ensure_function_deployed("snapshot_and_shutdown", app_name, None, interface)
 
     assert "snapshot_and_shutdown" in url
     assert len(interface.get_deployments()) == 1
@@ -3721,10 +3680,36 @@ def test_ensure_function_deployed_deploys_when_the_marker_cannot_be_read(
     """An unreadable answer must cost no more than no answer: deploy, do not fail the caller."""
     interface = _UnreadableModalInterface(root_dir=tmp_path / "modal_unreadable", concurrency_group=cg)
     app_name = f"test-app-{uuid4().hex}"
-    environment_name = f"test-env-{uuid4().hex}"
     interface.register_deployed_function(get_source_marker_function_name("snapshot_and_shutdown"), app_name=app_name)
 
-    url = ensure_function_deployed("snapshot_and_shutdown", app_name, environment_name, interface)
+    url = ensure_function_deployed("snapshot_and_shutdown", app_name, None, interface)
 
     assert "snapshot_and_shutdown" in url
     assert len(interface.get_deployments()) == 1
+
+
+def test_app_registry_separates_same_named_apps_opened_with_different_credentials(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """The registry keys by (app name, credential identity), so two instances that share an
+    ``app_name`` but carry different Modal tokens never reuse one another's app context."""
+    modal_interface = make_testing_modal_interface(tmp_path, cg)
+
+    app_a, _ = ModalProviderBackend._get_or_create_app(
+        "shared-name", "env1", False, modal_interface, credential_identity="ak-a"
+    )
+    app_b, _ = ModalProviderBackend._get_or_create_app(
+        "shared-name", "env1", False, modal_interface, credential_identity="ak-b"
+    )
+    app_a_again, _ = ModalProviderBackend._get_or_create_app(
+        "shared-name", "env1", False, modal_interface, credential_identity="ak-a"
+    )
+
+    assert app_a.get_app_id() != app_b.get_app_id()
+    assert app_a_again.get_app_id() == app_a.get_app_id()
+    ModalProviderBackend.close_app(app_registry_key("shared-name", "ak-a"))
+    ModalProviderBackend.close_app(app_registry_key("shared-name", "ak-b"))
+    assert app_registry_key("shared-name", "ak-a") not in ModalProviderBackend._app_registry
+    assert app_registry_key("shared-name", "ak-b") not in ModalProviderBackend._app_registry

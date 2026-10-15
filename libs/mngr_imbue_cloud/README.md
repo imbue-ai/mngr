@@ -233,3 +233,42 @@ mngr imbue_cloud account recheck-storage
 ```
 
 Grants that actually reduce usage are unlimited; only grants that free nothing count against a small rolling budget (so a grant cannot be farmed for extra write time). `recheck-storage` also works standalone -- if you dropped under quota some other way, it restores your keys without waiting for the hourly sweep.
+
+## Sync (transport for the minds app)
+
+`mngr imbue_cloud sync ...` is pure transport for the per-account sync features the minds desktop app builds on: workspace records, the password-wrapped key bundle, and per-account documents. The plugin never encrypts, decrypts, or interprets the payloads; every verb emits JSON on stdout (errors are a JSON body on stderr), and the push verbs read their document from stdin or `--input-file`.
+
+```bash
+# Workspace records: pull all, push one (CAS on revision), delete one.
+mngr imbue_cloud sync records pull
+mngr imbue_cloud sync records push --input-file record.json
+mngr imbue_cloud sync records delete agent-<hex>
+
+# The password-wrapped key bundle.
+mngr imbue_cloud sync bundle pull
+mngr imbue_cloud sync bundle push --input-file bundle.json
+mngr imbue_cloud sync bundle delete
+
+# Strip every client-encrypted blob (records and documents) server-side.
+mngr imbue_cloud sync scrub-secrets
+```
+
+### Account documents
+
+Per-account documents (the connector's `/sync/documents/*` routes) hold account-scoped state that follows the user to every device, keyed by a `kind` and a `doc_id`: a plaintext `metadata` object plus an optional client-encrypted `encrypted_payload`. The first kind is `connection` (the cloud connections an account owns).
+
+```bash
+# {documents: [...]}, tombstones included so devices can drop local copies.
+mngr imbue_cloud sync documents pull --kind connection
+
+# Push one document: revision 1 inserts, otherwise CAS on revision. Only the
+# fields present in the input are sent -- leave encrypted_payload out to keep
+# the stored payload, send it as null to clear it. A revision conflict is a
+# JSON error carrying the server's current row under "stored".
+mngr imbue_cloud sync documents push --input-file document.json
+
+# Tombstone one document (idempotent); emits the stored tombstone.
+mngr imbue_cloud sync documents delete connection conn-<hex>
+```
+
+A document whose `document_format` is newer than this client's `SUPPORTED_DOCUMENT_FORMAT` should be treated as read-only by consumers; the connector refuses pushes below the stored format (`ImbueCloudRecordFormatTooNewError`) and inserts past the per-kind cap (`ImbueCloudDocumentLimitError`).

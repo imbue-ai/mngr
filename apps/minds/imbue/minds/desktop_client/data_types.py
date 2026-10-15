@@ -82,7 +82,9 @@ class RemoteWorkspaceTile(FrozenModel):
     state: str = Field(
         default="",
         description=(
-            "Derived access state for cloud rows: '' (plain), 'signed_out', 'connecting', 'unreachable', or 'error'"
+            "Derived access state for cloud rows: '' (plain), 'locked' (the account's key is not on this device), "
+            "'missing_connection' (the row's connection is not held here), 'no_credentials' (its credentials are "
+            "unusable here), 'read_only' (a newer app wrote it), 'connecting', 'unreachable', or 'error'"
         ),
     )
     state_detail: str | None = Field(default=None, description="Failure detail for the 'error' state (chip tooltip)")

@@ -35,6 +35,19 @@ _LIMA_PROVIDER_NAME: Final[str] = "lima"
 
 
 @pure
+def clamp_machine_size_to_cpu_count(selection: MachineSizeSelection, cpu_count: int) -> MachineSizeSelection:
+    """``selection`` with its CPU count lowered to ``cpu_count`` when it asks for more.
+
+    A docker daemon refuses a ``--cpus`` cap above its own CPU count, so the
+    default the create form offers on a smaller machine is lowered to what
+    that machine can give rather than failing the create it would submit.
+    """
+    if selection.cpu_count is None or selection.cpu_count <= cpu_count:
+        return selection
+    return MachineSizeSelection(cpu_count=cpu_count, memory_gb=selection.memory_gb, disk_gb=selection.disk_gb)
+
+
+@pure
 def narrow_machine_size_to_launch_mode(
     selection: MachineSizeSelection, launch_mode: LaunchMode
 ) -> MachineSizeSelection | None:

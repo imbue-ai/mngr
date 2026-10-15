@@ -9,15 +9,11 @@ tests.
 """
 
 import json
-import os
-import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
 from pydantic import SecretStr
 
 from imbue.imbue_common.model_update import to_update
@@ -26,17 +22,31 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
+from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_profiled_device_for_test
+from imbue.minds.desktop_client.conftest import make_profiled_device_with_connections_for_test
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
+from imbue.minds.desktop_client.connections.data_types import ConnectionAvailability
+from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
+from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
 from imbue.minds.desktop_client.dek_store import is_account_unlocked
+from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
+from imbue.minds.desktop_client.dek_store import load_dek
 from imbue.minds.desktop_client.dek_store import read_bundle_mirror
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
+from imbue.minds.desktop_client.host_access_material import host_access_paths
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.testing import device_id_for_test
+from imbue.minds.desktop_client.testing import generate_test_ssh_private_key
+from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
+from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
+from imbue.minds.desktop_client.workspace_record_store import SUPPORTED_PAYLOAD_FORMAT
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
-from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
+from imbue.minds.desktop_client.workspace_record_store import encode_encrypted_secrets
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
@@ -242,21 +252,11 @@ def test_scheduler_pass_converts_legacy_state_and_tombstones_absent_rows(tmp_pat
     assert cli.sync_records_by_email[_EMAIL][str(agent_id)]["state"] == "destroyed"
 
 
-# -- SSH material materialization (cloud rows accessible from any install) ----
-
-
-def _generate_test_ssh_private_key() -> str:
-    """An OpenSSH-format Ed25519 key, the exact flavor mngr's ``generate_ssh_keypair`` produces."""
-    private_key = ed25519.Ed25519PrivateKey.generate()
-    return private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.OpenSSH,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode("utf-8")
+# SSH material materialization (cloud rows accessible from any install)
 
 
 def _cloud_host_key_dir(profile_dir: Path, host_id: HostId) -> Path:
-    instance_name = imbue_cloud_provider_name_for_account(_EMAIL)
+    instance_name = imbue_cloud_provider_name_for_user(_USER_ID)
     return profile_dir / "providers" / "imbue_cloud" / instance_name / "hosts" / str(host_id)
 
 
@@ -269,17 +269,22 @@ def _pin_at_line_endpoint(
     pin_host_key(known_hosts_path, endpoint[0], endpoint[1], public_key, host_id=host_id, origin=origin)
 
 
-def _cloud_resolver_with_workspace(agent_id: AgentId, host_id: HostId, name: str) -> MngrCliBackendResolver:
-    instance_name = imbue_cloud_provider_name_for_account(_EMAIL)
+def _resolver_with_workspace_on(
+    provider_kind: str, agent_id: AgentId, host_id: HostId, name: str
+) -> MngrCliBackendResolver:
     agents = [
         {
             "id": str(agent_id),
             "labels": {"is_primary": "true"},
             "host": {"id": str(host_id), "name": name},
-            "provider": instance_name,
+            "provider": provider_kind,
         }
     ]
     return make_resolver_with_data(agents_json=json.dumps({"agents": agents}))
+
+
+def _cloud_resolver_with_workspace(agent_id: AgentId, host_id: HostId, name: str) -> MngrCliBackendResolver:
+    return _resolver_with_workspace_on(imbue_cloud_provider_name_for_user(_USER_ID), agent_id, host_id, name)
 
 
 def _provision_cloud_workspace(
@@ -292,7 +297,7 @@ def _provision_cloud_workspace(
 
     agent_id = AgentId.generate()
     host_id = HostId.generate()
-    private_key = _generate_test_ssh_private_key()
+    private_key = generate_test_ssh_private_key()
     known_hosts_line = f"[198.51.100.7]:22001 ssh-ed25519 AAAATESTPIN{uuid4().hex}"
     key_dir = _cloud_host_key_dir(profile_dir, host_id)
     key_dir.mkdir(parents=True)
@@ -358,7 +363,7 @@ def test_materializer_applies_advanced_synced_material_to_a_host_this_install_le
     # the record carries different, never-applied-here material.
     key_dir_b = _cloud_host_key_dir(profile_b, host_id)
     key_dir_b.mkdir(parents=True)
-    (key_dir_b / "ssh_key").write_text(_generate_test_ssh_private_key())
+    (key_dir_b / "ssh_key").write_text(generate_test_ssh_private_key())
     (key_dir_b / "lease.json").write_text("{}")
 
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
@@ -382,7 +387,7 @@ def test_materializer_keeps_leaseholder_material_the_record_has_not_advanced_pas
     # then rotates its key material locally, ahead of any push.
     key_dir_b = _cloud_host_key_dir(profile_b, host_id)
     (key_dir_b / "lease.json").write_text("{}")
-    rotated_key = _generate_test_ssh_private_key()
+    rotated_key = generate_test_ssh_private_key()
     (key_dir_b / "ssh_key").write_text(rotated_key)
     (key_dir_b / "ssh_key.pub").write_text("ssh-ed25519 AAAAROTATEDPUB rotated\n")
     rotated_pin = f"ssh-ed25519 AAAAROTATEDPIN{uuid4().hex}"
@@ -419,7 +424,7 @@ def test_materializer_reapplies_record_pins_over_stale_bootstrap_pins_despite_a_
     # BOOTSTRAP pin (the connector's bake-time key) at the record's endpoint.
     key_dir_b = _cloud_host_key_dir(profile_b, host_id)
     key_dir_b.mkdir(parents=True)
-    (key_dir_b / "ssh_key").write_text(_generate_test_ssh_private_key())
+    (key_dir_b / "ssh_key").write_text(generate_test_ssh_private_key())
     (key_dir_b / "ssh_key.pub").write_text("ssh-ed25519 AAAAOLDPUB old\n")
     (key_dir_b / "lease.json").write_text("{}")
     _pin_at_line_endpoint(
@@ -467,13 +472,15 @@ def test_materializer_replaces_a_placeholder_keypair(tmp_path: Path) -> None:
     # without a local key; no lease.json exists, so the synced key must win.
     key_dir_b = _cloud_host_key_dir(profile_b, host_id)
     key_dir_b.mkdir(parents=True)
-    (key_dir_b / "ssh_key").write_text(_generate_test_ssh_private_key())
+    (key_dir_b / "ssh_key").write_text(generate_test_ssh_private_key())
 
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
     assert (key_dir_b / "ssh_key").read_text() == synced_key
 
 
-def test_sweep_removes_key_dirs_for_tombstoned_records_but_keeps_owned_leases(tmp_path: Path) -> None:
+def test_sweep_removes_key_dirs_for_tombstoned_records_but_keeps_owned_leases_and_unrecorded_dirs(
+    tmp_path: Path,
+) -> None:
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
     agent_id, host_id, _, _ = _provision_cloud_workspace_on_device_a(tmp_path, cli)
@@ -485,24 +492,125 @@ def test_sweep_removes_key_dirs_for_tombstoned_records_but_keeps_owned_leases(tm
     key_dir_b = _cloud_host_key_dir(profile_b, host_id)
     assert key_dir_b.is_dir()
 
-    # The workspace is destroyed from another install; B pulls the tombstone.
+    # A dir with no record at all is never swept: absence is not evidence that the host is gone
+    # (a long create may not have pushed its record yet).
+    unrecorded_dir = _cloud_host_key_dir(profile_b, HostId.generate())
+    unrecorded_dir.mkdir(parents=True)
+    (unrecorded_dir / "ssh_key").write_text(generate_test_ssh_private_key())
+    store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL)
+    assert unrecorded_dir.is_dir()
+
+    # The workspace is destroyed from another install; B pulls the tombstone and sweeps the dir at once.
     server_record = cli.sync_records_by_email[_EMAIL][str(agent_id)]
     server_record["state"] = "destroyed"
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
-
-    # Fresh dirs are protected by the in-flight-lease grace; age it out.
-    old_timestamp = time.time() - 7200
-    os.utime(key_dir_b, (old_timestamp, old_timestamp))
     store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL)
     assert not key_dir_b.exists()
+    assert unrecorded_dir.is_dir()
 
-    # An owned lease dir (lease.json) is never swept, even without a record.
-    owned_dir = _cloud_host_key_dir(profile_b, HostId.generate())
-    owned_dir.mkdir(parents=True)
-    (owned_dir / "lease.json").write_text("{}")
-    os.utime(owned_dir, (old_timestamp, old_timestamp))
+    # A tombstoned row whose dir still holds a lease this device owns is kept.
+    key_dir_b.mkdir(parents=True)
+    (key_dir_b / "lease.json").write_text("{}")
     store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL)
-    assert owned_dir.is_dir()
+    assert key_dir_b.is_dir()
+
+
+def test_sweep_removes_a_tombstoned_connection_workspaces_key_dir_in_its_own_layout(tmp_path: Path) -> None:
+    """A Modal workspace destroyed on device A loses its per-host dir under the connection instance on device B."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_a, store_a, session_a, connections_a, profile_a = make_profiled_device_with_connections_for_test(
+        tmp_path, "laptop", cli
+    )
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    cli.sync_bundle_push(_EMAIL, bundle)
+    connection_id = add_modal_connection_for_test(connections_a, _USER_ID, "team modal")
+    connections_a.push_connection(_USER_ID, _EMAIL, str(connection_id))
+    instance = provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id)
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    paths_on_a = host_access_paths(profile_a, instance, host_id)
+    assert paths_on_a is not None
+    paths_on_a.per_host_dir.mkdir(parents=True)
+    (paths_on_a.per_host_dir / "modal_ssh_key").write_text("MODAL-CLIENT-KEY")
+    (paths_on_a.per_host_dir / "host_key").write_text("MODAL-HOST-KEY")
+    session_a.associate_workspace(
+        _USER_ID, str(agent_id), _resolver_with_workspace_on(instance, agent_id, host_id, "ws")
+    )
+
+    _, store_b, _, connections_b, profile_b = make_profiled_device_with_connections_for_test(tmp_path, "desktop", cli)
+    assert connections_b.pull(_USER_ID, _EMAIL).is_changed
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+    paths_on_b = host_access_paths(profile_b, instance, host_id)
+    assert paths_on_b is not None
+    assert (paths_on_b.per_host_dir / "modal_ssh_key").is_file()
+
+    # Device A destroys the workspace; the next sync on B tombstones the row and sweeps the dir.
+    store_a.tombstone_record(_USER_ID, _EMAIL, str(agent_id))
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL)
+    assert not paths_on_b.per_host_dir.exists()
+
+
+def test_sweep_leaves_a_device_hosted_rows_key_dir_alone_when_its_row_is_tombstoned(tmp_path: Path) -> None:
+    """A lima dir lives on its hosting device alone and is never re-laid from the record, so a tombstone
+    (which local discovery may still overturn) must not cost the live host its only client key."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_a, store_a, session_a, _, profile_a = make_profiled_device_with_connections_for_test(tmp_path, "laptop", cli)
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    cli.sync_bundle_push(_EMAIL, bundle)
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    lima_paths = host_access_paths(profile_a, "lima", host_id)
+    assert lima_paths is not None
+    lima_paths.per_host_dir.mkdir(parents=True)
+    (lima_paths.per_host_dir / "root_ssh_key").write_text("LIMA-ROOT-KEY")
+    session_a.associate_workspace(
+        _USER_ID, str(agent_id), _resolver_with_workspace_on("lima", agent_id, host_id, "ws")
+    )
+
+    store_a.tombstone_record(_USER_ID, _EMAIL, str(agent_id))
+    store_a.materialize_account_synced_secrets(_USER_ID, _EMAIL)
+
+    assert (lima_paths.per_host_dir / "root_ssh_key").is_file()
+
+
+def test_sweep_leaves_a_device_hosted_connection_rows_key_dir_alone_when_its_row_is_tombstoned(
+    tmp_path: Path,
+) -> None:
+    """A row on a local-profile connection is hosted by this device: local discovery alone tombstones it
+    and may still resurrect it, so its per-host dir (which the provider's own destroy removes) is left."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_a, store_a, session_a, connections_a, profile_a = make_profiled_device_with_connections_for_test(
+        tmp_path, "laptop", cli
+    )
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    cli.sync_bundle_push(_EMAIL, bundle)
+    connection_id = add_modal_connection_for_test(connections_a, LOCAL_PROFILE_USER_ID, "this device only")
+    instance = provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id)
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    modal_paths = host_access_paths(profile_a, instance, host_id)
+    assert modal_paths is not None
+    modal_paths.per_host_dir.mkdir(parents=True)
+    (modal_paths.per_host_dir / "modal_ssh_key").write_text("MODAL-CLIENT-KEY")
+    session_a.associate_workspace(
+        _USER_ID, str(agent_id), _resolver_with_workspace_on(instance, agent_id, host_id, "ws")
+    )
+    found = store_a.find_record_any_state(str(agent_id))
+    assert found is not None and found[1].hosting_device_id == store_a.device_id
+
+    store_a.tombstone_record(_USER_ID, _EMAIL, str(agent_id))
+    store_a.materialize_account_synced_secrets(_USER_ID, _EMAIL)
+
+    assert (modal_paths.per_host_dir / "modal_ssh_key").is_file()
 
 
 def test_producer_repushes_secrets_when_the_material_changes(tmp_path: Path) -> None:
@@ -679,7 +787,7 @@ def test_a_metadata_only_revision_advance_does_not_clobber_a_local_rotation(tmp_
 
     # B rotates locally: new client key on disk, new user-origin endpoint pin.
     key_dir_b = _cloud_host_key_dir(profile_b, host_id)
-    rotated_private_key = _generate_test_ssh_private_key()
+    rotated_private_key = generate_test_ssh_private_key()
     (key_dir_b / "ssh_key").write_text(rotated_private_key)
     rotated_pin = f"ssh-ed25519 AAAAROTATED{uuid4().hex}"
     pin_host_key(key_dir_b / "known_hosts", "198.51.100.7", 22001, rotated_pin, host_id, HostKeyOrigin.USER)
@@ -882,7 +990,7 @@ def test_rotation_run_on_a_non_leasing_device_propagates_through_the_record(tmp_
 
     # B rotates locally: new client key on disk, new user-origin endpoint pin.
     key_dir_b = _cloud_host_key_dir(profile_b, host_id)
-    rotated_private_key = _generate_test_ssh_private_key()
+    rotated_private_key = generate_test_ssh_private_key()
     (key_dir_b / "ssh_key").write_text(rotated_private_key)
     rotated_pin = f"ssh-ed25519 AAAAROTATEDHOSTKEY{uuid4().hex}"
     pin_host_key(key_dir_b / "known_hosts", "198.51.100.7", 22001, rotated_pin, host_id, HostKeyOrigin.USER)
@@ -903,6 +1011,190 @@ def test_rotation_run_on_a_non_leasing_device_propagates_through_the_record(tmp_
     assert old_line not in content_c
 
 
+def test_an_account_with_only_a_synced_connection_counts_as_locked_on_a_fresh_device(tmp_path: Path) -> None:
+    """A fresh device that has pulled the account's connection but no workspace record or bundle mirror
+    still reports the account locked, so the unlock route installs the DEK and the connection opens."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_a, _, _, connections_a, _ = make_profiled_device_with_connections_for_test(tmp_path, "laptop", cli)
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    cli.sync_bundle_push(_EMAIL, bundle)
+    connection_id = add_modal_connection_for_test(connections_a, _USER_ID, "team modal")
+    connections_a.push_connection(_USER_ID, _EMAIL, str(connection_id))
+
+    paths_b, store_b, _, connections_b, _ = make_profiled_device_with_connections_for_test(tmp_path, "desktop", cli)
+    assert connections_b.pull(_USER_ID, _EMAIL).is_changed
+    (record_b,) = connections_b.list_connections(_USER_ID)
+    assert store_b.list_records(_USER_ID) == []
+    assert not is_master_password_set_for_account(paths_b, _USER_ID)
+
+    assert store_b.locked_account_user_ids([_USER_ID]) == [_USER_ID]
+    assert connections_b.availability(_USER_ID, record_b) is ConnectionAvailability.LOCKED
+
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+
+    assert store_b.locked_account_user_ids([_USER_ID]) == []
+    assert connections_b.availability(_USER_ID, record_b) is ConnectionAvailability.AVAILABLE
+
+
+# Host access material for every backend (payload format 2)
+
+
+def test_a_workspace_on_an_account_owned_connection_reaches_another_device(tmp_path: Path) -> None:
+    """Device A creates a Modal workspace on a synced connection; device B pulls the connection, unlocks,
+    and gets the host's per-host keys and pins laid down under its own copy of the connection instance."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_a, store_a, session_a, connections_a, profile_a = make_profiled_device_with_connections_for_test(
+        tmp_path, "laptop", cli
+    )
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    cli.sync_bundle_push(_EMAIL, bundle)
+    connection_id = add_modal_connection_for_test(connections_a, _USER_ID, "team modal")
+    connections_a.push_connection(_USER_ID, _EMAIL, str(connection_id))
+    instance = provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id)
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    paths_on_a = host_access_paths(profile_a, instance, host_id)
+    assert paths_on_a is not None
+    paths_on_a.per_host_dir.mkdir(parents=True)
+    (paths_on_a.per_host_dir / "modal_ssh_key").write_text("MODAL-CLIENT-KEY")
+    (paths_on_a.per_host_dir / "modal_ssh_key.pub").write_text("ssh-ed25519 AAAA-client")
+    (paths_on_a.per_host_dir / "host_key").write_text("MODAL-HOST-KEY")
+    pin_host_key(
+        paths_on_a.pin_store_by_name["known_hosts"],
+        "sandbox.modal.host",
+        2222,
+        "ssh-ed25519 AAAA-sandbox",
+        host_id,
+        HostKeyOrigin.USER,
+    )
+
+    session_a.associate_workspace(
+        _USER_ID, str(agent_id), _resolver_with_workspace_on(instance, agent_id, host_id, "ws")
+    )
+
+    pushed = cli.sync_records_by_email[_EMAIL][str(agent_id)]
+    # The row is account-synced: any device that unlocks the account may reach it.
+    assert pushed["hosting_device_id"] is None
+    record_a = store_a.list_records(_USER_ID)[0]
+    payload_a = store_a.decrypt_record_secrets(_USER_ID, record_a)
+    assert payload_a is not None and payload_a.host_access is not None
+    assert payload_a.payload_format == SUPPORTED_PAYLOAD_FORMAT
+    assert payload_a.host_access.layout == "modal"
+    assert payload_a.host_access.files["modal_ssh_key"] == "MODAL-CLIENT-KEY"
+    assert payload_a.ssh_private_key is None
+
+    # Device B: pulls the connection and the record, unlocks, materializes.
+    _, store_b, _, connections_b, profile_b = make_profiled_device_with_connections_for_test(tmp_path, "desktop", cli)
+    assert connections_b.pull(_USER_ID, _EMAIL).is_changed
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is False
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+
+    paths_on_b = host_access_paths(profile_b, instance, host_id)
+    assert paths_on_b is not None
+    assert (paths_on_b.per_host_dir / "modal_ssh_key").read_text() == "MODAL-CLIENT-KEY"
+    assert (paths_on_b.per_host_dir / "modal_ssh_key").stat().st_mode & 0o777 == 0o600
+    assert (paths_on_b.per_host_dir / "host_key").read_text() == "MODAL-HOST-KEY"
+    assert (paths_on_b.per_host_dir / "known_hosts").is_symlink()
+    record_b = load_host_key_record(paths_on_b.pin_store_by_name["known_hosts"], host_id)
+    assert record_b is not None and [pin.public_key for pin in record_b.pins] == ["ssh-ed25519 AAAA-sandbox"]
+    assert record_b.pins[0].origin is HostKeyOrigin.USER
+    assert store_b.host_access_key_path(_USER_ID, store_b.list_records(_USER_ID)[0]) == (
+        paths_on_b.per_host_dir / "modal_ssh_key"
+    )
+    # Idempotent.
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is False
+
+
+def test_a_device_hosted_rows_material_rides_the_record_but_is_not_laid_down_elsewhere(tmp_path: Path) -> None:
+    """A lima workspace's per-host material is carried (for a later cross-device connection) while its row
+    stays attributed to the hosting device, so another device materializes nothing for it."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_a, _, session_a, _, profile_a = make_profiled_device_with_connections_for_test(tmp_path, "laptop", cli)
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    cli.sync_bundle_push(_EMAIL, bundle)
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    lima_paths = host_access_paths(profile_a, "lima", host_id)
+    assert lima_paths is not None
+    lima_paths.per_host_dir.mkdir(parents=True)
+    (lima_paths.per_host_dir / "root_ssh_key").write_text("LIMA-ROOT-KEY")
+    (lima_paths.per_host_dir / "ssh_host_ed25519_key.pub").write_text("ssh-ed25519 AAAA-vm")
+    # The provider-wide legacy root key must never be collected.
+    (lima_paths.per_host_dir.parent.parent / "root_ssh_key").write_text("PROVIDER-WIDE-KEY")
+
+    session_a.associate_workspace(
+        _USER_ID, str(agent_id), _resolver_with_workspace_on("lima", agent_id, host_id, "ws")
+    )
+
+    pushed = cli.sync_records_by_email[_EMAIL][str(agent_id)]
+    assert pushed["hosting_device_id"] == str(device_id_for_test("laptop"))
+    _, store_b, _, _, profile_b = make_profiled_device_with_connections_for_test(tmp_path, "desktop", cli)
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    record_b = store_b.list_records(_USER_ID)[0]
+    payload_b = store_b.decrypt_record_secrets(_USER_ID, record_b)
+    assert payload_b is not None and payload_b.host_access is not None
+    assert payload_b.host_access.layout == "lima"
+    assert payload_b.host_access.files == {
+        "root_ssh_key": "LIMA-ROOT-KEY",
+        "ssh_host_ed25519_key.pub": "ssh-ed25519 AAAA-vm",
+    }
+
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is False
+
+    assert not (profile_b / "providers" / "lima").exists()
+
+
+def test_a_format_1_imbue_cloud_payload_still_materializes_after_the_format_bump(tmp_path: Path) -> None:
+    """A record pushed by a pre-format-2 client carries only the imbue_cloud key fields; they still land."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_a, store_a, _, _ = make_profiled_device_for_test(tmp_path, "laptop", cli)
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    cli.sync_bundle_push(_EMAIL, bundle)
+    dek = load_dek(paths_a, _USER_ID)
+    assert dek is not None
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    private_key = generate_test_ssh_private_key()
+    known_hosts_line = f"[198.51.100.7]:22001 ssh-ed25519 AAAATESTPIN{uuid4().hex}"
+    legacy_payload = {"payload_format": 1, "ssh_private_key": private_key, "ssh_known_hosts": known_hosts_line + "\n"}
+    store_a.upsert_local_record(
+        _USER_ID,
+        _EMAIL,
+        ReplicaRecord(
+            host_id=str(host_id),
+            agent_id=str(agent_id),
+            display_name="old-client-ws",
+            provider_kind=imbue_cloud_provider_name_for_user(_USER_ID),
+            hosting_device_id=None,
+            state=RECORD_STATE_ACTIVE,
+            encrypted_secrets=encode_encrypted_secrets(dek, json.dumps(legacy_payload).encode("utf-8")),
+        ),
+    )
+
+    _, store_b, _, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+
+    key_dir_b = _cloud_host_key_dir(profile_b, host_id)
+    assert (key_dir_b / "ssh_key").read_text() == private_key
+    assert (key_dir_b / "ssh_key.pub").read_text().startswith("ssh-ed25519 ")
+    assert known_hosts_line in (key_dir_b / "known_hosts").read_text()
+
+
 def test_create_path_seed_of_a_cloud_machine_carries_its_provider_and_secrets(tmp_path: Path) -> None:
     """The very first push of a created cloud machine is complete enough for another device.
 
@@ -921,7 +1213,7 @@ def test_create_path_seed_of_a_cloud_machine_carries_its_provider_and_secrets(tm
     host_id = HostId.generate()
     key_dir = _cloud_host_key_dir(profile_a, host_id)
     key_dir.mkdir(parents=True)
-    private_key = _generate_test_ssh_private_key()
+    private_key = generate_test_ssh_private_key()
     (key_dir / "ssh_key").write_text(private_key)
 
     session_a.associate_created_workspace(
@@ -934,7 +1226,7 @@ def test_create_path_seed_of_a_cloud_machine_carries_its_provider_and_secrets(tm
     )
 
     pushed = cli.sync_records_by_email[_EMAIL][str(agent_id)]
-    assert pushed["provider_kind"] == imbue_cloud_provider_name_for_account(_EMAIL)
+    assert pushed["provider_kind"] == imbue_cloud_provider_name_for_user(_USER_ID)
     assert pushed["encrypted_secrets"] is not None
     assert pushed["hosting_device_id"] is None
 
@@ -945,9 +1237,50 @@ def test_create_path_seed_of_a_cloud_machine_carries_its_provider_and_secrets(tm
     assert store_b.locked_account_user_ids([_USER_ID]) == [_USER_ID]
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
     scheduler_b.run_one_pass()
-    key_path_b = store_b.imbue_cloud_host_ssh_key_path(_EMAIL, str(host_id))
+    key_path_b = store_b.host_access_key_path(_USER_ID, store_b.list_records(_USER_ID)[0])
     assert key_path_b is not None
     assert key_path_b.read_text() == private_key
+
+
+def test_create_path_seed_of_a_machine_on_an_account_owned_connection_carries_the_connection(
+    tmp_path: Path,
+) -> None:
+    """A create on a connection the account owns is seeded under that instance (not the account's Imbue
+    Cloud instance), as an account-synced row, with the per-host material the create wrote."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_a, store_a, session_a, connections_a, profile_a = make_profiled_device_with_connections_for_test(
+        tmp_path, "laptop", cli
+    )
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    cli.sync_bundle_push(_EMAIL, bundle)
+    connection_id = add_modal_connection_for_test(connections_a, _USER_ID, "team modal")
+    instance = provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id)
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    paths_on_a = host_access_paths(profile_a, instance, host_id)
+    assert paths_on_a is not None
+    paths_on_a.per_host_dir.mkdir(parents=True)
+    (paths_on_a.per_host_dir / "modal_ssh_key").write_text("MODAL-CLIENT-KEY")
+
+    session_a.associate_created_workspace(
+        user_id=_USER_ID,
+        agent_id=str(agent_id),
+        host_id=str(host_id),
+        display_name="fresh",
+        color=None,
+        is_cloud_row=True,
+        provider_kind=instance,
+    )
+
+    pushed = cli.sync_records_by_email[_EMAIL][str(agent_id)]
+    assert pushed["provider_kind"] == instance
+    assert pushed["hosting_device_id"] is None
+    payload = store_a.decrypt_record_secrets(_USER_ID, store_a.list_records(_USER_ID)[0])
+    assert payload is not None and payload.host_access is not None
+    assert payload.host_access.layout == "modal"
+    assert payload.host_access.files["modal_ssh_key"] == "MODAL-CLIENT-KEY"
 
 
 def test_create_path_seed_of_a_local_machine_leaves_the_provider_to_discovery(tmp_path: Path) -> None:

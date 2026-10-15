@@ -11,5 +11,5 @@ A machine is *stopped on purpose* when the connector reports it stopping, stoppe
 
 ## Out of scope for this folder
 
-- Machines on the user's own device (docker, lima) and bring-your-own-key cloud machines, whose hosts can stop on their own; the app keeps starting those when they stop answering.
+- Machines on the user's own device (docker, lima) and machines on the user's aws, gcp, azure, and modal connections, whose hosts can stop on their own; the app keeps starting those when they stop answering.
 - How the operator tooling stops a machine or picks its kind (`minds-admin`, the migration runbook).

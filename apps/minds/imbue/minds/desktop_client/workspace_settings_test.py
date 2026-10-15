@@ -8,13 +8,24 @@ still carries the ``host-<hex>`` coordinate).
 
 from pathlib import Path
 
+import pytest
+
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
 from imbue.minds.desktop_client.conftest import make_agents_json
+from imbue.minds.desktop_client.conftest import make_connection_store_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.conftest import unlock_account_with_master_password_for_test
+from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
 from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
+from imbue.minds.desktop_client.workspace_settings import WorkspaceAssociationError
+from imbue.minds.desktop_client.workspace_settings import associate_workspace_account
 from imbue.minds.desktop_client.workspace_settings import disassociate_workspace_account
 from imbue.minds.desktop_client.workspace_settings import set_workspace_color
 from imbue.minds.utils.testing import RecordingMngrCaller
@@ -38,7 +49,7 @@ def test_disassociate_tears_down_share_for_stopped_undiscovered_workspace(tmp_pa
     cli.add_share(_EMAIL, _HOST)
     undiscovering_resolver = StaticBackendResolver(url_by_agent_and_service={})
 
-    disassociate_workspace_account(_AGENT, undiscovering_resolver, session_store, cli)
+    disassociate_workspace_account(_AGENT, undiscovering_resolver, session_store, None, cli)
 
     assert cli.deleted_share_host_ids == [_HOST]
     assert session_store.get_account_for_workspace(str(_AGENT)) is None
@@ -52,9 +63,54 @@ def test_disassociate_without_share_only_removes_association(tmp_path: Path) -> 
         _USER_ID, str(_AGENT), _HOST, display_name="ws", color=None, is_cloud_row=False
     )
 
-    disassociate_workspace_account(_AGENT, StaticBackendResolver(url_by_agent_and_service={}), session_store, cli)
+    disassociate_workspace_account(
+        _AGENT, StaticBackendResolver(url_by_agent_and_service={}), session_store, None, cli
+    )
 
     assert cli.deleted_share_host_ids == []
+    assert session_store.get_account_for_workspace(str(_AGENT)) is None
+
+
+class _ConnectionHostedResolver(StaticBackendResolver):
+    """Static resolver reporting every known agent as living on one connection instance."""
+
+    provider_name: str
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        return AgentDisplayInfo(agent_name=str(agent_id), host_id=_HOST, provider_name=self.provider_name)
+
+
+def test_account_link_is_refused_on_an_account_owned_connection_but_not_on_a_local_profile_one(
+    tmp_path: Path,
+) -> None:
+    """An account-owned connection binds its workspaces to the account for life; a device-only connection does not."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    session_store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    connection_store = make_connection_store_for_test(tmp_path / "minds", cli)
+    unlock_account_with_master_password_for_test(connection_store.paths, _USER_ID)
+    account_connection_id = add_modal_connection_for_test(connection_store, _USER_ID, "team modal")
+    local_connection_id = add_modal_connection_for_test(connection_store, LOCAL_PROFILE_USER_ID, "my modal")
+    on_account_connection = _ConnectionHostedResolver(
+        url_by_agent_and_service={},
+        provider_name=provider_instance_name_for_connection(ConnectionBackend.MODAL, account_connection_id),
+    )
+    on_local_connection = _ConnectionHostedResolver(
+        url_by_agent_and_service={},
+        provider_name=provider_instance_name_for_connection(ConnectionBackend.MODAL, local_connection_id),
+    )
+
+    with pytest.raises(WorkspaceAssociationError) as associate_refusal:
+        associate_workspace_account(_AGENT, _USER_ID, on_account_connection, session_store, connection_store)
+    with pytest.raises(WorkspaceAssociationError) as disassociate_refusal:
+        disassociate_workspace_account(_AGENT, on_account_connection, session_store, connection_store, cli)
+    assert (associate_refusal.value.status_code, disassociate_refusal.value.status_code) == (403, 403)
+    assert session_store.get_account_for_workspace(str(_AGENT)) is None
+
+    matched = associate_workspace_account(_AGENT, _USER_ID, on_local_connection, session_store, connection_store)
+    assert matched.user_id == _USER_ID
+    assert session_store.get_account_for_workspace(str(_AGENT)) is not None
+    disassociate_workspace_account(_AGENT, on_local_connection, session_store, connection_store, cli)
     assert session_store.get_account_for_workspace(str(_AGENT)) is None
 
 
@@ -69,7 +125,9 @@ def test_disassociate_clears_the_grants_of_an_unpublished_workspace(tmp_path: Pa
     caller = cli.mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
 
-    disassociate_workspace_account(_AGENT, StaticBackendResolver(url_by_agent_and_service={}), session_store, cli)
+    disassociate_workspace_account(
+        _AGENT, StaticBackendResolver(url_by_agent_and_service={}), session_store, None, cli
+    )
 
     # No share to delete, but the document goes anyway.
     assert cli.deleted_share_host_ids == []

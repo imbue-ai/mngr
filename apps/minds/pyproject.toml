@@ -19,17 +19,16 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "loguru",
     "imbue-mngr",
-    # The bring-your-own-key cloud backends minds writes provider blocks for.
+    # The cloud backends minds writes connection provider blocks for.
     "imbue-mngr-aws",
     "imbue-mngr-azure",
     "imbue-mngr-gcp",
-    # The local-container compute provider (LaunchMode.DOCKER).
+    # The local compute providers (LaunchMode.DOCKER and LaunchMode.LIMA).
     "imbue-mngr-docker",
+    "imbue-mngr-lima",
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
     "imbue-mngr-latchkey",
-    # minds writes an enabled modal provider block into its mngr settings, and
-    # mngr rejects an enabled provider whose backend plugin is not installed.
     "imbue-mngr-modal",
     "imbue-mngr-vps",
     # The agent-type plugins the default workspace template configures. mngr
@@ -85,6 +84,7 @@ imbue-mngr-docker = { workspace = true }
 imbue-mngr-forward = { workspace = true }
 imbue-mngr-imbue-cloud = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
+imbue-mngr-lima = { workspace = true }
 imbue-mngr-modal = { workspace = true }
 imbue-mngr-opencode = { workspace = true }
 imbue-mngr-pi-coding = { workspace = true }

@@ -1,25 +1,33 @@
-"""Background scheduler for workspace-record sync.
+"""Background scheduler for workspace-record and connection sync.
 
 Runs the reconcile (pull + legacy migration + metadata refresh + dirty pushes
 + definitively-absent tombstoning) event-driven: once after the session's
 first complete discovery snapshot, then on a slow periodic tick, and
 immediately whenever :meth:`WorkspaceSyncScheduler.kick` is called (sign-in /
 sign-out, password changes). The legacy password-file conversion runs at the
-start of every pass (a no-op once converted).
+start of every pass (a no-op once converted). Each pass also pulls every
+account's cloud connections, re-materializes the provider blocks, and retires accounts whose imbue_cloud session discovery
+reports as expired (one forced refresh; a definitive refusal signs the
+account out locally, a transient failure never does).
 
 One daemon thread; every pass is wrapped so an expected failure (a connector
 outage, or any sync / crypto / file error) can never kill the loop.
 """
 
 import threading
+import time
+import tomllib
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from enum import auto
+from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from tomlkit.exceptions import TOMLKitError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
@@ -27,16 +35,27 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.secret_wrapping import SecretWrappingError
+from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
+from imbue.minds.desktop_client.connections.account_lifecycle import has_live_create_on_account
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
+from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
+from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
 from imbue.minds.desktop_client.dek_store import convert_legacy_password_files
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
+from imbue.minds.desktop_client.imbue_cloud_cli import AuthRefreshOutcome
+from imbue.minds.desktop_client.imbue_cloud_cli import IMBUE_CLOUD_AUTH_ERROR_CLASS
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceSyncError
+from imbue.minds.mngr_settings.errors import MindsSettingsError
+from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.primitives import ProviderInstanceName
 
 # How often the loop re-reconciles when nothing kicks it. Records change
 # rarely; this bounds how stale another device's view can get.
@@ -51,6 +70,17 @@ _DISCOVERY_POLL_SECONDS = 2.0
 # so a wedged pass cannot stall shutdown indefinitely; it matches the root
 # concurrency group's own shutdown budget.
 _STOP_WAIT_TIMEOUT_SECONDS = 10.0
+# Discovery error type names that mean an account instance's session no longer
+# authenticates: the plugin's own auth error (what its discovery raises on an
+# expired or revoked session) and mngr's not-authorized provider error.
+SESSION_EXPIRED_ERROR_TYPE_NAMES: Final[frozenset[str]] = frozenset(
+    {IMBUE_CLOUD_AUTH_ERROR_CLASS, ProviderNotAuthorizedError.__name__}
+)
+# A refresh that succeeded leaves the errored snapshot in place until the
+# bounced observe child reports again, so the same account is not re-refreshed
+# on every pass in between; the stamp is taken before the outcome is known, so
+# it also spaces out retries after a transient refresh failure.
+_SESSION_REFRESH_COOLDOWN_SECONDS: Final[float] = 600.0
 
 
 class InitialSyncState(UpperCaseStrEnum):
@@ -79,17 +109,20 @@ class InitialSyncStatus(FrozenModel):
 
 
 class WorkspaceSyncScheduler(MutableModel):
-    """Owns the background reconcile loop for workspace records."""
+    """Owns the background sync loop: each pass reconciles workspace records, pulls every
+    account's cloud connections (re-materializing the provider blocks afterwards),
+    and retires accounts whose imbue_cloud session discovery proves dead."""
 
     record_store: WorkspaceRecordStore = Field(frozen=True, description="The sync engine the loop drives")
     session_store: MultiAccountSessionStore = Field(frozen=True, description="Source of the signed-in account list")
     resolver: BackendResolverInterface = Field(frozen=True, description="Discovery view records are built from")
-    on_ssh_material_written: Callable[[], None] | None = Field(
+    on_discovery_bounce_needed: Callable[[], None] | None = Field(
         default=None,
         frozen=True,
         description=(
-            "Invoked after a pass materializes new/changed SSH material, so the app "
-            "can bounce discovery instead of waiting for the next poll"
+            "Invoked after a pass changes something a running discovery observer only reads at launch "
+            "(new/changed SSH material, a refreshed account session), so the app can bounce it instead of "
+            "waiting for the next poll"
         ),
     )
     backup_reaper: BackupReaperManager | None = Field(
@@ -108,6 +141,31 @@ class WorkspaceSyncScheduler(MutableModel):
             "follows shares enabled or disabled from another device or the web chrome"
         ),
     )
+    connection_store: ConnectionStore | None = Field(
+        default=None, frozen=True, description="Cloud connection replicas pulled every pass; None disables"
+    )
+    provider_materializer: ProviderSettingsMaterializer | None = Field(
+        default=None,
+        frozen=True,
+        description="Re-run on every pass, after the connection pulls; None disables",
+    )
+    imbue_cloud_cli: ImbueCloudCli | None = Field(
+        default=None, frozen=True, description="Used to force a session refresh when discovery reports auth errors"
+    )
+    agent_creator: AgentCreator | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Source of the creates in flight: an account with one on its providers is not retired, since "
+            "the create's later mngr calls need the account's blocks; None never defers a retirement"
+        ),
+    )
+    on_account_session_dead: Callable[[str], None] | None = Field(
+        default=None,
+        frozen=True,
+        description="Invoked with a user id whose refresh the connector refused (the local signout)",
+    )
+    _last_session_refresh_at_by_user_id: dict[str, float] = PrivateAttr(default_factory=dict)
     _kick_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _exited_event: threading.Event = PrivateAttr(default_factory=threading.Event)
@@ -165,8 +223,14 @@ class WorkspaceSyncScheduler(MutableModel):
         with self._initial_sync_lock:
             tracked_user_ids = tuple(self._initial_sync_by_user_id.keys())
         accounts = {str(account.user_id): str(account.email) for account in self.session_store.list_accounts()}
+        # An account whose session discovery proves dead is retired before its
+        # records and connections are synced: every later step would fail on
+        # its auth anyway, and the retirement re-materializes the providers.
+        for user_id in self._retire_accounts_with_dead_sessions(accounts):
+            accounts.pop(user_id, None)
         convert_legacy_password_files(self.record_store.paths, list(accounts.keys()))
         outcome = self.record_store.reconcile(accounts, self.resolver)
+        self._sync_connections(accounts)
         self._resolve_initial_syncs(tracked_user_ids, accounts, outcome.is_pull_ok_by_user_id)
         if self.forward_identity is not None:
             self.forward_identity.apply_sync_results(outcome.shared_agent_ids_by_user_id)
@@ -181,10 +245,90 @@ class WorkspaceSyncScheduler(MutableModel):
             is_ssh_material_written = (
                 self.record_store.materialize_account_synced_secrets(user_id, account_email) or is_ssh_material_written
             )
-        if is_ssh_material_written and self.on_ssh_material_written is not None:
-            self.on_ssh_material_written()
+        if is_ssh_material_written and self.on_discovery_bounce_needed is not None:
+            self.on_discovery_bounce_needed()
         if self.backup_reaper is not None:
             self.backup_reaper.maybe_start_reap_pass(accounts)
+
+    def _sync_connections(self, accounts: Mapping[str, str]) -> None:
+        """Pull every account's connections, push dirty rows, and re-materialize the provider blocks.
+
+        The materializer runs on every pass, not only when a pull changed a
+        row: it lists the accounts itself, under its own lock, so a signout
+        that happened during the pulls is honored rather than undone by a
+        stale snapshot (and it is a no-op writer when nothing changed).
+        """
+        if self.connection_store is None:
+            return
+        for user_id, account_email in accounts.items():
+            outcome = self.connection_store.pull(user_id, account_email)
+            if outcome.is_reached:
+                self.connection_store.push_dirty(user_id, account_email)
+        if self.provider_materializer is not None:
+            self.provider_materializer.materialize()
+
+    def _retire_accounts_with_dead_sessions(self, accounts: Mapping[str, str]) -> list[str]:
+        """Sign out (locally) every account whose account instance discovery reports as unauthenticated
+        and whose forced refresh the connector refuses; returns the retired user ids.
+
+        A transient refresh failure leaves the account active: only the plugin's
+        own auth error proves the session dead. A successful refresh bounces
+        discovery so the errored snapshot is replaced. An account with a
+        workspace create in flight on one of its providers is skipped (not
+        even refreshed); the refresh cooldown retries it on a later pass.
+        """
+        if self.imbue_cloud_cli is None:
+            return []
+        errors = self.resolver.get_provider_errors()
+        retired: list[str] = []
+        is_any_refreshed = False
+        now = time.monotonic()
+        for user_id, account_email in accounts.items():
+            error = errors.get(ProviderInstanceName(imbue_cloud_provider_name_for_user(user_id)))
+            if error is None or error.type_name not in SESSION_EXPIRED_ERROR_TYPE_NAMES:
+                continue
+            last_refresh_at = self._last_session_refresh_at_by_user_id.get(user_id)
+            if last_refresh_at is not None and now - last_refresh_at < _SESSION_REFRESH_COOLDOWN_SECONDS:
+                continue
+            if self._has_live_create_on_account(user_id):
+                logger.info(
+                    "Leaving the expired-looking session of {} alone: a workspace is still being created on "
+                    "one of the account's providers",
+                    account_email,
+                )
+                continue
+            self._last_session_refresh_at_by_user_id[user_id] = now
+            outcome = self.imbue_cloud_cli.auth_refresh_outcome(account_email)
+            match outcome:
+                case AuthRefreshOutcome.REFRESHED:
+                    logger.info(
+                        "Refreshed the expired-looking session of {} after a discovery auth error", account_email
+                    )
+                    is_any_refreshed = True
+                case AuthRefreshOutcome.SESSION_DEAD:
+                    logger.warning(
+                        "The session of {} is dead (refresh refused); signing the account out", account_email
+                    )
+                    if self.on_account_session_dead is not None:
+                        self.on_account_session_dead(user_id)
+                    # A re-signin within the cooldown starts a fresh session,
+                    # which deserves its own refresh on the next auth error.
+                    self._last_session_refresh_at_by_user_id.pop(user_id, None)
+                    retired.append(user_id)
+                case AuthRefreshOutcome.TRANSIENT_FAILURE:
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
+        if is_any_refreshed and self.on_discovery_bounce_needed is not None:
+            self.on_discovery_bounce_needed()
+        return retired
+
+    def _has_live_create_on_account(self, user_id: str) -> bool:
+        if self.agent_creator is None:
+            return False
+        return has_live_create_on_account(
+            user_id, self.connection_store, self.agent_creator.live_in_flight_provider_instance_names()
+        )
 
     def _resolve_initial_syncs(
         self,
@@ -250,7 +394,18 @@ class WorkspaceSyncScheduler(MutableModel):
         """
         try:
             self.run_one_pass()
-        except (ImbueCloudCliError, WorkspaceSyncError, SyncCryptoError, SecretWrappingError, OSError) as e:
+        except (
+            ImbueCloudCliError,
+            WorkspaceSyncError,
+            SyncCryptoError,
+            SecretWrappingError,
+            OSError,
+            # The pass re-materializes the provider settings, which a malformed env
+            # override or a hand-broken settings.toml makes fail until it is fixed.
+            MindsSettingsError,
+            tomllib.TOMLDecodeError,
+            TOMLKitError,
+        ) as e:
             logger.opt(exception=e).error("Machine-record sync pass failed")
             self._mark_pending_initial_syncs_failed(str(e))
 

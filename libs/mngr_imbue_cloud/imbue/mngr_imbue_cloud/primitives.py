@@ -10,9 +10,31 @@ from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.imbue_common.pure import pure
+from imbue.mngr.providers.host_access_manifest import HostAccessManifest
+from imbue.mngr.providers.host_access_manifest import PerHostDirScheme
+from imbue.mngr.providers.host_access_manifest import keypair_file_names
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.regions import OVH_DATACENTER_CODE_BY_US_REGION
 
 IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
+
+# The files in a leased host's own state dir, ``hosts/<host id>/`` directly
+# under the provider instance dir: the per-lease client key the pool host
+# authorizes, and the host's own known_hosts (the pool host's sshd keys are
+# the connector's, never minted here, so there is no host keypair to carry).
+IMBUE_CLOUD_CLIENT_KEY_NAME: Final[str] = "ssh_key"
+IMBUE_CLOUD_KNOWN_HOSTS_NAME: Final[str] = "known_hosts"
+
+# The per-host layout contract, published for consumers that carry a host's
+# access material to another machine.
+IMBUE_CLOUD_HOST_ACCESS_MANIFEST: Final[HostAccessManifest] = HostAccessManifest(
+    key_dir_name="",
+    per_host_dir_scheme=PerHostDirScheme.HOSTS_HOST_ID,
+    file_names=keypair_file_names(IMBUE_CLOUD_CLIENT_KEY_NAME),
+    agent_key_file_name=IMBUE_CLOUD_CLIENT_KEY_NAME,
+    pin_store_names=(IMBUE_CLOUD_KNOWN_HOSTS_NAME,),
+    is_pin_store_per_host=True,
+    known_hosts_link_store_name=None,
+)
 
 # The pre-baked agent every pool host carries, whose id is the pool row's
 # ``agent_id`` and the workspace's durable identity (see ``WorkspaceId``).

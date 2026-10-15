@@ -1087,12 +1087,12 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 logger.warning("Resolver change callback failed: {}", e)
 
     def notify_change(self) -> None:
-        """Public wake-up for SSE listeners after external state mutations.
+        """Public wake-up for the chrome listeners after an external state mutation.
 
         ``_fire_on_change`` is fired internally on agent/service updates, but
-        the request inbox lives outside this resolver. Inbox mutations
-        (new request events, mirrored response events) call this so chrome
-        SSE consumers don't have to wait for the next 30s poll tick.
+        some state the chrome derives from lives outside this resolver (the
+        request inbox, the signed-in accounts). Producers of that state call
+        this so the listeners re-derive now instead of at the next poll tick.
         """
         self._fire_on_change()
 

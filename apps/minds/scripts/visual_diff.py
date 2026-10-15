@@ -62,13 +62,17 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.ui_api import read_vite_entry_tags
+from imbue.minds.desktop_client.ui_models import AccountPanelState
+from imbue.minds.desktop_client.ui_models import ConnectionPanelStatus
 from imbue.minds.desktop_client.ui_models import NotificationKind
 from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiAccountEntry
+from imbue.minds.desktop_client.ui_models import UiAccountProvidersEntry
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiBootstrap
 from imbue.minds.desktop_client.ui_models import UiBootstrapSeed
+from imbue.minds.desktop_client.ui_models import UiConnectionEntry
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
@@ -324,25 +328,47 @@ def build_spa_fixture_bootstrap() -> UiBootstrap:
                     email="alice@example.com",
                     workspace_count=3,
                     is_default=True,
-                    is_enabled=True,
                 ),
-                UiAccountEntry(
-                    user_id="user-bob", email="bob@example.com", workspace_count=0, is_default=False, is_enabled=True
-                ),
+                UiAccountEntry(user_id="user-bob", email="bob@example.com", workspace_count=0, is_default=False),
             ),
         ),
         providers=UiProvidersMessage(
-            providers=(
-                UiProviderEntry(name="local", backend="local", status=ProviderPanelStatus.OK, is_enabled=True),
-                UiProviderEntry(
-                    name="modal",
-                    backend=None,
-                    status=ProviderPanelStatus.ERROR,
-                    is_enabled=True,
-                    error_type="AuthError",
-                    error_message="Modal token expired.",
+            accounts=(
+                UiAccountProvidersEntry(
+                    user_id="00000000-0000-4000-8000-000000000001",
+                    email="alice@example.com",
+                    state=AccountPanelState.SIGNED_IN,
+                    is_connection_owner_eligible=True,
+                    imbue_cloud=UiProviderEntry(
+                        name="imbue_cloud_00000000-0000-4000-8000-000000000001",
+                        backend="imbue_cloud",
+                        status=ProviderPanelStatus.OK,
+                    ),
+                    connections=(
+                        UiConnectionEntry(
+                            id="conn-00000000000000000000000000000001",
+                            instance="modal_00000000000000000000000000000001",
+                            backend="modal",
+                            alias="team modal",
+                            identifier="ak-...0001",
+                            placement={},
+                            status=ConnectionPanelStatus.ERROR,
+                            error_type="AuthError",
+                            error_message="Modal token expired.",
+                            workspace_count=1,
+                        ),
+                    ),
+                ),
+                UiAccountProvidersEntry(
+                    user_id="local",
+                    email="",
+                    state=AccountPanelState.SIGNED_IN,
+                    is_connection_owner_eligible=True,
+                    imbue_cloud=None,
+                    connections=(),
                 ),
             ),
+            device_providers=(UiProviderEntry(name="docker", backend="docker", status=ProviderPanelStatus.OK),),
             last_event_at="2026-01-01T00:00:00+00:00",
             last_full_snapshot_at="2026-01-01T00:00:00+00:00",
         ),

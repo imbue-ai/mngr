@@ -4,6 +4,9 @@ from typing import Final
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import PositiveInt
+from imbue.mngr.providers.host_access_manifest import HostAccessManifest
+from imbue.mngr.providers.host_access_manifest import PerHostDirScheme
+from imbue.mngr.providers.host_access_manifest import keypair_file_names
 
 # The per-host key helpers moved to mngr core (shared with docker/modal/lima);
 # re-exported here so vps callers keep their historical import path.
@@ -13,14 +16,36 @@ from imbue.mngr.providers.ssh_utils import (
     read_host_public_key_with_legacy_fallback as read_host_public_key_with_legacy_fallback,
 )
 
-# SSH key-file names under a provider instance's ``key_dir``. Shared so the
-# provider (substrate) and the bare realizer refer to the same files: the
-# provider-wide ``vps_ssh_key`` is the VM-root management key, and the bare
-# realizer uses the same name for the per-host agent key it mints (falling back
-# to the shared file for hosts created before per-host keys existed).
+# SSH key-file names under a provider instance's ``key_dir``. ``vps_ssh_key``
+# is the VM-root client key, minted per host under ``host_keys/<hex>/`` at
+# create; the bare realizer's agent endpoint is that same key. The known_hosts
+# file stays provider-wide (its pin store attributes pins per host).
 VPS_SSH_KEY_NAME: Final[str] = "vps_ssh_key"
 VPS_HOST_KEY_NAME: Final[str] = "host_key"
 VPS_KNOWN_HOSTS_NAME: Final[str] = "vps_known_hosts"
+# The container placement's client/host keys and its known_hosts, under the same key dir.
+CONTAINER_SSH_KEY_NAME: Final[str] = "container_ssh_key"
+CONTAINER_HOST_KEY_NAME: Final[str] = "container_host_key"
+CONTAINER_KNOWN_HOSTS_NAME: Final[str] = "container_known_hosts"
+VPS_KEY_DIR_NAME: Final[str] = "keys"
+
+# The per-host layout contract (README, "SSH key material"), published for
+# consumers that carry a host's access material to another machine. The
+# VPS-root key is the agent key: under bare placement it opens the agent
+# endpoint, and it is the one key every host has minted per host. The per-host
+# known_hosts link names the container placement's store (the default); bare
+# placement links the VPS store itself (``BareRealizer._agent_ssh_keypair``).
+VPS_HOST_ACCESS_MANIFEST: Final[HostAccessManifest] = HostAccessManifest(
+    key_dir_name=VPS_KEY_DIR_NAME,
+    per_host_dir_scheme=PerHostDirScheme.HOST_KEYS_UUID_HEX,
+    file_names=keypair_file_names(
+        VPS_SSH_KEY_NAME, CONTAINER_SSH_KEY_NAME, VPS_HOST_KEY_NAME, CONTAINER_HOST_KEY_NAME
+    ),
+    agent_key_file_name=VPS_SSH_KEY_NAME,
+    pin_store_names=(VPS_KNOWN_HOSTS_NAME, CONTAINER_KNOWN_HOSTS_NAME),
+    is_pin_store_per_host=False,
+    known_hosts_link_store_name=CONTAINER_KNOWN_HOSTS_NAME,
+)
 
 
 class VpsInstanceId(NonEmptyStr):
@@ -61,6 +86,12 @@ class IsolationMode(UpperCaseStrEnum):
 # ``IsolationMode`` name (``"none"`` / ``"container"``), per the conventional
 # lowercase tag/label charset.
 ISOLATION_TAG_KEY: Final[str] = "mngr-isolation"
+
+# Instance-level identity marker carrying the mngr host id, stamped at create
+# and read back by discovery (again without SSH) to pick the per-host client key
+# that opens the VPS. Providers whose tag charset cannot hold it (GCE labels)
+# store the same key/value in instance metadata instead.
+HOST_ID_TAG_KEY: Final[str] = "mngr-host-id"
 
 
 def isolation_marker_value(isolation: IsolationMode) -> str:

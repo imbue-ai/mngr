@@ -14,6 +14,7 @@ import click
 from loguru import logger
 
 from imbue.mngr.primitives import HostId
+from imbue.mngr.providers.host_access_manifest import host_access_per_host_dir
 from imbue.mngr.providers.host_key_store import load_host_key_record
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
@@ -29,6 +30,9 @@ from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.errors import HostKeyDriftError
+from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_CLIENT_KEY_NAME
+from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_HOST_ACCESS_MANIFEST
+from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_KNOWN_HOSTS_NAME
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.providers.adoption import AdoptionEndpointKind
 from imbue.mngr_imbue_cloud.providers.adoption import ParamikoSliceVmAccess
@@ -107,19 +111,22 @@ def _find_lease_by_ref(leases: list[LeasedHostInfo], host_ref: str) -> LeasedHos
     return None
 
 
-def _find_host_state_dirs(host_id: str) -> list[Path]:
+def _find_host_state_dirs(host_id: HostId) -> list[Path]:
     """Locate the per-host state dir(s) holding this host's client keypair, across provider instances."""
     profile_dir = get_active_profile_dir(get_default_host_dir())
     state_root = get_provider_state_dir(profile_dir)
     if not state_root.is_dir():
         return []
-    return sorted(
-        instance_dir / "hosts" / host_id
+    candidate_dirs = (
+        host_access_per_host_dir(instance_dir, IMBUE_CLOUD_HOST_ACCESS_MANIFEST, host_id)
         for instance_dir in state_root.iterdir()
-        if instance_dir.is_dir()
-        and instance_dir.name != "sessions"
-        and (instance_dir / "hosts" / host_id / "ssh_key").exists()
-        and (instance_dir / "hosts" / host_id / "ssh_key.pub").exists()
+        if instance_dir.is_dir() and instance_dir.name != "sessions"
+    )
+    return sorted(
+        host_state_dir
+        for host_state_dir in candidate_dirs
+        if (host_state_dir / IMBUE_CLOUD_CLIENT_KEY_NAME).exists()
+        and (host_state_dir / f"{IMBUE_CLOUD_CLIENT_KEY_NAME}.pub").exists()
     )
 
 
@@ -152,7 +159,8 @@ def rotate_host_keys(host_ref: str, account: str | None, connector_url: str | No
             error_class="NotASlice",
         )
 
-    state_dirs = _find_host_state_dirs(lease.host_id)
+    host_id = HostId(lease.host_id)
+    state_dirs = _find_host_state_dirs(host_id)
     if not state_dirs:
         fail_with_json(
             f"No local key material for host {lease.host_id}; rotate from the machine that leased it",
@@ -166,22 +174,21 @@ def rotate_host_keys(host_ref: str, account: str | None, connector_url: str | No
         )
     host_state_dir = state_dirs[0]
 
-    host_id = HostId(lease.host_id)
     target = SliceAdoptionTarget(
         host_id=host_id,
         address=lease.vps_address,
         vm_port=lease.ssh_port,
         container_port=lease.container_ssh_port,
         host_state_dir=host_state_dir,
-        known_hosts_path=host_state_dir / "known_hosts",
-        client_public_key=(host_state_dir / "ssh_key.pub").read_text().strip(),
+        known_hosts_path=host_state_dir / IMBUE_CLOUD_KNOWN_HOSTS_NAME,
+        client_public_key=(host_state_dir / f"{IMBUE_CLOUD_CLIENT_KEY_NAME}.pub").read_text().strip(),
     )
     access = ParamikoSliceVmAccess(
         host_id=host_id,
         address=lease.vps_address,
         vm_port=lease.ssh_port,
         ssh_user=lease.ssh_user,
-        private_key_path=host_state_dir / "ssh_key",
+        private_key_path=host_state_dir / IMBUE_CLOUD_CLIENT_KEY_NAME,
         known_hosts_path=target.known_hosts_path,
     )
 

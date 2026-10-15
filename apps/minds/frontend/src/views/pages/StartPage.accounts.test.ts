@@ -52,7 +52,7 @@ function press(tree: unknown, name: string, value: string): void {
 }
 
 function formDefaults(accounts: UiAccountEntry[]): CreateFormDefaults {
-  return createFormDefaults({ accounts: accounts.map((account) => ({ user_id: account.user_id, email: account.email })) });
+  return createFormDefaults({ accounts: accounts.map((account) => ({ user_id: account.user_id, email: account.email, state: "SIGNED_IN" as const, is_connection_owner_eligible: true })) });
 }
 
 /** The address a verification check asks about. */

@@ -33,11 +33,11 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 
-# An imbue_cloud account and the provider instance name it slugifies to (mirrors
-# ``imbue_cloud_provider_name_for_account``); used by the account-scoping tests.
+# An imbue_cloud account and its account instance name (``imbue_cloud_<user id>``,
+# see ``imbue_cloud_provider_name_for_user``); used by the account-scoping tests.
 _ACCOUNT_USER_ID = "user-abc"
 _ACCOUNT_EMAIL = "alice@imbue.com"
-_ACCOUNT_PROVIDER = "imbue_cloud_alice-imbue-com"
+_ACCOUNT_PROVIDER = f"imbue_cloud_{_ACCOUNT_USER_ID}"
 
 
 def _workspace_agent(host_id: HostId, agent_id: AgentId, name: str, provider: str) -> DiscoveredAgent:

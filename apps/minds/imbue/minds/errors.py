@@ -1,5 +1,7 @@
 import click
 
+from imbue.minds.mngr_settings.errors import MindsSettingsError
+
 
 class MindError(click.ClickException):
     """Base exception for all Imbue Studio errors.
@@ -236,6 +238,51 @@ class WorkspaceRecordTooNewError(WorkspaceSyncError):
     ...
 
 
+class ConnectionRequiresMasterPasswordError(WorkspaceSyncError):
+    """Raised when a connection would be added to an account that cannot encrypt it here.
+
+    Synced connections ride the account's DEK, so the account must be unlocked
+    on this device and have a non-empty master password; the local profile is
+    the alternative for an account that has neither.
+    """
+
+    ...
+
+
+class ConnectionNotFoundError(WorkspaceSyncError):
+    """Raised when a connection id or instance name matches no active connection."""
+
+    ...
+
+
+class ConnectionTooNewError(WorkspaceSyncError):
+    """Raised when a state-changing operation targets a connection written by a newer app version."""
+
+    ...
+
+
+class ConnectionRemovedElsewhereError(WorkspaceSyncError):
+    """Raised when a push would rebase an active connection onto a tombstone another device wrote.
+
+    The removal wins: resurrecting the document would bring the connection
+    back on every device after one of them deliberately removed it.
+    """
+
+    ...
+
+
+class ConnectionUpdateInProgressError(WorkspaceSyncError):
+    """Raised when a removal or another update targets a connection whose new credentials are still being validated.
+
+    The update route settles such a row (clears or restores its rollback)
+    when the validation ends; a writer that changed it meanwhile would
+    either be undone by that settlement or carry the rollback into a row
+    that must never have one (a tombstone).
+    """
+
+    ...
+
+
 class LimaImageError(MindError):
     """Base exception for the pre-baked Lima image cache."""
 
@@ -284,6 +331,15 @@ class FolderSyncStoreError(MindError):
     """Raised when the record of which folders to keep synced cannot be written."""
 
     ...
+
+
+class AccountsIndexUnreadableError(MindsSettingsError):
+    """Raised when the plugin's ``accounts.json`` index exists but cannot be read as a signed-in account list.
+
+    Distinct from an absent index (no account was ever signed in): a caller
+    deriving the provider set must not treat an unreadable listing as an
+    empty one, since writing it would delete every account and connection block.
+    """
 
 
 class SnapshotContainerStatesError(MindError):

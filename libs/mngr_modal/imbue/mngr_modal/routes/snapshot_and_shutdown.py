@@ -64,10 +64,7 @@ image = (
 
 app = modal.App(name=APP_NAME, image=image)
 VOLUME_NAME = f"{APP_NAME}-state"
-# Must equal STATE_VOLUME_FS_VERSION in mngr_modal.backend: Modal refuses to open a
-# volume at any version but the one it was created with, and either side may be
-# the one that creates it.
-volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True, version=2)
+volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 
 # A marker naming the source this app was deployed from. It is never called --

@@ -22,8 +22,8 @@ export interface WorkspaceOptionsData {
   color: string;
   palette: Record<string, string>;
   is_stale: boolean;
-  is_leased_imbue_cloud: boolean;
-  /** The account a leased machine belongs to; '' when not leased or not known. */
+  is_account_owned_provider: boolean;
+  /** The account an account-owned machine belongs to; '' when not account-owned or not known. */
   leased_owner_email: string;
   has_account: boolean;
   account_email: string;

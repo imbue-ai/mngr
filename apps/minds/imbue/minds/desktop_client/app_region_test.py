@@ -17,7 +17,7 @@ def _config(tmp_path: Path) -> MindsConfig:
 def test_region_provider_key_maps_only_region_bearing_modes() -> None:
     assert region_provider_key_for_launch_mode(LaunchMode.IMBUE_CLOUD) == "imbue_cloud"
     assert region_provider_key_for_launch_mode(LaunchMode.VULTR) == "vultr"
-    # The cloud modes are bring-your-own-key-account with placement pinned per
+    # The cloud modes are connection-backed with placement pinned per
     # account entry, so they carry no ambient region key.
     assert region_provider_key_for_launch_mode(LaunchMode.AWS) is None
     assert region_provider_key_for_launch_mode(LaunchMode.DOCKER) is None

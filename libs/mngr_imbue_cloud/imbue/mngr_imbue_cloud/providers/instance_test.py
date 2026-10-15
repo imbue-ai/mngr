@@ -8,6 +8,9 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 from threading import Event
 from threading import Lock
@@ -52,6 +55,8 @@ from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
+from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
+from imbue.mngr_imbue_cloud.data_types import AuthSession
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
@@ -66,6 +71,7 @@ from imbue.mngr_imbue_cloud.errors import WorkspaceStartFailedError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
+from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 from imbue.mngr_imbue_cloud.providers.adoption import BoundEndpoints
 from imbue.mngr_imbue_cloud.providers.adoption import bound_endpoints_path
 from imbue.mngr_imbue_cloud.providers.adoption import load_bound_endpoints
@@ -631,6 +637,55 @@ def test_list_leased_hosts_preserves_auth_error() -> None:
 
     with pytest.raises(ImbueCloudAuthError):
         provider._list_leased_hosts_cached()
+
+
+class _RefreshingDiscoveryProvider(_NoWorkspacesMixin, ImbueCloudProvider):
+    """Provider stub whose token resolution runs the real refresh path against the client's transport."""
+
+    def _require_account(self, override: str | None = None) -> ImbueCloudAccount:
+        return ImbueCloudAccount("user@example.com")
+
+
+def test_discover_hosts_raises_the_auth_error_unwrapped_on_a_refused_refresh(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The connector's refused refresh (``200 {"status": "ERROR"}``) reaches discovery's caller as ImbueCloudAuthError.
+
+    minds signs the account out on that class (by its type name across the
+    observe boundary), so neither the refresh helper nor the listing may wrap
+    it in ProviderUnavailableError or any other type.
+    """
+    request_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_paths.append(request.url.path)
+        return httpx.Response(200, json={"status": "ERROR", "message": "refresh token revoked"})
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+    store = ImbueCloudSessionStore(sessions_dir=tmp_path / "sessions")
+    store.save(
+        AuthSession(
+            user_id=SuperTokensUserId("user-abc"),
+            email=ImbueCloudAccount("user@example.com"),
+            access_token=SecretStr("expired-access-token"),
+            refresh_token=SecretStr("rt-1"),
+            access_token_expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        )
+    )
+    provider = _RefreshingDiscoveryProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        client=client,
+        session_store=store,
+        _leased_hosts_cache=None,
+    )
+
+    with pytest.raises(ImbueCloudAuthError) as exc_info:
+        provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
+
+    assert type(exc_info.value) is ImbueCloudAuthError
+    assert "Refresh rejected by connector" in str(exc_info.value)
+    # The refusal came from the refresh itself; the listing was never attempted with a stale token.
+    assert request_paths == ["/auth/session/refresh"]
 
 
 def test_list_leased_hosts_maps_exhausted_transport_retries_to_provider_unavailable() -> None:

@@ -19,9 +19,9 @@ from typing import Literal
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import RootModel
-from pydantic import StrictBool
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.connections.primitives import MODAL_SANDBOX_TIMEOUT_SECONDS_MAX
 from imbue.minds.desktop_client.data_types import ShareGatewayState
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import DockerRuntime
@@ -308,12 +308,21 @@ class CreateWorkspaceRequest(ApiRequestModel):
         ge=1,
         description="Data disk in whole GB for the LIMA mode (the btrfs disk the workspace's data lives on); ignored elsewhere",
     )
+    modal_sandbox_timeout_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        le=MODAL_SANDBOX_TIMEOUT_SECONDS_MAX,
+        description=(
+            "Sandbox lifetime in seconds for the MODAL mode, overriding the connection block's default "
+            "(about a day, the most Modal allows and this field's cap) for this one create; ignored by the other modes"
+        ),
+    )
     cloud_account: str | None = Field(
         default=None,
         description=(
-            "Bring-your-own-key cloud account to create on: the ``byok-<backend>-<slug>`` provider "
-            "block name from /desktop/cloud-accounts. When set, launch_mode must match the "
-            "account's backend and the create targets that provider instance."
+            "Cloud connection to create on: the ``<backend>_<hex>`` connection instance name "
+            "(the ``name`` from /desktop/cloud-accounts). When set, launch_mode must match the "
+            "connection's backend and the create targets that provider instance."
         ),
     )
     backup_provider: BackupProvider | None = Field(
@@ -499,25 +508,37 @@ class BugReportRequest(ApiRequestModel):
 
 
 class _CloudAccountCreateBase(ApiRequestModel):
-    """Fields shared by every backend's bring-your-own-key account registration."""
+    """Fields shared by every backend's cloud-connection registration."""
 
-    alias: str = Field(min_length=1, description="Display name for the account (also seeds the block-name slug)")
-    region: str = Field(
-        min_length=1,
-        description="Default placement for machines created on this account (an AWS/Azure region, or a GCE zone)",
+    alias: str = Field(min_length=1, description="Display name for the connection")
+    owner: str | None = Field(
+        default=None,
+        description=(
+            "Who owns the connection: an imbue cloud account's user id (the connection syncs to every device "
+            "that unlocks the account) or 'local' (this device only). Omitted: the default account."
+        ),
     )
 
 
-class AwsCloudAccountCreateRequest(_CloudAccountCreateBase):
-    """Register an AWS account from a pasted access-key pair."""
+class _PlacedCloudAccountCreateBase(_CloudAccountCreateBase):
+    """The VPS clouds pin a placement per connection."""
+
+    region: str = Field(
+        min_length=1,
+        description="Default placement for machines created on this connection (an AWS/Azure region, or a GCE zone)",
+    )
+
+
+class _AwsCredentialFields(ApiRequestModel):
+    """A pasted AWS access-key pair."""
 
     backend: Literal["aws"] = Field(description="Cloud backend discriminator")
     aws_access_key_id: str | None = Field(default=None, description="AWS access key id")
     aws_secret_access_key: str | None = Field(default=None, description="AWS secret access key")
 
 
-class GcpCloudAccountCreateRequest(_CloudAccountCreateBase):
-    """Register a GCP account from a pasted service-account key."""
+class _GcpCredentialFields(ApiRequestModel):
+    """A pasted GCP service-account key."""
 
     backend: Literal["gcp"] = Field(description="Cloud backend discriminator")
     gcp_service_account_key_json: str | None = Field(
@@ -525,8 +546,8 @@ class GcpCloudAccountCreateRequest(_CloudAccountCreateBase):
     )
 
 
-class AzureCloudAccountCreateRequest(_CloudAccountCreateBase):
-    """Register an Azure account from a service-principal."""
+class _AzureCredentialFields(ApiRequestModel):
+    """An Azure service-principal."""
 
     backend: Literal["azure"] = Field(description="Cloud backend discriminator")
     azure_subscription_id: str | None = Field(default=None, description="Azure subscription id")
@@ -535,15 +556,51 @@ class AzureCloudAccountCreateRequest(_CloudAccountCreateBase):
     azure_client_secret: str | None = Field(default=None, description="Service-principal client secret")
 
 
+class _ModalCredentialFields(ApiRequestModel):
+    """A Modal token pair."""
+
+    backend: Literal["modal"] = Field(description="Cloud backend discriminator")
+    modal_token_id: str | None = Field(default=None, description="Modal token id")
+    modal_token_secret: str | None = Field(default=None, description="Modal token secret")
+
+
+class AwsCloudAccountCreateRequest(_PlacedCloudAccountCreateBase, _AwsCredentialFields):
+    """Register an AWS connection from a pasted access-key pair."""
+
+
+class GcpCloudAccountCreateRequest(_PlacedCloudAccountCreateBase, _GcpCredentialFields):
+    """Register a GCP connection from a pasted service-account key."""
+
+
+class AzureCloudAccountCreateRequest(_PlacedCloudAccountCreateBase, _AzureCredentialFields):
+    """Register an Azure connection from a service-principal."""
+
+
+class ModalCloudAccountCreateRequest(_CloudAccountCreateBase, _ModalCredentialFields):
+    """Register a Modal connection from a token pair (no placement)."""
+
+    modal_user_id: str | None = Field(
+        default=None,
+        description=(
+            "Names the connection's Modal namespace (the environment is <prefix><modal_user_id>) instead of "
+            "deriving it from the connection id; this-device-only connections only, matching "
+            "[A-Za-z0-9][A-Za-z0-9_-]{0,47}"
+        ),
+    )
+
+
 class CloudAccountCreateRequest(
     RootModel[
         Annotated[
-            AwsCloudAccountCreateRequest | GcpCloudAccountCreateRequest | AzureCloudAccountCreateRequest,
+            AwsCloudAccountCreateRequest
+            | GcpCloudAccountCreateRequest
+            | AzureCloudAccountCreateRequest
+            | ModalCloudAccountCreateRequest,
             Field(discriminator="backend"),
         ]
     ]
 ):
-    """Body for registering a bring-your-own-key cloud account (pasted credentials).
+    """Body for registering a cloud connection (pasted credentials).
 
     A discriminated union on ``backend``: each cloud's credential fields live on
     its own variant instead of being splatted flat across one model. The wire
@@ -554,22 +611,59 @@ class CloudAccountCreateRequest(
     """
 
 
-class CloudAccountSummary(FrozenModel):
-    """One registered bring-your-own-key cloud account."""
+class _CloudAccountUpdateBase(ApiRequestModel):
+    """Fields shared by every backend's in-place credential update: no owner, no region, no backend change."""
 
-    name: str = Field(description="Provider block name (byok-<backend>-<slug>) -- the stable id")
+    alias: str | None = Field(default=None, description="New display name; omitted keeps the current one")
+
+
+class AwsCloudAccountUpdateRequest(_CloudAccountUpdateBase, _AwsCredentialFields):
+    """Replace an AWS connection's access-key pair."""
+
+
+class GcpCloudAccountUpdateRequest(_CloudAccountUpdateBase, _GcpCredentialFields):
+    """Replace a GCP connection's service-account key."""
+
+
+class AzureCloudAccountUpdateRequest(_CloudAccountUpdateBase, _AzureCredentialFields):
+    """Replace an Azure connection's service-principal."""
+
+
+class ModalCloudAccountUpdateRequest(_CloudAccountUpdateBase, _ModalCredentialFields):
+    """Replace a Modal connection's token pair."""
+
+
+class CloudAccountUpdateRequest(
+    RootModel[
+        Annotated[
+            AwsCloudAccountUpdateRequest
+            | GcpCloudAccountUpdateRequest
+            | AzureCloudAccountUpdateRequest
+            | ModalCloudAccountUpdateRequest,
+            Field(discriminator="backend"),
+        ]
+    ]
+):
+    """Body for updating a cloud connection's credentials in place (``PUT .../cloud-accounts/<instance>``).
+
+    The ``backend`` discriminator must name the connection's own backend; the
+    connection keeps its id, instance name, owner, and placement. Every
+    credential field of the backend is required, as on registration.
+    """
+
+
+class CloudAccountSummary(FrozenModel):
+    """One cloud connection whose credentials are available on this device."""
+
+    name: str = Field(description="Connection instance name (<backend>_<hex>) -- the stable id")
     alias: str = Field(description="Display alias")
     backend: str = Field(description="Cloud backend (e.g. 'aws')")
-    region: str = Field(description="The account's current default region")
+    region: str = Field(description="The connection's pinned placement (empty for modal)")
     identifier: str = Field(description="Masked credential hint (e.g. 'AKIA…F5X2'); never the secret")
-
-
-class SetProviderEnabledRequest(ApiRequestModel):
-    """Body for toggling a provider's enabled flag."""
-
-    # StrictBool (not bool) so a non-boolean like ``1`` or ``"yes"`` is rejected
-    # rather than truthiness-coerced, matching the route's prior isinstance check.
-    enabled: StrictBool = Field(description="Desired enabled state for the provider")
+    owner_user_id: str = Field(description="The owning account's user id, or 'local' for this device's profile")
+    is_region_pinned: bool = Field(
+        description="Whether the backend fixes the region on the connection (aws, gcp, azure)"
+    )
 
 
 class WorkspaceSummary(FrozenModel):
@@ -826,14 +920,6 @@ class MachineSharingResponse(FrozenModel):
             "not live until the workspace's share stack restarts."
         ),
     )
-
-
-class ProviderToggleResponse(FrozenModel):
-    """Result of toggling a provider's enabled flag."""
-
-    provider_name: str = Field(description="The provider that was toggled")
-    enabled: bool = Field(description="The provider's new enabled state")
-    changed: bool = Field(description="Whether the state actually changed")
 
 
 class StopStateContainerResponse(FrozenModel):

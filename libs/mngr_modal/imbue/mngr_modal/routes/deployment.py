@@ -85,7 +85,7 @@ def get_source_marker_function_name(function: str) -> str:
 def _url_if_app_already_carries_source(
     function: str,
     app_name: str,
-    environment_name: str,
+    environment_name: str | None,
     modal_interface: ModalInterface,
 ) -> str | None:
     """The function's URL if the app already carries this exact source, else None.
@@ -113,7 +113,7 @@ def _url_if_app_already_carries_source(
 def ensure_function_deployed(
     function: str,
     app_name: str,
-    environment_name: str,
+    environment_name: str | None,
     modal_interface: ModalInterface,
     *,
     retry_budget_seconds: float = DEPLOY_RETRY_BUDGET_SECONDS,
@@ -167,7 +167,7 @@ def ensure_function_deployed(
 def _deploy_unless_a_concurrent_deploy_got_there_first(
     function: str,
     app_name: str,
-    environment_name: str,
+    environment_name: str | None,
     modal_interface: ModalInterface,
 ) -> str:
     """One attempt at ``ensure_function_deployed``: adopt this source if present, else deploy it."""
@@ -180,15 +180,10 @@ def _deploy_unless_a_concurrent_deploy_got_there_first(
 def deploy_function(
     function: str,
     app_name: str,
-    environment_name: str,
+    environment_name: str | None,
     modal_interface: ModalInterface,
 ) -> str:
     """Deploy a Function to Modal with the given app name and return the URL.
-
-    The app is taken through the atomic get-or-create first, so a deploy is
-    never what brings an app into existence: Modal's own app creation inside
-    ``modal deploy`` is not atomic, and concurrent first deploys of one app
-    name mint rival apps that fight over it.
 
     Raises MngrError if deployment fails, except when Modal failed the deploy
     in a way another attempt could clear: that propagates as a
@@ -199,7 +194,6 @@ def deploy_function(
 
     with log_span("Deploying {} function for app: {}", function, app_name):
         try:
-            modal_interface.app_lookup(app_name, create_if_missing=True, environment_name=environment_name)
             modal_interface.deploy(
                 script_path,
                 app_name=app_name,
@@ -238,7 +232,7 @@ def deploy_function(
 def _get_function_url_after_deploy(
     function: str,
     app_name: str,
-    environment_name: str,
+    environment_name: str | None,
     modal_interface: ModalInterface,
 ) -> str:
     return get_function_url(function, app_name, environment_name, modal_interface)
@@ -247,7 +241,7 @@ def _get_function_url_after_deploy(
 def get_function_url(
     function: str,
     app_name: str,
-    environment_name: str,
+    environment_name: str | None,
     modal_interface: ModalInterface,
 ) -> str:
     """Look up the web URL for an already-deployed Modal function.

@@ -29,6 +29,8 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_trim import BackupTrimManager
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
+from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
@@ -174,6 +176,14 @@ class DesktopClientState(MutableModel):
             "is no root concurrency group to run them on, which the pane reports as syncing "
             "being unsupported"
         ),
+    )
+    connection_store: ConnectionStore | None = Field(
+        default=None, frozen=True, description="Per-account cloud connection replicas + the local profile"
+    )
+    provider_materializer: ProviderSettingsMaterializer | None = Field(
+        default=None,
+        frozen=True,
+        description="The single writer of account/connection provider blocks (bounces discovery on change)",
     )
     pending_requests: PendingRequestsInterface | None = Field(
         default=None,

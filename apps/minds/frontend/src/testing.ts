@@ -8,7 +8,10 @@ import type {
   UiNotificationEntry,
   UiWorkspacesMessage,
 } from "./channel/messages";
-import type { CreateFormDefaults } from "./models/create";
+import type {
+  ConnectionBackendOption,
+  CreateFormDefaults,
+} from "./models/create";
 import { createAppQueryClient } from "./models/queryClient";
 import type { SettingsOverview } from "./models/settings";
 import type { SharePanelModelOptions } from "./models/sharePanel";
@@ -132,7 +135,6 @@ export function accountEntry(
     email: "alice@example.com",
     workspace_count: 0,
     is_default: true,
-    is_enabled: true,
     ...overrides,
   };
 }
@@ -146,10 +148,20 @@ export function secondAccountEntry(): UiAccountEntry {
   });
 }
 
+/** The connection backends as the server tables them: three with a pinned region, Modal placed per create. */
+export const CONNECTION_BACKEND_OPTIONS: readonly ConnectionBackendOption[] = [
+  { name: "aws", label: "AWS", is_region_pinned: true },
+  { name: "gcp", label: "GCP", is_region_pinned: true },
+  { name: "azure", label: "Azure", is_region_pinned: true },
+  { name: "modal", label: "Modal", is_region_pinned: false },
+];
+
 /** A create-form defaults payload with accountEntry's account as the default and Imbue Cloud selected. */
 export function createFormDefaults(overrides: Partial<CreateFormDefaults> = {}): CreateFormDefaults {
   return {
-    accounts: [{ user_id: "user-1", email: "alice@example.com" }],
+    accounts: [
+      { user_id: "user-1", email: "alice@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
+    ],
     default_account_id: "user-1",
     launch_modes: ["IMBUE_CLOUD", "LIMA", "DOCKER"],
     selected_launch_mode: "IMBUE_CLOUD",
@@ -167,7 +179,7 @@ export function createFormDefaults(overrides: Partial<CreateFormDefaults> = {}):
       MODAL: { cpu_count: 2, memory_gb: 4, disk_gb: null },
     },
     cloud_accounts: [],
-    byok_clouds_enabled: false,
+    connection_backends: [...CONNECTION_BACKEND_OPTIONS],
     git_url: "https://github.com/imbue-ai/default-workspace-template.git",
     branch: "minds-v9.9.9",
     color: "#0b292b",

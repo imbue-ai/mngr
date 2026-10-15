@@ -31,8 +31,6 @@ from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import register_modal_test_app
 from imbue.mngr.utils.testing import register_modal_test_volume
-from imbue.mngr_modal.backend import STATE_VOLUME_FS_VERSION
-from imbue.mngr_modal.backend import STATE_VOLUME_SUFFIX
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.routes.deployment import ensure_function_deployed
 from imbue.modal_proxy.direct import DirectModalInterface
@@ -216,7 +214,7 @@ def _write_host_record_to_volume(app_name: str, host_id: str, environment_name: 
     Creates a minimal host record that the snapshot function can update.
     The structure matches HostRecord model with nested certified_host_data.
     """
-    volume_name = f"{app_name}{STATE_VOLUME_SUFFIX}"
+    volume_name = f"{app_name}-state"
     register_modal_test_volume(volume_name)
     volume = modal.Volume.from_name(volume_name, create_if_missing=True, environment_name=environment_name)
 
@@ -235,7 +233,7 @@ def _write_host_record_to_volume(app_name: str, host_id: str, environment_name: 
 
 def _read_host_record_from_volume(app_name: str, host_id: str, environment_name: str) -> dict[str, Any] | None:
     """Read a host record from the Modal volume."""
-    volume_name = f"{app_name}{STATE_VOLUME_SUFFIX}"
+    volume_name = f"{app_name}-state"
     register_modal_test_volume(volume_name)
     volume = modal.Volume.from_name(volume_name, environment_name=environment_name)
 
@@ -270,8 +268,8 @@ def deployed_snapshot_function(
         :_MAX_MODAL_ENVIRONMENT_NAME_LENGTH
     ]
     app_name = _get_test_app_name()
-    # The deployed function creates the app's state volume.
-    volume_name = f"{app_name}{STATE_VOLUME_SUFFIX}"
+    # The deployed function creates a volume named {app_name}-state
+    volume_name = f"{app_name}-state"
     register_modal_test_app(app_name)
     register_modal_test_volume(volume_name)
 
@@ -481,26 +479,3 @@ def test_ensure_function_deployed_reuses_an_app_that_already_carries_this_source
 
     assert url == function_url
     assert interface.deploy_count == 0
-
-
-@pytest.mark.acceptance
-@pytest.mark.modal
-@pytest.mark.timeout(180)
-def test_the_state_volume_a_deploy_creates_opens_at_the_version_a_host_create_asks_for(
-    deployed_snapshot_function: tuple[str, str, str],
-) -> None:
-    """When the deploy is what creates the state volume, a host create's open of it must not be refused.
-
-    Opened without ``create_if_missing``: a drifted volume name would otherwise
-    create a second volume here and pass.
-    """
-    app_name, _, environment_name = deployed_snapshot_function
-
-    volume = DirectModalInterface().volume_from_name(
-        f"{app_name}{STATE_VOLUME_SUFFIX}",
-        create_if_missing=False,
-        environment_name=environment_name,
-        version=STATE_VOLUME_FS_VERSION,
-    )
-
-    volume.listdir("/")

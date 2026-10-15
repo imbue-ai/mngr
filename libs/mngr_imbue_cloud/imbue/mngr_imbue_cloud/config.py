@@ -36,7 +36,7 @@ class ImbueCloudProviderConfig(VpsProviderConfig):
     ``install_gvisor_runtime`` / ``default_start_args``) and the user-data
     layout knobs (``host_dir`` / ``volume_home_path`` / ``host_log_dir``).
     Imbue Studio writes runsc + hardening values and the ``/home/user`` layout into
-    the per-account block (see ``minds.mngr_settings.imbue_cloud_accounts``).
+    the per-account block (see ``minds.desktop_client.connections.provider_settings``).
 
     Two recognized usages:
 
@@ -45,11 +45,11 @@ class ImbueCloudProviderConfig(VpsProviderConfig):
       ``mngr imbue_cloud auth use --account <email>`` (set automatically
       whenever an account signs in). Callers can still pin per-call via
       ``-b account=<email>`` on ``mngr create``.
-    - Per-account instance ``[providers.imbue_cloud_<slug>]``: ``account``
+    - Per-account instance ``[providers.imbue_cloud_<user id>]`` (older
+      installs spelled it with the account's email slug): ``account``
       is bound at config time. Imbue Studio writes one of these per signed-in
-      account into its mngr settings.toml (see
-      ``minds.mngr_settings.imbue_cloud_accounts.set_imbue_cloud_provider_for_account``
-      / ``unset_imbue_cloud_provider_for_account``) so per-account
+      account into its mngr settings.toml (the settings materializer in
+      ``minds.desktop_client.connections.provider_settings``) so per-account
       ``discover_hosts`` works without consulting the active-account file.
     """
 

@@ -30,6 +30,8 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudClientTooOldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudDocumentLimitError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudDocumentNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
@@ -53,6 +55,7 @@ from imbue.mngr_imbue_cloud.errors import workspace_hold_message_in
 from imbue.mngr_imbue_cloud.wire_types import InvitationOutcome
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
+from imbue.mngr_imbue_cloud.wire_types import SyncDocument
 from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.wire_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
@@ -209,6 +212,49 @@ def test_auth_signin_transport_error_raises_typed_auth_error() -> None:
     assert calls["n"] == 1
 
 
+def test_auth_refresh_transport_error_raises_the_unreachable_error() -> None:
+    """A connector that cannot be reached never counts as refusing the refresh (minds signs out on the auth class)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("simulated post-send failure", request=request)
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+    with pytest.raises(ImbueCloudUnreachableError):
+        client.auth_refresh_session(SecretStr("rt-1"))
+
+
+def test_auth_refresh_server_error_raises_the_connector_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="bad gateway")
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+    with pytest.raises(ImbueCloudConnectorError) as exc_info:
+        client.auth_refresh_session(SecretStr("rt-1"))
+    assert not isinstance(exc_info.value, ImbueCloudAuthError)
+
+
+def test_auth_refresh_auth_upstream_unavailable_503_raises_the_unreachable_error() -> None:
+    """A SuperTokens core outage during the refresh is an outage, never a refused refresh (which would sign the account out)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _auth_upstream_unavailable_response("The authentication service answered 502")
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+    with pytest.raises(ImbueCloudUnreachableError) as exc_info:
+        client.auth_refresh_session(SecretStr("rt-1"))
+    assert not isinstance(exc_info.value, ImbueCloudAuthError)
+    assert "authentication service answered 502" in str(exc_info.value)
+
+
+def test_auth_refresh_refusal_raises_the_auth_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "refresh token revoked"})
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+    with pytest.raises(ImbueCloudAuthError):
+        client.auth_refresh_session(SecretStr("rt-1"))
+
+
 def test_rename_host_success_posts_new_name(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -258,7 +304,7 @@ def test_500_lease_raises_connector_error(monkeypatch: pytest.MonkeyPatch) -> No
         client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=1), "ssh-ed25519 X", "my-host")
 
 
-# -- Auth email verification --
+# Auth email verification
 
 
 def test_auth_is_email_verified_sends_bearer_token_and_parses_verified() -> None:
@@ -314,7 +360,7 @@ def test_auth_is_email_verified_raises_auth_error_on_401() -> None:
         client.auth_is_email_verified(SecretStr("stale"), "alice@imbue.com")
 
 
-# -- R2 buckets --
+# R2 buckets
 #
 # Same MockTransport approach as above, but patched through a single loop so the
 # monkeypatch ratchet counts one occurrence regardless of how many HTTP verbs
@@ -766,7 +812,7 @@ def test_admin_account_path_percent_encodes_reserved_email_characters(monkeypatc
     assert seen[0].fragment == ""
 
 
-# -- Paid lists (admin-key authenticated) --
+# Paid lists (admin-key authenticated)
 
 
 def test_list_paid_domains_parses_and_sends_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -838,7 +884,7 @@ def test_paid_list_unauthenticated_raises_auth_error(monkeypatch: pytest.MonkeyP
         client.list_paid_domains(SecretStr("wrong"), paid_only=False)
 
 
-# -- Transient-transport retry (_send) --
+# Transient-transport retry (_send)
 #
 # The connector is a scale-to-zero Modal app, so a call can fail at the transport
 # layer (DNS / reset / connect-timeout) before any HTTP response. ``_send`` rides
@@ -1014,7 +1060,7 @@ def test_list_workspaces_does_not_retry_the_old_connector_404(monkeypatch: pytes
     assert state["calls"] == 1
 
 
-# -- Modal 303 long-request redirects --
+# Modal 303 long-request redirects
 #
 # The connector is a Modal web function: a synchronous request that runs long
 # is answered with ``303 See Other`` pointing at an attempt-token URL the
@@ -1088,7 +1134,7 @@ def test_every_module_level_httpx_call_in_client_follows_redirects() -> None:
     assert lines_missing_follow_redirects == []
 
 
-# -- Workspace sync methods --
+# Workspace sync methods
 
 
 def _sync_record_json(host_id: str = "host-1", revision: int = 1) -> dict[str, object]:
@@ -1274,6 +1320,185 @@ def test_scrub_sync_secrets_returns_count(monkeypatch: pytest.MonkeyPatch) -> No
 
     client = _install_mock_httpx(monkeypatch, handler)
     assert client.scrub_sync_secrets(SecretStr("tok")) == 3
+
+
+# Account document methods
+
+
+def _sync_document_json(doc_id: str = "conn-1", revision: int = 1, state: str = "active") -> dict[str, object]:
+    return {
+        "kind": "connection",
+        "doc_id": doc_id,
+        "metadata": {"backend": "aws", "alias": "work"},
+        "encrypted_payload": None,
+        "state": state,
+        "revision": revision,
+        "document_format": 1,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "deleted_at": None,
+    }
+
+
+def test_list_sync_documents_parses_documents_of_the_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/sync/documents/connection"
+        assert request.headers["authorization"] == "Bearer tok"
+        return httpx.Response(
+            200, json={"documents": [_sync_document_json(), _sync_document_json(doc_id="conn-2", state="deleted")]}
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    documents = client.list_sync_documents(SecretStr("tok"), "connection")
+    assert [document.doc_id for document in documents] == ["conn-1", "conn-2"]
+    assert documents[0].metadata == {"backend": "aws", "alias": "work"}
+    assert documents[1].state == "deleted"
+
+
+def test_list_sync_documents_tolerates_additive_server_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"documents": [{**_sync_document_json(), "added_later": True}]})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    documents = client.list_sync_documents(SecretStr("tok"), "connection")
+    assert documents[0].doc_id == "conn-1"
+
+
+def test_put_sync_document_sends_only_the_fields_set_on_the_document(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PUT"
+        assert request.url.path == "/sync/documents/connection/conn-1"
+        seen_bodies.append(_json.loads(request.content))
+        return httpx.Response(200, json=_sync_document_json(revision=2))
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    # A document built without encrypted_payload must not send the field (the
+    # server then preserves the stored blob); an explicit None must send null.
+    without_payload = SyncDocument(
+        kind="connection", doc_id="conn-1", metadata={"alias": "renamed"}, state="active", revision=2
+    )
+    stored = client.put_sync_document(SecretStr("tok"), without_payload)
+    assert stored.revision == 2
+    with_null_payload = SyncDocument(
+        kind="connection", doc_id="conn-1", metadata={}, encrypted_payload=None, state="active", revision=2
+    )
+    client.put_sync_document(SecretStr("tok"), with_null_payload)
+
+    assert "encrypted_payload" not in seen_bodies[0]
+    assert seen_bodies[0]["metadata"] == {"alias": "renamed"}
+    assert seen_bodies[1]["encrypted_payload"] is None
+
+
+def test_put_sync_document_conflict_carries_stored_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409,
+            json={
+                "detail": {
+                    "code": "revision_conflict",
+                    "message": "revision conflict",
+                    "stored": _sync_document_json(revision=4),
+                }
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudSyncConflictError) as exc_info:
+        client.put_sync_document(SecretStr("tok"), SyncDocument.model_validate(_sync_document_json()))
+    assert str(exc_info.value) == "revision conflict"
+    assert exc_info.value.stored_record is not None
+    assert exc_info.value.stored_record["revision"] == 4
+
+
+def test_put_sync_document_insert_at_wrong_revision_has_no_stored_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409, json={"detail": {"code": "revision_conflict", "message": "revision conflict", "stored": None}}
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudSyncConflictError) as exc_info:
+        client.put_sync_document(SecretStr("tok"), SyncDocument.model_validate(_sync_document_json(revision=3)))
+    assert exc_info.value.stored_record is None
+
+
+def test_put_sync_document_maps_the_format_refusal_to_its_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409,
+            json={
+                "detail": {
+                    "code": "document_format_too_new",
+                    "message": "update the app to modify it",
+                    "stored": _sync_document_json(),
+                }
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudRecordFormatTooNewError) as exc_info:
+        client.put_sync_document(SecretStr("tok"), SyncDocument.model_validate(_sync_document_json(revision=2)))
+    assert str(exc_info.value) == "update the app to modify it"
+
+
+def test_put_sync_document_maps_the_limit_refusal_to_its_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409,
+            json={"detail": {"code": "document_limit_exceeded", "message": "too many connections", "limit": 500}},
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudDocumentLimitError) as exc_info:
+        client.put_sync_document(SecretStr("tok"), SyncDocument.model_validate(_sync_document_json()))
+    assert str(exc_info.value) == "too many connections"
+    assert exc_info.value.limit == 500
+
+
+def test_delete_sync_document_returns_the_stored_tombstone(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/sync/documents/connection/conn-1"
+        return httpx.Response(
+            200, json={**_sync_document_json(revision=2, state="deleted"), "deleted_at": "2026-07-01"}
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    tombstone = client.delete_sync_document(SecretStr("tok"), "connection", "conn-1")
+    assert tombstone.state == "deleted"
+    assert tombstone.revision == 2
+    assert tombstone.deleted_at == "2026-07-01"
+
+
+def test_delete_sync_document_distinguishes_a_missing_document_from_an_old_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def structured_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": {"code": "document_not_found", "message": "no such document"}})
+
+    client = _install_mock_httpx(monkeypatch, structured_handler)
+    with pytest.raises(ImbueCloudDocumentNotFoundError) as exc_info:
+        client.delete_sync_document(SecretStr("tok"), "connection", "conn-1")
+    assert str(exc_info.value) == "no such document"
+
+    def bare_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    old_connector_client = _install_mock_httpx(monkeypatch, bare_handler)
+    with pytest.raises(ImbueCloudSyncError):
+        old_connector_client.delete_sync_document(SecretStr("tok"), "connection", "conn-1")
+
+
+def test_sync_documents_auth_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "Invalid token"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudAuthError):
+        client.list_sync_documents(SecretStr("tok"), "connection")
 
 
 def test_get_key_bundle_returns_none_on_404(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2516,7 +2741,7 @@ def test_set_share_grantees_replaces_the_index_and_returns_the_count(monkeypatch
     assert client.set_share_grantees(SecretStr("tok"), "host-abc", ["user-2", "user-3"]) == 2
 
 
-# -- Signup codes (admin-key authenticated) --
+# Signup codes (admin-key authenticated)
 
 
 def test_admin_signup_code_methods_hit_their_routes_and_parse(monkeypatch: pytest.MonkeyPatch) -> None:

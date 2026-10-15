@@ -1,0 +1,21 @@
+Account-owned remote providers, part 4 (`specs/account-owned-providers/spec.md` section 6): the account selects the providers, the providers panel lists accounts and their connections, and a workspace's host access material follows every backend across devices.
+
+- The create form asks for the account first. The compute options are the device providers (docker, lima, vultr), the selected account's Imbue Cloud, and the connections that account owns (or the local profile's when no account is selected), labeled `<alias> (<backend>)`. The selected account is the workspace's association; `POST /api/v1/workspaces` refuses (400 on `cloud_account`) a connection that belongs to a different owner than the selected account. Associate and disassociate answer 403 for any workspace on an account-owned provider (the account instance or one of its connections), extending the rule leased imbue_cloud hosts already followed.
+
+- Whether the region is fixed on the connection or picked per create is a property of the backend: aws, gcp, and azure pin it when the connection is added (the form shows it as a note), while imbue_cloud, vultr, and Modal pick it per create. Modal gains a region picker over Modal's broad region names (`us-east`, `eu-west`, ...), defaulting to the nearest, and the create passes it to the sandbox.
+
+- The providers panel is now one section per account (plus "This device only") with an Add connection button each: the account's Imbue Cloud instance and each connection with its status (OK, error with the provider's message, starting, locked, no credentials, or needs a newer app) and a Remove button disabled "in use by N" while machines use it. An account with local machines but no session still appears, signed out. docker, lima, and vultr form a device section. The `/ui/ws` providers frame changed shape accordingly (`accounts` and `device_providers`; UI schema version 26).
+
+- The add-connection modal gains an owner selector (each signed-in, unlocked account with a master password, and "This device only") and the Modal backend (token id and secret, no region). It opens from every section's Add connection button and from the create form's compute select.
+
+- Workspace records now carry the per-host access material of every backend (secrets payload format 2, `host_access` with the backend's layout: imbue_cloud, vps for aws/gcp/azure/vultr, modal, lima, docker). Another device that unlocks the account lays the material down under its own copy of the provider instance (the account instance, or a connection whose credentials are usable there), so a machine on an account-owned connection is reachable from every such device; the imbue_cloud key fields are still written so a previous app version keeps reaching imbue_cloud hosts. docker and lima material rides the record for a future cross-device connection but is not laid down elsewhere yet (only per-host material is ever collected; lima's legacy provider-wide root key stays out). Rows on account-owned connections carry no hosting device; rows on docker, lima, vultr, and local-profile connections keep theirs.
+
+- Remote tiles gain `locked` (no master password entered here yet) and `connection removed` states beside connecting, unreachable, and error.
+
+- The bring-your-own-clouds feature flag (`FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS`) is gone; connections are on by default. The accounts page no longer carries the always-true `is_enabled` remnant of the enable/disable toggle.
+
+- The `apps/minds` dependency on the Modal provider plugin is described as what it is now: one of the cloud backends minds writes connection provider blocks for, not the backend of an ambient enabled `modal` block.
+
+- `GET /ui/api/workspaces/<id>/options` reports `is_account_owned_provider` (formerly `is_leased_imbue_cloud`): true for a workspace on an account instance or an account-owned connection, which is what fixes its account link.
+
+- A fresh device that has pulled an account's connections but none of its workspace records now counts the account as locked (the encrypted credentials prove a master password), so the unlock banner and `POST /_chrome/sync-unlock` install its DEK and the connections open; before, its connections stayed "Locked" in the providers panel with no way to unlock them.

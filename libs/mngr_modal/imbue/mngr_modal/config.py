@@ -2,6 +2,7 @@ from enum import auto
 from pathlib import Path
 
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -34,6 +35,23 @@ class ModalProviderConfig(ProviderInstanceConfig):
         description=(
             "How to reach Modal. ``DIRECT`` uses the Modal SDK against the "
             "user's Modal account. ``PROXIED`` routes Modal traffic through the imbue_cloud gateway."
+        ),
+    )
+    token_id: str | None = Field(
+        default=None,
+        description=(
+            "Modal token id this provider instance authenticates with (DIRECT mode). Set together with "
+            "token_secret so the instance carries its own Modal account, independent of MODAL_TOKEN_ID / "
+            "MODAL_TOKEN_SECRET in the environment and of ~/.modal.toml. When unset, the Modal SDK's own "
+            "credential resolution applies. Override via MNGR__PROVIDERS__<NAME>__TOKEN_ID."
+        ),
+    )
+    token_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Modal token secret paired with token_id (DIRECT mode); after the config layers merge, both must be "
+            "set or both unset (the two may come from different layers, e.g. the secret from the environment). "
+            "Override via MNGR__PROVIDERS__<NAME>__TOKEN_SECRET."
         ),
     )
     user_id: UserId | None = Field(

@@ -1,11 +1,13 @@
 import pytest
 from pydantic import Field
+from pydantic import ValidationError
 
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.wire import WireModel
 from imbue.mngr_imbue_cloud.wire import parse_wire_entries
 from imbue.mngr_imbue_cloud.wire import validate_wire
 from imbue.mngr_imbue_cloud.wire_types import R2BucketAccess
+from imbue.mngr_imbue_cloud.wire_types import SyncDocument
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStopKind
@@ -89,3 +91,9 @@ def test_parse_wire_entries_raises_on_non_list_body() -> None:
 
 def test_parse_wire_entries_accepts_empty_list() -> None:
     assert parse_wire_entries(_ExampleWireModel, [], "GET /example", ImbueCloudConnectorError) == []
+
+
+def test_sync_document_requires_metadata() -> None:
+    """A push sends only set fields and the server replaces metadata whole, so an unset metadata must not validate."""
+    with pytest.raises(ValidationError):
+        SyncDocument.model_validate({"kind": "connection", "doc_id": "conn-1", "state": "active", "revision": 1})

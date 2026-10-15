@@ -320,6 +320,9 @@ export interface AnswerButton {
   label: string;
   isEmphasized: boolean;
   onPress: () => void;
+  /** An answer that cannot be given right now; `title` says why. */
+  isDisabled?: boolean;
+  title?: string;
 }
 
 /**
@@ -347,6 +350,8 @@ export function answerRow(
           // The quieter answer is lighter in weight, but not in color: the
           // variant's own text-primary stands, so it does not read as disabled.
           extra: button.isEmphasized ? "" : "font-normal",
+          disabled: button.isDisabled ?? false,
+          title: button.title,
           onclick: button.onPress,
         },
         button.label,

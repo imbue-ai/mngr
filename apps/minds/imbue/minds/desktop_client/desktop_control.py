@@ -1,11 +1,11 @@
-"""Install-scoped desktop control (provider config + host/state-container lifecycle).
+"""Install-scoped desktop control (host/state-container lifecycle).
 
 Extracted from ``app.py`` so the cookie-only ``/api/v1/desktop/...`` routes (in
-``api_v1.py``) can drive the same provider enable/disable, bulk host stop, and
-Docker state-container stop the legacy UI routes drove, without importing
-``app.py`` (which would be an import cycle). The functions take resolved
-dependencies and raise typed errors the route maps to JSON; mirrors the
-``workspace_lifecycle`` / ``workspace_create`` extraction pattern.
+``api_v1.py``) can drive the same bulk host stop and Docker state-container
+stop the legacy UI routes drove, without importing ``app.py`` (which would be
+an import cycle). The functions take resolved dependencies and raise typed
+errors the route maps to JSON; mirrors the ``workspace_lifecycle`` /
+``workspace_create`` extraction pattern.
 """
 
 import os
@@ -15,37 +15,18 @@ from pathlib import Path
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.mind_liveness import MindLiveness
 from imbue.minds.desktop_client.mind_liveness import compute_local_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
-from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.errors import MngrCommandError
-from imbue.minds.mngr_settings.enablement import set_provider_is_enabled
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
-from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
-
-
-class ProviderHasActiveWorkspacesError(RuntimeError):
-    """A provider cannot be disabled while it still has active workspaces.
-
-    Carries the provider name and the active workspace ids so the route can
-    surface a 409 with an explanatory JSON error.
-    """
-
-    def __init__(self, provider_name: str, active_agent_ids: Sequence[AgentId]) -> None:
-        super().__init__(
-            f"Provider '{provider_name}' has {len(active_agent_ids)} active workspace(s) and cannot be disabled."
-        )
-        self.provider_name = provider_name
-        self.active_agent_ids = tuple(active_agent_ids)
 
 
 def list_active_workspaces_for_provider(
@@ -58,30 +39,6 @@ def list_active_workspaces_for_provider(
         if info is not None and info.provider_name == provider_name:
             matching.append(agent_id)
     return matching
-
-
-def set_provider_enabled(
-    provider_name: str,
-    is_enabled: bool,
-    backend_resolver: BackendResolverInterface,
-    latchkey_forward_supervisor: LatchkeyForwardSupervisor | None,
-) -> bool:
-    """Idempotently set a provider's ``is_enabled`` flag; bounce observe when it changed.
-
-    Refuses to disable a provider that still has active workspaces (raising
-    :class:`ProviderHasActiveWorkspacesError`) -- disabling it would drop those
-    live workspaces off discovery. Returns whether the settings file changed.
-    """
-    if not is_enabled:
-        active = list_active_workspaces_for_provider(backend_resolver, provider_name)
-        if active:
-            raise ProviderHasActiveWorkspacesError(provider_name, active)
-    changed = set_provider_is_enabled(provider_name, is_enabled, root=MindsRoot.from_environment())
-    # Only bounce when the settings file actually changed -- a no-op toggle should
-    # not trigger a SIGHUP and a full mngr observe restart.
-    if changed:
-        bounce_latchkey_forward_supervisor(latchkey_forward_supervisor)
-    return changed
 
 
 def _running_entries(

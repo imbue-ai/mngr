@@ -986,6 +986,66 @@ mngr imbue_cloud sync bundle delete [OPTIONS]
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud sync documents
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync documents [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud sync documents pull
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync documents pull [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--kind` | text | Document kind to list (e.g. connection) | None |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud sync documents push
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync documents push [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+| `--input-file` | text | Read the document JSON from this file instead of stdin | None |
+
+## mngr imbue_cloud sync documents delete
+
+**Usage:**
+
+```text
+mngr imbue_cloud sync documents delete [OPTIONS] KIND DOC_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud users
 
 **Usage:**

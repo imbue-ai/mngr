@@ -25,6 +25,8 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.host_key_store import load_host_key_record
+from imbue.mngr.providers.ssh_utils import per_host_key_dir
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.backend import AwsProvider
 from imbue.mngr_aws.backend import AwsProviderBackend
@@ -46,6 +48,7 @@ from imbue.mngr_vps.primitives import VpsMemoryMib
 from imbue.mngr_vps.primitives import VpsVcpuCount
 from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.testing import seed_stopped_host_record
+from imbue.mngr_vps.vps_keys import mint_vps_root_keypair
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
@@ -480,7 +483,9 @@ def test_destroy_host_offline_terminates_instance_and_clears_state(temp_mngr_ctx
     (no reachable vps_ip), so ``OfflineCapableVpsProvider.destroy_host`` must
     fall back to the offline path: resolve the instance by its ``mngr-host-id`` tag,
     terminate it, and delete the mirrored state. This is the fix for the leak where
-    ``mngr destroy`` of a stopped host left the instance running.
+    ``mngr destroy`` of a stopped host left the instance running. Like the online
+    path, it also removes the host's local key material (per-host key dir and
+    attributed pins), so nothing that opened the host outlives it.
     """
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
@@ -488,6 +493,9 @@ def test_destroy_host_offline_terminates_instance_and_clears_state(temp_mngr_ctx
     bucket = _seed_state_store_bucket(
         provider, record_json=_stopped_host_record_json(host_id, vps_ssh_key_id="mngr-key")
     )
+    mint_vps_root_keypair(provider._key_dir(), host_id)
+    provider.record_outer_host_key("1.2.3.4", 22, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIStoppedHostKey", host_id)
+    assert load_host_key_record(provider._vps_known_hosts_path(), host_id) is not None
     # The offline path resolves the instance from the tag listing, terminates it,
     # then cleans up the per-host EC2 KeyPair recovered from the mirrored record.
     stubber.add_response("describe_instances", _stopped_instance_describe_response("i-stopped", host_id))
@@ -500,6 +508,8 @@ def test_destroy_host_offline_terminates_instance_and_clears_state(temp_mngr_ctx
         stubber.deactivate()
     stubber.assert_no_pending_responses()
     assert bucket.deleted_host_ids == [host_id]
+    assert not per_host_key_dir(provider._key_dir(), host_id).exists()
+    assert load_host_key_record(provider._vps_known_hosts_path(), host_id) is None
 
 
 def test_destroy_host_offline_fails_loudly_when_terminate_fails(temp_mngr_ctx: MngrContext) -> None:
@@ -514,6 +524,7 @@ def test_destroy_host_offline_fails_loudly_when_terminate_fails(temp_mngr_ctx: M
     host_id = HostId.generate()
     seed_stopped_host_record(provider, host_id)
     _seed_state_store_bucket(provider)
+    mint_vps_root_keypair(provider._key_dir(), host_id)
     stubber.add_response("describe_instances", _stopped_instance_describe_response("i-stuck", host_id))
     stubber.add_client_error("terminate_instances", service_error_code="InternalError", http_status_code=500)
     stubber.activate()
@@ -524,6 +535,8 @@ def test_destroy_host_offline_fails_loudly_when_terminate_fails(temp_mngr_ctx: M
         stubber.deactivate()
     categories = {failure.category for failure in exc_info.value.failures}
     assert CleanupFailureCategory.HOST_RESOURCE_REMAINS in categories
+    # The surviving instance authorizes only this host's per-host key, so it stays on disk.
+    assert per_host_key_dir(provider._key_dir(), host_id).exists()
 
 
 def test_destroy_host_offline_is_idempotent_when_instance_already_gone(temp_mngr_ctx: MngrContext) -> None:
@@ -564,7 +577,7 @@ def test_destroy_host_offline_dispatch_ignores_stale_cached_record_with_vps_ip(t
 
     class _OuterRaisingAwsProvider(AwsProvider):
         @contextmanager
-        def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
+        def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
             raise _OnVolumeReached("base SSH teardown must not run for a stopped host")
             yield
 
@@ -657,7 +670,7 @@ def test_persist_agent_data_does_not_bypass_on_volume_store_for_running_host(tem
 
     class _OuterRaisingProvider(AwsProvider):
         @contextmanager
-        def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
+        def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
             # The unreachable yield below keeps this a generator function (which
             # @contextmanager requires); the raise fires before it is ever reached.
             raise _OnVolumeReached("on-volume persist path entered")

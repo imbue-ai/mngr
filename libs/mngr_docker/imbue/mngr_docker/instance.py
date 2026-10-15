@@ -75,6 +75,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.providers.host_access_manifest import host_access_key_dir
 from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import remove_host_key_record
 from imbue.mngr.providers.ssh_host_setup import REQUIRED_HOST_PACKAGES
@@ -101,6 +102,10 @@ from imbue.mngr_docker.config import format_docker_publish_address
 from imbue.mngr_docker.config import is_docker_daemon_local
 from imbue.mngr_docker.config import ssh_host_for_docker_daemon
 from imbue.mngr_docker.config import verify_ssh_bind_address_reachable
+from imbue.mngr_docker.constants import DOCKER_HOST_ACCESS_MANIFEST
+from imbue.mngr_docker.constants import DOCKER_HOST_KEY_NAME
+from imbue.mngr_docker.constants import DOCKER_KNOWN_HOSTS_NAME
+from imbue.mngr_docker.constants import DOCKER_SSH_KEY_NAME
 from imbue.mngr_docker.data_types import ContainerSize
 from imbue.mngr_docker.data_types import ContainerSizeRequest
 from imbue.mngr_docker.data_types import DockerDaemonTotals
@@ -550,12 +555,13 @@ class DockerProviderInstance(BaseProviderInstance):
     @property
     def _keys_dir(self) -> Path:
         """Get the directory for SSH keys (profile-specific)."""
-        return self.mngr_ctx.profile_dir / "providers" / "docker" / str(self.name) / "keys"
+        instance_dir = self.mngr_ctx.profile_dir / "providers" / "docker" / str(self.name)
+        return host_access_key_dir(instance_dir, DOCKER_HOST_ACCESS_MANIFEST)
 
     @property
     def _known_hosts_path(self) -> Path:
         """Get the path to the known_hosts file for this provider instance."""
-        return self._keys_dir / "known_hosts"
+        return self._keys_dir / DOCKER_KNOWN_HOSTS_NAME
 
     def _build_volume_mount_args(
         self,
@@ -664,7 +670,7 @@ class DockerProviderInstance(BaseProviderInstance):
         ``known_hosts`` symlink so key-sibling consumers (the forward SSH
         tunnel) keep finding the pinned host keys.
         """
-        return resolve_per_host_client_keypair(self._keys_dir, host_id, "docker_ssh_key", "known_hosts")
+        return resolve_per_host_client_keypair(self._keys_dir, host_id, DOCKER_SSH_KEY_NAME, DOCKER_KNOWN_HOSTS_NAME)
 
     def _get_host_keypair(self, host_id: HostId) -> tuple[Path, str]:
         """Resolve the sshd host keypair for this host's container: per-host first, legacy fallback.
@@ -673,7 +679,7 @@ class DockerProviderInstance(BaseProviderInstance):
         host keeps serving the shared key already pinned for it while new
         hosts serve their own per-host key.
         """
-        return resolve_per_host_host_keypair(self._keys_dir, host_id, "host_key")
+        return resolve_per_host_host_keypair(self._keys_dir, host_id, DOCKER_HOST_KEY_NAME)
 
     def _get_ssh_host(self) -> str:
         """Get the SSH-reachable hostname for containers."""
@@ -1611,8 +1617,8 @@ kill -TERM 1
         # Mint this host's own client + host keypairs up front so the setup
         # helper's per-host resolution uses them for the new container instead
         # of falling back to a legacy shared pair from older hosts.
-        load_or_create_per_host_client_keypair(self._keys_dir, host_id, "docker_ssh_key", "known_hosts")
-        load_or_create_per_host_host_keypair(self._keys_dir, host_id, "host_key")
+        load_or_create_per_host_client_keypair(self._keys_dir, host_id, DOCKER_SSH_KEY_NAME, DOCKER_KNOWN_HOSTS_NAME)
+        load_or_create_per_host_host_keypair(self._keys_dir, host_id, DOCKER_HOST_KEY_NAME)
 
         try:
             host, ssh_host, ssh_port, host_public_key = self._setup_container_ssh_and_create_host(

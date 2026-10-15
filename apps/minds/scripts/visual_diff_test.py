@@ -17,7 +17,7 @@ def test_spa_fixture_bootstrap_satisfies_the_wire_models() -> None:
 
     snapshot = bootstrap.snapshot
     assert len(snapshot.workspaces.workspaces) > 0
-    assert len(snapshot.providers.providers) > 0
+    assert len(snapshot.providers.accounts) > 0 and len(snapshot.providers.device_providers) > 0
     assert len(snapshot.requests.request_ids) > 0
     # The feed the bell reads, whose absence broke the harness outright.
     assert len(snapshot.notifications.entries) > 0

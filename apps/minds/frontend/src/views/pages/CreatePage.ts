@@ -17,11 +17,12 @@ import type { ResendOutcome } from "../../models/emailVerification";
 import type { MachineSizeDimension } from "../../models/machineSize";
 import {
   backupProviderLabel,
+  connectionBackendOptionFor,
   fetchCreateFormDefaults,
-  launchModeLabel,
   submitCreateRequest,
 } from "../../models/create";
 import type { WebLoginState } from "../../models/webLogin";
+import type { ConnectionOwnerOption } from "../../models/providers";
 import { webLogin } from "../../models/webLogin";
 import { Button, ButtonSubmit } from "../components/Button";
 import { FormLabel, Select, TextInput, Textarea } from "../components/FormControls";
@@ -84,6 +85,14 @@ export function signInOutcome(
   return "pending";
 }
 
+/** The compute select's value for the row that opens the add-connection modal for a backend. */
+const ADD_CONNECTION_PREFIX = "ADD:";
+
+/** The article a backend label takes in "add a ... connection"; the served labels (AWS, Azure, GCP, Modal) all start with a letter. */
+function indefiniteArticle(label: string): string {
+  return /^[aeiou]/i.test(label) ? "an" : "a";
+}
+
 const LINK_BUTTON_EXTRA =
   "!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline " +
   "whitespace-nowrap";
@@ -99,7 +108,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
   const attrs = initialVnode.attrs;
   const isEmbedded = attrs.mode === "embedded";
   const model = new CreateFormModel();
-  const byokModal = new CloudAccountsModalState();
+  const connectionModal = new CloudAccountsModalState();
   const verificationWait = new VerificationWait({
     redraw: () => m.redraw(),
     bringAppToFront: () => electronBridge.bringAppToFront(),
@@ -205,9 +214,13 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     fetchCreateFormDefaults(null).then(
       (defaults) => {
         if (isRemoved) return;
-        model.adoptAccounts(defaults);
+        const isComputeKept = model.adoptAccounts(defaults);
         model.isSubmitting = false;
-        createNow(true);
+        if (isComputeKept) createNow(true);
+        else
+          model.submitError =
+            "Signed in, but the selected compute is not available under your account, so it was reset. " +
+            "Review the form and press Create.";
         m.redraw();
       },
       (error: unknown) => {
@@ -374,10 +387,10 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     ]);
   }
 
-  function advancedView(defaults: CreateFormDefaults): m.Children {
+  function advancedView(defaults: CreateFormDefaults, ownerOptions: readonly ConnectionOwnerOption[]): m.Children {
     const regionOptions = model.regionOptions();
     const instanceTypeOptions = model.instanceTypeOptions();
-    const byokPinnedRegion = model.byokPinnedRegion();
+    const pinnedRegion = model.pinnedRegion();
     return m("div", { id: "advanced-view", class: model.isAdvancedOpen ? "mt-8" : "hidden mt-8" }, [
       m("div", { class: "mx-auto max-w-[560px] flex flex-col gap-4" }, [
         m("div", [
@@ -402,10 +415,9 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
           m("div", { class: "flex items-start justify-between gap-3" }, [
             m("div", [
               m(FormLabel, { target: "launch_mode", inline: true }, "Compute provider"),
-              model.launchValue === "MODAL"
+              model.launchSelection().mode === "MODAL"
                 ? m("p", { id: "modal-direct-note", class: "mt-1 type-helper text-tertiary" }, [
-                    "Modal creates sandboxes from this machine using your own Modal token. Sandboxes are ",
-                    "ephemeral (~1 day) -- testing only.",
+                    "Modal sandboxes stop after about a day.",
                   ])
                 : null,
             ]),
@@ -419,8 +431,19 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                 value: model.launchValue,
                 onchange: (event: Event) => {
                   const value = (event.target as HTMLSelectElement).value;
-                  if (value.startsWith("ADD:")) {
-                    byokModal.openForBackend(value.slice(4), defaults.region_selected_by_launch_mode);
+                  if (value.startsWith(ADD_CONNECTION_PREFIX)) {
+                    const backend = connectionBackendOptionFor(
+                      defaults.connection_backends,
+                      value.slice(ADD_CONNECTION_PREFIX.length),
+                    );
+                    if (backend !== null) {
+                      connectionModal.openForBackend(
+                        backend,
+                        { userId: model.selectedOwnerUserId(), label: model.selectedAccountEmail() },
+                        defaults.region_selected_by_launch_mode,
+                        ownerOptions,
+                      );
+                    }
                     // Revert the select to the previous real selection.
                     (event.target as HTMLSelectElement).value = model.launchValue;
                     return;
@@ -431,31 +454,24 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                 },
               },
               [
-                defaults.launch_modes.map((mode) =>
+                model.launchOptions().map((option) =>
                   m(
                     "option",
                     {
-                      value: mode,
-                      selected: model.launchValue === mode,
-                      disabled: mode === "IMBUE_CLOUD" && model.accountId === "" && defaults.accounts.length === 0,
+                      value: option.value,
+                      selected: model.launchValue === option.value,
+                      disabled: option.isDisabled,
                     },
-                    launchModeLabel(mode),
+                    option.label,
                   ),
                 ),
-                defaults.byok_clouds_enabled
-                  ? [
-                      defaults.cloud_accounts.map((account) =>
-                        m(
-                          "option",
-                          { value: `BYOK:${account.name}`, selected: model.launchValue === `BYOK:${account.name}` },
-                          `${account.alias} (${account.backend.toUpperCase()} account)`,
-                        ),
-                      ),
-                      m("option", { value: "ADD:aws" }, "add AWS account…"),
-                      m("option", { value: "ADD:gcp" }, "add GCP account…"),
-                      m("option", { value: "ADD:azure" }, "add Azure account…"),
-                    ]
-                  : null,
+                defaults.connection_backends.map((backend) =>
+                  m(
+                    "option",
+                    { value: `${ADD_CONNECTION_PREFIX}${backend.name}` },
+                    `add ${indefiniteArticle(backend.label)} ${backend.label} connection…`,
+                  ),
+                ),
               ],
             ),
           ]),
@@ -466,12 +482,19 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                 "imbue_cloud requires a selected account.",
               )
             : null,
-          byokPinnedRegion !== ""
+          model.isSelectedAccountLocked()
             ? m(
                 "p",
-                { id: "byok-region-note", class: "mt-1 type-helper text-tertiary" },
-                `Runs in ${byokPinnedRegion} — fixed when this account was added. For a different region, add ` +
-                  "another account entry with the same keys.",
+                { id: "launch-mode-locked-note", class: "mt-1 type-helper text-warning" },
+                "Locked: enter your master password to use this account's connections",
+              )
+            : null,
+          pinnedRegion !== ""
+            ? m(
+                "p",
+                { id: "connection-region-note", class: "mt-1 type-helper text-tertiary" },
+                `Runs in ${pinnedRegion} — fixed when this connection was added. For a different region, add ` +
+                  "another connection with the same keys.",
               )
             : null,
           // The compute mode's own requirement (Docker's daemon, Lima's QEMU and
@@ -697,7 +720,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
           model.applyDefaults(defaults);
           // An embedded caller's opening preset and view, unless a retry
           // prefill already decided both.
-          if (defaults.prefill === null) {
+          if (defaults.prefill === null || model.retryUnavailableReason !== "") {
             if (attrs.initialPreset !== undefined) model.applyPreset(attrs.initialPreset);
             if (attrs.isAdvancedOpen) {
               model.isAdvancedOpen = true;
@@ -730,6 +753,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     },
     view() {
       const defaults = model.defaults;
+      const ownerOptions = getAppContext().stores.providers.connectionOwnerOptions();
       // Embedded, the modal is the page: no centering container, and the
       // masthead is the modal's own title.
       const container = (content: m.Children): m.Children =>
@@ -766,6 +790,13 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                       m("p", { class: "type-label uppercase tracking-wide text-secondary" }, "Create a workspace"),
                       m("h1", { class: "type-heading-lg text-primary mt-1" }, "Where should it run?"),
                     ]),
+                model.retryUnavailableReason
+                  ? m(
+                      Notice,
+                      { variant: "error", id: "retry-unavailable", role: "alert", extra: "mb-6" },
+                      model.retryUnavailableReason,
+                    )
+                  : null,
                 model.submitError
                   ? m(
                       "p",
@@ -810,6 +841,8 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                       value: model.accountId,
                       onchange: (event: Event) => {
                         model.accountId = (event.target as HTMLSelectElement).value;
+                        // The account picks the providers on offer; a selection it does not own falls back.
+                        model.syncLaunchValueToSelectedAccount();
                         if (!model.imbueCloudNeedsAccount()) model.isAccountErrorShown = false;
                         scheduleHostNameValidation();
                       },
@@ -866,7 +899,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                       "Pick an account to run on Imbue Cloud, or choose a different option for the providers.",
                     )
                   : m("p", { id: "account-error", class: "hidden" }),
-                advancedView(defaults),
+                advancedView(defaults, ownerOptions),
                 m(
                   "div",
                   { class: "flex justify-center mt-16" },
@@ -885,12 +918,12 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                   ),
                 ),
                 m(CloudAccountsModal, {
-                  state: byokModal,
+                  state: connectionModal,
                   regionOptionsByBackend: defaults.region_options_by_launch_mode,
+                  backends: defaults.connection_backends,
+                  ownerOptions,
                   onAccountAdded: (account) => {
-                    defaults.cloud_accounts.push(account);
-                    model.launchValue = `BYOK:${account.name}`;
-                    model.selectedPreset = null;
+                    model.adoptConnection(account);
                     scheduleHostNameValidation();
                   },
                 }),

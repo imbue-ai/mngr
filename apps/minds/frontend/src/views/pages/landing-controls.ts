@@ -10,6 +10,7 @@
 // is worse than no action offered.
 
 import type { UiWorkspaceEntry } from "../../channel/messages";
+import type { RemoteTileState } from "../../generated/ui";
 import type { DiscoveryHealth, RecoveryKind, WorkspaceHealth } from "../../models/health";
 import type { MindLiveness } from "../../models/create";
 import { MIND_LIVENESS_LABELS } from "../../models/create";
@@ -202,27 +203,58 @@ export interface RemoteStateChip {
   label: string;
   /** Whether the chip reports a problem (rendered in the important tone). */
   isImportant: boolean;
-  /** Whether clicking the chip should take the user to the Accounts page (the remedy for a signed-out provider). */
-  isAccountsLink: boolean;
+  /** The chip's tooltip: the label spelled out, or the failure detail behind an error. */
+  title: string;
 }
 
 /** The chip a remote row shows for its derived access state, or null for the plain state. */
 export function remoteStateChipFor(
-  remoteState: string,
+  tile: Pick<RemoteTileState, "state" | "detail">,
 ): RemoteStateChip | null {
-  switch (remoteState) {
-    case "signed_out":
-      return { label: "Signed out", isImportant: true, isAccountsLink: true };
+  switch (tile.state) {
     case "connecting":
       return {
         label: "connecting…",
         isImportant: false,
-        isAccountsLink: false,
+        title: "Setting up this device's access to this machine",
       };
     case "unreachable":
-      return { label: "unreachable", isImportant: true, isAccountsLink: false };
+      return {
+        label: "unreachable",
+        isImportant: true,
+        title: "This machine could not be reached from this device",
+      };
     case "error":
-      return { label: "sync error", isImportant: true, isAccountsLink: false };
+      return {
+        label: "sync error",
+        isImportant: true,
+        title: tile.detail || "Setting up this device's access to this machine failed",
+      };
+    case "locked":
+      return {
+        label: "locked",
+        isImportant: false,
+        title: "Enter your master password to reach this machine",
+      };
+    case "missing_connection":
+      return {
+        label: "connection removed",
+        isImportant: true,
+        title:
+          "The connection this machine runs on was removed; re-add it or remove this machine from the list",
+      };
+    case "no_credentials":
+      return {
+        label: "no credentials",
+        isImportant: true,
+        title: "The credentials of the connection this machine runs on are not available on this device",
+      };
+    case "read_only":
+      return {
+        label: "needs a newer app",
+        isImportant: true,
+        title: "This machine was set up by a newer version of the app",
+      };
     default:
       return null;
   }
