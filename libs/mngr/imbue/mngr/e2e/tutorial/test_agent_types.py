@@ -7,6 +7,11 @@ import pytest
 from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
+# A codex create installs the codex CLI when the host has none.
+_CODEX_CREATE_TIMEOUT = 120.0
+# Computing a just-launched codex agent's live state is occasionally slow.
+_CODEX_LIST_TIMEOUT = 60.0
+
 
 @pytest.mark.release
 @pytest.mark.tmux
@@ -151,16 +156,10 @@ def test_plugin_list_active_to_see_types(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 # Verification scopes `mngr list` to the local provider (`--provider local`), so
-# this never queries Modal. The local provider sets up the agent workspace via a
-# git worktree rather than rsync, so this test is intentionally not marked
-# @pytest.mark.rsync.
-# Flaky: `mngr create` always launches the agent (there is no create flag to
-# create-without-starting; --no-auto-start only governs starting offline hosts),
-# so the codex agent's command runs even though no codex binary is present. It
-# dies immediately (state REPLACED), and computing that just-replaced agent's
-# live state during the follow-up `mngr list` is occasionally slow enough to
-# overshoot the default per-command timeout. The list call below uses a longer
-# timeout, and this mark lets offload retry on the rare overshoot.
+# this never queries Modal. The source repo is clean, so the worktree transfer
+# finds no untracked or modified files to copy and never invokes rsync; this test
+# is therefore not marked @pytest.mark.rsync.
+# Flaky: the read-back below occasionally overshoots even _CODEX_LIST_TIMEOUT.
 @pytest.mark.flaky
 def test_create_codex_positional(e2e: E2eSession) -> None:
     """Tutorial block:
@@ -170,32 +169,24 @@ def test_create_codex_positional(e2e: E2eSession) -> None:
     Scope: the agent type can be given as the second positional argument to
     `mngr create`. With `codex` passed positionally, the created agent appears in
     `mngr list --format json` with type == codex (not a default fallback),
-    confirming positional-argument type resolution. Flags (-y, --no-auto-start)
-    let the type resolve without a codex binary or auth on this host.
+    confirming positional-argument type resolution. The real codex conversation is
+    covered by the mngr_codex release test.
     """
-    # codex is a real agent-type plugin now (not a command-driven stub), so it
-    # can't be faked with a `command` override. Auto-approve workspace trust (-y)
-    # and don't connect (--no-connect); the e2e fixture sets
-    # `[agent_types.codex] check_installation = false` so provisioning skips the
-    # `npm i -g @openai/codex` install (no codex binary or npm on this host). This
-    # exercises positional-argument type resolution; the codex process the agent
-    # launches simply exits (no binary), which is fine since we only assert on the
-    # resolved type. The real codex run is covered by the mngr_codex release test.
+    # `-y` is load-bearing: this create installs the codex CLI on a host that has
+    # none, and a local install only proceeds under auto-approve.
     expect(
         e2e.run(
-            "mngr create my-task codex -y --no-auto-start --no-ensure-clean --no-connect",
+            "mngr create my-task codex -y --no-ensure-clean --no-connect",
             comment="agent type as second positional argument",
+            timeout=_CODEX_CREATE_TIMEOUT,
         )
     ).to_succeed()
     # Verify the positional argument was interpreted as the agent type: the
     # created agent must actually be of type codex, not merely exit 0.
-    # Longer timeout than the default: computing the just-replaced codex agent's
-    # live state is occasionally slow (see the @pytest.mark.flaky note above). The
-    # release class budget remains the backstop against a true hang.
     list_result = e2e.run(
         "mngr list --provider local --format json",
         comment="verify the agent was created with the codex type",
-        timeout=60.0,
+        timeout=_CODEX_LIST_TIMEOUT,
     )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
@@ -216,33 +207,16 @@ def test_create_codex_explicit_type(e2e: E2eSession) -> None:
     Scope: the agent type can be given explicitly via `--type` (counterpart to
     test_create_codex_positional). With `--type codex`, the created agent appears
     in `mngr list --format json` with type == codex (not a silent default
-    fallback), confirming `--type` resolves the agent type. Flags (-y,
-    --no-auto-start) let it resolve without a codex binary or auth on this host.
+    fallback), confirming `--type` resolves the agent type. The real codex
+    conversation is covered by the mngr_codex release test.
     """
-    # codex is a real agent-type plugin now (not a command-driven stub), so it
-    # can't be faked with a `command` override. Disable the codex install check so
-    # provisioning does not try to `npm i -g @openai/codex` on a host without a
-    # codex binary (or npm); this is what lets `--type codex` resolve without a
-    # codex binary or auth. Write to the local scope, whose settings.local.toml
-    # carries is_allowed_in_pytest = true so the create below loads it.
-    # Generous per-command timeout: this is the first `mngr` invocation in the
-    # test, so it pays the one-time interpreter + plugin cold-start cost, which
-    # can brush the 30s default under load.
+    # `-y` is load-bearing: this create installs the codex CLI on a host that has
+    # none, and a local install only proceeds under auto-approve.
     expect(
         e2e.run(
-            "mngr config set --scope local agent_types.codex.check_installation false",
-            comment="skip the codex install check so no codex binary is needed",
-            timeout=90.0,
-        )
-    ).to_succeed()
-    # Create it without launching (--no-auto-start) and auto-approve workspace
-    # trust (-y): this verifies `--type codex` resolves to the codex agent type
-    # without needing a codex binary or auth. The real codex run is covered by the
-    # mngr_codex release test.
-    expect(
-        e2e.run(
-            "mngr create my-task --type codex -y --no-auto-start --no-connect",
+            "mngr create my-task --type codex -y --no-connect",
             comment="agent type via --type",
+            timeout=_CODEX_CREATE_TIMEOUT,
         )
     ).to_succeed()
 
@@ -251,7 +225,11 @@ def test_create_codex_explicit_type(e2e: E2eSession) -> None:
     # resolves. Scope discovery to the local provider so the check stays fast and
     # never queries Modal (--provider restricts which providers are queried, unlike
     # the --local result filter which still fans out to remote providers).
-    list_result = e2e.run("mngr list --provider local --format json", comment="verify the codex agent was created")
+    list_result = e2e.run(
+        "mngr list --provider local --format json",
+        comment="verify the codex agent was created",
+        timeout=_CODEX_LIST_TIMEOUT,
+    )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [agent for agent in agents if agent["name"] == "my-task"]

@@ -10,6 +10,11 @@ import pytest
 from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
+# A codex create installs the codex CLI when the host has none.
+_CODEX_CREATE_TIMEOUT = 120.0
+# Computing a just-launched codex agent's live state is occasionally slow.
+_CODEX_LIST_TIMEOUT = 60.0
+
 
 @pytest.mark.release
 @pytest.mark.tmux
@@ -193,16 +198,18 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     assert my_other_task["state"] in ("RUNNING", "WAITING"), f"my-other-task not running: {my_other_task['state']}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# No @pytest.mark.modal here: the codex agent is created locally (and not even
-# launched -- see --no-auto-start below), and `mngr list` reaches Modal solely
-# through the in-process gRPC SDK inside the spawned `mngr` subprocess, which the
-# resource guard cannot track (the SDK monkeypatch lives in the pytest process,
-# and the `modal` CLI binary -- the only cross-process-tracked path -- is never
-# invoked for local agents). With the mark, the guard's NEVER_INVOKED check fails
-# the test; without it there is no tracked Modal usage, so no BLOCKED violation.
+# No @pytest.mark.modal here: the codex agent is created locally, and `mngr list`
+# reaches Modal solely through the in-process gRPC SDK inside the spawned `mngr`
+# subprocess, which the resource guard cannot track (the SDK monkeypatch lives in
+# the pytest process, and the `modal` CLI binary -- the only cross-process-tracked
+# path -- is never invoked for local agents). With the mark, the guard's
+# NEVER_INVOKED check fails the test; without it there is no tracked Modal usage,
+# so no BLOCKED violation.
+# No @pytest.mark.rsync either: the source repo is clean, so the worktree
+# transfer finds no untracked or modified files to copy and never invokes rsync,
+# which trips the same NEVER_INVOKED check.
 def test_create_codex_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also specify a different agent (ex: codex)
@@ -211,23 +218,23 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
     Scope: the positional `codex` argument selects the codex agent type (a real
     plugin, not the `command` stub) -- the created agent appears in `mngr list`
     with type "codex", confirming the type resolved rather than falling back to a
-    default. Created with --no-auto-start since this host has no codex binary; the
-    real codex run is covered by the plugin's own release test.
+    default. The real codex conversation is covered by the plugin's own release
+    test (libs/mngr_codex/.../test_codex_agent_e2e.py).
     """
-    # codex is a real agent-type plugin (imbue-mngr-codex), not a command-driven
-    # stub, so it cannot be faked with a `command` override. This Modal host
-    # has no codex binary or auth, so the agent is created *without launching it*
-    # (--no-auto-start), auto-approving the workspace-trust prompt (-y). That keeps
-    # the tutorial command (`mngr create my-task codex`) honest while verifying the
-    # positional `codex` resolves to the codex agent type. The real codex run is
-    # covered by the plugin's own release test (libs/mngr_codex/.../test_codex_agent_e2e.py).
+    # `-y` is load-bearing: this create installs the codex CLI on a host that has
+    # none, and a local install only proceeds under auto-approve.
     result = e2e.run(
-        "mngr create my-task codex -y --no-auto-start --no-ensure-clean",
+        "mngr create my-task codex -y --no-ensure-clean",
         comment="you can also specify a different agent (ex: codex)",
+        timeout=_CODEX_CREATE_TIMEOUT,
     )
     expect(result).to_succeed()
 
-    list_result = e2e.run("mngr list --format json", comment="Verify codex agent is created")
+    list_result = e2e.run(
+        "mngr list --format json",
+        comment="Verify codex agent is created",
+        timeout=_CODEX_LIST_TIMEOUT,
+    )
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
