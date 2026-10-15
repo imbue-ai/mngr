@@ -49,6 +49,9 @@ from imbue.modal_proxy.interface import VolumeInterface
 from imbue.modal_proxy.log_utils import ModalLoguruWriter
 
 STATE_VOLUME_SUFFIX: Final[str] = "-state"
+# Restated as a literal in routes/snapshot_and_shutdown.py, which is standalone and
+# may be what creates the volume.
+STATE_VOLUME_FS_VERSION: Final[int] = 2
 MODAL_NAME_MAX_LENGTH: Final[int] = 64
 
 
@@ -61,6 +64,23 @@ def truncate_modal_name(name: str, max_length: int) -> str:
     if len(name) <= max_length:
         return name
     return name[:max_length].rstrip("-_")
+
+
+def derive_modal_app_name(
+    prefix: str,
+    name: ProviderInstanceName,
+    configured_app_name: str | None,
+) -> str:
+    """The Modal app name a provider instance uses: its configured name, else prefix + instance name.
+
+    Truncated to leave room for the state volume's suffix, since that volume's
+    name is this name plus the suffix and Modal caps both.
+    """
+    app_name = configured_app_name if configured_app_name is not None else f"{prefix}{name}"
+    max_app_name_length = MODAL_NAME_MAX_LENGTH - len(STATE_VOLUME_SUFFIX)
+    if len(app_name) > max_app_name_length:
+        logger.warning("Truncating Modal app name to {} characters: {}", max_app_name_length, app_name)
+    return truncate_modal_name(app_name, max_length=max_app_name_length)
 
 
 def _create_environment(environment_name: str, modal_interface: ModalInterface) -> None:
@@ -371,7 +391,7 @@ class ModalProviderBackend(ProviderBackendInterface):
                 context_handle.volume_name,
                 create_if_missing=True,
                 environment_name=context_handle.environment_name,
-                version=2,
+                version=STATE_VOLUME_FS_VERSION,
             )
 
         # Cache the volume in the context handle (need to update the registry entry)
@@ -632,8 +652,7 @@ class ModalProviderBackend(ProviderBackendInterface):
         - ``environment_name`` = ``f"{prefix}{user_id}"``, truncated to ``MODAL_NAME_MAX_LENGTH``.
           The provider config can override the profile's user_id to allow sharing
           Modal resources across different mngr profiles or installations.
-        - ``app_name`` = ``config.app_name`` if set, else ``f"{prefix}{name}"``,
-          truncated to leave room for the state-volume suffix.
+        - ``app_name`` = whatever ``derive_modal_app_name`` makes of the instance name.
         - ``host_dir`` = ``config.host_dir`` if set, else ``Path("/mngr")``.
 
         Logs a warning when truncation actually shortens a name.
@@ -648,12 +667,7 @@ class ModalProviderBackend(ProviderBackendInterface):
             )
         environment_name = truncate_modal_name(environment_name, max_length=MODAL_NAME_MAX_LENGTH)
 
-        default_app_name = f"{prefix}{name}"
-        app_name = config.app_name if config.app_name is not None else default_app_name
-        max_app_name_length = MODAL_NAME_MAX_LENGTH - len(STATE_VOLUME_SUFFIX)
-        if len(app_name) > max_app_name_length:
-            logger.warning("Truncating Modal app name to {} characters: {}", max_app_name_length, app_name)
-        app_name = truncate_modal_name(app_name, max_length=max_app_name_length)
+        app_name = derive_modal_app_name(prefix, name, config.app_name)
 
         host_dir = config.host_dir if config.host_dir is not None else Path("/mngr")
         return environment_name, app_name, host_dir
