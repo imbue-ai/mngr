@@ -11,7 +11,9 @@ from importlinter.application.use_cases import read_user_options
 from importlinter.configuration import configure
 from importlinter.contracts.layers import LayersContract
 from importlinter.domain.contract import registry as contract_registry
+from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.imbue_common.ratchet_testing.core import FileExtension
 from imbue.imbue_common.ratchet_testing.core import LineNumber
@@ -468,36 +470,117 @@ def find_assert_isinstance_usages(
     return tuple(sorted_chunks)
 
 
+# ``ty check --output-format concise`` prints one line per diagnostic:
+# ``<path>:<line>:<col>: <severity>[<rule>] <message>``. Project-level diagnostics carry
+# no location, so the prefix is optional.
+_TY_DIAGNOSTIC_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(?:.+?:\d+:\d+: )?(?P<severity>error|warning)\[[\w-]+\] "
+)
+_TY_SUMMARY_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(?:Found \d+ diagnostics?|All checks passed!)$")
+
+
+class TypeCheckOutcome(FrozenModel):
+    """Everything one ``ty check`` run reported, partitioned by diagnostic severity.
+
+    Diagnostics are kept as the verbatim lines ty printed rather than split into fields,
+    so a failure message can only ever quote what ty actually said.
+    """
+
+    error_diagnostics: tuple[str, ...] = Field(description="Error-severity diagnostics, in the order ty printed them")
+    warning_diagnostics: tuple[str, ...] = Field(
+        description="Warning-severity diagnostics, in the order ty printed them"
+    )
+    unrecognized_output: tuple[str, ...] = Field(
+        description="Stdout lines that are neither a diagnostic nor ty's own summary line"
+    )
+    stderr_output: str = Field(description="Everything the ty process wrote to stderr")
+    return_code: int = Field(description="The exit status of the ty process")
+
+    @property
+    def is_failure(self) -> bool:
+        """Whether this run should fail the type-check gate."""
+        return self.return_code != 0 or len(self.error_diagnostics) > 0
+
+    @property
+    def failure_message(self) -> str:
+        """The gate's failure message, leading with the diagnostics that caused the failure.
+
+        Only meaningful when ``is_failure``. Warnings come after the errors and are labelled:
+        ty exits zero on a warning-only run, so a warning is never why this gate failed. Order
+        matters because only the first line reaches the junit ``message`` attribute and the CI
+        check-run summary, and ty sorts its own output by path rather than by severity.
+        """
+        if self.error_diagnostics:
+            lines = [
+                f"Type checker found {len(self.error_diagnostics)} error(s) (ty exit code {self.return_code}):",
+                "",
+                *self.error_diagnostics,
+            ]
+        else:
+            lines = [f"Type checker exited {self.return_code} without reporting an error-severity diagnostic."]
+
+        if self.warning_diagnostics:
+            lines += [
+                "",
+                f"ty also reported {len(self.warning_diagnostics)} warning(s); ty exits zero on warnings, "
+                "so none of these caused this failure:",
+                "",
+                *self.warning_diagnostics,
+            ]
+
+        if self.unrecognized_output:
+            lines += ["", "Type checker output that this check could not parse:", "", *self.unrecognized_output]
+
+        if self.stderr_output.strip():
+            lines += ["", "Type checker stderr:", "", self.stderr_output]
+
+        lines += ["", "Run `uv run ty check` for each diagnostic's full source context."]
+        return "\n".join(lines)
+
+
+@pure
+def parse_type_check_output(stdout: str, stderr: str, return_code: int) -> TypeCheckOutcome:
+    """Partition ``ty check --output-format concise`` output by diagnostic severity.
+
+    Blank lines and ty's own summary line are dropped; every other unparseable line is
+    retained as unrecognized output, so a ty crash or an output-format change surfaces in
+    the failure message instead of quietly shrinking the diagnostic counts.
+    """
+    error_lines: list[str] = []
+    warning_lines: list[str] = []
+    unrecognized_lines: list[str] = []
+
+    for line in stdout.splitlines():
+        match = _TY_DIAGNOSTIC_PATTERN.match(line)
+        if match is None:
+            if line.strip() and not _TY_SUMMARY_PATTERN.match(line):
+                unrecognized_lines.append(line)
+        elif match.group("severity") == "error":
+            error_lines.append(line)
+        else:
+            warning_lines.append(line)
+
+    return TypeCheckOutcome(
+        error_diagnostics=tuple(error_lines),
+        warning_diagnostics=tuple(warning_lines),
+        unrecognized_output=tuple(unrecognized_lines),
+        stderr_output=stderr,
+        return_code=return_code,
+    )
+
+
 def check_no_type_errors(project_root: Path) -> None:
     """Run the type checker (ty) and raise AssertionError if any type errors are found."""
     result = subprocess.run(
-        ["uv", "run", "ty", "check"],
+        ["uv", "run", "ty", "check", "--output-format", "concise", "--color", "never"],
         cwd=project_root,
         capture_output=True,
         text=True,
     )
 
-    if result.returncode != 0:
-        error_lines = [
-            line for line in result.stdout.splitlines() if line.startswith("error[") or "error:" in line.lower()
-        ]
-        error_count = len(error_lines)
-
-        failure_message = [
-            f"Type checker found {error_count} error(s) (returncode {result.returncode}):",
-            "",
-            "Full type checker stdout:",
-            "=" * 80,
-            result.stdout,
-            "=" * 80,
-            "",
-            "Full type checker stderr:",
-            "=" * 80,
-            result.stderr,
-            "=" * 80,
-        ]
-
-        raise AssertionError("\n".join(failure_message))
+    outcome = parse_type_check_output(result.stdout, result.stderr, result.returncode)
+    if outcome.is_failure:
+        raise AssertionError(outcome.failure_message)
 
 
 def assert_posix_compatible(command: str) -> None:
