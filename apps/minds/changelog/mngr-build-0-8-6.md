@@ -3,3 +3,5 @@
 - The template-alignment release tests (the Claude Code version pin and the restore excludes) send the shell's `GH_TOKEN` or `GITHUB_TOKEN` with their GitHub contents-API fetch when one is set, and log a failed fetch at warning level instead of trace, so a run that hits GitHub's anonymous rate limit says so.
 
 - Recorded the minds 0.8.6 cut, verification, staging deploy and bake in `docs/deploy/history/minds-v0.8.6.md`, reset `docs/deploy/next_deploy.md`, and added to the runbooks the scheduled launch-to-msg pin race on template `main`, the API route around `gh run download`'s path-traversal refusal, and what a slice whose bake-time finalize failed looks like at verification.
+
+- Recorded the 0.8.6 staging rehearsal (fast path confirmed), the staging and production analytics backfills, the production deploys (`20261014T220319Z`, `20261015T004118Z`), the production bake (5 US-EAST-VA, 10 US-WEST-OR, all verified) and the alpha promotion in `docs/deploy/history/minds-v0.8.6.md`, and reset `docs/deploy/next_deploy.md` for what remains (beta and stable, the backfill's clean-up deploy, the fast-path desktop check).
