@@ -54,7 +54,7 @@ def _share_to_json(info: ShareInfo, include_token: bool) -> dict[str, object]:
     "--entry-label",
     default=None,
     help=(
-        "The workspace's shell-service origin label (e.g. system_interface-<rand>); the hosted "
+        "The workspace's shell-service origin label (e.g. system-interface-<rand>); the hosted "
         "web chrome enters the workspace at <entry-label>.<workspace-domain>. Omit to keep any "
         "previously recorded label."
     ),

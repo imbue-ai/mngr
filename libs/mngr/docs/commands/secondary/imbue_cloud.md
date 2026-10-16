@@ -684,7 +684,7 @@ mngr imbue_cloud shares create [OPTIONS] HOST_ID
 | ---- | ---- | ----------- | ------- |
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
-| `--entry-label` | text | The workspace's shell-service origin label (e.g. system_interface-<rand>); the hosted web chrome enters the workspace at <entry-label>.<workspace-domain>. Omit to keep any previously recorded label. | None |
+| `--entry-label` | text | The workspace's shell-service origin label (e.g. system-interface-<rand>); the hosted web chrome enters the workspace at <entry-label>.<workspace-domain>. Omit to keep any previously recorded label. | None |
 | `--preferred-region` | text | Preferred relay region code (e.g. us1) for a first-time share of a local workspace. Ignored for pool hosts, unknown regions, and re-shares (the existing region sticks). | None |
 | `--workspace-id` | text | The workspace's id (agent-<hex>). When given, the share is workspace-keyed: its domain leads with a minted, persisted share label instead of the host id, and re-shares resolve through the workspace id. | None |
 
