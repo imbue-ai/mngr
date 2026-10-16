@@ -47,7 +47,9 @@ class ObserveCliOptions(CommonCliOptions):
     is_flag=True,
     help="Stream only discovery events as JSONL (hosts and agents discovered/destroyed). "
     "Polls each provider independently on its own loop, emitting a per-provider snapshot "
-    "as each finishes, then tails the event file for updates. "
+    "as each finishes, then tails the event file for updates. Between a provider's polls, "
+    "each host its last poll listed as running is re-read every few seconds "
+    "(host_discovery_poll_interval_seconds), and only what changed is emitted as per-host events. "
     "Does not start activity streams or emit agent state events.",
 )
 @click.option(

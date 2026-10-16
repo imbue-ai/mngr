@@ -10,6 +10,7 @@ from typing import Sequence
 
 from loguru import logger
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import ValidationError
 from pyinfra.api import Host as PyinfraHost
 from pyinfra.api import State as PyinfraState
@@ -52,6 +53,9 @@ class SSHProviderInstance(BaseProviderInstance):
 
     Tags and snapshots are not supported.
     """
+
+    # The config each cached host object was built from, so a changed config yields a new object.
+    _host_config_by_cached_host_id: dict[HostId, SSHHostConfig] = PrivateAttr(default_factory=dict)
 
     hosts: dict[str, SSHHostConfig] = Field(
         frozen=True,
@@ -166,9 +170,7 @@ class SSHProviderInstance(BaseProviderInstance):
             mngr_ctx=self.mngr_ctx,
         )
 
-    # =========================================================================
-    # Core Lifecycle Methods (not supported for SSH provider)
-    # =========================================================================
+    # Core lifecycle methods (not supported for SSH provider)
 
     def create_host(
         self,
@@ -206,7 +208,13 @@ class SSHProviderInstance(BaseProviderInstance):
         raise NotImplementedError("SSH provider does not support destroying hosts")
 
     def on_connection_error(self, host_id: HostId) -> None:
-        pass
+        """Drop the host's cached object so the next read dials afresh."""
+        self._forget_cached_host(host_id)
+
+    def _forget_cached_host(self, host_id: HostId) -> None:
+        """Drop (and disconnect) the host's cached object, if any."""
+        self._evict_cached_host(host_id)
+        self._host_config_by_cached_host_id.pop(host_id, None)
 
     # FIXME: implement to_offline_host so an SSH pool host that becomes
     # unreachable mid-discovery can fall back to persisted offline data instead
@@ -218,9 +226,7 @@ class SSHProviderInstance(BaseProviderInstance):
     # that can raise HostConnectionError implements to_offline_host) and surfaces
     # as a per-provider ProviderDiscoveryError.
 
-    # =========================================================================
-    # Discovery Methods
-    # =========================================================================
+    # Discovery methods
 
     def _get_all_hosts(self) -> dict[str, SSHHostConfig]:
         """Merge static and dynamic hosts, with static taking precedence."""
@@ -234,14 +240,14 @@ class SSHProviderInstance(BaseProviderInstance):
         self,
         host: HostId | HostName,
     ) -> Host:
-        """Get a host by ID or name."""
+        """Get a host by ID or name, reusing the host object (and its SSH connection) while its config is unchanged."""
         all_hosts = self._get_all_hosts()
 
         if isinstance(host, HostId):
             # Search for a host with matching ID
             for host_name, host_config in all_hosts.items():
                 if self._host_id_for_name(host_name) == host:
-                    return self._create_host_object(host_name, host_config)
+                    return self._cached_or_new_host_object(host_name, host_config)
             raise HostNotFoundError(self.name, host)
 
         # Search by name
@@ -249,15 +255,39 @@ class SSHProviderInstance(BaseProviderInstance):
         if name_str not in all_hosts:
             raise HostNotFoundError(self.name, host)
 
-        return self._create_host_object(name_str, all_hosts[name_str])
+        return self._cached_or_new_host_object(name_str, all_hosts[name_str])
+
+    def _cached_or_new_host_object(self, host_name: str, host_config: SSHHostConfig) -> Host:
+        """The host object built for this config earlier, or a fresh one when the config changed or none exists.
+
+        Reusing the object keeps its SSH transport across the discovery stream's
+        between-poll re-reads, which would otherwise handshake on every read. A
+        host whose config moved (a dynamic host re-registered at another address)
+        gets a new object, and the stale one is disconnected.
+        """
+        host_id = self._host_id_for_name(host_name)
+        cached = self._host_by_id_cache.get(host_id)
+        if isinstance(cached, Host) and self._host_config_by_cached_host_id.get(host_id) == host_config:
+            return cached
+        host_object = self._create_host_object(host_name, host_config)
+        self._evict_cached_host(host_id, replacement=host_object)
+        self._host_config_by_cached_host_id[host_id] = host_config
+        return host_object
 
     def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
     ) -> list[DiscoveredHost]:
-        """Discover all configured hosts, including dynamic hosts from file."""
+        """Discover all configured hosts, including dynamic hosts from file.
+
+        A cached host object whose host is no longer configured (a dynamic host that was
+        unregistered) is dropped here, since no read will disconnect it again.
+        """
         all_hosts = self._get_all_hosts()
+        configured_host_ids = {self._host_id_for_name(host_name) for host_name in all_hosts}
+        for cached_host_id in [host_id for host_id in self._host_by_id_cache if host_id not in configured_host_ids]:
+            self._forget_cached_host(cached_host_id)
         host_refs: list[DiscoveredHost] = []
         for host_name in all_hosts:
             host_refs.append(
@@ -280,9 +310,7 @@ class SSHProviderInstance(BaseProviderInstance):
             gpu=None,
         )
 
-    # =========================================================================
-    # Snapshot Methods (not supported)
-    # =========================================================================
+    # Snapshot methods (not supported)
 
     def create_snapshot(
         self,
@@ -304,9 +332,7 @@ class SSHProviderInstance(BaseProviderInstance):
     ) -> None:
         raise SnapshotsNotSupportedError(self.name)
 
-    # =========================================================================
-    # Volume Methods (not supported)
-    # =========================================================================
+    # Volume methods (not supported)
 
     def list_volumes(self) -> list[VolumeInfo]:
         return []
@@ -314,9 +340,7 @@ class SSHProviderInstance(BaseProviderInstance):
     def delete_volume(self, volume_id: VolumeId) -> None:
         raise NotImplementedError("SSH provider does not support volumes")
 
-    # =========================================================================
-    # Tag Methods (not supported for SSH provider)
-    # =========================================================================
+    # Tag methods (not supported for SSH provider)
 
     def get_host_tags(
         self,
@@ -353,9 +377,7 @@ class SSHProviderInstance(BaseProviderInstance):
     ) -> Host:
         raise NotImplementedError("SSH provider does not support renaming hosts")
 
-    # =========================================================================
-    # Connector Method
-    # =========================================================================
+    # Connector method
 
     def get_connector(
         self,
@@ -372,10 +394,9 @@ class SSHProviderInstance(BaseProviderInstance):
 
         raise HostNotFoundError(self.name, host_id)
 
-    # =========================================================================
-    # Lifecycle Methods
-    # =========================================================================
+    # Lifecycle methods
 
     def close(self) -> None:
-        """Clean up resources (no-op for SSH provider)."""
-        pass
+        """Disconnect every cached host object."""
+        for host_id in list(self._host_by_id_cache):
+            self._forget_cached_host(host_id)

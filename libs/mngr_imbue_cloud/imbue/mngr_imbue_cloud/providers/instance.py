@@ -29,6 +29,7 @@ import json
 import shlex
 import time
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -49,6 +50,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
+from pydantic import SkipValidation
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
@@ -344,6 +346,11 @@ def _includes_services_agent(agent_refs: Sequence[DiscoveredAgent]) -> bool:
 
 
 @pure
+def _find_lease_for_host(leases: Iterable[LeasedHostInfo], host_id: HostId) -> LeasedHostInfo | None:
+    return next((lease for lease in leases if lease.host_id == str(host_id)), None)
+
+
+@pure
 def _synthesize_services_agent_for_lifecycle_entry(
     entry: WorkspaceInfo, host_id: HostId, provider_name: ProviderInstanceName
 ) -> DiscoveredAgent:
@@ -502,6 +509,30 @@ def _advance_workspace_start(
             assert_never(unreachable)
 
 
+class _OuterListingSession(MutableModel):
+    """One leased host's kept outer-SSH connection for discovery listings, run one listing at a time."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    # SkipValidation: the outer is a live host object (and tests supply a duck-typed
+    # canned one), so the static type is kept but the isinstance validation is skipped.
+    outer: SkipValidation[OuterHostInterface] = Field(
+        frozen=True, description="The outer host, connected on first use"
+    )
+    vps_address: str = Field(frozen=True, description="The lease endpoint the outer was built for")
+    ssh_port: int = Field(frozen=True, description="The lease endpoint port the outer was built for")
+    _listing_lock: Lock = PrivateAttr(default_factory=Lock)
+
+    def is_for_lease(self, lease: LeasedHostInfo) -> bool:
+        return self.vps_address == lease.vps_address and self.ssh_port == lease.ssh_port
+
+    @contextmanager
+    def listing(self) -> Iterator[OuterHostInterface]:
+        """The outer, for one listing at a time: a full poll's read and a re-read of the same host serialize here."""
+        with self._listing_lock:
+            yield self.outer
+
+
 class ImbueCloudProvider(BaseProviderInstance):
     """Provider that surfaces a single account's imbue-cloud leases as mngr hosts."""
 
@@ -524,6 +555,17 @@ class ImbueCloudProvider(BaseProviderInstance):
     _listing_raw_cache: dict[HostId, dict[str, Any]] = PrivateAttr(default_factory=dict)
     # Guards ``_listing_raw_cache``, which several hosts' listings write in parallel.
     _listing_raw_cache_lock: Lock = PrivateAttr(default_factory=Lock)
+    # Outer-SSH sessions kept open across discovery listings, one per leased host, so a
+    # listing is one exec on an established connection rather than a handshake each
+    # time. Not a per-cycle cache: ``reset_caches`` leaves them alone; a session goes
+    # when its listing fails, its lease ends or moves, or the provider closes.
+    _outer_listing_session_by_host_id: dict[HostId, _OuterListingSession] = PrivateAttr(default_factory=dict)
+    _outer_listing_sessions_lock: Lock = PrivateAttr(default_factory=Lock)
+    # What this instance last wrote to each per-host state file, so a listing that reads
+    # the same answer every few seconds (the between-poll re-read) does not rewrite and
+    # fsync it every time. Not a per-cycle cache: a host id is never reused, so a stale
+    # entry can only ever suppress a redundant write.
+    _persisted_content_by_path: dict[Path, str] = PrivateAttr(default_factory=dict)
     # host_ids whose adoption was attempted (adopt or verification) this
     # process, so a failed attempt is not hammered on every host build within
     # one process. Successful verification is durable across processes (the
@@ -595,19 +637,27 @@ class ImbueCloudProvider(BaseProviderInstance):
     # object as `host_dir_override` (the same per-host mechanism the docker and
     # lima providers feed from their persisted host records).
 
-    def _persist_resolved_host_dir(self, host_id: HostId, host_dir: str) -> None:
-        """Record the in-container host_dir a listing pass resolved for this host.
+    def _persist_host_state_if_changed(self, path: Path, content: str, description: str) -> None:
+        """Atomically write a per-host state file, unless this instance already wrote the same content to it.
 
         Best-effort: a write failure is logged, not raised -- discovery must not
-        fail because the cache could not be refreshed; the next reader just
-        falls back to the configured host_dir.
+        fail because a cache could not be refreshed; the next reader just falls
+        back to whatever the file last held.
         """
+        if self._persisted_content_by_path.get(path) == content:
+            return
         try:
-            atomic_write(self._resolved_host_dir_path(host_id), host_dir)
+            atomic_write(path, content)
         except OSError as exc:
-            logger.warning(
-                "imbue_cloud[{}] could not persist resolved host_dir for host {}: {}", self.name, host_id, exc
-            )
+            logger.warning("imbue_cloud[{}] could not persist {}: {}", self.name, description, exc)
+            return
+        self._persisted_content_by_path[path] = content
+
+    def _persist_resolved_host_dir(self, host_id: HostId, host_dir: str) -> None:
+        """Record the in-container host_dir a listing pass resolved for this host."""
+        self._persist_host_state_if_changed(
+            self._resolved_host_dir_path(host_id), host_dir, f"resolved host_dir for host {host_id}"
+        )
 
     def _load_resolved_host_dir(self, host_id: HostId) -> Path | None:
         """Return the recorded in-container host_dir, or None to use the configured one.
@@ -640,21 +690,17 @@ class ImbueCloudProvider(BaseProviderInstance):
     def _persist_last_known_agents(self, host_id: HostId, agent_refs: Sequence[DiscoveredAgent]) -> None:
         """Persist the identity of the agents seen in a complete listing pass (one that includes the services agent).
 
-        Stored as ``agent_id -> {name, certified_data}`` under the per-host
-        state dir. Best-effort: a write failure is logged, not raised --
-        discovery must not fail just because the sticky-identity cache could not
-        be refreshed.
+        Stored as ``agent_id -> {name, certified_data}`` under the per-host state dir.
         """
         payload = {
             str(ref.agent_id): {"name": str(ref.agent_name), "certified_data": dict(ref.certified_data)}
             for ref in agent_refs
         }
-        try:
-            atomic_write(self._last_known_agents_path(host_id), json.dumps(payload, indent=2))
-        except OSError as exc:
-            logger.warning(
-                "imbue_cloud[{}] could not persist last-known agents for host {}: {}", self.name, host_id, exc
-            )
+        self._persist_host_state_if_changed(
+            self._last_known_agents_path(host_id),
+            json.dumps(payload, indent=2),
+            f"last-known agents for host {host_id}",
+        )
 
     def _load_last_known_agents(self, host_id: HostId) -> list[DiscoveredAgent]:
         """Re-attach the last-known agents for a host, each marked stale.
@@ -913,6 +959,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         is unused: a host's listing reads its agents too.
         """
         lease_by_host_id = {HostId(lease.host_id): lease for lease in self._list_leased_hosts_cached()}
+        self._drop_outer_listing_sessions_except(lease_by_host_id)
         leased_result = discover_hosts_within_per_host_timeout(
             provider_name=self.name,
             cg=cg,
@@ -958,6 +1005,38 @@ class ImbueCloudProvider(BaseProviderInstance):
             ssh_info=self._build_lease_ssh_info(host_ref.host_id, lease),
         )
 
+    def read_host_for_incremental_discovery(self, host_ref: DiscoveredHost, timeout_seconds: float) -> BoundedHostRead:
+        """Re-list one leased host over its kept outer session, from the lease list the last full poll fetched.
+
+        Never asks the connector: a host the fetched lease list does not hold -- the
+        list was reset, the lease ended, or the machine is stopped and has no box to
+        read -- raises ``HostNotFoundError``. A failed outer listing raises
+        ``HostConnectionError`` instead of answering with the host's cached agents, so
+        the re-read emits nothing rather than a stale listing. The listing bounds its
+        own SSH command, so ``timeout_seconds`` is unused.
+        """
+        del timeout_seconds
+        host_id = host_ref.host_id
+        lease = self._find_leased_in_fetched_list(host_id)
+        if lease is None:
+            raise HostNotFoundError(self.name, host_id)
+        raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(lease)
+        if raw is None:
+            if is_auth_failure:
+                raise HostAuthenticationError(f"outer listing of host {host_id} failed: {outer_error}")
+            raise HostConnectionError(f"outer listing of host {host_id} failed: {outer_error}")
+        listed_host_ref, agent_refs = self._shape_leased_host_listing(lease, raw)
+        return BoundedHostRead(
+            host=listed_host_ref,
+            agents=tuple(agent_refs),
+            ssh_info=self._build_lease_ssh_info(host_id, lease),
+        )
+
+    def _find_leased_in_fetched_list(self, host_id: HostId) -> LeasedHostInfo | None:
+        """The host's lease from the list already fetched this cycle, or None when there is no such list or lease."""
+        fetched = self._leased_hosts_cache
+        return None if fetched is None else _find_lease_for_host(fetched, host_id)
+
     def discover_hosts_and_agents(
         self,
         cg: ConcurrencyGroup,
@@ -971,6 +1050,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         it), and the lifecycle statuses map only to non-terminal states.
         """
         leased = self._list_leased_hosts_cached()
+        self._drop_outer_listing_sessions_except(HostId(lease.host_id) for lease in leased)
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
         # Each leased host needs its own outer-SSH round trip (connect + run the
         # listing script), so a sequential loop's wall time is the sum across every
@@ -1046,60 +1126,63 @@ class ImbueCloudProvider(BaseProviderInstance):
         distinct per-host file. Every leased host is listed: a held lease is a
         live resource whatever its container is doing.
         """
-        host_id = HostId(entry.host_id)
         raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(entry)
         if raw is None:
-            # Per-host failure isolation and its WARNING-level logging
-            # (inside _collect_listing_raw_via_outer, above) predate this PR
-            # unchanged: introduced in 668ad81ad1b757102588ba70a8f338e639d1b12b
-            # ("Surface outer-SSH auth failures as UNAUTHENTICATED, not
-            # CRASHED", Josh Albrecht, 2026-05-11). Parallelizing the caller
-            # does not change what happens when one host's outer SSH fails.
-            #
-            # Outer SSH itself failed; fall back to a lease-only stub
-            # so the host doesn't disappear from `mngr list`. An auth
-            # mismatch means the host answered but rejected this
-            # machine's key -> UNAUTHENTICATED: observation of the container
-            # is impossible and a retry or restart routes through the
-            # same rejected credential, so consumers should treat it as
-            # terminal rather than restart-worthy. Any other failure means
-            # we could not observe the host at all -- the box may be down,
-            # or the network path from this client may be broken -- so the
-            # state is UNKNOWN, not CRASHED: an unreachable host is
-            # non-evidence about the container, and consumers (e.g. the
-            # minds recovery page) must not read it as a positive
-            # "container is down" verdict.
-            fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.UNKNOWN
-            host_ref = DiscoveredHost(
+            return self._shape_unreachable_leased_host(entry, outer_error, is_auth_failure)
+        return self._shape_leased_host_listing(entry, raw)
+
+    def _shape_unreachable_leased_host(
+        self, entry: LeasedHostInfo, outer_error: str | None, is_auth_failure: bool
+    ) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
+        """Shape a leased host whose outer listing failed: a lease-only stub carrying the last-known agents.
+
+        The host does not disappear from the listing. An auth mismatch means the host
+        answered but rejected this machine's key -> UNAUTHENTICATED: observation of
+        the container is impossible and a retry or restart routes through the same
+        rejected credential, so consumers should treat it as terminal rather than
+        restart-worthy. Any other failure means the host could not be observed at
+        all -- the box may be down, or the network path from this client may be
+        broken -- so the state is UNKNOWN, not CRASHED: an unreachable host is
+        non-evidence about the container, and consumers (e.g. the minds recovery
+        page) must not read it as a positive "container is down" verdict.
+        """
+        host_id = HostId(entry.host_id)
+        fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.UNKNOWN
+        host_ref = DiscoveredHost(
+            host_id=host_id,
+            host_name=HostName(entry.host_name),
+            provider_name=self.name,
+            host_state=fallback_state,
+        )
+        # Re-attach the full set of agents last seen on this host (each
+        # with its cached certified_data, marked stale) so the workspace
+        # keeps its labels -- and its is_primary sidebar/restart guard --
+        # through the unreachable window. Only when nothing was ever
+        # cached (first-ever discovery) do we fall back to the bare
+        # lease stub. The host state stays truthfully UNKNOWN/UNAUTHENTICATED:
+        # cached data restores identity, not liveness.
+        agent_refs = self._load_last_known_agents(host_id) or [
+            DiscoveredAgent(
+                agent_id=AgentId(entry.agent_id),
+                agent_name=AgentName(entry.agent_id),
                 host_id=host_id,
-                host_name=HostName(entry.host_name),
                 provider_name=self.name,
-                host_state=fallback_state,
             )
-            # Re-attach the full set of agents last seen on this host (each
-            # with its cached certified_data, marked stale) so the workspace
-            # keeps its labels -- and its is_primary sidebar/restart guard --
-            # through the unreachable window. Only when nothing was ever
-            # cached (first-ever discovery) do we fall back to the bare
-            # lease stub, preserving today's behavior for that case. The
-            # host state stays truthfully UNKNOWN/UNAUTHENTICATED: cached
-            # data restores identity, not liveness.
-            agent_refs = self._load_last_known_agents(host_id) or [
-                DiscoveredAgent(
-                    agent_id=AgentId(entry.agent_id),
-                    agent_name=AgentName(entry.agent_id),
-                    host_id=host_id,
-                    provider_name=self.name,
-                )
-            ]
-            # Stash the outer error so get_host_and_agent_details can
-            # surface it in failure_reason without re-trying SSH.
-            with self._listing_raw_cache_lock:
-                self._listing_raw_cache[host_id] = {
-                    "outer_ssh_error": outer_error,
-                    "outer_ssh_is_auth_failure": is_auth_failure,
-                }
-            return host_ref, agent_refs
+        ]
+        # Stash the outer error so get_host_and_agent_details can
+        # surface it in failure_reason without re-trying SSH.
+        with self._listing_raw_cache_lock:
+            self._listing_raw_cache[host_id] = {
+                "outer_ssh_error": outer_error,
+                "outer_ssh_is_auth_failure": is_auth_failure,
+            }
+        return host_ref, agent_refs
+
+    def _shape_leased_host_listing(
+        self, entry: LeasedHostInfo, raw: dict[str, Any]
+    ) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
+        """Shape a leased host's parsed outer listing into its discovery result, refreshing the per-host caches."""
+        host_id = HostId(entry.host_id)
         with self._listing_raw_cache_lock:
             self._listing_raw_cache[host_id] = raw
         # Record which layout this container actually uses while we have a
@@ -1198,8 +1281,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         host_id = HostId(lease.host_id)
         host_dir = str(self.host_dir)
         try:
-            with self.outer_host_for(host_id) as outer:
-                assert outer is not None
+            with self._outer_listing_session_for(lease) as outer:
                 script = build_outer_listing_collection_script(
                     str(host_id),
                     host_dir,
@@ -2843,14 +2925,12 @@ class ImbueCloudProvider(BaseProviderInstance):
         self._evict_cached_host(host_id)
 
     def _find_leased(self, host_id: HostId) -> LeasedHostInfo | None:
-        for entry in self._list_leased_hosts_cached():
-            if entry.host_id == str(host_id):
-                return entry
-        return None
+        return _find_lease_for_host(self._list_leased_hosts_cached(), host_id)
 
     def on_connection_error(self, host_id: HostId) -> None:
-        """A connection error doesn't change connector-side lease state; just clear our cache."""
+        """A connection error doesn't change connector-side lease state; just clear our cache and the host's session."""
         self.reset_caches()
+        self._drop_outer_listing_session(host_id)
 
     def outer_host_id_for(self, host_id: HostId) -> str | None:
         """Stable id for the outer (leased VPS) of host_id, keyed by VPS IP."""
@@ -2871,7 +2951,18 @@ class ImbueCloudProvider(BaseProviderInstance):
 
     @contextmanager
     def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
-        """Open the outer host (the leased VPS itself, root@vps_address:ssh_port).
+        """Open the outer host (the leased VPS itself, root@vps_address:ssh_port), closing it on exit."""
+        leased = self._find_leased(host_id)
+        if leased is None:
+            raise HostNotFoundError(self.name, host_id)
+        outer = self._build_outer_host_for_lease(leased)
+        try:
+            yield outer
+        finally:
+            outer.disconnect()
+
+    def _build_outer_host_for_lease(self, leased: LeasedHostInfo) -> OuterHostInterface:
+        """The outer host of a lease (root@vps_address:ssh_port), connected on first use.
 
         Uses the per-host SSH key already on disk (the lease step authorized
         this key on both the container's sshd and the VPS root account). The
@@ -2879,9 +2970,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         the box-forwarded VM-root port for a slice (``:22`` on a slice's
         ``vps_address`` is the bare-metal box's own sshd, not the VM).
         """
-        leased = self._find_leased(host_id)
-        if leased is None:
-            raise HostNotFoundError(self.name, host_id)
+        host_id = HostId(leased.host_id)
         private_key_path, _ = self._host_keypair_paths(host_id)
         if not private_key_path.exists():
             raise HostNotFoundError(self.name, host_id)
@@ -2902,15 +2991,72 @@ class ImbueCloudProvider(BaseProviderInstance):
             known_hosts_path=known_hosts_path,
             ssh_user="root",
         )
-        outer = OuterHost(
+        return OuterHost(
             id=host_id,
             connector=PyinfraConnector(pyinfra_host),
             mngr_ctx=self.mngr_ctx,
         )
+
+    # Kept outer-SSH sessions for discovery listings
+
+    @contextmanager
+    def _outer_listing_session_for(self, lease: LeasedHostInfo) -> Iterator[OuterHostInterface]:
+        """The lease's kept outer session, for one listing; a session whose listing fails is dropped.
+
+        A session is built on the lease's first listing and reused by every later
+        one, so a listing costs one exec on an established connection. A lease
+        whose endpoint moved since (a restore onto another box) gets a fresh
+        session. Any ``MngrError`` the listing raises -- a connection or
+        authentication failure -- disconnects and drops the session, so the next
+        listing dials afresh instead of retrying a connection known to be bad.
+        """
+        host_id = HostId(lease.host_id)
+        moved_session: _OuterListingSession | None = None
         try:
-            yield outer
+            with self._outer_listing_sessions_lock:
+                session = self._outer_listing_session_by_host_id.get(host_id)
+                if session is not None and not session.is_for_lease(lease):
+                    moved_session = self._outer_listing_session_by_host_id.pop(host_id)
+                    session = None
+                if session is None:
+                    session = _OuterListingSession(
+                        outer=self._build_outer_host_for_lease(lease),
+                        vps_address=lease.vps_address,
+                        ssh_port=lease.ssh_port,
+                    )
+                    self._outer_listing_session_by_host_id[host_id] = session
         finally:
-            outer.disconnect()
+            # Torn down outside the lock: an SSH teardown can block, and holding the lock
+            # through it would stall every other host's listing at its session lookup.
+            # Also when the replacement could not be built: the popped session is
+            # referenced from nowhere else, so this is its one chance to close.
+            if moved_session is not None:
+                moved_session.outer.disconnect()
+        try:
+            with session.listing() as outer:
+                yield outer
+        except MngrError:
+            self._drop_outer_listing_session(host_id)
+            raise
+
+    def _drop_outer_listing_session(self, host_id: HostId) -> None:
+        with self._outer_listing_sessions_lock:
+            session = self._outer_listing_session_by_host_id.pop(host_id, None)
+        if session is not None:
+            session.outer.disconnect()
+
+    def _drop_outer_listing_sessions_except(self, leased_host_ids: Iterable[HostId]) -> None:
+        """Disconnect the sessions of hosts that are no longer leased."""
+        kept_host_ids = set(leased_host_ids)
+        with self._outer_listing_sessions_lock:
+            dropped_host_ids = [
+                host_id for host_id in self._outer_listing_session_by_host_id if host_id not in kept_host_ids
+            ]
+        for host_id in dropped_host_ids:
+            self._drop_outer_listing_session(host_id)
+
+    def close(self) -> None:
+        self._drop_outer_listing_sessions_except(())
 
     # Snapshots / volumes / tags / rename: not supported
 

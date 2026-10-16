@@ -2758,6 +2758,11 @@ log "=== Shutdown script completed ==="
             logger.debug("Found {} running host ID(s) for app={}", len(running_host_ids), self.app_name)
             return running_host_ids
 
+    @property
+    def supports_incremental_host_discovery(self) -> bool:
+        # Hosts are read in one batched pass, so one host cannot be re-read on its own.
+        return False
+
     @handle_modal_auth_error
     def discover_hosts_and_agents_within_timeouts(
         self,

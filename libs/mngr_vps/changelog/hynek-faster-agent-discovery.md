@@ -1,0 +1,1 @@
+The vps provider (and the providers built on it) reports that it cannot re-read one host on its own (`supports_incremental_host_discovery` is false), since it reads every host in one batched pass, so the streaming discovery poller's new between-poll host re-reads skip it.

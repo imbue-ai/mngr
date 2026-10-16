@@ -66,6 +66,7 @@ def _account_config_with_non_default_knobs() -> ImbueCloudProviderConfig:
         destroyed_host_persisted_seconds=111.0,
         min_online_host_age_seconds=222.0,
         discovery_poll_interval_seconds=PositiveFloat(7.0),
+        host_discovery_poll_interval_seconds=PositiveFloat(2.0),
         discovery_warn_seconds=PositiveFloat(100.0),
         host_discovery_timeout_seconds=PositiveFloat(110.0),
         agent_discovery_timeout_seconds=PositiveFloat(120.0),

@@ -254,9 +254,7 @@ def test_create_pyinfra_host_sets_banner_timeout(temp_mngr_ctx: MngrContext) -> 
     assert host.data.get("ssh_paramiko_connect_kwargs") == {"banner_timeout": SSH_BANNER_TIMEOUT_SECONDS}
 
 
-# =========================================================================
 # Dynamic hosts tests
-# =========================================================================
 
 
 def test_discover_hosts_includes_dynamic_hosts_from_file(
@@ -381,3 +379,60 @@ def test_read_dynamic_hosts_expands_key_file_and_preserves_known_hosts_file(
     assert host_config.key_file == Path("~/.ssh/id_ed25519").expanduser()
     assert not str(host_config.key_file).startswith("~")
     assert host_config.known_hosts_file == Path("/etc/ssh/ssh_known_hosts")
+
+
+def test_get_host_reuses_the_host_object_while_its_config_is_unchanged(temp_mngr_ctx: MngrContext) -> None:
+    """Repeated lookups return one object, so its SSH transport survives the discovery stream's re-reads."""
+    provider = make_ssh_provider(temp_mngr_ctx)
+
+    first = provider.get_host(HostName("test-host"))
+    second = provider.get_host(first.id)
+
+    assert second is first
+
+
+def test_get_host_builds_a_new_object_when_the_host_config_changed(temp_mngr_ctx: MngrContext) -> None:
+    provider = make_ssh_provider(temp_mngr_ctx, hosts={"test-host": SSHHostConfig(address="localhost", port=22)})
+    first = provider.get_host(HostName("test-host"))
+
+    provider.hosts["test-host"] = SSHHostConfig(address="localhost", port=2222)
+    moved = provider.get_host(HostName("test-host"))
+
+    assert moved is not first
+    assert moved.id == first.id
+    assert provider.get_host(HostName("test-host")) is moved
+
+
+def test_on_connection_error_drops_the_cached_host_object(temp_mngr_ctx: MngrContext) -> None:
+    provider = make_ssh_provider(temp_mngr_ctx)
+    first = provider.get_host(HostName("test-host"))
+
+    provider.on_connection_error(first.id)
+
+    assert provider.get_host(HostName("test-host")) is not first
+
+
+def test_discover_hosts_drops_the_cached_object_of_an_unregistered_dynamic_host(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """No read will ever disconnect a host that is no longer listed, so the listing releases its object."""
+    dynamic_file = tmp_path / "dynamic_hosts.toml"
+    dynamic_file.write_text('[dynamic-host-1]\naddress = "10.0.0.1"\nport = 2222\nuser = "root"\n')
+    provider = make_ssh_provider(temp_mngr_ctx, hosts={}, dynamic_hosts_file=dynamic_file)
+    cached = provider.get_host(HostName("dynamic-host-1"))
+
+    dynamic_file.unlink()
+    provider.discover_hosts(cg=provider.mngr_ctx.concurrency_group)
+
+    assert cached.id not in provider._host_by_id_cache
+    assert cached.id not in provider._host_config_by_cached_host_id
+
+
+def test_close_drops_every_cached_host_object(temp_mngr_ctx: MngrContext) -> None:
+    provider = make_ssh_provider(temp_mngr_ctx)
+    first = provider.get_host(HostName("test-host"))
+
+    provider.close()
+
+    assert provider._host_by_id_cache == {}
+    assert provider.get_host(HostName("test-host")) is not first

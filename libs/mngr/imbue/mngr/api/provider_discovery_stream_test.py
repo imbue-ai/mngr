@@ -6,16 +6,25 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from pydantic import ConfigDict
+from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.primitives import PositiveFloat
+from imbue.mngr.api.discovery_events import AgentDestroyedEvent
+from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
+from imbue.mngr.api.discovery_events import DiscoveryEvent
+from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.provider_discovery_stream import _ProviderDiscoveryPoller
+from imbue.mngr.api.provider_discovery_stream import _compute_host_read_delta
 from imbue.mngr.api.provider_discovery_stream import _discover_one_provider
+from imbue.mngr.api.provider_discovery_stream import _host_reads_from_result
 from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -23,6 +32,7 @@ from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.data_types import BoundedHostRead
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
@@ -42,19 +52,43 @@ from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.thread_cleanup import _MngrExecutor
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 class _ControllableProvider(MockProviderInstance):
-    """Mock provider whose discovery can succeed, raise, or block until released."""
+    """Mock provider whose discovery can succeed, raise, or block until released, and whose host re-reads are canned."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     discovery_call_count: int = 0
     should_raise: bool = False
     result_agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] | None = None
     result_host_ssh_infos: list[tuple[HostId, SSHInfo]] | None = None
+    is_reread_supported: bool = True
+    reread_by_host_id: dict[HostId, BoundedHostRead] = Field(default_factory=dict)
+    reread_error_by_host_id: dict[HostId, Exception] = Field(default_factory=dict)
+    reread_count_by_host_id: dict[HostId, int] = Field(default_factory=dict)
 
     _release_gate: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _reread_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    @property
+    def supports_incremental_host_discovery(self) -> bool:
+        return self.is_reread_supported
+
+    def read_host_for_incremental_discovery(self, host_ref: DiscoveredHost, timeout_seconds: float) -> BoundedHostRead:
+        with self._reread_lock:
+            self.reread_count_by_host_id[host_ref.host_id] = self.reread_count_by_host_id.get(host_ref.host_id, 0) + 1
+        error = self.reread_error_by_host_id.get(host_ref.host_id)
+        if error is not None:
+            raise error
+        return self.reread_by_host_id[host_ref.host_id]
+
+    def reread_count(self, host_id: HostId) -> int:
+        with self._reread_lock:
+            return self.reread_count_by_host_id.get(host_id, 0)
 
     def discover_hosts_and_agents_within_timeouts(
         self,
@@ -275,28 +309,53 @@ def _tiny_timeout_config() -> ProviderInstanceConfig:
     )
 
 
-def _read_snapshots(temp_mngr_ctx: MngrContext) -> list[ProviderDiscoverySnapshotEvent]:
+def _read_events(temp_mngr_ctx: MngrContext) -> list[DiscoveryEvent]:
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     if not events_path.exists():
         return []
-    snapshots: list[ProviderDiscoverySnapshotEvent] = []
+    events: list[DiscoveryEvent] = []
     for line in events_path.read_text().splitlines():
         parsed = parse_discovery_event_line(line)
-        if isinstance(parsed, ProviderDiscoverySnapshotEvent):
-            snapshots.append(parsed)
-    return snapshots
+        if parsed is not None:
+            events.append(parsed)
+    return events
+
+
+def _read_snapshots(temp_mngr_ctx: MngrContext) -> list[ProviderDiscoverySnapshotEvent]:
+    return [event for event in _read_events(temp_mngr_ctx) if isinstance(event, ProviderDiscoverySnapshotEvent)]
 
 
 def _read_host_ssh_info_events(temp_mngr_ctx: MngrContext) -> list[HostSSHInfoEvent]:
-    events_path = get_discovery_events_path(temp_mngr_ctx.config)
-    if not events_path.exists():
-        return []
-    events: list[HostSSHInfoEvent] = []
-    for line in events_path.read_text().splitlines():
-        parsed = parse_discovery_event_line(line)
-        if isinstance(parsed, HostSSHInfoEvent):
-            events.append(parsed)
-    return events
+    return [event for event in _read_events(temp_mngr_ctx) if isinstance(event, HostSSHInfoEvent)]
+
+
+def _make_host(provider_name: ProviderInstanceName, host_state: HostState) -> DiscoveredHost:
+    return DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("h-" + get_short_random_string()),
+        provider_name=provider_name,
+        host_state=host_state,
+    )
+
+
+def _make_agent(host: DiscoveredHost, labels: dict[str, str] | None = None) -> DiscoveredAgent:
+    return DiscoveredAgent(
+        host_id=host.host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("a-" + get_short_random_string()),
+        provider_name=host.provider_name,
+        certified_data={"labels": labels or {}},
+    )
+
+
+def _make_ssh_info(temp_host_dir: Path, port: int) -> SSHInfo:
+    return SSHInfo(
+        user="root",
+        host="203.0.113.7",
+        port=port,
+        key_path=temp_host_dir / "keys" / "id_ed25519",
+        command=f"ssh -i /keys/id_ed25519 -p {port} root@203.0.113.7",
+    )
 
 
 @pytest.mark.allow_warnings(match="could not be built")
@@ -480,26 +539,9 @@ def test_poller_emits_host_ssh_info_events_from_discovery_result(
     as a HOST_SSH_INFO event, so a tunnel consumer (the minds forward) can reach the host from
     the streaming path alone -- without waiting for an occasional full ``mngr list``."""
     provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
-    host = DiscoveredHost(
-        host_id=HostId.generate(),
-        host_name=HostName("remote-host"),
-        provider_name=provider.name,
-        host_state=HostState.RUNNING,
-    )
-    agent = DiscoveredAgent(
-        host_id=host.host_id,
-        agent_id=AgentId.generate(),
-        agent_name=AgentName("a1"),
-        provider_name=provider.name,
-        certified_data={},
-    )
-    ssh_info = SSHInfo(
-        user="root",
-        host="203.0.113.7",
-        port=22013,
-        key_path=temp_host_dir / "keys" / "id_ed25519",
-        command="ssh -i /keys/id_ed25519 -p 22013 root@203.0.113.7",
-    )
+    host = _make_host(provider.name, HostState.RUNNING)
+    agent = _make_agent(host)
+    ssh_info = _make_ssh_info(temp_host_dir, 22013)
     provider.result_agents_by_host = {host: [agent]}
     provider.result_host_ssh_infos = [(host.host_id, ssh_info)]
 
@@ -516,12 +558,7 @@ def test_poller_emits_host_ssh_info_events_from_discovery_result(
 def test_poller_emits_no_host_ssh_info_when_result_has_none(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
     """A provider that surfaces no SSH info (e.g. local hosts) emits no HOST_SSH_INFO events."""
     provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
-    host = DiscoveredHost(
-        host_id=HostId.generate(),
-        host_name=HostName("local-host"),
-        provider_name=provider.name,
-        host_state=HostState.RUNNING,
-    )
+    host = _make_host(provider.name, HostState.RUNNING)
     provider.result_agents_by_host = {host: []}
 
     poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_generous_config())
@@ -636,3 +673,370 @@ def test_poller_timeout_emits_error_then_accepts_late_result(temp_host_dir: Path
             assert {h.host_id for h in snapshots[-1].hosts} == {host.host_id}
     finally:
         provider.release()
+
+
+# Between-poll re-reads of known hosts
+
+
+def _reread_config(host_discovery_poll_interval_seconds: float) -> ProviderInstanceConfig:
+    """A generous full-poll config whose re-read interval is the given one."""
+    return _generous_config().model_copy_update(
+        to_update(
+            _generous_config().field_ref().host_discovery_poll_interval_seconds,
+            PositiveFloat(host_discovery_poll_interval_seconds),
+        )
+    )
+
+
+def test_compute_host_read_delta_reports_nothing_for_an_unchanged_read(temp_host_dir: Path) -> None:
+    host = _make_host(_CONTROLLABLE_PROVIDER_NAME, HostState.RUNNING)
+    agent = _make_agent(host)
+    ssh_info = _make_ssh_info(temp_host_dir, 22001)
+    previous = BoundedHostRead(host=host, agents=(agent,), ssh_info=ssh_info)
+    current = BoundedHostRead(host=host, agents=(agent,), ssh_info=ssh_info)
+
+    delta = _compute_host_read_delta(previous, current)
+
+    assert delta.host is None
+    assert delta.ssh_info is None
+    assert delta.agents == ()
+    assert delta.destroyed_agent_ids == ()
+
+
+def test_compute_host_read_delta_reports_agents_that_appeared_or_changed() -> None:
+    host = _make_host(_CONTROLLABLE_PROVIDER_NAME, HostState.RUNNING)
+    unchanged = _make_agent(host)
+    relabeled_before = _make_agent(host, labels={"color": "red"})
+    relabeled_after = relabeled_before.model_copy_update(
+        to_update(relabeled_before.field_ref().certified_data, {"labels": {"color": "blue"}})
+    )
+    appeared = _make_agent(host)
+    previous = BoundedHostRead(host=host, agents=(unchanged, relabeled_before), ssh_info=None)
+    current = BoundedHostRead(host=host, agents=(unchanged, relabeled_after, appeared), ssh_info=None)
+
+    delta = _compute_host_read_delta(previous, current)
+
+    assert delta.agents == (relabeled_after, appeared)
+    assert delta.destroyed_agent_ids == ()
+    assert delta.host is None
+
+
+@pytest.mark.parametrize(
+    ("current_state", "expected_destroyed_count"),
+    [(HostState.RUNNING, 1), (HostState.STOPPED, 0), (HostState.UNKNOWN, 0)],
+)
+def test_compute_host_read_delta_reports_destroyed_agents_only_from_a_live_listing(
+    current_state: HostState, expected_destroyed_count: int
+) -> None:
+    """Only a running host's read enumerates its agents live; any other read answers from cache, so an
+    agent missing from it is unread rather than gone."""
+    host = _make_host(_CONTROLLABLE_PROVIDER_NAME, HostState.RUNNING)
+    kept = _make_agent(host)
+    gone = _make_agent(host)
+    previous = BoundedHostRead(host=host, agents=(kept, gone), ssh_info=None)
+    current_host = host.model_copy_update(to_update(host.field_ref().host_state, current_state))
+    current = BoundedHostRead(host=current_host, agents=(kept,), ssh_info=None)
+
+    delta = _compute_host_read_delta(previous, current)
+
+    assert len(delta.destroyed_agent_ids) == expected_destroyed_count
+    if expected_destroyed_count:
+        assert delta.destroyed_agent_ids == (gone.agent_id,)
+    assert delta.agents == ()
+
+
+def test_compute_host_read_delta_reports_a_changed_host_listing_and_ssh_endpoint(temp_host_dir: Path) -> None:
+    host = _make_host(_CONTROLLABLE_PROVIDER_NAME, HostState.RUNNING)
+    stopped_host = host.model_copy_update(to_update(host.field_ref().host_state, HostState.STOPPED))
+    previous = BoundedHostRead(host=host, agents=(), ssh_info=_make_ssh_info(temp_host_dir, 22001))
+    moved_ssh_info = _make_ssh_info(temp_host_dir, 22002)
+    current = BoundedHostRead(host=stopped_host, agents=(), ssh_info=moved_ssh_info)
+
+    delta = _compute_host_read_delta(previous, current)
+
+    assert delta.host == stopped_host
+    assert delta.ssh_info == moved_ssh_info
+
+
+def test_host_reads_from_result_regroups_a_snapshot_by_host(temp_host_dir: Path) -> None:
+    first_host = _make_host(_CONTROLLABLE_PROVIDER_NAME, HostState.RUNNING)
+    second_host = _make_host(_CONTROLLABLE_PROVIDER_NAME, HostState.STOPPED)
+    unlisted_host = _make_host(_CONTROLLABLE_PROVIDER_NAME, HostState.RUNNING)
+    first_agents = (_make_agent(first_host), _make_agent(first_host))
+    ssh_info = _make_ssh_info(temp_host_dir, 22001)
+    result = BoundedProviderDiscoveryResult(
+        hosts=(first_host, second_host),
+        # The unlisted host's agent (a host that timed out this poll) belongs to no listed host.
+        agents=first_agents + (_make_agent(unlisted_host),),
+        host_ssh_infos=((first_host.host_id, ssh_info),),
+        unknown_host_ids=(unlisted_host.host_id,),
+    )
+
+    read_by_host_id = _host_reads_from_result(result)
+
+    assert set(read_by_host_id) == {first_host.host_id, second_host.host_id}
+    assert read_by_host_id[first_host.host_id] == BoundedHostRead(
+        host=first_host, agents=first_agents, ssh_info=ssh_info
+    )
+    assert read_by_host_id[second_host.host_id] == BoundedHostRead(host=second_host, agents=(), ssh_info=None)
+
+
+def test_host_reads_from_result_is_empty_for_an_empty_snapshot() -> None:
+    assert _host_reads_from_result(BoundedProviderDiscoveryResult(hosts=(), agents=())) == {}
+
+
+def _full_poll(poller: _ProviderDiscoveryPoller, temp_mngr_ctx: MngrContext) -> None:
+    with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
+        poller.poll_and_emit(lambda resolved: _submit_discovery(executor, resolved, temp_mngr_ctx, poller))
+
+
+def test_reread_emits_only_what_changed_since_the_host_was_last_read(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A re-read of a known running host emits an event per agent that appeared, nothing while nothing
+    changes, and a destroyed event once an agent is gone -- never a provider snapshot."""
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    host = _make_host(provider.name, HostState.RUNNING)
+    services_agent = _make_agent(host)
+    provider.result_agents_by_host = {host: [services_agent]}
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_reread_config(0.05))
+    _full_poll(poller, temp_mngr_ctx)
+    event_count_after_poll = len(_read_events(temp_mngr_ctx))
+
+    # A chat agent is created inside the host between full polls.
+    chat_agent = _make_agent(host)
+    provider.reread_by_host_id[host.host_id] = BoundedHostRead(
+        host=host, agents=(services_agent, chat_agent), ssh_info=None
+    )
+    poller.reread_known_hosts_and_emit()
+
+    appeared_events = _read_events(temp_mngr_ctx)[event_count_after_poll:]
+    assert len(appeared_events) == 1
+    assert isinstance(appeared_events[0], AgentDiscoveryEvent)
+    assert appeared_events[0].agent == chat_agent
+    assert len(_read_snapshots(temp_mngr_ctx)) == 1
+
+    # Nothing changed: the steady state is silent.
+    poller.reread_known_hosts_and_emit()
+    assert len(_read_events(temp_mngr_ctx)) == event_count_after_poll + 1
+    assert provider.reread_count(host.host_id) == 2
+
+    # The chat agent is destroyed inside the host.
+    provider.reread_by_host_id[host.host_id] = BoundedHostRead(host=host, agents=(services_agent,), ssh_info=None)
+    poller.reread_known_hosts_and_emit()
+
+    destroyed_events = _read_events(temp_mngr_ctx)[event_count_after_poll + 1 :]
+    assert len(destroyed_events) == 1
+    assert isinstance(destroyed_events[0], AgentDestroyedEvent)
+    assert destroyed_events[0].agent_id == chat_agent.agent_id
+    assert destroyed_events[0].host_id == host.host_id
+
+
+def test_reread_emits_the_host_when_its_listing_changed(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    host = _make_host(provider.name, HostState.RUNNING)
+    provider.result_agents_by_host = {host: []}
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_reread_config(0.05))
+    _full_poll(poller, temp_mngr_ctx)
+    event_count_after_poll = len(_read_events(temp_mngr_ctx))
+
+    stopped_host = host.model_copy_update(to_update(host.field_ref().host_state, HostState.STOPPED))
+    provider.reread_by_host_id[host.host_id] = BoundedHostRead(host=stopped_host, agents=(), ssh_info=None)
+    poller.reread_known_hosts_and_emit()
+
+    host_events = _read_events(temp_mngr_ctx)[event_count_after_poll:]
+    assert len(host_events) == 1
+    assert isinstance(host_events[0], HostDiscoveryEvent)
+    assert host_events[0].host == stopped_host
+    # A host that no longer reads as running is not re-read again until a full poll lists it running.
+    poller.reread_known_hosts_and_emit()
+    assert provider.reread_count(host.host_id) == 1
+
+
+def test_reread_covers_only_the_hosts_the_full_poll_listed_as_running(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    running_host = _make_host(provider.name, HostState.RUNNING)
+    stopped_host = _make_host(provider.name, HostState.STOPPED)
+    provider.result_agents_by_host = {running_host: [], stopped_host: []}
+    provider.reread_by_host_id[running_host.host_id] = BoundedHostRead(host=running_host, agents=(), ssh_info=None)
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_reread_config(0.05))
+    _full_poll(poller, temp_mngr_ctx)
+
+    poller.reread_known_hosts_and_emit()
+
+    assert provider.reread_count(running_host.host_id) == 1
+    assert provider.reread_count(stopped_host.host_id) == 0
+
+
+def test_reread_is_skipped_for_a_provider_that_reads_its_hosts_in_one_batch(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    provider.is_reread_supported = False
+    host = _make_host(provider.name, HostState.RUNNING)
+    provider.result_agents_by_host = {host: []}
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_reread_config(0.05))
+    _full_poll(poller, temp_mngr_ctx)
+
+    poller.reread_known_hosts_and_emit()
+
+    assert provider.reread_count(host.host_id) == 0
+
+
+def test_reread_is_skipped_before_the_first_full_poll(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_reread_config(0.05))
+
+    poller.reread_known_hosts_and_emit()
+
+    assert _read_events(temp_mngr_ctx) == []
+
+
+@pytest.mark.allow_warnings(match=r"discovery is slow|discovery timed out")
+def test_reread_is_skipped_while_the_full_poll_is_still_in_flight(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A wedged provider is not piled onto: the hosts its last good poll listed are left alone."""
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    host = _make_host(provider.name, HostState.RUNNING)
+    provider.result_agents_by_host = {host: []}
+    provider.reread_by_host_id[host.host_id] = BoundedHostRead(host=host, agents=(), ssh_info=None)
+    poller = _ProviderDiscoveryPoller(
+        provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_tiny_timeout_config()
+    )
+    with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
+        try:
+            poller.poll_and_emit(lambda resolved: _submit_discovery(executor, resolved, temp_mngr_ctx, poller))
+            # The second poll wedges: its discovery blocks on the gate, so the poll times out.
+            provider._release_gate.clear()
+            poller.poll_and_emit(lambda resolved: _submit_discovery(executor, resolved, temp_mngr_ctx, poller))
+            assert _read_snapshots(temp_mngr_ctx)[-1].error is not None
+
+            poller.reread_known_hosts_and_emit()
+
+            assert provider.reread_count(host.host_id) == 0
+        finally:
+            # Released inside the executor's scope, which waits for the wedged discovery on exit.
+            provider.release()
+
+
+def test_a_failed_reread_emits_nothing_and_leaves_the_host_to_the_next_full_poll(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    host = _make_host(provider.name, HostState.RUNNING)
+    provider.result_agents_by_host = {host: [_make_agent(host)]}
+    provider.reread_error_by_host_id[host.host_id] = ProviderUnavailableError(provider.name, "outer SSH unreachable")
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_reread_config(0.05))
+    _full_poll(poller, temp_mngr_ctx)
+    event_count_after_poll = len(_read_events(temp_mngr_ctx))
+
+    poller.reread_known_hosts_and_emit()
+    poller.reread_known_hosts_and_emit()
+
+    assert len(_read_events(temp_mngr_ctx)) == event_count_after_poll
+    assert provider.reread_count(host.host_id) == 1
+    # The next full poll lists the host again, which puts it back in the re-read set.
+    _full_poll(poller, temp_mngr_ctx)
+    poller.reread_known_hosts_and_emit()
+    assert provider.reread_count(host.host_id) == 2
+
+
+def test_reread_never_reads_a_host_whose_read_is_still_in_flight(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """One read per host at a time: a slow re-read is left running, and the pass does not wait past
+    its interval for it; the next pass harvests it once it finished."""
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    host = _make_host(provider.name, HostState.RUNNING)
+    provider.result_agents_by_host = {host: []}
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_reread_config(0.05))
+    _full_poll(poller, temp_mngr_ctx)
+    event_count_after_poll = len(_read_events(temp_mngr_ctx))
+    appeared_agent = _make_agent(host)
+    started = threading.Event()
+    gate = threading.Event()
+
+    class _GatedProvider(_ControllableProvider):
+        def read_host_for_incremental_discovery(
+            self, host_ref: DiscoveredHost, timeout_seconds: float
+        ) -> BoundedHostRead:
+            started.set()
+            gate.wait()
+            return super().read_host_for_incremental_discovery(host_ref, timeout_seconds)
+
+    gated = _GatedProvider(name=provider.name, host_dir=temp_host_dir, mngr_ctx=temp_mngr_ctx)
+    gated.reread_by_host_id[host.host_id] = BoundedHostRead(host=host, agents=(appeared_agent,), ssh_info=None)
+    poller._provider = gated
+    try:
+        poller.reread_known_hosts_and_emit()
+        assert started.wait(timeout=5.0)
+        poller.reread_known_hosts_and_emit()
+        # Both passes left the one gated read running, and neither emitted for the host.
+        assert list(poller._host_read_registry.future_by_host_id) == [host.host_id]
+        assert gated.reread_count(host.host_id) == 0
+        assert len(_read_events(temp_mngr_ctx)) == event_count_after_poll
+    finally:
+        gate.set()
+    in_flight = poller._host_read_registry.future_by_host_id[host.host_id]
+    assert poll_until(in_flight.done)
+    assert gated.reread_count(host.host_id) == 1
+
+    poller.reread_known_hosts_and_emit()
+
+    harvested = _read_events(temp_mngr_ctx)[event_count_after_poll:]
+    assert [event.agent for event in harvested if isinstance(event, AgentDiscoveryEvent)] == [appeared_agent]
+
+
+def test_run_rereads_known_hosts_between_full_polls(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """The poll loop re-reads the hosts its full poll listed, on the re-read cadence, so an agent created
+    inside a known host reaches the stream long before the next full poll."""
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    host = _make_host(provider.name, HostState.RUNNING)
+    provider.result_agents_by_host = {host: []}
+    provider.reread_by_host_id[host.host_id] = BoundedHostRead(host=host, agents=(), ssh_info=None)
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_reread_config(0.02))
+    stop_event = threading.Event()
+    thread = threading.Thread(target=poller.run, args=(stop_event,), daemon=True)
+    thread.start()
+    try:
+        assert poll_until(lambda: provider.reread_count(host.host_id) >= 1)
+        chat_agent = _make_agent(host)
+        provider.reread_by_host_id[host.host_id] = BoundedHostRead(host=host, agents=(chat_agent,), ssh_info=None)
+
+        assert poll_until(
+            lambda: any(
+                isinstance(event, AgentDiscoveryEvent) and event.agent == chat_agent
+                for event in _read_events(temp_mngr_ctx)
+            )
+        )
+    finally:
+        stop_event.set()
+        thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    # The re-reads never stood in for a full poll: only the one full poll's snapshot was written.
+    assert len(_read_snapshots(temp_mngr_ctx)) == 1
+
+
+def test_run_does_not_reread_when_the_reread_interval_is_not_below_the_poll_interval(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    host = _make_host(provider.name, HostState.RUNNING)
+    provider.result_agents_by_host = {host: []}
+    provider.reread_by_host_id[host.host_id] = BoundedHostRead(host=host, agents=(), ssh_info=None)
+    config = _tiny_timeout_config().model_copy_update(
+        to_update(_tiny_timeout_config().field_ref().host_discovery_poll_interval_seconds, PositiveFloat(0.05))
+    )
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=config)
+    stop_event = threading.Event()
+    thread = threading.Thread(target=poller.run, args=(stop_event,), daemon=True)
+    thread.start()
+    try:
+        assert poll_until(lambda: len(_read_snapshots(temp_mngr_ctx)) >= 3)
+    finally:
+        stop_event.set()
+        thread.join(timeout=5.0)
+    assert provider.reread_count(host.host_id) == 0

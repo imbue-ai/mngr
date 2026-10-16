@@ -22,6 +22,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import BoundedHostRead
+from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostBootInfo
@@ -1355,3 +1356,115 @@ def test_get_host_and_agent_details_populates_boot_time_and_uptime_from_one_prob
     assert host_details.uptime_seconds == 3 * 60 * 60
     # A single probe answers both -- not one shell-out per value.
     online_host.read_boot_info.assert_called_once()
+
+
+def test_discover_within_timeouts_adopts_a_young_in_flight_read_instead_of_skipping_it(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A read that a between-poll re-read started moments ago has not outlived the host timeout, so
+    the poll waits for it and harvests it as its own listing of the host, starting no second read."""
+    provider = _PerHostGatedProvider(
+        name=ProviderInstanceName("gated"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("young"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    agent = _make_agent_ref(host.host_id, AgentId.generate(), provider.name)
+    provider.mock_discovered_hosts = [host]
+    provider.gated_host_id = host.host_id
+    provider.agents_by_host_id = {str(host.host_id): [agent]}
+    registry = HostDiscoveryReadRegistry()
+    registry.start_read(
+        temp_mngr_ctx.concurrency_group,
+        host.host_id,
+        lambda: provider._read_host_for_bounded_discovery(host, 30.0),
+    )
+    assert poll_until(lambda: provider.read_count_for_host(host.host_id) >= 1)
+    results: list[BoundedProviderDiscoveryResult] = []
+
+    def discover() -> None:
+        results.append(
+            provider.discover_hosts_and_agents_within_timeouts(
+                cg=temp_mngr_ctx.concurrency_group,
+                host_discovery_timeout_seconds=30.0,
+                agent_discovery_timeout_seconds=30.0,
+                registry=registry,
+            )
+        )
+
+    # The gate is released only once the poll is waiting on the adopted read, so the poll
+    # cannot have found the read already finished.
+    discover_thread = threading.Thread(target=discover, daemon=True)
+    try:
+        with capture_loguru(level="DEBUG") as log_output:
+            discover_thread.start()
+            assert poll_until(lambda: "Adopted the in-flight read" in log_output.getvalue())
+            provider.release()
+            discover_thread.join(timeout=5.0)
+    finally:
+        provider.release()
+    assert not discover_thread.is_alive()
+
+    (result,) = results
+    assert result.unknown_host_ids == ()
+    assert result.hosts == (host,)
+    assert {a.agent_id for a in result.agents} == {agent.agent_id}
+    assert provider.read_count_for_host(host.host_id) == 1
+    assert host.host_id not in registry.future_by_host_id
+    assert "wedged past" not in log_output.getvalue()
+
+
+def test_read_host_for_incremental_discovery_reads_the_host_live(
+    provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    host_id = HostId.generate()
+    agent_ref = _make_agent_ref(host_id, AgentId.generate(), provider.name)
+    host = MagicMock(spec=HostInterface)
+    host.id = host_id
+    host.discover_agents.return_value = [agent_ref]
+    provider.mock_hosts = [host]
+    host_ref = DiscoveredHost(
+        host_id=host_id, host_name=HostName("live"), provider_name=provider.name, host_state=HostState.RUNNING
+    )
+
+    first_read = provider.read_host_for_incremental_discovery(host_ref, 30.0)
+    second_read = provider.read_host_for_incremental_discovery(host_ref, 30.0)
+
+    assert first_read == BoundedHostRead(host=host_ref, agents=(agent_ref,), ssh_info=None)
+    assert second_read == first_read
+    # The host stays connected between re-reads: the next one reuses its transport
+    # rather than paying a handshake, and only the full poll's read disconnects.
+    host.disconnect.assert_not_called()
+    assert host.discover_agents.call_count == 2
+    assert provider.connection_errors_cleared == []
+
+
+def test_read_host_for_incremental_discovery_raises_instead_of_answering_from_the_offline_view(
+    provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """The full poll answers a connection error with the host's offline agents so the host stays
+    listed; a re-read must not, or the offline view would be diffed against the last live listing and
+    every agent it lacks emitted as destroyed."""
+    host_id = HostId.generate()
+    broken_host = MagicMock(spec=HostInterface)
+    broken_host.id = host_id
+    broken_host.discover_agents.side_effect = HostConnectionError("Error reading SSH protocol banner")
+    provider.mock_hosts = [broken_host]
+    provider.mock_offline_hosts = {str(host_id): _make_offline_host(host_id, provider, temp_mngr_ctx)}
+    provider.mock_agent_data = [{"id": str(AgentId.generate()), "name": "persisted-agent", "labels": {}}]
+    host_ref = DiscoveredHost(
+        host_id=host_id, host_name=HostName("ssh-dead"), provider_name=provider.name, host_state=HostState.RUNNING
+    )
+
+    with pytest.raises(HostConnectionError, match="protocol banner"):
+        provider.read_host_for_incremental_discovery(host_ref, 30.0)
+
+    broken_host.disconnect.assert_called_once()
+    # The cached per-host handle is dropped, as the full poll's fallback does, so the
+    # next read dials afresh rather than replaying the wedged connection.
+    assert provider.connection_errors_cleared == [host_id]

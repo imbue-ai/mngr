@@ -1,4 +1,5 @@
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import wait
@@ -11,12 +12,17 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.thread_utils import ObservableThread
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.imbue_common.tracebacks import format_exception_traceback
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME
+from imbue.mngr.api.discovery_events import emit_agent_destroyed
+from imbue.mngr.api.discovery_events import emit_agent_discovered
+from imbue.mngr.api.discovery_events import emit_host_discovered
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import make_discovered_provider
@@ -31,10 +37,17 @@ from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.data_types import BoundedHostRead
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -99,6 +112,62 @@ def _discover_one_provider(
     )
 
 
+class _HostReadDelta(FrozenModel):
+    """What changed between two reads of one host: the per-host events a re-read owes the stream."""
+
+    host: DiscoveredHost | None = Field(description="The host's listing, when it changed")
+    ssh_info: SSHInfo | None = Field(description="The host's SSH endpoint, when it changed")
+    agents: tuple[DiscoveredAgent, ...] = Field(description="Agents that appeared, or whose data changed")
+    destroyed_agent_ids: tuple[AgentId, ...] = Field(description="Agents that disappeared from the running host")
+
+
+@pure
+def _compute_host_read_delta(previous: BoundedHostRead, current: BoundedHostRead) -> _HostReadDelta:
+    """Diff two reads of one host into the events that bring a consumer from the first to the second.
+
+    An agent is reported destroyed only when the host still read as running: that is
+    the one read that enumerates the host's agents live and in full. A read of a host
+    in any other state answers with whatever the provider has cached about it, and an
+    agent missing from that answer is unread, not gone.
+    """
+    previous_agent_by_id = {agent.agent_id: agent for agent in previous.agents}
+    current_agent_by_id = {agent.agent_id: agent for agent in current.agents}
+    changed_agents = tuple(
+        agent for agent_id, agent in current_agent_by_id.items() if previous_agent_by_id.get(agent_id) != agent
+    )
+    is_live_listing = current.host.host_state == HostState.RUNNING
+    destroyed_agent_ids = (
+        tuple(agent_id for agent_id in previous_agent_by_id if agent_id not in current_agent_by_id)
+        if is_live_listing
+        else ()
+    )
+    return _HostReadDelta(
+        host=current.host if current.host != previous.host else None,
+        ssh_info=current.ssh_info if current.ssh_info != previous.ssh_info else None,
+        agents=changed_agents,
+        destroyed_agent_ids=destroyed_agent_ids,
+    )
+
+
+@pure
+def _host_reads_from_result(result: BoundedProviderDiscoveryResult) -> dict[HostId, BoundedHostRead]:
+    """Regroup a provider snapshot's flat hosts, agents and SSH endpoints into one read per host."""
+    agents_by_host_id: dict[HostId, list[DiscoveredAgent]] = {host.host_id: [] for host in result.hosts}
+    for agent in result.agents:
+        # An agent whose host the snapshot did not list (a sub-provider timeout) has no read to belong to.
+        if agent.host_id in agents_by_host_id:
+            agents_by_host_id[agent.host_id].append(agent)
+    ssh_info_by_host_id = dict(result.host_ssh_infos)
+    return {
+        host.host_id: BoundedHostRead(
+            host=host,
+            agents=tuple(agents_by_host_id[host.host_id]),
+            ssh_info=ssh_info_by_host_id.get(host.host_id),
+        )
+        for host in result.hosts
+    }
+
+
 class _ProviderDiscoveryPoller(MutableModel):
     """Polls one provider's discovery on its own cadence and writes per-provider snapshots.
 
@@ -123,6 +192,15 @@ class _ProviderDiscoveryPoller(MutableModel):
     built every instance once at startup, so a provider that failed *there* got a single
     snapshot and no poller for the life of the process, while one that failed on every
     *poll* kept its poller and recovered on its own. That asymmetry is what this removes.
+
+    Between full polls the poller re-reads, on the faster
+    ``host_discovery_poll_interval_seconds`` cadence, each host the last full poll listed
+    as running, and emits per-host events (host, agent, agent-destroyed, SSH info) for
+    what changed since that host was last read. The full poll is where hosts appear and
+    disappear and where the provider's health is reported; the re-reads are where an
+    agent created inside a known host shows up within seconds rather than a poll interval
+    later. A re-read that fails emits nothing and drops the host from the re-read set
+    until the next full poll lists it again.
     """
 
     provider_name: ProviderInstanceName = Field(frozen=True)
@@ -135,6 +213,11 @@ class _ProviderDiscoveryPoller(MutableModel):
     # Carries in-flight per-host reads across this poller's polls so a wedged host is not
     # re-read every poll (bounding accumulation to at most one abandoned read per host).
     _host_read_registry: HostDiscoveryReadRegistry = PrivateAttr(default_factory=HostDiscoveryReadRegistry)
+    # The provider the last full poll built, which the between-poll re-reads go through.
+    _provider: BaseProviderInstance | None = PrivateAttr(default=None)
+    # Each known host as it was last read (by the last full poll, or a re-read since), the
+    # baseline a re-read is diffed against. Emptied when a full poll fails.
+    _last_read_by_host_id: dict[HostId, BoundedHostRead] = PrivateAttr(default_factory=dict)
     # Whether the last poll's construction failed, so a repeat of the same failure logs
     # quietly. Cleared as soon as the provider builds.
     _is_construction_failing: bool = PrivateAttr(default=False)
@@ -179,7 +262,9 @@ class _ProviderDiscoveryPoller(MutableModel):
 
         started_at = _utc_now()
         provider = self._build_provider_or_emit_skip(started_at)
+        self._provider = provider
         if provider is None:
+            self._last_read_by_host_id.clear()
             return
         future = submit_discovery(provider)
         # Two-threshold wait: warn first, then declare errored.
@@ -318,9 +403,11 @@ class _ProviderDiscoveryPoller(MutableModel):
         # provider becomes an error snapshot rather than propagating out of the poll.
         error = future.exception()
         if error is not None:
+            self._last_read_by_host_id.clear()
             self._emit_error_snapshot(started_at, error)
             return
         result = future.result()
+        self._last_read_by_host_id = _host_reads_from_result(result)
         write_provider_discovery_snapshot(
             self.mngr_ctx.config,
             provider_name=self.provider_name,
@@ -399,8 +486,85 @@ class _ProviderDiscoveryPoller(MutableModel):
             error=error,
         )
 
+    def reread_known_hosts_and_emit(self) -> None:
+        """Re-read each host the last full poll listed as running, emitting per-host events for what changed.
+
+        Nothing runs while the provider is unbuilt or its full poll is still in flight (a
+        wedged provider is not piled onto), or for a provider that cannot read one host on
+        its own. Only hosts the last full poll actually read are candidates, so one whose
+        read that poll abandoned is left to the poll that harvests it. Each host's read
+        runs on its own thread through the poller's read registry, so a host whose read
+        from an earlier pass is still in flight is not read again, and a slow host never
+        holds the others back: the pass waits one re-read interval at most, and harvests
+        whatever finished. A read that finished late is harvested on a later pass or by
+        the next full poll.
+        """
+        provider = self._provider
+        if provider is None or self._in_flight_future is not None or not provider.supports_incremental_host_discovery:
+            return
+        previous_read_by_host_id = {
+            host_id: read
+            for host_id, read in self._last_read_by_host_id.items()
+            if read.host.host_state == HostState.RUNNING
+        }
+        if not previous_read_by_host_id:
+            return
+
+        # Start a read for every running host that has none in flight, and pick up the
+        # finished ones left behind by a prior pass or poll.
+        registry = self._host_read_registry
+        future_by_host_id: dict[HostId, Future[BoundedHostRead]] = {}
+        for host_id, previous_read in previous_read_by_host_id.items():
+            in_flight = registry.future_by_host_id.get(host_id)
+            if in_flight is not None and not in_flight.done():
+                continue
+            if in_flight is not None:
+                future_by_host_id[host_id] = in_flight
+                continue
+            future_by_host_id[host_id] = registry.start_read(
+                self.mngr_ctx.concurrency_group,
+                host_id,
+                lambda host_ref=previous_read.host: provider.read_host_for_incremental_discovery(
+                    host_ref, self.config.host_discovery_timeout_seconds
+                ),
+            )
+        wait(list(future_by_host_id.values()), timeout=self.config.host_discovery_poll_interval_seconds)
+
+        # Fold each finished read into the stream as the events it differs by. A failed
+        # read says nothing about the host's agents, so it emits nothing; the host leaves
+        # the re-read set until the next full poll reports it.
+        for host_id, future in future_by_host_id.items():
+            if not future.done():
+                continue
+            registry.forget_read(host_id)
+            error = future.exception()
+            if error is not None:
+                logger.debug(
+                    "Re-read of host {} on provider {} failed; leaving it to the next full poll: {}",
+                    host_id,
+                    self.provider_name,
+                    error,
+                )
+                self._last_read_by_host_id.pop(host_id, None)
+                continue
+            current_read = future.result()
+            self._emit_host_read_delta(previous_read_by_host_id[host_id], current_read)
+            self._last_read_by_host_id[host_id] = current_read
+
+    def _emit_host_read_delta(self, previous_read: BoundedHostRead, current_read: BoundedHostRead) -> None:
+        delta = _compute_host_read_delta(previous_read, current_read)
+        config = self.mngr_ctx.config
+        if delta.host is not None:
+            emit_host_discovered(config, delta.host)
+        if delta.ssh_info is not None:
+            emit_host_ssh_info(config, current_read.host.host_id, delta.ssh_info)
+        for agent in delta.agents:
+            emit_agent_discovered(config, agent)
+        for agent_id in delta.destroyed_agent_ids:
+            emit_agent_destroyed(config, agent_id, current_read.host.host_id)
+
     def run(self, stop_event: threading.Event) -> None:
-        """Loop: poll, emit, then wait this provider's poll interval (until stopped).
+        """Loop: poll, emit, then re-read the known hosts until this provider's next poll is due (until stopped).
 
         Holds one long-lived executor for the poller's lifetime; each poll submits the
         provider's discovery to it. The executor only runs one discovery at a time, but
@@ -437,7 +601,31 @@ class _ProviderDiscoveryPoller(MutableModel):
                     logger.warning("Provider {} discovery poll failed (continuing): {}", self.provider_name, e)
                 if self._is_ended_pending_credentials:
                     return
-                stop_event.wait(timeout=self.config.discovery_poll_interval_seconds)
+                self._wait_for_next_poll_rereading_known_hosts(stop_event)
+
+    def _wait_for_next_poll_rereading_known_hosts(self, stop_event: threading.Event) -> None:
+        """Wait out the poll interval, re-reading the known running hosts on the host cadence meanwhile.
+
+        A re-read pass starts only when a whole re-read interval still fits before the
+        next full poll is due, and a pass waits at most that long for its reads, so the
+        full poll is never pushed back by the re-reads. A re-read interval at or above
+        the poll interval therefore never fits, which is how the re-reads are disabled.
+        """
+        next_poll_due_at = time.monotonic() + self.config.discovery_poll_interval_seconds
+        reread_interval_seconds = self.config.host_discovery_poll_interval_seconds
+        while not stop_event.is_set():
+            remaining_seconds = next_poll_due_at - time.monotonic()
+            if remaining_seconds <= 0:
+                return
+            if stop_event.wait(timeout=min(reread_interval_seconds, remaining_seconds)):
+                return
+            # The fit is judged once the wait is over: that is when the pass would start.
+            if next_poll_due_at - time.monotonic() < reread_interval_seconds:
+                continue
+            try:
+                self.reread_known_hosts_and_emit()
+            except (OSError, MngrError) as e:
+                logger.warning("Provider {} host re-read pass failed (continuing): {}", self.provider_name, e)
 
 
 def _wait_for_future(future: Future[BoundedProviderDiscoveryResult], timeout_seconds: float) -> bool:

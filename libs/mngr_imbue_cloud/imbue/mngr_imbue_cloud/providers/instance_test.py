@@ -21,6 +21,7 @@ import pytest
 from gevent.hub import Hub
 from loguru import logger
 from pydantic import AnyUrl
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
@@ -1104,11 +1105,8 @@ class _AuthFailureOuterProvider(_NoWorkspacesMixin, ImbueCloudProvider):
     def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
         return [self._lease] if self._lease is not None else []
 
-    @contextmanager
-    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+    def _build_outer_host_for_lease(self, leased: LeasedHostInfo) -> OuterHostInterface:
         raise HostAuthenticationError("simulated: this machine's key was rejected")
-        # Unreachable: required syntactically to keep this a generator function.
-        yield
 
 
 # this tests: IF a host's real (unstubbed) outer-SSH connection is rejected
@@ -1150,11 +1148,8 @@ class _CrashingOuterProvider(_NoWorkspacesMixin, ImbueCloudProvider):
     def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
         return [self._lease] if self._lease is not None else []
 
-    @contextmanager
-    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+    def _build_outer_host_for_lease(self, leased: LeasedHostInfo) -> OuterHostInterface:
         raise RuntimeError("simulated: a genuine bug, not an expected SSH failure")
-        # Unreachable: required syntactically to keep this a generator function.
-        yield
 
 
 # this tests: IF a host's check raises something that is not an expected SSH failure (a real bug)
@@ -1471,6 +1466,36 @@ def test_cached_identity_survives_a_fresh_provider_instance(temp_mngr_ctx: MngrC
     assert [str(agent.agent_name) for agent in agents] == ["system-services"]
     assert agents[0].labels["is_primary"] == "true"
     assert agents[0].certified_data.get("stale") is True
+
+
+def test_an_unchanged_listing_does_not_rewrite_the_persisted_identity(temp_mngr_ctx: MngrContext) -> None:
+    """Listings repeat every few seconds between full polls, so the sticky-identity file is written
+    (an atomic replace, hence a new inode) only when the listing's agents actually changed."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    services = _services_agent_data()
+    chat = _agent_data("chat", {}, "claude")
+    provider = _make_sequenced_provider(
+        lease,
+        [
+            (_raw_with_agents([services]), None, False),
+            (_raw_with_agents([services]), None, False),
+            (_raw_with_agents([services, chat]), None, False),
+        ],
+        temp_mngr_ctx,
+    )
+    identity_path = provider._last_known_agents_path(host_id)
+
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+    first_inode = identity_path.stat().st_ino
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+    unchanged_inode = identity_path.stat().st_ino
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+    changed_inode = identity_path.stat().st_ino
+
+    assert unchanged_inode == first_inode
+    assert changed_inode != first_inode
+    assert set(json.loads(identity_path.read_text())) == {services["id"], chat["id"]}
 
 
 def test_outer_auth_rejection_mints_unauthenticated_and_reattaches_cached_agents(temp_mngr_ctx: MngrContext) -> None:
@@ -2486,3 +2511,301 @@ def test_pinned_read_records_the_host_dir_the_container_actually_uses(temp_mngr_
 
     later = _make_sequenced_provider(lease, [], temp_mngr_ctx)
     assert later.to_offline_host(host_id).host_dir == Path("/mngr")
+
+
+# Kept outer-SSH sessions for discovery listings, and the between-poll re-read
+
+
+class _SessionStubOuter(_StubOuter):
+    """A canned outer that records its disconnects and can be told to fail its next listing."""
+
+    disconnect_count: int = 0
+    listing_error: MngrError | None = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        if self.listing_error is not None:
+            raise self.listing_error
+        return super().execute_idempotent_command(command, user, cwd, env, timeout_seconds)
+
+    def disconnect(self) -> None:
+        self.disconnect_count += 1
+
+
+class _KeptSessionProvider(_NoWorkspacesMixin, ImbueCloudProvider):
+    """Drives the real kept-session logic against canned outers, one new outer per build."""
+
+    _leases: list[LeasedHostInfo] = []
+    _built_outers: list[_SessionStubOuter] = []
+    _next_listing_error: MngrError | None = None
+    _next_build_error: MngrError | None = None
+
+    def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
+        return list(self._leases)
+
+    def _build_outer_host_for_lease(self, leased: LeasedHostInfo) -> OuterHostInterface:
+        if self._next_build_error is not None:
+            raise self._next_build_error
+        outer = _SessionStubOuter(listing_error=self._next_listing_error)
+        self._built_outers.append(outer)
+        return cast(OuterHostInterface, outer)
+
+
+def _make_kept_session_provider(mngr_ctx: MngrContext, leases: list[LeasedHostInfo]) -> _KeptSessionProvider:
+    return _KeptSessionProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=mngr_ctx,
+        host_dir=Path("/tmp/imbue-cloud-test-host-dir"),
+        _leases=leases,
+        _built_outers=[],
+    )
+
+
+def test_listing_reuses_one_outer_session_across_listings_of_a_host(temp_mngr_ctx: MngrContext) -> None:
+    """The second listing of a leased host runs on the outer the first one built, which is never
+    disconnected between them: a listing is one exec, not a handshake."""
+    lease = _make_lease(HostId.generate())
+    provider = _make_kept_session_provider(temp_mngr_ctx, [lease])
+
+    first_raw, _first_error, _ = provider._collect_listing_raw_via_outer(lease)
+    second_raw, _second_error, _ = provider._collect_listing_raw_via_outer(lease)
+
+    assert first_raw is not None and second_raw is not None
+    assert len(provider._built_outers) == 1
+    outer = provider._built_outers[0]
+    assert len(outer.recorded_commands) == 2
+    assert outer.disconnect_count == 0
+
+
+def test_listing_keeps_one_session_per_leased_host(temp_mngr_ctx: MngrContext) -> None:
+    first_lease = _make_lease(HostId.generate())
+    second_lease = _make_lease(HostId.generate())
+    provider = _make_kept_session_provider(temp_mngr_ctx, [first_lease, second_lease])
+
+    provider._collect_listing_raw_via_outer(first_lease)
+    provider._collect_listing_raw_via_outer(second_lease)
+    provider._collect_listing_raw_via_outer(first_lease)
+
+    assert len(provider._built_outers) == 2
+    assert [len(outer.recorded_commands) for outer in provider._built_outers] == [2, 1]
+
+
+def test_listing_drops_the_session_whose_listing_failed(temp_mngr_ctx: MngrContext) -> None:
+    """A failed listing disconnects the kept session; the next listing dials afresh rather than
+    retrying a connection known to be bad."""
+    lease = _make_lease(HostId.generate())
+    provider = _make_kept_session_provider(temp_mngr_ctx, [lease])
+    provider._next_listing_error = HostConnectionError("simulated: the box went away")
+
+    with allow_warnings():
+        raw, error, is_auth_failure = provider._collect_listing_raw_via_outer(lease)
+
+    assert raw is None
+    assert error is not None and "the box went away" in error
+    assert is_auth_failure is False
+    failed_outer = provider._built_outers[0]
+    assert failed_outer.disconnect_count == 1
+
+    provider._next_listing_error = None
+    recovered_raw, _, _ = provider._collect_listing_raw_via_outer(lease)
+
+    assert recovered_raw is not None
+    assert len(provider._built_outers) == 2
+    assert provider._built_outers[1] is not failed_outer
+
+
+def test_listing_rebuilds_the_session_when_the_lease_endpoint_moved(temp_mngr_ctx: MngrContext) -> None:
+    """A restore onto another box changes the lease's address; the session built for the old box
+    is disconnected and a new one dials the new endpoint."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    moved_lease = lease.model_copy_update(to_update(lease.field_ref().vps_address, "203.0.113.99"))
+    provider = _make_kept_session_provider(temp_mngr_ctx, [lease])
+
+    provider._collect_listing_raw_via_outer(lease)
+    provider._collect_listing_raw_via_outer(moved_lease)
+
+    assert len(provider._built_outers) == 2
+    assert provider._built_outers[0].disconnect_count == 1
+    assert provider._built_outers[1].disconnect_count == 0
+
+
+def test_listing_disconnects_the_moved_session_even_when_its_replacement_cannot_be_built(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Once the old box's session is unregistered nothing else can close it, so it is disconnected
+    even when building the session for the new endpoint fails (the host's key file is gone)."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    moved_lease = lease.model_copy_update(to_update(lease.field_ref().vps_address, "203.0.113.99"))
+    provider = _make_kept_session_provider(temp_mngr_ctx, [lease])
+    provider._collect_listing_raw_via_outer(lease)
+    provider._next_build_error = HostNotFoundError(provider.name, host_id)
+
+    with pytest.raises(HostNotFoundError):
+        with provider._outer_listing_session_for(moved_lease):
+            pass
+
+    assert provider._built_outers[0].disconnect_count == 1
+    assert provider._outer_listing_session_by_host_id == {}
+
+
+def _discover_bounded(provider: ImbueCloudProvider, mngr_ctx: MngrContext) -> None:
+    provider.discover_hosts_and_agents_within_timeouts(
+        cg=mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=30.0,
+        agent_discovery_timeout_seconds=30.0,
+    )
+
+
+def _discover_unbounded(provider: ImbueCloudProvider, mngr_ctx: MngrContext) -> None:
+    provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group)
+
+
+@pytest.mark.parametrize(
+    "discover", [_discover_bounded, _discover_unbounded], ids=["bounded per-host poll", "unbounded listing"]
+)
+def test_a_discovery_drops_the_sessions_of_hosts_no_longer_leased(
+    temp_mngr_ctx: MngrContext, discover: Callable[[ImbueCloudProvider, MngrContext], None]
+) -> None:
+    kept_lease = _make_lease(HostId.generate())
+    released_lease = _make_lease(HostId.generate())
+    provider = _make_kept_session_provider(temp_mngr_ctx, [kept_lease, released_lease])
+    provider._collect_listing_raw_via_outer(kept_lease)
+    provider._collect_listing_raw_via_outer(released_lease)
+    released_outer = provider._built_outers[1]
+
+    provider._leases = [kept_lease]
+    discover(provider, temp_mngr_ctx)
+
+    assert released_outer.disconnect_count == 1
+    assert provider._built_outers[0].disconnect_count == 0
+    # The kept host's poll listing ran on its kept session.
+    assert len(provider._built_outers) == 2
+
+
+def test_close_disconnects_every_kept_session(temp_mngr_ctx: MngrContext) -> None:
+    leases = [_make_lease(HostId.generate()) for _ in range(2)]
+    provider = _make_kept_session_provider(temp_mngr_ctx, leases)
+    for lease in leases:
+        provider._collect_listing_raw_via_outer(lease)
+
+    provider.close()
+
+    assert [outer.disconnect_count for outer in provider._built_outers] == [1, 1]
+    assert provider._outer_listing_session_by_host_id == {}
+
+
+def test_on_connection_error_drops_the_hosts_kept_session(temp_mngr_ctx: MngrContext) -> None:
+    lease = _make_lease(HostId.generate())
+    provider = _make_kept_session_provider(temp_mngr_ctx, [lease])
+    provider._collect_listing_raw_via_outer(lease)
+
+    provider.on_connection_error(HostId(lease.host_id))
+
+    assert provider._built_outers[0].disconnect_count == 1
+    assert provider._outer_listing_session_by_host_id == {}
+
+
+class _RereadProvider(_NoWorkspacesMixin, ImbueCloudProvider):
+    """Drives the real between-poll re-read against a canned outer listing and a seeded lease list."""
+
+    _responses_by_host_id: dict[HostId, tuple[dict[str, Any] | None, str | None, bool]] = {}
+
+    def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
+        return Path("/tmp/imbue-cloud-test-keys/ssh_key"), Path("/tmp/imbue-cloud-test-keys/ssh_key.pub")
+
+    def _collect_listing_raw_via_outer(self, lease: LeasedHostInfo) -> tuple[dict[str, Any] | None, str | None, bool]:
+        return self._responses_by_host_id[HostId(lease.host_id)]
+
+
+def _make_reread_provider(
+    mngr_ctx: MngrContext,
+    fetched_leases: list[LeasedHostInfo] | None,
+    responses_by_host_id: Mapping[HostId, tuple[dict[str, Any] | None, str | None, bool]],
+) -> _RereadProvider:
+    provider = _RereadProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=mngr_ctx,
+        _responses_by_host_id=dict(responses_by_host_id),
+    )
+    provider._leased_hosts_cache = fetched_leases
+    return provider
+
+
+def _running_host_ref(lease: LeasedHostInfo) -> DiscoveredHost:
+    return DiscoveredHost(
+        host_id=HostId(lease.host_id),
+        host_name=HostName(lease.host_name),
+        provider_name=ProviderInstanceName("imbue-cloud-test"),
+        host_state=HostState.RUNNING,
+    )
+
+
+def test_reread_lists_a_fetched_lease_live_with_its_container_endpoint(temp_mngr_ctx: MngrContext) -> None:
+    lease = _make_lease(HostId.generate())
+    services = _services_agent_data()
+    chat = _agent_data("chat", {}, "claude")
+    raw = {
+        "container_state": RUNNING_CONTAINER_STATE,
+        "certified_data": {"image": "some-image"},
+        "agents": [{"data": services}, {"data": chat}],
+    }
+    provider = _make_reread_provider(temp_mngr_ctx, [lease], {HostId(lease.host_id): (raw, None, False)})
+
+    read = provider.read_host_for_incremental_discovery(_running_host_ref(lease), 30.0)
+
+    assert read.host.host_state == HostState.RUNNING
+    assert [str(agent.agent_name) for agent in read.agents] == ["system-services", "chat"]
+    assert read.agents[1].certified_data == chat
+    assert read.ssh_info is not None
+    assert (read.ssh_info.host, read.ssh_info.port) == (lease.vps_address, lease.container_ssh_port)
+
+
+@pytest.mark.parametrize("fetched_leases", [None, []], ids=["no list fetched", "host not in the fetched list"])
+def test_reread_raises_host_not_found_instead_of_asking_the_connector(
+    temp_mngr_ctx: MngrContext, fetched_leases: list[LeasedHostInfo] | None
+) -> None:
+    lease = _make_lease(HostId.generate())
+    provider = _make_reread_provider(temp_mngr_ctx, fetched_leases, {})
+
+    with pytest.raises(HostNotFoundError):
+        provider.read_host_for_incremental_discovery(_running_host_ref(lease), 30.0)
+
+
+@pytest.mark.parametrize(
+    ("is_auth_failure", "expected_error"),
+    [(False, HostConnectionError), (True, HostAuthenticationError)],
+    ids=["unreachable", "rejected key"],
+)
+def test_reread_raises_instead_of_answering_from_cache_when_the_listing_fails(
+    temp_mngr_ctx: MngrContext, is_auth_failure: bool, expected_error: type[MngrError]
+) -> None:
+    """The full poll answers a failed listing with the host's cached agents so the host stays listed;
+    a re-read must not, or a cached answer would be emitted as a change."""
+    lease = _make_lease(HostId.generate())
+    provider = _make_reread_provider(
+        temp_mngr_ctx, [lease], {HostId(lease.host_id): (None, "simulated outer failure", is_auth_failure)}
+    )
+    provider._persist_last_known_agents(
+        HostId(lease.host_id),
+        [
+            DiscoveredAgent(
+                agent_id=AgentId.generate(),
+                agent_name=AgentName("system-services"),
+                host_id=HostId(lease.host_id),
+                provider_name=provider.name,
+            )
+        ],
+    )
+
+    with pytest.raises(expected_error, match="simulated outer failure"):
+        provider.read_host_for_incremental_discovery(_running_host_ref(lease), 30.0)

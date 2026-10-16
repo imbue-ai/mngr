@@ -470,6 +470,7 @@ def make_discovered_provider(
             destroyed_host_persisted_seconds=config.destroyed_host_persisted_seconds,
             min_online_host_age_seconds=config.min_online_host_age_seconds,
             discovery_poll_interval_seconds=config.discovery_poll_interval_seconds,
+            host_discovery_poll_interval_seconds=config.host_discovery_poll_interval_seconds,
             discovery_warn_seconds=config.discovery_warn_seconds,
             discovery_error_timeout_seconds=config.discovery_error_timeout_seconds,
             host_discovery_timeout_seconds=config.host_discovery_timeout_seconds,

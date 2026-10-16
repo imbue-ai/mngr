@@ -66,6 +66,7 @@ _DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS: Final[float] = 60.0 * 10.0
 # UNKNOWN rather than holding up its whole provider; they are validated to stay
 # below the provider error timeout.
 _DEFAULT_DISCOVERY_POLL_INTERVAL_SECONDS: Final[float] = 30.0
+_DEFAULT_HOST_DISCOVERY_POLL_INTERVAL_SECONDS: Final[float] = 3.0
 _DEFAULT_DISCOVERY_WARN_SECONDS: Final[float] = 20.0
 _DEFAULT_DISCOVERY_ERROR_TIMEOUT_SECONDS: Final[float] = 120.0
 _DEFAULT_HOST_DISCOVERY_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -76,7 +77,7 @@ _DEFAULT_AGENT_DISCOVERY_TIMEOUT_SECONDS: Final[float] = 30.0
 # contended host cannot stall the whole read.
 _DEFAULT_HOST_DETAIL_READ_TIMEOUT_SECONDS: Final[float] = 20.0
 
-# === Helper Functions ===
+# Helper functions
 
 PluginConfigT = TypeVar("PluginConfigT", bound="PluginConfig")
 
@@ -116,7 +117,7 @@ def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
     return tuple(lexer)
 
 
-# === Enums ===
+# Enums
 
 
 class WorkDirExtraPathMode(UpperCaseStrEnum):
@@ -139,7 +140,7 @@ class ConfigScope(UpperCaseStrEnum):
     LOCAL = auto()
 
 
-# === Value Types ===
+# Value types
 
 
 class EnvVar(FrozenModel):
@@ -179,7 +180,7 @@ class HookDefinition(FrozenModel):
         return cls(hook=hook, command=command.strip())
 
 
-# === Config Types ===
+# Config types
 
 
 class AgentTypeConfig(FrozenModel):
@@ -267,6 +268,13 @@ class ProviderInstanceConfig(FrozenModel):
         default=PositiveFloat(_DEFAULT_DISCOVERY_POLL_INTERVAL_SECONDS),
         description="How often (in seconds) this provider's decoupled discovery loop re-polls. "
         "Each provider polls independently so a slow provider cannot delay any other.",
+    )
+    host_discovery_poll_interval_seconds: PositiveFloat = Field(
+        default=PositiveFloat(_DEFAULT_HOST_DISCOVERY_POLL_INTERVAL_SECONDS),
+        description="How often (in seconds) the decoupled discovery loop re-reads the agents of each host the "
+        "provider's last poll listed as running, between the full polls paced by discovery_poll_interval_seconds. "
+        "A re-read emits per-host events only for what changed. Set it at or above "
+        "discovery_poll_interval_seconds to disable the re-reads.",
     )
     discovery_warn_seconds: PositiveFloat = Field(
         default=PositiveFloat(_DEFAULT_DISCOVERY_WARN_SECONDS),

@@ -1786,6 +1786,11 @@ class VpsProvider(BaseProviderInstance):
 
         return discovered
 
+    @property
+    def supports_incremental_host_discovery(self) -> bool:
+        # Hosts are read in one batched pass, so one host cannot be re-read on its own.
+        return False
+
     def discover_hosts_and_agents_within_timeouts(
         self,
         cg: ConcurrencyGroup,
