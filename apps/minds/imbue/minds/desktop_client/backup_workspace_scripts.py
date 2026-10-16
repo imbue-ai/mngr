@@ -33,8 +33,10 @@ out of arbitrarily noisy output:
   ``restic.env`` is written back afterwards, a ``restored`` snapshot of the
   restored state is appended (tagged with the source snapshot's time, so the
   timeline shows the restored version as a new "Restored from ..." entry),
-  then ``uv sync --all-packages`` and a restart of every supervisord service. Every exit
-  path after the service stop restarts the services (best-effort). The
+  then ``uv sync --all-packages`` and a ``supervisorctl reload``, which brings the
+  services back from the restored tree's supervisord config as a boot would
+  (``restart all`` instead when that config does not parse). Every exit path
+  after the service stop brings the services back the same way (best-effort). The
   snapshot's subpath (the directory inside the snapshot that corresponds to
   the backup root) and timestamp are resolved by Imbue Studio and passed in via argv,
   so the script never queries restic for metadata Imbue Studio already holds. The
@@ -58,6 +60,13 @@ CHECK_RESULT_MARKER: Final[str] = "MINDS_BACKUP_CHECK_JSON:"
 GATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_GATE_JSON:"
 UPDATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_UPDATE_JSON:"
 RESTORE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_RESTORE_JSON:"
+
+# The restore script's ``_resume_services`` as one shell command, for the desktop's
+# backstop when the script dies without reporting: ``reload`` when the config parses,
+# since a ``reload`` that cannot parse it takes supervisord down with every service.
+RESUME_SERVICES_COMMAND: Final[str] = (
+    "if supervisorctl reread; then supervisorctl reload; else supervisorctl restart all; fi"
+)
 
 # The one repository backup-service code is fetched from. Imbue Studio owns the
 # ``official`` remote on every workspace: the scripts create it (or repoint it)
@@ -791,6 +800,8 @@ _RESTORE_PRESERVED_PATHS = ("**/.ssh/authorized_keys", _FALLBACK_RESTIC_EXCLUDE)
 # this restore. The backup service is deliberately OUTSIDE the set: its
 # health has its own verification and repair flows, and the pre-restore
 # safety snapshot exists regardless.
+# A program configured autostart=false is not started by a boot or a reload,
+# so it is not judged at all: it is the user's or an agent's to start.
 _HEALTHY_SERVICE_STATES = ("RUNNING", "EXITED")
 _RESTORE_CRITICAL_SERVICES = ("system_interface",)
 _SERVICE_SETTLE_POLL_SECONDS = 2.0
@@ -815,13 +826,28 @@ def _healthy_service_names(states):
     return set(name for name, state in states.items() if state in _HEALTHY_SERVICE_STATES)
 
 
-def _unhealthy_services(states, services_up_before):
+def _manual_programs():
+    # Names of the programs configured autostart=false, which `supervisorctl
+    # avail` marks "manual" in its next-to-last column. Empty when supervisorctl
+    # is unusable, so every program is judged.
+    avail = _run(["supervisorctl", "avail"], timeout=60)
+    manual = set()
+    for line in (avail.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[-2] == "manual":
+            manual.add(parts[0])
+    return manual
+
+
+def _unhealthy_services(states, services_up_before, manual_programs):
     # (critical_down, other_down): sorted names not healthy in `states`.
     # Critical is absolute -- absent from the roster counts as down, and so
     # does a critical service that was already down. Every other name is
     # judged against `services_up_before`, making other_down a difference
     # rather than an absolute: what this restore took down and did not bring
-    # back.
+    # back. A program configured autostart=false is never judged: the reload
+    # leaves it stopped as a boot would, even one started by hand before the
+    # restore.
     critical_down = sorted(
         name for name in _RESTORE_CRITICAL_SERVICES if states.get(name) not in _HEALTHY_SERVICE_STATES
     )
@@ -831,8 +857,15 @@ def _unhealthy_services(states, services_up_before):
         if state not in _HEALTHY_SERVICE_STATES
         and name not in _RESTORE_CRITICAL_SERVICES
         and name in services_up_before
+        and name not in manual_programs
     )
     return critical_down, other_down
+
+
+def _sample_service_health(services_up_before):
+    states = _all_service_states()
+    critical_down, other_down = _unhealthy_services(states, services_up_before, _manual_programs())
+    return states, critical_down, other_down
 
 
 def _wait_for_service_recovery(timeout_seconds, services_up_before):
@@ -844,26 +877,42 @@ def _wait_for_service_recovery(timeout_seconds, services_up_before):
     # a single all-healthy sample (rather than first-sight-of-RUNNING per
     # service) also catches a service that spawns and promptly crash-loops.
     deadline = _time.time() + timeout_seconds
-    states = _all_service_states()
-    critical_down, other_down = _unhealthy_services(states, services_up_before)
+    states, critical_down, other_down = _sample_service_health(services_up_before)
     while (critical_down or other_down) and _time.time() <= deadline:
         _time.sleep(_SERVICE_SETTLE_POLL_SECONDS)
-        states = _all_service_states()
-        critical_down, other_down = _unhealthy_services(states, services_up_before)
+        states, critical_down, other_down = _sample_service_health(services_up_before)
     return states, critical_down, other_down
+
+
+def _resume_services(result):
+    # `reload` brings the services back as a boot would, from the config the
+    # tree now holds: programs the restored tree lacks are dropped, ones it adds
+    # are loaded, and only autostart=true ones start. `restart all` would start
+    # every program loaded before the restore, autostart=false ones included.
+    # A `reload` of a config supervisord cannot parse takes supervisord down
+    # with every service, so `reread` checks it first.
+    reread = _run(["supervisorctl", "reread"], timeout=60)
+    if reread.returncode == 0:
+        command = "reload"
+    else:
+        command = "restart all"
+        result["supervisord_config_error"] = ((reread.stdout or "") + (reread.stderr or "")).strip()[-500:]
+    resumed = _run(["supervisorctl"] + command.split(), timeout=300)
+    result["services_resumed_by"] = command
+    result["services_restarted"] = resumed.returncode == 0
+    return command, resumed
 
 
 # Cleanup obligations of the current run. Every side effect the restore takes
 # registers its cleanup here, and _finish pays the debts (best-effort) before
 # reporting -- so no individual failure path can forget to bring the services
 # back. `is_resume_owed` flips on right after `stop all` and off once the
-# success path has run its own verified restart.
+# success path has brought the services back and is verifying them.
 _DEBTS = {"is_resume_owed": False}
 
 def _finish(result, status, detail=""):
     if _DEBTS["is_resume_owed"]:
-        restarted = _run(["supervisorctl", "restart", "all"], timeout=300)
-        result["services_restarted"] = restarted.returncode == 0
+        _resume_services(result)
         _DEBTS["is_resume_owed"] = False
     result["status"] = status
     if detail:
@@ -1305,29 +1354,25 @@ def _main():
         detail = "restored, but uv sync failed: %s" % (synced.stderr or synced.stdout).strip()[-800:]
         _finish(result, "failed", detail)
 
-    # Every supervisord service was stopped before the restore; bounce them
-    # all onto the restored tree (`restart all` starts stopped programs too).
-    # This pays the resume debt directly (and clears it first, so a failed
-    # restart is not blindly retried by _finish) because the success path
-    # must also verify the services actually came back.
+    # Every supervisord service was stopped before the restore; bring them
+    # back from the restored tree's config. This pays the resume debt directly
+    # (and clears it first, so a failed resume is not blindly retried by
+    # _finish) because the success path must also verify the services came
+    # back. The re-run env-converge one-shot converges the (untouched) rootfs
+    # back to the restored environment record -- that is what makes a restore
+    # reproduce the restored package set, not just files. The resume's exit
+    # code is recorded but deliberately NOT the success gate: `restart all`
+    # goes non-zero when ANY program fails to start immediately, and only the
+    # restore-critical set below decides the verdict.
     _progress("Restarting the workspace services...")
     _DEBTS["is_resume_owed"] = False
-    # `restart all` also re-runs the env-converge one-shot, which converges the
-    # (untouched) rootfs back to the restored environment record -- that is
-    # what makes a restore reproduce the restored package set, not just files.
-    # Its exit code is recorded but deliberately NOT the success gate: it goes
-    # non-zero when ANY program fails to start immediately, and only the
-    # restore-critical set below decides the verdict.
-    restarted = _run(["supervisorctl", "restart", "all"], timeout=300)
-    result["services_restarted"] = restarted.returncode == 0
-    post_states, critical_down, other_down = _wait_for_service_recovery(
-        service_verify_timeout, services_up_before
-    )
+    resume_command, resumed = _resume_services(result)
+    post_states, critical_down, other_down = _wait_for_service_recovery(service_verify_timeout, services_up_before)
     if critical_down:
-        restart_tail = (restarted.stderr or restarted.stdout).strip()[-300:]
+        resume_tail = (resumed.stderr or resumed.stdout).strip()[-300:]
         detail = "restored, but the restore-critical service(s) did not come back: %s%s" % (
             ", ".join("%s (%s)" % (name, post_states.get(name) or "absent") for name in critical_down),
-            ("; restart all said: %s" % restart_tail) if restarted.returncode != 0 else "",
+            ("; %s said: %s" % (resume_command, resume_tail)) if resumed.returncode != 0 else "",
         )
         _finish(result, "failed", detail)
     if other_down:
@@ -1338,7 +1383,7 @@ def _main():
 # No catch-all here: an unexpected crash prints its traceback to stderr and
 # produces no marker, which the desktop side treats as "script died" -- it
 # surfaces the stderr tail and dispatches its own best-effort
-# `supervisorctl restart all` (the same backstop that covers an exec timeout,
+# RESUME_SERVICES_COMMAND (the same backstop that covers an exec timeout,
 # which no in-script handler could survive anyway).
 _main()
 """

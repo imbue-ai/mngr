@@ -217,6 +217,16 @@ def test_restore_completion_warnings_name_the_services_down() -> None:
     assert _restore_completion_warnings({"services_down": []}) == []
 
 
+def test_restore_completion_warnings_report_an_unparseable_restored_service_config() -> None:
+    # The restore script resumes with `restart all` when the restored
+    # supervisord config does not parse; the user has to hear that the
+    # workspace will not start its services on its next restart until it is fixed.
+    warnings = _restore_completion_warnings({"supervisord_config_error": "ERROR: CANT_REREAD: bad section"})
+    assert len(warnings) == 1
+    assert "will not start" in warnings[0]
+    assert "CANT_REREAD: bad section" in warnings[0]
+
+
 @pytest.mark.parametrize("workspace_version_ref", ["minds-v0.3.9", "minds-v0.2.0"])
 def test_backup_service_update_refuses_a_machine_below_the_in_place_floor(
     tmp_path: Path, workspace_version_ref: str

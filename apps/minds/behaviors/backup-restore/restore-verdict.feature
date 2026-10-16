@@ -50,3 +50,18 @@ Feature: Restore verdict
       But that service is still not running
       Then the restore reports success
       And the restore reports no warning
+
+  @services-started-on-their-own
+  Rule: The restore brings back and judges only the services the workspace starts on its own
+    A restore brings the workspace's services back the way the workspace's own startup would, from the service configuration the restored data holds.
+    A service configured not to start on its own stays stopped after a restore, whether or not it was running when the restore started, and its being stopped is neither a failure nor a warning.
+
+    @service-off-by-default
+    Example: A service configured not to start on its own stays stopped without a warning
+      Given a workspace with a backup snapshot
+      And a service configured not to start on its own
+      When the user restores that snapshot in place
+      And every other workspace service comes back up
+      Then the service configured not to start on its own is stopped
+      And the restore reports success
+      And the restore reports no warning

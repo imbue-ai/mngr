@@ -105,6 +105,8 @@ def _make_stub_bin(
     supervisorctl_call_log: Path | None = None,
     supervisorctl_status_lines: tuple[str, ...] | None = None,
     supervisorctl_status_lines_after_restart: tuple[str, ...] | None = None,
+    reread_ok: bool = True,
+    manual_programs: tuple[str, ...] = (),
 ) -> Path:
     """A PATH dir with stub `uv` and `supervisorctl` acting like a healthy machine.
 
@@ -145,6 +147,8 @@ def _make_stub_bin(
         call_log_path=supervisorctl_call_log,
         status_lines=supervisorctl_status_lines,
         status_lines_after_restart=supervisorctl_status_lines_after_restart,
+        is_reread_ok=reread_ok,
+        manual_programs=manual_programs,
     )
     return stub_bin
 
@@ -821,6 +825,8 @@ def _stub_bin_with_restic(
     supervisorctl_call_log: Path | None = None,
     supervisorctl_status_lines: tuple[str, ...] | None = None,
     supervisorctl_status_lines_after_restart: tuple[str, ...] | None = None,
+    reread_ok: bool = True,
+    manual_programs: tuple[str, ...] = (),
     restic_script: str | None = None,
 ) -> Path:
     """The usual uv/supervisorctl stub dir, plus a restic on PATH.
@@ -839,6 +845,8 @@ def _stub_bin_with_restic(
         supervisorctl_call_log=supervisorctl_call_log,
         supervisorctl_status_lines=supervisorctl_status_lines,
         supervisorctl_status_lines_after_restart=supervisorctl_status_lines_after_restart,
+        reread_ok=reread_ok,
+        manual_programs=manual_programs,
     )
     restic_path = shutil.which(_get_restic_binary())
     assert restic_path is not None, "restic binary not found; run `pnpm build` in apps/minds/"
@@ -1328,7 +1336,8 @@ def test_restore_script_uses_a_preseeded_fallback_restic_when_path_restic_is_too
 def test_restore_script_stops_all_services_before_the_restore_and_restarts_them_after(tmp_path: Path) -> None:
     # The destructive restore must run writer-free: every supervisord service
     # (not just host-backup) runs from and writes into the host dir, so the
-    # script quiesces them all and brings them all back at the end.
+    # script quiesces them all and brings them back at the end with a reload
+    # of the restored config, checked by a reread first.
     host, code, restic_repo = _make_restore_workspace(tmp_path)
     _restic_for_test(restic_repo, "backup", str(host))
     snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
@@ -1346,10 +1355,12 @@ def test_restore_script_stops_all_services_before_the_restore_and_restarts_them_
     assert payload is not None, run
     assert payload["status"] == "ok", payload
     assert payload["services_restarted"] is True
+    assert payload["services_resumed_by"] == "reload"
+    assert "supervisord_config_error" not in payload
     calls = _supervisorctl_calls(call_log)
     assert "stop all" in calls
-    assert "restart all" in calls
-    assert calls.index("stop all") < calls.index("restart all")
+    assert calls.index("stop all") < calls.index("reread") < calls.index("reload")
+    assert "restart all" not in calls
     # The whole workspace is quiesced, not just the backup service.
     assert "stop host-backup" not in calls
 
@@ -1388,7 +1399,7 @@ def test_restore_script_resumes_services_when_the_restic_restore_fails(tmp_path:
     # The services came back even though the restore failed.
     assert payload["services_restarted"] is True
     calls = _supervisorctl_calls(call_log)
-    assert calls.index("stop all") < calls.index("restart all")
+    assert calls.index("stop all") < calls.index("reload")
     # Nothing was mutated: the injected failure fired before restic wrote.
     assert (code / "file.txt").read_text() == "version 2\n"
 
@@ -1421,7 +1432,7 @@ def test_restore_script_resumes_services_when_uv_sync_fails_after_the_restore(tm
     assert payload["restored"] is True
     assert payload["services_restarted"] is True
     calls = _supervisorctl_calls(call_log)
-    assert calls.index("stop all") < calls.index("restart all")
+    assert calls.index("stop all") < calls.index("reload")
     # The restore itself completed: the host dir carries the snapshot's content.
     assert (code / "file.txt").read_text() == "version 1\n"
 
@@ -1541,9 +1552,8 @@ def test_restore_script_reports_non_critical_services_down_as_a_warning_not_fail
 )
 @pytest.mark.witnesses("backup-restore.down-before-and-after")
 def test_restore_script_ignores_a_service_that_was_already_down_when_it_started(tmp_path: Path) -> None:
-    # supervisord leaves an autostart=false program STOPPED until something
-    # starts it, and the restore's own `restart all` does -- so the state to
-    # model after the restart is BACKOFF, not STOPPED. The large
+    # An autostart=true program that was already crash-looping before the
+    # restore is crash-looping again after the reload. The large
     # --service-verify-timeout-seconds is deliberate: a wait still counting
     # this program would poll to that deadline instead of returning on its
     # first sample.
@@ -1551,21 +1561,16 @@ def test_restore_script_ignores_a_service_that_was_already_down_when_it_started(
     _restic_for_test(restic_repo, "backup", str(host))
     snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
     call_log = tmp_path / "supervisorctl-calls.log"
+    roster = (
+        "host-backup RUNNING pid 123, uptime 0:00:01",
+        "system_interface RUNNING pid 124, uptime 0:00:01",
+        "crash-looping BACKOFF Exited too quickly (process log may have details)",
+    )
     stub_bin = _stub_bin_with_restic(
         tmp_path,
-        # `restart all` exits non-zero when any program spawn-errors.
-        restart_ok=False,
         supervisorctl_call_log=call_log,
-        supervisorctl_status_lines=(
-            "host-backup RUNNING pid 123, uptime 0:00:01",
-            "system_interface RUNNING pid 124, uptime 0:00:01",
-            "dark-launched STOPPED Not started",
-        ),
-        supervisorctl_status_lines_after_restart=(
-            "host-backup RUNNING pid 123, uptime 0:00:01",
-            "system_interface RUNNING pid 124, uptime 0:00:01",
-            "dark-launched BACKOFF Exited too quickly (process log may have details)",
-        ),
+        supervisorctl_status_lines=roster,
+        supervisorctl_status_lines_after_restart=roster,
     )
     run = _run_script(
         code,
@@ -1579,8 +1584,8 @@ def test_restore_script_ignores_a_service_that_was_already_down_when_it_started(
     assert payload["status"] == "ok", payload
     assert "services_down" not in payload
     calls = _supervisorctl_calls(call_log)
-    assert "restart all" in calls, calls
-    assert calls[calls.index("restart all") + 1 :].count("status") == 1, calls
+    assert "reload" in calls, calls
+    assert calls[calls.index("reload") + 1 :].count("status") == 1, calls
 
 
 @pytest.mark.timeout(120)
@@ -1696,3 +1701,78 @@ def test_restore_script_treats_the_backup_service_as_non_critical(tmp_path: Path
     assert payload is not None, run
     assert payload["status"] == "ok", payload
     assert payload["services_down"] == ["host-backup"]
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.witnesses("backup-restore.service-off-by-default")
+@pytest.mark.witnesses(
+    "backup-restore.services-started-on-their-own",
+    partial="one autostart=false service; the reload-from-restored-config clause is asserted only as the reload call",
+)
+def test_restore_script_leaves_an_autostart_false_service_stopped_and_unjudged(tmp_path: Path) -> None:
+    # A program configured autostart=false (the datalib app) is not started by
+    # a boot, so the restore must not start it either: it reloads instead of
+    # `restart all`, and a STOPPED autostart=false program is not reported as
+    # down. Modelling it RUNNING before the restore (started by hand) shows
+    # the exemption is its autostart setting, not its pre-restore state.
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    _restic_for_test(restic_repo, "backup", str(host))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+    call_log = tmp_path / "supervisorctl-calls.log"
+    stub_bin = _stub_bin_with_restic(
+        tmp_path,
+        supervisorctl_call_log=call_log,
+        supervisorctl_status_lines=(
+            "datalib RUNNING pid 122, uptime 0:00:01",
+            "host-backup RUNNING pid 123, uptime 0:00:01",
+            "system_interface RUNNING pid 124, uptime 0:00:01",
+        ),
+        supervisorctl_status_lines_after_restart=(
+            "datalib STOPPED Not started",
+            "host-backup RUNNING pid 123, uptime 0:00:01",
+            "system_interface RUNNING pid 124, uptime 0:00:01",
+        ),
+        manual_programs=("datalib",),
+    )
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        _restore_args(restic_repo, snapshot_id, extra=("--service-verify-timeout-seconds", "0.2")),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert "services_down" not in payload
+    calls = _supervisorctl_calls(call_log)
+    assert "reload" in calls
+    assert "restart all" not in calls
+
+
+@pytest.mark.timeout(120)
+def test_restore_script_falls_back_to_restart_all_when_the_restored_config_does_not_parse(tmp_path: Path) -> None:
+    # `supervisorctl reload` on a config supervisord cannot parse takes
+    # supervisord down with every service, so a failed reread must route the
+    # resume to `restart all` (the config loaded before the restore) and
+    # report the parse error for the desktop to surface.
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    _restic_for_test(restic_repo, "backup", str(host))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+    call_log = tmp_path / "supervisorctl-calls.log"
+    stub_bin = _stub_bin_with_restic(tmp_path, supervisorctl_call_log=call_log, reread_ok=False)
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        _restore_args(restic_repo, snapshot_id),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert payload["services_resumed_by"] == "restart all"
+    assert "CANT_REREAD" in str(payload["supervisord_config_error"])
+    calls = _supervisorctl_calls(call_log)
+    assert calls.index("stop all") < calls.index("reread") < calls.index("restart all")
+    assert "reload" not in calls

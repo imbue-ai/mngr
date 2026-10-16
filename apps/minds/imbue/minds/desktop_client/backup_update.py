@@ -57,6 +57,7 @@ from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROB
 from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_RESTORE_SCRIPT
 from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import RESTORE_RESULT_MARKER
+from imbue.minds.desktop_client.backup_workspace_scripts import RESUME_SERVICES_COMMAND
 from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
@@ -106,7 +107,7 @@ _APPLY_EXEC_TIMEOUT_SECONDS: Final[float] = 3600.0
 # restore) plus its tick wait and a `uv sync`; the ceiling must exceed their
 # sum so the script's structured failure payload always beats the exec timeout.
 _RESTORE_EXEC_TIMEOUT_SECONDS: Final[float] = 9000.0
-# Ceiling for the best-effort `supervisorctl restart all` dispatched when the
+# Ceiling for the best-effort RESUME_SERVICES_COMMAND dispatched when the
 # restore exec dies without reporting; restarting every service can take a
 # couple of minutes on a loaded workspace.
 _SERVICE_RESUME_TIMEOUT_SECONDS: Final[float] = 360.0
@@ -542,11 +543,31 @@ def _services_down_warning(names: list[str]) -> str:
     )
 
 
+def _supervisord_config_warning(payload: dict[str, object]) -> str | None:
+    """Word the restore script's ``supervisord_config_error`` (the restored config did not parse), or None.
+
+    The script then brought the services back from the config supervisord loaded before
+    the restore, and a supervisord that starts from the restored config will refuse to.
+    """
+    config_error = payload.get("supervisord_config_error")
+    if not isinstance(config_error, str) or not config_error:
+        return None
+    return (
+        "The restored workspace's service configuration could not be read, so its services were "
+        "restarted from the configuration in use before the restore. Until that configuration is "
+        f"fixed, the workspace's services will not start when it next restarts. supervisorctl said: {config_error}"
+    )
+
+
 def _restore_completion_warnings(payload: dict[str, object]) -> list[str]:
+    warnings: list[str] = []
+    config_warning = _supervisord_config_warning(payload)
+    if config_warning is not None:
+        warnings.append(config_warning)
     services_down = payload.get("services_down")
-    if not isinstance(services_down, list) or not services_down:
-        return []
-    return [_services_down_warning([str(name) for name in services_down])]
+    if isinstance(services_down, list) and services_down:
+        warnings.append(_services_down_warning([str(name) for name in services_down]))
+    return warnings
 
 
 def _complete_restore(registry: WorkspaceOperationRegistryInterface, agent_id: AgentId, warnings: list[str]) -> None:
@@ -676,7 +697,7 @@ def _run_restore_phases(
         registry.append_log(agent_id, "The restore did not report a result; restarting the workspace services...")
         resume_result = run_mngr_exec_on_agent(
             agent_address,
-            "supervisorctl restart all",
+            RESUME_SERVICES_COMMAND,
             parent_cg=parent_cg,
             timeout_seconds=_SERVICE_RESUME_TIMEOUT_SECONDS,
         )
@@ -698,7 +719,9 @@ def _run_restore_phases(
             if payload.get("safety_snapshot_taken")
             else ""
         )
-        registry.fail(agent_id, f"{detail}{safety_note}")
+        config_warning = _supervisord_config_warning(payload)
+        config_note = f" {config_warning}" if config_warning is not None else ""
+        registry.fail(agent_id, f"{detail}{safety_note}{config_note}")
         return
     registry.append_log(
         agent_id, "Restored the backup, reinstalled dependencies, and restarted the workspace services."

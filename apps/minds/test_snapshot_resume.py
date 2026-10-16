@@ -1200,8 +1200,8 @@ class _LiveWorkspaceRepo(FrozenModel):
     def quiesced(self) -> Iterator[_QuiescedWorkspaceRepo]:
         """Stop ``host-backup`` for the scope so the repository has no other restic actor.
 
-        The restore under test restarts the service itself (``supervisorctl
-        restart all``), so production service recovery is still exercised.
+        The restore under test brings the service back itself (``supervisorctl
+        reload``), so production service recovery is still exercised.
         """
         _exec_in_container(self.container_name, "supervisorctl stop host-backup", timeout=60)
         # The service is a separate process the type cannot see, so verify the

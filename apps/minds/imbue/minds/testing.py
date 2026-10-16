@@ -205,23 +205,28 @@ def write_stub_supervisorctl(
     call_log_path: Path | None = None,
     status_lines: Sequence[str] | None = None,
     status_lines_after_restart: Sequence[str] | None = None,
+    is_reread_ok: bool = True,
+    manual_programs: Sequence[str] = (),
 ) -> Path:
     """Write a stub ``supervisorctl`` into ``stub_bin`` and return its path.
 
     ``status`` prints the roster in ``status_lines`` (defaulting to a healthy
     ``host-backup`` + ``system_interface``, with ``host-backup`` STOPPED when
     ``is_restart_ok=False``); ``status <name>`` filters it like the real tool.
-    Once a ``restart`` has been attempted, ``status`` switches to
+    Once a ``restart`` or ``reload`` has been attempted, ``status`` switches to
     ``status_lines_after_restart`` when given -- so tests can model a machine
     whose service states differ before and after the restore's restart.
+    ``avail`` lists the programs of the current roster, those named in
+    ``manual_programs`` as autostart=false ("manual") and the rest as "auto".
 
-    The ``is_restart_ok=False`` variant additionally fails ``restart``, for
-    exercising the update script's rollback path and the restore's
-    restart-exit-code independence.
+    The ``is_restart_ok=False`` variant additionally fails ``restart`` and
+    ``reload``, for exercising the update script's rollback path and the
+    restore's resume-exit-code independence. ``is_reread_ok=False`` fails
+    ``reread`` the way supervisorctl does on a config it cannot parse.
 
     ``call_log_path`` appends each invocation's arguments as one line, so tests
     can assert on service-lifecycle ordering (e.g. ``stop all`` before
-    ``restart all``).
+    ``reload``).
     """
     if status_lines is None:
         status_lines = (
@@ -239,9 +244,33 @@ def write_stub_supervisorctl(
     lines = ["#!/bin/bash"]
     if call_log_path is not None:
         lines.append(f'echo "$@" >> "{call_log_path}"')
-    lines.append(f'if [ "$1" = "restart" ]; then touch "{restart_marker}"; fi')
+    lines.append(f'if [ "$1" = "restart" ] || [ "$1" = "reload" ]; then touch "{restart_marker}"; fi')
     if not is_restart_ok:
-        lines.append('if [ "$1" = "restart" ]; then echo "failed" >&2; exit 1; fi')
+        lines.append('if [ "$1" = "restart" ] || [ "$1" = "reload" ]; then echo "failed" >&2; exit 1; fi')
+    if is_reread_ok:
+        lines.append('if [ "$1" = "reread" ]; then echo "No config updates to processes"; exit 0; fi')
+    else:
+        lines.append(
+            'if [ "$1" = "reread" ]; then echo "ERROR: CANT_REREAD: File contains no section headers."; exit 1; fi'
+        )
+    if manual_programs:
+        manual_pattern = "|".join(manual_programs)
+        avail_mode = f'case "$name" in {manual_pattern}) mode=manual ;; *) mode=auto ;; esac; '
+    else:
+        avail_mode = "mode=auto; "
+    lines += [
+        'if [ "$1" = "avail" ]; then',
+        f'    if [ -e "{restart_marker}" ]; then',
+        f"        roster=$({_printf(status_lines_after_restart)})",
+        "    else",
+        f"        roster=$({_printf(status_lines)})",
+        "    fi",
+        "    printf '%s\\n' \"$roster\" | while read -r name _; do",
+        f'        {avail_mode}printf \'%-32s in use    %-9s 999:999\\n\' "$name" "$mode"',
+        "    done",
+        "    exit 0",
+        "fi",
+    ]
     lines += [
         'if [ "$1" = "status" ]; then',
         f'    if [ -e "{restart_marker}" ]; then',
