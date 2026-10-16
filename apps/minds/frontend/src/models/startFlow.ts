@@ -224,7 +224,7 @@ const VERIFIED_CHOICE: FlowChoice = {
 export const FLOW: Record<StepId, FlowStep> = {
   run: {
     ask:
-      "Let's create your first workspace. A workspace is your own virtual computer. " +
+      "Let's create your first workspace. A workspace is a private place where you and your agent work together. " +
       "We recommend running it on Imbue Cloud.",
     table: [
       {

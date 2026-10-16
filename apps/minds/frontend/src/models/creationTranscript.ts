@@ -18,7 +18,7 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
     id: "what",
     label: "What a workspace is",
     detail:
-      "A workspace is a private computer where you and your agent work together. It holds your files, apps, " +
+      "A workspace is a private place where you and your agent work together. It holds your files, apps, " +
       "tools, and the memory you build together. It keeps your work in one place from one conversation to the " +
       "next, so you don’t have to start over.\n\n" +
       "When you hand off a task or set a routine, your agent can keep working while you’re away.",
@@ -27,7 +27,7 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
     id: "now",
     label: "What’s happening right now",
     detail:
-      "We’re setting up your workspace on its own computer. We’re installing the tools your agent needs to make " +
+      "We’re setting up your workspace on its own machine. We’re installing the tools your agent needs to make " +
       "apps, work with your files and accounts, and keep tasks running while you’re away.\n\n" +
       "The last step connects your workspace to this app so you can start using it.\n\n" +
       "Want more detail? The setup log shows each part as it happens.",
@@ -60,8 +60,7 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
     id: "later",
     label: "Changing it later",
     detail:
-      "You can rename your workspace, change its color, connect or disconnect accounts, and change the computer " +
-      "it runs on later in Settings.",
+      "You can rename your workspace, change its color, and connect or disconnect accounts later in Settings.",
   },
 ];
 export const READY_LINE = "Your workspace is ready! What do you want to do first?";

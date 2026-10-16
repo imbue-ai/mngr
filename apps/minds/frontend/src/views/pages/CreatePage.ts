@@ -408,7 +408,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
               m(FormLabel, { target: "launch_mode", inline: true }, "Compute provider"),
               model.launchValue === "MODAL"
                 ? m("p", { id: "modal-direct-note", class: "mt-1 type-helper text-tertiary" }, [
-                    "Modal creates sandboxes from this machine using your own Modal token. Sandboxes are ",
+                    "Modal creates sandboxes from this computer using your own Modal token. Sandboxes are ",
                     "ephemeral (~1 day) -- testing only.",
                   ])
                 : null,

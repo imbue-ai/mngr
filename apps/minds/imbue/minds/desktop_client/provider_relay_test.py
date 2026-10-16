@@ -302,7 +302,7 @@ def test_relay_keeps_waiting_when_the_callback_cannot_reach_the_workspace_and_a_
         retried = _get(relay, f"/callback?code=c-1&state={_STATE}")
 
     assert unreachable.status_code == 502
-    assert "Couldn&#x27;t reach your machine" in unreachable.text
+    assert "Couldn&#x27;t reach your workspace" in unreachable.text
     assert is_still_listening
     assert "You&#x27;re signed in to Anthropic" in retried.text
     assert len(forwarder.forwarded()) == 2

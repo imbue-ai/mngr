@@ -252,8 +252,8 @@ def page_for_result(result: SignInCallbackResult) -> RelayPage:
 
 _UNREACHABLE_WORKSPACE_PAGE: Final[RelayPage] = RelayPage(
     status=502,
-    title="Couldn't reach your machine",
-    message="Imbue Studio couldn't pass this sign-in to your machine. Make sure the machine is running, then reload this page.",
+    title="Couldn't reach your workspace",
+    message="Imbue Studio couldn't pass this sign-in to your workspace. Make sure the workspace is running, then reload this page.",
 )
 _STALE_STATE_PAGE: Final[RelayPage] = RelayPage(
     status=400,

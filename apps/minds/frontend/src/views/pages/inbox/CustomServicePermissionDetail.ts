@@ -101,7 +101,7 @@ function summary(
       m(
         "p",
         { class: "type-body text-secondary" },
-        `This computer already has a connection to ${detail.base_api_url}; approving stores credentials for this workspace's machine as well.`,
+        `This computer already has a connection to ${detail.base_api_url}; approving stores credentials for this workspace as well.`,
       ),
     );
   }

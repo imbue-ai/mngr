@@ -207,7 +207,7 @@ def run_backup_trim(
             break
 
     untrimmable_suffix = (
-        f" Backups not reachable from this machine (delete their workspaces or clean them up elsewhere): "
+        f" Backups not reachable from this computer (delete their workspaces or clean them up elsewhere): "
         f"{', '.join(untrimmable_names)}."
         if untrimmable_names
         else ""
