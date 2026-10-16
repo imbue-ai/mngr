@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -133,6 +134,10 @@ from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
 from imbue.mngr_claude.plugin import on_before_host_destroy
 from imbue.mngr_claude.plugin import should_trust_work_dir
+from imbue.mngr_claude.testing import STYLED_EMPTY_SHELL_ROW_WITH_TRY_HINT
+from imbue.mngr_claude.testing import STYLED_TYPED_SHELL_ROW_READING_LIKE_THE_HINT
+from imbue.mngr_claude.testing import build_styled_prompt_pane
+from imbue.mngr_claude.testing import build_styled_shell_mode_pane
 from imbue.overlay.markers import StaticList
 
 # Test Helpers
@@ -1824,19 +1829,16 @@ def test_detect_preexisting_input_text_reads_bottom_prompt_line(
 ) -> None:
     """Leftover input-box text is detected from the bottom-most ``❯`` line only.
 
-    The empty input row and the dim ``Try "..."`` placeholder must NOT count as
-    leftover text (they are what a routine send sees), while genuinely stranded
-    text after the glyph must be reported. Prompt lines higher up in the
-    scrollback (already-submitted turns) must be ignored in favor of the
-    bottom-most input row.
+    The empty input row must NOT count as leftover text (it is what a routine send
+    sees), while genuinely stranded text after the glyph must be reported. Prompt
+    lines higher up in the scrollback (already-submitted turns) must be ignored in
+    favor of the bottom-most input row.
     """
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     assert agent._detect_preexisting_input_text("some output\n❯ previously stranded text") == (
         "previously stranded text"
     )
-    # Empty input row and the placeholder are routine, not leftovers.
     assert agent._detect_preexisting_input_text("some output\n❯ ") is None
-    assert agent._detect_preexisting_input_text('some output\n❯ Try "how do I fix this test?"') is None
     # No prompt glyph anywhere (e.g. a dialog occupies the pane).
     assert agent._detect_preexisting_input_text("Do you trust the files in this folder?") is None
     # The bottom-most prompt line wins: an older submitted turn above an empty
@@ -1941,6 +1943,16 @@ def test_detect_preexisting_input_text_ignores_selector_option_line(
     assert agent._detect_preexisting_input_text(_SELECTOR_A) is None
 
 
+_SGR_SEQUENCE_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _as_captured(scripted_pane: str | None, include_styles: bool) -> str | None:
+    """A scripted pane as tmux returns it: with its escape sequences only when styles were asked for."""
+    if scripted_pane is None or include_styles:
+        return scripted_pane
+    return _SGR_SEQUENCE_RE.sub("", scripted_pane)
+
+
 class _ScriptedPaneClaudeAgent(ClaudeAgent):
     """Test double: pane content is scripted and advances one frame per Enter, which is counted.
 
@@ -1965,9 +1977,9 @@ class _ScriptedPaneClaudeAgent(ClaudeAgent):
         return None
 
     def _capture_pane_content(
-        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False
+        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False, include_styles: bool = False
     ) -> str | None:
-        return self.scripted_panes[min(self.pane_position, len(self.scripted_panes) - 1)]
+        return _as_captured(self.scripted_panes[min(self.pane_position, len(self.scripted_panes) - 1)], include_styles)
 
     def _unpainted_pane_grace_seconds(self) -> float:
         # Production waits the full readiness window here; a scripted pane never changes, so
@@ -1998,11 +2010,11 @@ class _PaintsLaterClaudeAgent(_ScriptedPaneClaudeAgent):
     """
 
     def _capture_pane_content(
-        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False
+        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False, include_styles: bool = False
     ) -> str | None:
         pane = self.scripted_panes[min(self.pane_position, len(self.scripted_panes) - 1)]
         self.pane_position += 1
-        return pane
+        return _as_captured(pane, include_styles)
 
 
 def _make_scripted_agent(
@@ -2049,7 +2061,19 @@ def _input_box_pane(input_text: str) -> str:
 
 _EMPTY_INPUT_BOX_PANE = _input_box_pane("")
 
+# Input rows verbatim from `capture-pane -e` captures of the claude build `CLAUDE_CODE_VERSION` names;
+# the rules and footers around them are shortened.
+_EMPTY_PROMPT_ROW_WITH_TRY_HINT = (
+    '\x1b[39m❯\xa0\x1b[7mT\x1b[0;2mry\x1b[0m \x1b[2m"fix\x1b[0m \x1b[2mtypecheck\x1b[0m \x1b[2merrors"\x1b[0m'
+)
+_TYPED_PROMPT_ROW_READING_LIKE_THE_HINT = '\x1b[39m❯\xa0\x1b[7mT\x1b[0mry "how do I log an error?"'
 
+
+@pytest.mark.parametrize(
+    "cleared_pane",
+    [_EMPTY_INPUT_BOX_PANE, build_styled_prompt_pane(_EMPTY_PROMPT_ROW_WITH_TRY_HINT)],
+    ids=["bare", "hint"],
+)
 @pytest.mark.parametrize(
     "restored_text",
     [
@@ -2059,15 +2083,22 @@ _EMPTY_INPUT_BOX_PANE = _input_box_pane("")
     ],
 )
 def test_send_clears_restored_compact_draft_instead_of_appending(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext, restored_text: str
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    restored_text: str,
+    cleared_pane: str,
 ) -> None:
-    """A cancelled /compact left in the input box is cleared with Ctrl+E, Ctrl+U before pasting."""
+    """A cancelled /compact left in the input box is cleared with Ctrl+E, Ctrl+U before pasting.
+
+    The cleared box counts as empty whether or not Claude draws its placeholder in it.
+    """
     restored_pane = _input_box_pane(restored_text)
     agent = _make_scripted_agent(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        [restored_pane, restored_pane, _EMPTY_INPUT_BOX_PANE],
+        [restored_pane, restored_pane, cleared_pane],
         agent_class=_KeyRecordingClaudeAgent,
     )
     assert isinstance(agent, _KeyRecordingClaudeAgent)
@@ -2118,6 +2149,90 @@ def test_send_falls_back_to_append_warning_when_clearing_restored_compact_leaves
 
     assert agent.pressed_keys == ["C-e", "C-u"]
     assert [event_type for event_type, _ in agent.recorded_events] == ["preexisting_input_text"]
+
+
+@pytest.mark.parametrize(
+    ("styled_input_row", "expected_event_types"),
+    [(_EMPTY_PROMPT_ROW_WITH_TRY_HINT, []), (_TYPED_PROMPT_ROW_READING_LIKE_THE_HINT, ["preexisting_input_text"])],
+    ids=["hint", "typed"],
+)
+def test_send_tells_the_input_box_hint_from_typed_text_by_its_styling(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    styled_input_row: str,
+    expected_event_types: list[str],
+) -> None:
+    """Both rows read ``❯ Try "..."`` as plain text; only the hint's is dim."""
+    agent = _make_scripted_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        [build_styled_prompt_pane(styled_input_row)],
+        agent_class=_KeyRecordingClaudeAgent,
+    )
+    assert isinstance(agent, _KeyRecordingClaudeAgent)
+
+    agent._clear_or_warn_about_preexisting_input_text(_TARGET)
+
+    assert agent.pressed_keys == []
+    assert [event_type for event_type, _ in agent.recorded_events] == expected_event_types
+
+
+@pytest.mark.parametrize(
+    ("styled_input_row", "expected_pressed_keys", "expected_event_types"),
+    [
+        (STYLED_EMPTY_SHELL_ROW_WITH_TRY_HINT, ["BSpace"], ["exited_shell_mode"]),
+        (STYLED_TYPED_SHELL_ROW_READING_LIKE_THE_HINT, [], []),
+    ],
+    ids=["stranded", "typed"],
+)
+def test_exit_empty_shell_mode_tells_the_hint_from_a_typed_command(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    styled_input_row: str,
+    expected_pressed_keys: list[str],
+    expected_event_types: list[str],
+) -> None:
+    """Both rows read ``! Try "..."`` as plain text; only the strand's is the dim hint."""
+    agent = _make_scripted_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        [build_styled_shell_mode_pane(styled_input_row), _NORMAL_READY_PANE],
+        agent_class=_KeyRecordingClaudeAgent,
+    )
+    assert isinstance(agent, _KeyRecordingClaudeAgent)
+
+    agent._exit_empty_shell_mode(_TARGET)
+
+    assert agent.pressed_keys == expected_pressed_keys
+    assert [event_type for event_type, _ in agent.recorded_events] == expected_event_types
+
+
+def test_send_preflight_sees_the_bare_bang_strand_behind_the_hint(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent = _make_scripted_agent(
+        local_provider, tmp_path, temp_mngr_ctx, [build_styled_shell_mode_pane(STYLED_EMPTY_SHELL_ROW_WITH_TRY_HINT)]
+    )
+
+    assert isinstance(classify(agent._dialog_pane(_TARGET).capture()), EmptyShellMode)
+
+
+def test_startup_dialog_report_sees_the_bare_bang_strand_behind_the_hint(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent = _make_scripted_agent(
+        local_provider, tmp_path, temp_mngr_ctx, [build_styled_shell_mode_pane(STYLED_EMPTY_SHELL_ROW_WITH_TRY_HINT)]
+    )
+    agent.session_started_ready_at_position = 1
+
+    with pytest.raises(DialogDetectedError) as exc_info:
+        agent.wait_for_ready_signal(is_readiness_awaited=False, start_action=lambda: None, timeout=0.1)
+
+    assert exc_info.value.dialog_description == EmptyShellMode().get_nickname()
 
 
 def test_post_submit_dialog_observe_seconds_defaults_to_module_constant() -> None:

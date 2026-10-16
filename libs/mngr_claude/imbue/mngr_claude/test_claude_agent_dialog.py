@@ -1,3 +1,4 @@
+import shlex
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,9 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
+from imbue.mngr_claude.dialogs import SHELL_MODE_FOOTER_TEXT
+from imbue.mngr_claude.dialogs import is_pending_shell_command
+from imbue.mngr_claude.dialogs import is_stranded_in_empty_shell_mode
 from imbue.mngr_claude.plugin import DialogDetectedError
 from imbue.mngr_claude.plugin import INPUT_PROMPT_GLYPH
 from imbue.mngr_claude.plugin_test import make_claude_agent
@@ -116,5 +120,54 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
         with pytest.raises(SendMessageError, match="Timeout waiting for") as exc_info:
             agent.send_message("hello")
         assert not isinstance(exc_info.value, DialogDetectedError)
+    finally:
+        cleanup_tmux_session(session_name)
+
+
+# Shell-mode pane bottoms as printf formats. In the first the dim run of the row above continues
+# through the `!` row, so its glyph and hint are dim with no attribute change at the row boundary.
+_STRANDED_SHELL_MODE_PRINTF_FORMAT = (
+    r'\033[2m  ⎿  (No output)\n!\302\240\033[7mT\033[0;2mry "how do I log an error?"\033[0m\n  ! for shell mode\n'
+)
+_TYPED_SHELL_COMMAND_PRINTF_FORMAT = (
+    r'\033[2m  ⎿  (No output)\033[0m\n!\302\240Try "how do I log an error?"\033[7m \033[0m\n  ! for shell mode\n'
+)
+
+
+@pytest.mark.tmux
+@pytest.mark.parametrize(
+    ("printf_format", "is_stranded_expected"),
+    [(_STRANDED_SHELL_MODE_PRINTF_FORMAT, True), (_TYPED_SHELL_COMMAND_PRINTF_FORMAT, False)],
+    ids=["stranded", "typed"],
+)
+def test_input_box_capture_tells_a_real_tmux_panes_hint_from_typed_text(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    printf_format: str,
+    is_stranded_expected: bool,
+) -> None:
+    """The hint-free capture reads tmux's own ``capture-pane -e`` output, attributes carried across rows included."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    session_name = agent.session_name
+    window_name = agent.mngr_ctx.config.tmux.primary_window_name
+    pane_command = f"printf {shlex.quote(printf_format)}; sleep {_KEEP_ALIVE_SLEEP_SECONDS}"
+
+    try:
+        agent.host.execute_idempotent_command(
+            f"tmux new-session -d -s {shlex.quote(session_name)} -n {shlex.quote(window_name)} {shlex.quote(pane_command)}",
+            timeout_seconds=5.0,
+        )
+        wait_for(
+            lambda: agent._check_pane_contains(agent.tmux_target, SHELL_MODE_FOOTER_TEXT),
+            timeout=5.0,
+            error_message="Shell-mode footer not visible in pane",
+        )
+
+        content = agent._capture_input_box_pane_content(agent.tmux_target)
+
+        assert content is not None
+        assert is_stranded_in_empty_shell_mode(content) is is_stranded_expected
+        assert is_pending_shell_command(content) is not is_stranded_expected
     finally:
         cleanup_tmux_session(session_name)

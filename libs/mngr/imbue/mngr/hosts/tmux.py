@@ -93,7 +93,9 @@ class TmuxWindowTarget(FrozenModel):
         return shlex.quote(f"={self.session_name}:{self.window}")
 
 
-def build_tmux_capture_pane_command(target: TmuxWindowTarget | str, include_scrollback: bool = False) -> str:
+def build_tmux_capture_pane_command(
+    target: TmuxWindowTarget | str, include_scrollback: bool = False, include_styles: bool = False
+) -> str:
     """Build the tmux command string to capture pane content for a target.
 
     ``target`` may be an already-rendered ``-t`` argument (the agent's pane ID, resolved by the
@@ -102,10 +104,14 @@ def build_tmux_capture_pane_command(target: TmuxWindowTarget | str, include_scro
 
     When include_scrollback is True, uses ``-S -`` to capture from the start of the
     scrollback buffer instead of just the visible pane.
+
+    When include_styles is True, uses ``-e`` to keep each cell's SGR attributes (colour, dim,
+    reverse video) as escape sequences in the output.
     """
     target_arg = target if isinstance(target, str) else target.as_shell_arg()
     scrollback_flag = " -S -" if include_scrollback else ""
-    return f"tmux capture-pane -t {target_arg}{scrollback_flag} -p"
+    styles_flag = " -e" if include_styles else ""
+    return f"tmux capture-pane -t {target_arg}{scrollback_flag}{styles_flag} -p"
 
 
 def capture_tmux_pane_content(
@@ -113,16 +119,18 @@ def capture_tmux_pane_content(
     target: TmuxWindowTarget | str,
     timeout_seconds: float = _DEFAULT_CAPTURE_PANE_TIMEOUT_SECONDS,
     include_scrollback: bool = False,
+    include_styles: bool = False,
 ) -> str | None:
     """Capture the current tmux pane content via a host, returning None on failure.
 
     This is the canonical implementation for capturing tmux pane content through
     a host's command execution layer (which works both locally and over SSH).
 
-    When include_scrollback is True, captures the full scrollback buffer.
+    When include_scrollback is True, captures the full scrollback buffer. When include_styles is
+    True, the content keeps each cell's SGR escape sequences.
     """
     result: CommandResult = host.execute_idempotent_command(
-        build_tmux_capture_pane_command(target, include_scrollback=include_scrollback),
+        build_tmux_capture_pane_command(target, include_scrollback=include_scrollback, include_styles=include_styles),
         timeout_seconds=timeout_seconds,
     )
     if result.success:

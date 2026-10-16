@@ -110,7 +110,7 @@ class _RecordingClaudeAgent(ClaudeAgent):
         return ""
 
     def _capture_pane_content(
-        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False
+        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False, include_styles: bool = False
     ) -> str | None:
         return "❯ " + " ".join(self.sent_messages)
 

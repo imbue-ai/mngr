@@ -56,7 +56,7 @@ class _RecordingTuiAgent(_ProbeTuiAgent):
         yield
 
     def _capture_pane_content(
-        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False
+        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False, include_styles: bool = False
     ) -> str | None:
         return self.pane_content
 

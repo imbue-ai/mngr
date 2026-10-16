@@ -113,8 +113,16 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         """
         return False
 
+    def _capture_input_box_pane_content(self, tmux_target: TmuxWindowTarget | str) -> str | None:
+        """Capture the pane for reading what is typed in the input box.
+
+        Default: the plain capture. A TUI that draws text nobody typed in its input box (a
+        placeholder hint) overrides this to leave that text out.
+        """
+        return self._capture_pane_content(tmux_target)
+
     def _clear_or_warn_about_preexisting_input_text(self, tmux_target: TmuxWindowTarget) -> None:
-        pane_content = self._capture_pane_content(tmux_target)
+        pane_content = self._capture_input_box_pane_content(tmux_target)
         if pane_content is None:
             return
         leftover_text = self._detect_preexisting_input_text(pane_content)

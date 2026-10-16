@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import importlib.resources
+import re
 from pathlib import Path
 
 import pytest
 
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr_claude.dialogs import ALL_KNOWN_AND_UNKNOWN_DIALOGS
 from imbue.mngr_claude.dialogs import ALL_KNOWN_DIALOGS
 from imbue.mngr_claude.dialogs import Answerable
@@ -19,17 +22,23 @@ from imbue.mngr_claude.dialogs import MatchesPattern
 from imbue.mngr_claude.dialogs import ModelSwitchWarning
 from imbue.mngr_claude.dialogs import PendingShellCommand
 from imbue.mngr_claude.dialogs import SELECTABLE_NICKNAMES
+from imbue.mngr_claude.dialogs import SHELL_MODE_FOOTER_TEXT
 from imbue.mngr_claude.dialogs import SelfClearing
 from imbue.mngr_claude.dialogs import StatusWindow
 from imbue.mngr_claude.dialogs import Unrecognized
 from imbue.mngr_claude.dialogs import classify
 from imbue.mngr_claude.dialogs import cycle_to_option
 from imbue.mngr_claude.dialogs import deal_with_dialogs
+from imbue.mngr_claude.dialogs import get_input_row
+from imbue.mngr_claude.dialogs import get_pane_text_without_input_row_hints
 from imbue.mngr_claude.dialogs import is_nonbenign_answer_allowed
 from imbue.mngr_claude.dialogs import is_option_highlighted
 from imbue.mngr_claude.dialogs import is_pending_shell_command
 from imbue.mngr_claude.dialogs import is_restored_compact_command
 from imbue.mngr_claude.dialogs import is_stranded_in_empty_shell_mode
+from imbue.mngr_claude.testing import STYLED_EMPTY_SHELL_ROW_WITH_TRY_HINT
+from imbue.mngr_claude.testing import STYLED_TYPED_SHELL_ROW_READING_LIKE_THE_HINT
+from imbue.mngr_claude.testing import build_styled_shell_mode_pane
 
 _IDLE_PANE = "some assistant output\n\n❯ \n  ? for shortcuts\n"
 
@@ -59,6 +68,21 @@ _USAGE_LIMIT_PANE = (
 
 _SHELL_PENDING_PANE = "! ls -la\n\n ! for shell mode\n"
 _SHELL_EMPTY_PANE = "! \n\n ! for shell mode\n"
+
+# Shell-mode input rows verbatim from `capture-pane -e` captures of the claude build
+# `CLAUDE_CODE_VERSION` names.
+# An empty box while a message is queued.
+_EMPTY_ROW_WITH_QUEUED_HINT = "\x1b[38;5;246m!\xa0\x1b[7m\x1b[39mP\x1b[0;2mress up to edit queued messages\x1b[0m"
+# An empty box under the native terminal cursor (`CLAUDE_CODE_NATIVE_CURSOR=1`): no reverse cell.
+_EMPTY_ROW_WITH_HINT_UNDER_NATIVE_CURSOR = (
+    '!\xa0\x1b[2m\x1b[39mTry\x1b[0m \x1b[2m"fix\x1b[0m \x1b[2mlint\x1b[0m \x1b[2merrors"\x1b[0m'
+)
+# A human typed `ls -la` and moved the caret to the start: a reverse cell first, like a hint.
+_TYPED_ROW_WITH_CARET_AT_START = "!\xa0\x1b[7m\x1b[39ml\x1b[0ms -la"
+# A human typed `l` and moved the caret onto it: a reverse cell with nothing dim after it.
+_TYPED_ROW_OF_ONE_CHARACTER_UNDER_THE_CARET = "!\xa0\x1b[7m\x1b[39ml\x1b[0m"
+# A human typed `ec`, and Claude offers `echo hello-from-cph` from shell history as ghost text.
+_TYPED_ROW_WITH_GHOST_TEXT = "!\xa0\x1b[39mec\x1b[7mh\x1b[0;2mo hello-from-cph\x1b[0m"
 
 
 class FakePane:
@@ -126,6 +150,67 @@ def test_shell_mode_goes_through_the_same_loop() -> None:
     assert isinstance(classify(_SHELL_EMPTY_PANE), EmptyShellMode)
     assert is_pending_shell_command(_SHELL_PENDING_PANE)
     assert is_stranded_in_empty_shell_mode(_SHELL_EMPTY_PANE)
+
+
+@pytest.mark.parametrize(
+    "styled_input_row",
+    [STYLED_EMPTY_SHELL_ROW_WITH_TRY_HINT, _EMPTY_ROW_WITH_QUEUED_HINT, _EMPTY_ROW_WITH_HINT_UNDER_NATIVE_CURSOR],
+    ids=["try-hint", "queued-hint", "native-cursor"],
+)
+def test_empty_shell_mode_is_seen_through_its_hint(styled_input_row: str) -> None:
+    pane = get_pane_text_without_input_row_hints(build_styled_shell_mode_pane(styled_input_row))
+    assert is_stranded_in_empty_shell_mode(pane)
+    assert isinstance(classify(pane), EmptyShellMode)
+
+
+@pytest.mark.parametrize(
+    "styled_input_row",
+    [
+        STYLED_TYPED_SHELL_ROW_READING_LIKE_THE_HINT,
+        _TYPED_ROW_WITH_CARET_AT_START,
+        _TYPED_ROW_OF_ONE_CHARACTER_UNDER_THE_CARET,
+        _TYPED_ROW_WITH_GHOST_TEXT,
+    ],
+    ids=["reads-like-the-hint", "caret-at-start", "one-character-under-the-caret", "ghost-text"],
+)
+def test_typed_shell_command_stays_pending_whatever_it_reads_like(styled_input_row: str) -> None:
+    pane = get_pane_text_without_input_row_hints(build_styled_shell_mode_pane(styled_input_row))
+    assert is_pending_shell_command(pane)
+    assert isinstance(classify(pane), PendingShellCommand)
+
+
+def test_hint_without_styling_reads_as_typed_text() -> None:
+    """Under NO_COLOR Claude draws the hint without dim, so it reads as a typed command."""
+    no_colour_empty_row = '!\xa0\x1b[7mT\x1b[0mry "edit <filepath> to..."'
+    pane = get_pane_text_without_input_row_hints(build_styled_shell_mode_pane(no_colour_empty_row))
+    assert isinstance(classify(pane), PendingShellCommand)
+
+
+def test_get_pane_text_without_input_row_hints_keeps_typed_text_and_drops_ghost_text() -> None:
+    assert (
+        get_input_row(get_pane_text_without_input_row_hints(build_styled_shell_mode_pane(_TYPED_ROW_WITH_GHOST_TEXT)))
+        == "!\xa0ec"
+    )
+
+
+def test_get_pane_text_without_input_row_hints_reads_the_rest_of_the_pane_as_plain_text() -> None:
+    dim_transcript_row = "\x1b[2m  ⎿  (No output)\x1b[0m"
+    styled_pane = dim_transcript_row + "\n" + build_styled_shell_mode_pane(STYLED_EMPTY_SHELL_ROW_WITH_TRY_HINT)
+    assert get_pane_text_without_input_row_hints(styled_pane) == "\n".join(
+        ("  ⎿  (No output)", "─" * 40, "!\xa0", "─" * 40, "  ! for shell mode")
+    )
+
+
+def test_get_pane_text_without_input_row_hints_keeps_an_input_glyph_drawn_dim() -> None:
+    """The glyph is what makes the row the input row, so a dim one is kept."""
+    empty_row_with_dim_glyph = '\x1b[2m❯\xa0\x1b[0m\x1b[7mT\x1b[0;2mry "fix lint errors"\x1b[0m'
+    pane = get_pane_text_without_input_row_hints(empty_row_with_dim_glyph)
+    assert get_input_row(pane) == "❯"
+    assert classify(pane) is None
+
+
+def test_get_pane_text_without_input_row_hints_leaves_an_unstyled_pane_unchanged() -> None:
+    assert get_pane_text_without_input_row_hints(_SHELL_PENDING_PANE) == _SHELL_PENDING_PANE.rstrip()
 
 
 def test_empty_shell_mode_backspaces_out() -> None:
@@ -506,6 +591,17 @@ _SKIP_REASON = f"no claude {CLAUDE_CODE_VERSION} binary installed"
 _ASSEMBLED_AT_RUNTIME = frozenset({"Status window", "Model switch warning", "Effort switch warning"})
 
 
+def test_dockerfile_pins_the_same_claude_version_as_the_dialog_registry() -> None:
+    """The drift guards below find their binary by ``CLAUDE_CODE_VERSION``, so it must name the build the Dockerfile installs."""
+    dockerfile = importlib.resources.files(mngr_resources).joinpath("Dockerfile").read_text()
+    pinned = re.search(r'^ARG\s+CLAUDE_CODE_VERSION="([^"]+)"', dockerfile, re.MULTILINE)
+    assert pinned is not None, 'the Dockerfile no longer pins claude with `ARG CLAUDE_CODE_VERSION="..."`'
+    assert pinned.group(1) == CLAUDE_CODE_VERSION, (
+        f"the Dockerfile installs claude {pinned.group(1)} but this file was read off {CLAUDE_CODE_VERSION}; "
+        "bump both together"
+    )
+
+
 @pytest.mark.skipif(_CLAUDE_BINARY is None, reason=_SKIP_REASON)
 def test_patterns_match_installed_binary() -> None:
     """Every pattern must still find its text in the shipped claude.
@@ -524,6 +620,13 @@ def test_patterns_match_installed_binary() -> None:
         literal = dialog.get_pattern().pattern.replace(r"\s+", " ")
         probe = literal.split("|")[0].replace(r"\?", "?").replace("(?:", "").replace(")", "")
         assert probe.encode() in blob, f"{dialog.get_nickname()}: {probe!r} not in binary"
+
+
+@pytest.mark.skipif(_CLAUDE_BINARY is None, reason=_SKIP_REASON)
+def test_shell_mode_footer_matches_installed_binary() -> None:
+    """The footer is read off the same binary, but no dialog carries it."""
+    assert _CLAUDE_BINARY is not None
+    assert SHELL_MODE_FOOTER_TEXT.encode() in _CLAUDE_BINARY.read_bytes()
 
 
 @pytest.mark.skipif(_CLAUDE_BINARY is None, reason=_SKIP_REASON)

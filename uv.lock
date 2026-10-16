@@ -2111,6 +2111,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "imbue-mngr" },
     { name = "overlay" },
+    { name = "rich" },
 ]
 
 [package.dev-dependencies]
@@ -2123,6 +2124,7 @@ requires-dist = [
     { name = "anthropic" },
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "overlay", editable = "libs/overlay" },
+    { name = "rich", specifier = ">=13.0" },
 ]
 
 [package.metadata.requires-dev]

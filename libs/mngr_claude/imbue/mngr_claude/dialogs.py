@@ -23,8 +23,8 @@ Three kinds of surface, told apart by what answering one costs:
 model-switch confirmation and the theme picker are both selectors, and one of them changes
 the session. It is about whether mngr dealing with the surface itself can be regretted.
 
-The pane predicates below (shell mode, the input prompt) came from PR #397 and are
-moved here unchanged so one module owns "how to read a claude screen".
+The pane predicates below (shell mode, the input prompt) live here too, so one module
+owns "how to read a claude screen".
 """
 
 from __future__ import annotations
@@ -32,15 +32,19 @@ from __future__ import annotations
 import re
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Sequence
 from typing import Final
 from typing import Protocol
+
+from rich.ansi import AnsiDecoder
+from rich.style import Style
+from rich.text import Text
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 
-# The claude build these patterns were read out of. Keep it equal to the pinned version in
-# libs/mngr/.../resources/Dockerfile: the drift guards in dialogs_test.py look up the build
-# this names, so on a mismatch they find nothing in the CI image and skip.
+# The claude build these patterns were read out of. It must equal the version the mngr
+# Dockerfile installs.
 CLAUDE_CODE_VERSION: Final[str] = "2.1.293"
 
 
@@ -61,9 +65,6 @@ SELECTOR_HIGHLIGHTED_OPTION_RE: Final[re.Pattern[str]] = re.compile(r"^[ \t]+❯
 # is a no-op that STAYS in shell mode, hiding the `❯` prompt. A single Backspace deletes
 # the `!` and returns to normal mode.
 SHELL_MODE_FOOTER_TEXT: Final[str] = "! for shell mode"
-# The shell-mode input row with an EMPTY command. Claude renders the empty box as `!` plus
-# a non-breaking space (U+00A0), so that is matched alongside ordinary spaces/tabs.
-EMPTY_SHELL_MODE_INPUT_RE: Final[re.Pattern[str]] = re.compile(r"^![ \t\xa0]*$", re.MULTILINE)
 
 
 # How much of the pane's bottom counts as the input area. Claude draws the input box -- or
@@ -111,10 +112,75 @@ def get_input_row(pane_content: str) -> str | None:
     ``!`` when shell mode has replaced it. Taken from the BOTTOM because the rows above it are
     the transcript, where Claude renders each past user turn with the very same prompt glyph.
     """
-    for line in reversed(get_input_region(pane_content).splitlines()):
-        if line.startswith(INPUT_PROMPT_GLYPH) or line.startswith(SHELL_MODE_INPUT_GLYPH):
-            return line
+    lines = pane_content.splitlines()
+    input_row_idx = _find_input_row_idx(lines)
+    return None if input_row_idx is None else lines[input_row_idx]
+
+
+@pure
+def _find_input_row_idx(lines: Sequence[str]) -> int | None:
+    """The index of the input row :func:`get_input_row` describes, or None."""
+    non_blank_idxs = [idx for idx, line in enumerate(lines) if line.strip()]
+    for idx in reversed(non_blank_idxs[-INPUT_REGION_LINES:]):
+        if lines[idx].startswith(INPUT_PROMPT_GLYPH) or lines[idx].startswith(SHELL_MODE_INPUT_GLYPH):
+            return idx
     return None
+
+
+@pure
+def get_pane_text_without_input_row_hints(styled_pane_content: str) -> str:
+    """The text of a ``capture-pane -e`` capture, as ``capture-pane -p`` gives it, without the hints in the input row.
+
+    A hint is text Claude draws in the input row that nobody typed: the placeholder in an empty
+    box (``Try "how do I log an error?"``, ``Press up to edit queued messages``) and completion
+    ghost text after typed text. Claude draws every hint dim and never draws typed text dim. A
+    capture without styling has nothing dim, so its hints read as typed text.
+    """
+    decoder = AnsiDecoder()
+    styled_lines = [decoder.decode_line(line) for line in styled_pane_content.split("\n")]
+    plain_lines = [line.plain.rstrip(" ") for line in styled_lines]
+    input_row_idx = _find_input_row_idx(plain_lines)
+    return "\n".join(
+        _get_input_row_text_without_hints(styled_lines[idx]) if idx == input_row_idx else line
+        for idx, line in enumerate(plain_lines)
+    ).rstrip()
+
+
+@pure
+def _get_input_row_text_without_hints(styled_input_row: Text) -> str:
+    """The input row without its hints, keeping the glyph that starts it however Claude styles it."""
+    return (styled_input_row.plain[:1] + _get_text_without_hints(styled_input_row[1:])).rstrip(" ")
+
+
+@pure
+def _get_text_without_hints(styled_text: Text) -> str:
+    """The text without its dim characters or the reverse-video cursor Claude draws over a hint's first character."""
+    style_by_char_idx = _get_style_by_char_idx(styled_text)
+    return "".join(
+        char
+        for idx, char in enumerate(styled_text.plain)
+        if not style_by_char_idx[idx].dim
+        and not (
+            style_by_char_idx[idx].reverse and _is_next_visible_char_dim(styled_text.plain, style_by_char_idx, idx)
+        )
+    )
+
+
+@pure
+def _get_style_by_char_idx(styled_text: Text) -> list[Style]:
+    style_by_char_idx = [Style.null()] * len(styled_text.plain)
+    for span in styled_text.spans:
+        span_style = span.style if isinstance(span.style, Style) else Style.parse(span.style)
+        style_by_char_idx[span.start : span.end] = [span_style] * (span.end - span.start)
+    return style_by_char_idx
+
+
+@pure
+def _is_next_visible_char_dim(text: str, style_by_char_idx: Sequence[Style], char_idx: int) -> bool:
+    for idx in range(char_idx + 1, len(text)):
+        if not text[idx].isspace():
+            return bool(style_by_char_idx[idx].dim)
+    return False
 
 
 @pure
@@ -154,22 +220,30 @@ def is_restored_compact_command(input_text: str) -> bool:
 
 
 @pure
-def is_stranded_in_empty_shell_mode(pane_content: str) -> bool:
-    """Whether the pane is stranded in Claude's shell mode on an empty command line -- the state a bare ``!`` submission leaves behind.
+def _get_shell_mode_input_text(pane_content: str) -> str | None:
+    """The input row's text after the shell-mode ``!``, or None when shell mode is not holding the input.
 
-    Recognised by the input row itself, plus the shell-mode footer near it. Neither test may be
-    made against the whole pane: the footer text and a bare ``!`` row both occur in ordinary
-    transcript content -- a conversation that merely discusses shell mode contains them.
+    Whitespace alone means an empty command line. Expects a pane read through
+    :func:`get_pane_text_without_input_row_hints`; on a raw capture the placeholder in an empty
+    box reads as a typed command.
 
-    Asking instead whether the pane has an input-prompt line anywhere nearby does not work
-    either, and that is the subtle one. In a short conversation the echo of a past user turn
-    sits within the region, so "a prompt is nearby" is true even while shell mode holds the
-    input. The input ROW is the evidence; what surrounds it is not.
+    Both the row and the footer are read from the input region, never from the whole pane: the
+    footer text and a bare ``!`` row both occur in ordinary transcript content -- a conversation
+    that merely discusses shell mode contains them.
     """
     if SHELL_MODE_FOOTER_TEXT not in get_input_region(pane_content):
-        return False
+        return None
     input_row = get_input_row(pane_content)
-    return input_row is not None and EMPTY_SHELL_MODE_INPUT_RE.match(input_row) is not None
+    if input_row is None or not input_row.startswith(SHELL_MODE_INPUT_GLYPH):
+        return None
+    return input_row[len(SHELL_MODE_INPUT_GLYPH) :]
+
+
+@pure
+def is_stranded_in_empty_shell_mode(pane_content: str) -> bool:
+    """Whether the pane is stranded in Claude's shell mode on an empty command line -- the state a bare ``!`` submission leaves behind."""
+    input_text = _get_shell_mode_input_text(pane_content)
+    return input_text is not None and input_text.strip() == ""
 
 
 @pure
@@ -179,16 +253,12 @@ def is_pending_shell_command(pane_content: str) -> bool:
     Within shell mode this is the complement of :func:`is_stranded_in_empty_shell_mode`: the
     footer is up and the ``❯`` prompt is hidden, but the input row is not the empty strand. mngr
     never leaves this state -- its own sends always submit with Enter -- so it can only be a
-    command a human typed directly into the pane and did not submit. Keyed off the *absence* of an
-    empty input row rather than the presence of a bare ``!`` line, so a prior ``!<command>`` echoed
-    in the transcript is not mistaken for the pending input.
+    command a human typed directly into the pane and did not submit. Reads the input row, never a
+    ``!`` line elsewhere, so a prior ``!<command>`` echoed in the transcript is not mistaken for
+    the pending input.
     """
-    if SHELL_MODE_FOOTER_TEXT not in get_input_region(pane_content):
-        return False
-    input_row = get_input_row(pane_content)
-    if input_row is None or not input_row.startswith(SHELL_MODE_INPUT_GLYPH):
-        return False
-    return not is_stranded_in_empty_shell_mode(pane_content)
+    input_text = _get_shell_mode_input_text(pane_content)
+    return input_text is not None and input_text.strip() != ""
 
 
 @pure
@@ -219,7 +289,7 @@ class DialogPane(Protocol):
     """
 
     def capture(self) -> str:
-        """The pane's current visible content."""
+        """The pane's current visible content, read through :func:`get_pane_text_without_input_row_hints`."""
         ...
 
     def press_enter(self) -> None: ...

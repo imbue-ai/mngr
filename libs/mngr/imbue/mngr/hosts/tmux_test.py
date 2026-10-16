@@ -65,3 +65,8 @@ def test_build_tmux_capture_pane_command_visible_only() -> None:
 def test_build_tmux_capture_pane_command_with_scrollback() -> None:
     result = build_tmux_capture_pane_command(TmuxWindowTarget(session_name="mngr-my-agent"), include_scrollback=True)
     assert result == "tmux capture-pane -t =mngr-my-agent:0 -S - -p"
+
+
+def test_build_tmux_capture_pane_command_with_styles() -> None:
+    result = build_tmux_capture_pane_command(TmuxWindowTarget(session_name="mngr-my-agent"), include_styles=True)
+    assert result == "tmux capture-pane -t =mngr-my-agent:0 -e -p"

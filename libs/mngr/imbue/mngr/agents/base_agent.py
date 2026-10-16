@@ -565,7 +565,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             )
 
     def _capture_pane_content(
-        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False
+        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False, include_styles: bool = False
     ) -> str | None:
         """Capture the agent pane's content, returning None on failure.
 
@@ -583,6 +583,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             tmux_target if isinstance(tmux_target, str) else self._send_target_arg(tmux_target),
             timeout_seconds=_CAPTURE_PANE_TIMEOUT_SECONDS,
             include_scrollback=include_scrollback,
+            include_styles=include_styles,
         )
 
     def _check_pane_contains(self, tmux_target: TmuxWindowTarget, text: str) -> bool:

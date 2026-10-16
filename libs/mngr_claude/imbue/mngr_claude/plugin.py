@@ -152,6 +152,7 @@ from imbue.mngr_claude.dialogs import Unrecognized
 from imbue.mngr_claude.dialogs import classify
 from imbue.mngr_claude.dialogs import deal_with_dialogs
 from imbue.mngr_claude.dialogs import get_input_region
+from imbue.mngr_claude.dialogs import get_pane_text_without_input_row_hints
 from imbue.mngr_claude.dialogs import has_input_prompt_line
 from imbue.mngr_claude.dialogs import is_nonbenign_answer_allowed
 from imbue.mngr_claude.dialogs import is_restored_compact_command
@@ -2357,7 +2358,7 @@ class _ClaudeDialogPane(FrozenModel):
     resolved_target: str
 
     def capture(self) -> str:
-        return self.agent._capture_pane_content(self.resolved_target) or ""
+        return self.agent._capture_input_box_pane_content(self.resolved_target) or ""
 
     def _press_and_settle(self, send: Callable[[], None]) -> None:
         # Leave copy-mode first. A pane in a mode swallows keys AND shows scrollback rather than
@@ -2576,6 +2577,11 @@ class ClaudeAgent(
             case _ as unreachable:
                 assert_never(unreachable)
 
+    def _capture_input_box_pane_content(self, tmux_target: TmuxWindowTarget | str) -> str | None:
+        """Capture the pane with its styling and return its text without the input row's hints."""
+        content = self._capture_pane_content(tmux_target, include_styles=True)
+        return None if content is None else get_pane_text_without_input_row_hints(content)
+
     def _detect_preexisting_input_text(self, pane_content: str) -> str | None:
         """Detect leftover text on Claude Code's input row (the column-0 ``❯`` prompt line).
 
@@ -2584,15 +2590,13 @@ class ClaudeAgent(
         never-submitted message that the new paste would append to. Matching the raw
         (un-stripped) line is deliberate: it anchors to the column-0 input row, so an open
         selector's indented option line (``  ❯ 1. ...``) is not misread as leftover input.
-        The dim placeholder Claude renders in an empty input box (``Try "..."``) is
-        excluded so routine sends don't warn.
+        The pane comes from ``_capture_input_box_pane_content``, so the placeholder Claude draws
+        in an empty box is already gone.
         """
         for line in reversed(get_input_region(pane_content).splitlines()):
             if line.startswith(INPUT_PROMPT_GLYPH):
                 leftover_text = line[len(INPUT_PROMPT_GLYPH) :].strip()
-                if leftover_text == "" or leftover_text.startswith('Try "'):
-                    return None
-                return leftover_text
+                return leftover_text or None
         return None
 
     def _clear_preexisting_input_text_if_restored_command(
@@ -2617,7 +2621,7 @@ class ClaudeAgent(
 
     def _is_input_row_empty(self, tmux_target: TmuxWindowTarget) -> bool:
         """Whether the pane shows Claude Code's input row with nothing typed in it."""
-        content = self._capture_pane_content(tmux_target)
+        content = self._capture_input_box_pane_content(tmux_target)
         return (
             content is not None
             and has_input_prompt_line(content)
@@ -2736,7 +2740,7 @@ class ClaudeAgent(
         stays. A non-empty line is a command a human typed and did not submit -- refused up front by
         ``_preflight_send_message`` (see ``is_pending_shell_command``), never finished or deleted here.
         """
-        content = self._capture_pane_content(tmux_target)
+        content = self._capture_input_box_pane_content(tmux_target)
         if content is None or not is_stranded_in_empty_shell_mode(content):
             return
         logger.info(
@@ -2771,7 +2775,7 @@ class ClaudeAgent(
 
     def _press_backspace(self, tmux_target: TmuxWindowTarget) -> None:
         """Send a single Backspace keystroke to the agent's pane (leaves an empty shell mode)."""
-        send_key_keystroke(self, tmux_target, "BSpace")
+        self._press_key(tmux_target, "BSpace")
 
     def wait_for_ready_signal(
         self, is_readiness_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
@@ -2823,7 +2827,7 @@ class ClaudeAgent(
             # input prompt yet and matches nothing, so it classifies as Unrecognized -- and
             # treating that as "blocked" would turn every slow start into a false dialog error
             # instead of the honest AgentStartError below.
-            startup_dialog = classify(self._capture_pane_content(self.tmux_target) or "")
+            startup_dialog = classify(self._capture_input_box_pane_content(self.tmux_target) or "")
             if startup_dialog is not None and not isinstance(startup_dialog, Unrecognized):
                 raise DialogDetectedError(
                     str(self.name), startup_dialog.get_nickname(), startup_dialog.get_message() or None

@@ -217,7 +217,7 @@ class _ProbeAgent(BaseAgent[AgentTypeConfig]):
     captured_commands: list[str] = pydantic.Field(default_factory=list)
 
     def _capture_pane_content(
-        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False
+        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False, include_styles: bool = False
     ) -> str | None:
         return "pane still shows the typed message"
 
