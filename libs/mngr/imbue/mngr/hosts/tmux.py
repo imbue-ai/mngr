@@ -1,9 +1,11 @@
+import re
 import shlex
 from typing import Final
 
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
 
@@ -63,6 +65,24 @@ AGENT_PANE_ID_OPTION: Final[str] = "@mngr_agent_pane"
 # just before can find no session by it; the id never changes, and the option travels with the
 # session through `rename-session`.
 AGENT_ID_OPTION: Final[str] = "@mngr_agent_id"
+
+# Shell expressions for the name and id of the tmux session a command's own pane belongs to. A
+# launch command is stored once at create and replayed on every start, so one that baked in the
+# session's name would name a gone session after the agent is renamed; these read it when they run.
+PANE_SESSION_NAME_SHELL_EXPRESSION: Final[str] = '"$(tmux display-message -p -t "$TMUX_PANE" \'#{session_name}\')"'
+PANE_SESSION_ID_SHELL_EXPRESSION: Final[str] = '"$(tmux display-message -p -t "$TMUX_PANE" \'#{session_id}\')"'
+
+# A session name as an older mngr's launch command passed it: `shlex.quote`d, so bare unless it needed quoting.
+_LITERAL_SESSION_NAME_ARGUMENT: Final[str] = r"(?:'[^']*'|[^\s'\"$()]+)"
+
+
+# CLEANUP: drop this and the agent types' upgrade_stored_command rewrites that use it once every agent
+# whose launch command an older mngr stored has been started on an mngr that upgrades it (or destroyed).
+@pure
+def upgrade_literal_session_name_argument(command: str, invocation_prefix: str) -> str:
+    """Return ``command`` with the session name following ``invocation_prefix`` rewritten to read the pane's session at run time."""
+    pattern = re.compile(re.escape(invocation_prefix) + " " + _LITERAL_SESSION_NAME_ARGUMENT + r"(?=[\s)])")
+    return pattern.sub(lambda _match: f"{invocation_prefix} {PANE_SESSION_NAME_SHELL_EXPRESSION}", command)
 
 
 class TmuxWindowTarget(FrozenModel):

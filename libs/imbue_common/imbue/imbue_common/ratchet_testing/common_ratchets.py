@@ -627,6 +627,11 @@ PREVENT_BARE_TMUX_TARGETS = RegexRatchetRule(
     # both. Variable-interpolated targets without outer quotes -- `-t {var}` -- are
     # unmatched and assumed safe by convention (the variable should hold a
     # `TmuxSessionTarget.as_shell_arg()` / `TmuxWindowTarget.as_shell_arg()` result).
-    pattern_string=r"""^(?!\s*#).*\btmux\b(?:\s+(?:-[a-zA-Z]\S*|[a-z][a-z-]*))*\s+-t\s+["'](?!=)""",
+    # tmux ids (`$N` session, `@N` window, `%N` pane) are unique for the object's life and
+    # never prefix-matched, so targets that are id literals or shell variables holding an
+    # id (`$TMUX_PANE`, or a variable whose name ends in `_ID`) are exempt. A `$N` session id
+    # is only a literal inside single quotes; inside double quotes the shell expands it as a
+    # positional parameter, which usually holds a session name.
+    pattern_string=r"""^(?!\s*#).*\btmux\b(?:\s+(?:-[a-zA-Z]\S*|[a-z][a-z-]*))*\s+-t\s+["'](?!=|[@%]\d|(?<=')\$\d|\$\{?TMUX_PANE\b|\$\{?[A-Z_]*_ID\b)""",
     is_multiline=True,
 )

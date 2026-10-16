@@ -185,6 +185,9 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         logger.trace("Assembled command: {}", command)
         return command
 
+    def upgrade_stored_command(self, command: CommandString) -> CommandString:
+        return command
+
     def _get_agent_dir(self) -> Path:
         """Get the agent's state directory path."""
         return get_agent_state_dir_path(self.host.host_dir, self.id)

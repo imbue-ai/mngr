@@ -133,6 +133,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import symlink_on_host
+from imbue.mngr.hosts.tmux import PANE_SESSION_NAME_SHELL_EXPRESSION
+from imbue.mngr.hosts.tmux import upgrade_literal_session_name_argument
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
@@ -412,7 +414,7 @@ def _resolve_adopt_session(adopt_arg: str, mngr_ctx: MngrContext) -> tuple[str, 
 class AntigravityAgentConfig(AgentTypeConfig):
     """Config for the antigravity agent type."""
 
-    # --- role behaviour, set by a create template and applied by this harness ---
+    # Role behaviour, set by a create template and applied by this harness.
     #
     # Both are harness-neutral *intent*: a role (e.g. `-t chat`) states them once and each
     # harness applies them its own way. They live on the harness subclasses rather than
@@ -1376,7 +1378,14 @@ class AntigravityAgent(
         duplicate launch to exit immediately.
         """
         script_path = f"$MNGR_AGENT_STATE_DIR/commands/{_BACKGROUND_TASKS_SCRIPT_NAME}"
-        return f"( bash {script_path} {shlex.quote(self.session_name)} ) &"
+        return f"( bash {script_path} {PANE_SESSION_NAME_SHELL_EXPRESSION} ) &"
+
+    def upgrade_stored_command(self, command: CommandString) -> CommandString:
+        return CommandString(
+            upgrade_literal_session_name_argument(
+                command, f"( bash $MNGR_AGENT_STATE_DIR/commands/{_BACKGROUND_TASKS_SCRIPT_NAME}"
+            )
+        )
 
     def _get_agy_workspace_symlink_path(self) -> str:
         """Per-agent symlink target that agy will treat as its project folder.

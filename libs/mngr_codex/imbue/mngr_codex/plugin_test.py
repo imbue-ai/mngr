@@ -35,6 +35,7 @@ from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.tmux import PANE_SESSION_NAME_SHELL_EXPRESSION
 from imbue.mngr.interfaces.agent import HasCompactionMixin
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -71,6 +72,7 @@ from imbue.mngr_codex.codex_config import is_project_trusted
 from imbue.mngr_codex.plugin import CodexAgent
 from imbue.mngr_codex.plugin import CodexAgentConfig
 from imbue.mngr_codex.plugin import CodexUpdatePolicy
+from imbue.mngr_codex.plugin import _APP_SERVER_WINDOW_SPAWN_PREFIX
 from imbue.mngr_codex.plugin import _app_server_client_version
 from imbue.mngr_codex.plugin import _resolve_adopt_session
 from imbue.mngr_codex.plugin import _resolve_lifecycle_state_for_permission
@@ -947,6 +949,30 @@ def test_assemble_command_structure(codex_agent: CodexAgent) -> None:
     assert "app-server --listen" in command
     assert "--remote" in command
     assert f"unix://{socket_path}" in command
+
+
+def test_assemble_command_reads_its_session_when_it_runs(codex_agent: CodexAgent) -> None:
+    """The stored launch command is replayed on every start, so it must not name a session a rename can move."""
+    command = str(codex_agent.assemble_command(codex_agent.host, (), None))
+    assert codex_agent.session_name not in command
+
+
+def test_upgrade_stored_command_leaves_a_command_this_mngr_assembles_unchanged(codex_agent: CodexAgent) -> None:
+    command = codex_agent.assemble_command(codex_agent.host, (), None)
+    assert codex_agent.upgrade_stored_command(command) == command
+
+
+def test_upgrade_stored_command_rewrites_every_session_name_an_older_mngr_stored(codex_agent: CodexAgent) -> None:
+    current = codex_agent.assemble_command(codex_agent.host, (), None)
+    # The same command as an older mngr stored it, passing the supervisor the session's name and
+    # spawning the app-server window into it by name.
+    stored_by_older_mngr = CommandString(
+        current.replace(
+            _APP_SERVER_WINDOW_SPAWN_PREFIX, f"tmux new-window -d -t {codex_agent.session_name} -n codex-app-server"
+        ).replace(PANE_SESSION_NAME_SHELL_EXPRESSION, shlex.quote(codex_agent.session_name))
+    )
+    assert stored_by_older_mngr != current
+    assert codex_agent.upgrade_stored_command(stored_by_older_mngr) == current
 
 
 def test_assemble_command_launches_both_windows(codex_agent: CodexAgent) -> None:

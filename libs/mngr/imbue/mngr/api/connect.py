@@ -13,6 +13,8 @@ from imbue.mngr.errors import NestedTmuxError
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
@@ -35,6 +37,7 @@ CONNECT_COMMAND_ACTIVE_ENV_VAR: Final[str] = "MNGR_CONNECT_COMMAND_ACTIVE"
 @pure
 def _build_ssh_activity_wrapper_script(
     session_name: str,
+    agent_id: AgentId,
     host_dir: Path,
     attach_args: tuple[str, ...] = (),
 ) -> str:
@@ -47,6 +50,10 @@ def _build_ssh_activity_wrapper_script(
     4. Kills the activity tracker when tmux exits
     5. Checks for signal files (written by tmux Ctrl-q/Ctrl-t bindings) and
        exits with a specific code to tell the local mngr process what to do
+
+    The bindings name the signal file for the agent id, which a rename while attached
+    leaves alone. Any signal file left from an earlier connect is removed before
+    attaching, so it cannot turn a plain detach into a stop or destroy.
 
     The activity file contains JSON with:
     - time: milliseconds since Unix epoch (int)
@@ -66,7 +73,11 @@ def _build_ssh_activity_wrapper_script(
     """
     activity_dir = host_dir / "activity"
     activity_file = activity_dir / "ssh"
-    signal_file = host_dir / "signals" / session_name
+    # CLEANUP: drop the session-name file once no host's tmux config predates the bindings
+    # that name it for the agent id (every host has restarted its agents on such an mngr).
+    quoted_signal_files = " ".join(
+        shlex.quote(str(host_dir / "signals" / key)) for key in (str(agent_id), session_name)
+    )
     # Render the shared attach argv to a shell-command string. shlex.join quotes
     # each token (matching TmuxSessionTarget.as_shell_arg for the target), so this
     # is the same command the local path execs -- just as text for the remote shell.
@@ -80,6 +91,7 @@ def _build_ssh_activity_wrapper_script(
         f'printf \'{{\\n  "time": %d,\\n  "ssh_pid": %d\\n}}\\n\' "$TIME_MS" "$$" > \'{activity_file}\'; '
         f"sleep 5; done) & "
         "MNGR_ACTIVITY_PID=$!; "
+        f"rm -f {quoted_signal_files}; "
         # actually attach. Route the -t target through TmuxSessionTarget so the
         # = exact-match prefix and shell-escaping rule are uniform with the rest
         # of the codebase (see TmuxSessionTarget docstring for the prefix-matching
@@ -87,13 +99,13 @@ def _build_ssh_activity_wrapper_script(
         f"{attach_command}; "
         "kill $MNGR_ACTIVITY_PID 2>/dev/null; "
         # Check for signal files written by tmux key bindings (Ctrl-q writes "destroy", Ctrl-t writes "stop")
-        f"SIGNAL_FILE='{signal_file}'; "
+        f"for SIGNAL_FILE in {quoted_signal_files}; do "
         'if [ -f "$SIGNAL_FILE" ]; then '
         'ACTION=$(cat "$SIGNAL_FILE"); '
         'rm -f "$SIGNAL_FILE"; '
         f'if [ "$ACTION" = "destroy" ]; then exit {SIGNAL_EXIT_CODE_DESTROY}; '
         f'elif [ "$ACTION" = "stop" ]; then exit {SIGNAL_EXIT_CODE_STOP}; fi; '
-        "fi"
+        "fi; done"
     )
 
 
@@ -159,17 +171,21 @@ def _build_ssh_args(
 @pure
 def _determine_post_disconnect_action(
     exit_code: int,
-    session_name: str,
+    agent_id: AgentId,
+    host_id: HostId,
 ) -> tuple[str, list[str]] | None:
     """Given an SSH exit code, return the post-disconnect action to execute.
 
     Returns (executable, argv) if an action should be taken, or None if no
-    action is needed (normal exit or unknown exit code).
+    action is needed (normal exit or unknown exit code). The agent is addressed
+    as ``ID@HOST``: the same agent id can exist on more than one host, and a bare
+    id would stop or destroy every instance.
     """
+    agent_address = f"{agent_id}@{host_id}"
     if exit_code == SIGNAL_EXIT_CODE_DESTROY:
-        return ("mngr", ["mngr", "destroy", "--session", session_name, "-f"])
+        return ("mngr", ["mngr", "destroy", agent_address, "-f"])
     elif exit_code == SIGNAL_EXIT_CODE_STOP:
-        return ("mngr", ["mngr", "stop", "--session", session_name])
+        return ("mngr", ["mngr", "stop", agent_address])
     else:
         return None
 
@@ -273,6 +289,7 @@ def connect_to_agent(
         # Build wrapper script that tracks SSH activity while running tmux
         wrapper_script = _build_ssh_activity_wrapper_script(
             session_name,
+            agent.id,
             host.host_dir,
             mngr_ctx.config.tmux.attach_args,
         )
@@ -302,7 +319,7 @@ def connect_to_agent(
                 return
 
             # Check for post-disconnect actions (destroy/stop via tmux key bindings)
-            action = _determine_post_disconnect_action(exit_code, session_name)
+            action = _determine_post_disconnect_action(exit_code, agent.id, host.id)
             if action is not None:
                 executable, argv = action
                 logger.info("Running post-disconnect action: {}", argv)

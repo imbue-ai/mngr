@@ -1,4 +1,5 @@
 import json
+import subprocess
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -32,6 +33,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import create_test_agent_via_cli
+from imbue.mngr.utils.testing import terminal_tmux_server
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -174,6 +176,47 @@ def test_an_agent_loaded_before_a_rename_reads_the_same_lifecycle_as_one_loaded_
         lifecycle_after = agent_loaded_after.get_lifecycle_state()
         assert lifecycle_after != AgentLifecycleState.STOPPED
         assert agent_loaded_before.get_lifecycle_state() == lifecycle_after
+
+
+def _agent_window_size(session_name: str) -> str:
+    return subprocess.run(
+        ["tmux", "display-message", "-p", "-t", f"={session_name}:agent", "#{window_width}x#{window_height}"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.tmux
+def test_a_renamed_agents_window_still_refits_to_a_client_that_attaches(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    mngr_test_prefix: str,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The resize hook is set when the session starts and a rename keeps it, so it must find the session by the
+    name the session has when the hook fires, not the one it had when the hook was set."""
+    agent_name = f"test-rename-refit-{uuid4().hex}"
+    new_name = f"test-renamed-refit-{uuid4().hex}"
+    old_session_name = f"{mngr_test_prefix}{agent_name}"
+    new_session_name = f"{mngr_test_prefix}{new_name}"
+
+    with tmux_session_cleanup(old_session_name), tmux_session_cleanup(new_session_name):
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, command="sleep 847296"
+        )
+        rename_result = cli_runner.invoke(rename, [agent_name, new_name], obj=plugin_manager, catch_exceptions=False)
+        assert rename_result.exit_code == 0, f"Rename failed: {rename_result.output}"
+        assert _agent_window_size(new_session_name) != "131x36"
+
+        # The attach goes to tmux as separate arguments, so no shell parses the target (zsh would expand a
+        # leading `=` as a command path).
+        attach_command = ["env", "-u", "TMUX", "tmux", "attach", "-t", f"={new_session_name}:agent"]
+        with terminal_tmux_server(attach_command, width=131, height=37):
+            wait_for(
+                lambda: _agent_window_size(new_session_name) == "131x36",
+                timeout=10.0,
+                error_message="the renamed agent's window was not refit to the attaching client (131x37, less the status line)",
+            )
 
 
 def test_rename_dry_run_does_not_change_agent(

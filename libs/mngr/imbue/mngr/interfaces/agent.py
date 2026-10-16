@@ -90,6 +90,11 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """
         ...
 
+    @abstractmethod
+    def upgrade_stored_command(self, command: CommandString) -> CommandString:
+        """Return the stored launch ``command`` rewritten for this mngr, or ``command`` itself if it needs no rewrite."""
+        ...
+
     # Certified Field Getters/Setters
 
     @abstractmethod

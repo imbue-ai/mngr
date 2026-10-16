@@ -68,6 +68,7 @@ import importlib.metadata
 import importlib.resources
 import json
 import os
+import re
 import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -87,6 +88,7 @@ from websockets.exceptions import WebSocketException
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.pure import pure
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
@@ -116,6 +118,9 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import symlink_on_host
+from imbue.mngr.hosts.tmux import PANE_SESSION_ID_SHELL_EXPRESSION
+from imbue.mngr.hosts.tmux import PANE_SESSION_NAME_SHELL_EXPRESSION
+from imbue.mngr.hosts.tmux import upgrade_literal_session_name_argument
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
@@ -207,6 +212,23 @@ _VERSION_SPLIT_SENTINEL: Final[str] = "__MNGR_CODEX_VERSION_SPLIT__"
 # process in the agent's session, ``tmux kill-session`` (mngr stop/destroy) reaps
 # the daemon with everything else -- no orphaned daemons, no leaked sockets.
 _APP_SERVER_WINDOW_NAME: Final[str] = "codex-app-server"
+
+# The start of the command that spawns the app-server window, targeting the session of the pane
+# the launch command runs in, read when it runs. The stored launch command outlives a rename, so
+# one that named the session would spawn into a gone session and leave the TUI no daemon.
+_APP_SERVER_WINDOW_SPAWN_PREFIX: Final[str] = (
+    f"_MNGR_SESSION_ID={PANE_SESSION_ID_SHELL_EXPRESSION}; "
+    + 'tmux new-window -d -t "${_MNGR_SESSION_ID}:" '
+    + f"-n {shlex.quote(_APP_SERVER_WINDOW_NAME)}"
+)
+
+# The spawn as older launch commands stored it, with the session named literally.
+# CLEANUP: drop this pattern, upgrade_app_server_window_spawn and CodexAgent.upgrade_stored_command
+# once every codex agent created before the spawn read its session at run time has been started on
+# an mngr that upgrades it (or destroyed).
+_SESSION_NAMING_APP_SERVER_WINDOW_SPAWN_PATTERN: Final[re.Pattern[str]] = re.compile(
+    rf"tmux new-window -d -t (?:'[^']*'|[^\s'\"$]+) -n {re.escape(shlex.quote(_APP_SERVER_WINDOW_NAME))}"
+)
 
 # Top-level flags the DAEMON needs so its hooks actually run. codex gates hooks behind a
 # feature flag that is OFF by default (``--enable hooks`` == ``-c features.hooks=true``), and
@@ -347,6 +369,12 @@ class CodexUpdatePolicy(UpperCaseStrEnum):
     ASK = auto()
     # Never update; only log a non-blocking notice.
     NEVER = auto()
+
+
+@pure
+def upgrade_app_server_window_spawn(command: str) -> str:
+    """Return ``command`` with an app-server window spawn that names its session rewritten to read it at run time."""
+    return _SESSION_NAMING_APP_SERVER_WINDOW_SPAWN_PATTERN.sub(lambda _match: _APP_SERVER_WINDOW_SPAWN_PREFIX, command)
 
 
 def _load_codex_resource_script(filename: str) -> str:
@@ -1674,7 +1702,13 @@ class CodexAgent(
         is safe.
         """
         script_path = f"$MNGR_AGENT_STATE_DIR/commands/{BACKGROUND_TASKS_SCRIPT_NAME}"
-        return f"( bash {script_path} {shlex.quote(self.session_name)} ) &"
+        return f"( bash {script_path} {PANE_SESSION_NAME_SHELL_EXPRESSION} ) &"
+
+    def upgrade_stored_command(self, command: CommandString) -> CommandString:
+        upgraded = upgrade_literal_session_name_argument(
+            command, f"( bash $MNGR_AGENT_STATE_DIR/commands/{BACKGROUND_TASKS_SCRIPT_NAME}"
+        )
+        return CommandString(upgrade_app_server_window_spawn(upgraded))
 
     def assemble_command(
         self,
@@ -1774,10 +1808,7 @@ class CodexAgent(
             f"{{ {source_env_prefix}{cd_cmd} && exec {daemon_env} {base}{extra_str} "
             f"{_DAEMON_HOOK_FLAGS} app-server --listen {socket_url} ; }} > {daemon_log} 2>&1"
         )
-        spawn_daemon_cmd = (
-            f"tmux new-window -d -t {shlex.quote(self.session_name)} "
-            f"-n {shlex.quote(_APP_SERVER_WINDOW_NAME)} {shlex.quote(daemon_cmd)}"
-        )
+        spawn_daemon_cmd = f"{_APP_SERVER_WINDOW_SPAWN_PREFIX} {shlex.quote(daemon_cmd)}"
 
         # Wait (bounded) for the daemon's socket so window start-order is irrelevant.
         wait_for_socket_cmd = (

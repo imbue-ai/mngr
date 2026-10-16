@@ -354,9 +354,9 @@ def test_read_last_complete_assistant_id_missing_file(tmp_path: Path) -> None:
 
 
 def test_agent_pane_target_addresses_window_by_name() -> None:
-    """The pane is targeted by the primary window name (not the literal :0 index), with
-    the `=` exact-match prefix, so capture is correct regardless of the user's base-index."""
-    assert stream_snapshot._agent_pane_target("mngr-my-agent", "agent") == "=mngr-my-agent:agent"
-    target = stream_snapshot._agent_pane_target("mngr-my-agent", "primary")
-    assert target == "=mngr-my-agent:primary"
+    """The pane is targeted by session id and primary window name (not the literal :0
+    index), so capture is correct regardless of the user's base-index or a session rename."""
+    assert stream_snapshot._agent_pane_target("$3", "agent") == "$3:agent"
+    target = stream_snapshot._agent_pane_target("$3", "primary")
+    assert target == "$3:primary"
     assert ":0" not in target

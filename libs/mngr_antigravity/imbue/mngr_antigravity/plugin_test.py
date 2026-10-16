@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shlex
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -22,6 +23,7 @@ from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import is_macos
+from imbue.mngr.hosts.tmux import PANE_SESSION_NAME_SHELL_EXPRESSION
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
@@ -29,6 +31,7 @@ from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputStyleName
 from imbue.mngr.primitives import SystemPromptText
@@ -166,9 +169,7 @@ def test_register_agent_aliases_maps_agy_to_antigravity() -> None:
     assert register_agent_aliases() == {"agy": "antigravity"}
 
 
-# =============================================================================
 # Capability-mixin contract methods (install / unattended / permission policy)
-# =============================================================================
 
 
 def test_get_install_binary_name_is_agy() -> None:
@@ -409,9 +410,7 @@ def interactive_ctx_with_declination(local_provider: LocalProviderInstance, tmp_
     )
 
 
-# =============================================================================
 # assemble_command
-# =============================================================================
 
 _BACKGROUND_TASKS_LAUNCH_PREFIX = "( bash $MNGR_AGENT_STATE_DIR/commands/antigravity_background_tasks.sh"
 
@@ -656,9 +655,7 @@ def test_assemble_command_resume_prelude_runs_after_cd_and_before_agy(antigravit
     assert command.rstrip().endswith('"$@" ; }')
 
 
-# =============================================================================
 # provision: trust (global = durable source repo; per-agent = transient workspace)
-# =============================================================================
 
 
 def _read_global_settings(home: Path) -> dict[str, Any]:
@@ -949,9 +946,7 @@ def test_provision_errors_when_trustedworkspaces_has_non_list_value(
     assert json.loads(settings_path.read_text()) == {"trustedWorkspaces": "not-a-list"}
 
 
-# =============================================================================
 # provision: per-agent $HOME tree (settings / onboarding / hooks / token)
-# =============================================================================
 
 
 def test_provision_writes_per_agent_settings_with_overrides_and_synced_base(
@@ -1135,9 +1130,7 @@ def test_provision_symlinks_macos_keychain_into_per_agent_home(
         assert not dest.is_symlink()
 
 
-# =============================================================================
 # provision: per-agent hooks.json
-# =============================================================================
 
 
 def _read_hooks_json(agent: AntigravityAgent) -> dict[str, Any]:
@@ -1290,9 +1283,7 @@ def test_provision_does_not_write_hooks_into_work_dir(
     assert not (agent.work_dir / ".agents").exists()
 
 
-# =============================================================================
 # provision: transcript + supervisor scripts
-# =============================================================================
 
 
 @pytest.fixture
@@ -1380,9 +1371,7 @@ def test_provision_writes_supervisor_even_when_common_transcript_disabled(
     assert expected.exists()
 
 
-# =============================================================================
 # Preservation on destroy
-# =============================================================================
 
 
 def test_antigravity_config_preserves_on_destroy_by_default() -> None:
@@ -1428,9 +1417,7 @@ def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProvid
     assert not dest_dir.exists()
 
 
-# =============================================================================
 # Session adoption (--adopt / --from)
-# =============================================================================
 
 
 def _seed_conversation_store(conversations_dir: Path, conversation_id: str, suffix: str = ".db") -> Path:
@@ -1823,3 +1810,16 @@ def test_assemble_command_stamps_the_process_started_marker(antigravity_agent: A
     command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
     assert "antigravity_process_started" in command
     assert command.index("touch ") < command.index(" agy ")
+
+
+def test_upgrade_stored_command_rewrites_the_session_name_an_older_mngr_stored(
+    antigravity_agent: AntigravityAgent,
+) -> None:
+    current = antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None)
+    stored_by_older_mngr = CommandString(
+        current.replace(PANE_SESSION_NAME_SHELL_EXPRESSION, shlex.quote(antigravity_agent.session_name))
+    )
+    assert stored_by_older_mngr != current
+
+    assert antigravity_agent.upgrade_stored_command(stored_by_older_mngr) == current
+    assert antigravity_agent.upgrade_stored_command(current) == current

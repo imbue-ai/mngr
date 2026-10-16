@@ -1194,12 +1194,15 @@ def test_build_start_agent_shell_command_sigwinch_hook_targets_named_window(
     temp_work_dir: Path,
 ) -> None:
     """The SIGWINCH hook passes the primary window name to the script (not the literal
-    :0 index), so the manual-pin guard holds regardless of the user's tmux base-index."""
+    :0 index), so the manual-pin guard holds regardless of the user's tmux base-index, and
+    the session as tmux expands it when the hook fires, so a rename cannot leave it stale."""
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir, primary_window_name="primary")
 
     assert "sigwinch_panes.sh" in result
-    assert f"mngr-{agent.name} primary" in result
+    assert "#{session_name}" in result
+    assert " primary fit #{client_width} #{client_height}" in result
+    assert f"mngr-{agent.name} primary" not in result
 
 
 # Tests for onboarding helpers
