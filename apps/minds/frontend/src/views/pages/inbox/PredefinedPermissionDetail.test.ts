@@ -67,7 +67,7 @@ const DETAIL: PredefinedPermissionDetail = {
     { value: "bob@x", label: "bob@x", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false },
     {
       value: ":new-account",
-      label: "+ Add account",
+      label: "Add account",
       hint: "",
       is_credential_setup_needed: true,
       is_account_name_needed: false,
@@ -253,7 +253,7 @@ describe("PredefinedPermissionDetailView account states", () => {
     expect(collectVnodes(account).find((vnode) => vnode.tag === Select)).toBeDefined();
     expect(optionsOf(account)).toEqual([
       { value: "alice@x", label: "alice@x" },
-      { value: ":new-account", label: "+ Add account" },
+      { value: ":new-account", label: "Add account" },
     ]);
   });
 
@@ -269,7 +269,7 @@ describe("PredefinedPermissionDetailView account states", () => {
     expect(renderShell(makeModel(), DETAIL).approveLabel).toBe("Approve");
   });
 
-  it("says Approve will sign in once the picker is on '+ Add account'", () => {
+  it("says Approve will sign in once the picker is on 'Add account'", () => {
     // Staged, not signed in: the browser hop runs on Approve, so the button has
     // to say so even though the service already has accounts.
     const model = makeModel();
@@ -278,6 +278,19 @@ describe("PredefinedPermissionDetailView account states", () => {
     const shell = renderShell(model, DETAIL);
     expect(shell.approveLabel).toBe("Sign in & approve");
     expect(shell.account, "and the dropdown stays, so the choice is reversible").not.toBeNull();
+  });
+
+  it("says Approve will sign in for an account that has no usable credentials", () => {
+    // An account the agent asked for that is not connected here (or a stored
+    // one gone stale) runs the same browser hop as "Add account" does.
+    const personal = { value: "personal", label: "personal", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false };
+    const detail = { ...withChoices([ALICE, personal, NEW_ACCOUNT]), selected_account_value: "personal" };
+    const model = makeModel(detail);
+
+    expect(renderShell(model, detail).approveLabel).toBe("Sign in & approve");
+
+    model.selectedAccount = ALICE.value;
+    expect(renderShell(model, detail).approveLabel).toBe("Approve");
   });
 
   it("never promises a sign-in for a service that has none", () => {
@@ -307,7 +320,7 @@ describe("PredefinedPermissionDetailView account states", () => {
 });
 
 describe("PredefinedPermissionDetailView account picker", () => {
-  it("is a dropdown listing every account, with '+ Add account' last", () => {
+  it("is a dropdown listing every account, with 'Add account' last", () => {
     const account = renderShell(makeModel(), DETAIL).account;
 
     // A dropdown, not radios: a radio per account is what this replaced.
@@ -322,7 +335,7 @@ describe("PredefinedPermissionDetailView account picker", () => {
     expect(optionsOf(account)).toEqual([
       { value: "alice@x", label: "alice@x" },
       { value: "bob@x", label: "bob@x (needs sign-in)" },
-      { value: ":new-account", label: "+ Add account" },
+      { value: ":new-account", label: "Add account" },
     ]);
   });
 

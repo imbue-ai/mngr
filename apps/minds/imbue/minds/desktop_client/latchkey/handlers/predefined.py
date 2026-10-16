@@ -467,8 +467,8 @@ def _build_account_choices(
             value=NEW_ACCOUNT_FORM_VALUE,
             # "Sign in" only reads right when it is the single option, and only
             # when signing in is what actually happens. Otherwise this is the
-            # trailing "+ Add account" entry of the dialog's account dropdown.
-            label=_first_connection_label(is_browser_auth_supported) if len(choices) == 0 else "+ Add account",
+            # trailing "Add account" entry of the dialog's account dropdown.
+            label=_first_connection_label(is_browser_auth_supported) if len(choices) == 0 else "Add account",
             hint="",
             is_credential_setup_needed=True,
             # Latchkey names an account from the sign-in; a manual connection

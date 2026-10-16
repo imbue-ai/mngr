@@ -192,7 +192,7 @@ profile; otherwise it fails with latchkey's reason.
 
 Imbue Studio offers it **once**, at the moment it is worth the most: the
 first Approve that is about to open a browser for a sign-in (nothing signed
-in to the service yet, the account picker on "+ Add account", or a custom
+in to the service yet, the account picker on "Add account", or a custom
 service with a login URL). Before submitting the approval, the dialog asks
 "Want to skip logging in?" with two answers:
 
@@ -407,13 +407,15 @@ Details worth knowing:
   with nothing signed in there is no dropdown at all and Approve reads
   "Sign in & approve", so the browser hop is not a surprise; with anything
   signed in -- one account or several -- the dropdown appears, the account
-  the grant will ride on already selected and "+ Add account" last. A lone
+  the grant will ride on already selected and "Add account" last. A lone
   account is not a third arrangement: a service can hold several accounts,
-  so a review that named none would leave which one unsaid. Choosing
-  "+ Add account" flips Approve back to "Sign in & approve" and leaves the
-  dropdown in place, so the choice can be taken back; nothing is signed in
-  until Approve. A service with no accounts yet resolves to latchkey's
-  unnamed default account; "+ Add account" on a service that already has
+  so a review that named none would leave which one unsaid. Approve reads
+  "Sign in & approve" whenever the selected choice has no usable
+  credentials: "Add account", an account the agent asked for that is not
+  connected here, or a stored one marked "(needs sign-in)". Choosing
+  "Add account" leaves the dropdown in place, so the choice can be taken
+  back; nothing is signed in until Approve. A service with no accounts yet resolves to latchkey's
+  unnamed default account; "Add account" on a service that already has
   one also asks for an **account name** (`is_account_name_needed`), since
   a manual connection cannot discover it the way a browser sign-in does.
 

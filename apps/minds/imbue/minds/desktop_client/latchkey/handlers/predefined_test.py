@@ -1644,7 +1644,7 @@ def test_build_account_choices_promises_a_credential_form_without_browser_auth()
 
     assert [(choice.value, choice.label, choice.hint) for choice in choices] == [
         ("alice@x", "alice@x", "needs credentials"),
-        (NEW_ACCOUNT_FORM_VALUE, "+ Add account", ""),
+        (NEW_ACCOUNT_FORM_VALUE, "Add account", ""),
     ]
 
 

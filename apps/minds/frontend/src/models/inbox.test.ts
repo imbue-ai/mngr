@@ -114,7 +114,7 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
     },
     {
       value: ":new-account",
-      label: "+ Add account",
+      label: "Add account",
       hint: "",
       is_credential_setup_needed: true,
       is_account_name_needed: true,
@@ -1187,7 +1187,7 @@ describe("the Chrome sign-in import offer", () => {
     account_choices: [
       {
         value: ":new-account",
-        label: "+ Add account",
+        label: "Add account",
         hint: "",
         is_credential_setup_needed: true,
         is_account_name_needed: false,
@@ -1228,10 +1228,24 @@ describe("the Chrome sign-in import offer", () => {
     expect(makeOfferModel({}, SIGN_IN_DETAIL).isBrowserSignInPending()).toBe(true);
     // A stored account rides without a browser...
     expect(makeOfferModel({}, PREDEFINED_DETAIL).isBrowserSignInPending()).toBe(false);
-    // ...until the picker is moved to "+ Add account".
+    // ...until the picker is moved to "Add account".
     const staged = makeOfferModel({}, PREDEFINED_DETAIL);
     staged.selectedAccount = PREDEFINED_DETAIL.new_account_value;
     expect(staged.isBrowserSignInPending()).toBe(true);
+    // An account with no usable credentials -- one the agent asked for that is
+    // not connected here, or a stored one gone stale -- signs in just like
+    // "Add account" does.
+    const unconnected = makeOfferModel({}, {
+      ...PREDEFINED_DETAIL,
+      account_choices: [
+        ...PREDEFINED_DETAIL.account_choices,
+        { value: "personal", label: "personal", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false },
+      ],
+    });
+    unconnected.selectedAccount = "personal";
+    expect(unconnected.isBrowserSignInPending()).toBe(true);
+    unconnected.selectedAccount = "";
+    expect(unconnected.isBrowserSignInPending()).toBe(false);
     // A service with no browser flow connects by typed credentials instead.
     expect(makeOfferModel({}, MANUAL_DETAIL).isBrowserSignInPending()).toBe(false);
   });

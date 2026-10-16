@@ -55,13 +55,13 @@ function summaryRows(
 }
 
 /** The account the grant rides on -- shown whenever there is one to name.
- * Gated on the payload, never on the selection: choosing "+ Add account" must
+ * Gated on the payload, never on the selection: choosing "Add account" must
  * not take the dropdown away, or there would be no way back to a real one.
  *
  * The dialog has two shapes, not three. Nothing signed in yet: no picker at
  * all, and Approve says "Sign in & approve" so the browser hop is not a
  * surprise. Anything signed in: the picker, with the account the grant will
- * ride on already selected and "+ Add account" last -- including when there
+ * ride on already selected and "Add account" last -- including when there
  * is only one, where naming it is what stops a service the user holds several
  * accounts on from reading as ambiguous. One control that always says which
  * account beats several arrangements the user has to tell apart. */

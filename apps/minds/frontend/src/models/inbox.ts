@@ -294,7 +294,7 @@ export interface InboxModelOptions {
 }
 
 /** Whether nothing is signed in to the service yet: every choice the dialog
- * offers is the "+ Add account" sentinel (the server always appends that one,
+ * offers is the "Add account" sentinel (the server always appends that one,
  * so the raw choice list is never empty and its length says nothing). */
 export function hasNoStoredAccount(detail: PredefinedPermissionDetail): boolean {
   return detail.account_choices.every((choice) => choice.value === detail.new_account_value);
@@ -729,15 +729,16 @@ export class InboxModel {
 
   /** Whether Approve will run a browser sign-in before it grants anything.
    *
-   * For a catalog service, two ways in: nothing is signed in yet, or the picker
-   * is sitting on "+ Add account", which is a staged choice rather than an
-   * account -- picking it signs nothing in until Approve is pressed. Reading
-   * the selection and not just the payload is the point: the second one
-   * changes as the user works the dropdown, which is why the payload's own
-   * `will_open_browser` (computed for the account it was built with) cannot
-   * stand in. Neither counts for a service latchkey cannot sign in to at all
-   * (AWS, Coolify), which connects by the credentials the dialog asks for --
-   * `manual_credentials` is non-null exactly then.
+   * For a catalog service: whenever the selected choice has no usable
+   * credentials -- nothing signed in yet, the picker sitting on "Add account"
+   * (a staged choice that signs nothing in until Approve is pressed), an
+   * account the agent asked for that is not connected here, or a stored one
+   * whose credentials went bad. Reading the selection and not just the payload
+   * is the point: it changes as the user works the dropdown, which is why the
+   * payload's own `will_open_browser` (computed for the account it was built
+   * with) cannot stand in. None of it counts for a service latchkey cannot
+   * sign in to at all (AWS, Coolify), which connects by the credentials the
+   * dialog asks for -- `manual_credentials` is non-null exactly then.
    *
    * A custom service signs in through a browser exactly when the request
    * carries a login URL. */
@@ -746,7 +747,8 @@ export class InboxModel {
     if (detail === null) return false;
     if (detail.kind === "predefined") {
       if (detail.manual_credentials !== null) return false;
-      return hasNoStoredAccount(detail) || this.selectedAccount === detail.new_account_value;
+      if (hasNoStoredAccount(detail) || this.selectedAccount === detail.new_account_value) return true;
+      return this.selectedAccountChoice()?.is_credential_setup_needed ?? false;
     }
     if (detail.kind === "custom_service") return detail.login_url !== null;
     return false;
