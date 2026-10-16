@@ -28,9 +28,13 @@ dependencies = [
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
     "imbue-mngr-latchkey",
+    # The local-VM compute provider (LaunchMode.LIMA); also runs `mngr lima resize`.
+    "imbue-mngr-lima",
     # minds writes an enabled modal provider block into its mngr settings, and
     # mngr rejects an enabled provider whose backend plugin is not installed.
     "imbue-mngr-modal",
+    # Folder sync runs `mngr pair`.
+    "imbue-mngr-pair",
     "imbue-mngr-vps",
     # The agent-type plugins the default workspace template configures. mngr
     # refuses to parse the template's settings when any of them is missing, so
@@ -85,8 +89,10 @@ imbue-mngr-docker = { workspace = true }
 imbue-mngr-forward = { workspace = true }
 imbue-mngr-imbue-cloud = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
+imbue-mngr-lima = { workspace = true }
 imbue-mngr-modal = { workspace = true }
 imbue-mngr-opencode = { workspace = true }
+imbue-mngr-pair = { workspace = true }
 imbue-mngr-pi-coding = { workspace = true }
 imbue-mngr-vps = { workspace = true }
 imbue-common = { workspace = true }

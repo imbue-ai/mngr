@@ -48,6 +48,13 @@ const DESYNC_VERSION = '1.0.3';
 // Unaffected by mngr_vps's PINNED_DOCKER_APT_VERSION_CORE: the bug sits in
 // lima's host-side TCP forwarder, below the guest docker daemon.
 const LIMA_VERSION = '2.0.3';
+// unison: the file synchronizer `mngr pair` runs for folder sync.
+const UNISON_VERSION = '2.54.0';
+// The macOS file watcher unison execs for `-repeat watch`, from
+// autozimu/unison-fsmonitor; upstream's macOS release carries none. Its
+// release asset names carry no version, so a bump must also replace the
+// `unison-fsmonitor-macos-*` hashes in EXPECTED_SHA256.
+const UNISON_FSMONITOR_VERSION = '0.3.9';
 
 // latchkey-curl-shims distribution: the curl router + the Chrome-impersonating
 // curl it fronts (see the `latchkey-curl-shims-<triple>.tar.gz` release asset).
@@ -73,11 +80,12 @@ const CURL_SHIMS_VERSION = 'v0.6.0';
  * - restic: https://github.com/restic/restic/releases/download/v<version>/SHA256SUMS
  * - desync: https://github.com/folbricht/desync/releases/tag/v<version>
  * - lima: https://github.com/lima-vm/lima/releases/download/v<version>/SHA256SUMS
+ * - unison, unison-fsmonitor: the `digest` of each GitHub release asset
+ *   (neither release publishes a SHA256SUMS file)
  *
- * Update this map whenever UV_VERSION, GIT_FOR_WINDOWS_VERSION,
- * RESTIC_VERSION, DESYNC_VERSION, or LIMA_VERSION changes. If a download
- * hash doesn't match an entry here, the script aborts before extracting or
- * executing any downloaded bytes.
+ * Update this map whenever one of the pinned versions above changes. If a
+ * download hash doesn't match an entry here, the script aborts before
+ * extracting or executing any downloaded bytes.
  */
 const EXPECTED_SHA256 = {
   'uv-aarch64-apple-darwin.tar.gz':     '7e5b336108f8576eda1939920ca0a805b4a9a3c3d3eb2f6140e38b7092fbe4f3',
@@ -99,6 +107,11 @@ const EXPECTED_SHA256 = {
   'lima-2.0.3-Darwin-x86_64.tar.gz':    '0806bcb83a08411e9d878b43b2c4203f1556fe14f9f8ba1e5f0d5d9a3c2c0bd8',
   'lima-2.0.3-Linux-x86_64.tar.gz':     '6838a926d85ed2ddcfd636befb476256a96196516a3b7f36d2af66cde9188d66',
   'lima-2.0.3-Linux-aarch64.tar.gz':    'd0f9c30b82fdbd06b5c951b76bf3378b68cc658aebfe243f777949e131b6ea28',
+  'unison-2.54.0-macos-arm64.tar.gz':   '51cc9ad9f014e5c2ce0876bd9e398bd3cf6e671930d1193d7bc7e4a4b90a791f',
+  'unison-2.54.0-macos-x86-64.tar.gz':  '4c921bd555e03b47ec4f2e2fadc37acc4cd33b00e4e25b3dbb23454dd60338fe',
+  'unison-2.54.0-ubuntu-22.04-x86_64-static.tar.gz': 'd279dff18682c909d3ddb0b280ab151229b4798b9399b1d227084da424337d24',
+  'unison-fsmonitor-macos-aarch64.tar.gz': '13418727fbd2aae950eb4d6f357cfa76a61e7f7aa9986a666ce27a6b323bc68d',
+  'unison-fsmonitor-macos-amd64.tar.gz':   '79197d15f3a39c25a76f2188e24c8d4163e4e2b1442ffd98b04ff3761bc76dcd',
   // From the `SHA256SUMS` of the latchkey-curl-shims release named by
   // CURL_SHIMS_VERSION.
   'latchkey-curl-shims-aarch64-apple-darwin.tar.gz':      'c7ad059addf9d3b52005e20019818542fb0a0bd37e4d2f787aad92773aa58509',
@@ -333,6 +346,44 @@ function getLatchkeyCurlDownloadInfo({ platform, arch }) {
     filename,
     url: `https://github.com/${CURL_SHIMS_REPO}/releases/download/${CURL_SHIMS_VERSION}/${filename}`,
   };
+}
+
+// The `unison-<version>-<suffix>.tar.gz` asset of each platform/arch upstream
+// unison publishes a build for. Each tarball is `<asset stem>/{bin/,LICENSE,...}`.
+const UNISON_ASSET_SUFFIX_BY_PLATFORM_ARCH = {
+  'darwin/aarch64': 'macos-arm64',
+  'darwin/x86_64': 'macos-x86-64',
+  'linux/x86_64': 'ubuntu-22.04-x86_64-static',
+};
+
+// The `unison-fsmonitor-macos-<label>.tar.gz` asset of each macOS arch.
+const UNISON_FSMONITOR_MACOS_ARCH_LABEL_BY_ARCH = {
+  aarch64: 'aarch64',
+  x86_64: 'amd64',
+};
+
+/** The upstream unison release tarball for a platform/arch, or null where upstream has none. */
+function getUnisonDownloadUrl({ platform, arch }) {
+  const suffix = UNISON_ASSET_SUFFIX_BY_PLATFORM_ARCH[`${platform}/${arch}`];
+  if (suffix === undefined) {
+    return null;
+  }
+  return `https://github.com/bcpierce00/unison/releases/download/v${UNISON_VERSION}/unison-${UNISON_VERSION}-${suffix}.tar.gz`;
+}
+
+/**
+ * The tarball carrying unison-fsmonitor for a platform/arch, or null where
+ * there is none: autozimu's build on macOS, the unison release itself elsewhere.
+ */
+function getUnisonFsmonitorDownloadUrl({ platform, arch }) {
+  if (platform !== 'darwin') {
+    return getUnisonDownloadUrl({ platform, arch });
+  }
+  const archLabel = UNISON_FSMONITOR_MACOS_ARCH_LABEL_BY_ARCH[arch];
+  if (archLabel === undefined) {
+    return null;
+  }
+  return `https://github.com/autozimu/unison-fsmonitor/releases/download/v${UNISON_FSMONITOR_VERSION}/unison-fsmonitor-macos-${archLabel}.tar.gz`;
 }
 
 /**
@@ -863,6 +914,95 @@ async function downloadGit(resourcesDir, { platform, arch }) {
 }
 
 /**
+ * Extract `bin/<executable>` and LICENSE from the verified upstream unison
+ * tarball into `destDir`.
+ *
+ * Only those two members are extracted: the macOS tarball also carries a
+ * unison-gui linked against Homebrew's GTK, which cannot run on a user's Mac.
+ */
+async function extractFromUnisonRelease(destDir, executable, platformArch) {
+  const url = getUnisonDownloadUrl(platformArch);
+  const filename = path.basename(new URL(url).pathname);
+  console.log(`[download-binaries] Downloading unison from ${url}...`);
+  const archive = await download(url);
+  verifyChecksum(archive, filename);
+
+  const tarPath = path.join(destDir, 'unison.tar.gz');
+  fs.writeFileSync(tarPath, archive);
+  const assetStem = path.basename(filename, '.tar.gz');
+  execSync(`tar xzf "${tarPath}" -C "${destDir}" --strip-components=2 "${assetStem}/bin/${executable}"`, { stdio: 'inherit' });
+  execSync(`tar xzf "${tarPath}" -C "${destDir}" --strip-components=1 "${assetStem}/LICENSE"`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+}
+
+/** Write `<dir>/NOTICE` for a binary taken unmodified from the upstream unison release. */
+function writeUnisonNotice(dir, executable) {
+  const releaseUrl = `https://github.com/bcpierce00/unison/releases/tag/v${UNISON_VERSION}`;
+  const sourceUrl = `https://github.com/bcpierce00/unison/tree/v${UNISON_VERSION}`;
+  const notice =
+    `This directory contains ${executable} from the unison ${UNISON_VERSION} release\n` +
+    `(${releaseUrl}), unmodified.\n` +
+    `\n` +
+    `License: GPL-3.0-or-later; the text is in the adjacent LICENSE file.\n` +
+    `Source: ${sourceUrl}\n`;
+  fs.writeFileSync(path.join(dir, 'NOTICE'), notice);
+}
+
+/** Write `<dir>/NOTICE` for autozimu's unison-fsmonitor build. */
+function writeAutozimuUnisonFsmonitorNotice(dir) {
+  const releaseUrl = `https://github.com/autozimu/unison-fsmonitor/releases/tag/v${UNISON_FSMONITOR_VERSION}`;
+  const sourceUrl = `https://github.com/autozimu/unison-fsmonitor/tree/v${UNISON_FSMONITOR_VERSION}`;
+  const notice =
+    `This directory contains unison-fsmonitor ${UNISON_FSMONITOR_VERSION} by Junfeng Li and contributors\n` +
+    `(${releaseUrl}), unmodified.\n` +
+    `\n` +
+    `License: MIT; the text is in the adjacent LICENSE file.\n` +
+    `Source: ${sourceUrl}\n`;
+  fs.writeFileSync(path.join(dir, 'NOTICE'), notice);
+}
+
+async function downloadUnison(resourcesDir, platformArch) {
+  const unisonDir = path.join(resourcesDir, 'unison');
+  if (fs.existsSync(unisonDir)) fs.rmSync(unisonDir, { recursive: true });
+  fs.mkdirSync(unisonDir, { recursive: true });
+
+  await extractFromUnisonRelease(unisonDir, 'unison', platformArch);
+  const unisonBinary = path.join(unisonDir, 'unison');
+  fs.chmodSync(unisonBinary, 0o755);
+  writeUnisonNotice(unisonDir, 'unison');
+  console.log(`[download-binaries] unison installed at ${unisonBinary}`);
+}
+
+async function downloadUnisonFsmonitor(resourcesDir, platformArch) {
+  const fsmonitorDir = path.join(resourcesDir, 'unison-fsmonitor');
+  if (fs.existsSync(fsmonitorDir)) fs.rmSync(fsmonitorDir, { recursive: true });
+  fs.mkdirSync(fsmonitorDir, { recursive: true });
+
+  if (platformArch.platform === 'darwin') {
+    const url = getUnisonFsmonitorDownloadUrl(platformArch);
+    const filename = path.basename(new URL(url).pathname);
+    console.log(`[download-binaries] Downloading unison-fsmonitor from ${url}...`);
+    const archive = await download(url);
+    verifyChecksum(archive, filename);
+
+    // The asset is an uncompressed tar, despite its name, holding only the executable.
+    const tarPath = path.join(fsmonitorDir, 'unison-fsmonitor.tar');
+    fs.writeFileSync(tarPath, archive);
+    execSync(`tar xf "${tarPath}" -C "${fsmonitorDir}" unison-fsmonitor`, { stdio: 'inherit' });
+    fs.unlinkSync(tarPath);
+    fs.copyFileSync(path.join(__dirname, 'assets', 'unison-fsmonitor-LICENSE'), path.join(fsmonitorDir, 'LICENSE'));
+    writeAutozimuUnisonFsmonitorNotice(fsmonitorDir);
+  } else {
+    await extractFromUnisonRelease(fsmonitorDir, 'unison-fsmonitor', platformArch);
+    writeUnisonNotice(fsmonitorDir, 'unison-fsmonitor');
+  }
+
+  const fsmonitorBinary = path.join(fsmonitorDir, 'unison-fsmonitor');
+  fs.chmodSync(fsmonitorBinary, 0o755);
+  console.log(`[download-binaries] unison-fsmonitor installed at ${fsmonitorBinary}`);
+}
+
+/**
  * Total size in bytes of the file (or, recursively, directory) at `target`,
  * following nothing further -- used to price a symlink the way an archiver
  * that follows symlinks would.
@@ -1135,6 +1275,21 @@ const BINARIES = {
     usedInDev: true,
     download: downloadLatchkeyCurl,
   },
+  unison: {
+    version: () => UNISON_VERSION,
+    requiredPath: 'unison',
+    isSupported: (platformArch) => getUnisonDownloadUrl(platformArch) !== null,
+    usedInDev: true,
+    download: downloadUnison,
+  },
+  'unison-fsmonitor': {
+    version: ({ platform }) => (platform === 'darwin' ? UNISON_FSMONITOR_VERSION : UNISON_VERSION),
+    requiredPath: 'unison-fsmonitor',
+    // Provisioned exactly where unison is: neither is any use without the other.
+    isSupported: (platformArch) => getUnisonDownloadUrl(platformArch) !== null,
+    usedInDev: true,
+    download: downloadUnisonFsmonitor,
+  },
 };
 
 /** Names from BINARIES that are provisioned for the given platform/arch. */
@@ -1229,6 +1384,8 @@ module.exports = {
   getDesyncDownloadUrl,
   getLimaDownloadUrl,
   getLatchkeyCurlDownloadInfo,
+  getUnisonDownloadUrl,
+  getUnisonFsmonitorDownloadUrl,
   getCacheEntryPath,
   ensureCachedBinary,
   downloadBinaries,

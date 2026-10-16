@@ -58,6 +58,7 @@ function runEnvSetup(onProgress, onLogLine = () => {}) {
       'imbue-mngr-lima',
       'imbue-mngr-modal',
       'imbue-mngr-ovh',
+      'imbue-mngr-pair',
       'imbue-mngr-pi-coding',
       'imbue-mngr-opencode',
       'imbue-mngr-antigravity',

@@ -58,7 +58,8 @@ apps/minds/scripts/start-desktop.sh
 It selects the pinned Node, checks for the pinned pnpm (erroring with the
 install command if either is missing), installs the Electron dependencies,
 and runs `pnpm start`, which provisions the bundled binaries (git, restic,
-lima, desync, the latchkey curl) into a per-user cache, builds the UI, and
+lima, desync, the latchkey curl, unison and its file watcher) into a per-user
+cache, builds the UI, and
 launches Electron. The Linux launcher and the internal `just minds-start`
 recipes end in this same script. You create your first agent from the login
 URL the app prints on startup.

@@ -17,15 +17,16 @@ reads. It is in its own file (not ``test_snapshot_resume.py``) because it
 needs no dockerd, which that module's autouse fixture requires.
 """
 
-import re
 import tomllib
-from importlib import metadata as importlib_metadata
-from pathlib import Path
 from typing import Final
 
 import pytest
 
 from imbue.minds.desktop_client.default_workspace_template_worktree import DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE
+from imbue.minds.testing import MINDS_INSTALLS
+from imbue.minds.testing import MindsInstall
+from imbue.minds.testing import get_mngr_plugin_package_names
+from imbue.minds.testing import read_pyproject_dependency_names
 from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.main import get_or_create_plugin_manager
 
@@ -33,45 +34,12 @@ from imbue.mngr.main import get_or_create_plugin_manager
 # types ship inside imbue-mngr, which is always installed.
 _BUILTIN_AGENT_PLUGIN_NAMES: Final[frozenset[str]] = frozenset({"command", "headless_command"})
 
-_MINDS_DIR: Final[Path] = Path(__file__).parent
-
-_PACKAGED_APP_FIX: Final[str] = (
-    "add it to ALL FOUR mirrored workspace-package lists: "
-    "apps/minds/scripts/build.js (WORKSPACE_PACKAGES), apps/minds/electron/env-setup.js "
-    "(WORKSPACE_PACKAGES), apps/minds/electron/pyproject/pyproject.toml "
-    "([project.dependencies] AND [tool.uv.sources], then run `uv lock` in that directory), "
-    "and apps/minds/scripts/build_test.py (WORKSPACE_PACKAGES)."
-)
-
-_SOURCE_INSTALL_FIX: Final[str] = (
-    "add it to apps/minds/pyproject.toml ([project.dependencies] AND [tool.uv.sources]), "
-    "then run `uv lock` at the repo root."
-)
-
 
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.timeout(60)
-@pytest.mark.parametrize(
-    ("install_description", "pyproject_path", "fix_instructions"),
-    [
-        pytest.param(
-            "the packaged desktop app",
-            _MINDS_DIR / "electron" / "pyproject" / "pyproject.toml",
-            _PACKAGED_APP_FIX,
-            id="packaged_app",
-        ),
-        pytest.param(
-            "minds run from source",
-            _MINDS_DIR / "pyproject.toml",
-            _SOURCE_INSTALL_FIX,
-            id="source_install",
-        ),
-    ],
-)
+@pytest.mark.parametrize("minds_install", MINDS_INSTALLS, ids=lambda install: install.test_id)
 def test_template_agent_types_are_installed_with_minds(
-    install_description: str,
-    pyproject_path: Path,
-    fix_instructions: str,
+    minds_install: MindsInstall,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings_path = DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE / ".mngr" / "settings.toml"
@@ -99,18 +67,8 @@ def test_template_agent_types_are_installed_with_minds(
     monkeypatch.setenv("MNGR_LOAD_ALL_PLUGINS", "1")
     get_or_create_plugin_manager()
 
-    # Map pluggy plugin names (setuptools entry-point names, e.g. "pi_coding")
-    # to the distribution that provides them (e.g. "imbue-mngr-pi-coding").
-    package_by_plugin_name = {
-        entry_point.name: entry_point.dist.metadata["Name"]
-        for entry_point in importlib_metadata.entry_points(group="mngr")
-        if entry_point.dist is not None
-    }
-
-    dependencies = tomllib.loads(pyproject_path.read_text())["project"]["dependencies"]
-    installed_package_names = {
-        re.split(r"[><=!~\[; ]", dependency, maxsplit=1)[0].strip().lower() for dependency in dependencies
-    }
+    package_by_plugin_name = get_mngr_plugin_package_names()
+    installed_package_names = read_pyproject_dependency_names(minds_install.pyproject_path)
 
     problems: list[str] = []
     for agent_type_name in sorted(required_base_type_names):
@@ -135,10 +93,10 @@ def test_template_agent_types_are_installed_with_minds(
             else:
                 problems.append(
                     f"agent type '{agent_type_name}' is provided by package '{package_name}', which is NOT "
-                    f"a dependency of {install_description}. Every `mngr create` from it will fail with "
-                    f'"Unknown fields in agent_types.{agent_type_name}". Fix: {fix_instructions}'
+                    f"a dependency of {minds_install.description}. Every `mngr create` from it will fail with "
+                    f'"Unknown fields in agent_types.{agent_type_name}". Fix: {minds_install.fix_instructions}'
                 )
     assert not problems, (
-        f"The default-workspace-template declares agent types {install_description} cannot parse:\n- "
+        f"The default-workspace-template declares agent types {minds_install.description} cannot parse:\n- "
         + "\n- ".join(problems)
     )

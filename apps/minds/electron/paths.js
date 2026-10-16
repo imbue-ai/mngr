@@ -69,6 +69,22 @@ function getDesyncBinDir() {
   return path.dirname(getDesyncPath());
 }
 
+function getUnisonPath() {
+  return path.join(getResourcesDir(), 'unison', 'unison');
+}
+
+function getUnisonBinDir() {
+  return path.dirname(getUnisonPath());
+}
+
+function getUnisonFsmonitorPath() {
+  return path.join(getResourcesDir(), 'unison-fsmonitor', 'unison-fsmonitor');
+}
+
+function getUnisonFsmonitorBinDir() {
+  return path.dirname(getUnisonFsmonitorPath());
+}
+
 /**
  * Path to the bundled restic binary used by the desktop client to
  * provision and query per-workspace backup repositories.
@@ -336,6 +352,8 @@ module.exports = {
   getLimaBinDir,
   getDesyncPath,
   getDesyncBinDir,
+  getUnisonBinDir,
+  getUnisonFsmonitorBinDir,
   getLatchkeyPath,
   getLatchkeyDirectory,
   getResticPath,

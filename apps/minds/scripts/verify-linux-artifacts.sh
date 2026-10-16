@@ -37,6 +37,8 @@ RUNNABLE_TOOLS=(
   "lima/bin/limactl|--version"
   "curl/latchkey-curl-router|--version"
   "curl/curl-impersonate|--version"
+  "unison/unison|-version"
+  "unison-fsmonitor/unison-fsmonitor|"
 )
 
 fail() {

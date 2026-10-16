@@ -40,6 +40,8 @@ import pytest
 
 from imbue.mngr_latchkey.remote.provisioning import CURL_SHIMS_SHA256_BY_TRIPLE as GATEWAY_CURL_SHIMS_SHA256_BY_TRIPLE
 from imbue.mngr_latchkey.remote.provisioning import CURL_SHIMS_VERSION as GATEWAY_CURL_SHIMS_VERSION
+from imbue.mngr_pair.remote import REMOTE_UNISON_SHA256
+from imbue.mngr_pair.remote import REMOTE_UNISON_VERSION
 from imbue.mngr_vps.host_setup import PINNED_GVISOR_RELEASE
 
 # The full set of workspace packages bundled into the standalone app. This
@@ -66,6 +68,7 @@ WORKSPACE_PACKAGES = [
     "imbue-mngr-lima",
     "imbue-mngr-modal",
     "imbue-mngr-ovh",
+    "imbue-mngr-pair",
     "imbue-mngr-pi-coding",
     "imbue-mngr-opencode",
     "imbue-mngr-antigravity",
@@ -803,6 +806,22 @@ def test_ensure_binaries_derives_its_required_set_from_the_binaries_table() -> N
     )
 
 
+def _backend_dev_branch() -> str:
+    """The body of backend.js's ``if (paths.isDev())`` branch."""
+    text = (APP_ROOT / "electron" / "backend.js").read_text()
+    match = re.search(r"if \(paths\.isDev\(\)\) \{(.*?)\n      \} else \{", text, re.DOTALL)
+    assert match is not None, "Could not locate the dev-mode branch in backend.js"
+    return match.group(1)
+
+
+def _backend_packaged_branch() -> str:
+    """The body of the ``else`` branch that pairs with backend.js's ``if (paths.isDev())``."""
+    text = (APP_ROOT / "electron" / "backend.js").read_text()
+    match = re.search(r"\n      \} else \{\n(.*?)\n      \}\n", text, re.DOTALL)
+    assert match is not None, "Could not locate the packaged-mode branch in backend.js"
+    return match.group(1)
+
+
 def test_both_uv_spawn_sites_shadow_install_name_tool() -> None:
     """Guard: every uv spawn must put the shim dir ahead of /usr/bin on PATH.
 
@@ -819,12 +838,9 @@ def test_both_uv_spawn_sites_shadow_install_name_tool() -> None:
     users, and a shim reaching the dev branch instead is the regression, not the
     fix.
     """
-    backend_text = (APP_ROOT / "electron" / "backend.js").read_text()
-    packaged_branch = re.search(r"\n      \} else \{\n(.*?)\n      \}\n", backend_text, re.DOTALL)
-    assert packaged_branch is not None, "Could not locate the packaged-mode branch in backend.js"
     spawn_sites = {
         "electron/env-setup.js": (APP_ROOT / "electron" / "env-setup.js").read_text(),
-        "electron/backend.js's packaged-mode branch": packaged_branch.group(1),
+        "electron/backend.js's packaged-mode branch": _backend_packaged_branch(),
     }
 
     for label, text in spawn_sites.items():
@@ -848,14 +864,27 @@ def test_dev_mode_puts_bundled_lima_on_path() -> None:
     enforces a *minimum*, so a newer system lima passes and then hangs. Dev
     therefore has to prepend the bundled lima bin dir like packaged mode does.
     """
-    text = (APP_ROOT / "electron" / "backend.js").read_text()
-    match = re.search(r"if \(paths\.isDev\(\)\) \{(.*?)\n      \} else \{", text, re.DOTALL)
-    assert match is not None, "Could not locate the dev-mode branch in backend.js"
-    assert "getLimaBinDir()" in match.group(1), (
+    assert "getLimaBinDir()" in _backend_dev_branch(), (
         "backend.js's dev branch must prepend paths.getLimaBinDir() to PATH so agent "
         "creation uses the pinned limactl; mngr_lima resolves it from PATH and only "
         "checks a minimum version, so a newer system lima silently hangs creation."
     )
+
+
+def test_both_backend_branches_put_bundled_unison_ahead_on_path() -> None:
+    """Guard: both backend modes put the bundled unison and unison-fsmonitor on PATH, ahead of the developer's own."""
+    for label, branch, array_name in (
+        ("dev-mode", _backend_dev_branch(), "devBinDirs"),
+        ("packaged-mode", _backend_packaged_branch(), "bundledBinDirs"),
+    ):
+        bin_dirs = re.search(rf"const {array_name} = \[(.*?)\];", branch, re.DOTALL)
+        assert bin_dirs is not None, f"Could not locate {array_name} in backend.js's {label} branch"
+        assert re.search(rf"^\s+PATH: `\$\{{{array_name}\.join\(':'\)\}}:", branch, re.MULTILINE), (
+            f"backend.js's {label} PATH must start with {array_name}, or a unison installed on the "
+            "machine shadows the bundled one."
+        )
+        for getter in ("getUnisonBinDir()", "getUnisonFsmonitorBinDir()"):
+            assert getter in bin_dirs.group(1), f"backend.js's {label} {array_name} must include paths.{getter}"
 
 
 def _run_cache_harness(tmp_path: Path, concurrency: int) -> dict:
@@ -1033,6 +1062,22 @@ def test_curl_shims_pin_agrees_with_the_latchkey_gateway() -> None:
         )
 
 
+def test_unison_pin_agrees_with_the_mngr_pair_remote_install() -> None:
+    """Drift guard: the desktop's Linux x86_64 unison and the one ``mngr pair`` installs on remotes are one asset."""
+    download_text = _DOWNLOAD_BINARIES_PATH.read_text()
+    match = re.search(r"^const UNISON_VERSION = '([^']+)';", download_text, re.MULTILINE)
+    assert match is not None, "Could not find UNISON_VERSION in download-binaries.js"
+    assert match.group(1) == REMOTE_UNISON_VERSION, (
+        f"download-binaries.js pins unison {match.group(1)} but mngr_pair.remote pins {REMOTE_UNISON_VERSION}; "
+        "bump both together."
+    )
+    desktop_sha256_by_asset = dict(re.findall(r"'(unison-[\w.-]+\.tar\.gz)':\s+'([0-9a-f]{64})'", download_text))
+    linux_x86_64_asset = f"unison-{REMOTE_UNISON_VERSION}-ubuntu-22.04-x86_64-static.tar.gz"
+    assert desktop_sha256_by_asset.get(linux_x86_64_asset) == REMOTE_UNISON_SHA256, (
+        f"download-binaries.js and mngr_pair.remote pin different sha256s for {linux_x86_64_asset}"
+    )
+
+
 def test_linux_installer_pins_the_mngr_vps_gvisor_release() -> None:
     """Drift guard: the Linux installer's Pi mode must install the gVisor release the cloud hosts pin.
 
@@ -1072,6 +1117,18 @@ def test_verify_linux_artifacts_runs_every_linux_provisioned_binary() -> None:
             f"BINARIES.{name} ships on Linux but verify-linux-artifacts.sh's RUNNABLE_TOOLS "
             f"never runs {name}/{required_path}; add it with the argument that makes it exit 0."
         )
+
+
+def test_every_shipped_target_provisions_the_unison_folder_sync_runs() -> None:
+    """Guard: folder sync's ``mngr pair`` needs unison and unison-fsmonitor in every shipped app."""
+    provisioned = _run_download_binaries_function(
+        "console.log(JSON.stringify(db.SHIPPED_TARGETS.map("
+        "(target) => [`${target.platform}-${target.arch}`, db.getProvisionedBinaries(target)])));"
+    )
+    assert provisioned.returncode == 0, provisioned.stderr
+    for target_name, binary_names in json.loads(provisioned.stdout):
+        missing = {"unison", "unison-fsmonitor"} - set(binary_names)
+        assert not missing, f"{target_name} ships without {sorted(missing)}, so folder sync cannot run there."
 
 
 def _run_download_binaries_function(expression: str, *arguments: str) -> subprocess.CompletedProcess[str]:

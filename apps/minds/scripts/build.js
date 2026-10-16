@@ -69,6 +69,7 @@ const WORKSPACE_PACKAGES = {
   'imbue-mngr-lima':        'libs/mngr_lima',
   'imbue-mngr-modal':       'libs/mngr_modal',
   'imbue-mngr-ovh':         'libs/mngr_ovh',
+  'imbue-mngr-pair':        'libs/mngr_pair',
   'imbue-mngr-pi-coding':   'libs/mngr_pi_coding',
   'imbue-mngr-opencode':    'libs/mngr_opencode',
   'imbue-mngr-antigravity': 'libs/mngr_antigravity',

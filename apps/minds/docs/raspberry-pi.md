@@ -106,3 +106,7 @@ restic, lima, desync, the dugite-native git payload, and datalib's
 Chrome-impersonating curl (all pinned and SHA256-verified, like the shipped
 platforms). Lima mode is not exercised on the Pi (it would run the VM under
 host QEMU); DOCKER is the supported launch mode there.
+
+`unison` and `unison-fsmonitor` are not provisioned for `linux/arm64`, which
+upstream unison publishes no build for, so folder sync on the Pi needs both on
+the system `PATH`. Debian's `unison` package ships no `unison-fsmonitor`.

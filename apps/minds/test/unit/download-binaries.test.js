@@ -25,6 +25,8 @@ const PINNED_ASSET_FILENAME_BY_BINARY = {
   desync: (platformArch) => assetFilename(db.getDesyncDownloadUrl(platformArch)),
   lima: (platformArch) => assetFilename(db.getLimaDownloadUrl(platformArch)),
   curl: (platformArch) => db.getLatchkeyCurlDownloadInfo(platformArch).filename,
+  unison: (platformArch) => assetFilename(db.getUnisonDownloadUrl(platformArch)),
+  'unison-fsmonitor': (platformArch) => assetFilename(db.getUnisonFsmonitorDownloadUrl(platformArch)),
 };
 const BINARIES_PINNED_ELSEWHERE = new Set(['git', 'uv-shims']);
 

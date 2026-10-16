@@ -238,30 +238,30 @@ wheels = [
 
 [[package]]
 name = "azure-mgmt-network"
-version = "32.0.0"
+version = "30.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "azure-mgmt-core" },
     { name = "isodate" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a9/6f/6cd4b1b7d1d6cff747ebafb8d08a260142a0f69698c74d7f567f7159f1e2/azure_mgmt_network-32.0.0.tar.gz", hash = "sha256:cd5707de7bac945c5407047cd764e64cc4b4ce8f51d1f4fe32bfc204d9229093", size = 1095872, upload-time = "2026-08-17T05:35:38.304Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/e5/31cf174ef67087532f159083e2e007507fe163f58c58fbd0e08d05209cf4/azure_mgmt_network-30.2.0.tar.gz", hash = "sha256:9b17c259e6344808aaa80a34bbc4b13f16bc01185dd9db137eaa0ae26664861a", size = 708178, upload-time = "2026-02-13T03:45:39.617Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2b/99/f28f77b1f4262639f2d57bb96e4b13390905183d6765d519e13e730504d1/azure_mgmt_network-32.0.0-py3-none-any.whl", hash = "sha256:915a6465edfb3b5c30a44027ed92851173d07054682682d0b362fbe9e5c78697", size = 892559, upload-time = "2026-08-17T05:35:40.471Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/5a/14c8cfb1655267dfed7529d35e5dd6581746238c9f50d4307b9e2faaacf8/azure_mgmt_network-30.2.0-py3-none-any.whl", hash = "sha256:a87edffd7c38aa9d3494daa8d42914213b0863a9072cf8c7c7e48018b12b6532", size = 631894, upload-time = "2026-02-13T03:45:41.738Z" },
 ]
 
 [[package]]
 name = "azure-mgmt-resource"
-version = "26.0.0"
+version = "25.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "azure-mgmt-core" },
     { name = "isodate" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/61/e1/c6196381cc6bb3eff9e24f5bf31b7fd962651ddbd6120bc2a4c482a7af16/azure_mgmt_resource-26.0.0.tar.gz", hash = "sha256:54227c5db06d3be4dd4b77ad885b273e9eb2606d1de653c5b534066cfbb60c0c", size = 117372, upload-time = "2026-06-24T09:48:29.546Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d7/7e/b3f9d544a94782be9c5ab8123d2fa7fb20cbdf3f5a16b883f308865e1406/azure_mgmt_resource-25.0.0.tar.gz", hash = "sha256:dc123a9f6509c37299d7716c9090cff0a9d73309b228cc094ea950ce3cca3603", size = 92837, upload-time = "2026-02-06T06:00:39.699Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e6/6e/3e776a0817ebe3558fbd8d3f98b1bd8fa75a46596e5cf9bb4377960c4611/azure_mgmt_resource-26.0.0-py3-none-any.whl", hash = "sha256:ef36559a4c0843b4272aa584efb455c686e4c3f6357421b38c82f405c01a9a9f", size = 102492, upload-time = "2026-06-24T09:48:30.854Z" },
+    { url = "https://files.pythonhosted.org/packages/92/41/ce12546aa2a20c4f37d061bfa7df3bf8fa72ff01e7557ec330929c72ec7d/azure_mgmt_resource-25.0.0-py3-none-any.whl", hash = "sha256:f6f17b2305abe9bf6ec6c92a9410af21a2b0d805cc98e94d80c07220924a045b", size = 83670, upload-time = "2026-02-06T06:00:41.317Z" },
 ]
 
 [[package]]
@@ -1199,8 +1199,8 @@ requires-dist = [
     { name = "azure-identity", specifier = ">=1.25" },
     { name = "azure-mgmt-authorization", specifier = ">=4" },
     { name = "azure-mgmt-compute", specifier = ">=37" },
-    { name = "azure-mgmt-network", specifier = ">=30" },
-    { name = "azure-mgmt-resource", specifier = ">=25" },
+    { name = "azure-mgmt-network", specifier = ">=30,<31" },
+    { name = "azure-mgmt-resource", specifier = ">=25,<26" },
     { name = "azure-mgmt-storage", specifier = ">=21" },
     { name = "azure-storage-blob", specifier = ">=12.28" },
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
@@ -1481,6 +1481,21 @@ requires-dist = [
 ]
 
 [[package]]
+name = "imbue-mngr-pair"
+version = "0.2.17"
+source = { editable = "../../../../libs/mngr_pair" }
+dependencies = [
+    { name = "click-option-group" },
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click-option-group", specifier = ">=0.5.6" },
+    { name = "imbue-mngr", editable = "../../../../libs/mngr" },
+]
+
+[[package]]
 name = "imbue-mngr-pi-coding"
 version = "0.1.14"
 source = { editable = "../../../../libs/mngr_pi_coding" }
@@ -1690,8 +1705,10 @@ dependencies = [
     { name = "imbue-mngr-gcp" },
     { name = "imbue-mngr-imbue-cloud" },
     { name = "imbue-mngr-latchkey" },
+    { name = "imbue-mngr-lima" },
     { name = "imbue-mngr-modal" },
     { name = "imbue-mngr-opencode" },
+    { name = "imbue-mngr-pair" },
     { name = "imbue-mngr-pi-coding" },
     { name = "imbue-mngr-vps" },
     { name = "itsdangerous" },
@@ -1737,8 +1754,10 @@ requires-dist = [
     { name = "imbue-mngr-gcp", editable = "../../../../libs/mngr_gcp" },
     { name = "imbue-mngr-imbue-cloud", editable = "../../../../libs/mngr_imbue_cloud" },
     { name = "imbue-mngr-latchkey", editable = "../../../../libs/mngr_latchkey" },
+    { name = "imbue-mngr-lima", editable = "../../../../libs/mngr_lima" },
     { name = "imbue-mngr-modal", editable = "../../../../libs/mngr_modal" },
     { name = "imbue-mngr-opencode", editable = "../../../../libs/mngr_opencode" },
+    { name = "imbue-mngr-pair", editable = "../../../../libs/mngr_pair" },
     { name = "imbue-mngr-pi-coding", editable = "../../../../libs/mngr_pi_coding" },
     { name = "imbue-mngr-vps", editable = "../../../../libs/mngr_vps" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
@@ -1785,6 +1804,7 @@ dependencies = [
     { name = "imbue-mngr-modal" },
     { name = "imbue-mngr-opencode" },
     { name = "imbue-mngr-ovh" },
+    { name = "imbue-mngr-pair" },
     { name = "imbue-mngr-pi-coding" },
     { name = "imbue-mngr-vps" },
     { name = "minds" },
@@ -1812,6 +1832,7 @@ requires-dist = [
     { name = "imbue-mngr-modal", editable = "../../../../libs/mngr_modal" },
     { name = "imbue-mngr-opencode", editable = "../../../../libs/mngr_opencode" },
     { name = "imbue-mngr-ovh", editable = "../../../../libs/mngr_ovh" },
+    { name = "imbue-mngr-pair", editable = "../../../../libs/mngr_pair" },
     { name = "imbue-mngr-pi-coding", editable = "../../../../libs/mngr_pi_coding" },
     { name = "imbue-mngr-vps", editable = "../../../../libs/mngr_vps" },
     { name = "minds", editable = "../../" },

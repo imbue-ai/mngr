@@ -25,6 +25,7 @@ dependencies = [
     "imbue-mngr-lima>=0.1.0",
     "imbue-mngr-modal>=0.2.0",
     "imbue-mngr-ovh>=0.1.0",
+    "imbue-mngr-pair>=0.2.0",
     "imbue-mngr-pi-coding>=0.1.0",
     "imbue-mngr-opencode>=0.1.0",
     "imbue-mngr-antigravity>=0.1.0",
@@ -64,6 +65,7 @@ imbue-mngr-latchkey = { path = "../../../../libs/mngr_latchkey", editable = true
 imbue-mngr-lima = { path = "../../../../libs/mngr_lima", editable = true }
 imbue-mngr-modal = { path = "../../../../libs/mngr_modal", editable = true }
 imbue-mngr-ovh = { path = "../../../../libs/mngr_ovh", editable = true }
+imbue-mngr-pair = { path = "../../../../libs/mngr_pair", editable = true }
 imbue-mngr-pi-coding = { path = "../../../../libs/mngr_pi_coding", editable = true }
 imbue-mngr-opencode = { path = "../../../../libs/mngr_opencode", editable = true }
 imbue-mngr-antigravity = { path = "../../../../libs/mngr_antigravity", editable = true }

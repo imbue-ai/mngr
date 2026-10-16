@@ -331,13 +331,19 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           ...configFileArgs,
         ];
         cwd = paths.getMonorepoRoot();
+        const devBinDirs = [
+          // Pair the bundled git binary with gitEnv in dev too: a system git
+          // running against the payload's exec-path would be version-skewed.
+          paths.getGitBinDir(),
+          // mngr_lima resolves limactl from PATH.
+          paths.getLimaBinDir(),
+          // `mngr pair` runs unison by bare name, and unison finds its watcher on PATH.
+          paths.getUnisonBinDir(), paths.getUnisonFsmonitorBinDir(),
+        ];
         env = {
           ...process.env,
           ...gitEnv,
-          // Pair the bundled git binary with gitEnv in dev too: a system git
-          // running against the payload's exec-path would be version-skewed.
-          // limactl too -- mngr_lima resolves it from PATH.
-          PATH: `${paths.getGitBinDir()}:${paths.getLimaBinDir()}:${process.env.PATH || ''}`,
+          PATH: `${devBinDirs.join(':')}:${process.env.PATH || ''}`,
           MINDS_ELECTRON: '1',
           MINDS_ROOT_NAME: mindsRootName,
           MNGR_HOST_DIR: mngrHostDir,
@@ -346,7 +352,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           // The prestart hook (ensure-binaries.js) stages resources/desync/ before the
-          // dev app launches. Dev mode inherits the developer's PATH untouched, so the
+          // dev app launches. Dev mode does not put that directory on PATH, so the
           // bundled binary is only reachable by absolute path -- without this the
           // fast-create path would need a system-wide desync.
           ...limaImageToolEnv,
@@ -371,6 +377,8 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const bundledBinDirs = [
           ...(process.platform === 'darwin' ? [paths.getUvShimBinDir()] : []),
           uvBinDir, gitBinDir, limaBinDir, desyncBinDir,
+          // `mngr pair` runs unison by bare name, and unison finds its watcher on PATH.
+          paths.getUnisonBinDir(), paths.getUnisonFsmonitorBinDir(),
         ];
         const uvCacheDir = paths.getUvCacheDir();
         const uvPythonDir = paths.getUvPythonDir();
@@ -400,8 +408,8 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         // LaunchServices-started apps on macOS inherit a minimal PATH
         // without /opt/homebrew/bin or /usr/local/bin. Append both so
         // user-installed tools (`docker` from Docker Desktop, etc.) are
-        // reachable. Bundled uv/git/lima are prepended via their own
-        // absolute paths above. On Linux these dirs are also conventional
+        // reachable. The bundled tool directories (bundledBinDirs) are
+        // prepended ahead of it. On Linux these dirs are also conventional
         // (`/usr/local/bin` is std) and the append is harmless either way.
         const systemPath = process.env.PATH || '';
         const homebrewPaths = ['/opt/homebrew/bin', '/usr/local/bin'].filter(

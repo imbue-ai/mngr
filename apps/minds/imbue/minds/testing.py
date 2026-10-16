@@ -1,8 +1,11 @@
 import base64
 import os
+import re
 import subprocess
+import tomllib
 from collections.abc import Mapping
 from collections.abc import Sequence
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Final
 
@@ -471,3 +474,58 @@ def assert_cloud_workspace_container_shape(
     assert expected_tmp_size_option in tmp_mount_lines[0], (
         f"expected /tmp capped at {expected_tmp_size_option} for a VM with {mem_total_kib} KiB, got:\n{tmp_mount_lines[0]}"
     )
+
+
+MINDS_APP_DIR: Final[Path] = Path(__file__).resolve().parents[2]
+
+
+class MindsInstall(FrozenModel):
+    """One way of installing minds, named by the pyproject whose dependencies decide what it carries."""
+
+    test_id: str = Field(description="The pytest id for tests parametrized over installs")
+    description: str = Field(description="How the install is named in failure messages")
+    pyproject_path: Path = Field(description="The pyproject whose [project.dependencies] the install carries")
+    fix_instructions: str = Field(description="How to add a missing package to this install")
+
+
+MINDS_INSTALLS: Final[tuple[MindsInstall, ...]] = (
+    MindsInstall(
+        test_id="packaged_app",
+        description="the packaged desktop app",
+        pyproject_path=MINDS_APP_DIR / "electron" / "pyproject" / "pyproject.toml",
+        fix_instructions=(
+            "add it to ALL FOUR mirrored workspace-package lists: "
+            "apps/minds/scripts/build.js (WORKSPACE_PACKAGES), apps/minds/electron/env-setup.js "
+            "(WORKSPACE_PACKAGES), apps/minds/electron/pyproject/pyproject.toml "
+            "([project.dependencies] AND [tool.uv.sources], then run `uv lock` in that directory), "
+            "and apps/minds/scripts/build_test.py (WORKSPACE_PACKAGES)."
+        ),
+    ),
+    MindsInstall(
+        test_id="source_install",
+        description="minds run from source",
+        pyproject_path=MINDS_APP_DIR / "pyproject.toml",
+        fix_instructions=(
+            "add it to apps/minds/pyproject.toml ([project.dependencies] AND [tool.uv.sources]), "
+            "then run `uv lock` at the repo root and in apps/minds/electron/pyproject"
+            "."
+        ),
+    ),
+)
+
+
+def read_pyproject_dependency_names(pyproject_path: Path) -> frozenset[str]:
+    """The lowercased distribution names in a pyproject's ``[project.dependencies]``."""
+    dependencies = tomllib.loads(pyproject_path.read_text())["project"]["dependencies"]
+    return frozenset(
+        re.split(r"[><=!~\[; ]", dependency, maxsplit=1)[0].strip().lower() for dependency in dependencies
+    )
+
+
+def get_mngr_plugin_package_names() -> dict[str, str]:
+    """Map each installed mngr plugin's entry-point name to its distribution, e.g. ``pi_coding`` -> ``imbue-mngr-pi-coding``."""
+    return {
+        entry_point.name: entry_point.dist.metadata["Name"]
+        for entry_point in importlib_metadata.entry_points(group="mngr")
+        if entry_point.dist is not None
+    }
