@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.errors import SnapshotContainerStatesError
-from imbue.minds.utils.snapshot_container_states import DockerContainerState
-from imbue.minds.utils.snapshot_container_states import read_snapshot_container_states
-from imbue.minds.utils.snapshot_container_states import record_snapshot_container_states
+from imbue.minds.utils.snapshot_container_states_testing import DockerContainerState
+from imbue.minds.utils.snapshot_container_states_testing import read_snapshot_container_states
+from imbue.minds.utils.snapshot_container_states_testing import record_snapshot_container_states
 
 
 def test_record_snapshot_container_states_reads_and_publishes_the_first_reading(tmp_path: Path) -> None:

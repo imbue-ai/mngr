@@ -92,7 +92,7 @@ from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOpe
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.primitives import BackupProvider
-from imbue.minds.utils.snapshot_container_states import DockerContainerState
+from imbue.minds.utils.snapshot_container_states_testing import DockerContainerState
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.testing import get_short_random_string

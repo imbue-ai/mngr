@@ -1,5 +1,8 @@
 """The Docker container states a minds-snapshot sandbox was resumed into.
 
+Test-only. The ``exclude`` list in ``apps/minds/pyproject.toml`` names this file
+to keep it out of the shipped app, so renaming it puts it back in the wheel.
+
 ``scripts/snapshot_minds_e2e_state.py`` ``docker stop``s every workspace
 container before capturing the filesystem, so a sandbox booted from that image
 finds them ``exited``. Whether it did is a one-shot observation: the first

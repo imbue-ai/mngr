@@ -83,6 +83,7 @@ WORKSPACE_PACKAGES = [
 APP_ROOT = Path(__file__).resolve().parents[1]
 MONOREPO_ROOT = Path(__file__).resolve().parents[3]
 TEST_PATTERN = re.compile(r"(^|/)(test_[^/]*\.py|[^/]+_test\.py|conftest\.py)$")
+TEST_ONLY_HELPER_PATTERN = re.compile(r"(^|/)([^/]*_)?testing\.py$")
 _DOWNLOAD_BINARIES_PATH: Final[Path] = APP_ROOT / "scripts" / "download-binaries.js"
 _ENSURE_BINARIES_PATH: Final[Path] = APP_ROOT / "scripts" / "ensure-binaries.js"
 _INSTALL_LINUX_PATH: Final[Path] = APP_ROOT / "scripts" / "install-linux.sh"
@@ -145,13 +146,33 @@ def test_workspace_wheel_excludes_test_files(built_wheels: dict[str, Path], pack
     `exclude` rules under `[tool.hatch.build.targets.wheel]`. See e.g.
     ``libs/imbue_common/pyproject.toml`` for the expected pattern.
     """
-    with zipfile.ZipFile(built_wheels[package_name]) as zf:
-        leaks = [n for n in zf.namelist() if TEST_PATTERN.search(n)]
+    leaks = _wheel_paths_matching(built_wheels[package_name], TEST_PATTERN)
     assert leaks == [], (
         f"{built_wheels[package_name].name} contains test files that should be excluded: {leaks}. "
         'Add `exclude = ["*_test.py", "test_*.py", "**/conftest.py"]` to '
         "[tool.hatch.build.targets.wheel] in the package's pyproject.toml."
     )
+
+
+@pytest.mark.acceptance
+def test_minds_wheel_excludes_test_only_helper_modules(built_wheels: dict[str, Path]) -> None:
+    """The minds wheel must not contain test-only helper modules.
+
+    Same contract as ``test_workspace_wheel_excludes_test_files``, over the
+    files that name themselves test-only rather than test files.
+    """
+    leaks = _wheel_paths_matching(built_wheels["minds"], TEST_ONLY_HELPER_PATTERN)
+    assert leaks == [], (
+        f"{built_wheels['minds'].name} contains test-only helper modules that should be excluded: "
+        f"{leaks}. Name each one in the `exclude` list under [tool.hatch.build.targets.wheel] in "
+        "apps/minds/pyproject.toml -- the shared `**/testing.py` entry matches only that bare filename."
+    )
+
+
+def _wheel_paths_matching(wheel: Path, pattern: re.Pattern[str]) -> list[str]:
+    """The paths inside ``wheel`` that ``pattern`` matches."""
+    with zipfile.ZipFile(wheel) as zf:
+        return [name for name in zf.namelist() if pattern.search(name)]
 
 
 # Two network-bound installs into a fresh venv: a slow package fetch on a

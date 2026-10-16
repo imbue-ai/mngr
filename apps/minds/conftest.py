@@ -43,9 +43,9 @@ from imbue.minds.testing import SYNC_E2E_SUPERTOKENS_API_KEY_ENV
 from imbue.minds.testing import SYNC_E2E_SUPERTOKENS_URI_ENV
 from imbue.minds.testing import SyncE2EAccount
 from imbue.minds.testing import SyncE2EEnv
-from imbue.minds.utils.snapshot_container_states import DockerContainerState
-from imbue.minds.utils.snapshot_container_states import read_snapshot_container_states
-from imbue.minds.utils.snapshot_container_states import record_snapshot_container_states
+from imbue.minds.utils.snapshot_container_states_testing import DockerContainerState
+from imbue.minds.utils.snapshot_container_states_testing import read_snapshot_container_states
+from imbue.minds.utils.snapshot_container_states_testing import record_snapshot_container_states
 from imbue.mngr.utils.logging import suppress_warnings
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import generate_test_environment_name

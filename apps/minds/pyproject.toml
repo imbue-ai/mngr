@@ -108,7 +108,13 @@ artifacts = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
-exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
+exclude = [
+  "*_test.py",
+  "test_*.py",
+  "**/conftest.py",
+  "**/testing.py",
+  "**/utils/snapshot_container_states_testing.py",
+]
 
 # Build the frontend bundle (frontend/ -> static/ui/) when packaging a real
 # wheel. The hook skips editable builds (`uv sync`) so dev/CI environments
