@@ -112,7 +112,6 @@ export function flowTurns(entries: TranscriptEntry[]): WelcomeChatTurn[] {
     if (lead !== "") parts.push(`**${lead}**`);
     if (body !== "") parts.push(body);
     if (step.table) parts.push(...step.table.map(tableColumnMarkdown));
-    if (step.prompt) parts.push(step.prompt);
     turns.push(assistant(parts.join("\n\n")));
     if (entry.answer !== null && entry.said !== "")
       turns.push(user(entry.said));

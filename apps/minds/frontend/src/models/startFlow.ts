@@ -1,6 +1,6 @@
 // The start flow's conversation: the fixed manifesto exchange's schedule, and
 // the first-run questions as an append-only transcript with a pure reducer
-// for everything the user can do to it (answer, undo, back out of the custom
+// for everything the user can do to it (answer, undo, back out of the create
 // form, sign in). Views stay thin; every timing number and every transition
 // lives here so it is testable without a DOM.
 //
@@ -126,7 +126,14 @@ export function manifestoSchedule(): ManifestoSchedule {
 }
 
 export type StepId = "run" | "auth" | "account" | "retry" | "again" | "verify" | "verify-again";
-export type ChoiceId = "cloud" | "custom" | "signup" | "signin" | "continue" | "verified";
+const FORM_CHOICE_IDS = ["local", "own-cloud"] as const;
+/** The answers that open the create form instead of creating on Imbue Cloud. */
+export type FormChoiceId = (typeof FORM_CHOICE_IDS)[number];
+export type ChoiceId = "cloud" | FormChoiceId | "signup" | "signin" | "continue" | "verified";
+
+export function isFormChoice(value: string | null): value is FormChoiceId {
+  return FORM_CHOICE_IDS.some((id) => id === value);
+}
 
 export interface FlowChoice {
   id: ChoiceId;
@@ -153,29 +160,43 @@ export interface FlowStep {
   lead?: string;
   /** False for a question whose answer is a fact the user cannot take back (a verified email). */
   isUndoable?: boolean;
-  /** The two-column comparison, only on the question that is one. */
+  /** The points of the answer the question recommends, under its title, on the question that has them. */
   table?: TableColumn[];
-  /** The one-line prompt directly over the buttons, when a table sits between them and the ask. */
-  prompt?: string;
   choices: FlowChoice[];
+  /** The answers it does not recommend: small links under the buttons, so they read as the exceptions. */
+  minorChoices?: FlowChoice[];
   /** The quieter, agent-side way out under the question, when there is one. */
   aside?: { label: string };
 }
 
 const CLOUD_CHOICE: FlowChoice = {
   id: "cloud",
-  label: "On Imbue Cloud",
-  said: "On Imbue Cloud",
+  label: "Use Imbue Cloud",
+  said: "Use Imbue Cloud",
   ack: "Imbue Cloud it is.",
   isEmphasized: true,
 };
 
-const CUSTOM_CHOICE: FlowChoice = {
-  id: "custom",
-  label: "Custom setup",
-  said: "Custom setup",
-  ack: "Your own platform it is.",
+const LOCAL_CHOICE: FlowChoice = {
+  id: "local",
+  label: "Run it on this computer",
+  said: "Run it on this computer",
+  ack: "This computer it is.",
   isEmphasized: false,
+};
+
+const OWN_CLOUD_CHOICE: FlowChoice = {
+  id: "own-cloud",
+  label: "Use your own cloud",
+  said: "Use your own cloud",
+  ack: "Your own cloud it is.",
+  isEmphasized: false,
+};
+
+/** Where to run, as every question that asks it offers the answers. */
+const WHERE_TO_RUN_CHOICES: Pick<FlowStep, "choices" | "minorChoices"> = {
+  choices: [CLOUD_CHOICE],
+  minorChoices: [LOCAL_CHOICE, OWN_CLOUD_CHOICE],
 };
 
 export const EXISTING_LOGIN_LABEL = "I already have a workspace (log in)";
@@ -204,7 +225,7 @@ export const FLOW: Record<StepId, FlowStep> = {
   run: {
     ask:
       "Let's create your first workspace. A workspace is your own virtual computer. " +
-      "You can run it on Imbue Cloud (recommended) or bring your own platform (custom setup).",
+      "We recommend running it on Imbue Cloud.",
     table: [
       {
         title: "Imbue Cloud",
@@ -217,19 +238,8 @@ export const FLOW: Record<StepId, FlowStep> = {
           "Shareable with other people",
         ],
       },
-      {
-        title: "Custom setup",
-        badge: "Advanced",
-        isEmphasized: false,
-        points: [
-          "Runs on your computer, or in your own cloud",
-          "Docker or Lima here; AWS, GCP, Azure or Vultr there",
-          "You manage uptime, backups and cost",
-        ],
-      },
     ],
-    prompt: "How do you want to run it?",
-    choices: [CUSTOM_CHOICE, CLOUD_CHOICE],
+    ...WHERE_TO_RUN_CHOICES,
     aside: { label: EXISTING_LOGIN_LABEL },
   },
   // Sign in leads: the app is downloaded from a page that already required an
@@ -254,14 +264,14 @@ export const FLOW: Record<StepId, FlowStep> = {
   },
   retry: {
     ask:
-      "Looks like you closed the Custom setup dialog without finishing. No problem — would you like your " +
-      "workspace on Imbue Cloud instead? You can always move it later.",
-    choices: [CUSTOM_CHOICE, CLOUD_CHOICE],
+      "You closed the setup without creating a workspace. Imbue Cloud is the quickest way to start, " +
+      "and you can move your workspace later.",
+    ...WHERE_TO_RUN_CHOICES,
   },
   // Asked again after a refused cloud create, with the refusal as its ack.
   again: {
-    ask: "How do you want to run it?",
-    choices: [CUSTOM_CHOICE, CLOUD_CHOICE],
+    ask: "Where do you want to run it?",
+    ...WHERE_TO_RUN_CHOICES,
   },
   // A cloud workspace needs a verified email; the entry's ack names the address.
   verify: {
@@ -278,6 +288,11 @@ export const FLOW: Record<StepId, FlowStep> = {
     isUndoable: false,
   },
 };
+
+/** Every answer a question offers: its buttons, then its minor links. */
+export function stepChoices(step: FlowStep): FlowChoice[] {
+  return [...step.choices, ...(step.minorChoices ?? [])];
+}
 
 /** The agent's text for a question: its bold lead, then the ack the previous answer earned, then the ask. */
 export function stepText(step: FlowStep, ack: string): { lead: string; body: string } {
@@ -345,8 +360,8 @@ export type TranscriptEntry =
   | { kind: "said"; text: string }
   | { kind: "note"; text: string };
 
-/** Which modal, if any, the flow is waiting on before it can record an answer. */
-export type PendingModal = "custom" | "signup" | "signin" | "existing-login" | null;
+/** Which modal, if any, the flow is waiting on before it can record an answer; a form choice is the create form, opened on it. */
+export type PendingModal = FormChoiceId | "signup" | "signin" | "existing-login" | null;
 
 export interface StartFlowState {
   /** The manifesto's button has been pressed; the questions are live. */
@@ -421,7 +436,7 @@ export interface AnswerContext {
  * The user pressed one of a question's buttons. The answer lands on that
  * question; what follows depends on the choice: the cloud path asks for an
  * account (offering to continue as one already signed in), continuing owes the
- * create, and the custom path and the sign-ins hand off to a modal and record
+ * create, and the form answers and the sign-ins hand off to a modal and record
  * nothing more until it is done.
  */
 export function answerStep(
@@ -432,7 +447,7 @@ export function answerStep(
 ): StartFlowState {
   const entry = state.entries[at];
   if (entry === undefined || entry.kind !== "step") return state;
-  const choice = FLOW[entry.id].choices.find((candidate) => candidate.id === choiceId);
+  const choice = stepChoices(FLOW[entry.id]).find((candidate) => candidate.id === choiceId);
   if (choice === undefined) return state;
   // Pressing "I verified it" is a request to check, not an answer: the view
   // checks, then records the outcome with observeEmailVerified or
@@ -466,11 +481,11 @@ export function answerStep(
       isCloudCreatePending: true,
     };
   }
-  if (choiceId === "custom") {
+  if (isFormChoice(choiceId)) {
     return {
       ...state,
       entries: [...withAnswer(state.entries, at, choiceId, choice.said), { kind: "note", text: choice.ack }],
-      pending: "custom",
+      pending: choiceId,
     };
   }
   // The sign-ins: nothing is recorded until the modal reports an account.
@@ -508,7 +523,7 @@ export function landedAccount(
   return accounts.find((account) => !state.knownAccountIds.includes(account.userId)) ?? null;
 }
 
-/** The user pressed the quieter "I already have one (log in)" under the first question. */
+/** The user pressed the quieter "I already have a workspace (log in)" under the first question. */
 export function chooseExistingLogin(state: StartFlowState): StartFlowState {
   return { ...state, pending: "existing-login" };
 }
@@ -516,13 +531,13 @@ export function chooseExistingLogin(state: StartFlowState): StartFlowState {
 /** A modal the flow was waiting on closed without finishing. */
 export function dismissPendingModal(state: StartFlowState): StartFlowState {
   if (state.pending === null) return state;
-  if (state.pending === "custom") {
+  if (isFormChoice(state.pending)) {
     return { ...state, pending: null, entries: [...state.entries, stepEntry("retry", "")] };
   }
   return { ...state, pending: null };
 }
 
-/** A modal the flow was waiting on finished its job (the custom form submitted). */
+/** A modal the flow was waiting on finished its job (the create form submitted). */
 export function finishPendingModal(state: StartFlowState): StartFlowState {
   return { ...state, pending: null };
 }

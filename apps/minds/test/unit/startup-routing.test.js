@@ -98,7 +98,7 @@ test('onboarding incomplete but workspaces exist, no saved windows -> create', (
 });
 
 test('onboarding complete with no workspaces -> create, never start', () => {
-  // "I already have one (log in)" completes onboarding without creating
+  // "I already have a workspace (log in)" completes onboarding without creating
   // anything; the next launch must land on the home page's empty state.
   assert.equal(
     decideStartupRoute({ authenticated: true, isOnboardingComplete: true, workspaceCount: 0, restorableCount: 0 }),

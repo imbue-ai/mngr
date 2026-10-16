@@ -1,5 +1,7 @@
-// The remote/local compute-preset card pair shared by the create form and
-// the Create from Template page (port of CreatePresetCards.jinja).
+// The where-to-run preset cards shared by the create form and the Create from
+// Template page (port of CreatePresetCards.jinja): one large Imbue Cloud card,
+// the recommended answer, and two small cards under it for the others, the
+// same three answers in the same order as the start flow's question.
 
 import m from "mithril";
 import type { PresetName } from "./form-model";
@@ -11,13 +13,21 @@ interface PresetCardsAttrs {
   onSelect(name: PresetName): void;
 }
 
-function featureItem(text: string, isAccent: boolean): m.Children {
+/** Each preset as the cards and a step summary name it. */
+export const PRESET_TITLES: Record<PresetName, string> = {
+  remote: "Imbue Cloud",
+  local: "This computer",
+  "own-cloud": "Your own cloud",
+};
+
+const MINOR_PRESETS: { name: PresetName; detail: string }[] = [
+  { name: "local", detail: "5-10 minute setup. Runs only while this computer is on, and uses its memory." },
+  { name: "own-cloud", detail: "Runs on a cloud provider account of your own. You manage uptime, backups and cost." },
+];
+
+function featureItem(text: string): m.Children {
   return m("li", { class: "flex items-start gap-2 type-body text-primary" }, [
-    m(
-      "span",
-      { class: (isAccent ? "text-accent " : "") + "shrink-0 mt-0.5" },
-      m(Icon16, { name: isAccent ? "badge-check-filled" : "badge-check" }),
-    ),
+    m("span", { class: "text-accent shrink-0 mt-0.5" }, m(Icon16, { name: "badge-check-filled" })),
     text,
   ]);
 }
@@ -26,18 +36,18 @@ export function PresetCards(): m.Component<PresetCardsAttrs> {
   return {
     view(vnode) {
       const { selectedPreset, onSelect } = vnode.attrs;
-      return m("div", { class: "flex gap-6 items-stretch" }, [
+      return m("div", { class: "flex flex-col gap-4" }, [
         m(
           PresetCard,
           {
             preset: "remote",
             selected: selectedPreset === "remote",
-            extra: "flex-1",
+            extra: "w-full !p-5",
             onclick: () => onSelect("remote"),
           },
           [
             m("div", { class: "flex items-center gap-2" }, [
-              m("span", { class: "type-heading text-primary" }, "Imbue Cloud"),
+              m("span", { class: "type-heading text-primary" }, PRESET_TITLES.remote),
               m(
                 "span",
                 {
@@ -47,30 +57,33 @@ export function PresetCards(): m.Component<PresetCardsAttrs> {
                 "Recommended",
               ),
             ]),
-            m("ul", { class: "flex flex-col gap-1.5 mt-1" }, [
-              featureItem("30 second setup", true),
-              featureItem("Runs even if your computer is off", true),
-              featureItem("Accessible from mobile", true),
-              featureItem("Shareable with other people", true),
+            m("ul", { class: "grid grid-cols-2 gap-x-6 gap-y-1.5 mt-1" }, [
+              featureItem("30 second setup"),
+              featureItem("Runs even if your computer is off"),
+              featureItem("Accessible from mobile"),
+              featureItem("Shareable with other people"),
             ]),
           ],
         ),
         m(
-          PresetCard,
-          {
-            preset: "local",
-            selected: selectedPreset === "local",
-            extra: "flex-1",
-            onclick: () => onSelect("local"),
-          },
-          [
-            m("span", { class: "type-heading text-primary" }, "Directly on your computer"),
-            m("ul", { class: "flex flex-col gap-1.5 mt-1" }, [
-              featureItem("5-10 minute setup", false),
-              featureItem("Runs only when your computer is on", false),
-              featureItem("Uses your computer's memory (may slow your device)", false),
-            ]),
-          ],
+          "div",
+          { class: "flex gap-4 items-stretch" },
+          MINOR_PRESETS.map(({ name, detail }) =>
+            m(
+              PresetCard,
+              {
+                key: name,
+                preset: name,
+                selected: selectedPreset === name,
+                extra: "flex-1 !gap-1 !p-3 !outline-solid not-aria-checked:outline-primary",
+                onclick: () => onSelect(name),
+              },
+              [
+                m("span", { class: "type-body font-semibold text-primary" }, PRESET_TITLES[name]),
+                m("span", { class: "type-helper text-secondary" }, detail),
+              ],
+            ),
+          ),
         ),
       ]);
     },

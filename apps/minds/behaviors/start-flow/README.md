@@ -16,7 +16,7 @@ The *account step* is the question that settles which Imbue account a cloud work
 It is asked on every cloud answer: signed out, it offers to create an account or sign in; with an account already signed in, it names that account and offers to continue with it or to use a different one, which opens the same browser sign-in, where an account can be signed in to or created.
 The account the account step *settled on* is the one its answer names: the account continued with, or the account a sign-in started from that question reports.
 
-A *cloud create* is the workspace create the flow sends itself when the user answers that the workspace should run on Imbue Cloud; the custom answer instead opens the create form, whose submission is the create.
+A *cloud create* is the workspace create the flow sends itself when the user answers that the workspace should run on Imbue Cloud; every other answer to where the workspace should run instead opens the create form, whose submission is the create.
 
 *Stranded* means no sequence of actions available to the user -- pressing what the flow offers, taking answers back, closing dialogs, signing in and verifying email in the browser -- leads to a workspace create.
 

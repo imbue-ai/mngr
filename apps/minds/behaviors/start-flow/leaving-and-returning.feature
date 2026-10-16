@@ -10,6 +10,6 @@ Feature: Leaving the start flow and coming back
   @returning-signed-in
   Scenario: Returning with an unverified account already signed in is not a dead end
     Given the account "a@example.com" was created in an earlier visit and its email was never verified
-    When the start flow is shown afresh and the user answers "On Imbue Cloud"
+    When the start flow is shown afresh and the user answers "Use Imbue Cloud"
     Then the account step names "a@example.com" and offers to use a different account
     And the user can create the account "b@example.com" and have the cloud create run under it

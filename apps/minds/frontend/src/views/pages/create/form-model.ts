@@ -11,7 +11,7 @@ import {
   parseMachineSizeNumber,
 } from "../../../models/machineSize";
 
-export type PresetName = "remote" | "local";
+export type PresetName = "remote" | "local" | "own-cloud";
 
 /**
  * The local backend a compute mode depends on, or null for the cloud modes.
@@ -34,13 +34,17 @@ export const DEFAULT_RESTIC_ENV =
   "AWS_ACCESS_KEY_ID=\n" +
   "AWS_SECRET_ACCESS_KEY=\n";
 
-// The local preset's compute mode comes from the defaults (`local_launch_mode`,
-// the first local backend the machine can run); only its backup provider is
-// fixed here.
-export const PRESET_FILLS: Record<PresetName, { launch_mode: string | null; backup_provider: string }> = {
-  remote: { launch_mode: "IMBUE_CLOUD", backup_provider: "IMBUE_CLOUD" },
-  local: { launch_mode: null, backup_provider: "CONFIGURE_LATER" },
+// Each preset's backup provider; its compute mode is CreateFormModel.presetLaunchValue's.
+export const PRESET_BACKUP_PROVIDERS: Record<PresetName, string> = {
+  remote: "IMBUE_CLOUD",
+  local: "CONFIGURE_LATER",
+  "own-cloud": "CONFIGURE_LATER",
 };
+
+/** Whether picking a preset opens the advanced view: your own cloud's compute provider and region are chosen there. */
+export function presetOpensAdvanced(name: PresetName): boolean {
+  return name === "own-cloud";
+}
 
 export interface LaunchSelection {
   mode: string;
@@ -244,10 +248,29 @@ export class CreateFormModel {
     if (this.selectedPreset === "local") this.launchValue = defaults.local_launch_mode;
   }
 
+  /**
+   * The compute select value a preset picks: the local preset's is whichever
+   * local backend this machine can run, and the own-cloud preset's is the
+   * first cloud account the user added (while bring-your-own-cloud is on),
+   * else Vultr.
+   */
+  presetLaunchValue(name: PresetName): string {
+    switch (name) {
+      case "remote":
+        return "IMBUE_CLOUD";
+      case "local":
+        return this.localLaunchMode();
+      case "own-cloud": {
+        const account = this.defaults?.byok_clouds_enabled ? this.defaults.cloud_accounts[0] : undefined;
+        return account === undefined ? "VULTR" : `BYOK:${account.name}`;
+      }
+    }
+  }
+
   applyPreset(name: PresetName): void {
     this.selectedPreset = name;
-    this.launchValue = PRESET_FILLS[name].launch_mode ?? this.localLaunchMode();
-    this.backupProvider = PRESET_FILLS[name].backup_provider;
+    this.launchValue = this.presetLaunchValue(name);
+    this.backupProvider = PRESET_BACKUP_PROVIDERS[name];
     if (name === "remote" && this.accountId === "" && (this.defaults?.accounts.length ?? 0) > 0) {
       this.accountId = this.defaults?.accounts[0]?.user_id ?? "";
     }

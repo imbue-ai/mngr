@@ -1,13 +1,13 @@
-// The create form (port of Create.jinja + its inline script): two preset
-// cards backed by an advanced view whose selects are always the source of
-// truth on submit. Submission POSTs the existing /api/v1/workspaces front
-// door and routes to /creating/<operation_id>. DOM ids match the legacy form
-// (the e2e workspace runner drives them).
+// The create form (port of Create.jinja + its inline script): the
+// where-to-run preset cards backed by an advanced view whose selects are
+// always the source of truth on submit. Submission POSTs the existing
+// /api/v1/workspaces front door and routes to /creating/<operation_id>. DOM
+// ids match the legacy form (the e2e workspace runner drives them).
 //
-// The same component also runs embedded in a modal (the start flow's Custom
-// answer, the creation page's Retry): there the masthead is the modal's, the
-// caller picks the opening preset and whether the advanced view starts open,
-// and a successful submit reports the operation id instead of routing.
+// The same component also runs embedded in a modal (the start flow's local and
+// own-cloud answers, the creation page's Retry): there the masthead is the
+// modal's, the caller picks the opening preset, and a successful submit
+// reports the operation id instead of routing.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
@@ -30,11 +30,11 @@ import { PageNarrowContainer } from "../components/Layout";
 import { MachineSizeInput } from "../components/MachineSizeInput";
 import { DialogCloseButton, Modal } from "../components/Modal";
 import { Notice } from "../components/Notice";
-import { CloudAccountsModal, CloudAccountsModalState } from "./create/CloudAccountsModal";
+import { CloudAccountsModal, CloudAccountsModalState, cloudAccountOptions } from "./create/CloudAccountsModal";
 import { PresetCards } from "./create/PresetCards";
 import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
 import type { CreateSubmitBody, PresetName } from "./create/form-model";
-import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
+import { CreateFormModel, normalizeCreateApiError, presetOpensAdvanced } from "./create/form-model";
 import { VerificationWait } from "./create/verification-wait";
 import { renderSwitch, renderSwitchWord } from "../components/Switch";
 import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
@@ -44,8 +44,6 @@ export interface CreatePageAttrs {
   mode?: "page" | "embedded";
   /** The preset to open on; the page defaults to remote. */
   initialPreset?: PresetName;
-  /** Open with the advanced view expanded. */
-  isAdvancedOpen?: boolean;
   /** Prefill from an interrupted / failed attempt's record (the page reads `?retry=` instead). */
   retryId?: string;
   /** Embedded mode's outcome: called with the new attempt's operation id instead of routing. */
@@ -53,7 +51,7 @@ export interface CreatePageAttrs {
 }
 
 /**
- * The create form in a modal, as the start flow's Custom answer and the
+ * The create form in a modal, as the start flow's form answers and the
  * creation page's Retry host it: one shell (size, title) around the embedded
  * form, so the two hosts cannot drift. `key` and `id` are the caller's, since
  * both render it inside a keyed fragment and name it for tests.
@@ -131,6 +129,12 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
   function prerequisiteNotice(prerequisite: LocalBackendPrerequisite | null, id: string): m.Children {
     if (prerequisite === null) return null;
     return m(PrerequisiteNotice, { prerequisite, onCheckAgain: checkPrerequisitesAgain, id });
+  }
+
+  function selectPreset(name: PresetName): void {
+    model.applyPreset(name);
+    if (presetOpensAdvanced(name)) model.isAdvancedOpen = true;
+    scheduleHostNameValidation();
   }
 
   function scheduleHostNameValidation(): void {
@@ -444,13 +448,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                 ),
                 defaults.byok_clouds_enabled
                   ? [
-                      defaults.cloud_accounts.map((account) =>
-                        m(
-                          "option",
-                          { value: `BYOK:${account.name}`, selected: model.launchValue === `BYOK:${account.name}` },
-                          `${account.alias} (${account.backend.toUpperCase()} account)`,
-                        ),
-                      ),
+                      cloudAccountOptions(defaults.cloud_accounts, model.launchValue),
                       m("option", { value: "ADD:aws" }, "add AWS account…"),
                       m("option", { value: "ADD:gcp" }, "add GCP account…"),
                       m("option", { value: "ADD:azure" }, "add Azure account…"),
@@ -695,15 +693,9 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
       fetchCreateFormDefaults(retryId)
         .then((defaults) => {
           model.applyDefaults(defaults);
-          // An embedded caller's opening preset and view, unless a retry
-          // prefill already decided both.
-          if (defaults.prefill === null) {
-            if (attrs.initialPreset !== undefined) model.applyPreset(attrs.initialPreset);
-            if (attrs.isAdvancedOpen) {
-              model.isAdvancedOpen = true;
-              model.selectedPreset = null;
-            }
-          }
+          // An embedded caller's opening preset, unless a retry prefill
+          // already decided it.
+          if (defaults.prefill === null && attrs.initialPreset !== undefined) selectPreset(attrs.initialPreset);
           m.redraw();
         })
         .catch(() => {
@@ -781,10 +773,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                     { role: "radiogroup", "aria-label": "Where to run your workspace" },
                     m(PresetCards, {
                       selectedPreset: model.selectedPreset,
-                      onSelect: (name: PresetName) => {
-                        model.applyPreset(name);
-                        scheduleHostNameValidation();
-                      },
+                      onSelect: selectPreset,
                     }),
                   ),
                   // The local card stays selectable: the notice says what to

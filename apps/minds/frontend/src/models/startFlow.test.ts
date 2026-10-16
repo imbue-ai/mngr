@@ -5,6 +5,7 @@ import {
   CHAT_READ_MS,
   CHAT_REACT_MS,
   CHAT_THINK_MS,
+  FLOW,
   FLOW_OPTIONS_GAP_MS,
   MANIFESTO_ANSWER,
   MANIFESTO_OPENER,
@@ -29,6 +30,7 @@ import {
   settleCloudCreate,
   signedInSaid,
   startQuestions,
+  stepChoices,
   streamDurationMs,
   undoAnswer,
   undoReporting,
@@ -90,7 +92,7 @@ describe("starting the questions", () => {
 describe("answering where to run", () => {
   it("cloud, signed out: the answer lands and the account question follows with the ack", () => {
     const state = answerStep(started(), 1, "cloud", SIGNED_OUT);
-    expect(state.entries[1]).toMatchObject({ kind: "step", id: "run", answer: "cloud", said: "On Imbue Cloud" });
+    expect(state.entries[1]).toMatchObject({ kind: "step", id: "run", answer: "cloud", said: "Use Imbue Cloud" });
     expect(state.entries[2]).toEqual({ kind: "step", id: "auth", ack: "Imbue Cloud it is.", answer: null, said: "" });
     expect(state.isCloudCreatePending).toBe(false);
     expect(openStepIndex(state)).toBe(2);
@@ -118,11 +120,24 @@ describe("answering where to run", () => {
     expect(state.isCloudCreatePending).toBe(true);
   });
 
-  it("custom: the answer lands, the agent acknowledges, and the form is pending", () => {
-    const state = answerStep(started(), 1, "custom", SIGNED_OUT);
-    expect(state.entries[1]).toMatchObject({ answer: "custom", said: "Custom setup" });
-    expect(state.entries[2]).toEqual({ kind: "note", text: "Your own platform it is." });
-    expect(state.pending).toBe("custom");
+  it("this computer: the answer lands, the agent acknowledges, and the form is pending on it", () => {
+    const state = answerStep(started(), 1, "local", SIGNED_OUT);
+    expect(state.entries[1]).toMatchObject({ answer: "local", said: "Run it on this computer" });
+    expect(state.entries[2]).toEqual({ kind: "note", text: "This computer it is." });
+    expect(state.pending).toBe("local");
+  });
+
+  it("your own cloud: the answer lands, the agent acknowledges, and the form is pending on it", () => {
+    const state = answerStep(started(), 1, "own-cloud", SIGNED_OUT);
+    expect(state.entries[1]).toMatchObject({ answer: "own-cloud", said: "Use your own cloud" });
+    expect(state.entries[2]).toEqual({ kind: "note", text: "Your own cloud it is." });
+    expect(state.pending).toBe("own-cloud");
+  });
+
+  it("offers Imbue Cloud as its one button and the other two as minor answers", () => {
+    expect(FLOW.run.choices.map((choice) => choice.id)).toEqual(["cloud"]);
+    expect(FLOW.run.minorChoices?.map((choice) => choice.id)).toEqual(["local", "own-cloud"]);
+    expect(stepChoices(FLOW.run).map((choice) => choice.id)).toEqual(["cloud", "local", "own-cloud"]);
   });
 
   it("ignores a choice the question does not offer, and an index that is not a question", () => {
@@ -133,19 +148,20 @@ describe("answering where to run", () => {
   });
 });
 
-describe("the custom form", () => {
-  it("closing it without finishing asks the retry question, which offers the same two answers", () => {
-    const state = dismissPendingModal(answerStep(started(), 1, "custom", SIGNED_OUT));
+describe("the create form", () => {
+  it("closing it without finishing asks the retry question, which offers the same three answers", () => {
+    const state = dismissPendingModal(answerStep(started(), 1, "own-cloud", SIGNED_OUT));
     expect(state.pending).toBeNull();
     const last = state.entries[state.entries.length - 1];
     expect(last).toEqual({ kind: "step", id: "retry", ack: "", answer: null, said: "" });
-    // Custom is still among the answers: backing out is not a door closing on it.
-    const again = answerStep(state, state.entries.length - 1, "custom", SIGNED_OUT);
-    expect(again.pending).toBe("custom");
+    // The form answers are still offered: backing out is not a door closing on them.
+    expect(stepChoices(FLOW.retry)).toEqual(stepChoices(FLOW.run));
+    const again = answerStep(state, state.entries.length - 1, "local", SIGNED_OUT);
+    expect(again.pending).toBe("local");
   });
 
   it("finishing it clears the wait without a retry question", () => {
-    const state = finishPendingModal(answerStep(started(), 1, "custom", SIGNED_OUT));
+    const state = finishPendingModal(answerStep(started(), 1, "local", SIGNED_OUT));
     expect(state.pending).toBeNull();
     expect(state.entries.some((entry) => entry.kind === "step" && entry.id === "retry")).toBe(false);
   });
@@ -284,8 +300,8 @@ describe("the cloud create", () => {
       said: "",
     });
     expect(openStepIndex(state)).toBe(4);
-    // Custom is offered as the way out of a cloud that refused.
-    expect(answerStep(state, 4, "custom", SIGNED_IN).pending).toBe("custom");
+    // The form answers are offered as the way out of a cloud that refused.
+    expect(answerStep(state, 4, "own-cloud", SIGNED_IN).pending).toBe("own-cloud");
   });
 
   it("an account signed out since the account step settled on it is refused before the create goes out", () => {

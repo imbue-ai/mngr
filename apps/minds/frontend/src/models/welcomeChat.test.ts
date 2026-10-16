@@ -36,7 +36,7 @@ const REQUEST: CreateAttemptRequestSummary = {
 /** A cloud create by a returning user. */
 const ENTRIES: TranscriptEntry[] = [
   { kind: "said", text: REPORTING_ACCEPT_LABEL },
-  { kind: "step", id: "run", ack: "", answer: "cloud", said: "On Imbue Cloud" },
+  { kind: "step", id: "run", ack: "", answer: "cloud", said: "Use Imbue Cloud" },
   {
     kind: "note",
     text: "Imbue Cloud it is. You've signed in as me@example.com.",
@@ -70,7 +70,7 @@ describe("welcomeChatBody", () => {
     expect(body.turns[3].text).toContain(REPORTING_ASK);
     expect(body.turns[3].text).toContain(REPORTING_MORE_DETAIL);
     expect(body.turns[4].text).toBe(REPORTING_ACCEPT_LABEL);
-    expect(body.turns[6].text).toBe("On Imbue Cloud");
+    expect(body.turns[6].text).toBe("Use Imbue Cloud");
     expect(body.turns[8].text).toContain("Name — workspace-1");
     expect(body.turns[8].text).toContain("Branch — latest");
     expect(body.turns[9].text.startsWith(SETUP_LINE)).toBe(true);
@@ -82,7 +82,7 @@ describe("welcomeChatBody", () => {
 });
 
 describe("flowTurns", () => {
-  it("says a question with its comparison and prompt as one turn, and an unanswered question with no answer", () => {
+  it("says a question with its recommended answer's points as one turn, and an unanswered question with no answer", () => {
     const [ask] = flowTurns([
       { kind: "step", id: "run", ack: "Welcome back.", answer: null, said: "" },
     ]);
@@ -93,8 +93,7 @@ describe("flowTurns", () => {
     expect(ask.text).toContain(
       "**Imbue Cloud** (Recommended)\n- 30 second setup",
     );
-    expect(ask.text).toContain("**Custom setup** (Advanced)\n- Runs on your computer");
-    expect(ask.text.endsWith("How do you want to run it?")).toBe(true);
+    expect(ask.text.endsWith("- Shareable with other people")).toBe(true);
     expect(
       flowTurns([{ kind: "step", id: "run", ack: "", answer: null, said: "" }]),
     ).toHaveLength(1);

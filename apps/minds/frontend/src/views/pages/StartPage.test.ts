@@ -64,15 +64,17 @@ describe("areDefaultsStale", () => {
 describe("transcriptTurns", () => {
   const started = startQuestions(initialStartFlowState(), REPORTING_ACCEPT_LABEL);
 
-  it("renders the open question with its table, prompt, both answers, and the existing-account way out", () => {
+  it("renders the open question with Imbue Cloud's points, its button, the two minor answers, and the existing-account way out", () => {
     const turns = transcriptTurns(started.entries, { isInstant: true, isPressable: true });
     const text = allText(turns);
     expect(text).toContain(REPORTING_ACCEPT_LABEL);
     expect(text).toContain("Let's create your first workspace.");
-    expect(text).toContain("How do you want to run it?");
     expect(text).toContain("Recommended");
-    const answers = withAttr(turns, "data-answer").map((node) => node.attrs?.["data-answer"]);
-    expect(answers).toEqual(["custom", "cloud"]);
+    expect(text).toContain("30 second setup");
+    const answers = withAttr(turns, "data-answer");
+    expect(answers.map((node) => node.attrs?.["data-answer"])).toEqual(["cloud", "local", "own-cloud"]);
+    // Only Imbue Cloud is a button; the other two are links.
+    expect(answers.map((node) => typeof node.tag === "string")).toEqual([false, true, true]);
     expect(allText(withAttr(turns, "data-aside"))).toContain(EXISTING_LOGIN_LABEL);
   });
 
@@ -80,7 +82,7 @@ describe("transcriptTurns", () => {
     const answered = answerStep(started, 1, "cloud", SIGNED_OUT);
     const turns = transcriptTurns(answered.entries, { isInstant: true, isPressable: true, onUndo: () => undefined });
     const text = allText(turns);
-    expect(text).toContain("On Imbue Cloud");
+    expect(text).toContain("Use Imbue Cloud");
     expect(text).toContain("Imbue Cloud it is. A cloud workspace runs on our machines");
     // The where-to-run buttons are gone; the account question's are up, with
     // sign-in as the emphasized answer at the row's right end.
@@ -110,7 +112,7 @@ describe("transcriptTurns", () => {
     const turns = transcriptTurns(started.entries, { isInstant: true, isPressable: false });
     expect(withAttr(turns, "data-answer")).toHaveLength(0);
     expect(withAttr(turns, "data-aside")).toHaveLength(0);
-    expect(allText(turns)).toContain("How do you want to run it?");
+    expect(allText(turns)).toContain("We recommend running it on Imbue Cloud.");
   });
 });
 

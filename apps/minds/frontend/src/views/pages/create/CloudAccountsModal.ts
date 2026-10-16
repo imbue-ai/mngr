@@ -141,6 +141,17 @@ function submitAccount(state: CloudAccountsModalState, onAccountAdded: (account:
     });
 }
 
+/** The cloud accounts the user added, as options of a compute select whose value is `launchValue`. */
+export function cloudAccountOptions(accounts: readonly CloudAccountOption[], launchValue: string): m.Children[] {
+  return accounts.map((account) =>
+    m(
+      "option",
+      { value: `BYOK:${account.name}`, selected: launchValue === `BYOK:${account.name}` },
+      `${account.alias} (${account.backend.toUpperCase()} account)`,
+    ),
+  );
+}
+
 function labeledInput(id: string, label: string, value: string, onValue: (next: string) => void, attrs: m.Attributes = {}): m.Children {
   return m("div", { class: "mt-3" }, [
     m(FormLabel, { target: id }, label),

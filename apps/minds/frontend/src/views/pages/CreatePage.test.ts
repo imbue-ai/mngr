@@ -10,10 +10,13 @@ import {
   jsonResponse,
   settle,
 } from "../../testing";
+import type { CreateFormDefaults } from "../../models/create";
 import { DialogCloseButton } from "../components/Modal";
 import type { CreatePageAttrs } from "./CreatePage";
 import { CreatePage, createFormModal, signInOutcome } from "./CreatePage";
 import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
+import { PresetCards } from "./create/PresetCards";
+import type { PresetName } from "./create/form-model";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -24,8 +27,11 @@ function byId(root: unknown, id: string): AnyVnode | undefined {
   return collectVnodes(root).find((node) => attrsOf(node).id === id);
 }
 
-/** The routed page with its defaults loaded. */
-async function loadedPage(): Promise<{
+/** The page (routed unless `attrs` say otherwise) with its defaults loaded. */
+async function loadedPage(
+  attrs: CreatePageAttrs = {},
+  defaults: CreateFormDefaults = createFormDefaults(),
+): Promise<{
   page: m.Component<CreatePageAttrs>;
   vnode: m.Vnode<CreatePageAttrs>;
 }> {
@@ -33,10 +39,8 @@ async function loadedPage(): Promise<{
   vi.spyOn(m.route, "param").mockImplementation(
     (() => undefined) as typeof m.route.param,
   );
-  vi.stubGlobal("fetch", () =>
-    Promise.resolve(jsonResponse(createFormDefaults())),
-  );
-  const vnode = m(CreatePage, {}) as m.Vnode<CreatePageAttrs>;
+  vi.stubGlobal("fetch", () => Promise.resolve(jsonResponse(defaults)));
+  const vnode = m(CreatePage, attrs) as m.Vnode<CreatePageAttrs>;
   const page = CreatePage(vnode);
   page.oninit?.call(page, vnode);
   await settle();
@@ -44,6 +48,49 @@ async function loadedPage(): Promise<{
 }
 
 describe("CreatePage", () => {
+  it("opens on Imbue Cloud, and picking your own cloud opens the provider settings it needs", async () => {
+    const { page, vnode } = await loadedPage();
+
+    const simple = page.view.call(page, vnode);
+    expect(classTokensOf(byId(simple, "advanced-view") as AnyVnode)).toContain("hidden");
+    const cards = collectVnodes(simple).find((node) => node.tag === PresetCards) as AnyVnode;
+    expect(attrsOf(cards).selectedPreset).toBe("remote");
+
+    (attrsOf(cards).onSelect as (name: PresetName) => void)("own-cloud");
+    const advanced = page.view.call(page, vnode);
+
+    expect(classTokensOf(byId(advanced, "advanced-view") as AnyVnode)).not.toContain("hidden");
+    expect(attrsOf(byId(advanced, "launch_mode") as AnyVnode).value).toBe("VULTR");
+  });
+
+  it("opens embedded on the caller's preset, with your own cloud's provider settings showing", async () => {
+    const opened = async (initialPreset: PresetName, defaults?: CreateFormDefaults): Promise<AnyVnode[]> => {
+      const { page, vnode } = await loadedPage({ mode: "embedded", initialPreset }, defaults);
+      return collectVnodes(page.view.call(page, vnode));
+    };
+    const selectedPreset = (nodes: AnyVnode[]): unknown =>
+      attrsOf(nodes.find((node) => node.tag === PresetCards) as AnyVnode).selectedPreset;
+
+    const local = await opened("local");
+    expect(selectedPreset(local)).toBe("local");
+    expect(classTokensOf(byId(local, "advanced-view") as AnyVnode)).toContain("hidden");
+    expect(attrsOf(byId(local, "launch_mode") as AnyVnode).value).toBe(createFormDefaults().local_launch_mode);
+
+    const ownCloud = await opened("own-cloud");
+    expect(selectedPreset(ownCloud)).toBe("own-cloud");
+    expect(classTokensOf(byId(ownCloud, "advanced-view") as AnyVnode)).not.toContain("hidden");
+    expect(attrsOf(byId(ownCloud, "launch_mode") as AnyVnode).value).toBe("VULTR");
+
+    const withAccount = await opened(
+      "own-cloud",
+      createFormDefaults({
+        byok_clouds_enabled: true,
+        cloud_accounts: [{ name: "aws_acct", alias: "team aws", backend: "aws", region: "us-west-2" }],
+      }),
+    );
+    expect(attrsOf(byId(withAccount, "launch_mode") as AnyVnode).value).toBe("BYOK:aws_acct");
+  });
+
   it("offers the share panel's own switch in the advanced view, in the panel's own words", async () => {
     const { page, vnode } = await loadedPage();
 

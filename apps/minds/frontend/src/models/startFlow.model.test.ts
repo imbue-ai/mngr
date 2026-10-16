@@ -12,6 +12,7 @@ import {
   dismissPendingModal,
   finishPendingModal,
   initialStartFlowState,
+  isFormChoice,
   noteVerificationEmailSent,
   observeEmailVerified,
   openStepIndex,
@@ -21,13 +22,14 @@ import {
   settleAwaitedSignIn,
   settleCloudCreate,
   startQuestions,
+  stepChoices,
   undoAnswer,
   undoReporting,
 } from "./startFlow";
 import type { AnswerContext, ChoiceId, FlowAccount, StartFlowState } from "./startFlow";
 
 /** How the walk ended, once it has: a create went out, or the user left for the home page. */
-type Outcome = { kind: "cloud"; accountId: string; isSignedIn: boolean } | { kind: "custom" } | { kind: "home" };
+type Outcome = { kind: "cloud"; accountId: string; isSignedIn: boolean } | { kind: "form" } | { kind: "home" };
 
 interface World {
   flow: StartFlowState;
@@ -55,7 +57,7 @@ type Action =
   | { kind: "sign-in"; isNewAccount: boolean; isVerified: boolean; pick: number }
   | { kind: "verify"; pick: number }
   | { kind: "sign-out"; pick: number }
-  | { kind: "submit-custom" }
+  | { kind: "submit-form" }
   | { kind: "refuse-next-create" }
   | { kind: "relaunch" };
 
@@ -129,7 +131,7 @@ function openChoices(world: World): ChoiceId[] {
   const at = openStepIndex(world.flow);
   if (at === null) return [];
   const entry = world.flow.entries[at];
-  return entry.kind === "step" ? FLOW[entry.id].choices.map((choice) => choice.id) : [];
+  return entry.kind === "step" ? stepChoices(FLOW[entry.id]).map((choice) => choice.id) : [];
 }
 
 function undoableIndexes(world: World): number[] {
@@ -220,9 +222,9 @@ function act(world: World, action: Action): World {
       return world;
     }
     case "dismiss": {
-      // Closing a sign-in modal leaves the flow waiting; closing the custom form or the existing-login one ends the wait.
+      // Closing a sign-in modal leaves the flow waiting; closing the create form or the existing-login one ends the wait.
       const pending = world.flow.pending;
-      if (pending === "custom" || pending === "existing-login") return { ...world, flow: dismissPendingModal(world.flow) };
+      if (isFormChoice(pending) || pending === "existing-login") return { ...world, flow: dismissPendingModal(world.flow) };
       return world;
     }
     case "sign-in": {
@@ -243,9 +245,9 @@ function act(world: World, action: Action): World {
       if (account === undefined) return world;
       return { ...world, accounts: world.accounts.filter((existing) => existing.userId !== account.userId) };
     }
-    case "submit-custom": {
-      if (world.flow.pending !== "custom") return world;
-      return { ...world, flow: finishPendingModal(world.flow), outcome: { kind: "custom" } };
+    case "submit-form": {
+      if (!isFormChoice(world.flow.pending)) return world;
+      return { ...world, flow: finishPendingModal(world.flow), outcome: { kind: "form" } };
     }
     case "refuse-next-create":
       return { ...world, willRefuseNextCreate: true };
@@ -264,7 +266,7 @@ function step(world: World, action: Action): World {
  * as a brand-new, verified account or verify the awaited email.
  */
 function rescueMoves(world: World): Action[] {
-  const moves: Action[] = [{ kind: "report", isAllowed: true }, { kind: "dismiss" }, { kind: "submit-custom" }];
+  const moves: Action[] = [{ kind: "report", isAllowed: true }, { kind: "dismiss" }, { kind: "submit-form" }];
   openChoices(world).forEach((_, pick) => moves.push({ kind: "press", pick }));
   undoableIndexes(world).forEach((_, pick) => moves.push({ kind: "undo", pick }));
   moves.push({ kind: "sign-in", isNewAccount: true, isVerified: true, pick: 0 });
@@ -309,7 +311,7 @@ const actionArbitrary: fc.Arbitrary<Action> = fc.oneof(
   },
   { weight: 3, arbitrary: fc.record({ kind: fc.constant("verify" as const), pick: fc.nat(5) }) },
   { weight: 1, arbitrary: fc.record({ kind: fc.constant("sign-out" as const), pick: fc.nat(5) }) },
-  { weight: 1, arbitrary: fc.constant({ kind: "submit-custom" as const }) },
+  { weight: 1, arbitrary: fc.constant({ kind: "submit-form" as const }) },
   { weight: 1, arbitrary: fc.constant({ kind: "refuse-next-create" as const }) },
   { weight: 1, arbitrary: fc.constant({ kind: "relaunch" as const }) },
 );

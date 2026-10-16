@@ -2,10 +2,10 @@
 // backend is up. The manifesto exchange plays on a fixed clock and ends on the
 // error-reporting question; answering that starts the first-run questions,
 // asked one at a time as a chat (see models/startFlow.ts for the transcript
-// and its transitions). A cloud answer
-// submits the create form's remote preset directly; the custom answer opens
-// the create form itself as a modal; "I already have one (log in)" signs in and
-// leaves for the home page. A cloud create waits for the account's email to be
+// and its transitions). The cloud answer submits the create form's remote
+// preset directly; the two quieter answers open the create form itself as a
+// modal, on their own preset; "I already have a workspace (log in)" signs in
+// and leaves for the home page. A cloud create waits for the account's email to be
 // verified (the connector refuses it otherwise), polling and offering a resend
 // meanwhile. Submitting a create routes to the creation page, which renders
 // this transcript above its own turns.
@@ -37,6 +37,7 @@ import {
   chooseExistingLogin,
   dismissPendingModal,
   finishPendingModal,
+  isFormChoice,
   manifestoSchedule,
   noteVerificationEmailSent,
   observeEmailVerified,
@@ -52,9 +53,18 @@ import {
   undoAnswer,
   undoReporting,
 } from "../../models/startFlow";
-import type { ChoiceId, FlowAccount, StartFlowModel, StepId, TranscriptEntry } from "../../models/startFlow";
+import type {
+  ChoiceId,
+  FlowAccount,
+  FlowChoice,
+  FormChoiceId,
+  StartFlowModel,
+  StepId,
+  TranscriptEntry,
+} from "../../models/startFlow";
 import { webLogin } from "../../models/webLogin";
 import { createFormModal } from "./CreatePage";
+import type { PresetName } from "./create/form-model";
 import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
 import {
   TRANSCRIPT_COLUMN_CLASS,
@@ -65,6 +75,9 @@ import {
   scrollAnchor,
   userTurn,
 } from "./start/transcript";
+import type { AnswerButton } from "./start/transcript";
+
+const FORM_PRESET_BY_CHOICE: Record<FormChoiceId, PresetName> = { local: "local", "own-cloud": "own-cloud" };
 
 /** How long "I verified it" keeps checking before the agent says it is not verified yet. */
 export const VERIFICATION_PRESS_WAIT_MS = 10000;
@@ -121,12 +134,6 @@ export function transcriptTurns(
       turns.push(choiceTable({ key: `${key}-table`, delayMs: optionsAt, isInstant: options.isInstant, columns: step.table }));
       optionsAt += FLOW_OPTIONS_GAP_MS * 2;
     }
-    if (step.prompt) {
-      turns.push(
-        agentTurn({ key: `${key}-prompt`, text: step.prompt, startAtMs: optionsAt, isInstant: options.isInstant }),
-      );
-      optionsAt += streamDurationMs(step.prompt) + FLOW_OPTIONS_GAP_MS;
-    }
     if (entry.answer !== null) {
       turns.push(
         userTurn({
@@ -143,16 +150,18 @@ export function transcriptTurns(
     if (!options.isPressable) return;
     const buttonsAt = at === options.reopenedStepIndex ? 0 : optionsAt;
     const aside = step.aside;
+    const toButton = (choice: FlowChoice): AnswerButton => ({
+      id: choice.id,
+      label: choice.label,
+      isEmphasized: choice.isEmphasized,
+      onPress: () => options.onAnswer?.(at, choice.id),
+    });
     turns.push(
       answerRow({
         key: `${key}-buttons`,
         delayMs: buttonsAt,
-        buttons: step.choices.map((choice) => ({
-          id: choice.id,
-          label: choice.label,
-          isEmphasized: choice.isEmphasized,
-          onPress: () => options.onAnswer?.(at, choice.id),
-        })),
+        buttons: step.choices.map(toButton),
+        minorButtons: (step.minorChoices ?? []).map(toButton),
         aside: aside ? { label: aside.label, onPress: () => options.onAside?.(entry.id) } : undefined,
       }),
     );
@@ -198,7 +207,8 @@ export const StartPage: m.ClosureComponent = () => {
   const flow: StartFlowModel = startFlow;
   const schedule = manifestoSchedule();
   let defaults: CreateFormDefaults | null = null;
-  let isCustomFormOpen = false;
+  // The preset the create form is open on, for a form answer; null while it is closed.
+  let formPreset: PresetName | null = null;
   let isSubmittingCloud = false;
   // The manifesto points the reader has opened.
   const openManifestoIds = new Set<string>();
@@ -427,8 +437,8 @@ export const StartPage: m.ClosureComponent = () => {
       signedInAccount: accounts.default,
       knownAccountIds: accounts.all.map((account) => account.userId),
     });
-    if (flow.state.pending === "custom") {
-      isCustomFormOpen = true;
+    if (isFormChoice(flow.state.pending)) {
+      formPreset = FORM_PRESET_BY_CHOICE[flow.state.pending];
     } else if (flow.state.pending === "signup" || flow.state.pending === "signin") {
       void webLogin.start(SIGN_IN_INTRO_BY_CHOICE[flow.state.pending]);
     }
@@ -451,7 +461,7 @@ export const StartPage: m.ClosureComponent = () => {
     stopVerificationTimers();
     flow.state = undoAnswer(flow.state, at);
     reopenedStepIndex = at;
-    isCustomFormOpen = false;
+    formPreset = null;
   }
 
   function onUndoReporting(): void {
@@ -460,7 +470,7 @@ export const StartPage: m.ClosureComponent = () => {
     flow.state = undoReporting(flow.state);
     reopenedStepIndex = null;
     isReportingReopened = true;
-    isCustomFormOpen = false;
+    formPreset = null;
   }
 
   function toggleManifestoPoint(id: string): void {
@@ -468,8 +478,8 @@ export const StartPage: m.ClosureComponent = () => {
     else openManifestoIds.add(id);
   }
 
-  function closeCustomForm(): void {
-    isCustomFormOpen = false;
+  function closeCreateForm(): void {
+    formPreset = null;
     flow.state = dismissPendingModal(flow.state);
   }
 
@@ -601,16 +611,15 @@ export const StartPage: m.ClosureComponent = () => {
         }),
         scrollAnchor(state.entries.length),
       );
-      if (isCustomFormOpen) {
+      if (formPreset !== null) {
         children.push(
           createFormModal({
-            key: "start-custom-form",
-            id: "start-custom-form",
-            onClose: closeCustomForm,
-            initialPreset: "local",
-            isAdvancedOpen: true,
+            key: "start-create-form",
+            id: "start-create-form",
+            onClose: closeCreateForm,
+            initialPreset: formPreset,
             onSubmitted: (operationId: string) => {
-              isCustomFormOpen = false;
+              formPreset = null;
               flow.state = finishPendingModal(flow.state);
               enterCreation(operationId);
             },

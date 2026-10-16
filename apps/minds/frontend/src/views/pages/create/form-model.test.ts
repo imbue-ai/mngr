@@ -94,6 +94,24 @@ describe("CreateFormModel", () => {
     expect(model.accountId).toBe("user-1");
   });
 
+  it("points the own-cloud preset at the first cloud account the user added, else Vultr", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.applyPreset("own-cloud");
+    expect(model.launchValue).toBe("BYOK:aws_acct");
+    expect(model.launchSelection()).toEqual({ mode: "AWS", cloudAccount: "aws_acct" });
+    expect(model.backupProvider).toBe("CONFIGURE_LATER");
+
+    model.applyDefaults(buildDefaults({ cloud_accounts: [] }));
+    model.applyPreset("own-cloud");
+    expect(model.launchValue).toBe("VULTR");
+
+    // An account added while the feature is off is not offered.
+    model.applyDefaults(buildDefaults({ byok_clouds_enabled: false }));
+    model.applyPreset("own-cloud");
+    expect(model.launchValue).toBe("VULTR");
+  });
+
   it("points the local preset at whichever local backend this machine can run", () => {
     // On a Linux box with Docker but no QEMU the local preset must not pick Lima.
     const model = new CreateFormModel();

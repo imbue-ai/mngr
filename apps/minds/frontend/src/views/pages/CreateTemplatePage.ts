@@ -4,9 +4,9 @@
 // summary, click to reopen). Port of TemplateCreate.jinja.
 //
 //   Step 1: create a NEW machine from the repo, or add it to an EXISTING one.
-//   Create branch: (2) local vs remote presets, (3) confirm -- account, a
-//     required "I trust this Template" acknowledgment, optional advanced
-//     provider/region settings, and Create.
+//   Create branch: (2) where to run: Imbue Cloud, this computer, or your own
+//     cloud, (3) confirm -- account, a required "I trust this Template"
+//     acknowledgment, optional advanced provider/region settings, and Create.
 //   Add branch: (2) copy the adopt-command message (copying
 //     advances), (3) pick the machine to open (full page) -- or, in the modal,
 //     just paste it into the machine you are already in.
@@ -28,10 +28,11 @@ import { PageNarrowContainer } from "../components/Layout";
 import { Icon16 } from "../components/Icon";
 import { StatusBadge } from "../components/StatusBadge";
 import { keyStateChipFor, livenessBadgeLabelFor, rowClickActionFor } from "./landing-controls";
-import { PresetCards } from "./create/PresetCards";
+import { PRESET_TITLES, PresetCards } from "./create/PresetCards";
+import { cloudAccountOptions } from "./create/CloudAccountsModal";
 import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
 import type { PresetName } from "./create/form-model";
-import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
+import { CreateFormModel, normalizeCreateApiError, presetOpensAdvanced } from "./create/form-model";
 
 // The chat command the add flow tells the user to paste.
 //
@@ -353,8 +354,6 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     );
   }
 
-  // ---- Step bodies ----
-
   function step1Body(): m.Children {
     return m("div", { class: "flex flex-col gap-3" }, [
       m(Button, { variant: "secondary", block: true, onclick: () => chooseCreate() }, "Create a new workspace"),
@@ -377,7 +376,9 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
           selectedPreset: model.selectedPreset,
           onSelect: (name: PresetName) => {
             model.applyPreset(name);
-            isAdvanced = false;
+            const opensAdvanced = presetOpensAdvanced(name);
+            if (opensAdvanced) pinPageColumn();
+            isAdvanced = opensAdvanced;
             activeStep = 3;
           },
         }),
@@ -409,9 +410,12 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
               model.launchValue = (event.target as HTMLSelectElement).value;
             },
           },
-          defaults.launch_modes.map((mode) =>
-            m("option", { value: mode, selected: model.launchValue === mode }, mode.toLowerCase()),
-          ),
+          [
+            defaults.launch_modes.map((mode) =>
+              m("option", { value: mode, selected: model.launchValue === mode }, mode.toLowerCase()),
+            ),
+            defaults.byok_clouds_enabled ? cloudAccountOptions(defaults.cloud_accounts, model.launchValue) : null,
+          ],
         ),
       ]),
       m("div", { class: "flex items-center justify-between gap-4" }, [
@@ -497,7 +501,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
         ? m(
             "p",
             { class: "mb-4 type-helper text-important" },
-            "Pick an account to use Imbue Cloud, or choose the local preset.",
+            `Pick an account to use Imbue Cloud, or choose "${PRESET_TITLES.local}" or "${PRESET_TITLES["own-cloud"]}".`,
           )
         : null,
       m(
@@ -723,12 +727,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       body: step1Body,
     });
     if (branch === "create") {
-      const presetSummary =
-        model.selectedPreset === "remote"
-          ? "Imbue Cloud"
-          : model.selectedPreset === "local"
-            ? "Directly on your computer"
-            : "";
+      const presetSummary = model.selectedPreset === null ? "" : PRESET_TITLES[model.selectedPreset];
       if (activeStep >= 2)
         steps.push({
           number: 2,

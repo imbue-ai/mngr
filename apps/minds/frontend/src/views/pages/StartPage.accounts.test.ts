@@ -18,7 +18,7 @@ import {
   secondAccountEntry,
 } from "../../testing";
 import { ShellState } from "../shell/shell-state";
-import { StartPage } from "./StartPage";
+import { pressLast, renderStartPage } from "./StartPage.testing";
 
 vi.mock("../../models/webLogin", () => ({
   webLogin: {
@@ -35,21 +35,6 @@ const ALICE = accountEntry();
 const BOB = secondAccountEntry();
 const VERIFIED_EMAILS = new Set([BOB.email]);
 const CREATE_URL = "/api/v1/workspaces";
-
-function renderPage(): { view: () => unknown; update: () => void } {
-  const component = (StartPage as unknown as (vnode: unknown) => m.Component)({});
-  return {
-    view: (): unknown => (component.view as () => unknown)(),
-    update: (): void => (component.onupdate as () => void)(),
-  };
-}
-
-function press(tree: unknown, name: string, value: string): void {
-  const matches = collectVnodes(tree).filter((candidate) => attrsOf(candidate)[name] === value);
-  const vnode = matches[matches.length - 1];
-  if (vnode === undefined) throw new Error(`nothing with ${name}=${value}`);
-  (attrsOf(vnode).onclick as () => void)();
-}
 
 function formDefaults(accounts: UiAccountEntry[]): CreateFormDefaults {
   return createFormDefaults({ accounts: accounts.map((account) => ({ user_id: account.user_id, email: account.email })) });
@@ -104,20 +89,20 @@ describe("the account step on the live page", () => {
   });
 
   it("a second account created after undoing an unverified first one is the one the create runs under", async () => {
-    const page = renderPage();
-    press(page.view(), "data-answer", "reporting-yes");
-    press(page.view(), "data-answer", "cloud");
+    const page = renderStartPage();
+    pressLast(page.view(), "data-answer", "reporting-yes");
+    pressLast(page.view(), "data-answer", "cloud");
 
     // Create Alice, who never verifies: the flow waits on her email.
-    press(page.view(), "data-answer", "signup");
+    pressLast(page.view(), "data-answer", "signup");
     signIn([ALICE]);
     page.update();
     await vi.waitFor(() => expect(allText(page.view())).toContain("I verified it"));
     expect(verificationChecks()).toEqual([ALICE.email]);
 
     // Take the account answer back and create Bob instead.
-    press(page.view(), "aria-label", "Change answer");
-    press(page.view(), "data-answer", "signup");
+    pressLast(page.view(), "aria-label", "Change answer");
+    pressLast(page.view(), "data-answer", "signup");
     page.update();
     // Alice, signed in all along, is not the account this press is waiting on.
     expect(allText(page.view())).not.toContain("I verified it");
@@ -147,14 +132,14 @@ describe("the account step on the live page", () => {
       return defaultFetch(url);
     });
     signIn([ALICE]);
-    const page = renderPage();
-    press(page.view(), "data-answer", "reporting-yes");
-    press(page.view(), "data-answer", "cloud");
-    press(page.view(), "data-answer", "continue");
+    const page = renderStartPage();
+    pressLast(page.view(), "data-answer", "reporting-yes");
+    pressLast(page.view(), "data-answer", "cloud");
+    pressLast(page.view(), "data-answer", "continue");
     expect(verificationChecks()).toEqual([ALICE.email]);
 
-    press(page.view(), "aria-label", "Change answer");
-    press(page.view(), "data-answer", "signin");
+    pressLast(page.view(), "aria-label", "Change answer");
+    pressLast(page.view(), "data-answer", "signin");
     signIn([ALICE, BOB]);
     page.update();
     releaseAliceCheck();
@@ -185,16 +170,16 @@ describe("the account step on the live page", () => {
       return defaultFetch(url);
     });
     signIn([ALICE]);
-    const page = renderPage();
-    press(page.view(), "data-answer", "reporting-yes");
-    press(page.view(), "data-answer", "cloud");
-    press(page.view(), "data-answer", "continue");
+    const page = renderStartPage();
+    pressLast(page.view(), "data-answer", "reporting-yes");
+    pressLast(page.view(), "data-answer", "cloud");
+    pressLast(page.view(), "data-answer", "continue");
     await vi.waitFor(() => expect(startFlow.state.verificationEmail).toBe(ALICE.email));
-    press(page.view(), "data-answer", "verified");
+    pressLast(page.view(), "data-answer", "verified");
     await vi.waitFor(() => expect(aliceChecks).toBe(2));
 
-    press(page.view(), "aria-label", "Change answer");
-    press(page.view(), "data-answer", "signin");
+    pressLast(page.view(), "aria-label", "Change answer");
+    pressLast(page.view(), "data-answer", "signin");
     signIn([ALICE, BOB]);
     page.update();
     await vi.waitFor(() => expect(startFlow.state.verificationEmail).toBe(BOB.email));
@@ -216,10 +201,10 @@ describe("the account step on the live page", () => {
       return jsonResponse({});
     });
     signIn([{ ...BOB, is_default: true }]);
-    const page = renderPage();
-    press(page.view(), "data-answer", "reporting-yes");
-    press(page.view(), "data-answer", "cloud");
-    press(page.view(), "data-answer", "continue");
+    const page = renderStartPage();
+    pressLast(page.view(), "data-answer", "reporting-yes");
+    pressLast(page.view(), "data-answer", "cloud");
+    pressLast(page.view(), "data-answer", "continue");
 
     await vi.waitFor(() =>
       expect(startFlow.state.entries.at(-1)).toMatchObject({
@@ -234,9 +219,9 @@ describe("the account step on the live page", () => {
 
   it("with an account already signed in, the cloud answer asks whether to keep it", () => {
     signIn([ALICE]);
-    const page = renderPage();
-    press(page.view(), "data-answer", "reporting-yes");
-    press(page.view(), "data-answer", "cloud");
+    const page = renderStartPage();
+    pressLast(page.view(), "data-answer", "reporting-yes");
+    pressLast(page.view(), "data-answer", "cloud");
 
     const answers = collectVnodes(page.view())
       .map((node) => attrsOf(node)["data-answer"])
