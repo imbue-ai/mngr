@@ -3,6 +3,7 @@ import type { CreateAttemptRequestSummary } from "./create";
 import {
   IMBUE_CLOUD_SUMMARY_LINE,
   READY_LINE,
+  START_FALLBACK_LINE,
   START_OPTIONS,
   failureLine,
   readyTurnMarkdown,
@@ -120,5 +121,10 @@ describe("startOptionsMarkdown", () => {
 
   it("puts the ready line one heading level above the options", () => {
     expect(readyTurnMarkdown().startsWith(`## ${READY_LINE}\n\n### 1. `)).toBe(true);
+  });
+
+  it("ends the closing turn with the fallback line as a plain paragraph after the last option", () => {
+    const lastOption = startOptionsMarkdown()[START_OPTIONS.length - 1];
+    expect(readyTurnMarkdown().endsWith(`${lastOption}\n\n${START_FALLBACK_LINE}`)).toBe(true);
   });
 });

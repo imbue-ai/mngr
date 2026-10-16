@@ -330,7 +330,8 @@ function statesOf(actions: Action[]): World[] {
 }
 
 describe("randomized walks through the start flow", () => {
-  it("never strand the user: a cloud workspace under a fresh account is always a few moves away", () => {
+  // A bounded search from every state of every walk: CPU-bound, so it slows many times over under the full parallel suite.
+  it("never strand the user: a cloud workspace under a fresh account is always a few moves away", { timeout: 30_000 }, () => {
     fc.assert(
       fc.property(walkArbitrary, (actions) => {
         for (const world of statesOf(actions)) {

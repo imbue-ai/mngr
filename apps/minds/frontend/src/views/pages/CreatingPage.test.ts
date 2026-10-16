@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { AppContext } from "../../app-context";
 import type { CreateAttemptDetail } from "../../models/create";
-import { readyTurnMarkdown } from "../../models/creationTranscript";
+import { START_FALLBACK_LINE, readyTurnMarkdown } from "../../models/creationTranscript";
 import { MANIFESTO_OPENER, MANIFESTO_QUESTION, REPORTING_ASK } from "../../models/startFlow";
 import { manifestoOpenerMarkdown } from "../../models/welcomeChat";
 import type { WelcomeChatBody } from "../../models/welcomeChat";
@@ -183,7 +183,8 @@ describe("CreatingPage across a route change", () => {
     expect(turns[turns.length - 1].text).toBe(readyTurnMarkdown());
     const nodes = collectVnodes(render(vnodeFor("create-attempt-d")));
     expect(nodes.some((node) => attrsOf(node).key === "creation-ready")).toBe(true);
-    expect(allText(nodes.find((node) => attrsOf(node).id === "start-options"))).toContain("Start with an app");
+    expect(allText(nodes.find((node) => attrsOf(node).id === "start-options"))).toContain("Make something.");
+    expect(allText(nodes.find((node) => attrsOf(node).key === "creation-start-fallback"))).toBe(START_FALLBACK_LINE);
 
     // The ready hold passes, but the workspace is not entered while the hand-off is still in flight.
     await vi.advanceTimersByTimeAsync(30_000);

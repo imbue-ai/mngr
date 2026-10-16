@@ -64,7 +64,7 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
       "it runs on later in Settings.",
   },
 ];
-export const READY_LINE = "Your workspace is ready! What would you like to do first?";
+export const READY_LINE = "Your workspace is ready! What do you want to do first?";
 
 /** One way to start: its title, and the line or two under it. */
 export interface StartOption {
@@ -72,37 +72,35 @@ export interface StartOption {
   detail: string;
 }
 
-/** The ways to start the closing turn offers, in the order they are numbered. */
+/**
+ * The ways to start the closing turn offers, in the order they are numbered. They speak in the first person,
+ * unlike the turns before them: the agent the user messages next in the seeded chat is the one offering.
+ */
 export const START_OPTIONS: StartOption[] = [
   {
-    title: "Start with an app",
-    detail: "Pick a useful app someone else made, then change it to fit you.",
-  },
-  {
-    title: "Make something new",
+    title: "Make something.",
     detail:
-      "Tell your agent about a problem you want to solve or an app you want to make. It’ll help you shape it, " +
-      "build it, and improve it as you use it.",
+      "Tell me about a problem you have, and we can make a solution together. Or tell me something you want to make.",
   },
   {
-    title: "Connect your data",
+    title: "Connect your tools.",
     detail:
-      "Connect your email, calendar, Slack, GitHub, or another service so your agent can help with the information " +
-      "already there.",
+      "Privately connect your email, calendar, Slack, GitHub, or something else you use—I can start syncing with " +
+      "them so you can work with the live information.",
   },
   {
-    title: "Hand off some work",
-    detail: "Give your agent a task to do now, or set something to run on a schedule.",
-  },
-  {
-    title: "Learn how Imbue Studio works",
-    detail: "Ask your agent to explain what it can do, how your workspace works, and what you control.",
+    title: "Take a task off your plate.",
+    detail: "Give me a task. I can figure out how to do it, and can run it when specific triggers happen.",
   },
 ];
 
-/** The closing turn as markdown: the ready line as a heading one level above the numbered option headings under it. */
+/** The closing turn's last line, under the numbered options, for a reader who is not sure where to start. */
+export const START_FALLBACK_LINE =
+  "If you’re not sure where to start, I can explain how your workspace works and what you control.";
+
+/** The closing turn as markdown: the ready line as a heading one level above the numbered option headings. */
 export function readyTurnMarkdown(): string {
-  return [`## ${READY_LINE}`, ...startOptionsMarkdown()].join("\n\n");
+  return [`## ${READY_LINE}`, ...startOptionsMarkdown(), START_FALLBACK_LINE].join("\n\n");
 }
 
 /** The closing turn's options as markdown: a numbered heading per option with its detail under it. */

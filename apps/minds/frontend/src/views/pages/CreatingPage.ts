@@ -22,6 +22,7 @@ import {
   READY_LINE,
   SETUP_LINE,
   SETUP_SECTIONS,
+  START_FALLBACK_LINE,
   START_OPTIONS,
   failureLine,
   summaryLines,
@@ -478,6 +479,7 @@ export const CreatingPage: m.ClosureComponent = () => {
     if (state.isDone) {
       turns.push(agentTurn({ key: "creation-ready", text: READY_LINE, startAtMs: FLOW_THINK_MS, class: "type-heading" }));
       turns.push(startOptionsList(startOptionsAtMs()));
+      turns.push(startFallbackLine(startOptionsAtMs()));
     }
     return turns;
   }
@@ -498,6 +500,19 @@ export const CreatingPage: m.ClosureComponent = () => {
           m("div", { class: "text-secondary" }, option.detail),
         ]),
       ),
+    );
+  }
+
+  /** The line under the ways to start, offering an explanation instead; arrives with the list. */
+  function startFallbackLine(arriveAtMs: number): m.Children {
+    return m(
+      "p",
+      {
+        key: "creation-start-fallback",
+        class: "start-chat-in mt-3 max-w-[calc(100%-100px)] leading-[1.5]",
+        style: `--start-chat-delay: ${arriveAtMs}ms; --start-chat-fade: 280ms;`,
+      },
+      START_FALLBACK_LINE,
     );
   }
 
