@@ -11,6 +11,7 @@ from typing import Sequence
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
+from pydantic import ValidationError
 from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
@@ -801,14 +802,14 @@ class PublishedPortDeclaration(FrozenModel):
             raise InvalidPublishedPortError(
                 f"Invalid published port {value!r}: expected <port> or <port>/<protocol> with protocol tcp or udp"
             )
-        port = int(match.group(1))
-        if port < MIN_PORT_NUMBER or port > MAX_PORT_NUMBER:
-            raise InvalidPublishedPortError(
-                f"Invalid published port {value!r}: port must be between {MIN_PORT_NUMBER} and {MAX_PORT_NUMBER}"
-            )
         protocol_text = match.group(2)
         protocol = PortProtocol.TCP if protocol_text is None else PortProtocol(protocol_text.upper())
-        return cls(guest_port=port, protocol=protocol)
+        try:
+            return cls(guest_port=int(match.group(1)), protocol=protocol)
+        except ValidationError as e:
+            raise InvalidPublishedPortError(
+                f"Invalid published port {value!r}: port must be between {MIN_PORT_NUMBER} and {MAX_PORT_NUMBER}"
+            ) from e
 
     def __str__(self) -> str:
         return f"{self.guest_port}/{self.protocol.value.lower()}"
