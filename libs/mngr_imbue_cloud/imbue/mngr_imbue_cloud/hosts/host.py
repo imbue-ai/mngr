@@ -119,7 +119,7 @@ class ImbueCloudHost(Host):
 
         Re-read on every call rather than captured at construction: a restore
         re-picks the box ports, and the provider's lease listing is what moves
-        with the workspace (as the SSH ports do).
+        with the host (as the SSH ports do).
         """
         return self.published_endpoint_source.published_endpoints_for(self.id)
 

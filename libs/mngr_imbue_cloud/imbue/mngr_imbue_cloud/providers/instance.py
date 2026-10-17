@@ -382,24 +382,24 @@ def _synthesize_services_agent_for_lifecycle_entry(
 
 
 @pure
-def leased_info_from_workspace(workspace: WorkspaceInfo) -> LeasedHostInfo:
-    """Project a running workspace into the LeasedHostInfo shape the lease paths use."""
-    if workspace.vps_address is None or workspace.ssh_port is None or workspace.container_ssh_port is None:
-        raise ImbueCloudConnectorError(f"running workspace {workspace.host_db_id} is missing placement coordinates")
+def leased_info_from_workspace(record: WorkspaceInfo) -> LeasedHostInfo:
+    """Project a running host's sync record into the LeasedHostInfo shape the lease paths use."""
+    if record.vps_address is None or record.ssh_port is None or record.container_ssh_port is None:
+        raise ImbueCloudConnectorError(f"running host record {record.host_db_id} is missing placement coordinates")
     return LeasedHostInfo(
-        host_db_id=workspace.host_db_id,
-        vps_address=workspace.vps_address,
-        ssh_port=workspace.ssh_port,
-        ssh_user=workspace.ssh_user,
-        container_ssh_port=workspace.container_ssh_port,
-        agent_id=workspace.agent_id,
-        host_id=workspace.host_id,
-        host_name=workspace.host_name,
-        attributes=workspace.attributes,
-        leased_at=workspace.leased_at,
-        outer_host_public_key=workspace.outer_host_public_key,
-        container_host_public_key=workspace.container_host_public_key,
-        published_ports=workspace.published_ports,
+        host_db_id=record.host_db_id,
+        vps_address=record.vps_address,
+        ssh_port=record.ssh_port,
+        ssh_user=record.ssh_user,
+        container_ssh_port=record.container_ssh_port,
+        agent_id=record.agent_id,
+        host_id=record.host_id,
+        host_name=record.host_name,
+        attributes=record.attributes,
+        leased_at=record.leased_at,
+        outer_host_public_key=record.outer_host_public_key,
+        container_host_public_key=record.container_host_public_key,
+        published_ports=record.published_ports,
     )
 
 

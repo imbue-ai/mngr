@@ -123,9 +123,9 @@ def test_lease_result_published_ports_are_additive_and_coerce_unknown_protocols(
         PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22002),
         PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UNKNOWN, host_port=22002),
     )
-    workspace = validate_wire(
+    info = validate_wire(
         WorkspaceInfo,
         {"host_db_id": base["host_db_id"], "status": "running", "agent_id": "a", "host_id": "h", "host_name": "n"},
     )
-    assert workspace.published_ports == ()
+    assert info.published_ports == ()
     assert validate_wire(LeasedHostInfo, {**base, "leased_at": "2026-01-01T00:00:00Z"}).published_ports == ()

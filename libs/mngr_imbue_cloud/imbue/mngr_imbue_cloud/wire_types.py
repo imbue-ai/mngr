@@ -135,7 +135,7 @@ class PublishedPortProtocol(WireEnum):
 class PublishedPortInfo(WireModel):
     """One published port of a leased slice (specs/published-ports): the declared guest port and the box port forwarding to it."""
 
-    guest_port: int = Field(description="The declared port inside the workspace container")
+    guest_port: int = Field(description="The declared port inside the container")
     protocol: PublishedPortProtocol = Field(description="The declared transport protocol")
     host_port: int = Field(description="The box port DNAT'd to the guest port; re-picked on every restore")
 

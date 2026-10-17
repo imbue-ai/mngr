@@ -36,9 +36,13 @@ def test_reject_vm_port_collisions_refuses_the_vm_sshd_and_the_container_sshd_po
     reject_vm_port_collisions(provider_name, [_UDP_59000, _TCP_8080], container_ssh_port=2222)
     with pytest.raises(PublishedPortUnsupportedError, match="22/tcp.*sshd"):
         reject_vm_port_collisions(
-            provider_name, [PublishedPortDeclaration(guest_port=22, protocol=PortProtocol.TCP)], container_ssh_port=2222
+            provider_name,
+            [PublishedPortDeclaration(guest_port=22, protocol=PortProtocol.TCP)],
+            container_ssh_port=2222,
         )
     with pytest.raises(PublishedPortUnsupportedError, match="2222/udp.*container_ssh_port"):
         reject_vm_port_collisions(
-            provider_name, [PublishedPortDeclaration(guest_port=2222, protocol=PortProtocol.UDP)], container_ssh_port=2222
+            provider_name,
+            [PublishedPortDeclaration(guest_port=2222, protocol=PortProtocol.UDP)],
+            container_ssh_port=2222,
         )
