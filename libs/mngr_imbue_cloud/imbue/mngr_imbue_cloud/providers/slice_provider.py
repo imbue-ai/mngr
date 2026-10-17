@@ -66,6 +66,7 @@ from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsMemoryMib
 from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.published_ports import reject_vm_port_collisions
 from imbue.mngr_vps.sizing import VpsInstanceShape
 
 # region/plan are meaningless for a box-carved slice VM, but the shared
@@ -457,7 +458,9 @@ class SliceVpsDockerProvider(VpsProvider):
         published inside the VM by the container on the same guest numbers;
         the resulting endpoints are what the returned host reports.
         """
-        slice_declarations = to_slice_declarations(published_ports or ())
+        declarations = tuple(published_ports or ())
+        reject_vm_port_collisions(self.name, declarations, self.config.container_ssh_port)
+        slice_declarations = to_slice_declarations(declarations)
         host_id = (
             HostId(self.slice_config.slice_host_id)
             if self.slice_config.slice_host_id is not None

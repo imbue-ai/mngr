@@ -6,6 +6,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_vps.published_ports import reject_declarations_outside_firewall
+from imbue.mngr_vps.published_ports import reject_vm_port_collisions
 from imbue.mngr_vps.published_ports import vps_publish_specs
 from imbue.mngr_vps.published_ports import vps_published_endpoints
 
@@ -28,3 +29,16 @@ def test_reject_declarations_outside_firewall_passes_listed_ports_and_refuses_ot
     reject_declarations_outside_firewall(provider_name, [_UDP_59000], [_UDP_59000, _TCP_8080], "mngr aws prepare")
     with pytest.raises(PublishedPortUnsupportedError, match="8080/tcp.*mngr aws prepare"):
         reject_declarations_outside_firewall(provider_name, [_UDP_59000, _TCP_8080], [_UDP_59000], "mngr aws prepare")
+
+
+def test_reject_vm_port_collisions_refuses_the_vm_sshd_and_the_container_sshd_ports() -> None:
+    provider_name = ProviderInstanceName("ovh")
+    reject_vm_port_collisions(provider_name, [_UDP_59000, _TCP_8080], container_ssh_port=2222)
+    with pytest.raises(PublishedPortUnsupportedError, match="22/tcp.*sshd"):
+        reject_vm_port_collisions(
+            provider_name, [PublishedPortDeclaration(guest_port=22, protocol=PortProtocol.TCP)], container_ssh_port=2222
+        )
+    with pytest.raises(PublishedPortUnsupportedError, match="2222/udp.*container_ssh_port"):
+        reject_vm_port_collisions(
+            provider_name, [PublishedPortDeclaration(guest_port=2222, protocol=PortProtocol.UDP)], container_ssh_port=2222
+        )

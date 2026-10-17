@@ -89,7 +89,6 @@ from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import remove_host_key_record
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
-from imbue.mngr.providers.published_ports import reject_sshd_port_declarations
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
@@ -150,6 +149,7 @@ from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import isolation_marker_value
 from imbue.mngr_vps.primitives import load_or_create_per_host_host_keypair
 from imbue.mngr_vps.primitives import per_host_key_dir
+from imbue.mngr_vps.published_ports import reject_vm_port_collisions
 from imbue.mngr_vps.published_ports import vps_published_endpoints
 from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.sizing import host_resources_for_shape
@@ -221,8 +221,6 @@ def build_vps_tags(
 # step targeted was already gone -- a benign outcome that should not be recorded as
 # a cleanup failure.
 _VPS_RESOURCE_ALREADY_GONE_STATUS_CODES: Final = (404, 410)
-# The agent's sshd inside the container, which the realizer publishes at ``container_ssh_port``.
-CONTAINER_SSHD_GUEST_PORT: Final[int] = 22
 
 
 def is_vps_resource_already_gone(error: MngrError) -> bool:
@@ -733,7 +731,7 @@ class VpsProvider(BaseProviderInstance):
         published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> Host:
         declarations = tuple(published_ports or ())
-        reject_sshd_port_declarations(self.name, declarations, CONTAINER_SSHD_GUEST_PORT)
+        reject_vm_port_collisions(self.name, declarations, self.config.container_ssh_port)
         host_id = HostId.generate()
         logger.info("Creating VPS host {} ({}) ...", name, host_id)
 
