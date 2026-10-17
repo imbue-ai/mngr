@@ -2,6 +2,8 @@ import socket
 from collections.abc import Sequence
 from typing import Final
 
+from loguru import logger
+
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
@@ -107,7 +109,8 @@ def choose_free_loopback_port(protocols: Sequence[PortProtocol]) -> int:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
                 try:
                     udp_socket.bind((LOOPBACK_HOST, candidate))
-                except OSError:
+                except OSError as e:
+                    logger.trace("Loopback port {} is free for TCP but not UDP ({}); trying another", candidate, e)
                     continue
                 return candidate
     raise NoFreeHostPortError(
