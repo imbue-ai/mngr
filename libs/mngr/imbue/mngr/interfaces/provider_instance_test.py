@@ -35,7 +35,7 @@ from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.interfaces.provider_instance import _build_agent_details_from_online_agent
 from imbue.mngr.interfaces.provider_instance import _discover_agents_on_host
 from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
-from imbue.mngr.interfaces.provider_instance import collect_cached_host_ssh_infos
+from imbue.mngr.interfaces.provider_instance import bounded_result_from_cached_hosts
 from imbue.mngr.interfaces.provider_instance import discover_hosts_within_per_host_timeout
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -48,7 +48,9 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import LifecycleProbeResult
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.utils.testing import capture_loguru
@@ -836,15 +838,17 @@ def test_discover_within_timeouts_omits_ssh_info_for_local_host(
     assert result.host_ssh_infos == ()
 
 
-def test_collect_cached_host_ssh_infos_reads_only_running_hosts(
+def test_bounded_result_from_cached_hosts_reads_only_running_hosts(
     host_id: HostId, provider: MockProviderInstance
 ) -> None:
-    """The batch-provider SSH helper (used by vps/modal) reads the SSH endpoint off each RUNNING
-    host's cached object and skips non-running hosts (whose tunnel would fail anyway)."""
+    """The batch-provider helper (used by vps/modal) reads the SSH endpoint and the published endpoints
+    off each RUNNING host's cached object and skips non-running hosts (whose tunnel would fail anyway)."""
     online_host = MagicMock(spec=OnlineHostInterface)
     online_host.id = host_id
     online_host.get_ssh_connection_info.return_value = ("root", "203.0.113.5", 2222, Path("/keys/id"))
     online_host.get_ssh_known_hosts_path.return_value = None
+    endpoint = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="203.0.113.5", host_port=59000)
+    online_host.get_published_endpoints.return_value = [endpoint]
     provider.mock_hosts = [online_host]
 
     running = DiscoveredHost(
@@ -860,9 +864,10 @@ def test_collect_cached_host_ssh_infos_reads_only_running_hosts(
         host_state=HostState.STOPPED,
     )
 
-    result = collect_cached_host_ssh_infos(provider, [running, stopped])
+    result = bounded_result_from_cached_hosts(provider, {running: [], stopped: []})
 
-    assert result == [
+    assert result.hosts == (running, stopped)
+    assert result.host_ssh_infos == (
         (
             host_id,
             SSHInfo(
@@ -872,8 +877,9 @@ def test_collect_cached_host_ssh_infos_reads_only_running_hosts(
                 key_path=Path("/keys/id"),
                 command="ssh -i /keys/id -p 2222 root@203.0.113.5",
             ),
-        )
-    ]
+        ),
+    )
+    assert result.host_published_endpoints == ((host_id, (endpoint,)),)
     # The stopped host was skipped before any get_host connection attempt.
     online_host.get_ssh_connection_info.assert_called_once()
 

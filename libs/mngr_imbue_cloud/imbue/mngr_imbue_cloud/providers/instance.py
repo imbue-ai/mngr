@@ -1013,6 +1013,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             host=host_ref,
             agents=tuple(agent_refs),
             ssh_info=self._build_lease_ssh_info(host_ref.host_id, lease),
+            published_endpoints=tuple(_published_endpoints_of_lease(lease)),
         )
 
     def read_host_for_incremental_discovery(self, host_ref: DiscoveredHost, timeout_seconds: float) -> BoundedHostRead:
@@ -1040,6 +1041,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             host=listed_host_ref,
             agents=tuple(agent_refs),
             ssh_info=self._build_lease_ssh_info(host_id, lease),
+            published_endpoints=tuple(_published_endpoints_of_lease(lease)),
         )
 
     def _find_leased_in_fetched_list(self, host_id: HostId) -> LeasedHostInfo | None:

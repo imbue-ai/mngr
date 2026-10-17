@@ -78,8 +78,7 @@ from imbue.mngr.interfaces.data_types import discovered_host_size_from_resources
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
-from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
-from imbue.mngr.interfaces.provider_instance import collect_cached_host_ssh_infos
+from imbue.mngr.interfaces.provider_instance import bounded_result_from_cached_hosts
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -2807,10 +2806,9 @@ log "=== Shutdown script completed ==="
         spawns no per-host reads to de-duplicate across polls.
         """
         agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
-        # Surface each running host's SSH endpoint (read from the host object the batch discovery
-        # just cached) so the streaming poller re-emits it as HOST_SSH_INFO for tunneling consumers.
-        host_ssh_infos = collect_cached_host_ssh_infos(self, agents_by_host.keys())
-        return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
+        # Surface each running host's SSH endpoint and published endpoints (read from the host object
+        # the batch discovery just cached) so the streaming poller re-emits them as HOST_SSH_INFO.
+        return bounded_result_from_cached_hosts(self, agents_by_host)
 
     @handle_modal_auth_error
     def discover_hosts_and_agents(

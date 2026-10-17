@@ -761,7 +761,13 @@ def test_discover_within_timeouts_attaches_lease_ssh_info(temp_mngr_ctx: MngrCon
     """The streaming discovery result carries each discovered host's SSH endpoint (built from
     its lease, pointing at the container's inner sshd), so the poller can emit HOST_SSH_INFO."""
     host_id = HostId.generate()
-    lease = _make_lease(host_id)
+    base_lease = _make_lease(host_id)
+    lease = base_lease.model_copy_update(
+        to_update(
+            base_lease.field_ref().published_ports,
+            [PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22012)],
+        ),
+    )
     provider = _LeasedHostListingProvider.model_construct(
         name=ProviderInstanceName("imbue-cloud-test"),
         mngr_ctx=temp_mngr_ctx,
@@ -781,6 +787,13 @@ def test_discover_within_timeouts_attaches_lease_ssh_info(temp_mngr_ctx: MngrCon
     assert ssh_info.host == lease.vps_address
     assert ssh_info.port == lease.container_ssh_port
     assert ssh_info.user == lease.ssh_user
+    # The lease's published ports ride beside the SSH info, so the poller emits them with it.
+    assert result.host_published_endpoints == (
+        (
+            host_id,
+            (PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host=lease.vps_address, host_port=22012),),
+        ),
+    )
 
 
 def test_discover_within_timeouts_pins_container_host_key(temp_mngr_ctx: MngrContext) -> None:
@@ -2787,7 +2800,13 @@ def _running_host_ref(lease: LeasedHostInfo) -> DiscoveredHost:
 
 
 def test_reread_lists_a_fetched_lease_live_with_its_container_endpoint(temp_mngr_ctx: MngrContext) -> None:
-    lease = _make_lease(HostId.generate())
+    base_lease = _make_lease(HostId.generate())
+    lease = base_lease.model_copy_update(
+        to_update(
+            base_lease.field_ref().published_ports,
+            [PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22012)],
+        ),
+    )
     services = _services_agent_data()
     chat = _agent_data("chat", {}, "claude")
     raw = {
@@ -2804,6 +2823,9 @@ def test_reread_lists_a_fetched_lease_live_with_its_container_endpoint(temp_mngr
     assert read.agents[1].certified_data == chat
     assert read.ssh_info is not None
     assert (read.ssh_info.host, read.ssh_info.port) == (lease.vps_address, lease.container_ssh_port)
+    assert read.published_endpoints == (
+        PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host=lease.vps_address, host_port=22012),
+    )
 
 
 @pytest.mark.parametrize("fetched_leases", [None, []], ids=["no list fetched", "host not in the fetched list"])

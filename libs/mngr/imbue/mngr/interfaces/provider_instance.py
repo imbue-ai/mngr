@@ -475,22 +475,23 @@ def bounded_result_from_agents_by_host(
     )
 
 
-def collect_cached_host_ssh_infos(
+def bounded_result_from_cached_hosts(
     provider: "ProviderInstanceInterface",
-    hosts: Iterable[DiscoveredHost],
-) -> list[tuple[HostId, SSHInfo]]:
-    """Best-effort per-host SSH endpoints for a batch provider's streaming discovery.
+    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
+) -> BoundedProviderDiscoveryResult:
+    """A batch provider's discovery result, with each running host's SSH endpoint and published endpoints.
 
     Batch providers (vps, modal) read hosts in bulk without the per-host connection the base
     bounded path makes, so they can't capture SSH inline. This reads the (cheap, local) SSH
-    endpoint off each RUNNING host's already-cached host object, so the streaming poller can
-    re-emit it as a ``HOST_SSH_INFO`` event. A host whose object can't be read (not running,
-    offline, or uncached) contributes nothing -- a tunnel to it would fail anyway. Providers
-    that already have a cheaper source (imbue_cloud builds it straight from the lease) do not
-    need this.
+    endpoint off each RUNNING host's already-cached host object, and the host's published
+    endpoints beside it, so the streaming poller can re-emit both in the host's ``HOST_SSH_INFO``
+    event. A host whose object can't be read (not running, offline, or uncached) contributes
+    nothing -- a tunnel to it would fail anyway. Providers that already have a cheaper source
+    (imbue_cloud builds both straight from the lease) do not need this.
     """
     host_ssh_infos: list[tuple[HostId, SSHInfo]] = []
-    for host in hosts:
+    host_published_endpoints: list[tuple[HostId, tuple[PublishedEndpoint, ...]]] = []
+    for host in agents_by_host:
         if host.host_state != HostState.RUNNING:
             continue
         try:
@@ -499,9 +500,20 @@ def collect_cached_host_ssh_infos(
             logger.debug("Skipping SSH info for host {}: {}", host.host_id, e)
             continue
         ssh_info = _ssh_info_from_host(host_obj)
-        if ssh_info is not None:
-            host_ssh_infos.append((host.host_id, ssh_info))
-    return host_ssh_infos
+        if ssh_info is None:
+            continue
+        host_ssh_infos.append((host.host_id, ssh_info))
+        # The endpoints ride on the SSH info event, so a failed read of them still emits the endpoint.
+        try:
+            published_endpoints = tuple(host_obj.get_published_endpoints())
+        except (MngrError, OSError) as e:
+            logger.debug("Skipping published endpoints for host {}: {}", host.host_id, e)
+            continue
+        if published_endpoints:
+            host_published_endpoints.append((host.host_id, published_endpoints))
+    return bounded_result_from_agents_by_host(
+        agents_by_host, host_ssh_infos=host_ssh_infos, host_published_endpoints=host_published_endpoints
+    )
 
 
 def _set_bounded_host_read_future(
