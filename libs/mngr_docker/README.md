@@ -51,3 +51,5 @@ The full option list, the sizing and snapshot behavior, and the SSH port-binding
 ## How it works
 
 Each host is a container running sshd, reached over SSH like every other mngr host. Provider metadata (host records, persisted agent data, per-host volumes) lives on a Docker named volume that a small singleton state container serves, so several mngr clients can share one daemon. Snapshots are `docker commit`s; stop and start are native container stop and start. See [ARCHITECTURE.md](ARCHITECTURE.md) for the details.
+
+The keys that open a container are minted per host under the provider instance's key dir, `<profile>/providers/docker/<instance>/keys/host_keys/<host-uuid-hex>/` (`docker_ssh_key` / `.pub`, the client key, and `host_key` / `.pub`, the container sshd's host keypair), with the host-key pins in that instance's `keys/known_hosts` store; the layout is published as `DOCKER_HOST_ACCESS_MANIFEST` (`constants.py`) for consumers that carry a host's access material to another machine.

@@ -6,6 +6,7 @@
 
 import type { CreateAttemptRequestSummary } from "./create";
 import { backupProviderLabel, launchModeLabel } from "./create";
+import { connectionLaunchLabel } from "./providers";
 import { formatMachineSizeNumbers } from "./machineSize";
 import type { DisclosurePoint } from "./startFlow";
 
@@ -104,7 +105,9 @@ export function readyTurnMarkdown(): string {
 
 /** The closing turn's options as markdown: a numbered heading per option with its detail under it. */
 export function startOptionsMarkdown(): string[] {
-  return START_OPTIONS.map((option, index) => `### ${index + 1}. ${option.title}\n\n${option.detail}`);
+  return START_OPTIONS.map(
+    (option, index) => `### ${index + 1}. ${option.title}\n\n${option.detail}`,
+  );
 }
 /**
  * What an Imbue Cloud create restates instead of its settings. The cloud
@@ -124,7 +127,19 @@ export function failureLine(workspaceName: string, error: string): string {
 
 /** A repository the way people say it: the github.com prefix and .git suffix trimmed. */
 export function shortRepository(repository: string): string {
-  return repository.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "");
+  return repository
+    .replace(/^https:\/\/github\.com\//, "")
+    .replace(/\.git$/, "");
+}
+
+/** The connection as the form offered it; the bare instance name when the connection is no longer known. */
+function connectionSummaryLabel(request: CreateAttemptRequestSummary): string {
+  return request.cloud_account_alias !== ""
+    ? connectionLaunchLabel(
+        request.cloud_account_alias,
+        request.cloud_account_backend_label,
+      )
+    : request.cloud_account;
 }
 
 /**
@@ -138,9 +153,15 @@ export function shortRepository(repository: string): string {
  * the two submissions are identical on the wire -- so the caller passes what
  * the start flow remembers.
  */
-export function summaryLines(request: CreateAttemptRequestSummary, isCloudPreset: boolean): string[] {
+export function summaryLines(
+  request: CreateAttemptRequestSummary,
+  isCloudPreset: boolean,
+): string[] {
   if (isCloudPreset) return [IMBUE_CLOUD_SUMMARY_LINE];
-  const compute = request.cloud_account !== "" ? request.cloud_account : launchModeLabel(request.launch_mode);
+  const compute =
+    request.cloud_account !== ""
+      ? connectionSummaryLabel(request)
+      : launchModeLabel(request.launch_mode);
   const settings: Array<[string, string]> = [
     ["Name", request.display_name],
     ["Compute", compute],
@@ -152,6 +173,8 @@ export function summaryLines(request: CreateAttemptRequestSummary, isCloudPreset
   ];
   return [
     "Create a workspace with these settings:",
-    ...settings.filter(([, value]) => value !== "").map(([label, value]) => `${label} — ${value}`),
+    ...settings
+      .filter(([, value]) => value !== "")
+      .map(([label, value]) => `${label} — ${value}`),
   ];
 }

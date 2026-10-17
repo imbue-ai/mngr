@@ -7,7 +7,6 @@ import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { UiAccountEntry } from "../../../channel/messages";
 import { AccountsDetailModel } from "../../../models/accountsDetail";
-import { webLogin } from "../../../models/webLogin";
 import type { AnyVnode } from "../../../testing";
 import {
   accountEntry,
@@ -204,26 +203,6 @@ describe("the plan switcher's plan names", () => {
     expect(
       options.map((node) => collectText(node).join("").trim()),
     ).not.toContain("Free");
-  });
-});
-
-describe("a signed-out account's card", () => {
-  it("signs back in to close on landing, with no confirmation over the list", () => {
-    const start = vi
-      .spyOn(webLogin, "start")
-      .mockImplementation(() => Promise.resolve());
-    const render = mountCard(
-      modelOnPlan("free"),
-      accountEntry({ email: "person@example.com", is_enabled: false }),
-    );
-
-    const signInAgain = collectVnodes(render()).find(
-      (node) => collectText(node).join("").trim() === "Sign in again",
-    );
-    expect(signInAgain).toBeDefined();
-    (attrsOf(signInAgain as AnyVnode).onclick as () => void)();
-
-    expect(start).toHaveBeenCalledWith("", { isClosedOnSignIn: true });
   });
 });
 

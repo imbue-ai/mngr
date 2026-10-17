@@ -20,6 +20,7 @@ from datetime import timezone
 from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -99,6 +100,11 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
+
+# A SuperTokens user id (UUID v4) and a connection instance name, as the create path carries them.
+_USER_ID = "3f2a9c1e-5b7d-4a8e-9c0f-1d2e3f4a5b6c"
+_AWS_CONNECTION = f"aws_{uuid4().hex}"
+_MODAL_CONNECTION = f"modal_{uuid4().hex}"
 
 
 def test_latest_release_tag_prefers_the_minds_scheme_over_newer_plain_semver_tags() -> None:
@@ -473,21 +479,6 @@ def test_build_mngr_create_command_omits_prebaked_image_override_when_unset() ->
     assert "default_image_url" not in " ".join(command)
 
 
-def test_build_mngr_create_command_stacks_modal_overlay_template_from_env(monkeypatch) -> None:
-    """A MODAL create stacks the overlay template named in ``MINDS_MODAL_EXTRA_TEMPLATE`` on top of
-    ``modal`` (mirroring ``docker_runsc`` on ``docker``); the eval harness uses this for ``modal_eval``."""
-    monkeypatch.setenv("MINDS_MODAL_EXTRA_TEMPLATE", "modal_eval")
-    joined = " ".join(_build_mngr_create_command(launch_mode=LaunchMode.MODAL, host_name=HostName("hello")))
-    assert "--template main --template modal --template modal_eval" in joined
-
-
-def test_build_mngr_create_command_modal_has_no_overlay_when_env_unset(monkeypatch) -> None:
-    monkeypatch.delenv("MINDS_MODAL_EXTRA_TEMPLATE", raising=False)
-    joined = " ".join(_build_mngr_create_command(launch_mode=LaunchMode.MODAL, host_name=HostName("hello")))
-    assert "--template main --template modal" in joined
-    assert "modal_eval" not in joined
-
-
 def test_build_mngr_create_command_stamps_original_minds_version_label() -> None:
     """The resolved template ref is stamped as an immutable
     ``original_minds_version`` label so the version API can report what
@@ -546,12 +537,12 @@ def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
         (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.VULTR, None),
-        (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
+        (LaunchMode.IMBUE_CLOUD, _USER_ID),
     ):
         command = _build_mngr_create_command(
             launch_mode=mode,
             host_name=HostName("hello"),
-            imbue_cloud_account=account,
+            imbue_cloud_user_id=account,
         )
         joined = " ".join(command)
         assert "MINDS_API_KEY" not in joined, f"{mode}: command must not mention MINDS_API_KEY"
@@ -561,7 +552,7 @@ def test_build_mngr_create_command_forwards_fast_mode_for_imbue_cloud() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_user_id=_USER_ID,
         imbue_cloud_fast_mode="require",
     )
     # The fast_mode knob must reach mngr as a -b build arg.
@@ -573,7 +564,7 @@ def test_build_mngr_create_command_omits_fast_mode_when_unset() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_user_id=_USER_ID,
     )
     joined = " ".join(command)
     assert "fast_mode" not in joined
@@ -583,7 +574,7 @@ def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_user_id=_USER_ID,
         region="US-WEST-OR",
     )
     # The explicit region must reach mngr as a hard -b region= build arg.
@@ -591,14 +582,15 @@ def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
 
 
 def test_build_mngr_create_command_modal_targets_modal_provider() -> None:
-    """Modal addresses the ``modal`` provider instance (local-token mode)."""
+    """Modal addresses the connection instance the create names (Modal is a connection, not ambient)."""
+    modal_connection = f"modal_{uuid4().hex}"
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.MODAL,
         host_name=HostName("hello"),
+        cloud_account=modal_connection,
     )
-    # Exact list-element match so it can't be confused with ``modal_proxied``.
-    assert "system-services@hello.modal" in command
-    assert "system-services@hello.modal_proxied" not in command
+    assert f"system-services@hello.{modal_connection}" in command
+    assert "system-services@hello.modal" not in command
     # Same remote shape as vultr/aws: new host + main + modal templates.
     assert "--new-host" in command
     assert command.count("--template") == 2
@@ -606,6 +598,24 @@ def test_build_mngr_create_command_modal_targets_modal_provider() -> None:
     assert "main" in command
     # No --reuse (that is only for imbue_cloud pool adoption).
     assert "--reuse" not in command
+
+
+def test_build_mngr_create_command_passes_no_region_flag_for_an_unplaced_modal_create() -> None:
+    modal_connection = f"modal_{uuid4().hex}"
+    unplaced = _build_mngr_create_command(
+        launch_mode=LaunchMode.MODAL,
+        host_name=HostName("hello"),
+        cloud_account=modal_connection,
+        region="",
+    )
+    assert not any("--region=" in part for part in unplaced)
+    placed = _build_mngr_create_command(
+        launch_mode=LaunchMode.MODAL,
+        host_name=HostName("hello"),
+        cloud_account=modal_connection,
+        region="eu-west",
+    )
+    assert any("--region=eu-west" in part for part in placed)
 
 
 def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
@@ -619,14 +629,14 @@ def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
 
 
 def test_build_mngr_create_command_aws_address_encodes_cloud_account() -> None:
-    """AWS is bring-your-own-key-account: the address selects the account's block."""
+    """AWS is connection-only: the address selects the connection instance."""
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.AWS,
         host_name=HostName("hello"),
         region="us-west-2",
-        cloud_account="byok-aws-mine",
+        cloud_account=_AWS_CONNECTION,
     )
-    assert "system-services@hello.byok-aws-mine" in command
+    assert f"system-services@hello.{_AWS_CONNECTION}" in command
     assert "aws" in command
     assert "--template" in command
 
@@ -636,7 +646,7 @@ def test_build_mngr_create_command_forwards_region_for_aws() -> None:
         launch_mode=LaunchMode.AWS,
         host_name=HostName("hello"),
         region="eu-west-1",
-        cloud_account="byok-aws-mine",
+        cloud_account=_AWS_CONNECTION,
     )
     # AWS confirms the account's pinned placement with a matching build arg.
     assert "--aws-region=eu-west-1" in command
@@ -678,29 +688,34 @@ def test_latchkey_gateway_location_for_launch_uses_vps(launch_mode: LaunchMode) 
 
 
 def test_provider_instance_name_for_launch_aws_uses_cloud_account() -> None:
-    """AWS resolves only through a bring-your-own-key account block name."""
-    assert (
-        provider_instance_name_for_launch(LaunchMode.AWS, region="us-west-2", cloud_account="byok-aws-mine")
-        == "byok-aws-mine"
-    )
+    """AWS resolves only through a connection instance name."""
+    assert provider_instance_name_for_launch(LaunchMode.AWS, cloud_account=_AWS_CONNECTION) == _AWS_CONNECTION
 
 
 def test_provider_instance_name_for_launch_aws_requires_cloud_account() -> None:
     with pytest.raises(MngrCommandError, match="AWS mode requires a cloud account"):
-        provider_instance_name_for_launch(LaunchMode.AWS, region="us-west-2")
+        provider_instance_name_for_launch(LaunchMode.AWS)
 
 
 def test_provider_instance_name_for_launch_imbue_cloud_is_per_account() -> None:
-    """Imbue Cloud is per-account; the slug mirrors the registered provider block."""
+    """Imbue Cloud is per-account; the instance carries the full user id, never an email."""
     assert (
-        provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD, imbue_cloud_account="Alice@Imbue.com")
-        == "imbue_cloud_alice-imbue-com"
+        provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD, imbue_cloud_user_id=_USER_ID)
+        == f"imbue_cloud_{_USER_ID}"
     )
 
 
 def test_provider_instance_name_for_launch_imbue_cloud_requires_account() -> None:
-    with pytest.raises(MngrCommandError, match="IMBUE_CLOUD mode requires imbue_cloud_account"):
+    with pytest.raises(MngrCommandError, match="IMBUE_CLOUD mode requires imbue_cloud_user_id"):
         provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD)
+
+
+def test_provider_instance_name_for_launch_modal_requires_a_connection() -> None:
+    """Modal is a connection with credentials, not an ambient provider."""
+    with pytest.raises(MngrCommandError, match="MODAL mode requires a cloud account"):
+        provider_instance_name_for_launch(LaunchMode.MODAL)
+    modal_connection = f"modal_{uuid4().hex}"
+    assert provider_instance_name_for_launch(LaunchMode.MODAL, cloud_account=modal_connection) == modal_connection
 
 
 def test_provider_instance_name_matches_create_address() -> None:
@@ -710,11 +725,11 @@ def test_provider_instance_name_matches_create_address() -> None:
     so it has to be exactly the provider the create address selects -- otherwise
     the live check and the create-time conflict check would disagree.
     """
-    instance = provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD, imbue_cloud_account="alice@imbue.com")
+    instance = provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD, imbue_cloud_user_id=_USER_ID)
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_user_id=_USER_ID,
     )
     assert f"system-services@hello.{instance}" in command
 
@@ -722,16 +737,16 @@ def test_provider_instance_name_matches_create_address() -> None:
 def test_run_mngr_aws_prepare_requires_region() -> None:
     # prepare runs before the create-command builder in the AWS create flow, so
     # it must reject an empty region with the same message rather than shelling
-    # out to ``mngr aws prepare --provider aws- --region ''``.
+    # out to ``mngr aws prepare --provider aws_<hex> --region ''``.
     with pytest.raises(MngrCommandError, match="AWS mode requires a region"):
-        run_mngr_aws_prepare("")
+        run_mngr_aws_prepare("", _AWS_CONNECTION)
 
 
 def test_build_mngr_create_command_omits_region_when_unset() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_user_id=_USER_ID,
     )
     joined = " ".join(command)
     assert "region=" not in joined
@@ -798,11 +813,33 @@ def test_build_mngr_create_command_passes_the_machine_size_in_the_providers_own_
         launch_mode=launch_mode,
         host_name=HostName("hello"),
         machine_size=MachineSizeSelection(cpu_count=4, memory_gb=16, disk_gb=200),
+        # Modal is reachable only through a connection; the local modes ignore the account.
+        cloud_account="modal_" + "0" * 32 if launch_mode is LaunchMode.MODAL else None,
     )
     rendered = " ".join(command)
     assert " ".join(expected_args) in rendered
     # The size follows the templates, so it is what docker and lima keep as the last spelling of each flag.
     assert rendered.index("--template") < rendered.index(expected_args[1])
+
+
+def test_build_mngr_create_command_passes_the_modal_sandbox_timeout_as_a_build_arg() -> None:
+    connection = "modal_" + "0" * 32
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.MODAL,
+        host_name=HostName("hello"),
+        cloud_account=connection,
+        modal_sandbox_timeout_seconds=10710,
+    )
+    timeout_index = command.index("--timeout=10710")
+    assert command[timeout_index - 1] == "-b"
+    # Never as a settings override: a connection instance name is not a backend
+    # the standalone -S parse knows, so mngr would refuse the create outright.
+    assert not any(arg.startswith("providers.") for arg in command)
+
+    without_override = _build_mngr_create_command(
+        launch_mode=LaunchMode.MODAL, host_name=HostName("hello"), cloud_account=connection
+    )
+    assert not any(arg.startswith("--timeout=") for arg in without_override)
 
 
 def test_build_mngr_create_command_passes_no_size_flags_when_none_was_chosen() -> None:
@@ -871,15 +908,15 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_user_id=_USER_ID,
         imbue_cloud_repo_url="https://github.com/imbue-ai/default-workspace-template",
         imbue_cloud_branch_or_tag="v1.2.3",
     )
     joined = " ".join(command)
-    # Address points at the imbue_cloud_<slug> provider so mngr routes
+    # Address points at the imbue_cloud_<user id> provider so mngr routes
     # create_host to ImbueCloudProvider. The agent name is now the constant
     # ``system-services``; the user's input drives the host name.
-    assert "system-services@hello.imbue_cloud_alice-imbue-com" in joined
+    assert f"system-services@hello.imbue_cloud_{_USER_ID}" in joined
     # IMBUE_CLOUD passes ``--reuse`` because the bake's services agent
     # is named ``system-services`` too, which mngr's pre-flight "agent
     # already exists on this host" check would otherwise reject. It
@@ -921,12 +958,12 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
         (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.VULTR, None),
-        (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
+        (LaunchMode.IMBUE_CLOUD, _USER_ID),
     ):
         command = _build_mngr_create_command(
             launch_mode=mode,
             host_name=HostName("hello"),
-            imbue_cloud_account=account,
+            imbue_cloud_user_id=account,
         )
         joined = " ".join(command)
         assert "--pass-env" not in command, f"{mode} should not inline --pass-env"
@@ -1680,14 +1717,22 @@ def test_build_mngr_create_command_forwards_extra_pass_host_env(monkeypatch) -> 
     """MINDS_EXTRA_PASS_HOST_ENV (space-separated var names) becomes one --pass-host-env per name, so a
     creating host (e.g. the eval box) can push env vars onto every machine it creates."""
     monkeypatch.setenv("MINDS_EXTRA_PASS_HOST_ENV", "FEATURE_X FEATURE_Y")
-    joined = " ".join(_build_mngr_create_command(launch_mode=LaunchMode.MODAL, host_name=HostName("hello")))
+    joined = " ".join(
+        _build_mngr_create_command(
+            launch_mode=LaunchMode.MODAL, host_name=HostName("hello"), cloud_account=_MODAL_CONNECTION
+        )
+    )
     assert "--pass-host-env FEATURE_X" in joined
     assert "--pass-host-env FEATURE_Y" in joined
 
 
 def test_build_mngr_create_command_no_extra_pass_host_env_when_unset(monkeypatch) -> None:
     monkeypatch.delenv("MINDS_EXTRA_PASS_HOST_ENV", raising=False)
-    joined = " ".join(_build_mngr_create_command(launch_mode=LaunchMode.MODAL, host_name=HostName("hello")))
+    joined = " ".join(
+        _build_mngr_create_command(
+            launch_mode=LaunchMode.MODAL, host_name=HostName("hello"), cloud_account=_MODAL_CONNECTION
+        )
+    )
     assert "FEATURE_X" not in joined
 
 
@@ -2367,7 +2412,7 @@ def test_build_mngr_create_command_keeps_a_repo_path_with_spaces_whole_through_m
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_user_id="11111111-1111-1111-1111-111111111111",
         imbue_cloud_repo_url=repo_path,
         imbue_cloud_branch_or_tag="it's-a-branch",
     )

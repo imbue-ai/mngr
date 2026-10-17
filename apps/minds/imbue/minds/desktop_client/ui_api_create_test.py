@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from flask.testing import FlaskClient
@@ -11,10 +12,20 @@ from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import build_desktop_client_with_accounts
+from imbue.minds.desktop_client.conftest import make_connection_store_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.conftest import unlock_account_with_master_password_for_test
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
+from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
+from imbue.minds.desktop_client.dek_store import delete_dek
+from imbue.minds.desktop_client.local_prerequisites import CommandProbeResult
+from imbue.minds.desktop_client.mock_local_prerequisites_test import FakeHostProbe
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -22,6 +33,7 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import write_dead_destroy_marker
+from imbue.minds.desktop_client.ui_api_create import RETRY_CONNECTION_REMOVED_REASON
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
 from imbue.minds.primitives import CreateAttemptId
@@ -58,7 +70,7 @@ def _welcome_chat_body() -> dict[str, object]:
     }
 
 
-def test_form_defaults_exclude_byok_only_launch_modes_and_carry_region_context(tmp_path: Path) -> None:
+def test_form_defaults_exclude_connection_only_launch_modes_and_carry_region_context(tmp_path: Path) -> None:
     client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
 
     response = client.get("/ui/api/create/form-defaults")
@@ -69,12 +81,17 @@ def test_form_defaults_exclude_byok_only_launch_modes_and_carry_region_context(t
     assert "AWS" not in payload["launch_modes"]
     assert "GCP" not in payload["launch_modes"]
     assert "AZURE" not in payload["launch_modes"]
+    assert "MODAL" not in payload["launch_modes"]
     assert payload["selected_launch_mode"] == "IMBUE_CLOUD"
     assert len(payload["docker_runtimes"]) > 0
     assert payload["selected_docker_runtime"] in payload["docker_runtimes"]
-    # The BYOK backends merge into the same region machinery the form JS reads.
-    assert set(payload["region_options_by_launch_mode"]) >= {"IMBUE_CLOUD", "VULTR", "AWS", "GCP", "AZURE"}
+    # The connection backends merge into the same region machinery the form JS reads.
+    assert set(payload["region_options_by_launch_mode"]) >= {"IMBUE_CLOUD", "VULTR", "MODAL", "AWS", "GCP", "AZURE"}
     assert payload["region_selected_by_launch_mode"]["AWS"] in payload["region_options_by_launch_mode"]["AWS"]
+    # Modal places per create, so its connection rows read a region picker from the same tables,
+    # led by the two placement choices and defaulting to no constraint at all.
+    assert payload["region_options_by_launch_mode"]["MODAL"][:2] == ["any", "nearest"]
+    assert payload["region_selected_by_launch_mode"]["MODAL"] == "any"
     assert payload["default_instance_type_by_backend"]["AWS"]
     # The modes sized by numbers each offer a default size; the others offer none.
     assert set(payload["machine_size_defaults_by_launch_mode"]) == {"DOCKER", "LIMA", "MODAL"}
@@ -87,6 +104,48 @@ def test_form_defaults_exclude_byok_only_launch_modes_and_carry_region_context(t
     assert payload["color"].startswith("#")
     assert payload["prefill"] is None
     assert payload["accounts"] == []
+
+
+def test_form_defaults_lower_the_docker_cpu_default_to_what_the_local_daemon_can_give(tmp_path: Path) -> None:
+    """The form submits the default it shows as an explicit CPU cap, which the daemon refuses above its CPU count."""
+    two_cpu_docker_host = FakeHostProbe(
+        system="Linux",
+        executables=frozenset({"docker"}),
+        result_by_command={
+            "docker version --format {{.Server.Version}}": CommandProbeResult(returncode=0, stdout="28.1.0\n"),
+            "docker info --format {{json .Runtimes}}": CommandProbeResult(returncode=0, stdout='{"runc":{}}\n'),
+            "docker info --format {{.NCPU}}": CommandProbeResult(returncode=0, stdout="2\n"),
+        },
+    )
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, host_probe=two_cpu_docker_host
+    )
+
+    response = client.get("/ui/api/create/form-defaults")
+
+    assert response.status_code == 200
+    payload = json.loads(response.get_data(as_text=True))
+    assert payload["machine_size_defaults_by_launch_mode"]["DOCKER"] == {
+        "cpu_count": 2,
+        "memory_gb": 8,
+        "disk_gb": None,
+    }
+    # The other modes are not sized by this machine.
+    assert payload["machine_size_defaults_by_launch_mode"]["LIMA"]["cpu_count"] == 2
+    assert payload["machine_size_defaults_by_launch_mode"]["MODAL"]["cpu_count"] == 2
+
+
+def test_form_defaults_keep_the_docker_cpu_default_when_the_daemon_is_not_answering(tmp_path: Path) -> None:
+    """A bare machine (the test app's default probe) runs no CPU probe and offers the shipped default."""
+    bare_host = FakeHostProbe(system="Linux")
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True, host_probe=bare_host)
+
+    response = client.get("/ui/api/create/form-defaults")
+
+    assert response.status_code == 200
+    payload = json.loads(response.get_data(as_text=True))
+    assert payload["machine_size_defaults_by_launch_mode"]["DOCKER"]["cpu_count"] == 4
+    assert "docker info --format {{.NCPU}}" not in bare_host.commands_run
 
 
 @pytest.mark.parametrize(
@@ -191,6 +250,51 @@ def test_form_defaults_honor_the_operator_worktree_only_when_opted_in(
     opted = json.loads(client.get("/ui/api/create/form-defaults").get_data(as_text=True))
     assert opted["git_url"] == "/home/operator/default-workspace-template"
     assert opted["branch"] == "mngr/dev-branch"
+
+
+def test_form_defaults_list_the_connection_backends_with_their_labels_and_region_rule(tmp_path: Path) -> None:
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
+
+    response = client.get("/ui/api/create/form-defaults")
+
+    assert response.status_code == 200
+    backends = json.loads(response.get_data(as_text=True))["connection_backends"]
+    assert backends == [
+        {"name": "aws", "label": "AWS", "is_region_pinned": True},
+        {"name": "gcp", "label": "GCP", "is_region_pinned": True},
+        {"name": "azure", "label": "Azure", "is_region_pinned": True},
+        {"name": "modal", "label": "Modal", "is_region_pinned": False},
+    ]
+
+
+def test_form_defaults_report_each_accounts_state_and_whether_it_can_own_a_connection(tmp_path: Path) -> None:
+    """The form explains a locked account's missing connections and the modal keeps only an eligible owner."""
+    cli = make_fake_imbue_cloud_cli()
+    eligible_user_id, locked_user_id, bare_user_id = (str(uuid4()) for _ in range(3))
+    for user_id in (eligible_user_id, locked_user_id, bare_user_id):
+        cli.add_account(user_id=user_id, email=f"{user_id[:8]}@example.com")
+    data_dir = tmp_path / "minds"
+    connection_store = make_connection_store_for_test(data_dir, cli)
+    session_store = make_session_store_for_test(data_dir, cli, connection_store=connection_store)
+    unlock_account_with_master_password_for_test(connection_store.paths, eligible_user_id)
+    # A locked account: a synced connection proves a master password elsewhere, and no DEK is here.
+    unlock_account_with_master_password_for_test(connection_store.paths, locked_user_id)
+    add_modal_connection_for_test(connection_store, locked_user_id, "elsewhere modal")
+    delete_dek(connection_store.paths, locked_user_id)
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, session_store=session_store, connection_store=connection_store
+    )
+
+    response = client.get("/ui/api/create/form-defaults")
+
+    assert response.status_code == 200
+    by_user_id = {account["user_id"]: account for account in json.loads(response.get_data(as_text=True))["accounts"]}
+    assert by_user_id[eligible_user_id]["state"] == "SIGNED_IN"
+    assert by_user_id[eligible_user_id]["is_connection_owner_eligible"] is True
+    assert by_user_id[locked_user_id]["state"] == "LOCKED"
+    assert by_user_id[locked_user_id]["is_connection_owner_eligible"] is False
+    assert by_user_id[bare_user_id]["state"] == "SIGNED_IN"
+    assert by_user_id[bare_user_id]["is_connection_owner_eligible"] is False
 
 
 def test_form_defaults_ignore_an_unknown_retry_id(tmp_path: Path) -> None:
@@ -328,6 +432,7 @@ def _make_client_with_store(
     root_concurrency_group: ConcurrencyGroup,
     mngr_caller: MngrCaller | None = None,
     session_store: MultiAccountSessionStore | None = None,
+    connection_store: ConnectionStore | None = None,
 ) -> tuple[FlaskClient, PendingCreateAttemptStore, AgentCreator]:
     """A desktop-client test app whose agent creator carries a pending-create-attempt store.
 
@@ -350,6 +455,7 @@ def _make_client_with_store(
         root_concurrency_group=root_concurrency_group,
         mngr_caller=mngr_caller,
         session_store=session_store,
+        connection_store=connection_store,
     )
     return client, store, creator
 
@@ -360,10 +466,9 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
 ) -> None:
     """A ?retry naming a pending record restores the stored request into the prefill.
 
-    The record names a BYOK cloud account that no longer exists (this test env
-    has none configured) and an Imbue account that is no longer signed in (it
-    has none signed in), so the prefill drops both while still threading the
-    stored machine size through.
+    The record names a connection that no longer exists (this test env has
+    none configured), so the prefill says why the attempt cannot be retried
+    beside the recorded fields.
     """
     client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group)
     create_attempt_id = str(CreateAttemptId.generate())
@@ -371,7 +476,7 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
         _record(
             create_attempt_id,
             PendingCreateAttemptState.IN_FLIGHT,
-            cloud_account="byok-gcp-ghost",
+            cloud_account=f"gcp_{uuid4().hex}",
             instance_type="e2-standard-4",
             account_id="user-signed-out",
             cpu_count=6,
@@ -392,9 +497,37 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
     assert prefill["color"] == "#a1b2c3"
     assert prefill["instance_type"] == "e2-standard-4"
     assert (prefill["cpu_count"], prefill["memory_gb"], prefill["disk_gb"]) == (6, 12, 250)
-    # The ghost accounts are not offered, so they must not be pre-selected either.
-    assert prefill["cloud_account"] == ""
+    # The ghost account is not offered, so it must not be pre-selected either.
     assert prefill["account_id"] == ""
+    assert prefill["cloud_account"].startswith("gcp_")
+    assert prefill["unavailable_reason"] == RETRY_CONNECTION_REMOVED_REASON
+
+
+def test_form_defaults_prefill_is_retryable_while_its_connection_is_still_usable(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    connection_store = make_connection_store_for_test(tmp_path / "minds")
+    connection_id = add_modal_connection_for_test(connection_store, LOCAL_PROFILE_USER_ID, "device modal")
+    instance_name = provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id)
+    client, store, _creator = _make_client_with_store(
+        tmp_path, root_concurrency_group, connection_store=connection_store
+    )
+    create_attempt_id = str(CreateAttemptId.generate())
+    store.write_record(
+        _record(
+            create_attempt_id,
+            PendingCreateAttemptState.FAILED,
+            launch_mode=LaunchMode.MODAL,
+            cloud_account=instance_name,
+        )
+    )
+
+    response = client.get(f"/ui/api/create/form-defaults?retry={create_attempt_id}")
+
+    assert response.status_code == 200
+    prefill = json.loads(response.get_data(as_text=True))["prefill"]
+    assert prefill["cloud_account"] == instance_name and prefill["launch_mode"] == "MODAL"
+    assert prefill["unavailable_reason"] == ""
 
 
 def test_form_defaults_prefill_keeps_a_retried_account_that_is_still_signed_in(
@@ -496,6 +629,8 @@ def test_create_attempt_detail_carries_the_request_summary_for_a_live_attempt(
         "display_name": "Request Summary Test",
         "launch_mode": "DOCKER",
         "cloud_account": "",
+        "cloud_account_alias": "",
+        "cloud_account_backend_label": "",
         "backup_provider": "CONFIGURE_LATER",
         "region": "",
         "instance_type": "",
@@ -532,6 +667,8 @@ def test_create_attempt_detail_carries_the_request_summary_for_a_record(
         "display_name": "Row Test Name",
         "launch_mode": "LIMA",
         "cloud_account": "",
+        "cloud_account_alias": "",
+        "cloud_account_backend_label": "",
         "backup_provider": "CONFIGURE_LATER",
         "region": "",
         "instance_type": "t3.large",
@@ -541,6 +678,59 @@ def test_create_attempt_detail_carries_the_request_summary_for_a_record(
         "repository": "https://example.com/some-repo.git",
         "branch": "feature-branch-7",
     }
+
+
+def test_create_attempt_detail_names_the_connection_by_alias_and_backend(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """The summary carries the connection's alias and backend, so the page can say 'eval modal (Modal)', not modal_<hex>."""
+    connection_store = make_connection_store_for_test(tmp_path / "minds")
+    connection_id = add_modal_connection_for_test(connection_store, LOCAL_PROFILE_USER_ID, "eval modal")
+    instance_name = provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id)
+    client, store, _creator = _make_client_with_store(
+        tmp_path, root_concurrency_group, connection_store=connection_store
+    )
+    create_attempt_id = str(CreateAttemptId.generate())
+    store.write_record(
+        _record(
+            create_attempt_id,
+            PendingCreateAttemptState.FAILED,
+            launch_mode=LaunchMode.MODAL,
+            cloud_account=instance_name,
+        )
+    )
+
+    payload = json.loads(client.get(f"/ui/api/create/attempts/{create_attempt_id}").get_data(as_text=True))
+
+    request = payload["record"]["request"]
+    assert request["cloud_account"] == instance_name
+    assert request["cloud_account_alias"] == "eval modal" and request["cloud_account_backend_label"] == "Modal"
+    # The connection is still usable here, so the record can be retried as recorded.
+    assert payload["record"]["retry_unavailable_reason"] == ""
+
+
+def test_create_attempt_detail_says_a_record_cannot_be_retried_once_its_connection_is_gone(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """The creation page disables Retry (Discard stays) with the same reason the form's prefill carries."""
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group)
+    create_attempt_id = str(CreateAttemptId.generate())
+    store.write_record(
+        _record(
+            create_attempt_id,
+            PendingCreateAttemptState.IN_FLIGHT,
+            launch_mode=LaunchMode.GCP,
+            cloud_account=f"gcp_{uuid4().hex}",
+        )
+    )
+
+    payload = json.loads(client.get(f"/ui/api/create/attempts/{create_attempt_id}").get_data(as_text=True))
+
+    assert payload["kind"] == "record"
+    assert payload["record"]["state"] == "interrupted"
+    assert payload["record"]["retry_unavailable_reason"] == RETRY_CONNECTION_REMOVED_REASON
 
 
 _WORKSPACE_AGENT_ID = AgentId("agent-0123456789abcdef0123456789abcdef")

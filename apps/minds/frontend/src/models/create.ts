@@ -3,17 +3,44 @@
 // everything testable lives here.
 
 import m from "mithril";
+import type { AccountPanelState } from "../generated/ui";
 import type { MachineSizeNumbers } from "./machineSize";
 import type { OnboardingProgress } from "./onboarding";
 import { onboardingProgress } from "./onboarding";
 
-// ---- /ui/api/create response shapes (hand-typed: the per-area /ui/api
+// /ui/api/create response shapes (hand-typed: the per-area /ui/api
 // bodies are not part of the generated channel schema yet). Keep in sync
-// with ui_api_create.py.
+// with ui_api_create.py (and CloudAccountOption with workspace_create.py).
 
 export interface CreateAccountOption {
   user_id: string;
   email: string;
+  state: AccountPanelState;
+  /** Whether a new synced connection can be added under this account here (unlocked, master password set). */
+  is_connection_owner_eligible: boolean;
+}
+
+/** One cloud backend a connection can be added for, with its label and region rule, as the server tables them. */
+export interface ConnectionBackendOption {
+  name: string;
+  label: string;
+  is_region_pinned: boolean;
+}
+
+/** The backend option named `backendName`, or null for one this app's server does not table. */
+export function connectionBackendOptionFor(
+  backends: readonly ConnectionBackendOption[],
+  backendName: string,
+): ConnectionBackendOption | null {
+  return backends.find((backend) => backend.name === backendName) ?? null;
+}
+
+/** A backend's display label, falling back to its raw name for one the server does not table. */
+export function connectionBackendLabelFor(
+  backends: readonly ConnectionBackendOption[],
+  backendName: string,
+): string {
+  return connectionBackendOptionFor(backends, backendName)?.label ?? backendName;
 }
 
 export interface CloudAccountOption {
@@ -21,6 +48,8 @@ export interface CloudAccountOption {
   alias: string;
   backend: string;
   region: string;
+  owner_user_id: string;
+  is_region_pinned: boolean;
 }
 
 export interface CreateRetryPrefill {
@@ -39,6 +68,8 @@ export interface CreateRetryPrefill {
   memory_gb: number | null;
   disk_gb: number | null;
   color: string;
+  /** Why the attempt cannot be retried as recorded (its connection was removed); empty when it can. */
+  unavailable_reason: string;
 }
 
 /** One local backend's availability on this machine (see local_prerequisites.py). */
@@ -67,7 +98,8 @@ export interface CreateFormDefaults {
   /** The size offered per compute mode sized by numbers; a null dimension is one the mode does not take. */
   machine_size_defaults_by_launch_mode: Record<string, MachineSizeNumbers>;
   cloud_accounts: CloudAccountOption[];
-  byok_clouds_enabled: boolean;
+  /** The backends a connection can be added for, with their labels and region rule. */
+  connection_backends: ConnectionBackendOption[];
   git_url: string;
   branch: string;
   color: string;
@@ -96,6 +128,9 @@ export interface CreateAttemptRequestSummary {
   display_name: string;
   launch_mode: string;
   cloud_account: string;
+  /** The connection's alias and backend label; both "" for a plain mode or when the connection is gone. */
+  cloud_account_alias: string;
+  cloud_account_backend_label: string;
   backup_provider: string;
   region: string;
   instance_type: string;
@@ -125,6 +160,8 @@ export interface CreateAttemptDetail {
     log_tail: string[];
     provider_label: string;
     request: CreateAttemptRequestSummary;
+    /** Why the attempt cannot be retried as recorded (its connection was removed); empty when it can. */
+    retry_unavailable_reason: string;
   } | null;
 }
 
@@ -134,7 +171,9 @@ export async function fetchJson<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-export function fetchCreateFormDefaults(retryId: string | null): Promise<CreateFormDefaults> {
+export function fetchCreateFormDefaults(
+  retryId: string | null,
+): Promise<CreateFormDefaults> {
   const suffix = retryId ? `?retry=${encodeURIComponent(retryId)}` : "";
   return fetchJson<CreateFormDefaults>(`/ui/api/create/form-defaults${suffix}`);
 }
@@ -143,8 +182,12 @@ export function fetchLandingExtras(): Promise<LandingExtras> {
   return fetchJson<LandingExtras>("/ui/api/create/landing-extras");
 }
 
-export function fetchCreateAttemptDetail(createAttemptId: string): Promise<CreateAttemptDetail> {
-  return fetchJson<CreateAttemptDetail>(`/ui/api/create/attempts/${encodeURIComponent(createAttemptId)}`);
+export function fetchCreateAttemptDetail(
+  createAttemptId: string,
+): Promise<CreateAttemptDetail> {
+  return fetchJson<CreateAttemptDetail>(
+    `/ui/api/create/attempts/${encodeURIComponent(createAttemptId)}`,
+  );
 }
 
 /** What the create front door answered: the HTTP status and its JSON body (or {} when it sent none). */
@@ -165,7 +208,10 @@ export interface CreateSubmitResult {
  */
 export async function submitCreateRequest(
   body: Record<string, unknown>,
-  fetcher: (url: string, init?: RequestInit) => Promise<Response> = (url, init) => fetch(url, init),
+  fetcher: (url: string, init?: RequestInit) => Promise<Response> = (
+    url,
+    init,
+  ) => fetch(url, init),
   progress: OnboardingProgress = onboardingProgress,
 ): Promise<CreateSubmitResult> {
   try {
@@ -175,7 +221,10 @@ export async function submitCreateRequest(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    const data = (await response.json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >;
     if (response.status === 202) progress.markComplete();
     return { status: response.status, data };
   } catch {
@@ -183,13 +232,13 @@ export async function submitCreateRequest(
   }
 }
 
-// ---- How the compute and backup enums are said. One home for both, so the
+// How the compute and backup enums are said. One home for both, so the
 // create form's options and the creation page's summary of what was chosen
 // cannot name the same value differently.
 
 /** A launch mode as the create form offers it. */
 export function launchModeLabel(launchMode: string): string {
-  return launchMode === "MODAL" ? "Modal (1-day ephemeral)" : launchMode.toLowerCase();
+  return launchMode.toLowerCase();
 }
 
 /** A backup provider as the create form offers it. */
@@ -197,7 +246,7 @@ export function backupProviderLabel(backupProvider: string): string {
   return backupProvider === "API_KEY" ? "manual" : backupProvider.toLowerCase();
 }
 
-// ---- Name validation (port of the Create form's live host-name rules).
+// Name validation (port of the Create form's live host-name rules).
 
 export function hostNameFormatError(value: string): string {
   if (value === "") return "";
@@ -221,27 +270,35 @@ export function hostNameFormatError(value: string): string {
 export type RecoveryIntent = "start" | "restart" | null;
 
 /** The Recovery deep-link for a workspace. */
-export function recoveryRoute(agentId: string, returnTo: string, intent: RecoveryIntent): string {
+export function recoveryRoute(
+  agentId: string,
+  returnTo: string,
+  intent: RecoveryIntent,
+): string {
   const intentParam = intent === null ? "" : `&intent=${intent}`;
   return `/agents/${encodeURIComponent(agentId)}/recovery?return_to=${encodeURIComponent(returnTo)}${intentParam}`;
 }
 
-// ---- Creating-page progress (port of creating.js's time-eased bar).
+// Creating-page progress (port of creating.js's time-eased bar).
 
-export function progressForElapsed(elapsedSeconds: number, expectedDurationSeconds: number): number {
+export function progressForElapsed(
+  elapsedSeconds: number,
+  expectedDurationSeconds: number,
+): number {
   const T = expectedDurationSeconds > 0 ? expectedDurationSeconds : 60;
   if (elapsedSeconds <= T) return 80 * (elapsedSeconds / T);
   return 80 + 20 * (1 - Math.exp(-(elapsedSeconds - T) / T));
 }
 
-// ---- Optimistic machine Start/Stop tracking (port of the Landing page's
+// Optimistic machine Start/Stop tracking (port of the Landing page's
 // pendingMindActionByAgent machinery). The channel's workspaces message
 // carries the authoritative liveness -- including backend-observed
 // STARTING/STOPPING transitions (e.g. a stop issued from another device),
 // which pass straight through; while a local action is in flight the same
 // transient labels win until the target state arrives.
 
-export type MindLiveness = "RUNNING" | "STOPPED" | "UNKNOWN" | "STARTING" | "STOPPING";
+export type MindLiveness =
+  "RUNNING" | "STOPPED" | "UNKNOWN" | "STARTING" | "STOPPING";
 
 // Human labels for the non-RUNNING liveness states, shared by every surface
 // that renders a liveness badge or title (RUNNING deliberately has none:
@@ -283,19 +340,34 @@ export class MindLivenessTracker {
   }
 
   async start(agentId: string): Promise<boolean> {
-    return await this.runAction(agentId, "RUNNING", `/api/v1/workspaces/${encodeURIComponent(agentId)}/start`);
+    return await this.runAction(
+      agentId,
+      "RUNNING",
+      `/api/v1/workspaces/${encodeURIComponent(agentId)}/start`,
+    );
   }
 
   async stop(agentId: string): Promise<boolean> {
-    return await this.runAction(agentId, "STOPPED", `/api/v1/workspaces/${encodeURIComponent(agentId)}/stop`);
+    return await this.runAction(
+      agentId,
+      "STOPPED",
+      `/api/v1/workspaces/${encodeURIComponent(agentId)}/stop`,
+    );
   }
 
-  private async runAction(agentId: string, target: "RUNNING" | "STOPPED", url: string): Promise<boolean> {
+  private async runAction(
+    agentId: string,
+    target: "RUNNING" | "STOPPED",
+    url: string,
+  ): Promise<boolean> {
     this.pendingTargetByAgentId.set(agentId, target);
     this.redraw();
     let isOk: boolean;
     try {
-      const response = await fetch(url, { method: "POST", credentials: "same-origin" });
+      const response = await fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+      });
       isOk = response.ok;
     } catch {
       isOk = false;
@@ -306,7 +378,7 @@ export class MindLivenessTracker {
   }
 }
 
-// ---- Creating-page watcher: status polling (authoritative) + the op-log
+// Creating-page watcher: status polling (authoritative) + the op-log
 // SSE (live log lines only), port of creating.js. The op-log streams stay
 // SSE by decision; only the chrome events moved to the channel.
 
@@ -346,7 +418,10 @@ export class CreateAttemptWatcher {
     this.source.onmessage = (event) => {
       let data: { done?: boolean; log?: string };
       try {
-        data = JSON.parse(event.data as string) as { done?: boolean; log?: string };
+        data = JSON.parse(event.data as string) as {
+          done?: boolean;
+          log?: string;
+        };
       } catch {
         return;
       }
@@ -387,10 +462,17 @@ export class CreateAttemptWatcher {
   }
 
   private pollOnce(): void {
-    fetch(`/api/v1/workspaces/operations/create/${encodeURIComponent(this.createAttemptId)}`, {
-      credentials: "same-origin",
-    })
-      .then((response) => (response.ok ? (response.json() as Promise<CreateOperationStatus>) : null))
+    fetch(
+      `/api/v1/workspaces/operations/create/${encodeURIComponent(this.createAttemptId)}`,
+      {
+        credentials: "same-origin",
+      },
+    )
+      .then((response) =>
+        response.ok
+          ? (response.json() as Promise<CreateOperationStatus>)
+          : null,
+      )
       .then((data) => {
         this.applyStatus(data);
         m.redraw();

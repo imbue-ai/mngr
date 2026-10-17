@@ -330,7 +330,8 @@ describe("boot seeding", () => {
         ]),
         providers: {
           type: "providers",
-          providers: [],
+          accounts: [],
+          device_providers: [],
           last_event_at: null,
           last_full_snapshot_at: null,
         },
@@ -383,7 +384,8 @@ describe("boot seeding", () => {
         accounts: accountsMessage([accountEntry({ email: "a@b.c" })]),
         providers: {
           type: "providers",
-          providers: [],
+          accounts: [],
+          device_providers: [],
           last_event_at: null,
           last_full_snapshot_at: null,
         },

@@ -19,19 +19,16 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "loguru",
     "imbue-mngr",
-    # The bring-your-own-key cloud backends minds writes provider blocks for.
+    # The cloud backends minds writes connection provider blocks for.
     "imbue-mngr-aws",
     "imbue-mngr-azure",
     "imbue-mngr-gcp",
-    # The local-container compute provider (LaunchMode.DOCKER).
+    # The local compute providers (LaunchMode.DOCKER and LaunchMode.LIMA).
     "imbue-mngr-docker",
+    "imbue-mngr-lima",
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
     "imbue-mngr-latchkey",
-    # The local-VM compute provider (LaunchMode.LIMA); also runs `mngr lima resize`.
-    "imbue-mngr-lima",
-    # minds writes an enabled modal provider block into its mngr settings, and
-    # mngr rejects an enabled provider whose backend plugin is not installed.
     "imbue-mngr-modal",
     # Folder sync runs `mngr pair`.
     "imbue-mngr-pair",

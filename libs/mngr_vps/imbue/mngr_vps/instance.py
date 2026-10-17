@@ -1,6 +1,7 @@
 import os
 import shlex
 import shutil
+import sys
 import time
 from abc import abstractmethod
 from collections.abc import Callable
@@ -24,6 +25,7 @@ from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostConnectionError
@@ -84,13 +86,13 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.primitives import read_checked_out_branch
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.providers.host_access_manifest import host_access_key_dir
 from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import remove_host_key_record
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
-from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.polling import poll_for_value
@@ -118,14 +120,15 @@ from imbue.mngr_vps.data_types import ContainerFile
 from imbue.mngr_vps.data_types import PlacementHandle
 from imbue.mngr_vps.data_types import RealizePlacementContext
 from imbue.mngr_vps.data_types import RealizedPlacement
-from imbue.mngr_vps.docker_realizer import CONTAINER_HOST_KEY_NAME
-from imbue.mngr_vps.docker_realizer import CONTAINER_KNOWN_HOSTS_NAME
-from imbue.mngr_vps.docker_realizer import CONTAINER_SSH_KEY_NAME
+from imbue.mngr_vps.data_types import VpsListingEntry
+from imbue.mngr_vps.data_types import VpsRootKeypair
 from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.errors import BareIsolationNotSupportedError
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.errors import VpsError
+from imbue.mngr_vps.errors import VpsHostKeyMissingError
 from imbue.mngr_vps.errors import VpsHostSizeUnknownError
+from imbue.mngr_vps.errors import VpsInstanceLeakedError
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.host_setup import CONTAINER_MEMORY_CAP_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr_vps.host_setup import MEM_TOTAL_PROBE_COMMAND
@@ -139,11 +142,15 @@ from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store import VpsHostStore
 from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
+from imbue.mngr_vps.primitives import CONTAINER_HOST_KEY_NAME
+from imbue.mngr_vps.primitives import CONTAINER_KNOWN_HOSTS_NAME
+from imbue.mngr_vps.primitives import CONTAINER_SSH_KEY_NAME
+from imbue.mngr_vps.primitives import HOST_ID_TAG_KEY
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import IsolationMode
+from imbue.mngr_vps.primitives import VPS_HOST_ACCESS_MANIFEST
 from imbue.mngr_vps.primitives import VPS_HOST_KEY_NAME
 from imbue.mngr_vps.primitives import VPS_KNOWN_HOSTS_NAME
-from imbue.mngr_vps.primitives import VPS_SSH_KEY_NAME
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import isolation_marker_value
 from imbue.mngr_vps.primitives import load_or_create_per_host_host_keypair
@@ -151,13 +158,10 @@ from imbue.mngr_vps.primitives import per_host_key_dir
 from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.sizing import host_resources_for_shape
 from imbue.mngr_vps.vps_client import VpsClientInterface
+from imbue.mngr_vps.vps_keys import mint_vps_root_keypair
+from imbue.mngr_vps.vps_keys import resolve_vps_root_keypair
 
 ParsedVpsBuildOptionsT = TypeVar("ParsedVpsBuildOptionsT", bound=ParsedVpsBuildOptions)
-
-
-def _is_keep_failed_hosts_requested() -> bool:
-    """Whether ``MNGR_KEEP_FAILED_HOSTS=1`` asks create to leave a failed host's cloud resources for debugging."""
-    return os.environ.get("MNGR_KEEP_FAILED_HOSTS", "0") == "1"
 
 
 class _VpsDiscoveryData(FrozenModel):
@@ -199,7 +203,7 @@ def build_vps_tags(
     testable without standing up an entire provisioning flow.
     """
     tags: dict[str, str] = {
-        "mngr-host-id": str(host_id),
+        HOST_ID_TAG_KEY: str(host_id),
         "mngr-provider": provider_name,
         ISOLATION_TAG_KEY: isolation_marker_value(isolation),
     }
@@ -212,6 +216,58 @@ def build_vps_tags(
         key, _, value = stripped.partition("=")
         tags[key.strip()] = value.strip()
     return tags
+
+
+def normalized_tags_to_dict(instance: Mapping[str, Any]) -> dict[str, str]:
+    """Turn an instance's normalized ``["key=value", ...]`` tag/label list into a dict (split on first ``=``).
+
+    Shared by the tag/label-keyed providers (AWS EC2 tags, Azure VM tags, GCE
+    labels) to read the ``mngr-*`` identity tags a stopped instance carries.
+    """
+    tags: dict[str, str] = {}
+    for kv in instance.get("tags", ()):
+        key, sep, value = kv.partition("=")
+        if sep:
+            tags[key] = value
+    return tags
+
+
+def listing_entry_from_host_id_marker(
+    hostname: str, host_id_marker: str | None, instance_label: str
+) -> VpsListingEntry | None:
+    """Turn one cloud-listing row into a ``VpsListingEntry``, or None (with a warning) when it cannot be reached.
+
+    ``host_id_marker`` is the raw ``mngr-host-id`` tag/label/metadata value. A
+    row that carries this provider's ``mngr-provider`` marker but no parseable
+    host id (missing or malformed) has no per-host key to open it with, so
+    discovery skips it rather than attempting an SSH that would be rejected.
+    ``instance_label`` names the row in the warning. Providers that stamp a
+    deliberate non-host-id placeholder on some rows (OVH's recycle candidates)
+    filter those out before calling this, so the warning only fires for
+    markers that are genuinely unexpected.
+    """
+    if host_id_marker is None:
+        logger.warning(
+            "Skipping VPS {} ({}) in discovery: it carries no mngr-host-id marker", instance_label, hostname
+        )
+        return None
+    try:
+        host_id = HostId(host_id_marker)
+    except InvalidRandomIdError as e:
+        logger.warning(
+            "Skipping VPS {} ({}) in discovery: its mngr-host-id marker {!r} is not a host id ({})",
+            instance_label,
+            hostname,
+            host_id_marker,
+            e,
+        )
+        return None
+    return VpsListingEntry(hostname=hostname, host_id=host_id)
+
+
+def _is_keep_failed_hosts_requested() -> bool:
+    """Whether ``MNGR_KEEP_FAILED_HOSTS=1`` asks a failed create to leave its VPS and key material in place for debugging."""
+    return os.environ.get("MNGR_KEEP_FAILED_HOSTS", "0") == "1"
 
 
 # HTTP status codes from the VPS provider API that mean the resource the teardown
@@ -238,7 +294,7 @@ def attempt_cloud_resource_teardown(
     resource_description: str,
     host_id: HostId,
     failures: list[CleanupFailure],
-) -> None:
+) -> bool:
     """Run a single cloud-API teardown step, recording a real cleanup failure if it leaks.
 
     A failure that means the resource is already gone (HTTP 404/410) is benign and
@@ -246,20 +302,25 @@ def attempt_cloud_resource_teardown(
     incur cost), so it is recorded as a ``HOST_RESOURCE_REMAINS`` failure (the
     aggregation boundary later raises these as a ``CleanupFailedGroup``).
     ``resource_description`` names the leaked resource in the warning + failure
-    message (e.g. ``"VPS instance i-123"``).
+    message (e.g. ``"VPS instance i-123"``). Returns whether the resource is gone
+    (torn down, or already absent) so callers can gate follow-up steps that only
+    make sense once it is.
     """
     try:
         teardown()
     except MngrError as e:
         logger.warning("Failed to tear down {}: {}", resource_description, e)
-        if not is_vps_resource_already_gone(e):
-            failures.append(
-                CleanupFailure(
-                    category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                    message=f"failed to tear down {resource_description} for host {host_id}: {e}",
-                    host_id=host_id,
-                )
+        if is_vps_resource_already_gone(e):
+            return True
+        failures.append(
+            CleanupFailure(
+                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                message=f"failed to tear down {resource_description} for host {host_id}: {e}",
+                host_id=host_id,
             )
+        )
+        return False
+    return True
 
 
 def _is_mngr_ready_marker_present_or_none(outer: OuterHostInterface) -> bool | None:
@@ -323,6 +384,12 @@ class VpsProvider(BaseProviderInstance):
 
     config: VpsProviderConfig = Field(frozen=True, description="VPS provider configuration")
     vps_client: VpsClientInterface = Field(frozen=True, description="VPS provider API client")
+
+    is_legacy_key_fallback_logged: bool = Field(
+        default=False,
+        description="Whether this process has already reported opening one of this instance's hosts with the "
+        "retired provider-wide VPS-root key",
+    )
 
     _host_record_cache: dict[HostId, VpsHostRecord] = PrivateAttr(default_factory=dict)
     _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
@@ -388,20 +455,19 @@ class VpsProvider(BaseProviderInstance):
         is_bare = record.config.container_name is None
         return self._realizer_for_isolation(IsolationMode.NONE if is_bare else IsolationMode.CONTAINER)
 
-    def _realizer_for_vps_ip(self, vps_ip: str) -> HostRealizer:
-        """The realizer to probe the host on ``vps_ip`` with, BEFORE its record is read.
+    def _realizer_for_host_id(self, host_id: HostId) -> HostRealizer:
+        """The realizer to probe ``host_id``'s VPS with, BEFORE its record is read.
 
-        Discovery has only the VPS IP -- not yet the host record (reading it
-        requires knowing the placement: a bare host's record lives at a fixed
+        Discovery has only the listing entry -- not yet the host record (reading
+        it requires knowing the placement: a bare host's record lives at a fixed
         root-disk path, a container host's inside its per-host docker volume). The
-        base provider has no SSH-free instance listing and is container-only on the
-        bare-rejecting providers, so it returns the create-time realizer
-        (``config.isolation``); ``OfflineCapableVpsProvider`` overrides this to read
-        the host's placement from the instance's ``mngr-isolation`` marker, so a
-        bare host is probed with the bare realizer even under a default-container
-        config.
+        base provider is container-only on the bare-rejecting providers, so it
+        returns the create-time realizer (``config.isolation``);
+        ``OfflineCapableVpsProvider`` overrides this to read the host's placement
+        from its instance's ``mngr-isolation`` marker, so a bare host is probed with
+        the bare realizer even under a default-container config.
         """
-        del vps_ip
+        del host_id
         return self._realizer
 
     @property
@@ -453,7 +519,7 @@ class VpsProvider(BaseProviderInstance):
         """Provider-specific listing hook: return the raw instance dicts from the API.
 
         Default returns ``[]`` so subclasses without a tag-based listing API
-        (e.g. OVH, which uses ``_list_provider_vps_hostnames`` directly) can
+        (e.g. OVH, which uses ``_list_provider_vps_entries`` directly) can
         opt out. Subclasses with one (currently AWS and Vultr) override to
         call their typed client's ``list_instances``; the result is cached
         for the duration of a single command via ``_list_instances_cached``.
@@ -500,19 +566,38 @@ class VpsProvider(BaseProviderInstance):
 
     def _key_dir(self) -> Path:
         """Directory for SSH keys for this provider instance."""
-        key_dir = self.mngr_ctx.profile_dir / "providers" / str(self.config.backend) / str(self.name) / "keys"
+        instance_dir = self.mngr_ctx.profile_dir / "providers" / str(self.config.backend) / str(self.name)
+        key_dir = host_access_key_dir(instance_dir, VPS_HOST_ACCESS_MANIFEST)
         key_dir.mkdir(parents=True, exist_ok=True)
         return key_dir
 
-    def _get_vps_ssh_keypair(self) -> tuple[Path, str]:
-        """Load or create the provider-wide management keypair for authenticating to VPS roots.
+    def _mint_vps_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
+        """Create this host's own VPS-root client keypair (the create path only).
 
-        This key opens every VPS this provider instance ordered (discovery must
-        reach a VPS before knowing which host lives on it). It is never exported
-        with a host's credentials -- the agent connection uses per-host client
-        keys resolved by the realizers.
+        Every outer (VPS root) connection to the host uses this per-host key, so
+        the host's per-host key dir is the complete set of material that opens it
+        and no provider-wide key ever needs to leave this machine.
         """
-        return load_or_create_ssh_keypair(self._key_dir(), VPS_SSH_KEY_NAME)
+        return mint_vps_root_keypair(self._key_dir(), host_id)
+
+    def _resolve_vps_ssh_keypair(self, host_id: HostId) -> VpsRootKeypair:
+        """Resolve the client keypair that opens this host's VPS root; never creates one.
+
+        Raises ``VpsHostKeyMissingError`` when this machine holds no key for the
+        host (see ``resolve_vps_root_keypair``). The first host this process
+        opens with the retired provider-wide key is reported once, at info,
+        rather than on every discovery poll.
+        """
+        keypair = resolve_vps_root_keypair(self._key_dir(), host_id)
+        if keypair.is_legacy_provider_key and not self.is_legacy_key_fallback_logged:
+            self.is_legacy_key_fallback_logged = True
+            logger.info(
+                "Opened host {} of provider instance {} with the legacy provider-wide VPS key (it predates per-host "
+                "keys, so it is reachable only from the device holding that key)",
+                host_id,
+                self.name,
+            )
+        return keypair
 
     def _get_container_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
         """Resolve the client keypair that opens this host's container: per-host, then legacy.
@@ -547,14 +632,15 @@ class VpsProvider(BaseProviderInstance):
     def _vps_known_hosts_path(self) -> Path:
         return self._key_dir() / VPS_KNOWN_HOSTS_NAME
 
-    def record_outer_host_key(self, host: str, port: int, public_key: str, host_id: HostId | None = None) -> None:
-        """Pin an outer (VPS-root) sshd host key in this provider's known_hosts.
+    def record_outer_host_key(self, host: str, port: int, public_key: str, host_id: HostId) -> None:
+        """Pin an outer (VPS-root) sshd host key in this provider's known_hosts, attributed to ``host_id``.
 
         Callers operating on a VPS this provider did not itself order (e.g. the
         imbue_cloud rebuild on a leased host) use this so the provider's own outer
         connections -- including the certified-data sync callback -- pass strict
-        host-key checking instead of failing on a missing entry. ``host_id``,
-        when known, attributes the pin to that host's store record.
+        host-key checking instead of failing on a missing entry. The pin lands on
+        the host's own store record, so it is found by per-host reads and removed
+        with the host.
         """
         add_host_to_known_hosts(
             known_hosts_path=self._vps_known_hosts_path(),
@@ -570,17 +656,17 @@ class VpsProvider(BaseProviderInstance):
     # Outer host helper
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
-        """Open an outer host targeting root@vps_ip:22 via the provider's VPS SSH key.
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+        """Open an outer host targeting root@vps_ip:22 via ``host_id``'s own VPS-root client key.
 
-        Use this during create_host (when host_id is not yet known); use
-        ``outer_host_for(host_id)`` once a host record exists.
+        The key is resolved, never created: a host with no key on this machine
+        raises ``VpsHostKeyMissingError`` before any connection is attempted.
         """
-        vps_key_path, _pub = self._get_vps_ssh_keypair()
+        vps_keypair = self._resolve_vps_ssh_keypair(host_id)
         pyinfra_host = create_pyinfra_host(
             hostname=vps_ip,
             port=22,
-            private_key_path=vps_key_path,
+            private_key_path=vps_keypair.private_key_path,
             known_hosts_path=self._vps_known_hosts_path(),
             ssh_user="root",
         )
@@ -682,7 +768,7 @@ class VpsProvider(BaseProviderInstance):
         placement rather than the provider's create-time default.
         """
         try:
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
+            with self._make_outer_for_vps_ip(vps_ip, host_id) as outer:
                 host_store = realizer.open_host_store(outer, host_id)
                 existing = host_store.read_host_record()
                 if existing is not None:
@@ -771,16 +857,20 @@ class VpsProvider(BaseProviderInstance):
         self._validate_provider_args_for_create()
         self._validate_external_store_ready()
 
-        _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
+        _vps_key_path, vps_public_key = self._mint_vps_ssh_keypair(host_id)
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair(host_id)
 
-        with log_span("Uploading SSH key to provider"):
-            key_name = f"mngr-{self.name}-{host_id}"
-            vps_ssh_key_id = self.vps_client.upload_ssh_key(key_name, vps_public_key)
-
+        # The per-host key material above is minted before the first provider write,
+        # so the upload sits inside the cleanup's try as well: a failed upload must
+        # drop that material too, or it would be orphaned on disk.
+        vps_ssh_key_id: str | None = None
         vps_instance_id: VpsInstanceId | None = None
         vps_ip: str | None = None
         try:
+            with log_span("Uploading SSH key to provider"):
+                key_name = f"mngr-{self.name}-{host_id}"
+                vps_ssh_key_id = self.vps_client.upload_ssh_key(key_name, vps_public_key)
+
             vps_instance_id, vps_ip = self._provision_vps(
                 host_id=host_id,
                 name=name,
@@ -793,7 +883,7 @@ class VpsProvider(BaseProviderInstance):
 
             shape = self._describe_instance_shape(vps_instance_id, parsed.plan)
 
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
+            with self._make_outer_for_vps_ip(vps_ip, host_id) as outer:
                 host = self.create_host_on_existing_vps(
                     outer=outer,
                     host_id=host_id,
@@ -817,7 +907,7 @@ class VpsProvider(BaseProviderInstance):
             logger.info("VPS host {} created successfully (VPS: {}, IP: {})", name, vps_instance_id, vps_ip)
             return host
 
-        except Exception:
+        except Exception as create_error:
             if _is_keep_failed_hosts_requested():
                 # An instance whose boot wait failed was already reported (and
                 # kept) by ``_provision_vps``; its id never reaches this frame.
@@ -833,16 +923,7 @@ class VpsProvider(BaseProviderInstance):
                         vps_ip,
                     )
             else:
-                logger.error("Host creation failed, attempting cleanup...")
-                try:
-                    if vps_instance_id is not None:
-                        self.vps_client.destroy_instance(vps_instance_id)
-                except Exception as cleanup_err:
-                    logger.warning("Failed to clean up VPS instance: {}", cleanup_err)
-                try:
-                    self.vps_client.delete_ssh_key(vps_ssh_key_id)
-                except Exception as cleanup_err:
-                    logger.warning("Failed to clean up SSH key: {}", cleanup_err)
+                self._clean_up_failed_create(host_id, create_error, vps_instance_id, vps_ssh_key_id)
             raise
 
     def create_host_on_existing_vps(
@@ -1079,9 +1160,9 @@ class VpsProvider(BaseProviderInstance):
 
         Returns (vps_instance_id, vps_ip).
 
-        ``vps_public_key`` is the provider SSH public key already loaded by
-        ``create_host`` (the sole caller); it is threaded in rather than re-read
-        from disk here. The bootstrap (``_generate_bootstrap_payload``) injects it
+        ``vps_public_key`` is the host's per-host VPS-root public key already
+        minted by ``create_host`` (the sole caller); it is threaded in rather
+        than re-read from disk here. The bootstrap (``_generate_bootstrap_payload``) injects it
         straight into root (in addition to the copy-from-default-user step), which
         removes any reliance on a cloud image's default-user key landing in root --
         notably on GCE, where the google guest agent provisions the key
@@ -1117,23 +1198,26 @@ class VpsProvider(BaseProviderInstance):
                 tags=vps_tags,
             )
 
-        # From here on the instance exists and bills, but ``create_host`` only
-        # learns its id from this method's return value, so a boot wait that
-        # gives up must destroy the instance itself or it leaks running.
-        is_vps_ready = False
+        # From here on the instance exists, but ``create_host`` only learns its id
+        # from the return value: a failure in the boot / bootstrap waits must tear
+        # the instance down here (or report the instance as leaked), or its
+        # cleanup would treat the VPS as never created. Ownership transfers to
+        # the caller once the waits succeed.
+        is_instance_owned_here = True
         try:
-            vps_ip = self._wait_for_vps_ready(host_id, vps_instance_id, vps_host_public_key)
-            is_vps_ready = True
+            vps_ip = self._wait_for_provisioned_vps(host_id, vps_instance_id, vps_host_public_key)
+            is_instance_owned_here = False
         finally:
-            if not is_vps_ready:
-                self._destroy_vps_that_never_became_ready(vps_instance_id)
+            if is_instance_owned_here:
+                # Read rather than caught: the rollback must run for every exit, a
+                # KeyboardInterrupt included, and still name the failure that caused it.
+                self._clean_up_instance_of_failed_provision(host_id, vps_instance_id, sys.exc_info()[1])
         return vps_instance_id, vps_ip
 
-    def _wait_for_vps_ready(self, host_id: HostId, vps_instance_id: VpsInstanceId, vps_host_public_key: str) -> str:
-        """Wait for a freshly created VPS to boot, serve our SSH host key, and finish its first-boot host setup.
-
-        Returns the VPS's SSH address.
-        """
+    def _wait_for_provisioned_vps(
+        self, host_id: HostId, vps_instance_id: VpsInstanceId, vps_host_public_key: str
+    ) -> str:
+        """Wait for a just-created VPS to boot, pin its host key, and wait for its bootstrap; returns its IP."""
         logger.log(LogLevel.BUILD.value, "Waiting for VPS to become active...", source="vps")
         with log_span("Waiting for VPS to become active"):
             vps_ip = self.vps_client.wait_for_instance_active(
@@ -1167,27 +1251,83 @@ class VpsProvider(BaseProviderInstance):
             LogLevel.BUILD.value, "Waiting for host bootstrap to complete (Docker installation)...", source="vps"
         )
         with log_span("Waiting for host bootstrap (Docker install)"):
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
+            with self._make_outer_for_vps_ip(vps_ip, host_id) as outer:
                 self._wait_for_cloud_init(outer, timeout_seconds=self.config.docker_install_timeout)
         logger.log(LogLevel.BUILD.value, "Host bootstrap complete, Docker is ready", source="vps")
         return vps_ip
 
-    def _destroy_vps_that_never_became_ready(self, vps_instance_id: VpsInstanceId) -> None:
-        """Best-effort destroy of an instance whose boot wait failed, unless the user asked to keep failed hosts."""
+    def _clean_up_instance_of_failed_provision(
+        self, host_id: HostId, vps_instance_id: VpsInstanceId, provisioning_error: BaseException | None
+    ) -> None:
+        """Tear down the VPS a failed ``_provision_vps`` created, or raise ``VpsInstanceLeakedError`` when it survives.
+
+        The leak error names ``provisioning_error`` (the failure that made the
+        instance unwanted) and chains it as its cause, so the surfaced message
+        still says what went wrong. Under ``MNGR_KEEP_FAILED_HOSTS=1`` the
+        instance is deliberately kept for debugging, which is not a leak
+        (``create_host`` keeps everything too).
+        """
         if _is_keep_failed_hosts_requested():
             logger.error(
-                "VPS instance {} never became ready. MNGR_KEEP_FAILED_HOSTS=1 is set, skipping its cleanup so you "
-                "can debug.",
+                "VPS provisioning failed. MNGR_KEEP_FAILED_HOSTS=1 is set, keeping VPS instance {} for host {} "
+                "so you can debug",
                 vps_instance_id,
+                host_id,
             )
             return
-        logger.error("VPS instance {} never became ready, destroying it...", vps_instance_id)
+        logger.error("VPS provisioning failed after instance {} was created, destroying it...", vps_instance_id)
+        if not self._destroy_instance_of_failed_create(vps_instance_id):
+            failure = f" ({provisioning_error})" if provisioning_error is not None else ""
+            raise VpsInstanceLeakedError(
+                f"VPS instance {vps_instance_id} for host {host_id} could not be destroyed after its "
+                f"provisioning failed{failure}; destroy it via the provider's own console or CLI",
+                vps_instance_id,
+            ) from provisioning_error
+
+    def _clean_up_failed_create(
+        self,
+        host_id: HostId,
+        create_error: Exception,
+        vps_instance_id: VpsInstanceId | None,
+        vps_ssh_key_id: str | None,
+    ) -> None:
+        """Best-effort rollback of a failed ``create_host``: the cloud instance, the cloud key, then local key material.
+
+        ``vps_instance_id`` / ``vps_ssh_key_id`` are whatever the provider had
+        handed back before ``create_error`` was raised (None when that step never
+        completed). The host's per-host key material is removed only once no VPS
+        survives, since a leaked instance authorizes nothing but that key.
+        """
+        logger.error("Host creation failed, attempting cleanup...")
+        leaked_vps_instance_id: VpsInstanceId | None
+        if isinstance(create_error, VpsInstanceLeakedError):
+            # ``_provision_vps`` already tried, and failed, to destroy the
+            # instance it created; the id only reaches us on the error.
+            leaked_vps_instance_id = create_error.vps_instance_id
+        elif vps_instance_id is not None and not self._destroy_instance_of_failed_create(vps_instance_id):
+            leaked_vps_instance_id = vps_instance_id
+        else:
+            leaked_vps_instance_id = None
+        if vps_ssh_key_id is not None:
+            try:
+                self.vps_client.delete_ssh_key(vps_ssh_key_id)
+            except Exception as cleanup_err:
+                logger.warning("Failed to clean up SSH key: {}", cleanup_err)
+        if leaked_vps_instance_id is None:
+            # The per-host key material opens nothing once the VPS is gone; drop it
+            # (and any pins) so a failed create leaves no orphan key dir behind.
+            self._remove_local_host_key_material(host_id)
+        else:
+            self._warn_keeping_local_host_key_material(host_id, leaked_vps_instance_id)
+
+    def _destroy_instance_of_failed_create(self, vps_instance_id: VpsInstanceId) -> bool:
+        """Best-effort destroy of a VPS whose create failed; returns whether the instance is gone."""
         try:
             self.vps_client.destroy_instance(vps_instance_id)
-        except VpsError as cleanup_err:
-            logger.warning(
-                "Failed to destroy VPS instance {} that never became ready: {}", vps_instance_id, cleanup_err
-            )
+        except Exception as cleanup_err:
+            logger.warning("Failed to clean up VPS instance {}: {}", vps_instance_id, cleanup_err)
+            return False
+        return True
 
     def _describe_instance_shape(self, vps_instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
         """Ask the cloud for the created instance's shape, or None when it cannot say.
@@ -1517,7 +1657,7 @@ class VpsProvider(BaseProviderInstance):
             host.disconnect()
         self._evict_cached_host(host_id)
 
-        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+        with self._make_outer_for_vps_ip(host_record.vps_ip, host_id) as outer:
             realizer.stop_placement(outer, PlacementHandle.from_record(host_record), timeout_seconds)
 
             # Update the host record (bump updated_at). A subclass that stops more
@@ -1551,7 +1691,7 @@ class VpsProvider(BaseProviderInstance):
         realizer = self._realizer_for_record(host_record)
 
         handle = PlacementHandle.from_record(host_record)
-        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+        with self._make_outer_for_vps_ip(host_record.vps_ip, host_id) as outer:
             realizer.start_placement(outer, handle)
 
             with log_span("Waiting for container SSH"):
@@ -1613,23 +1753,12 @@ class VpsProvider(BaseProviderInstance):
 
         with collecting_cleanup_failures() as failures:
             if vps_ip is not None:
-                with self._make_outer_for_vps_ip(vps_ip) as outer:
-                    # Remove the agent placement and its per-host storage (container,
-                    # btrfs subvolume, named volumes for the container realizer; a no-op
-                    # for bare). The VPS-destroy below takes the whole loop file with it,
-                    # so this is primarily belt-and-suspenders for a destroy retried on a
-                    # still-existing VPS. The realizer records its own per-resource
-                    # cleanup failures and raises a ``CleanupFailedGroup``, which we
-                    # absorb into this destroy's aggregate.
-                    try:
-                        realizer.teardown_placement(outer, host_id, PlacementHandle.from_record(host_record))
-                    except CleanupFailedGroup as group:
-                        collect_cleanup_failures(failures, group)
+                self._teardown_placement_before_vps_destroy(host_record, host_id, vps_ip, realizer, failures)
 
             # Destroy the VPS instance. An "already gone" (HTTP 404/410) response is benign;
             # any other error means a VPS instance that may still exist (and incur cost).
             with log_span("Destroying VPS instance"):
-                attempt_cloud_resource_teardown(
+                is_vps_gone = attempt_cloud_resource_teardown(
                     lambda: self.vps_client.destroy_instance(vps_config.vps_instance_id),
                     resource_description=f"VPS instance {vps_config.vps_instance_id}",
                     host_id=host_id,
@@ -1647,38 +1776,93 @@ class VpsProvider(BaseProviderInstance):
                     failures=failures,
                 )
 
-            # Clean up local known_hosts. These are cosmetic local-file edits; a
-            # missing file or OS error here leaves no infrastructure behind, so it is
-            # always benign and never recorded as a failure.
-            if vps_ip is not None:
-                try:
-                    remove_host_from_known_hosts(self._vps_known_hosts_path(), vps_ip, 22)
-                except (OSError, UnicodeDecodeError) as e:
-                    logger.trace("Failed to clean up VPS known_hosts: {}", e)
-                try:
-                    remove_host_from_known_hosts(
-                        self._container_known_hosts_path(), vps_ip, self.config.container_ssh_port
-                    )
-                except (OSError, UnicodeDecodeError) as e:
-                    logger.trace("Failed to clean up container known_hosts: {}", e)
-
-            # Remove this host's unique on-disk keypairs and forget its pins in the
-            # host-key stores (dead-endpoint GC). Benign local cleanup (the keys are
-            # useless once the host is gone); a missing dir or OS error leaves no
-            # infrastructure behind, so it is never recorded as a failure.
-            try:
-                shutil.rmtree(per_host_key_dir(self._key_dir(), host_id), ignore_errors=True)
-            except OSError as e:
-                logger.trace("Failed to clean up per-host key dir: {}", e)
-            for known_hosts_path in (self._vps_known_hosts_path(), self._container_known_hosts_path()):
-                if has_host_key_store(known_hosts_path):
+            if is_vps_gone:
+                # Clean up local known_hosts. These are cosmetic local-file edits; a
+                # missing file or OS error here leaves no infrastructure behind, so it is
+                # always benign and never recorded as a failure.
+                if vps_ip is not None:
                     try:
-                        remove_host_key_record(known_hosts_path, host_id)
-                    except OSError as e:
-                        logger.trace("Failed to clean up host-key store for {}: {}", known_hosts_path, e)
+                        remove_host_from_known_hosts(self._vps_known_hosts_path(), vps_ip, 22)
+                    except (OSError, UnicodeDecodeError) as e:
+                        logger.trace("Failed to clean up VPS known_hosts: {}", e)
+                    try:
+                        remove_host_from_known_hosts(
+                            self._container_known_hosts_path(), vps_ip, self.config.container_ssh_port
+                        )
+                    except (OSError, UnicodeDecodeError) as e:
+                        logger.trace("Failed to clean up container known_hosts: {}", e)
+                self._remove_local_host_key_material(host_id)
+            else:
+                self._warn_keeping_local_host_key_material(host_id, vps_config.vps_instance_id)
 
             self._delete_host_record_externally(host_id)
             logger.info("Host {} destroyed (VPS {})", host_id, vps_config.vps_instance_id)
+
+    def _teardown_placement_before_vps_destroy(
+        self,
+        host_record: VpsHostRecord,
+        host_id: HostId,
+        vps_ip: str,
+        realizer: HostRealizer,
+        failures: list[CleanupFailure],
+    ) -> None:
+        """Remove the agent placement and its per-host storage on the VPS ahead of the VPS destroy.
+
+        Container, btrfs subvolume and named volumes for the container realizer; a
+        no-op for bare. The VPS destroy takes the whole loop file with it, so this
+        is primarily belt-and-suspenders for a destroy retried on a still-existing
+        VPS -- which is why a host this machine holds no key for (created
+        elsewhere, or its key material removed) is skipped with a warning rather
+        than blocking the cloud destroy. The realizer records its own per-resource
+        cleanup failures and raises a ``CleanupFailedGroup``, absorbed into the
+        destroy's aggregate.
+        """
+        try:
+            with self._make_outer_for_vps_ip(vps_ip, host_id) as outer:
+                try:
+                    realizer.teardown_placement(outer, host_id, PlacementHandle.from_record(host_record))
+                except CleanupFailedGroup as group:
+                    collect_cleanup_failures(failures, group)
+        except VpsHostKeyMissingError as e:
+            logger.warning(
+                "Skipping the placement teardown on VPS {} for host {} (the VPS destroy removes it anyway): {}",
+                vps_ip,
+                host_id,
+                e,
+            )
+
+    def _remove_local_host_key_material(self, host_id: HostId) -> None:
+        """Remove this host's per-host key dir and forget its pins in both host-key stores.
+
+        The dead-endpoint GC for one host: the material opens nothing once the
+        host is gone, and a re-created host id must never inherit stale pins.
+        Benign local cleanup -- a missing dir or OS error leaves no infrastructure
+        behind, so it is logged at trace and never recorded as a cleanup failure.
+        """
+        try:
+            shutil.rmtree(per_host_key_dir(self._key_dir(), host_id))
+        except OSError as e:
+            logger.trace("Failed to clean up per-host key dir: {}", e)
+        for known_hosts_path in (self._vps_known_hosts_path(), self._container_known_hosts_path()):
+            if has_host_key_store(known_hosts_path):
+                try:
+                    remove_host_key_record(known_hosts_path, host_id)
+                except OSError as e:
+                    logger.trace("Failed to clean up host-key store for {}: {}", known_hosts_path, e)
+
+    def _warn_keeping_local_host_key_material(self, host_id: HostId, vps_instance_id: VpsInstanceId) -> None:
+        """Log that a host's key material stays on disk because its VPS could not be destroyed.
+
+        The surviving VPS authorizes only this host's per-host key, so removing
+        the material would leave the instance unreachable from (and
+        un-destroyable by) this machine.
+        """
+        logger.warning(
+            "Keeping the local key material and pins for host {} so the surviving VPS {} stays reachable "
+            "and destroyable from this machine",
+            host_id,
+            vps_instance_id,
+        )
 
     def delete_host(self, host: HostInterface) -> None:
         """Delete all local records for a destroyed host (does not destroy VPS)."""
@@ -1701,13 +1885,13 @@ class VpsProvider(BaseProviderInstance):
     def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
         """Open the outer host (the VPS itself, root@vps_ip:22).
 
-        Uses this provider's per-instance VPS SSH key (the one cloud-init
-        injected on VPS provisioning).
+        Uses the host's own per-host VPS-root client key (the one the first-boot
+        bootstrap authorized on root at VPS provisioning).
         """
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
             raise HostNotFoundError(self.name, host_id)
-        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+        with self._make_outer_for_vps_ip(host_record.vps_ip, host_id) as outer:
             yield outer
 
     # Discovery
@@ -1727,7 +1911,7 @@ class VpsProvider(BaseProviderInstance):
         realizer = self._realizer_for_record(host_record)
 
         if vps_ip is not None and host_record.config is not None:
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
+            with self._make_outer_for_vps_ip(vps_ip, host_id) as outer:
                 # Check if the placement is running.
                 if realizer.is_placement_running(outer, PlacementHandle.from_record(host_record)):
                     return self._create_host_object(
@@ -1775,7 +1959,7 @@ class VpsProvider(BaseProviderInstance):
             # Cache the host object
             if record.vps_ip is not None and record.config is not None:
                 realizer = self._realizer_for_record(record)
-                with self._make_outer_for_vps_ip(record.vps_ip) as outer:
+                with self._make_outer_for_vps_ip(record.vps_ip, host_id) as outer:
                     if realizer.is_placement_running(outer, PlacementHandle.from_record(record)):
                         self._create_host_object(host_id, host_name, record.vps_ip, realizer)
                     else:
@@ -1931,21 +2115,22 @@ class VpsProvider(BaseProviderInstance):
         """
         return self.config.auto_shutdown_seconds
 
-    def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return SSH-reachable hostnames for VPSes owned by this provider instance.
+    def _list_provider_vps_entries(self) -> list[VpsListingEntry]:
+        """Return the VPSes owned by this provider instance, each with its SSH target and host id.
 
-        Each entry is whatever the provider hands back as the SSH target
-        for one of its VPSes -- a public IPv4 (Vultr, AWS) or a provider DNS
-        name (OVH classic VPS like ``vps-eec8860b.vps.ovh.us``). The
-        discovery machinery below treats it as an opaque ``hostname``
-        passed to paramiko.
+        The hostname is whatever the provider hands back as the SSH target for
+        one of its VPSes -- a public IPv4 (Vultr, AWS) or a provider DNS name
+        (OVH classic VPS like ``vps-eec8860b.vps.ovh.us``); the discovery
+        machinery below treats it as an opaque ``hostname`` passed to paramiko.
+        The host id comes from the ``mngr-host-id`` marker stamped on the
+        instance at create, and selects the per-host client key discovery opens
+        the VPS root with (see ``listing_entry_from_host_id_marker``).
 
         Concrete subclasses implement this by querying their provider's
-        listing API (e.g. by tag) and resolving the matching instances'
-        SSH targets. The remaining discovery machinery -- parallel SSH
-        into each VPS, reading host records and agent data from each
-        VPS's unified host volume, caching -- is shared and lives in
-        this base class.
+        listing API (e.g. by tag). The remaining discovery machinery --
+        parallel SSH into each VPS, reading host records and agent data from
+        each VPS's unified host volume, caching -- is shared and lives in this
+        base class.
 
         Default returns ``[]`` so test doubles and providers without a
         listing API can opt out without overriding.
@@ -1965,7 +2150,7 @@ class VpsProvider(BaseProviderInstance):
 
     def _read_records_from_vps(
         self,
-        vps_ip: str,
+        entry: VpsListingEntry,
     ) -> _VpsDiscoveryData:
         """Read the (single) host record + live agent data from one VPS.
 
@@ -1995,11 +2180,13 @@ class VpsProvider(BaseProviderInstance):
         # instance's ``mngr-isolation`` marker, no SSH needed), not the provider's
         # create-time default -- otherwise a bare host probed by the default
         # container realizer finds no container and is invisible to discovery.
-        # Resolved inside the try so a corrupt marker (a VpsError) degrades just
-        # this VPS rather than aborting the whole discovery sweep.
+        # Resolved inside the try so a corrupt marker (a VpsError), like a missing
+        # per-host key (VpsHostKeyMissingError, raised before any SSH), degrades
+        # just this VPS rather than aborting the whole discovery sweep.
+        vps_ip = entry.hostname
         try:
-            realizer = self._realizer_for_vps_ip(vps_ip)
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
+            realizer = self._realizer_for_host_id(entry.host_id)
+            with self._make_outer_for_vps_ip(vps_ip, entry.host_id) as outer:
                 found = realizer.find_host_record(outer)
                 if found is None:
                     logger.debug("No mngr host on VPS {} yet, skipping", vps_ip)
@@ -2033,6 +2220,17 @@ class VpsProvider(BaseProviderInstance):
                     live_agent_data_by_host_id={host_id: live_agent_data},
                     is_running_by_host_id={host_id: is_running},
                 )
+        except VpsHostKeyMissingError as e:
+            # Expected while a host created elsewhere has no access material
+            # here yet, so not a warning on every poll.
+            cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
+            logger.info(
+                "No key for the host on VPS {} on this machine yet ({}); surfacing {} cached host record(s) as offline",
+                vps_ip,
+                e,
+                len(cached_records),
+            )
+            return _VpsDiscoveryData(records=tuple(cached_records))
         except MngrError as e:
             cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
             if cached_records:
@@ -2049,15 +2247,15 @@ class VpsProvider(BaseProviderInstance):
     def _discover_host_records_with_agents(self) -> _VpsDiscoveryData:
         """Discover host records and live agent data from all VPSes for this provider.
 
-        Calls ``_list_provider_vps_hostnames`` to enumerate VPSes
+        Calls ``_list_provider_vps_entries`` to enumerate VPSes
         (provider-specific), then SSHes to each in parallel. Within each
         VPS, ``_read_records_from_vps`` finds the mngr container by host-id
         label, reads ``host_state.json``, and reads live agent data from the
         container; the parallel fan-out across VPSes keeps wall time bounded
         by the slowest VPS rather than the sum.
         """
-        vps_ips = self._list_provider_vps_hostnames()
-        if not vps_ips:
+        entries = self._list_provider_vps_entries()
+        if not entries:
             return _VpsDiscoveryData()
 
         all_records: list[VpsHostRecord] = []
@@ -2065,15 +2263,15 @@ class VpsProvider(BaseProviderInstance):
         all_running: dict[HostId, bool] = {}
 
         cg_name = f"{type(self).__name__}-discover"
-        with log_span("Reading records from {} VPS instance(s) in parallel", len(vps_ips)):
+        with log_span("Reading records from {} VPS instance(s) in parallel", len(entries)):
             cg = ConcurrencyGroup(name=cg_name)
             with cg:
                 with mngr_executor(
                     parent_cg=cg,
                     name=f"{cg_name}_read_records",
-                    max_workers=min(len(vps_ips), 32),
+                    max_workers=min(len(entries), 32),
                 ) as executor:
-                    futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
+                    futures = [executor.submit(self._read_records_from_vps, entry) for entry in entries]
 
                 for future in futures:
                     vps_data = future.result()
@@ -2158,7 +2356,7 @@ class VpsProvider(BaseProviderInstance):
             # Collect all data in one SSH command
             script = build_listing_collection_script(str(self.host_dir), self.mngr_ctx.config.prefix)
 
-            with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            with self._make_outer_for_vps_ip(host_record.vps_ip, host_ref.host_id) as outer:
                 with log_span("Collecting listing data via single SSH command"):
                     raw_output = self._realizer_for_record(host_record).collect_listing_output(
                         outer,
@@ -2403,7 +2601,7 @@ class VpsProvider(BaseProviderInstance):
 
         snapshot_name = name or SnapshotName(f"mngr-snapshot-{host_id}-{int(time.time())}")
 
-        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+        with self._make_outer_for_vps_ip(host_record.vps_ip, host_id) as outer:
             snapshot_id = realizer.snapshot_placement(outer, host_id, PlacementHandle.from_record(host_record))
 
             # Store snapshot record in host data
@@ -2460,7 +2658,7 @@ class VpsProvider(BaseProviderInstance):
         if len(remaining_snapshots) == len(certified.snapshots):
             raise SnapshotNotFoundError(self.name, snapshot_id)
 
-        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+        with self._make_outer_for_vps_ip(host_record.vps_ip, host_id) as outer:
             # Delete the image first: on a real failure this raises (the snapshot stays
             # in the record, so it still lists), and only on success do we drop it from
             # the record -- so the record never claims a snapshot is gone while its image
@@ -2514,7 +2712,7 @@ class VpsProvider(BaseProviderInstance):
                     f"Host record for {host_id} on VPS {host_record.vps_ip} is missing config -- "
                     "cannot determine unified volume name to rename"
                 )
-            with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            with self._make_outer_for_vps_ip(host_record.vps_ip, host_id) as outer:
                 host_store = self._realizer_for_record(host_record).open_host_store(outer, host_id)
                 self._write_and_mirror(host_store, updated_record)
 
@@ -2625,7 +2823,7 @@ class VpsProvider(BaseProviderInstance):
         if host_record is None or host_record.vps_ip is None or host_record.config is None:
             raise HostNotFoundError(self.name, host_id)
 
-        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+        with self._make_outer_for_vps_ip(host_record.vps_ip, host_id) as outer:
             host_store = self._realizer_for_record(host_record).open_host_store(outer, host_id)
             records = host_store.list_persisted_agent_data()
         logger.debug("Read {} persisted agent record(s) for host {}", len(records), host_id)
@@ -2636,7 +2834,7 @@ class VpsProvider(BaseProviderInstance):
         if host_record is None or host_record.vps_ip is None or host_record.config is None:
             raise HostNotFoundError(self.name, host_id)
 
-        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+        with self._make_outer_for_vps_ip(host_record.vps_ip, host_id) as outer:
             host_store = self._realizer_for_record(host_record).open_host_store(outer, host_id)
             host_store.persist_agent_data(agent_data)
 
@@ -2645,7 +2843,7 @@ class VpsProvider(BaseProviderInstance):
         if host_record is None or host_record.vps_ip is None or host_record.config is None:
             raise HostNotFoundError(self.name, host_id)
 
-        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+        with self._make_outer_for_vps_ip(host_record.vps_ip, host_id) as outer:
             host_store = self._realizer_for_record(host_record).open_host_store(outer, host_id)
             host_store.remove_persisted_agent_data(agent_id)
 

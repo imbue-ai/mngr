@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from enum import auto
 from pathlib import Path
+from typing import AbstractSet
 from typing import Final
 
 from loguru import logger
@@ -1087,12 +1088,12 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 logger.warning("Resolver change callback failed: {}", e)
 
     def notify_change(self) -> None:
-        """Public wake-up for SSE listeners after external state mutations.
+        """Public wake-up for the chrome listeners after an external state mutation.
 
         ``_fire_on_change`` is fired internally on agent/service updates, but
-        the request inbox lives outside this resolver. Inbox mutations
-        (new request events, mirrored response events) call this so chrome
-        SSE consumers don't have to wait for the next 30s poll tick.
+        some state the chrome derives from lives outside this resolver (the
+        request inbox, the signed-in accounts). Producers of that state call
+        this so the listeners re-derive now instead of at the next poll tick.
         """
         self._fire_on_change()
 
@@ -1328,6 +1329,50 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 and self._prune_last_good_for_clean_snapshot_locked(provider_name, clean_snapshot_host_ids)
                 and path is not None
             ):
+                topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
+        if path is not None and topology_to_write is not None:
+            _write_last_good_agent_topology(path, topology_to_write)
+        self._fire_on_change()
+
+    def list_last_good_provider_names(self) -> set[str]:
+        """The provider instances the persisted last-good topology attributes hosts to."""
+        with self._lock:
+            return {
+                str(record.provider_name) for records in self._last_good_agents_by_host.values() for record in records
+            }
+
+    def forget_providers(self, provider_names: AbstractSet[str]) -> None:
+        """Drop every trace of provider instances that no longer exist on this device.
+
+        A connection that was removed (or re-homed to another device) or an
+        account that signed out takes its ``[providers.*]`` block with it, so
+        no snapshot for the instance ever arrives again: nothing would otherwise
+        prune its hosts from the last-good topology, and they would keep
+        rendering as running machines of this device forever (and surviving
+        restarts through the persisted topology).
+        """
+        if not provider_names:
+            return
+        names = {ProviderInstanceName(name) for name in provider_names}
+        path = self.last_good_agents_path
+        topology_to_write: _LastGoodAgentTopology | None = None
+        with self._lock:
+            for name in names:
+                self._provider_by_name.pop(name, None)
+                self._error_by_provider_name.pop(name, None)
+                self._last_snapshot_at_by_provider.pop(name, None)
+                self._last_completed_poll_at_by_provider.pop(name, None)
+                self._unread_host_ids_by_provider.pop(name, None)
+                self._clean_snapshot_host_ids_by_provider.pop(name, None)
+            is_topology_changed = False
+            for host_id_str in tuple(self._last_good_agents_by_host):
+                records = self._last_good_agents_by_host[host_id_str]
+                if not any(record.provider_name in names for record in records):
+                    continue
+                del self._last_good_agents_by_host[host_id_str]
+                is_topology_changed = True
+                logger.info("Forgot last-good host {}: its provider instance no longer exists here", host_id_str)
+            if is_topology_changed and path is not None:
                 topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
         if path is not None and topology_to_write is not None:
             _write_last_good_agent_topology(path, topology_to_write)

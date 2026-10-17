@@ -1,4 +1,6 @@
 import fcntl
+import os
+import stat
 import time
 import tomllib
 from collections.abc import Callable
@@ -20,12 +22,18 @@ from imbue.minds.mngr_settings.profile_paths import resolve_active_settings_path
 # Writers hold the lock only for a read-mutate-write of a small file, so any real wait indicates a stuck holder.
 _LOCK_WAIT_WARN_SECONDS: Final[float] = 2.0
 
+_OWNER_ONLY_MODE: Final[int] = stat.S_IRUSR | stat.S_IWUSR
+
 
 class FileMindsSettingsStore(MindsSettingsStoreInterface):
     """File-backed settings store that serializes writers via a sidecar flock.
 
-    Concurrent writers exist in practice (signin threads, the startup reconcile, providers-panel toggles), so every read-modify-write runs under an exclusive ``flock`` on ``<settings>.lock``.
-    Writes go through a tmp-file + rename so readers never see a half-written file.
+    Concurrent writers exist in practice (signin threads, the startup reconcile, the sync pass and the connection routes materializing provider blocks), so every read-modify-write runs under an exclusive ``flock`` on ``<settings>.lock``.
+    Writes go through a tmp-file + rename so readers never see a half-written file, and leave the file
+    owner-only: the provider blocks carry cloud credentials in the clear.
+
+    This module is imported by the pre-import reconcile, so it must not import ``imbue.mngr`` (hence
+    its own atomic write rather than ``imbue.mngr.utils.file_utils.atomic_write``).
     """
 
     settings_path: Path = Field(frozen=True, description="The profile's settings.toml")
@@ -43,9 +51,7 @@ class FileMindsSettingsStore(MindsSettingsStoreInterface):
                 doc = tomlkit.document()
             is_write_needed = mutate_document(doc)
             if is_write_needed:
-                tmp_path = self.settings_path.with_suffix(".tmp")
-                tmp_path.write_text(tomlkit.dumps(doc))
-                tmp_path.rename(self.settings_path)
+                _write_owner_only(self.settings_path, tomlkit.dumps(doc))
             return is_write_needed
 
     @contextmanager
@@ -62,6 +68,18 @@ class FileMindsSettingsStore(MindsSettingsStoreInterface):
                 yield
             finally:
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def _write_owner_only(path: Path, text: str) -> None:
+    """Atomically replace ``path`` with ``text``, created 0600 and left 0600 even when the old file was wider."""
+    tmp_path = path.with_suffix(".tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _OWNER_ONLY_MODE)
+    with os.fdopen(fd, "w") as tmp_file:
+        tmp_file.write(text)
+        tmp_file.flush()
+        os.fsync(tmp_file.fileno())
+    os.chmod(tmp_path, _OWNER_ONLY_MODE)
+    os.replace(tmp_path, path)
 
 
 def settings_store_for(root: MindsRoot) -> FileMindsSettingsStore | None:

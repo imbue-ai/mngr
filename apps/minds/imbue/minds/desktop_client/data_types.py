@@ -51,6 +51,9 @@ class CloudRowKeyState(LowerCaseStrEnum):
     SYNCING = auto()
     # No key bundle exists anywhere, so no key will ever reach this device.
     UNAVAILABLE = auto()
+    # The host refused this device's credential (or its host key could not be
+    # verified): discovery reports it UNAUTHENTICATED, and no restart helps.
+    REJECTED = auto()
 
 
 class ShareGatewayState(LowerCaseStrEnum):
@@ -82,7 +85,9 @@ class RemoteWorkspaceTile(FrozenModel):
     state: str = Field(
         default="",
         description=(
-            "Derived access state for cloud rows: '' (plain), 'signed_out', 'connecting', 'unreachable', or 'error'"
+            "Derived access state for cloud rows: '' (plain), 'locked' (the account's key is not on this device), "
+            "'missing_connection' (the row's connection is not held here), 'no_credentials' (its credentials are "
+            "unusable here), 'read_only' (a newer app wrote it), 'connecting', 'unreachable', or 'error'"
         ),
     )
     state_detail: str | None = Field(default=None, description="Failure detail for the 'error' state (chip tooltip)")

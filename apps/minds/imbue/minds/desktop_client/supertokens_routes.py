@@ -4,8 +4,9 @@ Sign-up/sign-in itself happens on the connector's hosted accounts pages in
 the system browser: the desktop client just launches ``mngr imbue_cloud auth
 login`` (which opens the browser and receives the session via a localhost
 loopback + PKCE code exchange) and mirrors the resulting account into its own
-state -- default-account selection, ``[providers.imbue_cloud_<slug>]``
-registration, and the observer bounce. The Mithril UI drives the flow through
+state -- default-account selection, the provider-settings materialization
+(the ``[providers.imbue_cloud_<user id>]`` account instance), and the observer
+bounce. The Mithril UI drives the flow through
 the small JSON surface here (`/auth/api/web-login/*`) and renders the
 waiting/copy-link modal itself.
 
@@ -32,7 +33,8 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.minds.bootstrap import MindsRoot
+from imbue.minds.desktop_client.connections.account_lifecycle import sign_out_account_via_plugin
+from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthFailedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -47,8 +49,6 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
-from imbue.minds.mngr_settings.imbue_cloud_accounts import set_imbue_cloud_provider_for_account
-from imbue.minds.mngr_settings.imbue_cloud_accounts import unset_imbue_cloud_provider_for_account
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import emit_event
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -132,19 +132,6 @@ def _get_connector_url() -> str:
     return str(client_env_config.connector_url).rstrip("/")
 
 
-def _bounce_forward_observe() -> None:
-    """Bounce the single discovery observer so a freshly-written provider entry
-    takes effect within the same Imbue Studio session.
-
-    Sends ``SIGHUP`` to the detached ``mngr latchkey forward`` supervisor via
-    ``LatchkeyForwardSupervisor.bounce()``, restarting only its ``mngr observe``
-    child (the shared gateway, reverse tunnels, and per-agent state stay up). Its
-    next snapshot is written to the shared discovery log that Imbue Studio's ``mngr forward
-    --observe-via-file`` tails, so no separate ``mngr forward`` bounce is needed.
-    """
-    bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
-
-
 def bounce_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor | None) -> None:
     """Bounce the detached ``mngr latchkey forward`` supervisor's observe child.
 
@@ -159,60 +146,19 @@ def bounce_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor | N
         logger.warning("Failed to bounce mngr latchkey forward: {}", e)
 
 
-def _hand_off_default_account(signed_out_user_id: str, session_store: MultiAccountSessionStore) -> None:
-    """Make the first account still signed in the default when the default account signs out.
-
-    With none left the default is cleared, so the next sign-in takes it. The
-    default is left as it was when the account listing fails (it cannot name
-    a successor) or still lists the account (its signout did not go through).
-    """
-    minds_config = get_state().minds_config
-    if minds_config is None or minds_config.get_default_account_id() != signed_out_user_id:
-        return
-    remaining = session_store.list_accounts()
-    if session_store.is_last_identity_read_failed:
-        return
-    if any(str(account.user_id) == signed_out_user_id for account in remaining):
-        return
-    minds_config.set_default_account_id(str(remaining[0].user_id) if remaining else None)
-
-
 def signout_user_via_plugin(user_id: str) -> None:
-    """Sign ``user_id`` out via the mngr_imbue_cloud plugin and clear local state.
-
-    Resolves the email for ``user_id`` against the cached ``auth list``,
-    runs ``mngr imbue_cloud auth signout --account <email>`` (plugin owns
-    the SuperTokens session; only this device's session is revoked),
-    invalidates the local identity cache, and tears down the matching
-    ``[providers.imbue_cloud_<slug>]`` block / bounces ``mngr observe`` so
-    ``mngr create``/``list`` reflect the new state immediately.
-
-    No-ops gracefully when the user isn't currently visible to the
-    plugin -- the cache is still invalidated so a stale entry can't
-    survive.
-    """
-    session_store = _get_session_store()
-    cli = get_state().imbue_cloud_cli
-    session = session_store.get_session(user_id)
-    signed_out_email: str | None = None
-    if session is None:
-        logger.warning("No mirrored account for user {}; skipping plugin signout", user_id[:8])
-    elif cli is None:
-        logger.warning("imbue_cloud_cli is not configured; skipping plugin signout for user {}", user_id[:8])
-    else:
-        signed_out_email = str(session.email)
-        try:
-            cli.auth_signout(signed_out_email)
-        except ImbueCloudCliError as exc:
-            logger.warning("`mngr imbue_cloud auth signout` failed for {}: {}", signed_out_email, exc)
-    session_store.invalidate_identity_cache()
-    _hand_off_default_account(user_id, session_store)
+    """The interactive signout: :func:`sign_out_account_via_plugin` on the app's state, then the sync kick and UI wake."""
+    state = get_state()
+    sign_out_account_via_plugin(
+        user_id,
+        cli=state.imbue_cloud_cli,
+        session_store=_get_session_store(),
+        connection_store=state.connection_store,
+        provider_materializer=state.provider_materializer,
+        minds_config=state.minds_config,
+    )
     _kick_background_syncs()
     wake_ui_state_publisher()
-    if signed_out_email and unset_imbue_cloud_provider_for_account(
-        signed_out_email, root=MindsRoot.from_environment()
-    ):
-        _bounce_forward_observe()
 
 
 def _kick_background_syncs() -> None:
@@ -354,9 +300,8 @@ def _run_web_login_subprocess(
     sync_scheduler: WorkspaceSyncScheduler | None,
     minds_config: MindsConfig | None,
     output_format: OutputFormat,
-    latchkey_forward_supervisor: LatchkeyForwardSupervisor | None,
-    connector_url: str,
     notify_accounts_changed: Callable[[], None],
+    provider_materializer: ProviderSettingsMaterializer | None,
 ) -> None:
     """Run ``mngr imbue_cloud auth login`` in a background thread.
 
@@ -364,11 +309,10 @@ def _run_web_login_subprocess(
     listens on its own localhost port for the one-time code, exchanges it,
     and writes the session to its own state directory. We then mirror the
     resulting account identity into ``MultiAccountSessionStore`` so the
-    desktop UI can render it, register a ``[providers.imbue_cloud_<slug>]``
-    entry (force-enabled, even if the user previously clicked Disable on it
-    in the providers panel), and bounce the detached ``mngr latchkey
-    forward`` supervisor (the single discovery observer) so the new provider
-    config is picked up immediately.
+    desktop UI can render it and materialize the provider set (which writes
+    the account instance and bounces the detached ``mngr latchkey forward``
+    supervisor, the single discovery observer, so the new provider config is
+    picked up immediately).
     """
     login_url: str | None = None
     try:
@@ -426,9 +370,8 @@ def _run_web_login_subprocess(
             sync_scheduler=sync_scheduler,
             minds_config=minds_config,
             output_format=output_format,
-            latchkey_forward_supervisor=latchkey_forward_supervisor,
-            connector_url=connector_url,
             notify_accounts_changed=notify_accounts_changed,
+            provider_materializer=provider_materializer,
         )
         _record_web_login_status(
             flow_id,
@@ -464,9 +407,8 @@ def _mirror_signin_result(
     sync_scheduler: WorkspaceSyncScheduler | None,
     minds_config: MindsConfig | None,
     output_format: OutputFormat,
-    latchkey_forward_supervisor: LatchkeyForwardSupervisor | None,
-    connector_url: str,
     notify_accounts_changed: Callable[[], None],
+    provider_materializer: ProviderSettingsMaterializer | None,
 ) -> None:
     """Mirror a completed plugin signin into the desktop client.
 
@@ -488,17 +430,11 @@ def _mirror_signin_result(
         if stored_default_account_id is None or is_stored_default_signed_out:
             minds_config.set_default_account_id(str(result.user_id))
 
-    # Explicit signin -- always re-enable the provider entry, even if the
-    # user previously clicked Disable on it in the providers panel.
-    if set_imbue_cloud_provider_for_account(
-        str(result.email),
-        connector_url=connector_url,
-        root=MindsRoot.from_environment(),
-        force_enable=True,
-    ):
-        bounce_latchkey_forward_supervisor(latchkey_forward_supervisor)
-    # Last, so the accounts frame the open windows re-read already has the
-    # account both listed and re-enabled.
+    # The session list the invalidation above refreshed is the materializer's input.
+    if provider_materializer is not None:
+        provider_materializer.materialize()
+    # Last, so the accounts frame the open windows re-read already lists the
+    # account and its providers.
     notify_accounts_changed()
 
     emit_event(
@@ -526,7 +462,7 @@ def _handle_web_login_start() -> Response:
     session_store = _get_session_store()
     output_format = _get_output_format()
     minds_config: MindsConfig | None = state.minds_config
-    latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = state.latchkey_forward_supervisor
+    provider_materializer: ProviderSettingsMaterializer | None = state.provider_materializer
     sync_scheduler: WorkspaceSyncScheduler | None = state.sync_scheduler
     root_cg: ConcurrencyGroup | None = state.root_concurrency_group
     if imbue_cloud_cli is None:
@@ -557,9 +493,8 @@ def _handle_web_login_start() -> Response:
             "sync_scheduler": sync_scheduler,
             "minds_config": minds_config,
             "output_format": output_format,
-            "latchkey_forward_supervisor": latchkey_forward_supervisor,
-            "connector_url": _get_connector_url(),
             "notify_accounts_changed": _publisher_notifier(state.ui_publisher),
+            "provider_materializer": provider_materializer,
         },
         name="imbue-cloud-web-login",
         is_checked=False,

@@ -39,6 +39,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
+from typing import Any
 from typing import Final
 from typing import assert_never
 
@@ -47,13 +48,14 @@ from flask import Response
 from flask import request
 from loguru import logger
 from pydantic import Field
+from pydantic import SecretStr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
-from imbue.minds.bootstrap import BootstrapError
-from imbue.minds.bootstrap import MindsRoot
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import backup_update as backup_update_module
@@ -70,9 +72,13 @@ from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES
 from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
+from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.agent_creator import OutputCallback
+from imbue.minds.desktop_client.agent_creator import make_log_callback
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
+from imbue.minds.desktop_client.agent_creator import run_mngr_modal_connection_check
 from imbue.minds.desktop_client.agent_creator import run_mngr_provider_prepare
 from imbue.minds.desktop_client.api_auth import handle_invalid_random_id as _handle_invalid_random_id
 from imbue.minds.desktop_client.api_auth import json_error as _json_error
@@ -92,7 +98,9 @@ from imbue.minds.desktop_client.api_models import BackupSnapshotSummary
 from imbue.minds.desktop_client.api_models import BackupVerificationToggleRequest
 from imbue.minds.desktop_client.api_models import BugReportRequest
 from imbue.minds.desktop_client.api_models import CloudAccountCreateRequest
+from imbue.minds.desktop_client.api_models import CloudAccountOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CloudAccountSummary
+from imbue.minds.desktop_client.api_models import CloudAccountUpdateRequest
 from imbue.minds.desktop_client.api_models import CreateAttemptDiscardStatusResponse
 from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
@@ -112,10 +120,8 @@ from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
-from imbue.minds.desktop_client.api_models import ProviderToggleResponse
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
-from imbue.minds.desktop_client.api_models import SetProviderEnabledRequest
 from imbue.minds.desktop_client.api_models import SharingGrantsDocument
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
@@ -140,6 +146,28 @@ from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.backup_reaper import make_quota_evictor
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
 from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
+from imbue.minds.desktop_client.connection_operations import ConnectionOperationFailure
+from imbue.minds.desktop_client.connection_operations import ConnectionOperationKind
+from imbue.minds.desktop_client.connection_operations import ConnectionOperationRegistry
+from imbue.minds.desktop_client.connection_operations import ConnectionOperationStatus
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
+from imbue.minds.desktop_client.connections.data_types import AwsPlacement
+from imbue.minds.desktop_client.connections.data_types import AzurePlacement
+from imbue.minds.desktop_client.connections.data_types import ConnectionCredentials
+from imbue.minds.desktop_client.connections.data_types import ConnectionView
+from imbue.minds.desktop_client.connections.data_types import GcpPlacement
+from imbue.minds.desktop_client.connections.data_types import ModalPlacement
+from imbue.minds.desktop_client.connections.data_types import ProviderMaterializationOutcome
+from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
+from imbue.minds.desktop_client.connections.primitives import ConnectionId
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.connections.primitives import MODAL_USER_ID_RE
+from imbue.minds.desktop_client.connections.primitives import azure_resource_group_for_connection
+from imbue.minds.desktop_client.connections.primitives import connection_backend_from_name
+from imbue.minds.desktop_client.connections.primitives import is_region_pinned_for_backend
+from imbue.minds.desktop_client.connections.primitives import mngr_backend_name
+from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
+from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
 from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
@@ -157,6 +185,7 @@ from imbue.minds.desktop_client.machine_size import is_machine_disk_resizable_pr
 from imbue.minds.desktop_client.machine_size import is_machine_resizable_provider
 from imbue.minds.desktop_client.machine_size import machine_size_resize_args
 from imbue.minds.desktop_client.machine_size import narrow_machine_size_to_launch_mode
+from imbue.minds.desktop_client.minds_config import settle_default_account_id
 from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.responses import make_file_response
@@ -180,16 +209,18 @@ from imbue.minds.desktop_client.sharing_handler import send_mobile_access_link_f
 from imbue.minds.desktop_client.sharing_handler import unpublish_workspace
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
-from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
-from imbue.minds.desktop_client.supertokens_routes import wake_ui_state_publisher
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_api_inbox import build_agent_message_card
 from imbue.minds.desktop_client.ui_api_inbox import resolve_chat_agent_id
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
+from imbue.minds.desktop_client.workspace_create import CONNECTION_ONLY_LAUNCH_MODES
+from imbue.minds.desktop_client.workspace_create import ResolvedRegion
+from imbue.minds.desktop_client.workspace_create import available_cloud_account_options
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
 from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
+from imbue.minds.desktop_client.workspace_create import is_cloud_account_owned_by
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
@@ -199,6 +230,7 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKi
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRecord
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
+from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_TOO_NEW_MESSAGE
 from imbue.minds.desktop_client.workspace_record_store import is_record_too_new
 from imbue.minds.desktop_client.workspace_recovery import RecoveryDispatchOutcome
@@ -206,18 +238,23 @@ from imbue.minds.desktop_client.workspace_recovery import dispatch_host_recovery
 from imbue.minds.desktop_client.workspace_update_state import is_below_in_place_update_floor
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.errors import ConnectionNotFoundError
+from imbue.minds.errors import ConnectionOperationInProgressError
+from imbue.minds.errors import ConnectionRemovedElsewhereError
+from imbue.minds.errors import ConnectionRequiresMasterPasswordError
+from imbue.minds.errors import ConnectionTooNewError
+from imbue.minds.errors import ConnectionUpdateInProgressError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import WorkspaceNameInUseError
-from imbue.minds.mngr_settings.byok_accounts import delete_cloud_account_provider
-from imbue.minds.mngr_settings.byok_accounts import is_bring_your_own_cloud_enabled
-from imbue.minds.mngr_settings.byok_accounts import list_cloud_account_providers
-from imbue.minds.mngr_settings.byok_accounts import set_cloud_account_provider
-from imbue.minds.mngr_settings.data_types import CloudAccountRecord
+from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
 from imbue.minds.primitives import CONFIGURED_AZURE_VM_SIZES
 from imbue.minds.primitives import CONFIGURED_GCP_MACHINE_TYPES
 from imbue.minds.primitives import CreateAttemptId
+from imbue.minds.primitives import DEFAULT_AWS_INSTANCE_TYPE
+from imbue.minds.primitives import DEFAULT_AZURE_VM_SIZE
+from imbue.minds.primitives import DEFAULT_GCP_MACHINE_TYPE
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import default_docker_runtime
@@ -227,6 +264,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import InvalidName
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 # Cap for a short blocking ``mngr`` command run via ``_run_mngr_blocking``
 # (restart-services, git label read/write) -- quick operations, unlike the host
@@ -1056,18 +1094,26 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         ),
         launch_mode,
     )
+    # A sandbox lifetime applies to a Modal create only; a stray value for another mode is dropped.
+    raw_modal_sandbox_timeout = body.get("modal_sandbox_timeout_seconds")
+    modal_sandbox_timeout_seconds = (
+        int(raw_modal_sandbox_timeout)
+        if launch_mode is LaunchMode.MODAL and raw_modal_sandbox_timeout is not None
+        else None
+    )
     cloud_account = str(body.get("cloud_account", "")).strip()
-    if launch_mode in (LaunchMode.AWS, LaunchMode.GCP, LaunchMode.AZURE) and not cloud_account:
-        # BYOK-only modes (all three clouds): without an account the create
-        # would fail minutes later in the background thread with an opaque
-        # provider error. Ambient machine-credential AWS was removed from Imbue Studio.
+    if launch_mode in CONNECTION_ONLY_LAUNCH_MODES and not cloud_account:
+        # The remote clouds are reachable only through a connection: without
+        # one the create would fail minutes later in the background thread
+        # with an opaque provider error.
         return _json_field_error(f"{launch_mode.value} requires a configured cloud account.", "cloud_account")
     matching = None
     if cloud_account:
-        # A bring-your-own-key account must exist and match the submitted launch
-        # mode's backend, else the create would target a nonexistent provider.
+        # The connection must exist with usable credentials and match the
+        # submitted launch mode's backend, else the create would target a
+        # nonexistent provider.
         matching = next(
-            (a for a in list_cloud_account_providers(root=MindsRoot.from_environment()) if a.name == cloud_account),
+            (a for a in available_cloud_account_options(get_state().connection_store) if a.name == cloud_account),
             None,
         )
         if matching is None:
@@ -1076,6 +1122,14 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
             return _json_field_error(
                 f"Cloud account {matching.alias!r} is a {matching.backend} account; "
                 f"it cannot be used with launch_mode {launch_mode.value}.",
+                "cloud_account",
+            )
+        # The selected account picks the providers on offer: its own connections
+        # plus the local profile's, which are device providers like docker and
+        # lima; the selected account is then the workspace's association.
+        if not is_cloud_account_owned_by(matching, account_id):
+            return _json_field_error(
+                f"Cloud account {matching.alias!r} belongs to a different account than the one selected.",
                 "cloud_account",
             )
 
@@ -1150,23 +1204,30 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     # callback that associates the account and persists the chosen region --
     # exactly as the create form does.
     minds_config = get_state().minds_config
-    if matching is not None:
-        # A BYOK account's placement (region, or GCE zone) is pinned per entry --
-        # AWS/GCP discovery clients are region/zone-bound and Azure's scaffolding
-        # is region-locked, so honoring a different submitted value would orphan
-        # the entry's existing workspaces. The pin always rules; the form shows
-        # it as a static note. A different placement = another account entry.
-        region = matching.region
+    if matching is not None and matching.is_region_pinned:
+        # A pinned backend's placement (region, or GCE zone) is fixed per
+        # connection -- AWS/GCP discovery clients are region/zone-bound and
+        # Azure's scaffolding is region-locked, so honoring a different
+        # submitted value would orphan the connection's existing workspaces.
+        # The pin always rules; the form shows it as a static note. A different
+        # placement = another connection. Modal places per create like
+        # imbue_cloud and vultr, so its region comes from the form.
+        resolved_region = ResolvedRegion(region=matching.region, choice_to_remember="")
     else:
-        region = resolve_effective_region(launch_mode, submitted_region, minds_config, get_state().geo_location_cache)
+        resolved_region = resolve_effective_region(
+            launch_mode, submitted_region, minds_config, get_state().geo_location_cache
+        )
+    region = resolved_region.region
     on_created = build_create_on_created_callback(
         account_id,
         minds_config,
         launch_mode,
-        region,
+        resolved_region.choice_to_remember,
         display_name=host_name or resolved_host_name,
         color=color,
         is_web_access_enabled=is_web_access_enabled,
+        is_account_owned_connection=matching is not None and matching.owner_user_id != LOCAL_PROFILE_USER_ID,
+        connection_instance_name=matching.name if matching is not None else None,
     )
 
     try:
@@ -1185,6 +1246,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
             cloud_account=cloud_account,
             instance_type=instance_type,
             machine_size=machine_size,
+            modal_sandbox_timeout_seconds=modal_sandbox_timeout_seconds,
             on_created=on_created,
             backup_request=backup_request,
             color=color,
@@ -2617,13 +2679,13 @@ def _handle_patch_workspace(agent_id: str) -> Response:
         try:
             if is_disassociate:
                 workspace_settings.disassociate_workspace_account(
-                    parsed_id, backend_resolver, state.session_store, state.imbue_cloud_cli
+                    parsed_id, backend_resolver, state.session_store, state.connection_store, state.imbue_cloud_cli
                 )
                 applied["account_id"] = None
             else:
                 account_id = str(account_value).strip()
                 account = workspace_settings.associate_workspace_account(
-                    parsed_id, account_id, backend_resolver, state.session_store
+                    parsed_id, account_id, backend_resolver, state.session_store, state.connection_store
                 )
                 # Echo the *resolved* id (the input may have been an email) plus the
                 # email, so the caller can confirm exactly which account was bound.
@@ -3281,165 +3343,911 @@ def _handle_machine_sharing_readiness(host_id: str) -> SharingReadinessResponse:
 # the gateway (deny-all baseline) while the desktop UI reaches them by cookie.
 
 
-@require_api_or_cookie_auth
-@API_SPEC.validate(json=SetProviderEnabledRequest, resp=json_response_model(ProviderToggleResponse))
-def _handle_patch_provider(provider_name: str) -> ProviderToggleResponse | Response:
-    """Set a provider's ``is_enabled`` flag. Body: ``{"enabled": bool}``.
-
-    Idempotent desired-state. Refuses to disable a provider that still has active
-    workspaces (409) -- disabling it would drop those live workspaces off
-    discovery.
-    """
-    # ``enabled`` (a required bool) is validated by the spectree model.
-    body = request.get_json(silent=True, force=True) or {}
-    enabled = bool(body.get("enabled"))
-    state = get_state()
-    try:
-        changed = desktop_control.set_provider_enabled(
-            provider_name, enabled, state.backend_resolver, state.latchkey_forward_supervisor
-        )
-    except desktop_control.ProviderHasActiveWorkspacesError as exc:
-        return _json_error(str(exc), 409)
-    if changed:
-        # An Imbue Cloud account whose provider is off is listed as signed out.
-        wake_ui_state_publisher()
-    return ProviderToggleResponse(provider_name=provider_name, enabled=enabled, changed=changed)
-
-
-def _cloud_account_summary(account: CloudAccountRecord) -> CloudAccountSummary:
-    """Build the wire model for one settings-layer cloud account record."""
+def _cloud_account_summary(view: ConnectionView) -> CloudAccountSummary:
+    """Build the wire model for one connection."""
+    backend = connection_backend_from_name(view.backend)
     return CloudAccountSummary(
-        name=account.name,
-        alias=account.alias,
-        backend=account.backend,
-        region=account.region,
-        identifier=account.identifier,
+        name=view.instance_name,
+        alias=view.alias,
+        backend=view.backend,
+        region=view.region,
+        identifier=view.identifier,
+        owner_user_id=view.owner_user_id,
+        is_region_pinned=backend is not None and is_region_pinned_for_backend(backend),
     )
 
 
-@require_api_or_cookie_auth
-@API_SPEC.validate(json=CloudAccountCreateRequest, resp=json_response_model(CloudAccountSummary))
-def _handle_create_cloud_account() -> CloudAccountSummary | Response:
-    """Register a bring-your-own-key cloud account and run `mngr <backend> prepare` on it.
+def _masked_identifier(value: str) -> str:
+    """A display-safe hint for a key-like identifier: its ends, never the middle."""
+    return f"{value[:4]}…{value[-4:]}" if len(value) >= 12 else value
 
-    Prepare doubles as credential validation: it is the first privileged call
-    against the pasted keys (security group + state bucket). On prepare failure
-    the just-written provider block is rolled back so a bad key never leaves a
-    half-registered account behind; the error body carries the prepare output
-    so the UI can show the cloud's own message.
+
+class _ParsedConnectionRequest(FrozenModel):
+    """The typed half of a cloud-connection registration body, after the per-backend checks."""
+
+    backend: ConnectionBackend
+    region: str
+    identifier: str
+    credentials: ConnectionCredentials
+    modal_user_id: str | None = None
+
+
+def _parse_connection_backend(raw_backend: object) -> ConnectionBackend | Response:
+    """The body's backend as the typed enum; a 400 response on ``backend`` for any other value."""
+    backend_name = str(raw_backend if raw_backend is not None else "").strip().lower()
+    backend = connection_backend_from_name(backend_name)
+    if backend is None:
+        supported = ", ".join(mngr_backend_name(supported_backend) for supported_backend in ConnectionBackend)
+        return _json_field_error(f"Backend {backend_name!r} is not supported ({supported}).", "backend")
+    return backend
+
+
+def _parse_aws_connection_request(body: Mapping[str, Any], region: str) -> _ParsedConnectionRequest | Response:
+    access_key_id = str(body.get("aws_access_key_id", "")).strip()
+    secret_access_key = str(body.get("aws_secret_access_key", "")).strip()
+    if not access_key_id or not secret_access_key:
+        return _json_field_error("An AWS access key id and secret access key are required.", "aws_access_key_id")
+    return _ParsedConnectionRequest(
+        backend=ConnectionBackend.AWS,
+        region=region,
+        identifier=_masked_identifier(access_key_id),
+        credentials=ConnectionCredentials(
+            aws_access_key_id=access_key_id, aws_secret_access_key=SecretStr(secret_access_key)
+        ),
+    )
+
+
+def _parse_gcp_connection_request(body: Mapping[str, Any], region: str) -> _ParsedConnectionRequest | Response:
+    key_json = str(body.get("gcp_service_account_key_json", "")).strip()
+    if not key_json:
+        return _json_field_error("The service-account key JSON is required.", "gcp_service_account_key_json")
+    # Cheap structural check so an obviously-wrong paste (an API key, an
+    # OAuth client blob) fails here rather than mid-prepare.
+    try:
+        key_info = json.loads(key_json)
+    except json.JSONDecodeError as e:
+        logger.warning("Rejected pasted GCP key: not valid JSON: {}", e)
+        return _json_field_error(
+            "That is not valid JSON. Paste the full contents of the downloaded key file.",
+            "gcp_service_account_key_json",
+        )
+    if not isinstance(key_info, dict) or key_info.get("type") != "service_account":
+        return _json_field_error(
+            "That JSON is not a service-account key (expected 'type': 'service_account').",
+            "gcp_service_account_key_json",
+        )
+    return _ParsedConnectionRequest(
+        backend=ConnectionBackend.GCP,
+        region=region,
+        identifier=str(key_info.get("client_email", "")),
+        credentials=ConnectionCredentials(service_account_key_json=SecretStr(key_json)),
+    )
+
+
+def _parse_azure_connection_request(body: Mapping[str, Any], region: str) -> _ParsedConnectionRequest | Response:
+    subscription_id = str(body.get("azure_subscription_id", "")).strip()
+    tenant_id = str(body.get("azure_tenant_id", "")).strip()
+    client_id = str(body.get("azure_client_id", "")).strip()
+    client_secret = str(body.get("azure_client_secret", "")).strip()
+    if not (subscription_id and tenant_id and client_id and client_secret):
+        return _json_field_error(
+            "Subscription id, tenant id, client id, and client secret are all required.",
+            "azure_subscription_id",
+        )
+    return _ParsedConnectionRequest(
+        backend=ConnectionBackend.AZURE,
+        region=region,
+        identifier=client_id,
+        credentials=ConnectionCredentials(
+            subscription_id=subscription_id,
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=SecretStr(client_secret),
+        ),
+    )
+
+
+def _parse_modal_connection_request(body: Mapping[str, Any]) -> _ParsedConnectionRequest | Response:
+    token_id = str(body.get("modal_token_id", "")).strip()
+    token_secret = str(body.get("modal_token_secret", "")).strip()
+    if not token_id or not token_secret:
+        return _json_field_error("A Modal token id and token secret are required.", "modal_token_id")
+    raw_modal_user_id = body.get("modal_user_id")
+    modal_user_id = str(raw_modal_user_id).strip() if raw_modal_user_id is not None else ""
+    if modal_user_id and MODAL_USER_ID_RE.match(modal_user_id) is None:
+        return _json_field_error(
+            "modal_user_id must be 1-48 characters of letters, digits, '_' or '-', starting with a letter or digit.",
+            "modal_user_id",
+        )
+    return _ParsedConnectionRequest(
+        backend=ConnectionBackend.MODAL,
+        region="",
+        identifier=_masked_identifier(token_id),
+        credentials=ConnectionCredentials(token_id=token_id, token_secret=SecretStr(token_secret)),
+        modal_user_id=modal_user_id or None,
+    )
+
+
+def _parse_connection_request(body: Mapping[str, Any]) -> _ParsedConnectionRequest | Response:
+    """Validate the per-backend placement and credential fields; a 400 response names the offending field."""
+    backend = _parse_connection_backend(body.get("backend"))
+    if isinstance(backend, Response):
+        return backend
+    region = str(body.get("region", "")).strip()
+    if is_region_pinned_for_backend(backend) and not region:
+        return _json_field_error("A region (or zone) is required.", "region")
+    return _parse_connection_credentials(backend, body, region)
+
+
+def _parse_connection_credentials(
+    backend: ConnectionBackend, body: Mapping[str, Any], region: str
+) -> _ParsedConnectionRequest | Response:
+    """Validate the backend's credential fields; a 400 response names the offending field."""
+    match backend:
+        case ConnectionBackend.AWS:
+            return _parse_aws_connection_request(body, region)
+        case ConnectionBackend.GCP:
+            return _parse_gcp_connection_request(body, region)
+        case ConnectionBackend.AZURE:
+            return _parse_azure_connection_request(body, region)
+        case ConnectionBackend.MODAL:
+            return _parse_modal_connection_request(body)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _placement_for_connection(parsed: _ParsedConnectionRequest, connection_id: ConnectionId) -> dict[str, Any]:
+    """The backend's placement defaults for the connection metadata, in the shape the materializer reads back."""
+    match parsed.backend:
+        case ConnectionBackend.AWS:
+            return AwsPlacement(
+                default_region=parsed.region, default_instance_type=DEFAULT_AWS_INSTANCE_TYPE
+            ).model_dump()
+        case ConnectionBackend.GCP:
+            # GCE is zonal: the form's "region" value for GCP is a zone.
+            return GcpPlacement(default_zone=parsed.region, default_machine_type=DEFAULT_GCP_MACHINE_TYPE).model_dump()
+        case ConnectionBackend.AZURE:
+            # Azure's scaffolding (resource group / vnet / NSG) is region-locked,
+            # so each connection is pinned to its region for life and gets its
+            # own resource group, minted once from the connection id.
+            return AzurePlacement(
+                default_region=parsed.region,
+                default_vm_size=DEFAULT_AZURE_VM_SIZE,
+                resource_group=azure_resource_group_for_connection(connection_id, parsed.region),
+            ).model_dump()
+        case ConnectionBackend.MODAL:
+            return ModalPlacement(user_id=parsed.modal_user_id).model_dump()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+# The ``code`` values the connection routes answer with, so the add-connection
+# modal can tell the failures apart (their statuses alone are ambiguous).
+CONNECTION_ERROR_CODE_MASTER_PASSWORD_REQUIRED: Final[str] = "master_password_required"
+CONNECTION_ERROR_CODE_CONNECTION_IN_USE: Final[str] = "connection_in_use"
+CONNECTION_ERROR_CODE_REMOVED_ELSEWHERE: Final[str] = "connection_removed_elsewhere"
+CONNECTION_ERROR_CODE_CREDENTIALS_REJECTED: Final[str] = "credentials_rejected"
+CONNECTION_ERROR_CODE_SYNC_FAILED: Final[str] = "sync_failed"
+CONNECTION_ERROR_CODE_ACCOUNT_LISTING_FAILED: Final[str] = "account_listing_failed"
+
+CREATE_IN_FLIGHT_ON_CONNECTION_MESSAGE: Final[str] = (
+    "A workspace is still being created on this connection; wait for it to finish."
+)
+UPDATE_IN_FLIGHT_ON_CONNECTION_MESSAGE: Final[str] = (
+    "This connection's credentials are being updated; wait for the update to finish."
+)
+REGISTRATION_IN_FLIGHT_ON_CONNECTION_MESSAGE: Final[str] = (
+    "This connection's credentials are still being validated; wait for the setup to finish."
+)
+
+_ACCOUNT_LISTING_FAILED_MESSAGE: Final[str] = (
+    "Could not read the signed-in accounts to set up the connection; try again."
+)
+
+
+def _running_connection_operation_message(registry: ConnectionOperationRegistry, instance_name: str) -> str | None:
+    """The 409 message for a registration or update still running on the connection, or None when none is.
+
+    The row exists from the moment the add or update route answered 202, and
+    its worker still has to read it back, settle it, or roll it back: a removal
+    or a second update meanwhile would be undone by that.
     """
-    if not is_bring_your_own_cloud_enabled():
-        return _json_error("Bring-your-own cloud accounts are not enabled.", 403)
+    operation = registry.get(instance_name)
+    if operation is None or operation.status is not ConnectionOperationStatus.RUNNING:
+        return None
+    if operation.kind is ConnectionOperationKind.ADD:
+        return REGISTRATION_IN_FLIGHT_ON_CONNECTION_MESSAGE
+    return UPDATE_IN_FLIGHT_ON_CONNECTION_MESSAGE
+
+
+def _resolve_connection_owner(raw_owner: object) -> tuple[str, str | None] | Response:
+    """``(owner user id, account email)`` for a registration body's ``owner``; the local profile has no email."""
+    requested_owner = str(raw_owner).strip() if raw_owner is not None else ""
+    if requested_owner == LOCAL_PROFILE_USER_ID:
+        return LOCAL_PROFILE_USER_ID, None
+    state = get_state()
+    signed_in_user_ids = (
+        [str(account.user_id) for account in state.session_store.list_accounts()]
+        if state.session_store is not None
+        else []
+    )
+    if state.session_store is not None and state.session_store.is_last_identity_read_failed:
+        # A failed listing reads like no accounts; answering "signed out" would blame the user.
+        return _json_error(_ACCOUNT_LISTING_FAILED_MESSAGE, 503, CONNECTION_ERROR_CODE_ACCOUNT_LISTING_FAILED)
+    # Settled, not read raw: a default the scheduler retired as dead would
+    # otherwise answer every ownerless registration with "signed-out account".
+    default_account_id = settle_default_account_id(state.minds_config, signed_in_user_ids)
+    owner_user_id = requested_owner or default_account_id or ""
+    if not owner_user_id:
+        return _json_field_error(
+            "Sign in to an account to own this connection, or add it to this device only (owner 'local').", "owner"
+        )
+    session = state.session_store.get_session(owner_user_id) if state.session_store is not None else None
+    if session is None:
+        return _json_field_error(f"Unknown or signed-out account {owner_user_id!r}.", "owner")
+    return owner_user_id, str(session.email)
+
+
+def _discard_connection(
+    connection_store: ConnectionStore,
+    owner_user_id: str,
+    account_email: str | None,
+    connection_id: ConnectionId,
+    *,
+    is_push_attempted: bool,
+    materializer: ProviderSettingsMaterializer | None,
+) -> None:
+    """Drop a half-registered connection and its provider block again (see ``ConnectionStore.remove_connection``)."""
+    connection_store.remove_connection(
+        owner_user_id, account_email, str(connection_id), is_push_attempted=is_push_attempted
+    )
+    _materialize_with(materializer)
+
+
+def _configured_connection_store() -> ConnectionStore | Response:
+    """The connection store, or a 503 unless connections, the materializer, and the session store are all wired."""
+    state = get_state()
+    if state.connection_store is None or state.provider_materializer is None or state.session_store is None:
+        return _json_error("Cloud connections are not configured in this app instance.", 503)
+    return state.connection_store
+
+
+def _materialize_provider_settings() -> ProviderMaterializationOutcome:
+    """Re-derive the provider blocks; SKIPPED when nothing was written (stores not wired, or the account listing failed)."""
+    return _materialize_with(get_state().provider_materializer)
+
+
+def _materialize_with(materializer: ProviderSettingsMaterializer | None) -> ProviderMaterializationOutcome:
+    """``_materialize_provider_settings`` for a worker thread, which holds no request context to read the state from."""
+    if materializer is None:
+        return ProviderMaterializationOutcome.SKIPPED
+    return materializer.materialize()
+
+
+def _validate_connection_credentials(
+    parsed: _ParsedConnectionRequest,
+    instance_name: str,
+    parent_cg: ConcurrencyGroup | None,
+    on_output: OutputCallback,
+) -> None:
+    """The first privileged call against the pasted credentials; raises ``MngrCommandError`` when they are unusable.
+
+    The VPS clouds run their ``prepare`` (security group + state bucket) against
+    the freshly-written instance; Modal has no prepare, so one listing on the
+    instance stands in (a bad token fails it as not authorized). Every line the
+    command prints goes to ``on_output``, which is how the dialog shows what the
+    cloud is doing while the user waits.
+    """
+    match parsed.backend:
+        case ConnectionBackend.AWS:
+            run_mngr_aws_prepare(parsed.region, provider_name=instance_name, on_output=on_output, parent_cg=parent_cg)
+        case ConnectionBackend.GCP | ConnectionBackend.AZURE:
+            # gcp/azure prepare read placement + credentials from the connection
+            # block itself, so only --provider is passed.
+            run_mngr_provider_prepare(
+                mngr_backend_name(parsed.backend), instance_name, on_output=on_output, parent_cg=parent_cg
+            )
+        case ConnectionBackend.MODAL:
+            run_mngr_modal_connection_check(instance_name, on_output=on_output, parent_cg=parent_cg)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+class _StderrOnlyOutput(MutableModel):
+    """An output callback that forwards stderr lines only: a Modal listing's stdout is JSON, not progress."""
+
+    sink: CreateAttemptLogSink = Field(frozen=True, description="The operation log the stderr lines land in")
+
+    def __call__(self, line: str, is_stdout: bool) -> None:
+        if not is_stdout:
+            make_log_callback(self.sink)(line, is_stdout)
+
+
+def _connection_log_callback(backend: ConnectionBackend, sink: CreateAttemptLogSink) -> OutputCallback:
+    """The prepare's output, line by line, into the operation's log; Modal's stdout (a JSON listing) is noise."""
+    if backend is ConnectionBackend.MODAL:
+        return _StderrOnlyOutput(sink=sink)
+    return make_log_callback(sink)
+
+
+class _ConnectionWorkerFailureHandler(MutableModel):
+    """Callable ``on_failure`` hook for a connection worker: a crash still ends the operation the dialog polls.
+
+    The worker's own ``finally`` has already rolled the connection back and
+    ended its log by the time this runs; the crash itself is logged by the
+    thread machinery, so this only records the outcome.
+    """
+
+    registry: ConnectionOperationRegistry = Field(frozen=True, description="Where the operation is marked failed")
+    operation_id: str = Field(frozen=True, description="The connection instance the worker was registering")
+    verb: str = Field(frozen=True, description="'set up' or 'update', as the message reads")
+
+    def __call__(self, exc: BaseException) -> None:
+        self.registry.finish_failed(
+            self.operation_id,
+            ConnectionOperationFailure(status_code=500, error=f"Could not {self.verb} the connection: {exc}"),
+        )
+
+
+def _connection_summary_by_id(connection_store: ConnectionStore, connection_id: str) -> CloudAccountSummary | None:
+    """The wire model of a connection just written, or None when it cannot be read back."""
+    found = connection_store.find_active_connection(connection_id)
+    if found is None:
+        return None
+    view = connection_store.view_for(*found)
+    return None if view is None else _cloud_account_summary(view)
+
+
+def _spawn_connection_worker(
+    registry: ConnectionOperationRegistry,
+    operation_id: str,
+    concurrency_group: ConcurrencyGroup,
+    target: Callable[..., None],
+    kwargs: Mapping[str, object],
+    verb: str,
+) -> bool:
+    """Start the operation's worker; a spawn that fails (a group shutting down) ends the operation as failed."""
+    try:
+        start_mngr_thread(
+            concurrency_group=concurrency_group,
+            target=target,
+            kwargs=dict(kwargs),
+            name=f"connection-{operation_id}",
+            daemon=True,
+            # The worker reports its outcome into the registry (its failure
+            # handler covers a crash), so it must not poison the app's root group.
+            is_checked=False,
+            on_failure=_ConnectionWorkerFailureHandler(registry=registry, operation_id=operation_id, verb=verb),
+        )
+    except (ConcurrencyGroupError, ConcurrencyExceptionGroup, RuntimeError) as exc:
+        logger.opt(exception=exc).error("Could not start the worker for connection operation {}", operation_id)
+        registry.finish_failed(
+            operation_id, ConnectionOperationFailure(status_code=503, error="Could not start the connection setup.")
+        )
+        return False
+    return True
+
+
+def _run_connection_registration(
+    *,
+    registry: ConnectionOperationRegistry,
+    sink: CreateAttemptLogSink,
+    connection_store: ConnectionStore,
+    materializer: ProviderSettingsMaterializer | None,
+    parent_cg: ConcurrencyGroup | None,
+    parsed: _ParsedConnectionRequest,
+    owner_user_id: str,
+    account_email: str | None,
+    connection_id: ConnectionId,
+    instance_name: str,
+) -> None:
+    """The add route's work after its row and block exist: validate, push, read back; roll back on any failure.
+
+    The row and its credential block must not outlive a registration that did
+    not complete, whatever stopped it: the provider's own refusal (unusable
+    credentials or permissions; keeping the block would make every `mngr list`
+    fan out to it) or anything else (a closed concurrency group, no runnable
+    mngr, a crashed push). The refusals and a failed push get their own codes;
+    anything unexpected propagates to the thread's failure handler, which ends
+    the operation the dialog is waiting on as a plain failure. The outcome is
+    recorded only once the rollback is complete: the dialog (and the providers
+    panel it returns to) must never read a finished operation while the row it
+    discards is still on disk.
+    """
+    summary: CloudAccountSummary | None = None
+    failure: ConnectionOperationFailure | None = None
+    is_push_attempted = False
+    try:
+        try:
+            _validate_connection_credentials(
+                parsed, instance_name, parent_cg, _connection_log_callback(parsed.backend, sink)
+            )
+        except MngrCommandError as exc:
+            logger.warning("Rejected a connection's credentials: {}", exc)
+            failure = ConnectionOperationFailure(
+                status_code=502,
+                error=f"Account setup failed: {exc}",
+                code=CONNECTION_ERROR_CODE_CREDENTIALS_REJECTED,
+            )
+            return
+        if account_email is not None:
+            # Adding a synced connection requires connectivity, like associate.
+            is_push_attempted = True
+            try:
+                connection_store.push_connection(owner_user_id, account_email, str(connection_id))
+            except WorkspaceSyncError as exc:
+                logger.warning("Could not push a connection document to the account: {}", exc)
+                failure = ConnectionOperationFailure(
+                    status_code=502,
+                    error=f"Could not sync the connection to your account: {exc}",
+                    code=CONNECTION_ERROR_CODE_SYNC_FAILED,
+                )
+                return
+        summary = _connection_summary_by_id(connection_store, str(connection_id))
+        if summary is None:
+            failure = ConnectionOperationFailure(
+                status_code=500, error="The connection was set up but could not be read back."
+            )
+    finally:
+        try:
+            if summary is None:
+                # A push that failed may still have reached the connector.
+                _discard_connection(
+                    connection_store,
+                    owner_user_id,
+                    account_email,
+                    connection_id,
+                    is_push_attempted=is_push_attempted,
+                    materializer=materializer,
+                )
+        finally:
+            sink.put(LOG_SENTINEL)
+        if summary is not None:
+            registry.finish_done(instance_name, summary)
+        elif failure is not None:
+            registry.finish_failed(instance_name, failure)
+        else:
+            # Something unexpected raised: the thread's failure handler records
+            # it once the exception leaves this frame.
+            logger.debug("Leaving the outcome of connection operation {} to the failure handler", instance_name)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(json=CloudAccountCreateRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_create_cloud_account() -> tuple[OperationHandleResponse, int] | Response:
+    """Register a cloud connection: store it, materialize its block, then validate and push on a worker.
+
+    ``owner`` picks the account the connection syncs under (or ``local`` for
+    this device only; default: the default account). The refusals that need no
+    cloud call (a bad body, an unknown owner, a locked account) answer at once;
+    once the row and its block exist the route answers 202 with the instance
+    name as the operation id, and the validation (the first privileged call
+    against the pasted keys, streamed through the operation's log) and the push
+    finish on a worker. A failure there removes the connection again, so a bad
+    key never leaves a half-registered connection behind; the status route
+    carries the provider's own message.
+    """
+    connection_store = _configured_connection_store()
+    if isinstance(connection_store, Response):
+        return connection_store
     body = request.get_json(silent=True, force=True) or {}
     alias = str(body.get("alias", "")).strip()
-    backend = str(body.get("backend", "")).strip().lower()
-    region = str(body.get("region", "")).strip()
-    if backend == "aws":
-        access_key_id = str(body.get("aws_access_key_id", "")).strip()
-        secret_access_key = str(body.get("aws_secret_access_key", "")).strip()
-        if not access_key_id or not secret_access_key:
-            return _json_field_error("An AWS access key id and secret access key are required.", "aws_access_key_id")
-        credentials = {
-            "aws_access_key_id": access_key_id,
-            "aws_secret_access_key": secret_access_key,
-        }
-    elif backend == "gcp":
-        key_json = str(body.get("gcp_service_account_key_json", "")).strip()
-        if not key_json:
-            return _json_field_error("The service-account key JSON is required.", "gcp_service_account_key_json")
-        # Cheap structural check so an obviously-wrong paste (an API key, an
-        # OAuth client blob) fails here rather than mid-prepare.
-        try:
-            key_info = json.loads(key_json)
-        except json.JSONDecodeError as e:
-            logger.warning("Rejected pasted GCP key: not valid JSON: {}", e)
-            return _json_field_error(
-                "That is not valid JSON. Paste the full contents of the downloaded key file.",
-                "gcp_service_account_key_json",
-            )
-        if not isinstance(key_info, dict) or key_info.get("type") != "service_account":
-            return _json_field_error(
-                "That JSON is not a service-account key (expected 'type': 'service_account').",
-                "gcp_service_account_key_json",
-            )
-        credentials = {"service_account_key_json": key_json}
-    elif backend == "azure":
-        subscription_id = str(body.get("azure_subscription_id", "")).strip()
-        tenant_id = str(body.get("azure_tenant_id", "")).strip()
-        client_id = str(body.get("azure_client_id", "")).strip()
-        client_secret = str(body.get("azure_client_secret", "")).strip()
-        if not (subscription_id and tenant_id and client_id and client_secret):
-            return _json_field_error(
-                "Subscription id, tenant id, client id, and client secret are all required.",
-                "azure_subscription_id",
-            )
-        credentials = {
-            "subscription_id": subscription_id,
-            "tenant_id": tenant_id,
-            "client_id": client_id,
-            "client_secret": client_secret,
-        }
-    else:
-        return _json_field_error(f"Backend {backend!r} is not supported (aws, gcp, azure).", "backend")
+    if not alias:
+        return _json_field_error("An alias is required.", "alias")
+    parsed = _parse_connection_request(body)
+    if isinstance(parsed, Response):
+        return parsed
+    owner = _resolve_connection_owner(body.get("owner"))
+    if isinstance(owner, Response):
+        return owner
+    owner_user_id, account_email = owner
+    if parsed.modal_user_id is not None and owner_user_id != LOCAL_PROFILE_USER_ID:
+        # A synced connection must derive the same environment on every device
+        # from its id; a named namespace is the evals harness's device-only need.
+        return _json_field_error("modal_user_id is for this-device-only connections", "modal_user_id")
 
+    connection_id = ConnectionId.generate()
     try:
-        provider_name = set_cloud_account_provider(
-            alias, backend, credentials, region, root=MindsRoot.from_environment()
+        connection_store.add_connection(
+            owner_user_id=owner_user_id,
+            connection_id=connection_id,
+            backend=parsed.backend,
+            alias=alias,
+            identifier=parsed.identifier,
+            placement=_placement_for_connection(parsed, connection_id),
+            credentials=parsed.credentials,
         )
-    except BootstrapError as exc:
-        return _json_field_error(str(exc), "alias")
-
-    agent_creator: AgentCreator | None = get_state().agent_creator
-    parent_cg = agent_creator.root_concurrency_group if agent_creator is not None else None
+    except ConnectionRequiresMasterPasswordError as exc:
+        return _json_error(str(exc), 409, CONNECTION_ERROR_CODE_MASTER_PASSWORD_REQUIRED)
+    if _materialize_provider_settings() is ProviderMaterializationOutcome.SKIPPED:
+        # Without the block the validation below could only fail with an
+        # unknown-provider error that blames the credentials; the row was never
+        # pushed, so dropping it is local.
+        connection_store.remove_connection(owner_user_id, account_email, str(connection_id))
+        return _json_error(_ACCOUNT_LISTING_FAILED_MESSAGE, 503, CONNECTION_ERROR_CODE_ACCOUNT_LISTING_FAILED)
+    state = get_state()
+    instance_name = provider_instance_name_for_connection(parsed.backend, connection_id)
+    worker_group = state.root_concurrency_group
+    if worker_group is None:
+        _discard_connection(
+            connection_store,
+            owner_user_id,
+            account_email,
+            connection_id,
+            is_push_attempted=False,
+            materializer=state.provider_materializer,
+        )
+        return _json_error("Cloud connections are not configured in this app instance.", 503)
+    registry = state.connection_operations
     try:
-        if backend == "aws":
-            run_mngr_aws_prepare(region, provider_name=provider_name, parent_cg=parent_cg)
-        else:
-            # gcp/azure prepare read placement + credentials from the account
-            # block itself, so only --provider is passed.
-            run_mngr_provider_prepare(backend, provider_name, parent_cg=parent_cg)
-    except MngrCommandError as exc:
-        # Roll back: a failed prepare means unusable credentials/permissions;
-        # keeping the block would make every `mngr list` fan out to it.
-        # The exception text already carries the prepare output tail.
-        delete_cloud_account_provider(provider_name, root=MindsRoot.from_environment())
-        return _json_error(f"Account setup failed: {exc}", 502)
-
-    matching = next(
-        (a for a in list_cloud_account_providers(root=MindsRoot.from_environment()) if a.name == provider_name), None
+        sink = registry.begin(instance_name, ConnectionOperationKind.ADD)
+    except ConnectionOperationInProgressError as exc:
+        # A fresh id never collides; this guards the registry's own invariant.
+        _discard_connection(
+            connection_store,
+            owner_user_id,
+            account_email,
+            connection_id,
+            is_push_attempted=False,
+            materializer=state.provider_materializer,
+        )
+        return _json_error(str(exc), 409, CONNECTION_ERROR_CODE_CONNECTION_IN_USE)
+    agent_creator: AgentCreator | None = state.agent_creator
+    is_started = _spawn_connection_worker(
+        registry,
+        instance_name,
+        worker_group,
+        _run_connection_registration,
+        {
+            "registry": registry,
+            "sink": sink,
+            "connection_store": connection_store,
+            "materializer": state.provider_materializer,
+            "parent_cg": agent_creator.root_concurrency_group if agent_creator is not None else None,
+            "parsed": parsed,
+            "owner_user_id": owner_user_id,
+            "account_email": account_email,
+            "connection_id": connection_id,
+            "instance_name": instance_name,
+        },
+        verb="set up",
     )
-    if matching is None:
-        return _json_error("Account was prepared but could not be read back.", 500)
-    # The discovery daemon (`mngr observe`) read the settings file at launch, so
-    # it cannot see the just-written provider block until restarted -- without
-    # this bounce the new account's workspaces never enter the per-provider
-    # snapshots (no liveness, no Stop/Start controls). Mirrors
-    # desktop_control.set_provider_enabled's bounce-on-change.
-    bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
-    return _cloud_account_summary(matching)
+    if not is_started:
+        sink.put(LOG_SENTINEL)
+        _discard_connection(
+            connection_store,
+            owner_user_id,
+            account_email,
+            connection_id,
+            is_push_attempted=False,
+            materializer=state.provider_materializer,
+        )
+        return _json_error("Could not start the connection setup.", 503)
+    return OperationHandleResponse(operation_id=instance_name, kind=ConnectionOperationKind.ADD.wire_kind), 202
+
+
+def _settle_connection_update(
+    connection_store: ConnectionStore,
+    owner_user_id: str,
+    connection_id: str,
+    *,
+    is_updated: bool,
+    materializer: ProviderSettingsMaterializer | None,
+) -> None:
+    """End an in-place update: keep the new row, or put the previous one back; the blocks follow either way.
+
+    A row that is gone was dropped by its account's signout (the one writer
+    that does not refuse a row mid-update): there is nothing to settle, and the
+    signout already materialized the blocks without it.
+    """
+    try:
+        if is_updated:
+            connection_store.clear_validation_rollback(owner_user_id, connection_id)
+        else:
+            connection_store.restore_validation_rollback(owner_user_id, connection_id)
+    except ConnectionNotFoundError:
+        logger.warning(
+            "Connection {} of owner {} vanished while its credentials were being validated (its account signed out)",
+            connection_id,
+            owner_user_id[:8],
+        )
+    _materialize_with(materializer)
+
+
+def _run_connection_update(
+    *,
+    registry: ConnectionOperationRegistry,
+    sink: CreateAttemptLogSink,
+    connection_store: ConnectionStore,
+    materializer: ProviderSettingsMaterializer | None,
+    parent_cg: ConcurrencyGroup | None,
+    parsed: _ParsedConnectionRequest,
+    owner_user_id: str,
+    account_email: str | None,
+    connection_id: str,
+    instance_name: str,
+) -> None:
+    """The update route's work after the new row and block exist: validate, push, settle; any failure restores.
+
+    As in the add worker, the outcome reaches the registry only once the row
+    is settled (the new credentials kept, or the previous ones restored), so a
+    status read never precedes the rollback it reports.
+    """
+    is_updated = False
+    failure: ConnectionOperationFailure | None = None
+    try:
+        try:
+            _validate_connection_credentials(
+                parsed, instance_name, parent_cg, _connection_log_callback(parsed.backend, sink)
+            )
+        except MngrCommandError as exc:
+            logger.warning("Rejected a connection's credentials: {}", exc)
+            failure = ConnectionOperationFailure(
+                status_code=502,
+                error=f"Account setup failed: {exc}",
+                code=CONNECTION_ERROR_CODE_CREDENTIALS_REJECTED,
+            )
+            return
+        if account_email is not None:
+            try:
+                connection_store.push_connection(owner_user_id, account_email, connection_id)
+            except ConnectionRemovedElsewhereError as exc:
+                failure = ConnectionOperationFailure(
+                    status_code=409, error=f"{exc}.", code=CONNECTION_ERROR_CODE_REMOVED_ELSEWHERE
+                )
+                return
+            except ConnectionNotFoundError:
+                # The account signed out here meanwhile and its replica went with it.
+                failure = ConnectionOperationFailure(status_code=409, error=CONNECTION_GONE_DURING_UPDATE_MESSAGE)
+                return
+            except WorkspaceSyncError as exc:
+                logger.warning("Could not push a connection document to the account: {}", exc)
+                failure = ConnectionOperationFailure(
+                    status_code=502,
+                    error=f"Could not sync the connection to your account: {exc}",
+                    code=CONNECTION_ERROR_CODE_SYNC_FAILED,
+                )
+                return
+        is_updated = True
+    finally:
+        try:
+            _settle_connection_update(
+                connection_store, owner_user_id, connection_id, is_updated=is_updated, materializer=materializer
+            )
+        finally:
+            sink.put(LOG_SENTINEL)
+        if is_updated:
+            summary = _connection_summary_by_id(connection_store, connection_id)
+            if summary is None:
+                registry.finish_failed(
+                    instance_name,
+                    ConnectionOperationFailure(status_code=409, error=CONNECTION_GONE_DURING_UPDATE_MESSAGE),
+                )
+            else:
+                registry.finish_done(instance_name, summary)
+        elif failure is not None:
+            registry.finish_failed(instance_name, failure)
+        else:
+            logger.debug("Leaving the outcome of connection operation {} to the failure handler", instance_name)
+
+
+CONNECTION_GONE_DURING_UPDATE_MESSAGE: Final[str] = (
+    "This connection is no longer on this device: its account signed out while the new credentials were being "
+    "validated."
+)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(json=CloudAccountUpdateRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_update_cloud_account(account_name: str) -> tuple[OperationHandleResponse, int] | Response:
+    """Replace a connection's credentials (and alias) in place, keeping its id, instance, owner, and placement.
+
+    Mirrors the add route: the new row is stored with the previous one as its
+    rollback and the block is re-materialized at once; then the route answers
+    202 and a worker validates the credentials the way the add route does and
+    pushes an account owner's document. A validation or push failure restores
+    the previous row; so does a removal that landed on another device
+    meanwhile (409 on the status route).
+    """
+    connection_store = _configured_connection_store()
+    if isinstance(connection_store, Response):
+        return connection_store
+    found = connection_store.find_active_connection_by_instance_name(account_name)
+    if found is None:
+        return _json_error(f"Unknown cloud account {account_name!r}.", 404)
+    owner_user_id, record = found
+    view = connection_store.view_for(owner_user_id, record)
+    if view is None:
+        return _json_error(f"Unknown cloud account {account_name!r}.", 404)
+    body = request.get_json(silent=True, force=True) or {}
+    backend = _parse_connection_backend(body.get("backend"))
+    if isinstance(backend, Response):
+        return backend
+    if mngr_backend_name(backend) != view.backend:
+        return _json_field_error(
+            f"This connection is a {view.backend} connection; its backend cannot be changed.", "backend"
+        )
+    raw_alias = body.get("alias")
+    alias = (view.alias if raw_alias is None else str(raw_alias)).strip()
+    if not alias:
+        return _json_field_error("An alias is required.", "alias")
+    # The pinned backends keep the placement the connection was added with, so
+    # the region the validation runs against is the connection's own.
+    parsed = _parse_connection_credentials(backend, body, view.region)
+    if isinstance(parsed, Response):
+        return parsed
+    state = get_state()
+    account_email = (
+        state.session_store.get_account_email(owner_user_id)
+        if state.session_store is not None and owner_user_id != LOCAL_PROFILE_USER_ID
+        else None
+    )
+    if owner_user_id != LOCAL_PROFILE_USER_ID and account_email is None:
+        return _json_error(f"The account owning {account_name!r} is not signed in here.", 409)
+    registry = state.connection_operations
+    in_flight_message = _running_connection_operation_message(registry, account_name)
+    if in_flight_message is not None:
+        return _json_error(in_flight_message, 409, CONNECTION_ERROR_CODE_CONNECTION_IN_USE)
+
+    try:
+        connection_store.update_connection(
+            owner_user_id, record.doc_id, alias=alias, identifier=parsed.identifier, credentials=parsed.credentials
+        )
+    except ConnectionRequiresMasterPasswordError as exc:
+        return _json_error(str(exc), 409, CONNECTION_ERROR_CODE_MASTER_PASSWORD_REQUIRED)
+    except ConnectionUpdateInProgressError:
+        return _json_error(UPDATE_IN_FLIGHT_ON_CONNECTION_MESSAGE, 409, CONNECTION_ERROR_CODE_CONNECTION_IN_USE)
+    except ConnectionTooNewError as exc:
+        return _json_error(str(exc), 409)
+    if _materialize_provider_settings() is ProviderMaterializationOutcome.SKIPPED:
+        connection_store.restore_validation_rollback(owner_user_id, record.doc_id)
+        return _json_error(_ACCOUNT_LISTING_FAILED_MESSAGE, 503, CONNECTION_ERROR_CODE_ACCOUNT_LISTING_FAILED)
+    # Whatever stops the update (the provider's refusal, a failed push, a removal
+    # that landed elsewhere, or anything unexpected) puts the previous row back.
+    worker_group = state.root_concurrency_group
+    if worker_group is None:
+        _settle_connection_update(
+            connection_store, owner_user_id, record.doc_id, is_updated=False, materializer=state.provider_materializer
+        )
+        return _json_error("Cloud connections are not configured in this app instance.", 503)
+    try:
+        sink = registry.begin(account_name, ConnectionOperationKind.UPDATE)
+    except ConnectionOperationInProgressError:
+        # An operation that began between the check above and the store write.
+        _settle_connection_update(
+            connection_store, owner_user_id, record.doc_id, is_updated=False, materializer=state.provider_materializer
+        )
+        in_flight_message = (
+            _running_connection_operation_message(registry, account_name) or UPDATE_IN_FLIGHT_ON_CONNECTION_MESSAGE
+        )
+        return _json_error(in_flight_message, 409, CONNECTION_ERROR_CODE_CONNECTION_IN_USE)
+    agent_creator: AgentCreator | None = state.agent_creator
+    is_started = _spawn_connection_worker(
+        registry,
+        account_name,
+        worker_group,
+        _run_connection_update,
+        {
+            "registry": registry,
+            "sink": sink,
+            "connection_store": connection_store,
+            "materializer": state.provider_materializer,
+            "parent_cg": agent_creator.root_concurrency_group if agent_creator is not None else None,
+            "parsed": parsed,
+            "owner_user_id": owner_user_id,
+            "account_email": account_email,
+            "connection_id": record.doc_id,
+            "instance_name": account_name,
+        },
+        verb="update",
+    )
+    if not is_started:
+        sink.put(LOG_SENTINEL)
+        _settle_connection_update(
+            connection_store, owner_user_id, record.doc_id, is_updated=False, materializer=state.provider_materializer
+        )
+        return _json_error("Could not start the connection update.", 503)
+    return OperationHandleResponse(operation_id=account_name, kind=ConnectionOperationKind.UPDATE.wire_kind), 202
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(CloudAccountOperationStatusResponse))
+def _handle_cloud_account_operation_status(operation_id: str) -> CloudAccountOperationStatusResponse | Response:
+    """Report a connection registration or credential update (the id is the connection's instance name)."""
+    record = get_state().connection_operations.get(operation_id)
+    if record is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    failure = record.failure
+    return CloudAccountOperationStatusResponse(
+        operation_id=operation_id,
+        kind=record.kind.wire_kind,
+        status=record.status.value,
+        is_done=record.status is ConnectionOperationStatus.DONE,
+        account=record.account,
+        error=failure.error if failure is not None else None,
+        code=failure.code if failure is not None else None,
+        status_code=failure.status_code if failure is not None else None,
+    )
+
+
+@require_api_or_cookie_auth
+def _handle_cloud_account_operation_logs(operation_id: str) -> Response:
+    """Stream a connection operation's prepare output (history + live tail) as server-sent events."""
+    log_sink = get_state().connection_operations.get_log_sink(operation_id)
+    if log_sink is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return make_streaming_response(
+        _stream_create_operation_logs(log_sink), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
 
 
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(OkResponse))
 def _handle_delete_cloud_account(account_name: str) -> OkResponse | Response:
-    """Remove a cloud account from Imbue Studio (keys forgotten; cloud resources kept).
+    """Remove a connection from its owner (keys forgotten; cloud resources kept).
 
-    Refuses (409) while the account still has active workspaces -- deleting the
-    provider block would drop them off discovery with no way to manage them.
+    Refuses (409) while any active workspace on the connection's instance
+    exists in local discovery or in any account's workspace-record replica
+    -- deleting the block would drop those workspaces off discovery on every
+    device with no way to manage them -- while a workspace is still being
+    created on it, since the create's later ``mngr`` calls need the block, and
+    while its registration or an in-place credential update is still validating.
     """
-    if not is_bring_your_own_cloud_enabled():
-        return _json_error("Bring-your-own cloud accounts are not enabled.", 403)
-    active = desktop_control.list_active_workspaces_for_provider(get_state().backend_resolver, account_name)
-    if active:
+    connection_store = _configured_connection_store()
+    if isinstance(connection_store, Response):
+        return connection_store
+    found = connection_store.find_active_connection_by_instance_name(account_name)
+    if found is None:
+        return _json_error(f"Unknown cloud account {account_name!r}.", 404)
+    owner_user_id, record = found
+    state = get_state()
+    # A workspace hosted here is in both local discovery and the owner's
+    # records, so the two sources are unioned by workspace id, not summed.
+    active_agent_ids = {
+        str(agent_id)
+        for agent_id in desktop_control.list_active_workspaces_for_provider(state.backend_resolver, account_name)
+    }
+    # Every account's replica, not only the owner's: a workspace on a local-profile
+    # connection may be recorded under whichever account it was created with.
+    record_store = state.session_store.record_store if state.session_store is not None else None
+    if record_store is not None:
+        active_agent_ids.update(
+            workspace_record.agent_id
+            for records in record_store.list_all_records().values()
+            for workspace_record in records
+            if workspace_record.state == RECORD_STATE_ACTIVE and workspace_record.provider_kind == account_name
+        )
+    if active_agent_ids:
         return _json_error(
-            f"Cloud account {account_name!r} still has {len(active)} active workspace(s); "
+            f"Cloud account {account_name!r} still has {len(active_agent_ids)} active workspace(s); "
             "destroy them before removing the account.",
             409,
+            CONNECTION_ERROR_CODE_CONNECTION_IN_USE,
         )
-    if not delete_cloud_account_provider(account_name, root=MindsRoot.from_environment()):
+    # A record is seeded only once `mngr create` returns, and a cloud create
+    # runs for minutes, so the sources above cannot see a create in flight.
+    agent_creator: AgentCreator | None = state.agent_creator
+    if agent_creator is not None and agent_creator.live_in_flight_host_names(account_name):
+        return _json_error(CREATE_IN_FLIGHT_ON_CONNECTION_MESSAGE, 409, CONNECTION_ERROR_CODE_CONNECTION_IN_USE)
+    in_flight_message = _running_connection_operation_message(state.connection_operations, account_name)
+    if in_flight_message is not None:
+        return _json_error(in_flight_message, 409, CONNECTION_ERROR_CODE_CONNECTION_IN_USE)
+    account_email = (
+        state.session_store.get_account_email(owner_user_id)
+        if state.session_store is not None and owner_user_id != LOCAL_PROFILE_USER_ID
+        else None
+    )
+    try:
+        connection_store.remove_connection(owner_user_id, account_email, record.doc_id)
+    except ConnectionNotFoundError:
         return _json_error(f"Unknown cloud account {account_name!r}.", 404)
-    # Restart discovery so it stops fanning out to the removed provider.
-    bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
+    except ConnectionUpdateInProgressError:
+        return _json_error(UPDATE_IN_FLIGHT_ON_CONNECTION_MESSAGE, 409, CONNECTION_ERROR_CODE_CONNECTION_IN_USE)
+    except ConnectionTooNewError as exc:
+        return _json_error(str(exc), 409)
+    # The materializer restarts discovery when the block went away, so it stops
+    # fanning out to the removed provider.
+    _materialize_provider_settings()
     return OkResponse(ok=True)
 
 
@@ -3463,14 +4271,14 @@ def _handle_host_name_available() -> Response:
     Read-only liveness check for the create form's Name field. Reads the
     discovery snapshot (resolver cache) -- no provider/subprocess call -- and
     answers whether ``name`` is already taken by an *active* workspace on the
-    provider instance the selected ``launch_mode`` / ``account_id`` / ``region``
-    would target. Format validation is left to the client; an empty or malformed
+    provider instance the selected ``launch_mode`` / ``account_id`` /
+    ``cloud_account`` would target. Format validation is left to the client; an empty or malformed
     name reports available (only a valid name can collide, and the client
     surfaces its own format message). Cookie-only (desktop namespace): the
     browser create page is the sole caller.
 
     Query params: ``name`` (required), ``launch_mode``, ``account_id``,
-    ``region``. Returns ``{"available": bool}``.
+    ``cloud_account``. Returns ``{"available": bool}``.
     """
     name = request.args.get("name", "").strip()
     if not name:
@@ -3485,28 +4293,20 @@ def _handle_host_name_available() -> Response:
     except ValueError:
         launch_mode = LaunchMode.DOCKER
     account_id = request.args.get("account_id", "").strip()
-    region = request.args.get("region", "").strip()
     cloud_account = request.args.get("cloud_account", "").strip()
 
-    # Imbue Cloud is per-account, so its provider instance (``imbue_cloud_<slug>``)
-    # is named from the account email; the session store maps user_id -> email.
-    account_email = ""
-    if account_id and launch_mode is LaunchMode.IMBUE_CLOUD:
-        session_store: MultiAccountSessionStore | None = get_state().session_store
-        if session_store is not None:
-            account_email = session_store.get_account_email(account_id) or ""
-
+    # Imbue Cloud is per-account: its provider instance (``imbue_cloud_<user id>``)
+    # is named from the account's user id.
     try:
         provider_instance_name = provider_instance_name_for_launch(
             launch_mode,
-            imbue_cloud_account=account_email or None,
-            region=region or None,
+            imbue_cloud_user_id=account_id or None,
             cloud_account=cloud_account or None,
         )
     except MngrCommandError:
-        # Not enough context to scope (imbue_cloud without an account, or AWS
-        # without a region). The form blocks submit on those separately, so
-        # report available rather than a spurious conflict.
+        # Not enough context to scope (imbue_cloud without an account, or a
+        # remote cloud without a connection). The form blocks submit on those
+        # separately, so report available rather than a spurious conflict.
         return _json_response({"available": True})
 
     taken = taken_host_names_on_provider(get_state().backend_resolver, provider_instance_name)
@@ -3837,14 +4637,28 @@ def create_api_v1_blueprint() -> Blueprint:
     )
 
     # Desktop namespace (cookie-or-bearer; no agent verb, so deny-all at the gateway).
-    blueprint.add_url_rule("/desktop/providers/<provider_name>", view_func=_handle_patch_provider, methods=["PATCH"])
-    # Bring-your-own-key cloud accounts (pasted credentials + prepare).
+    # Cloud connections (pasted credentials + validation).
     blueprint.add_url_rule("/desktop/cloud-accounts", view_func=_handle_create_cloud_account, methods=["POST"])
+    blueprint.add_url_rule(
+        "/desktop/cloud-accounts/<account_name>",
+        view_func=_handle_update_cloud_account,
+        methods=["PUT"],
+    )
     blueprint.add_url_rule(
         "/desktop/cloud-accounts/<account_name>",
         view_func=_handle_delete_cloud_account,
         endpoint="delete_cloud_account",
         methods=["DELETE"],
+    )
+    blueprint.add_url_rule(
+        "/desktop/cloud-accounts/operations/<operation_id>",
+        view_func=_handle_cloud_account_operation_status,
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/desktop/cloud-accounts/operations/<operation_id>/logs",
+        view_func=_handle_cloud_account_operation_logs,
+        methods=["GET"],
     )
     blueprint.add_url_rule("/desktop/running-workspaces", view_func=_handle_running_workspaces, methods=["GET"])
     blueprint.add_url_rule("/desktop/host-name-available", view_func=_handle_host_name_available, methods=["GET"])

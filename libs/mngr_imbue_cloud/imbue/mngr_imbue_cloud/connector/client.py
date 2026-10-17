@@ -50,6 +50,8 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudClientTooOldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudDeviceCodeRefusedError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudDocumentLimitError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudDocumentNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
@@ -99,6 +101,7 @@ from imbue.mngr_imbue_cloud.wire_types import SignupCodeCreated
 from imbue.mngr_imbue_cloud.wire_types import SignupCodeInfo
 from imbue.mngr_imbue_cloud.wire_types import StorageCleanupGrant
 from imbue.mngr_imbue_cloud.wire_types import StorageRecheckResult
+from imbue.mngr_imbue_cloud.wire_types import SyncDocument
 from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.wire_types import SyncRecordsListing
 from imbue.mngr_imbue_cloud.wire_types import SyncWorkspaceRecord
@@ -491,17 +494,23 @@ class ImbueCloudConnectorClient(MutableModel):
         an already-consumed one trips its token-theft detection, so only
         connect-phase transport errors (request never reached the server) are
         retried.
+
+        ``ImbueCloudAuthError`` is reserved for the connector refusing the
+        refresh (401/403): callers such as minds' expired-session detection
+        sign the account out on that class, so an unreachable connector raises
+        ``ImbueCloudUnreachableError`` and any other status
+        ``ImbueCloudConnectorError`` instead.
         """
         response = self._send(
             "POST",
             self._url("/auth/session/refresh"),
-            exc_cls=ImbueCloudAuthError,
+            exc_cls=ImbueCloudUnreachableError,
             idempotent=False,
             headers=_client_id_headers(),
             json={"refresh_token": refresh_token.get_secret_value()},
             timeout=self.timeout_seconds,
         )
-        return self._check(response, ImbueCloudAuthError)
+        return self._check(response, ImbueCloudConnectorError)
 
     def auth_revoke_session(self, access_token: SecretStr) -> None:
         """Revoke EVERY session for the caller's user (all devices + browser).
@@ -1864,18 +1873,11 @@ class ImbueCloudConnectorClient(MutableModel):
                 timeout=self.timeout_seconds,
             )
         if response.status_code == 409:
-            detail_message = _detail_from_response(response)
-            detail = _detail_dict_from_response(response)
-            if detail is not None and detail.get("code") == "record_format_too_new":
-                # Prefer the structured human message over detail_message,
-                # which for a dict detail is the repr of the whole payload
-                # (embedded stored row included).
-                format_message = detail.get("message")
-                raise ImbueCloudRecordFormatTooNewError(
-                    format_message if isinstance(format_message, str) else detail_message
-                )
+            code, message, detail = _structured_conflict_detail(response)
+            if code == "record_format_too_new":
+                raise ImbueCloudRecordFormatTooNewError(message)
             stored = detail.get("stored") if detail is not None else None
-            raise ImbueCloudSyncConflictError(detail_message, stored if isinstance(stored, dict) else None)
+            raise ImbueCloudSyncConflictError(message, stored if isinstance(stored, dict) else None)
         body = self._check(response, ImbueCloudSyncError)
         return validate_wire(SyncWorkspaceRecord, body)
 
@@ -1922,7 +1924,12 @@ class ImbueCloudConnectorClient(MutableModel):
         self._check(response, ImbueCloudSyncError)
 
     def scrub_sync_secrets(self, access_token: SecretStr) -> int:
-        """Strip encrypted_secrets from all the account's records; returns how many were scrubbed."""
+        """Strip every client-encrypted blob of the account server-side; returns how many records were scrubbed.
+
+        The connector clears the records' ``encrypted_secrets`` and the
+        account documents' ``encrypted_payload`` in one call; the count covers
+        the records only.
+        """
         response = self._send(
             "POST",
             self._url("/sync/scrub-secrets"),
@@ -1967,6 +1974,79 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         self._check(response, ImbueCloudSyncError)
+
+    # Account documents (per-account synced documents, e.g. connections)
+
+    def list_sync_documents(self, access_token: SecretStr, kind: str) -> list[SyncDocument]:
+        """Every document of one kind for the account, tombstones included."""
+        response = self._send(
+            "GET",
+            self._url(f"/sync/documents/{quote(kind, safe='')}"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudSyncError)
+        return parse_wire_entries(
+            SyncDocument, body.get("documents", []), f"GET /sync/documents/{kind}", ImbueCloudSyncError
+        )
+
+    def put_sync_document(self, access_token: SecretStr, document: SyncDocument) -> SyncDocument:
+        """Push one document (insert at revision 1, else CAS on revision); returns the stored row.
+
+        Only the fields explicitly set on ``document`` ride the request, so an
+        ``encrypted_payload`` that was never set gets the server's
+        preserve-on-absent behavior while an explicit ``None`` clears it. A
+        409 raises one of three typed errors: ``document_format_too_new``
+        raises :class:`ImbueCloudRecordFormatTooNewError` (terminal until the
+        client updates), ``document_limit_exceeded`` raises
+        :class:`ImbueCloudDocumentLimitError`, and a revision conflict raises
+        :class:`ImbueCloudSyncConflictError` carrying the server's current row
+        (``None`` when the push tried to insert at a revision other than 1).
+        """
+        response = self._send(
+            "PUT",
+            self._url(f"/sync/documents/{quote(document.kind, safe='')}/{quote(document.doc_id, safe='')}"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            json=document.model_dump(mode="json", exclude_unset=True),
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 409:
+            code, message, detail = _structured_conflict_detail(response)
+            if code == "document_format_too_new":
+                raise ImbueCloudRecordFormatTooNewError(message)
+            if code == "document_limit_exceeded":
+                limit = detail.get("limit") if detail is not None else None
+                raise ImbueCloudDocumentLimitError(message, limit=limit if isinstance(limit, int) else None)
+            stored = detail.get("stored") if detail is not None else None
+            raise ImbueCloudSyncConflictError(message, stored if isinstance(stored, dict) else None)
+        body = self._check(response, ImbueCloudSyncError)
+        return validate_wire(SyncDocument, body)
+
+    def delete_sync_document(self, access_token: SecretStr, kind: str, doc_id: str) -> SyncDocument:
+        """Tombstone one document (idempotent) and return the stored tombstone.
+
+        Raises :class:`ImbueCloudDocumentNotFoundError` when the account holds
+        no such document (a structured 404); a bare 404 means a connector too
+        old for the documents routes and raises :class:`ImbueCloudSyncError`.
+        """
+        response = self._send(
+            "DELETE",
+            self._url(f"/sync/documents/{quote(kind, safe='')}/{quote(doc_id, safe='')}"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 404:
+            detail = _detail_dict_from_response(response)
+            if detail is not None and detail.get("code") == "document_not_found":
+                structured_message = detail.get("message")
+                raise ImbueCloudDocumentNotFoundError(
+                    structured_message if isinstance(structured_message, str) else f"no document {kind}/{doc_id}"
+                )
+        body = self._check(response, ImbueCloudSyncError)
+        return validate_wire(SyncDocument, body)
 
     # Paid lists (admin-key authenticated)
     #
@@ -2117,6 +2197,23 @@ def _detail_dict_from_response(response: httpx.Response) -> dict[str, Any] | Non
         return None
     detail = payload.get("detail") if isinstance(payload, dict) else None
     return detail if isinstance(detail, dict) else None
+
+
+def _structured_conflict_detail(response: httpx.Response) -> tuple[str | None, str, dict[str, Any] | None]:
+    """The ``(code, message, detail)`` of a sync push's 409.
+
+    ``message`` prefers the detail's structured ``message`` over the raw
+    detail text, which for a dict detail is the repr of the whole payload
+    (embedded stored row included). ``code`` is None for a 409 that carries
+    no structured code; ``detail`` is the whole dict for callers that need
+    more of it (``stored``, ``limit``).
+    """
+    detail_message = _detail_from_response(response)
+    detail = _detail_dict_from_response(response)
+    code = detail.get("code") if detail is not None else None
+    structured_message = detail.get("message") if detail is not None else None
+    message = structured_message if isinstance(structured_message, str) else detail_message
+    return (code if isinstance(code, str) else None), message, detail
 
 
 def _parse_paid_list_entry(raw: dict[str, Any], value_key: str) -> PaidListEntry:

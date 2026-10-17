@@ -68,6 +68,7 @@ from imbue.mngr_modal.backend import _create_environment
 from imbue.mngr_modal.backend import _enter_ephemeral_app_context_with_env_retry
 from imbue.mngr_modal.backend import _exit_modal_app_context
 from imbue.mngr_modal.backend import _lookup_persistent_app_with_env_retry
+from imbue.mngr_modal.backend import app_registry_key
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import ModalSandboxDiedMngrError
@@ -675,8 +676,9 @@ def test_discover_hosts_with_running_sandbox(
     make_sandbox_with_tags(testing_modal, host_id, "running-host")
 
     cg = testing_provider.mngr_ctx.concurrency_group
-    # discover_hosts with running sandboxes -- _create_host_from_sandbox will fail
-    # (no SSH) but the host record has snapshots, so it appears as a stopped host
+    # No client key for this sandbox exists on this machine, so the running
+    # sandbox cannot be opened; the host record has snapshots, so it is still
+    # surfaced from the record as a stopped host
     discovered = testing_provider.discover_hosts(cg)
     discovered_ids = {d.host_id for d in discovered}
     assert host_id in discovered_ids
@@ -3728,3 +3730,30 @@ def test_ensure_function_deployed_deploys_when_the_marker_cannot_be_read(
 
     assert "snapshot_and_shutdown" in url
     assert len(interface.get_deployments()) == 1
+
+
+def test_app_registry_separates_same_named_apps_opened_with_different_credentials(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """The registry keys by (app name, credential identity), so two instances that share an
+    ``app_name`` but carry different Modal tokens never reuse one another's app context."""
+    modal_interface = make_testing_modal_interface(tmp_path, cg)
+
+    app_a, _ = ModalProviderBackend._get_or_create_app(
+        "shared-name", "env1", False, modal_interface, credential_identity="ak-a"
+    )
+    app_b, _ = ModalProviderBackend._get_or_create_app(
+        "shared-name", "env1", False, modal_interface, credential_identity="ak-b"
+    )
+    app_a_again, _ = ModalProviderBackend._get_or_create_app(
+        "shared-name", "env1", False, modal_interface, credential_identity="ak-a"
+    )
+
+    assert app_a.get_app_id() != app_b.get_app_id()
+    assert app_a_again.get_app_id() == app_a.get_app_id()
+    ModalProviderBackend.close_app(app_registry_key("shared-name", "ak-a"))
+    ModalProviderBackend.close_app(app_registry_key("shared-name", "ak-b"))
+    assert app_registry_key("shared-name", "ak-a") not in ModalProviderBackend._app_registry
+    assert app_registry_key("shared-name", "ak-b") not in ModalProviderBackend._app_registry

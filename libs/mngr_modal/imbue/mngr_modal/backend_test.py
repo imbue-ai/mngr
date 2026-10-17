@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
@@ -12,8 +13,10 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr_modal.backend import ModalProviderBackend
+from imbue.mngr_modal.backend import app_registry_key
 from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
+from imbue.mngr_modal.errors import ModalConfigError
 from imbue.mngr_modal.plugin import get_files_for_deploy
 from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.errors import ModalProxyError
@@ -23,9 +26,7 @@ from imbue.modal_proxy.testing import FakeModalInterface
 from imbue.modal_proxy.testing import MODAL_UNREACHABLE_MESSAGE
 from imbue.modal_proxy.testing import UnreachableModalInterface
 
-# =============================================================================
 # get_files_for_deploy Tests
-# =============================================================================
 
 
 def test_get_files_for_deploy_returns_empty_when_user_settings_excluded(
@@ -79,9 +80,7 @@ def test_get_files_for_deploy_includes_non_key_files(temp_mngr_ctx: MngrContext,
     assert matched_values[0] == config_file
 
 
-# =============================================================================
 # ModalMode resolution -- no Modal/network calls
-# =============================================================================
 
 
 def test_resolve_modal_interface_direct_uses_sdk() -> None:
@@ -97,9 +96,7 @@ def test_resolve_modal_interface_proxied_is_not_implemented() -> None:
         ModalProviderBackend._resolve_modal_interface(config)
 
 
-# =============================================================================
 # Construction against an unreachable Modal
-# =============================================================================
 
 
 # What a Modal that answered -- with a version mismatch, a serialization fault,
@@ -221,3 +218,33 @@ def test_bootstrapping_for_host_creation_surfaces_an_unreachable_modal(
         _construct_against(modal_interface, temp_mngr_ctx, is_environment_creation_allowed=True)
 
     assert MODAL_UNREACHABLE_MESSAGE in str(exc_info.value)
+
+
+def test_resolve_modal_interface_threads_the_instance_tokens_into_the_sdk_boundary() -> None:
+    """A DIRECT instance with its own token authenticates through that token, not the SDK default."""
+    config = ModalProviderConfig(token_id="ak-instance", token_secret=SecretStr("as-instance"))
+    iface = ModalProviderBackend._resolve_modal_interface(config)
+    assert isinstance(iface, DirectModalInterface)
+    assert iface.token_id == "ak-instance"
+    assert iface.token_secret is not None
+    assert iface.token_secret.get_secret_value() == "as-instance"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [ModalProviderConfig(token_id="ak-only"), ModalProviderConfig(token_secret=SecretStr("as-only"))],
+    ids=["id-only", "secret-only"],
+)
+def test_resolve_modal_interface_rejects_half_a_token_on_the_merged_config(config: ModalProviderConfig) -> None:
+    """Half a token would silently fall back to the SDK's own credentials, so it is a config error."""
+    with pytest.raises(ModalConfigError, match="token_id and token_secret must be set together"):
+        ModalProviderBackend._resolve_modal_interface(config)
+
+
+def test_app_registry_key_qualifies_the_app_name_by_the_credentials_that_opened_it() -> None:
+    """Two instances sharing an app name but authenticating with different tokens get separate contexts."""
+    assert app_registry_key("mngr-modal", None) == "mngr-modal"
+    assert app_registry_key("mngr-modal", "ak-a") != app_registry_key("mngr-modal", "ak-b")
+    assert app_registry_key("mngr-modal", "ak-a") != app_registry_key("mngr-modal", None)
+    # The secret never becomes part of the key.
+    assert "as-" not in app_registry_key("mngr-modal", "ak-a")

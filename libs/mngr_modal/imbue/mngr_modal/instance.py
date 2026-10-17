@@ -100,6 +100,7 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.primitives import read_checked_out_branch
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.providers.host_access_manifest import host_access_key_dir
 from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import remove_host_key_record
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
@@ -118,6 +119,11 @@ from imbue.mngr.utils.ssh import build_ssh_connect_command
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_modal.config import ModalProviderConfig
+from imbue.mngr_modal.constants import MODAL_HOST_ACCESS_MANIFEST
+from imbue.mngr_modal.constants import MODAL_HOST_KEY_NAME
+from imbue.mngr_modal.constants import MODAL_KNOWN_HOSTS_NAME
+from imbue.mngr_modal.constants import MODAL_SSH_KEY_NAME
+from imbue.mngr_modal.errors import ModalHostKeyMissingError
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import ModalSandboxDiedMngrError
 from imbue.mngr_modal.errors import ModalSandboxTimeoutMngrError
@@ -131,8 +137,7 @@ from imbue.mngr_modal.ssh_utils import create_pyinfra_host
 from imbue.mngr_modal.ssh_utils import load_or_create_per_host_client_keypair
 from imbue.mngr_modal.ssh_utils import load_or_create_per_host_host_keypair
 from imbue.mngr_modal.ssh_utils import per_host_key_dir
-from imbue.mngr_modal.ssh_utils import resolve_per_host_client_keypair
-from imbue.mngr_modal.ssh_utils import resolve_per_host_host_keypair
+from imbue.mngr_modal.ssh_utils import resolve_modal_client_keypair
 from imbue.mngr_modal.ssh_utils import wait_for_sshd_with_retry
 from imbue.mngr_modal.volume import ModalVolume
 from imbue.modal_proxy.data_types import StreamType
@@ -568,34 +573,39 @@ class ModalProviderInstance(BaseProviderInstance):
 
     @property
     def _keys_dir(self) -> Path:
-        """Get the directory for SSH keys (profile-specific)."""
-        return self.mngr_ctx.profile_dir / "providers" / "modal"
+        """The per-instance key dir, ``<profile>/providers/modal/<instance>/keys/``.
 
-    # CLEANUP: the legacy shared modal_ssh_key / host_key files under _keys_dir
-    # only serve sandboxes created before per-host keys existed. Sandboxes cycle
-    # within about a day, so the shared files (and these resolvers' legacy
-    # fallbacks) can be dropped once no pre-per-host-key sandbox remains.
-    def _get_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
-        """Resolve the client keypair that opens this host: per-host first, legacy shared as fallback.
-
-        A per-host key dir carries a ``known_hosts`` symlink so key-sibling
-        consumers (the forward SSH tunnel) keep finding the pinned host keys.
+        The same shape as the vps providers' key dir, so a consumer that
+        carries a host's access material to another machine handles every
+        backend with one layout: per-host material under
+        ``keys/host_keys/<host uuid hex>/`` and the pins in ``keys/known_hosts``.
         """
-        return resolve_per_host_client_keypair(self._keys_dir, host_id, "modal_ssh_key", "known_hosts")
+        instance_dir = self.mngr_ctx.profile_dir / "providers" / "modal" / str(self.name)
+        return host_access_key_dir(instance_dir, MODAL_HOST_ACCESS_MANIFEST)
+
+    def _get_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
+        """The client keypair that opens this host: its per-host pair, else the instance's shared pair; never minted.
+
+        Only ``create_host`` mints a client key. A read path that minted one
+        would present a key the sandbox never authorized, and that key would
+        then win over a shared key installed later (see
+        ``resolve_modal_client_keypair``, which raises
+        ``ModalHostKeyMissingError`` when this machine holds neither).
+        """
+        return resolve_modal_client_keypair(self._keys_dir, host_id)
 
     def _get_host_keypair(self, host_id: HostId) -> tuple[Path, str]:
-        """Resolve the sshd host keypair for this host's sandbox: per-host first, legacy fallback.
+        """The per-host sshd host keypair for this host's sandbox, minted if it is not on disk yet.
 
         The key is injected into the sandbox at every boot (create and
-        snapshot-restore alike), so restore re-serves the same per-host key
-        while pre-per-host-key sandboxes keep their legacy shared one.
+        snapshot-restore alike), so restore re-serves the same per-host key.
         """
-        return resolve_per_host_host_keypair(self._keys_dir, host_id, "host_key")
+        return load_or_create_per_host_host_keypair(self._keys_dir, host_id, MODAL_HOST_KEY_NAME)
 
     @property
     def _known_hosts_path(self) -> Path:
         """Get the path to the known_hosts file for this provider instance."""
-        return self._keys_dir / "known_hosts"
+        return self._keys_dir / MODAL_KNOWN_HOSTS_NAME
 
     # Host Volume Methods
 
@@ -2096,13 +2106,11 @@ log "=== Shutdown script completed ==="
             updated_at=now,
         )
 
-        # Mint this host's own client + host keypairs up front so the setup
-        # helper's per-host resolution uses them for the new sandbox instead of
-        # falling back to the legacy shared pair from older sandboxes. A clone
+        # Mint this host's own client + host keypairs up front. A clone
         # (create_host --snapshot) lands here with a fresh host_id, so it mints
         # fresh keypairs rather than inheriting the source host's.
-        load_or_create_per_host_client_keypair(self._keys_dir, host_id, "modal_ssh_key", "known_hosts")
-        load_or_create_per_host_host_keypair(self._keys_dir, host_id, "host_key")
+        load_or_create_per_host_client_keypair(self._keys_dir, host_id, MODAL_SSH_KEY_NAME, MODAL_KNOWN_HOSTS_NAME)
+        load_or_create_per_host_host_keypair(self._keys_dir, host_id, MODAL_HOST_KEY_NAME)
 
         # Set up SSH and create host object using shared helper
         with log_span("Setting up SSH and creating Host object for {}", host_id):
@@ -2649,6 +2657,9 @@ log "=== Shutdown script completed ==="
                 if host_obj is not None:
                     hosts.append(host_obj)
                     discovery_state[host_obj.id] = HostState.RUNNING
+            except ModalHostKeyMissingError as e:
+                logger.info("No key for sandbox {} on this machine yet; skipping it: {}", future_host_id, e)
+                continue
             except (KeyError, ValueError, HostConnectionError) as e:
                 if isinstance(e, HostConnectionError):
                     self.on_connection_error(future_host_id)
@@ -2693,6 +2704,10 @@ log "=== Shutdown script completed ==="
                 host_obj = self._create_host_from_sandbox(sandbox, host_record=host_record)
                 if host_obj is not None:
                     return host_obj, HostState.RUNNING
+            except ModalHostKeyMissingError as e:
+                # Expected while a sandbox created elsewhere has no access material
+                # here yet, so not a warning on every poll; the record still lists it.
+                logger.info("No key for sandbox {} on this machine yet; surfacing it from its record: {}", host_id, e)
             except (KeyError, ValueError, HostConnectionError) as e:
                 if isinstance(e, HostConnectionError):
                     # must call on_connection_error when there is a connection error (to properly clear the cache)

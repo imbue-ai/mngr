@@ -45,6 +45,7 @@ from uuid import uuid4
 
 import pluggy
 import pytest
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrConfig
@@ -99,7 +100,9 @@ def _modal_credentials_available() -> bool:
     return bool(os.environ.get("MODAL_TOKEN_ID") and os.environ.get("MODAL_TOKEN_SECRET"))
 
 
-def _write_release_settings(settings_dir: Path, *, user_id: str, app_name: str) -> None:
+def _write_release_settings(
+    settings_dir: Path, *, user_id: str, app_name: str, config_tokens: tuple[str, str] | None = None
+) -> None:
     """Write the release-test ``settings.toml`` selecting the Modal provider into ``settings_dir``.
 
     ``is_allowed_in_pytest = true`` is required because the subprocess inherits
@@ -111,9 +114,17 @@ def _write_release_settings(settings_dir: Path, *, user_id: str, app_name: str) 
     disabled so the create-host preflight (and ``mngr list``) doesn't trip on
     them looking for credentials.
 
+    ``config_tokens``, when given, writes the ``(token_id, token_secret)`` pair
+    into the provider block so the instance authenticates with its own token
+    rather than the ``MODAL_TOKEN_*`` environment / ``~/.modal.toml``.
+
     ``MNGR_PROJECT_CONFIG_DIR`` is the literal directory containing
     ``settings.toml``, so the file is written directly into ``settings_dir``.
     """
+    token_lines = ""
+    if config_tokens is not None:
+        token_id, token_secret = config_tokens
+        token_lines = f'token_id = "{token_id}"\ntoken_secret = "{token_secret}"\n'
     (settings_dir / "settings.toml").write_text(
         # Opt this config past the pytest guard. Top-level key, so it must
         # precede the first table.
@@ -123,6 +134,7 @@ def _write_release_settings(settings_dir: Path, *, user_id: str, app_name: str) 
         'backend = "modal"\n'
         f'user_id = "{user_id}"\n'
         f'app_name = "{app_name}"\n'
+        f"{token_lines}"
         # Disable other remote providers so the create-host preflight (and
         # ``mngr list``) doesn't trip on them looking for credentials.
         "\n[providers.aws]\nis_enabled = false\n"
@@ -157,29 +169,41 @@ class _ModalReleaseProfile(ProviderReleaseProfile):
     # no resumable stopped state, so Trip 2 asserts the termination only and skips the resume.
     resumes_after_auto_shutdown = False
 
-    # Trip 4 (error classification). On the `mngr create` path Modal's bootstrap now raises the
-    # contract ``ProviderUnavailableError`` (the spec's wrong-error-class divergence was fixed in
-    # this PR -- see mngr_modal/backend.py), with curated help pointing at ``uvx modal token set``.
-    # Modal has its own build-arg parser (no shared ``--vps-*`` migration check), so that scenario
-    # is skipped.
+    # Trip 4 (error classification). On the `mngr create` path Modal's bootstrap raises the
+    # contract ``ProviderUnavailableError`` (see mngr_modal/backend.py), with curated help that
+    # names ``modal token new`` -- the command the README documents and the not-authorized message
+    # itself uses. Modal has its own build-arg parser (no shared ``--vps-*`` migration check), so
+    # that scenario is skipped.
     raises_contract_unavailable_error = True
     has_curated_unavailable_help = True
     supports_vps_migration_arg_check = False
-    credential_setup_command = "uvx modal token set"
+    credential_setup_command = "modal token new"
     unavailable_error_substring = "modal is not authorized"
 
-    def __init__(self, provider: ModalProviderInstance, user_id: str, app_name: str) -> None:
+    def __init__(
+        self,
+        provider: ModalProviderInstance,
+        user_id: str,
+        app_name: str,
+        config_tokens: tuple[str, str] | None = None,
+    ) -> None:
         self._provider = provider
         self._user_id = user_id
         self._app_name = app_name
+        self._config_tokens = config_tokens
 
     def unavailable_reason(self) -> str | None:
-        if not (_modal_credentials_available() and MODAL_RELEASE_TESTS_OPT_IN):
+        # A profile carrying its own tokens is credentialed even after the config-tokens
+        # fixture stripped MODAL_TOKEN_* from the environment.
+        is_credentialed = self._config_tokens is not None or _modal_credentials_available()
+        if not (is_credentialed and MODAL_RELEASE_TESTS_OPT_IN):
             return "Modal credentials or MNGR_MODAL_RELEASE_TESTS=1 not set"
         return None
 
     def write_settings(self, settings_dir: Path) -> None:
-        _write_release_settings(settings_dir, user_id=self._user_id, app_name=self._app_name)
+        _write_release_settings(
+            settings_dir, user_id=self._user_id, app_name=self._app_name, config_tokens=self._config_tokens
+        )
 
     def create_extra_args(self) -> Sequence[str]:
         return ()
@@ -243,7 +267,62 @@ def _modal_release_alignment(
     cg: ConcurrencyGroup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[tuple[ModalProviderInstance, str, str]]:
-    """Pin one (prefix, user_id, app_name) triple for both the CLI subprocess and the probe.
+    """Pin one (prefix, user_id, app_name) triple for both the CLI subprocess and the probe."""
+    yield from _aligned_modal_release_provider(
+        temp_host_dir, temp_profile_dir, plugin_manager, cg, monkeypatch, config_tokens=None
+    )
+
+
+@pytest.fixture()
+def _modal_release_alignment_with_config_tokens(
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    cg: ConcurrencyGroup,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Iterator[tuple[ModalProviderInstance, str, str, tuple[str, str]]]:
+    """Like ``_modal_release_alignment``, but the tokens live only in the provider config.
+
+    The autouse credential fixture loaded the developer's token into
+    ``MODAL_TOKEN_ID`` / ``MODAL_TOKEN_SECRET``; this captures that pair for the
+    provider config and then removes every other credential source the CLI
+    subprocess (and the SDK) could fall back to: the env vars are dropped and
+    ``MODAL_CONFIG_PATH`` points at an empty file, so a sandbox can only be
+    created if the instance authenticates with its configured ``token_id`` /
+    ``token_secret``.
+    """
+    token_id = os.environ.get("MODAL_TOKEN_ID", "")
+    token_secret = os.environ.get("MODAL_TOKEN_SECRET", "")
+    assert token_id and token_secret, "the autouse credential fixture must have loaded a Modal token"
+    config_tokens = (token_id, token_secret)
+    monkeypatch.delenv("MODAL_TOKEN_ID")
+    monkeypatch.delenv("MODAL_TOKEN_SECRET")
+    empty_modal_toml = tmp_path / "empty-modal.toml"
+    empty_modal_toml.write_text("")
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(empty_modal_toml))
+    for provider, user_id, app_name in _aligned_modal_release_provider(
+        temp_host_dir, temp_profile_dir, plugin_manager, cg, monkeypatch, config_tokens=config_tokens
+    ):
+        yield provider, user_id, app_name, config_tokens
+        # The helper's teardown (resumed below) deletes the app, volume and environment by
+        # shelling out to the ``modal`` CLI, which authenticates from the environment, so hand
+        # the token back first or those deletes fail and the environment leaks.
+        monkeypatch.setenv("MODAL_TOKEN_ID", token_id)
+        monkeypatch.setenv("MODAL_TOKEN_SECRET", token_secret)
+        monkeypatch.delenv("MODAL_CONFIG_PATH", raising=False)
+
+
+def _aligned_modal_release_provider(
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    cg: ConcurrencyGroup,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    config_tokens: tuple[str, str] | None,
+) -> Iterator[tuple[ModalProviderInstance, str, str]]:
+    """Build the aligned in-process probe provider (see ``_modal_release_alignment``).
 
     Generates a timestamped ``mngr_test-...-`` prefix (so the Modal backend's
     pytest env-name guard accepts it and the CI cleanup script recognizes any
@@ -267,7 +346,13 @@ def _modal_release_alignment(
 
     config = MngrConfig(default_host_dir=temp_host_dir, prefix=prefix)
     mngr_ctx = make_mngr_ctx(config, plugin_manager, temp_profile_dir, concurrency_group=cg)
-    provider_config = ModalProviderConfig(user_id=UserId(user_id), app_name=app_name, host_dir=Path("/mngr"))
+    provider_config = ModalProviderConfig(
+        user_id=UserId(user_id),
+        app_name=app_name,
+        host_dir=Path("/mngr"),
+        token_id=config_tokens[0] if config_tokens is not None else None,
+        token_secret=SecretStr(config_tokens[1]) if config_tokens is not None else None,
+    )
     instance_name = ProviderInstanceName(_MODAL_PROVIDER_NAME)
     # Bootstrap creates the per-user Modal environment if missing (the create
     # path does the same), so the probe provider can list sandboxes in it.
@@ -306,6 +391,34 @@ def test_provider_release_trip1(
     provider, user_id, app_name = _modal_release_alignment
     run_provider_release_trip1(
         _ModalReleaseProfile(provider=provider, user_id=user_id, app_name=app_name),
+        tmp_path,
+        temp_git_repo,
+    )
+
+
+@pytest.mark.release
+@pytest.mark.modal
+@pytest.mark.rsync
+@pytest.mark.timeout(1200)
+@pytest.mark.skipif(
+    not (_modal_credentials_available() and MODAL_RELEASE_TESTS_OPT_IN),
+    reason="Modal credentials or MNGR_MODAL_RELEASE_TESTS=1 not set",
+)
+def test_provider_release_trip1_authenticates_with_config_tokens_only(
+    tmp_path: Path,
+    temp_git_repo: Path,
+    _modal_release_alignment_with_config_tokens: tuple[ModalProviderInstance, str, str, tuple[str, str]],
+) -> None:
+    """Trip 1 with the Modal token living only in ``[providers.modal]`` (``token_id`` / ``token_secret``).
+
+    The alignment fixture removed ``MODAL_TOKEN_*`` from the environment and pointed
+    ``MODAL_CONFIG_PATH`` at an empty file, so the CLI subprocess has no other
+    credential source: a passing trip proves a DIRECT instance authenticates with
+    its configured token and nothing else.
+    """
+    provider, user_id, app_name, config_tokens = _modal_release_alignment_with_config_tokens
+    run_provider_release_trip1(
+        _ModalReleaseProfile(provider=provider, user_id=user_id, app_name=app_name, config_tokens=config_tokens),
         tmp_path,
         temp_git_repo,
     )

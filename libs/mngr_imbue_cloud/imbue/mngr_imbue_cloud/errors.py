@@ -172,15 +172,16 @@ class ImbueCloudBucketLimitError(ImbueCloudBucketError):
 
 
 class ImbueCloudSyncError(ImbueCloudError):
-    """Raised when a workspace-record / key-bundle sync operation fails."""
+    """Raised when a workspace-record, key-bundle, or account-document sync operation fails."""
 
 
 class ImbueCloudSyncConflictError(ImbueCloudSyncError):
-    """Raised on a 409 from a record push (revision CAS or active-agent conflict).
+    """Raised on a 409 from a record or account-document push (revision CAS or active-agent conflict).
 
     ``stored_record`` carries the server's current row (as a plain dict) when
     the conflict was a revision CAS failure, so the caller can merge and retry;
-    it is None for an active-agent uniqueness conflict.
+    it is None for an active-agent uniqueness conflict and for a document push
+    that tried to insert a new row at a revision other than 1.
     """
 
     def __init__(self, message: str, stored_record: dict[str, object] | None) -> None:
@@ -288,12 +289,13 @@ class ImbueCloudClientTooOldError(ImbueCloudError):
 
 
 class ImbueCloudRecordFormatTooNewError(ImbueCloudSyncError):
-    """Raised when a record push is refused because the stored row's record_format is newer.
+    """Raised when a push is refused because the stored row's format is newer than the client's.
 
-    The connector's structured 409 (``code: record_format_too_new``): the
-    stored record's semantics postdate this client, so modifying it could
-    corrupt meaning the client cannot see. The record stays readable; the
-    remedy is updating the app.
+    The connector's structured 409 (``code: record_format_too_new`` for a
+    synced record, ``code: document_format_too_new`` for an account
+    document): the stored row's semantics postdate this client, so modifying
+    it could corrupt meaning the client cannot see. The row stays readable;
+    the remedy is updating the app.
     """
 
 
@@ -362,6 +364,18 @@ def workspace_hold_message_in(text: str) -> str | None:
         if message in text:
             return message
     return None
+
+
+class ImbueCloudDocumentLimitError(ImbueCloudSyncError):
+    """Raised when the connector refuses a new account document at the per-kind cap (409 ``document_limit_exceeded``)."""
+
+    def __init__(self, message: str, limit: int | None) -> None:
+        super().__init__(message)
+        self.limit = limit
+
+
+class ImbueCloudDocumentNotFoundError(ImbueCloudSyncError):
+    """Raised when deleting an account document the connector holds no row for (404 ``document_not_found``)."""
 
 
 class UnrecognizedWorkspaceStatusError(ImbueCloudError):

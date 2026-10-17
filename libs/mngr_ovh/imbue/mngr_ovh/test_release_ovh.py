@@ -23,6 +23,7 @@ import ovh
 import pytest
 
 from imbue.mngr.providers.provider_release_testing import assert_host_resources_match
+from imbue.mngr.providers.provider_release_testing import assert_vps_root_keys_are_per_host
 from imbue.mngr.providers.provider_release_testing import host_from_list_json
 from imbue.mngr.providers.provider_release_testing import host_resources_from_list_json
 from imbue.mngr_ovh.client import OvhVpsClient
@@ -77,7 +78,17 @@ def ovh_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
     yield tmp_path
 
 
-def _run_mngr(project_config_dir: Path, *args: str, timeout: int = 1200) -> subprocess.CompletedProcess[str]:
+def _run_mngr(
+    project_config_dir: Path, cwd: Path, *args: str, timeout: int = 1200
+) -> subprocess.CompletedProcess[str]:
+    """Run a mngr command with the test settings.toml in scope.
+
+    ``cwd`` must be inside a git repository: ``mngr create`` reads the source
+    from the current checkout unless ``--from`` is passed, and the test
+    isolation fixtures move the process cwd away from the repo, so the test
+    passes the ``temp_git_repo`` fixture explicitly (as the other cloud release
+    trips do).
+    """
     env = os.environ.copy()
     env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
     cmd = ["uv", "run", "mngr", *args]
@@ -86,12 +97,12 @@ def _run_mngr(project_config_dir: Path, *args: str, timeout: int = 1200) -> subp
         capture_output=True,
         text=True,
         timeout=timeout,
-        cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
+        cwd=cwd,
         env=env,
     )
 
 
-def _destroy(project_config_dir: Path, agent_name: str) -> None:
+def _destroy(project_config_dir: Path, cwd: Path, agent_name: str) -> None:
     """Force-destroy an agent with the test settings.toml in scope."""
     env = os.environ.copy()
     env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
@@ -101,7 +112,7 @@ def _destroy(project_config_dir: Path, agent_name: str) -> None:
         capture_output=True,
         text=True,
         timeout=300,
-        cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
+        cwd=cwd,
         env=env,
     )
     time.sleep(30)
@@ -117,7 +128,7 @@ class TestOvhProviderLifecycle:
     """End-to-end create/exec/destroy through the mngr CLI."""
 
     @pytest.mark.rsync
-    def test_create_exec_and_destroy(self, ovh_test_settings_dir: Path) -> None:
+    def test_create_exec_and_destroy(self, ovh_test_settings_dir: Path, temp_git_repo: Path) -> None:
         """Creating an agent on OVH provisions a usable VPS reachable via the mngr CLI.
 
         Asserts that `mngr create --provider ovh` succeeds, then that `exec` runs a
@@ -133,6 +144,7 @@ class TestOvhProviderLifecycle:
         # Create (uses rsync to upload the build context to the VPS)
         result = _run_mngr(
             ovh_test_settings_dir,
+            temp_git_repo,
             "create",
             agent_name,
             "--type",
@@ -146,15 +158,20 @@ class TestOvhProviderLifecycle:
         assert result.returncode == 0, f"Create failed: {result.stderr}"
 
         try:
-            result = _run_mngr(ovh_test_settings_dir, "exec", agent_name, "echo hello-from-ovh")
+            # The create minted this host's own VM-root client key; no provider-wide key may exist.
+            assert_vps_root_keys_are_per_host()
+
+            result = _run_mngr(ovh_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-ovh")
             assert result.returncode == 0, f"Exec failed: {result.stderr}"
             assert "hello-from-ovh" in result.stdout
 
-            result = _run_mngr(ovh_test_settings_dir, "exec", agent_name, "test -d /mngr && echo exists")
+            result = _run_mngr(
+                ovh_test_settings_dir, temp_git_repo, "exec", agent_name, "test -d /mngr && echo exists"
+            )
             assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
             assert "exists" in result.stdout
 
-            result = _run_mngr(ovh_test_settings_dir, "list")
+            result = _run_mngr(ovh_test_settings_dir, temp_git_repo, "list")
             assert result.returncode == 0, f"List failed: {result.stderr}"
             assert agent_name in result.stdout
             assert "ovh" in result.stdout
@@ -162,7 +179,7 @@ class TestOvhProviderLifecycle:
             # The size `list` reports is the size OVH says the VPS model has. The host is
             # auto-named, so it is found through the agent; its SSH hostname is the OVH
             # serviceName, which is the client's instance id.
-            result = _run_mngr(ovh_test_settings_dir, "list", "--format", "json")
+            result = _run_mngr(ovh_test_settings_dir, temp_git_repo, "list", "--format", "json")
             assert result.returncode == 0, f"List failed: {result.stderr}"
             listed_host = host_from_list_json(result.stdout, agent_name)
             assert listed_host is not None, f"`mngr list` does not list {agent_name}"
@@ -174,10 +191,10 @@ class TestOvhProviderLifecycle:
             assert shape is not None, f"OVH reports no shape for {service_name}"
             assert_host_resources_match(listed_resources, host_resources_for_shape(shape))
         finally:
-            _destroy(ovh_test_settings_dir, agent_name)
+            _destroy(ovh_test_settings_dir, temp_git_repo, agent_name)
 
     @pytest.mark.rsync
-    def test_create_stop_start_destroy(self, ovh_test_settings_dir: Path) -> None:
+    def test_create_stop_start_destroy(self, ovh_test_settings_dir: Path, temp_git_repo: Path) -> None:
         """An OVH agent survives a stop/start cycle and remains executable afterwards.
 
         Asserts that `mngr stop` succeeds while `list` still reports the stopped agent,
@@ -190,6 +207,7 @@ class TestOvhProviderLifecycle:
 
         result = _run_mngr(
             ovh_test_settings_dir,
+            temp_git_repo,
             "create",
             agent_name,
             "--type",
@@ -203,21 +221,21 @@ class TestOvhProviderLifecycle:
         assert result.returncode == 0, f"Create failed: {result.stderr}"
 
         try:
-            result = _run_mngr(ovh_test_settings_dir, "stop", agent_name)
+            result = _run_mngr(ovh_test_settings_dir, temp_git_repo, "stop", agent_name)
             assert result.returncode == 0, f"Stop failed: {result.stderr}"
 
-            result = _run_mngr(ovh_test_settings_dir, "list")
+            result = _run_mngr(ovh_test_settings_dir, temp_git_repo, "list")
             assert result.returncode == 0
             assert agent_name in result.stdout
 
-            result = _run_mngr(ovh_test_settings_dir, "start", agent_name, "--no-connect")
+            result = _run_mngr(ovh_test_settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
             assert result.returncode == 0, f"Start failed: {result.stderr}"
 
-            result = _run_mngr(ovh_test_settings_dir, "exec", agent_name, "echo alive-after-restart")
+            result = _run_mngr(ovh_test_settings_dir, temp_git_repo, "exec", agent_name, "echo alive-after-restart")
             assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
             assert "alive-after-restart" in result.stdout
         finally:
-            _destroy(ovh_test_settings_dir, agent_name)
+            _destroy(ovh_test_settings_dir, temp_git_repo, agent_name)
 
 
 class TestOvhVpsClient:

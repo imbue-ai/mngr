@@ -37,15 +37,3 @@ def resolve_active_settings_path(root: MindsRoot) -> Path | None:
     if settings_dir is None or not settings_dir.exists():
         return None
     return settings_dir / "settings.toml"
-
-
-def imbue_cloud_accounts_path(root: MindsRoot) -> Path | None:
-    """Return the path to the imbue_cloud plugin's ``accounts.json``, or None if no profile is set.
-
-    Mirrors ``mngr_imbue_cloud.config.get_sessions_dir`` / ``get_active_profile_dir``: the accounts index lives at ``<host_dir>/profiles/<profile>/providers/imbue_cloud/sessions/accounts.json``.
-    Inlined here because this package must be importable before mngr (which ``imbue.mngr_imbue_cloud`` transitively pulls in).
-    """
-    profile_dir = read_active_profile_dir(root.mngr_host_dir)
-    if profile_dir is None:
-        return None
-    return profile_dir / "providers" / "imbue_cloud" / "sessions" / "accounts.json"

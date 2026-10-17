@@ -1,5 +1,7 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { clearAppContextForTests, registerAppContext } from "../../app-context";
+import type { AppContext } from "../../app-context";
 import type { AnyVnode } from "../../testing";
 import {
   allText,
@@ -15,10 +17,12 @@ import { DialogCloseButton } from "../components/Modal";
 import type { CreatePageAttrs } from "./CreatePage";
 import { CreatePage, createFormModal, signInOutcome } from "./CreatePage";
 import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
+import { SLOW_START_WARNING } from "./create/ComputeNotices";
 import { PresetCards } from "./create/PresetCards";
 import type { PresetName } from "./create/form-model";
 
 afterEach(() => {
+  clearAppContextForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -35,6 +39,14 @@ async function loadedPage(
   page: m.Component<CreatePageAttrs>;
   vnode: m.Vnode<CreatePageAttrs>;
 }> {
+  // The page reads the accounts store for the sign-in gate and the providers
+  // store for the add-connection owner list; neither matters to these tests.
+  registerAppContext({
+    stores: {
+      accounts: { hasAccounts: false },
+      providers: { connectionOwnerOptions: () => [] },
+    },
+  } as unknown as AppContext);
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   vi.spyOn(m.route, "param").mockImplementation(
     (() => undefined) as typeof m.route.param,
@@ -84,14 +96,22 @@ describe("CreatePage", () => {
     const withAccount = await opened(
       "own-cloud",
       createFormDefaults({
-        byok_clouds_enabled: true,
-        cloud_accounts: [{ name: "aws_acct", alias: "team aws", backend: "aws", region: "us-west-2" }],
+        cloud_accounts: [
+          {
+            name: "aws_acct",
+            alias: "team aws",
+            backend: "aws",
+            region: "us-west-2",
+            owner_user_id: "user-1",
+            is_region_pinned: true,
+          },
+        ],
       }),
     );
-    expect(attrsOf(byId(withAccount, "launch_mode") as AnyVnode).value).toBe("BYOK:aws_acct");
+    expect(attrsOf(byId(withAccount, "launch_mode") as AnyVnode).value).toBe("CONNECTION:aws_acct");
   });
 
-  it("offers the share panel's own switch in the advanced view, in the panel's own words", async () => {
+  it("offers the share panel's own switch in the advanced view, on by default under an account", async () => {
     const { page, vnode } = await loadedPage();
 
     const simple = page.view.call(page, vnode);
@@ -105,17 +125,17 @@ describe("CreatePage", () => {
     expect(allText(row)).toContain(SHARING_SENTENCE);
     const control = byId(row, "enable_web_access") as AnyVnode;
     expect(attrsOf(control).role).toBe("switch");
-    expect(attrsOf(control)["aria-checked"]).toBe("false");
+    expect(attrsOf(control)["aria-checked"]).toBe("true");
     expect(attrsOf(control)["aria-label"]).toBe(ENABLE_SHARING_LABEL);
     expect(classTokensOf(control)).toContain("perm-switch");
-    expect(allText(byId(row, "web-access-word"))).toBe("No");
+    expect(allText(byId(row, "web-access-word"))).toBe("Yes");
     expect(byId(row, "web-access-account-error")).toBeUndefined();
 
     (attrsOf(control).onclick as () => void)();
     const thrown = byId(page.view.call(page, vnode), "web-access-row");
 
-    expect(attrsOf(byId(thrown, "enable_web_access") as AnyVnode)["aria-checked"]).toBe("true");
-    expect(allText(byId(thrown, "web-access-word"))).toBe("Yes");
+    expect(attrsOf(byId(thrown, "enable_web_access") as AnyVnode)["aria-checked"]).toBe("false");
+    expect(allText(byId(thrown, "web-access-word"))).toBe("No");
   });
 });
 
@@ -151,5 +171,22 @@ describe("signInOutcome", () => {
     for (const state of ["starting", "waiting", "finishing", "error"] as const) {
       expect(signInOutcome(state, false)).toBe("pending");
     }
+  });
+
+  it("warns that the workspace will be slow to start on any compute but Imbue Cloud", async () => {
+    const { page, vnode } = await loadedPage();
+
+    const remote = page.view.call(page, vnode);
+    expect(byId(remote, "slow-start-notice")).toBeUndefined();
+
+    const cards = collectVnodes(remote).find((node) => node.tag === PresetCards) as AnyVnode;
+    (attrsOf(cards).onSelect as (name: PresetName) => void)("local");
+    const local = page.view.call(page, vnode);
+
+    const notice = byId(local, "slow-start-notice");
+    expect(notice).toBeDefined();
+    expect(allText(notice)).toBe(SLOW_START_WARNING);
+    // Shown beside the Create button, so the simple view carries it too.
+    expect(classTokensOf(byId(local, "advanced-view") as AnyVnode)).toContain("hidden");
   });
 });

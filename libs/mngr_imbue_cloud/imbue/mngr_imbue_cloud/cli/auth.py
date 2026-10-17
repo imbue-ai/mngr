@@ -39,6 +39,7 @@ from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStor
 from imbue.mngr_imbue_cloud.connector.session_store import make_session_from_tokens
 from imbue.mngr_imbue_cloud.data_types import AuthSession
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
@@ -287,7 +288,9 @@ def _revoke_server_sessions(
     Returns whether the server-side revocation happened. The client already
     treats a 401 revoke answer as success (the session was dead), so an
     ``ImbueCloudAuthError`` here means the revocation did NOT land: the
-    connector was unreachable or answered a server error. For
+    connector was unreachable or answered a server error. The refresh reports
+    those two outcomes as ``ImbueCloudConnectorError``, and the stored token is
+    used for the revoke attempt in that case too. For
     ``--all-devices`` that failure propagates -- reporting "all sessions
     revoked" when none were is dangerous (e.g. after a device compromise) --
     while the default single-device sign-out returns ``False`` so the caller
@@ -296,7 +299,7 @@ def _revoke_server_sessions(
     """
     try:
         access_token = get_active_token(store, client, account)
-    except ImbueCloudAuthError:
+    except (ImbueCloudAuthError, ImbueCloudConnectorError):
         access_token = session.access_token
     try:
         if all_devices:

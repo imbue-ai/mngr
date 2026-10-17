@@ -43,3 +43,23 @@ class ModalSnapshotEndpointTimeoutMngrError(ModalMngrError, TimeoutError):
             f"{timeout_seconds}s. The endpoint is deployed once per app, so concurrent creates "
             f"against the same app queue behind Modal's per-app deploy lock."
         )
+
+
+class ModalConfigError(ModalMngrError, ValueError):
+    """Raised when a ModalProviderConfig combines mutually-incompatible options."""
+
+
+class ModalHostKeyMissingError(ModalMngrError):
+    """Raised when no client key that opens a sandbox is on disk.
+
+    Read paths never mint the client key: it is created once, at host
+    creation, under the host's per-host key dir, and the only fallback is the
+    operator-installed shared key under the instance key dir. A sandbox with
+    neither on this machine cannot be reached from it, so the operation fails
+    here instead of opening an SSH connection that would be rejected.
+    """
+
+    user_help_text = (
+        "This sandbox was created on another device, or before per-host keys existed, so it has to be reached "
+        "from the device that created it, or its record synced to this one."
+    )

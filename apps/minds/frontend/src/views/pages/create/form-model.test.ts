@@ -1,12 +1,24 @@
 import { describe, expect, it } from "vitest";
+import { launchModeLabel } from "../../../models/create";
 import type { CreateFormDefaults } from "../../../models/create";
-import { CreateFormModel, DEFAULT_RESTIC_ENV, normalizeCreateApiError } from "./form-model";
+import { CONNECTION_BACKEND_OPTIONS } from "../../../testing";
+import {
+  CONNECTION_LAUNCH_PREFIX,
+  CreateFormModel,
+  DEFAULT_RESTIC_ENV,
+  LOCAL_CONNECTION_SUFFIX,
+  normalizeCreateApiError,
+  regionChoiceLabel,
+} from "./form-model";
 
-function buildDefaults(overrides: Partial<CreateFormDefaults> = {}): CreateFormDefaults {
+function buildDefaults(
+  overrides: Partial<CreateFormDefaults> = {},
+): CreateFormDefaults {
   return {
-    accounts: [{ user_id: "user-1", email: "alice@example.com" }],
+    accounts: [{ user_id: "user-1", email: "alice@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true }],
     default_account_id: "user-1",
-    launch_modes: ["IMBUE_CLOUD", "LIMA", "DOCKER", "MODAL", "VULTR"],
+    // The backend never sends the connection-only modes (AWS, GCP, AZURE, MODAL).
+    launch_modes: ["IMBUE_CLOUD", "LIMA", "DOCKER", "VULTR"],
     selected_launch_mode: "IMBUE_CLOUD",
     docker_runtimes: ["RUNC", "RUNSC"],
     selected_docker_runtime: "RUNSC",
@@ -15,9 +27,15 @@ function buildDefaults(overrides: Partial<CreateFormDefaults> = {}): CreateFormD
     region_options_by_launch_mode: {
       IMBUE_CLOUD: ["us-west", "eu-central"],
       VULTR: ["ewr"],
+      MODAL: ["any", "nearest", "us-east", "eu-west"],
       AWS: ["us-west-2", "us-east-1"],
     },
-    region_selected_by_launch_mode: { IMBUE_CLOUD: "us-west", VULTR: "ewr", AWS: "us-west-2" },
+    region_selected_by_launch_mode: {
+      IMBUE_CLOUD: "us-west",
+      VULTR: "ewr",
+      MODAL: "any",
+      AWS: "us-west-2",
+    },
     instance_types_by_backend: {
       AWS: [
         ["t3.large", "t3.large (8 GB)"],
@@ -30,16 +48,51 @@ function buildDefaults(overrides: Partial<CreateFormDefaults> = {}): CreateFormD
       LIMA: { cpu_count: 2, memory_gb: 4, disk_gb: 100 },
       MODAL: { cpu_count: 2, memory_gb: 4, disk_gb: null },
     },
-    cloud_accounts: [{ name: "aws_acct", alias: "team aws", backend: "aws", region: "us-west-2" }],
-    byok_clouds_enabled: true,
+    cloud_accounts: [
+      {
+        name: "aws_acct",
+        alias: "team aws",
+        backend: "aws",
+        region: "us-west-2",
+        owner_user_id: "user-1",
+        is_region_pinned: true,
+      },
+      {
+        name: "modal_acct",
+        alias: "my modal",
+        backend: "modal",
+        region: "",
+        owner_user_id: "local",
+        is_region_pinned: false,
+      },
+    ],
+    connection_backends: [...CONNECTION_BACKEND_OPTIONS],
     git_url: "https://github.com/imbue-ai/default-workspace-template.git",
     branch: "minds-v9.9.9",
     color: "#0b292b",
     prefill: null,
     local_prerequisites: [
-      { key: "DOCKER", is_available: false, summary: "Docker is not installed.", install_command: "", docs_url: "https://d" },
-      { key: "RUNSC", is_available: false, summary: "No runsc on macOS.", install_command: "", docs_url: "https://g" },
-      { key: "LIMA", is_available: true, summary: "Lima is built in.", install_command: "", docs_url: "https://q" },
+      {
+        key: "DOCKER",
+        is_available: false,
+        summary: "Docker is not installed.",
+        install_command: "",
+        docs_url: "https://d",
+      },
+      {
+        key: "RUNSC",
+        is_available: false,
+        summary: "No runsc on macOS.",
+        install_command: "",
+        docs_url: "https://g",
+      },
+      {
+        key: "LIMA",
+        is_available: true,
+        summary: "Lima is built in.",
+        install_command: "",
+        docs_url: "https://q",
+      },
     ],
     local_launch_mode: "LIMA",
     ...overrides,
@@ -50,7 +103,13 @@ function buildDefaults(overrides: Partial<CreateFormDefaults> = {}): CreateFormD
 const LINUX_WITH_DOCKER: Partial<CreateFormDefaults> = {
   selected_docker_runtime: "RUNC",
   local_prerequisites: [
-    { key: "DOCKER", is_available: true, summary: "Docker is running.", install_command: "", docs_url: "https://d" },
+    {
+      key: "DOCKER",
+      is_available: true,
+      summary: "Docker is running.",
+      install_command: "",
+      docs_url: "https://d",
+    },
     {
       key: "RUNSC",
       is_available: false,
@@ -73,9 +132,27 @@ const LINUX_WITH_DOCKER: Partial<CreateFormDefaults> = {
 const LINUX_WITH_NOTHING: Partial<CreateFormDefaults> = {
   selected_docker_runtime: "RUNC",
   local_prerequisites: [
-    { key: "DOCKER", is_available: false, summary: "Docker is not installed.", install_command: "", docs_url: "https://d" },
-    { key: "RUNSC", is_available: false, summary: "No runsc.", install_command: "", docs_url: "https://g" },
-    { key: "LIMA", is_available: false, summary: "QEMU is not installed.", install_command: "", docs_url: "https://q" },
+    {
+      key: "DOCKER",
+      is_available: false,
+      summary: "Docker is not installed.",
+      install_command: "",
+      docs_url: "https://d",
+    },
+    {
+      key: "RUNSC",
+      is_available: false,
+      summary: "No runsc.",
+      install_command: "",
+      docs_url: "https://g",
+    },
+    {
+      key: "LIMA",
+      is_available: false,
+      summary: "QEMU is not installed.",
+      install_command: "",
+      docs_url: "https://q",
+    },
   ],
   local_launch_mode: "DOCKER",
 };
@@ -94,22 +171,24 @@ describe("CreateFormModel", () => {
     expect(model.accountId).toBe("user-1");
   });
 
-  it("points the own-cloud preset at the first cloud account the user added, else Vultr", () => {
+  it("points the own-cloud preset at the first connection on offer under the selected owner, else Vultr", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults());
     model.applyPreset("own-cloud");
-    expect(model.launchValue).toBe("BYOK:aws_acct");
+    expect(model.launchValue).toBe("CONNECTION:aws_acct");
     expect(model.launchSelection()).toEqual({ mode: "AWS", cloudAccount: "aws_acct" });
-    expect(model.backupProvider).toBe("CONFIGURE_LATER");
+    // Under an account the preset leaves Imbue backups on.
+    expect(model.backupProvider).toBe("IMBUE_CLOUD");
 
     model.applyDefaults(buildDefaults({ cloud_accounts: [] }));
     model.applyPreset("own-cloud");
     expect(model.launchValue).toBe("VULTR");
 
-    // An account added while the feature is off is not offered.
-    model.applyDefaults(buildDefaults({ byok_clouds_enabled: false }));
+    // With no account selected, only this device's connections are on offer: the account's own is not.
+    model.applyDefaults(buildDefaults());
+    model.accountId = "";
     model.applyPreset("own-cloud");
-    expect(model.launchValue).toBe("VULTR");
+    expect(model.launchValue).toBe("CONNECTION:modal_acct");
   });
 
   it("points the local preset at whichever local backend this machine can run", () => {
@@ -125,7 +204,9 @@ describe("CreateFormModel", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults(LINUX_WITH_DOCKER));
     model.launchValue = "LIMA";
-    expect(model.unmetPrerequisiteForSubmit()?.summary).toBe("QEMU is not installed.");
+    expect(model.unmetPrerequisiteForSubmit()?.summary).toBe(
+      "QEMU is not installed.",
+    );
     model.launchValue = "DOCKER";
     model.runtime = "RUNSC";
     expect(model.unmetPrerequisiteForSubmit()?.key).toBe("RUNSC");
@@ -146,7 +227,9 @@ describe("CreateFormModel", () => {
 
     model.applyDefaults(buildDefaults(LINUX_WITH_NOTHING));
     model.applyPreset("local");
-    expect(model.unmetPrerequisiteForSubmit()?.summary).toBe("Docker is not installed.");
+    expect(model.unmetPrerequisiteForSubmit()?.summary).toBe(
+      "Docker is not installed.",
+    );
     // Check again found Docker up: the same selection submits.
     model.refreshPrerequisites(buildDefaults(LINUX_WITH_DOCKER));
     expect(model.unmetPrerequisiteForSubmit()).toBeNull();
@@ -168,7 +251,9 @@ describe("CreateFormModel", () => {
     model.applyDefaults(buildDefaults(LINUX_WITH_NOTHING));
     model.launchValue = "IMBUE_CLOUD";
     expect(model.unmetPrerequisiteForLaunchMode()).toBeNull();
-    expect(model.unmetPrerequisiteForLocalPreset()?.summary).toBe("Docker is not installed.");
+    expect(model.unmetPrerequisiteForLocalPreset()?.summary).toBe(
+      "Docker is not installed.",
+    );
   });
 
   it("re-reads the prerequisites without disturbing the rest of the form", () => {
@@ -176,8 +261,18 @@ describe("CreateFormModel", () => {
     model.applyDefaults(buildDefaults(LINUX_WITH_DOCKER));
     model.applyPreset("local");
     model.hostName = "my-box";
-    const lima = { key: "LIMA" as const, is_available: true, summary: "Ready.", install_command: "", docs_url: "https://q" };
-    const limaReady = buildDefaults({ ...LINUX_WITH_DOCKER, local_prerequisites: [lima], local_launch_mode: "LIMA" });
+    const lima = {
+      key: "LIMA" as const,
+      is_available: true,
+      summary: "Ready.",
+      install_command: "",
+      docs_url: "https://q",
+    };
+    const limaReady = buildDefaults({
+      ...LINUX_WITH_DOCKER,
+      local_prerequisites: [lima],
+      local_launch_mode: "LIMA",
+    });
     model.refreshPrerequisites(limaReady);
     expect(model.hostName).toBe("my-box");
     // The local preset follows the refreshed choice.
@@ -204,13 +299,18 @@ describe("CreateFormModel", () => {
 
   it("takes up a mid-form sign-in's account without disturbing the rest of the form", () => {
     const model = new CreateFormModel();
-    model.applyDefaults(buildDefaults({ accounts: [], default_account_id: "" }));
+    model.applyDefaults(
+      buildDefaults({ accounts: [], default_account_id: "" }),
+    );
     model.hostName = "my-machine";
     expect(model.imbueCloudNeedsAccount()).toBe(true);
     expect(model.selectedAccountEmail()).toBe("");
 
     model.adoptAccounts(
-      buildDefaults({ accounts: [{ user_id: "user-new", email: "new@example.com" }], default_account_id: "user-new" }),
+      buildDefaults({
+        accounts: [{ user_id: "user-new", email: "new@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true }],
+        default_account_id: "user-new",
+      }),
     );
 
     expect(model.accountId).toBe("user-new");
@@ -220,14 +320,75 @@ describe("CreateFormModel", () => {
     expect(model.launchValue).toBe("IMBUE_CLOUD");
   });
 
+  it("reports whether a sign-in's account could keep the selected compute", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.launchValue = `${CONNECTION_LAUNCH_PREFIX}aws_acct`;
+    const signedIn = buildDefaults({
+      accounts: [{ user_id: "user-new", email: "new@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true }],
+      default_account_id: "user-new",
+    });
+
+    // The first account signed out and another signed in: its connection is not offered under the new one.
+    expect(model.adoptAccounts(signedIn)).toBe(false);
+    expect(model.accountId).toBe("user-new");
+    expect(model.launchValue).toBe("IMBUE_CLOUD");
+
+    // A this-device-only connection is offered under every account, so it survives the account change.
+    model.launchValue = `${CONNECTION_LAUNCH_PREFIX}modal_acct`;
+    expect(model.adoptAccounts(signedIn)).toBe(true);
+    expect(model.launchValue).toBe(`${CONNECTION_LAUNCH_PREFIX}modal_acct`);
+
+    model.accountId = "";
+    model.launchValue = "LIMA";
+    expect(model.adoptAccounts(signedIn)).toBe(true);
+    expect(model.launchValue).toBe("LIMA");
+  });
+
+  it("offers the connections a sign-in's account owns", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(
+      buildDefaults({
+        accounts: [],
+        default_account_id: "",
+        cloud_accounts: [],
+      }),
+    );
+    const signedIn = buildDefaults({
+      accounts: [{ user_id: "user-new", email: "new@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true }],
+      default_account_id: "user-new",
+      cloud_accounts: [
+        {
+          name: "aws_synced",
+          alias: "synced aws",
+          backend: "aws",
+          region: "us-west-2",
+          owner_user_id: "user-new",
+          is_region_pinned: true,
+        },
+      ],
+    });
+
+    model.adoptAccounts(signedIn);
+
+    expect(model.accountId).toBe("user-new");
+    expect(
+      model
+        .launchOptions()
+        .some(
+          (option) => option.value === `${CONNECTION_LAUNCH_PREFIX}aws_synced`,
+        ),
+    ).toBe(true);
+  });
+
   it("keeps an explicit account pick when a sign-in adds another account", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults());
     model.adoptAccounts(
       buildDefaults({
         accounts: [
-          { user_id: "user-1", email: "alice@example.com" },
-          { user_id: "user-2", email: "bob@example.com" },
+          { user_id: "user-1", email: "alice@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
+          { user_id: "user-2", email: "bob@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
         ],
         default_account_id: "user-2",
       }),
@@ -239,23 +400,231 @@ describe("CreateFormModel", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults());
     model.adoptAccounts(
-      buildDefaults({ accounts: [{ user_id: "user-2", email: "bob@example.com" }], default_account_id: "user-2" }),
+      buildDefaults({
+        accounts: [{ user_id: "user-2", email: "bob@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true }],
+        default_account_id: "user-2",
+      }),
     );
     expect(model.accountId).toBe("user-2");
     expect(model.selectedAccountEmail()).toBe("bob@example.com");
   });
 
-  it("resolves a BYOK selection into the backend mode plus the account name", () => {
+  it("offers a just-added this-device-only connection under the selected account and selects it, leaving the account alone", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults());
-    model.launchValue = "BYOK:aws_acct";
-    expect(model.launchSelection()).toEqual({ mode: "AWS", cloudAccount: "aws_acct" });
-    // BYOK entries pin their region: no picker, a note instead.
+    model.hostName = "my-machine";
+    expect(model.accountId).toBe("user-1");
+
+    model.adoptConnection({
+      name: "gcp_new",
+      alias: "new gcp",
+      backend: "gcp",
+      region: "us-central1-a",
+      owner_user_id: "local",
+      is_region_pinned: true,
+    });
+
+    expect(model.accountId).toBe("user-1");
+    expect(model.launchValue).toBe(`${CONNECTION_LAUNCH_PREFIX}gcp_new`);
+    expect(model.selectedPreset).toBeNull();
+    expect(
+      model
+        .launchOptions()
+        .find((option) => option.value === model.launchValue)?.label,
+    ).toBe(`new gcp (GCP)${LOCAL_CONNECTION_SUFFIX}`);
+    expect(model.hostName).toBe("my-machine");
+  });
+
+  it("never moves the account pick to a just-added connection's owner", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(
+      buildDefaults({ accounts: [], default_account_id: "" }),
+    );
+    model.accountId = "";
+    model.launchValue = "LIMA";
+
+    model.adoptConnection({
+      name: "aws_new",
+      alias: "new aws",
+      backend: "aws",
+      region: "us-west-2",
+      owner_user_id: "user-9",
+      is_region_pinned: true,
+    });
+
+    // The connection is on offer once its owner is picked; until then the selection stands.
+    expect(model.accountId).toBe("");
+    expect(model.launchValue).toBe("LIMA");
+    model.accountId = "user-9";
+    expect(
+      model.launchOptions().some((option) => option.value === `${CONNECTION_LAUNCH_PREFIX}aws_new`),
+    ).toBe(true);
+  });
+
+  it("clears the account error once an added connection replaces the compute that needed one", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(
+      buildDefaults({ accounts: [], default_account_id: "" }),
+    );
+    model.accountId = "";
+    model.launchValue = "IMBUE_CLOUD";
+    model.isAccountErrorShown = true;
+    const connection = {
+      name: "gcp_new",
+      alias: "new gcp",
+      backend: "gcp",
+      region: "us-central1-a",
+      owner_user_id: "local",
+      is_region_pinned: true,
+    };
+
+    // The backup still needs an account, so the error stands.
+    model.backupProvider = "IMBUE_CLOUD";
+    model.adoptConnection(connection);
+    expect(model.launchValue).toBe(`${CONNECTION_LAUNCH_PREFIX}gcp_new`);
+    expect(model.isAccountErrorShown).toBe(true);
+
+    model.backupProvider = "CONFIGURE_LATER";
+    model.launchValue = "IMBUE_CLOUD";
+    model.adoptConnection({ ...connection, name: "gcp_other" });
+    expect(model.isAccountErrorShown).toBe(false);
+  });
+
+  it("says whether the picked account is locked here", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(
+      buildDefaults({
+        accounts: [
+          { user_id: "user-1", email: "alice@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
+          { user_id: "user-2", email: "bob@example.com", state: "LOCKED", is_connection_owner_eligible: false },
+        ],
+      }),
+    );
+    expect(model.isSelectedAccountLocked()).toBe(false);
+    model.accountId = "user-2";
+    expect(model.isSelectedAccountLocked()).toBe(true);
+    model.accountId = "";
+    expect(model.isSelectedAccountLocked()).toBe(false);
+  });
+
+  it("resolves a connection selection into the backend mode plus the instance name", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.launchValue = `${CONNECTION_LAUNCH_PREFIX}aws_acct`;
+    expect(model.launchSelection()).toEqual({
+      mode: "AWS",
+      cloudAccount: "aws_acct",
+    });
+    // A pinned backend's connection has no region picker, a note instead.
     expect(model.regionOptions()).toEqual([]);
-    expect(model.byokPinnedRegion()).toBe("us-west-2");
+    expect(model.pinnedRegion()).toBe("us-west-2");
     // The machine-size options come from the backend.
-    expect(model.instanceTypeOptions().map(([value]) => value)).toEqual(["t3.large", "t3.xlarge"]);
+    expect(model.instanceTypeOptions().map(([value]) => value)).toEqual([
+      "t3.large",
+      "t3.xlarge",
+    ]);
     expect(model.selectedInstanceType()).toBe("t3.large");
+  });
+
+  it("offers the region picker for a connection whose backend places per create", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.accountId = "";
+    model.launchValue = `${CONNECTION_LAUNCH_PREFIX}modal_acct`;
+    expect(model.launchSelection()).toEqual({
+      mode: "MODAL",
+      cloudAccount: "modal_acct",
+    });
+    expect(model.pinnedRegion()).toBe("");
+    // Modal leads with its two placement choices and defaults to no constraint at all.
+    expect(model.regionOptions()).toEqual(["any", "nearest", "us-east", "eu-west"]);
+    expect(model.selectedRegion()).toBe("any");
+    expect(model.submitBody().region).toBe("any");
+    expect(model.regionOptions().map(regionChoiceLabel)).toEqual([
+      "Any (cheapest)",
+      "Nearest to me",
+      "us-east",
+      "eu-west",
+    ]);
+    model.setRegion("eu-west");
+    expect(model.submitBody().region).toBe("eu-west");
+  });
+
+  it("offers the account's own connections, then this device's, after the device providers and Imbue Cloud", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    expect(model.launchOptions().map((option) => option.value)).toEqual([
+      "IMBUE_CLOUD",
+      "LIMA",
+      "DOCKER",
+      "VULTR",
+      `${CONNECTION_LAUNCH_PREFIX}aws_acct`,
+      `${CONNECTION_LAUNCH_PREFIX}modal_acct`,
+    ]);
+    const labelOf = (value: string): string | undefined =>
+      model.launchOptions().find((option) => option.value === value)?.label;
+    expect(labelOf(`${CONNECTION_LAUNCH_PREFIX}aws_acct`)).toBe("team aws (AWS)");
+    // A this-device-only connection under an account reads apart from the account's own.
+    expect(labelOf(`${CONNECTION_LAUNCH_PREFIX}modal_acct`)).toBe(`my modal (Modal)${LOCAL_CONNECTION_SUFFIX}`);
+    // The modes say themselves the way the creation transcript does.
+    expect(labelOf("IMBUE_CLOUD")).toBe(launchModeLabel("IMBUE_CLOUD"));
+    // No account: only this device's connections, unsuffixed, and Imbue Cloud unusable.
+    model.accountId = "";
+    const localOptions = model.launchOptions();
+    expect(localOptions.map((option) => option.value)).toEqual([
+      "IMBUE_CLOUD",
+      "LIMA",
+      "DOCKER",
+      "VULTR",
+      `${CONNECTION_LAUNCH_PREFIX}modal_acct`,
+    ]);
+    expect(localOptions[0].isDisabled).toBe(true);
+    expect(localOptions[4].label).toBe("my modal (Modal)");
+  });
+
+  it("drops a selected account-owned connection when its account is no longer picked, and keeps a this-device-only one", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.launchValue = `${CONNECTION_LAUNCH_PREFIX}aws_acct`;
+    model.accountId = "";
+    model.syncLaunchValueToSelectedAccount();
+    expect(model.launchValue).toBe("LIMA");
+    // A this-device-only connection is offered under every account, so picking one keeps it.
+    model.accountId = "user-1";
+    model.launchValue = `${CONNECTION_LAUNCH_PREFIX}modal_acct`;
+    model.syncLaunchValueToSelectedAccount();
+    expect(model.launchValue).toBe(`${CONNECTION_LAUNCH_PREFIX}modal_acct`);
+    // A selection the new owner still holds is kept.
+    model.launchValue = `${CONNECTION_LAUNCH_PREFIX}aws_acct`;
+    model.syncLaunchValueToSelectedAccount();
+    expect(model.launchValue).toBe(`${CONNECTION_LAUNCH_PREFIX}aws_acct`);
+  });
+
+  it("clears the preset card when the account change moves the compute selection", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.applyPreset("remote");
+    expect(model.launchValue).toBe("IMBUE_CLOUD");
+    // A sync that keeps the selection keeps the card.
+    model.syncLaunchValueToSelectedAccount();
+    expect(model.selectedPreset).toBe("remote");
+    // "No account" cannot run Imbue Cloud: the compute falls back and the card no longer describes it.
+    model.accountId = "";
+    model.syncLaunchValueToSelectedAccount();
+    expect(model.launchValue).toBe("LIMA");
+    expect(model.selectedPreset).toBeNull();
+  });
+
+  it("falls back to the machine's own local mode when no account is selected", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults(LINUX_WITH_DOCKER));
+    model.launchValue = `${CONNECTION_LAUNCH_PREFIX}aws_acct`;
+    model.accountId = "";
+    model.syncLaunchValueToSelectedAccount();
+    expect(model.launchValue).toBe("DOCKER");
+    model.launchValue = "IMBUE_CLOUD";
+    model.syncLaunchValueToSelectedAccount();
+    expect(model.launchValue).toBe("DOCKER");
   });
 
   it("keeps an explicit region pick per provider but resets across providers", () => {
@@ -298,18 +667,58 @@ describe("CreateFormModel", () => {
     expect(model.submitBody().runtime).toBe("RUNSC");
   });
 
-  it("sends the web-access toggle, off by default", () => {
+  it("turns sharing and Imbue backups on by default under an account, and off without one", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults());
-    expect(model.submitBody().enable_web_access).toBe(false);
-    model.enableWebAccess = true;
     expect(model.submitBody().enable_web_access).toBe(true);
+    expect(model.backupProvider).toBe("IMBUE_CLOUD");
+
+    // No account: the server refuses both, so the form drops them.
+    model.accountId = "";
+    model.syncLaunchValueToSelectedAccount();
+    expect(model.submitBody().enable_web_access).toBe(false);
+    expect(model.backupProvider).toBe("CONFIGURE_LATER");
+
+    // Back under an account: both come back on.
+    model.accountId = "user-1";
+    model.syncLaunchValueToSelectedAccount();
+    expect(model.enableWebAccess).toBe(true);
+    expect(model.backupProvider).toBe("IMBUE_CLOUD");
+
+    // A fresh form with no account at all starts with both off.
+    const alone = new CreateFormModel();
+    alone.applyDefaults(buildDefaults({ accounts: [], default_account_id: "" }));
+    expect(alone.submitBody().enable_web_access).toBe(false);
+    expect(alone.backupProvider).toBe("CONFIGURE_LATER");
+  });
+
+  it("keeps a sharing switch or backup provider the user set by hand across account changes", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.setWebAccess(false);
+    model.setBackupProvider("API_KEY");
+
+    model.accountId = "";
+    model.syncLaunchValueToSelectedAccount();
+    expect(model.enableWebAccess).toBe(false);
+    expect(model.backupProvider).toBe("API_KEY");
+
+    model.accountId = "user-1";
+    model.syncLaunchValueToSelectedAccount();
+    expect(model.enableWebAccess).toBe(false);
+    expect(model.backupProvider).toBe("API_KEY");
+
+    // A preset no longer forces the backup provider either way.
+    model.applyPreset("local");
+    expect(model.backupProvider).toBe("API_KEY");
   });
 
   it("seeds the repository and branch from the server defaults", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults());
-    expect(model.gitUrl).toBe("https://github.com/imbue-ai/default-workspace-template.git");
+    expect(model.gitUrl).toBe(
+      "https://github.com/imbue-ai/default-workspace-template.git",
+    );
     expect(model.branch).toBe("minds-v9.9.9");
   });
 
@@ -351,12 +760,13 @@ describe("CreateFormModel", () => {
       memory_gb: null,
       disk_gb: null,
       color: "#123456",
+      unavailable_reason: "",
     };
     model.applyDefaults(buildDefaults({ prefill }));
     expect(model.backupApiKeyEnv).toBe("RESTIC_REPOSITORY=s3:saved");
   });
 
-  it("applies a retry prefill including the BYOK selection and one-shot machine size", () => {
+  it("applies a retry prefill including the connection selection and one-shot machine size", () => {
     const model = new CreateFormModel();
     model.applyDefaults(
       buildDefaults({
@@ -376,13 +786,191 @@ describe("CreateFormModel", () => {
           memory_gb: null,
           disk_gb: null,
           color: "#123456",
+          unavailable_reason: "",
         },
       }),
     );
-    expect(model.launchValue).toBe("BYOK:aws_acct");
+    expect(model.launchValue).toBe(`${CONNECTION_LAUNCH_PREFIX}aws_acct`);
     expect(model.isAdvancedOpen).toBe(true);
     expect(model.selectedInstanceType()).toBe("t3.xlarge");
     expect(model.submitBody().cloud_account).toBe("aws_acct");
+  });
+
+  it("keeps a retry prefill's backup provider under an account instead of the account's Imbue backups default", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(
+      buildDefaults({
+        prefill: {
+          git_url: "https://example.com/repo.git",
+          branch: "main",
+          host_name: "old-name",
+          launch_mode: "LIMA",
+          docker_runtime: "RUNC",
+          backup_provider: "API_KEY",
+          backup_api_key_env: "RESTIC_REPOSITORY=s3:saved",
+          account_id: "user-1",
+          region: "",
+          cloud_account: "",
+          instance_type: "",
+          cpu_count: null,
+          memory_gb: null,
+          disk_gb: null,
+          color: "#123456",
+          unavailable_reason: "",
+        },
+      }),
+    );
+    expect(model.accountId).toBe("user-1");
+    expect(model.backupProvider).toBe("API_KEY");
+    expect(model.submitBody().backup_provider).toBe("API_KEY");
+
+    // The attempt's choice holds across account changes, like one the user made by hand.
+    model.accountId = "";
+    model.syncLaunchValueToSelectedAccount();
+    model.accountId = "user-1";
+    model.syncLaunchValueToSelectedAccount();
+    expect(model.backupProvider).toBe("API_KEY");
+  });
+
+  it("keeps a retry prefill's this-device-only connection under the re-listed default account", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(
+      buildDefaults({
+        prefill: {
+          git_url: "https://example.com/repo.git",
+          branch: "main",
+          host_name: "old-name",
+          launch_mode: "MODAL",
+          docker_runtime: "RUNC",
+          backup_provider: "API_KEY",
+          backup_api_key_env: "",
+          // The attempt's account signed out, so the default account is selected; modal_acct belongs to the local profile.
+          account_id: "",
+          region: "",
+          cloud_account: "modal_acct",
+          instance_type: "",
+          cpu_count: null,
+          memory_gb: null,
+          disk_gb: null,
+          color: "#123456",
+          unavailable_reason: "",
+        },
+      }),
+    );
+    expect(model.accountId).toBe("user-1");
+    expect(model.launchValue).toBe(`${CONNECTION_LAUNCH_PREFIX}modal_acct`);
+    expect(model.submitBody().cloud_account).toBe("modal_acct");
+  });
+
+  it("applies none of a retry prefill whose connection is gone, and exposes the reason instead", () => {
+    const model = new CreateFormModel();
+    const reason = "The connection this attempt used was removed, so it cannot be retried.";
+    model.applyDefaults(
+      buildDefaults({
+        prefill: {
+          git_url: "https://example.com/repo.git",
+          branch: "main",
+          host_name: "old-name",
+          launch_mode: "GCP",
+          docker_runtime: "RUNC",
+          backup_provider: "API_KEY",
+          backup_api_key_env: "RESTIC_REPOSITORY=s3:saved",
+          account_id: "user-1",
+          region: "us-central1-a",
+          cloud_account: "gcp_gone",
+          instance_type: "e2-standard-4",
+          cpu_count: null,
+          memory_gb: null,
+          disk_gb: null,
+          color: "#123456",
+          unavailable_reason: reason,
+        },
+      }),
+    );
+    expect(model.retryUnavailableReason).toBe(reason);
+    // The form reads as a fresh one: the shipped defaults, the opening preset, nothing of the attempt.
+    expect(model.hostName).toBe("");
+    expect(model.gitUrl).toBe("https://github.com/imbue-ai/default-workspace-template.git");
+    expect(model.branch).toBe("minds-v9.9.9");
+    expect(model.color).toBe("#0b292b");
+    expect(model.launchValue).toBe("IMBUE_CLOUD");
+    expect(model.backupProvider).toBe("IMBUE_CLOUD");
+    expect(model.backupApiKeyEnv).toBe(DEFAULT_RESTIC_ENV);
+    expect(model.selectedPreset).toBe("remote");
+    expect(model.isAdvancedOpen).toBe(false);
+    expect(model.submitBody().cloud_account).toBe("");
+
+    // A usable prefill clears the reason again.
+    model.applyDefaults(buildDefaults());
+    expect(model.retryUnavailableReason).toBe("");
+  });
+
+  it("falls back from a retry prefill's account-owned connection once another account is the one picked", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(
+      buildDefaults({
+        accounts: [
+          { user_id: "user-1", email: "alice@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
+          { user_id: "user-2", email: "bob@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
+        ],
+        default_account_id: "user-2",
+        prefill: {
+          git_url: "https://example.com/repo.git",
+          branch: "main",
+          host_name: "old-name",
+          launch_mode: "AWS",
+          docker_runtime: "RUNC",
+          backup_provider: "API_KEY",
+          backup_api_key_env: "",
+          // The attempt's account signed out, so the default (another account) is selected; aws_acct is user-1's.
+          account_id: "",
+          region: "",
+          cloud_account: "aws_acct",
+          instance_type: "",
+          cpu_count: null,
+          memory_gb: null,
+          disk_gb: null,
+          color: "#123456",
+          unavailable_reason: "",
+        },
+      }),
+    );
+    expect(model.accountId).toBe("user-2");
+    expect(model.launchValue).toBe("IMBUE_CLOUD");
+    expect(model.submitBody().cloud_account).toBe("");
+  });
+
+  it("falls back from a retry prefill's connection-only mode whose connection is gone", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(
+      buildDefaults({
+        prefill: {
+          git_url: "https://example.com/repo.git",
+          branch: "main",
+          host_name: "old-name",
+          launch_mode: "MODAL",
+          docker_runtime: "RUNC",
+          backup_provider: "API_KEY",
+          backup_api_key_env: "",
+          account_id: "user-1",
+          region: "",
+          // The backend blanks a connection that no longer exists, keeping the mode.
+          cloud_account: "",
+          instance_type: "",
+          cpu_count: null,
+          memory_gb: null,
+          disk_gb: null,
+          color: "#123456",
+          unavailable_reason: "",
+        },
+      }),
+    );
+    expect(model.launchValue).toBe("IMBUE_CLOUD");
+    expect(
+      model
+        .launchOptions()
+        .some((option) => option.value === model.launchValue),
+    ).toBe(true);
   });
 });
 
@@ -451,6 +1039,7 @@ describe("CreateFormModel machine size", () => {
           memory_gb: 12,
           disk_gb: 250,
           color: "#123456",
+          unavailable_reason: "",
         },
       }),
     );
@@ -459,18 +1048,81 @@ describe("CreateFormModel machine size", () => {
     const body = model.submitBody();
     expect([body.cpu_count, body.memory_gb, body.disk_gb]).toEqual([6, 12, 250]);
   });
+
+  it("drops a retry prefill's size once its mode fell back, so another mode starts from its own defaults", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(
+      buildDefaults({
+        prefill: {
+          git_url: "https://example.com/repo.git",
+          branch: "",
+          host_name: "",
+          launch_mode: "MODAL",
+          docker_runtime: "RUNC",
+          backup_provider: "CONFIGURE_LATER",
+          backup_api_key_env: "",
+          account_id: "user-1",
+          region: "",
+          // The attempt's connection no longer exists, so the mode falls back to Imbue Cloud.
+          cloud_account: "",
+          instance_type: "",
+          cpu_count: 8,
+          memory_gb: 32,
+          disk_gb: null,
+          color: "#123456",
+          unavailable_reason: "",
+        },
+      }),
+    );
+    expect(model.launchValue).toBe("IMBUE_CLOUD");
+    model.launchValue = "DOCKER";
+    expect(model.machineSizeDraft()).toEqual({ cpu_count: "4", memory_gb: "8", disk_gb: "" });
+  });
 });
 
 describe("normalizeCreateApiError", () => {
   it("normalizes the three error shapes into one", () => {
-    expect(normalizeCreateApiError({ error: "bad url", field: "git_url" })).toEqual({
+    expect(
+      normalizeCreateApiError({ error: "bad url", field: "git_url" }),
+    ).toEqual({
       message: "bad url",
       field: "git_url",
       redirectUrl: "",
     });
-    expect(normalizeCreateApiError({ error: "no account", redirect_url: "/auth/signup" }).redirectUrl).toBe(
-      "/auth/signup",
+    expect(
+      normalizeCreateApiError({
+        error: "no account",
+        redirect_url: "/auth/signup",
+      }).redirectUrl,
+    ).toBe("/auth/signup");
+    expect(normalizeCreateApiError(null).message).toBe(
+      "Could not create the workspace.",
     );
-    expect(normalizeCreateApiError(null).message).toBe("Could not create the workspace.");
+  });
+
+  it("names the caller's operation when the body carries no message", () => {
+    expect(
+      normalizeCreateApiError({}, "Could not set up the connection.").message,
+    ).toBe("Could not set up the connection.");
+    expect(
+      normalizeCreateApiError(
+        { error: "bad key" },
+        "Could not set up the connection.",
+      ).message,
+    ).toBe("bad key");
+  });
+});
+
+describe("CreateFormModel.isSlowStartCompute", () => {
+  it("is false only for Imbue Cloud: every other compute boots a machine from scratch", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    expect(model.launchValue).toBe("IMBUE_CLOUD");
+    expect(model.isSlowStartCompute()).toBe(false);
+
+    for (const launchValue of ["DOCKER", "LIMA", "VULTR", `${CONNECTION_LAUNCH_PREFIX}aws_acct`]) {
+      model.launchValue = launchValue;
+      expect(model.isSlowStartCompute(), launchValue).toBe(true);
+    }
   });
 });

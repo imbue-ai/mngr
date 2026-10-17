@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import re
 import subprocess
@@ -69,6 +70,9 @@ def fetch_default_workspace_template_file(repo_relative_path: str) -> str | None
         logger.trace("base64/utf-8 decode of {} failed: {}", url, e)
         return None
 
+
+# The mngr profile id ``stub_mngr_host_dir`` activates.
+_STUB_MNGR_PROFILE_ID: Final[str] = "testprofile"
 
 _GIT_TEST_ENV_KEYS: Final[dict[str, str]] = {
     "GIT_AUTHOR_NAME": "test",
@@ -156,11 +160,22 @@ def stub_mngr_host_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_nam
     monkeypatch.setenv("HOME", str(tmp_path))
     mngr_host_dir = mngr_host_dir_for(root_name)
     mngr_host_dir.mkdir(parents=True, exist_ok=True)
-    profile_id = "testprofile"
-    (mngr_host_dir / "config.toml").write_text(f'profile = "{profile_id}"\n')
-    settings_dir = mngr_host_dir / "profiles" / profile_id
+    (mngr_host_dir / "config.toml").write_text(f'profile = "{_STUB_MNGR_PROFILE_ID}"\n')
+    settings_dir = mngr_host_dir / "profiles" / _STUB_MNGR_PROFILE_ID
     settings_dir.mkdir(parents=True, exist_ok=True)
     return settings_dir / "settings.toml"
+
+
+def write_imbue_cloud_accounts_index(root_name: str, entries: Sequence[object]) -> Path:
+    """Write the imbue_cloud plugin's ``accounts.json`` (its signed-in session index) under the profile
+    ``stub_mngr_host_dir`` activated, with ``entries`` verbatim; returns the index path."""
+    sessions_dir = (
+        mngr_host_dir_for(root_name) / "profiles" / _STUB_MNGR_PROFILE_ID / "providers" / "imbue_cloud" / "sessions"
+    )
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    accounts_path = sessions_dir / "accounts.json"
+    accounts_path.write_text(json.dumps({"entries": list(entries)}))
+    return accounts_path
 
 
 def extract_response(exec_result: subprocess.CompletedProcess[str]) -> str:

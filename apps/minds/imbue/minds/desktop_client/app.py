@@ -3,6 +3,7 @@ import os
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -29,10 +30,10 @@ from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_address import build_agent_address
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
@@ -48,6 +49,20 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
+from imbue.minds.desktop_client.connections.account_lifecycle import CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE
+from imbue.minds.desktop_client.connections.account_lifecycle import account_panel_state
+from imbue.minds.desktop_client.connections.account_lifecycle import has_live_create_on_account
+from imbue.minds.desktop_client.connections.account_lifecycle import is_connection_owner_eligible
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
+from imbue.minds.desktop_client.connections.data_types import ConnectionAvailability
+from imbue.minds.desktop_client.connections.data_types import ConnectionView
+from imbue.minds.desktop_client.connections.data_types import ProviderMaterializationOutcome
+from imbue.minds.desktop_client.connections.primitives import IMBUE_CLOUD_PROVIDER_NAME_PREFIX
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
+from imbue.minds.desktop_client.connections.primitives import is_connection_instance_name
+from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_synced_row
+from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -92,6 +107,7 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
 from imbue.minds.desktop_client.notification_feed import SystemEventCard
+from imbue.minds.desktop_client.provider_display import connection_backend_label_for_name
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.report_collector import submit_report_with_attachments
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -132,10 +148,15 @@ from imbue.minds.desktop_client.ui_api_updates import build_workspace_updates_me
 from imbue.minds.desktop_client.ui_api_updates import format_update_window
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_login import handle_static_login_page
+from imbue.minds.desktop_client.ui_models import AccountPanelState
+from imbue.minds.desktop_client.ui_models import ConnectionPanelStatus
 from imbue.minds.desktop_client.ui_models import NotificationOutcome
 from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
+from imbue.minds.desktop_client.ui_models import RemoteTileState
 from imbue.minds.desktop_client.ui_models import UiAccountEntry
+from imbue.minds.desktop_client.ui_models import UiAccountProvidersEntry
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
+from imbue.minds.desktop_client.ui_models import UiConnectionEntry
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
@@ -163,7 +184,7 @@ from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOpe
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
-from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
+from imbue.minds.desktop_client.workspace_record_store import is_account_synced_provider
 from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
 from imbue.minds.desktop_client.workspace_recovery import is_network_dependent_workspace
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
@@ -175,16 +196,15 @@ from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceRecordLeaseActiveError
 from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
-from imbue.minds.mngr_settings.enablement import list_disabled_provider_names
-from imbue.minds.mngr_settings.imbue_cloud_accounts import is_imbue_cloud_provider_enabled_for_account
-from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.primitives import BROWSER_BRIDGE_PATH
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
@@ -367,6 +387,27 @@ def _push_new_password_state(
     record_store.push_all_secrets(user_id, account_email, resolver)
 
 
+def _rehome_connections_before_scrub(user_id: str, account_email: str) -> None:
+    """The password is being cleared: keep the account's connections on this device as local-profile ones.
+
+    The scrub that follows strips every connection payload server-side, which
+    would otherwise remove the credentials from this device too and make the
+    reconcile drop every connection instance. Re-homing keeps the same
+    connection id, so the instance name and the hosts attributed to it survive.
+    """
+    state = get_state()
+    connection_store = state.connection_store
+    if connection_store is None:
+        return
+    rehomed = connection_store.rehome_account_connections_to_local(user_id, account_email)
+    if rehomed:
+        logger.info(
+            "Re-homed {} connection(s) of {} into the local profile before the scrub", len(rehomed), account_email
+        )
+    if state.provider_materializer is not None:
+        state.provider_materializer.materialize()
+
+
 def _scrub_cleared_password_server_state(record_store: WorkspaceRecordStore, account_email: str) -> None:
     """The password was cleared: nothing secret may stay server-side."""
     if record_store.cli is None:
@@ -436,6 +477,7 @@ def _handle_backup_password_change() -> Response:
             if bundle is not None:
                 _push_new_password_state(record_store, resolver, str(account.user_id), str(account.email), bundle)
             else:
+                _rehome_connections_before_scrub(str(account.user_id), str(account.email))
                 _scrub_cleared_password_server_state(record_store, str(account.email))
             results.append({"account": str(account.email), "is_ok": True, "error": None})
         except (SyncCryptoError, WorkspaceSyncError, ImbueCloudCliError) as exc:
@@ -496,7 +538,15 @@ def _handle_sync_unlock() -> Response:
     scheduler = get_state().sync_scheduler
     if unlocked and scheduler is not None:
         scheduler.kick()
-    if is_ssh_material_written:
+    # The just-unlocked accounts' connections are decryptable now: write their
+    # blocks (the materializer bounces discovery itself when the file changed).
+    provider_materializer = get_state().provider_materializer
+    is_provider_settings_changed = (
+        bool(unlocked)
+        and provider_materializer is not None
+        and provider_materializer.materialize() is ProviderMaterializationOutcome.CHANGED
+    )
+    if is_ssh_material_written and not is_provider_settings_changed:
         bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
     is_any_account_unlocked = any(
         is_account_unlocked(record_store.paths, str(account.user_id)) for account in accounts
@@ -741,14 +791,12 @@ def _build_ui_accounts_message(session_store: MultiAccountSessionStore | None) -
     default_account_id = settle_default_account_id(
         get_state().minds_config, [str(account.user_id) for account in accounts]
     )
-    root = MindsRoot.from_environment()
     entries = tuple(
         UiAccountEntry(
             user_id=str(account.user_id),
             email=str(account.email),
             workspace_count=len(account.workspace_ids),
             is_default=str(account.user_id) == default_account_id,
-            is_enabled=is_imbue_cloud_provider_enabled_for_account(str(account.email), root=root),
         )
         for account in accounts
     )
@@ -764,36 +812,58 @@ def _build_ui_accounts_message(session_store: MultiAccountSessionStore | None) -
 def _compute_cloud_tile_state(
     backend_resolver: BackendResolverInterface,
     record_store: WorkspaceRecordStore,
-    account_email: str,
+    user_id: str,
     record: ReplicaRecord,
-    is_provider_enabled: bool,
 ) -> tuple[str, str | None]:
-    """Derive the access state for one cloud row that is not in local discovery.
+    """Derive the access state for one account-synced row that is not in local discovery.
 
     Everything is computed from current facts (key-file presence and mtime,
     the provider's latest snapshot, the in-memory materialization error) --
-    no stored flags:
+    no stored flags. The row's instance comes from
+    ``provider_instance_name_for_synced_row``:
 
-    - ``"signed_out"``: the account's provider block is disabled, so discovery
-      never polls it -- the workspace is invisible here until the user signs
-      in again, which is what the chip says.
     - ``""`` (plain remote): nothing is shown before any key is materialized
-      (locked account / no synced key).
+      while the account is unlocked (no synced key yet).
     - ``"error"``: the last materialization attempt failed (detail in tooltip).
+    - ``"locked"``: no key here and the account's DEK is absent, so the key
+      cannot be materialized until the master password is entered.
+    - ``"missing_connection"``: the row's connection is not in the account's
+      replica (removed elsewhere), so no provider block will ever read a key.
+    - ``"no_credentials"``: the connection is held but its credentials are
+      unusable here (scrubbed after a master-password clear, or unreadable),
+      so no block is written for it either.
+    - ``"read_only"``: the connection was written by a newer app version, which
+      this one never materializes.
     - ``"connecting"``: a key exists but no healthy provider snapshot has
       arrived since it appeared -- discovery has not had its chance yet.
     - ``"unreachable"``: a healthy snapshot newer than the key lacks the host
       (the lease expired/was released, or the key does not grant access).
     """
-    if not is_provider_enabled:
-        return "signed_out", None
     error_detail = record_store.ssh_material_errors().get(record.agent_id)
     if error_detail is not None:
         return "error", error_detail
-    key_path = record_store.imbue_cloud_host_ssh_key_path(account_email, record.host_id)
+    if is_connection_instance_name(record.provider_kind):
+        availability = _connection_availability_for_account(
+            record_store.connection_store, user_id, record.provider_kind
+        )
+        if availability is None:
+            return "missing_connection", None
+        match availability:
+            case ConnectionAvailability.NO_CREDENTIALS:
+                return "no_credentials", None
+            case ConnectionAvailability.READ_ONLY:
+                return "read_only", None
+            case ConnectionAvailability.LOCKED | ConnectionAvailability.AVAILABLE:
+                # A locked account's key cannot land here; the key check below says so.
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+    key_path = record_store.host_access_key_path(user_id, record)
     if key_path is None or not key_path.is_file():
+        if not is_account_unlocked(record_store.paths, user_id):
+            return "locked", None
         return "", None
-    provider_name = ProviderInstanceName(imbue_cloud_provider_name_for_account(account_email))
+    provider_name = ProviderInstanceName(provider_instance_name_for_synced_row(user_id, record.provider_kind))
     last_snapshot_at = backend_resolver.get_last_snapshot_at_for_provider(provider_name)
     is_provider_errored = provider_name in backend_resolver.get_provider_errors()
     try:
@@ -803,6 +873,44 @@ def _compute_cloud_tile_state(
     if last_snapshot_at is None or last_snapshot_at <= key_appeared_at or is_provider_errored:
         return "connecting", None
     return "unreachable", None
+
+
+def _connection_availability_for_account(
+    connection_store: ConnectionStore | None, user_id: str, instance_name: str
+) -> ConnectionAvailability | None:
+    """How usable the ACTIVE connection behind an instance name is here, or None when the account does not hold it."""
+    if connection_store is None:
+        return None
+    found = connection_store.find_active_connection_by_instance_name(instance_name)
+    if found is None or found[0] != user_id:
+        return None
+    return connection_store.availability(user_id, found[1])
+
+
+def _is_account_synced_row(record: ReplicaRecord, connection_store: ConnectionStore | None) -> bool:
+    """Whether the record's host lives with an account-owned provider rather than on the device that created it.
+
+    A row on a connection the account no longer holds was still written
+    without a hosting device, so it stays a cloud row (rendered with the
+    ``missing_connection`` state) instead of turning into another device's row.
+    """
+    if is_account_synced_provider(record.provider_kind, connection_store):
+        return True
+    return record.hosting_device_id is None and is_connection_instance_name(record.provider_kind)
+
+
+def _remote_location_label(provider_kind: str, connection_store: ConnectionStore | None) -> str:
+    """Where an account-synced remote row lives: the connection's alias and backend, or the provider label."""
+    label = friendly_provider_label(provider_kind)
+    if connection_store is None or not is_connection_instance_name(provider_kind):
+        return label
+    found = connection_store.find_active_connection_by_instance_name(provider_kind)
+    if found is None:
+        return label
+    view = connection_store.view_for(*found)
+    if view is None or not view.alias:
+        return label
+    return f"{view.alias} ({label})"
 
 
 def _compute_backup_access(
@@ -850,9 +958,6 @@ def _collect_remote_workspace_tiles(
     tiles: list[RemoteWorkspaceTile] = []
     seen_agent_ids: set[str] = set()
     for account in session_store.list_accounts():
-        is_provider_enabled = is_imbue_cloud_provider_enabled_for_account(
-            str(account.email), root=MindsRoot.from_environment()
-        )
         for record in session_store.record_store.list_records(str(account.user_id)):
             is_remote_active = (
                 record.state == RECORD_STATE_ACTIVE
@@ -862,19 +967,20 @@ def _collect_remote_workspace_tiles(
             if not is_remote_active:
                 continue
             seen_agent_ids.add(record.agent_id)
-            # A cloud workspace lives with its provider, not on the device that
-            # happened to create it -- so its badge names the provider, never
-            # the creating device's hostname the record carries.
-            is_cloud_row = is_cloud_provider_kind(record.provider_kind)
+            # An account-synced workspace lives with its provider, not on the
+            # device that happened to create it -- so its badge names the
+            # provider (and the connection's alias), never the creating
+            # device's hostname the record carries.
+            connection_store = session_store.record_store.connection_store
+            is_cloud_row = _is_account_synced_row(record, connection_store)
             if is_cloud_row:
                 kind = RemoteWorkspaceKind.CLOUD
-                location = friendly_provider_label(record.provider_kind)
+                location = _remote_location_label(record.provider_kind, connection_store)
                 state, state_detail = _compute_cloud_tile_state(
                     backend_resolver,
                     session_store.record_store,
-                    str(account.email),
+                    str(account.user_id),
                     record,
-                    is_provider_enabled=is_provider_enabled,
                 )
             else:
                 kind = RemoteWorkspaceKind.OTHER_DEVICE
@@ -899,13 +1005,17 @@ def _collect_remote_workspace_tiles(
 def _build_remote_tile_states(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
-) -> dict[str, str]:
-    """``agent_id -> derived state`` for every remote tile (the SSE drift payload).
+) -> dict[str, RemoteTileState]:
+    """``agent_id -> derived state`` (with its detail) for every remote tile (the drift payload).
 
     A rendered remote tile whose id vanishes from this map (it flipped into
-    local discovery) or whose state changed makes the landing page reload.
+    local discovery) or whose state or detail changed makes the landing page
+    re-render; the detail is what the ``error`` chip's tooltip shows.
     """
-    return {tile.agent_id: tile.state for tile in _collect_remote_workspace_tiles(backend_resolver, session_store)}
+    return {
+        tile.agent_id: RemoteTileState(state=tile.state, detail=tile.state_detail)
+        for tile in _collect_remote_workspace_tiles(backend_resolver, session_store)
+    }
 
 
 def _handle_post_login_redirect() -> Response:
@@ -1018,104 +1128,288 @@ def _finalize_destroyed_workspace(
 
 # Provider names that are always hidden from Imbue Studio's providers panel:
 # - ``local``: always present, always healthy; nothing actionable.
-# - ``imbue_cloud``: the default singleton instance is non-functional. Imbue Studio
-#   uses the multi-account variant (``imbue_cloud_<slug>`` per signed-in
-#   account), so the default block is dead weight and surfacing it would
-#   confuse users into thinking they need to enable / disable it.
-# Other consumers (e.g. `mngr list` CLI) keep showing both normally -- the
-# hide applies only to Imbue Studio's panel.
-_HIDDEN_PROVIDER_NAMES_IN_PANEL: Final[frozenset[str]] = frozenset({"local", "imbue_cloud"})
+# - the default instance mngr auto-creates for each remote backend: minds
+#   suppresses them in favor of the account and connection instances, so
+#   surfacing them would only confuse users.
+# Other consumers (e.g. `mngr list` CLI) keep showing them normally -- the
+# hide applies only to minds' panel.
+_HIDDEN_PROVIDER_NAMES_IN_PANEL: Final[frozenset[str]] = frozenset(
+    {"local", "imbue_cloud", "aws", "gcp", "azure", "modal"}
+)
 
 
-def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -> dict[str, Any]:
-    """Build the providers panel SSE payload from resolver state + Imbue Studio's settings file.
+class _DiscoveryVerdicts(FrozenModel):
+    """What the latest discovery snapshot says about every provider instance, plus its freshness."""
 
-    Combines three sources:
-    - ``backend_resolver.list_providers()`` -- providers that loaded
-      successfully in the most recent discovery snapshot.
-    - ``backend_resolver.get_provider_errors()`` -- providers whose discovery
-      raised.
-    - ``list_disabled_provider_names()`` -- providers Imbue Studio's settings file
-      explicitly disables. These are skipped by discovery and so don't appear
-      in the snapshot, but the panel needs them for the Enable button.
+    backend_by_name: dict[str, str] = Field(description="Backend of each instance that loaded in the latest snapshot")
+    error_by_name: dict[str, DiscoveryError] = Field(description="Discovery error of each instance whose poll raised")
+    last_event_at: datetime | None = Field(description="When the last discovery event arrived, None before any")
+    last_full_snapshot_at: datetime | None = Field(description="When the last full snapshot arrived, None before any")
 
-    The ``local`` provider is always hidden. Each entry carries name + backend
-    + status; errored entries also carry ``error_type`` and ``error_message``.
+
+def _provider_entry_from_discovery(
+    name: str, backend_by_name: Mapping[str, str], error_by_name: Mapping[str, DiscoveryError]
+) -> UiProviderEntry:
+    """One instance's panel row from the discovery snapshot; an error outranks a stale healthy listing."""
+    error = error_by_name.get(name)
+    if error is not None:
+        return UiProviderEntry(
+            name=name,
+            backend=None,
+            status=ProviderPanelStatus.ERROR,
+            error_type=error.type_name,
+            error_message=error.message,
+        )
+    backend = backend_by_name.get(name)
+    if backend is None:
+        return UiProviderEntry(name=name, backend=None, status=ProviderPanelStatus.UNLISTED)
+    return UiProviderEntry(name=name, backend=backend, status=ProviderPanelStatus.OK)
+
+
+def _connection_entry(
+    view: ConnectionView,
+    backend_by_name: Mapping[str, str],
+    error_by_name: Mapping[str, DiscoveryError],
+    workspace_count: int,
+) -> UiConnectionEntry:
+    """One connection's panel row: its availability here, else discovery's verdict on its instance."""
+    match view.availability:
+        case ConnectionAvailability.LOCKED:
+            status, error = ConnectionPanelStatus.LOCKED, None
+        case ConnectionAvailability.NO_CREDENTIALS:
+            status, error = ConnectionPanelStatus.NO_CREDENTIALS, None
+        case ConnectionAvailability.READ_ONLY:
+            status, error = ConnectionPanelStatus.READ_ONLY, None
+        case ConnectionAvailability.AVAILABLE:
+            error = error_by_name.get(view.instance_name)
+            if error is not None:
+                status = ConnectionPanelStatus.ERROR
+            elif view.instance_name in backend_by_name:
+                status = ConnectionPanelStatus.OK
+            else:
+                status = ConnectionPanelStatus.UNLISTED
+        case _ as unreachable:
+            assert_never(unreachable)
+    return UiConnectionEntry(
+        id=view.connection_id,
+        instance=view.instance_name,
+        backend=view.backend,
+        backend_label=connection_backend_label_for_name(view.backend),
+        alias=view.alias,
+        identifier=view.identifier,
+        placement={key: str(value) for key, value in view.placement.items() if value is not None},
+        status=status,
+        error_type=error.type_name if error is not None else None,
+        error_message=error.message if error is not None else None,
+        workspace_count=workspace_count,
+    )
+
+
+def _connection_entries_for_owner(
+    connection_store: ConnectionStore | None,
+    owner_user_id: str,
+    verdicts: _DiscoveryVerdicts,
+    workspace_count_by_provider: Mapping[str, int],
+) -> tuple[UiConnectionEntry, ...]:
+    """One owner's connection rows, in alias order."""
+    views = connection_store.list_views(owner_user_id) if connection_store is not None else []
+    return tuple(
+        _connection_entry(
+            view,
+            verdicts.backend_by_name,
+            verdicts.error_by_name,
+            workspace_count_by_provider.get(view.instance_name, 0),
+        )
+        for view in sorted(views, key=lambda view: (view.alias.casefold(), view.instance_name))
+    )
+
+
+def _active_workspace_ids_by_provider(
+    backend_resolver: BackendResolverInterface, record_store: WorkspaceRecordStore | None
+) -> dict[str, set[str]]:
+    """Active workspace ids per provider instance: local discovery unioned with every account's ACTIVE records.
+
+    A workspace hosted here appears in both sources, so the union is by
+    workspace id, not a sum. Render-time UX for the Remove buttons only; the
+    DELETE route's own check (409) remains the authority.
     """
-    if not isinstance(backend_resolver, MngrCliBackendResolver):
-        return {
-            "providers": [],
-            "last_event_at": None,
-            "last_full_snapshot_at": None,
-        }
-    providers = backend_resolver.list_providers()
-    errored = backend_resolver.get_provider_errors()
-    disabled_names = list_disabled_provider_names(root=MindsRoot.from_environment())
-    last_event_at, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
-
-    # Active (non-destroyed) workspace count per provider, for the panel's
-    # bring-your-own-key-account Delete buttons: an account in use renders its
-    # button disabled ("in use by N"). Render-time UX only -- the DELETE route's
-    # own active-workspace check (409) remains the authority.
-    workspace_count_by_provider: dict[str, int] = {}
+    ids_by_provider: dict[str, set[str]] = {}
     for agent_id in backend_resolver.list_active_workspace_ids():
         info = backend_resolver.get_agent_display_info(agent_id)
         if info is not None and info.provider_name is not None:
-            provider_name_str = str(info.provider_name)
-            workspace_count_by_provider[provider_name_str] = workspace_count_by_provider.get(provider_name_str, 0) + 1
+            ids_by_provider.setdefault(str(info.provider_name), set()).add(str(agent_id))
+    if record_store is not None:
+        for records in record_store.list_all_records().values():
+            for record in records:
+                if record.state == RECORD_STATE_ACTIVE and record.provider_kind:
+                    ids_by_provider.setdefault(record.provider_kind, set()).add(record.agent_id)
+    return ids_by_provider
 
-    # De-duplicate by name with priority disabled > error > ok. A provider can
-    # appear in multiple source buckets during the window between a Disable click
-    # (writes to Imbue Studio's settings) and mngr observe's restart (rewrites the snapshot
-    # to drop the now-disabled provider). In that window the same name shows up in
-    # both `disabled_names` and the resolver's errored or healthy set. The user's
-    # explicitly recorded intent (disabled-in-settings) wins; transient error state
-    # wins over stale healthy state.
-    entry_by_name: dict[str, dict[str, Any]] = {}
-    for provider in providers:
-        name = str(provider.provider_name)
-        if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
+
+def _in_flight_create_count_by_provider(
+    agent_creator: AgentCreator | None, workspace_ids_by_provider: Mapping[str, AbstractSet[str]]
+) -> dict[str, int]:
+    """Live creates per provider instance that neither discovery nor the records count yet.
+
+    A record is seeded only once ``mngr create`` returns, and a cloud create
+    runs for minutes, so until then the create is invisible to both sources;
+    once it has an agent id that one of them lists, it is counted there.
+    """
+    counts: dict[str, int] = {}
+    if agent_creator is None:
+        return counts
+    for info in agent_creator.list_create_attempt_infos():
+        if info.status in (AgentCreateAttemptStatus.DONE, AgentCreateAttemptStatus.FAILED):
             continue
-        entry_by_name[name] = {
-            "name": name,
-            "backend": str(provider.config.backend),
-            "status": "ok",
-            "is_enabled": provider.config.is_enabled if provider.config.is_enabled is not None else True,
-        }
-    for provider_name, error in errored.items():
-        name = str(provider_name)
-        if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
+        if not info.provider_instance_name:
             continue
-        entry_by_name[name] = {
-            "name": name,
-            "backend": None,
-            "status": "error",
-            "is_enabled": True,
-            "error_type": error.type_name,
-            "error_message": error.message,
-        }
-    for name in disabled_names:
-        if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
+        counted_ids = workspace_ids_by_provider.get(info.provider_instance_name, set())
+        if info.agent_id is not None and str(info.agent_id) in counted_ids:
             continue
-        entry_by_name[name] = {
-            "name": name,
-            "backend": None,
-            "status": "disabled",
-            "is_enabled": False,
-        }
-    # Bring-your-own-key account annotations, applied across every source bucket
-    # (a byok provider can be healthy, errored, or disabled and still deletable).
-    for name, entry in entry_by_name.items():
-        if name.startswith("byok-"):
-            entry["is_cloud_account"] = True
-            entry["workspace_count"] = workspace_count_by_provider.get(name, 0)
-    # Stable alphabetical order by name across all categories.
-    entries = sorted(entry_by_name.values(), key=lambda entry: entry["name"])
-    return {
-        "providers": entries,
-        "last_event_at": last_event_at.isoformat() if last_event_at is not None else None,
-        "last_full_snapshot_at": last_full_snapshot_at.isoformat() if last_full_snapshot_at is not None else None,
+        counts[info.provider_instance_name] = counts.get(info.provider_instance_name, 0) + 1
+    return counts
+
+
+def _signed_out_account_ids_with_local_rows(
+    record_store: WorkspaceRecordStore | None, signed_in_user_ids: AbstractSet[str]
+) -> list[str]:
+    """Accounts with no session here whose replica still holds ACTIVE rows this device hosts."""
+    if record_store is None:
+        return []
+    signed_out: list[str] = []
+    for user_id, records in sorted(record_store.list_all_records().items()):
+        if user_id in signed_in_user_ids or user_id == LOCAL_PROFILE_USER_ID:
+            continue
+        if any(
+            record.state == RECORD_STATE_ACTIVE and record.hosting_device_id == record_store.device_id
+            for record in records
+        ):
+            signed_out.append(user_id)
+    return signed_out
+
+
+def _discovery_verdicts(backend_resolver: BackendResolverInterface) -> _DiscoveryVerdicts:
+    """The resolver's per-instance verdicts; empty for a resolver that carries no discovery state."""
+    if not isinstance(backend_resolver, MngrCliBackendResolver):
+        return _DiscoveryVerdicts(backend_by_name={}, error_by_name={}, last_event_at=None, last_full_snapshot_at=None)
+    last_event_at, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
+    return _DiscoveryVerdicts(
+        backend_by_name={
+            str(provider.provider_name): str(provider.config.backend) for provider in backend_resolver.list_providers()
+        },
+        error_by_name={str(name): error for name, error in backend_resolver.get_provider_errors().items()},
+        last_event_at=last_event_at,
+        last_full_snapshot_at=last_full_snapshot_at,
+    )
+
+
+def _account_sections(
+    session_store: MultiAccountSessionStore | None,
+    connection_store: ConnectionStore | None,
+    verdicts: _DiscoveryVerdicts,
+    workspace_count_by_provider: Mapping[str, int],
+) -> list[UiAccountProvidersEntry]:
+    """The panel's sections in order: signed-in accounts, signed-out accounts with local rows, the local profile."""
+    record_store = session_store.record_store if session_store is not None else None
+    signed_in_accounts = session_store.list_accounts() if session_store is not None else []
+    sections: list[UiAccountProvidersEntry] = []
+    for account in signed_in_accounts:
+        user_id = str(account.user_id)
+        sections.append(
+            UiAccountProvidersEntry(
+                user_id=user_id,
+                email=str(account.email),
+                state=account_panel_state(record_store, user_id),
+                is_connection_owner_eligible=is_connection_owner_eligible(connection_store, user_id),
+                imbue_cloud=_provider_entry_from_discovery(
+                    imbue_cloud_provider_name_for_user(user_id), verdicts.backend_by_name, verdicts.error_by_name
+                ),
+                connections=_connection_entries_for_owner(
+                    connection_store, user_id, verdicts, workspace_count_by_provider
+                ),
+            )
+        )
+    signed_in_user_ids = {str(account.user_id) for account in signed_in_accounts}
+    for user_id in _signed_out_account_ids_with_local_rows(record_store, signed_in_user_ids):
+        sections.append(
+            UiAccountProvidersEntry(
+                user_id=user_id,
+                email=(record_store.account_email_for(user_id) if record_store is not None else None) or "",
+                state=AccountPanelState.SIGNED_OUT,
+                is_connection_owner_eligible=False,
+                imbue_cloud=None,
+                connections=(),
+            )
+        )
+    sections.append(
+        UiAccountProvidersEntry(
+            user_id=LOCAL_PROFILE_USER_ID,
+            email="",
+            state=AccountPanelState.SIGNED_IN,
+            is_connection_owner_eligible=True,
+            imbue_cloud=None,
+            connections=_connection_entries_for_owner(
+                connection_store, LOCAL_PROFILE_USER_ID, verdicts, workspace_count_by_provider
+            ),
+        )
+    )
+    return sections
+
+
+def _device_provider_entries(
+    verdicts: _DiscoveryVerdicts, sections: Sequence[UiAccountProvidersEntry]
+) -> tuple[UiProviderEntry, ...]:
+    """Everything discovery reports that no account section claims, sorted by name."""
+    claimed_names = {section.imbue_cloud.name for section in sections if section.imbue_cloud is not None}
+    device_provider_names = sorted(
+        name
+        for name in set(verdicts.backend_by_name) | set(verdicts.error_by_name)
+        if name not in _HIDDEN_PROVIDER_NAMES_IN_PANEL
+        and name not in claimed_names
+        and not name.startswith(IMBUE_CLOUD_PROVIDER_NAME_PREFIX)
+        and not is_connection_instance_name(name)
+    )
+    return tuple(
+        _provider_entry_from_discovery(name, verdicts.backend_by_name, verdicts.error_by_name)
+        for name in device_provider_names
+    )
+
+
+def _build_providers_state_payload(
+    backend_resolver: BackendResolverInterface,
+    session_store: MultiAccountSessionStore | None,
+    connection_store: ConnectionStore | None,
+    agent_creator: AgentCreator | None,
+) -> UiProvidersMessage:
+    """Build the providers panel frame: one section per account (plus the local profile) and the device providers.
+
+    Discovery contributes each instance's verdict (``list_providers()`` for
+    the healthy ones, ``get_provider_errors()`` for the ones whose poll
+    raised); the session store and the record replicas contribute the
+    account list (signed in, locked, or signed out with local rows); the
+    connection store contributes each owner's connections and whether their
+    credentials are usable here; the agent creator contributes the creates
+    still in flight, so a connection reads "in use" while one runs on it. The
+    ``local`` provider and the suppressed defaults are always hidden.
+    """
+    verdicts = _discovery_verdicts(backend_resolver)
+    record_store = session_store.record_store if session_store is not None else None
+    workspace_ids_by_provider = _active_workspace_ids_by_provider(backend_resolver, record_store)
+    in_flight_count_by_provider = _in_flight_create_count_by_provider(agent_creator, workspace_ids_by_provider)
+    workspace_count_by_provider = {
+        provider_name: len(workspace_ids_by_provider.get(provider_name, set()))
+        + in_flight_count_by_provider.get(provider_name, 0)
+        for provider_name in set(workspace_ids_by_provider) | set(in_flight_count_by_provider)
     }
+    sections = _account_sections(session_store, connection_store, verdicts, workspace_count_by_provider)
+    return UiProvidersMessage(
+        accounts=tuple(sections),
+        device_providers=_device_provider_entries(verdicts, sections),
+        last_event_at=verdicts.last_event_at.isoformat() if verdicts.last_event_at is not None else None,
+        last_full_snapshot_at=(
+            verdicts.last_full_snapshot_at.isoformat() if verdicts.last_full_snapshot_at is not None else None
+        ),
+    )
 
 
 def _visible_create_attempt_rows(backend_resolver: BackendResolverInterface) -> list[CreateAttemptRow]:
@@ -1203,6 +1497,7 @@ def _build_workspace_list(
     neither field.
     """
     liveness_by_agent_id = compute_mind_liveness_by_agent_id(backend_resolver)
+    host_state_by_agent_id = backend_resolver.list_active_workspace_host_states()
     agent_ids = backend_resolver.list_active_workspace_ids()
     workspaces: list[dict[str, str]] = []
     for aid in agent_ids:
@@ -1254,9 +1549,13 @@ def _build_workspace_list(
                 entry["account"] = account.email
                 # A cloud machine is listed on every device signed in to its
                 # account, but only opens from a device holding its SSH key.
-                key_state = _cloud_row_key_state(session_store.record_store, account, info)
+                key_state = _cloud_row_key_state(session_store.record_store, account, str(aid), info)
                 if key_state is not None:
                     entry["key_state"] = key_state.value
+        # A host that refused this device's key reads "Status unknown" on its
+        # own; the chip says why, and that no restart will change it.
+        if "key_state" not in entry and host_state_by_agent_id.get(aid) is HostState.UNAUTHENTICATED:
+            entry["key_state"] = CloudRowKeyState.REJECTED.value
         workspaces.append(entry)
     # In-flight / interrupted / failed create attempts ride in the same list,
     # badged via ``create_attempt_state``, so they sit inline with the finished
@@ -1290,14 +1589,16 @@ def _build_workspace_list(
 def _cloud_row_key_state(
     record_store: WorkspaceRecordStore | None,
     account: AccountSession,
+    agent_id: str,
     info: AgentDisplayInfo | None,
 ) -> CloudRowKeyState | None:
-    """Why this device cannot open a live cloud row, or None when it can (or the row is not a cloud one)."""
+    """Why this device cannot open a live account-synced row, or None when it can (or the row is not one)."""
     if record_store is None or info is None or info.provider_name is None:
         return None
-    if not is_cloud_provider_kind(str(info.provider_name)):
+    if not is_account_synced_provider(str(info.provider_name), record_store.connection_store):
         return None
-    key_path = record_store.imbue_cloud_host_ssh_key_path(str(account.email), str(info.host_id))
+    found = record_store.find_active_record(agent_id)
+    key_path = record_store.host_access_key_path(found[0], found[1]) if found is not None else None
     if key_path is None or key_path.is_file():
         return None
     user_id = str(account.user_id)
@@ -1587,15 +1888,28 @@ def _handle_account_logout(
     """Log out a specific account.
 
     Routes through the same plugin-side signout as ``_handle_signout_api``
-    so the SuperTokens session is actually revoked, the
-    ``[providers.imbue_cloud_<slug>]`` block is torn down, and the
-    identity cache reflects the new state. Without this, just dropping
+    so the SuperTokens session is actually revoked, the account's provider
+    instances (``imbue_cloud_<user id>`` and its connections) are removed by
+    the materializer, and the identity cache reflects the new state. Without
+    this, just dropping
     the cache would let the next ``auth list`` call resurrect the
     account because the plugin still holds the session on disk.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
-    if get_state().session_store is not None:
+    state = get_state()
+    # Signing out removes the account's provider blocks, which a create still
+    # running on one of them needs for its later ``mngr`` calls; the body is the
+    # text the accounts page shows for a refused action.
+    in_flight_provider_names = (
+        state.agent_creator.live_in_flight_provider_instance_names() if state.agent_creator is not None else set()
+    )
+    in_flight_account_ids = (
+        state.agent_creator.live_in_flight_account_ids() if state.agent_creator is not None else set()
+    )
+    if has_live_create_on_account(user_id, state.connection_store, in_flight_provider_names, in_flight_account_ids):
+        return make_response(status_code=409, content=CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE)
+    if state.session_store is not None:
         signout_user_via_plugin(user_id)
     return make_response(status_code=303, headers={"Location": "/accounts"})
 
@@ -1709,21 +2023,6 @@ def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspac
     )
 
 
-def _ui_provider_entry_from_legacy_dict(entry: Mapping[str, Any]) -> UiProviderEntry:
-    return UiProviderEntry(
-        name=entry["name"],
-        backend=entry.get("backend"),
-        # The legacy panel payload uses lowercase buckets; the wire enum is
-        # the repo-standard uppercase form.
-        status=ProviderPanelStatus(str(entry["status"]).upper()),
-        is_enabled=bool(entry.get("is_enabled", True)),
-        error_type=entry.get("error_type"),
-        error_message=entry.get("error_message"),
-        is_cloud_account=bool(entry.get("is_cloud_account", False)),
-        workspace_count=int(entry.get("workspace_count", 0)),
-    )
-
-
 def _derive_ui_workspaces_message(
     app: Flask,
     backend_resolver: BackendResolverInterface,
@@ -1768,11 +2067,9 @@ def _derive_ui_accounts_message(app: Flask, session_store: MultiAccountSessionSt
 
 def _derive_ui_providers_message(app: Flask, backend_resolver: BackendResolverInterface) -> UiProvidersMessage:
     with app.app_context():
-        payload = _build_providers_state_payload(backend_resolver)
-        return UiProvidersMessage(
-            providers=tuple(_ui_provider_entry_from_legacy_dict(entry) for entry in payload["providers"]),
-            last_event_at=payload["last_event_at"],
-            last_full_snapshot_at=payload["last_full_snapshot_at"],
+        state = get_state(app)
+        return _build_providers_state_payload(
+            backend_resolver, state.session_store, state.connection_store, state.agent_creator
         )
 
 
@@ -2266,6 +2563,8 @@ def create_desktop_client(
     device_id: str = "",
     identity_cache: IdentityCache | None = None,
     forward_identity: ForwardIdentityPublisher | None = None,
+    connection_store: ConnectionStore | None = None,
+    provider_materializer: ProviderSettingsMaterializer | None = None,
 ) -> Flask:
     """Create the bare-origin Imbue Studio Flask application.
 
@@ -2472,6 +2771,8 @@ def create_desktop_client(
         sign_in_browsers=sign_in_browsers if sign_in_browsers is not None else InstalledSignInBrowsers(),
         sync_scheduler=sync_scheduler,
         folder_sync_manager=folder_sync_manager,
+        connection_store=connection_store,
+        provider_materializer=provider_materializer,
         ui_channel_broadcaster=ui_channel_broadcaster,
         ui_publisher=ui_publisher,
         machine_stop_kind_tracker=machine_stop_kind_tracker,

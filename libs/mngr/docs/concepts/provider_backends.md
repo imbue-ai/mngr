@@ -33,3 +33,5 @@ Each provider backend has different trade-offs:
 Browse [100's of additional plugins](http://imbue.com/mngr/plugins) [future] for other provider backends (like AWS [future], GCP, Kubernetes, etc.).
 
 Only `local` and `ssh` are built in; `docker`, `modal`, `lima`, and the cloud backends are plugins that register themselves via the `register_provider_backend` hook. See [the plugin API](./api.md) and the docker or modal plugin for examples.
+
+A backend that mints SSH material per host (see `specs/provider-shape.md`, section 3.9) should publish its layout as a `HostAccessManifest` (`imbue.mngr.providers.host_access_manifest`) and resolve its own key paths through it, as the docker, modal, lima, vps, and imbue_cloud plugins do: a consumer that carries one host's access to another machine then reads the file and store names from the provider instead of restating them.

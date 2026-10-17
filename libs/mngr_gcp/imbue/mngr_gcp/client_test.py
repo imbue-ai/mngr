@@ -793,6 +793,31 @@ def test_get_instance_metadata_returns_empty_when_instance_gone() -> None:
     assert client.get_instance_metadata(VpsInstanceId("mngr-host-1")) == {}
 
 
+def test_set_instance_metadata_is_a_noop_when_instance_gone() -> None:
+    """A 404 on the read before the write (the instance was just deleted) is nothing to update, not an error.
+
+    The destroy's record cleanup reaches the write through a cached listing that still names the instance.
+    """
+    instances = FakeInstancesClient()
+    instances.get_error = google_api_exceptions.NotFound("gone")
+    client = _make_client(instances)
+    client.set_instance_metadata(VpsInstanceId("mngr-host-1"), {}, delete_keys=["mngr-host-state"])
+    assert instances.set_metadata_calls == []
+
+
+def test_set_instance_metadata_is_a_noop_when_instance_vanishes_before_the_write() -> None:
+    """A 404 from setMetadata itself (deleted between the read and the write) is tolerated the same way."""
+    instances = FakeInstancesClient()
+    instances.get_result = compute_v1.Instance(
+        name="mngr-host-1",
+        metadata=compute_v1.Metadata(fingerprint="fp-1", items=[compute_v1.Items(key="mngr-host-state", value="{}")]),
+    )
+    instances.set_metadata_errors = [google_api_exceptions.NotFound("gone")]
+    client = _make_client(instances)
+    client.set_instance_metadata(VpsInstanceId("mngr-host-1"), {}, delete_keys=["mngr-host-state"])
+    assert len(instances.set_metadata_calls) == 1
+
+
 # SSH keys (in-memory map; no native GCE resource)
 
 

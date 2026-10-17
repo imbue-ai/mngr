@@ -295,6 +295,27 @@ def _registered_docker_runtime_names(probe: HostProbeInterface) -> frozenset[str
     return frozenset(str(name) for name in runtimes)
 
 
+def docker_daemon_cpu_count(probe: HostProbeInterface) -> int | None:
+    """The CPU count the Docker daemon reports (the most a ``--cpus`` cap may ask for), or None when it cannot be read.
+
+    Only worth asking once the daemon is known to answer; a create form that
+    offers more CPUs than this would have every default create refused.
+    """
+    result = probe.run(["docker", "info", "--format", "{{.NCPU}}"])
+    if result is None or result.returncode != 0:
+        return None
+    raw_cpu_count = result.stdout.strip()
+    try:
+        cpu_count = int(raw_cpu_count)
+    except ValueError:
+        logger.warning("Could not parse the Docker daemon's CPU count: {!r}", raw_cpu_count)
+        return None
+    if cpu_count < 1:
+        logger.warning("Ignored the Docker daemon's CPU count {}: expected a positive number", cpu_count)
+        return None
+    return cpu_count
+
+
 def _linux_install_command_for(key: LocalBackendKey, host: HostFacts) -> str:
     """The pasteable command that installs a missing backend on a Linux host, or empty without apt."""
     match host.package_manager:

@@ -828,21 +828,28 @@ function renderAccountGroup(
   return m("div", [
     m(SectionHeader, "Account"),
     m("div", { id: "account-section" }, [
-      data.is_leased_imbue_cloud
-        ? m(
-            "p",
-            { id: "leased-account-note", class: "type-body text-secondary" },
-            [
-              "Workspaces running in Imbue Cloud can't be moved to a different account.",
-              data.leased_owner_email
-                ? [
-                    " This workspace is owned by ",
+      data.is_account_owned_provider
+        ? [
+            data.current_account
+              ? m("p", { class: "type-body text-primary mb-3" }, [
+                  "Linked to ",
+                  m("strong", data.current_account.email),
+                  ".",
+                ])
+              : data.leased_owner_email
+                ? m("p", { class: "type-body text-primary mb-3" }, [
+                    "This workspace is owned by ",
                     m("strong", data.leased_owner_email),
                     ".",
-                  ]
+                  ])
                 : null,
-            ],
-          )
+            m(
+              Notice,
+              { variant: "info" },
+              "This workspace runs on a provider owned by its account (Imbue Cloud, or one of the account's cloud " +
+                "connections), so its account link is fixed and cannot be changed.",
+            ),
+          ]
         : data.current_account
           ? [
               m("p", { class: "type-body text-primary mb-3" }, [

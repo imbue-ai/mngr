@@ -25,6 +25,8 @@ from typing import Any
 from typing import Final
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from flask import Flask
 from loguru import logger as loguru_logger
 from pydantic import Field
@@ -479,7 +481,9 @@ def build_ui_state_publisher_for_test(
         derive_accounts=lambda: UiAccountsMessage(
             has_accounts=False, account_email="", extra_account_count=0, accounts=()
         ),
-        derive_providers=lambda: UiProvidersMessage(providers=(), last_event_at=None, last_full_snapshot_at=None),
+        derive_providers=lambda: UiProvidersMessage(
+            accounts=(), device_providers=(), last_event_at=None, last_full_snapshot_at=None
+        ),
         derive_requests=lambda: UiRequestsMessage(count=0, request_ids=()),
         derive_notifications=lambda: UiNotificationsMessage(entries=(), unresolved_count=0),
         derive_discovery_health=lambda: UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
@@ -1506,6 +1510,16 @@ def write_template_pyproject_pinning_mngr(
 ) -> None:
     """Give the tree at ``template_dir`` a template-shaped ``pyproject.toml`` pinning mngr from ``repo_url`` at ``rev``."""
     (template_dir / "pyproject.toml").write_text(template_pyproject_pinning_mngr(repo_url, rev=rev))
+
+
+def generate_test_ssh_private_key() -> str:
+    """An OpenSSH-format Ed25519 key, the exact flavor mngr's ``generate_ssh_keypair`` produces."""
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    return private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.OpenSSH,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("utf-8")
 
 
 class HandshakeDrainingWebSocketClient(SimpleWebsocketClient):

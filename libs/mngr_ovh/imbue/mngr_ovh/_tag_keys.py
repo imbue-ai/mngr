@@ -13,3 +13,9 @@ from typing import Final
 MNGR_PROVIDER_TAG_KEY: Final[str] = "mngr-provider"
 MNGR_HOST_ID_TAG_KEY: Final[str] = "mngr-host-id"
 MNGR_RECYCLING_LOCK_TAG_KEY: Final[str] = "mngr-recycling-by"
+
+# ``mngr-host-id`` value prefix of a recycle-candidate orphan: a VPS adopted from a
+# timed-out order carries ``host-orphan-from-order-<order>-<uuid>`` there until the
+# recycle path claims it for a real host, so it is not a host id and discovery must
+# not treat it as one.
+ORPHAN_HOST_ID_PLACEHOLDER_PREFIX: Final[str] = "host-orphan-from-order-"

@@ -46,12 +46,33 @@ User Machine                              VPS
 - **Direct SSH to container**: The container's sshd port (default 2222) is exposed on the VPS's public IP. mngr connects directly to `<vps_ip>:2222` with key-based authentication.
 - **SSH host keys via cloud-init**: Host keys are generated locally and injected into the VPS via cloud-init `user_data`, eliminating TOFU (trust-on-first-use).
 - **Per-host docker volume on a btrfs subvolume**: Each VPS has exactly one mngr-managed Docker named volume (`mngr-host-vol-<host_id_hex>`), created with `--driver=local --opt type=none --opt device=/mngr-btrfs/<host_id_hex> --opt o=bind`. The `device=` path is a real btrfs subvolume on a loop-mounted btrfs filesystem (image file `/var/lib/mngr-btrfs.img`, mounted at `/mngr-btrfs` via `/etc/fstab`), which makes the per-host data eligible for `btrfs subvolume snapshot -r` for consistent snapshots. mngr reads and writes metadata (`host_state.json`, `agents/<agent_id>.json`, `host_dir/`) directly on the subvolume by extracting `Options.device` from `docker volume inspect`. Docker itself keeps default `data-root=/var/lib/docker` and `storage-driver=overlay2` (on the ext4 root); only this single volume's storage lives on btrfs.
-- **Separate SSH keypairs**: The VPS and container each have their own SSH keypair for defense in depth.
+- **Separate, per-host SSH keypairs**: The VPS root and the container each have their own client keypair, and both are minted per host (see "SSH key material" below), so the material that opens one host never opens another.
 - **Outer host reachable by name**: Every container is created with `--add-host host.docker.internal:host-gateway`, so a service the VPS binds on its docker bridge address (the `mngr_latchkey` VPS-resident gateway) is reachable from inside the container as `host.docker.internal` without an address known at create time.
+
+## SSH key material (per-host layout contract)
+
+Every keypair that grants access to a host is minted at `mngr create` under that host's own directory in the provider instance's key dir, `<profile>/providers/<backend>/<instance>/keys/host_keys/<host-uuid-hex>/`:
+
+| File | Purpose |
+|---|---|
+| `vps_ssh_key` / `vps_ssh_key.pub` | Client key for the VPS root (`root@vps:22`). The public half is uploaded to the cloud under the per-host name `mngr-<provider>-<host_id>` and authorized on root by the first-boot bootstrap. Under bare placement this is also the agent key. |
+| `container_ssh_key` / `container_ssh_key.pub` | Client key for the agent container's sshd (`vps:2222`). Container placement only. |
+| `host_key` / `host_key.pub` | The VPS sshd's host keypair, injected at first boot so strict host-key checking works on the first connection. |
+| `container_host_key` / `container_host_key.pub` | The container sshd's host keypair, likewise injected. |
+| `known_hosts` (symlink) | Convenience for consumers handed only the agent key path, which derive the pinned-host-keys file as its sibling. Points at whichever provider-wide store that key's endpoint is pinned in (`container_known_hosts` for container placement, `vps_known_hosts` for bare). |
+
+The host-key *pins* stay in the two provider-wide files, `keys/vps_known_hosts` and `keys/container_known_hosts`, whose `.pins.json` sidecar attributes every pin to its host. A host's pins are its records there, read with `load_host_key_record(known_hosts_path, host_id)`; every pin `mngr_vps` writes for a host is attributed, so nothing outside the per-host directory plus those two records is needed to reach a host. Destroy removes the per-host directory and both records once the VPS is gone, so a recycled host id can never inherit stale material; when the cloud destroy itself fails, the material is kept (with a warning) so the surviving instance stays reachable and destroyable from this machine.
+
+This directory is the complete set of material that grants access to one host. A consumer that carries a host's access to another machine collects exactly this directory (plus the host's two pin records) and nothing provider-wide; the layout is published as `VPS_HOST_ACCESS_MANIFEST` (`primitives.py`, a `HostAccessManifest` from mngr core), which the provider's own key paths resolve through, so such a consumer reads the file and store names from here rather than restating them. The published layout is the container-placement one (its per-host `known_hosts` link names `container_known_hosts`; bare placement links `vps_known_hosts` instead, and the manifest does not describe that variant), and minds materializes container placement only. Read paths never mint the VPS-root key: an operation on a host whose per-host `vps_ssh_key` is absent fails with `VpsHostKeyMissingError` before any SSH attempt (the container client key keeps resolve-or-mint semantics, per `specs/provider-shape.md` section 3.9).
+
+### Compatibility with hosts created before per-host VPS-root keys
+
+Hosts created by earlier releases only authorize the provider-wide `keys/vps_ssh_key`. That file is no longer created, but it is still read as a fallback when a host has no per-host `vps_ssh_key`, so such hosts stay reachable, listable, and destroyable from the machine that created them. They are not covered by the per-host layout contract above (their access material is provider-wide), and a machine without that legacy key cannot reach them.
 
 ## Modules
 
 - `vps_client.py` -- Abstract `VpsClientInterface` that concrete providers implement (create/destroy instances, SSH key management)
+- `vps_keys.py` -- Minting (create path) and strict resolution (read paths) of the per-host VPS-root client key
 - `instance.py` -- `VpsProvider` implementation with full lifecycle (create, stop, start, destroy, snapshots, discovery)
 - `host_store.py` -- `VpsHostStore` for reading/writing host records on the unified per-host volume; constructed via `open_host_store(outer, volume_name)`
 - `cloud_init.py` -- Cloud-init user_data generation for VPS provisioning
@@ -163,9 +184,9 @@ To add support for a new VPS provider (e.g., DigitalOcean, Hetzner):
 1. Create a new package (e.g., `mngr_digitalocean`)
 2. Implement `VpsClientInterface` with the provider's API
 3. Subclass `VpsProvider` and override the two discovery extension points:
-   - `_list_provider_vps_hostnames()` — return SSH-reachable hostnames (public IPv4 or provider DNS name like OVH's `serviceName`) for VPSes tagged with `mngr-provider=<self.name>`
+   - `_list_provider_vps_entries()` — return one `VpsListingEntry` (SSH-reachable hostname -- a public IPv4 or a provider DNS name like OVH's `serviceName` -- plus the host id from the instance's `mngr-host-id` tag) per VPS tagged with `mngr-provider=<self.name>`; `listing_entry_from_host_id_marker` does the parsing and skips rows without a usable host id
    - `_credentials_configured()` — return whether the provider's API credentials are resolvable
-   The shared discovery flow (SSH-into-each-VPS, read state container, fall back to cache on failure)
+   The shared discovery flow (SSH-into-each-VPS with that host's own key, read state container, fall back to cache on failure)
    lives on `VpsProvider` itself; subclasses only need to wire up these two hooks.
 4. Override `_supports_bare_isolation` to return True only if the provider's substrate can stop and later restart a machine (required for `isolation=NONE`; the default is False)
 5. Create a `ProviderBackendInterface` implementation and register via pluggy entry points

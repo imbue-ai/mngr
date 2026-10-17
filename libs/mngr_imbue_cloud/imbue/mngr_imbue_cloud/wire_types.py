@@ -30,6 +30,12 @@ from imbue.mngr_imbue_cloud.wire import WireModel
 # preserve-on-absent merge without a bump.
 SUPPORTED_RECORD_FORMAT: int = 1
 
+# The newest account-document semantics this client understands; the same
+# read-only rule as SUPPORTED_RECORD_FORMAT, applied per document. The
+# plugin itself never interprets documents, so this exists for the consumers
+# (minds) to compare against a document's wire ``document_format``.
+SUPPORTED_DOCUMENT_FORMAT: int = 1
+
 
 class WorkspaceStatus(WireEnum):
     """Wire lifecycle status of a remote workspace (GET /workspaces).
@@ -732,3 +738,46 @@ class SyncKeyBundle(WireModel):
     wrapped_dek: str = Field(description="Base64 password-wrapped DEK (opaque here)")
     key_epoch: int = Field(description="Bumped only on compromise recovery")
     updated_at: str = Field(default="", description="Server timestamp (response only)")
+
+
+class SyncDocument(WireModel):
+    """Wire form of one per-account document (transport-only; the plugin never decrypts or interprets).
+
+    Mirrors the connector's ``AccountDocumentModel``: a plaintext ``metadata``
+    object plus the base64 of the client-encrypted payload, keyed by
+    ``(kind, doc_id)`` within the account. ``state`` is passed through as its
+    lowercase wire string -- the producing (minds) and validating (connector)
+    ends own the vocabulary.
+    """
+
+    kind: str = Field(description="Document kind, e.g. 'connection' (lowercase letters and underscores)")
+    doc_id: str = Field(description="Document id within its kind")
+    metadata: dict[str, Any] = Field(
+        description=(
+            "Plaintext JSON object the server stores whole and never interprets. Required: a push sends only "
+            "the fields set on the document and the server replaces the stored object whole, so an unset "
+            "value would wipe it."
+        )
+    )
+    encrypted_payload: str | None = Field(
+        default=None,
+        description=(
+            "Base64 of the client-encrypted payload (opaque here). Omitted from a push, the server keeps "
+            "the stored blob; sent as null, it clears it."
+        ),
+    )
+    state: str = Field(description="Lifecycle state: 'active' or 'deleted' (tombstone)")
+    revision: int = Field(description="Per-row monotonic revision; pushes are CAS on this (a new row is 1)")
+    document_format: int = Field(
+        default=1,
+        description=(
+            "Semantic format of the document (missing = 1). A client whose SUPPORTED_DOCUMENT_FORMAT is "
+            "below this treats the document as read-only; the server rejects pushes carrying a value "
+            "below the stored row's (409 document_format_too_new)."
+        ),
+    )
+    created_at: str = Field(default="", description="Server timestamp (response only)")
+    updated_at: str = Field(default="", description="Server timestamp (response only)")
+    deleted_at: str | None = Field(
+        default=None, description="Server tombstone stamp (response only; set while state is 'deleted')"
+    )

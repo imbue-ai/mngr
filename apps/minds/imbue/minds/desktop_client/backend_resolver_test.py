@@ -800,6 +800,77 @@ def test_last_good_topology_falls_back_when_discovery_loses_the_host(tmp_path: P
     assert resolver.get_system_services_agent_id(workspace_agent) == services_agent
 
 
+def test_forget_providers_drops_the_instances_last_good_hosts_and_persists(tmp_path: Path) -> None:
+    """A removed provider instance (a connection removed or re-homed elsewhere) takes its hosts with it.
+
+    No snapshot for the instance ever arrives again, so nothing else would
+    prune them; without this they would render as running machines of this
+    device forever, surviving restarts through the persisted topology.
+    """
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    host = HostId.generate()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    other_host = HostId.generate()
+    other_workspace_agent = AgentId.generate()
+    other_services_agent = AgentId.generate()
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent, other_workspace_agent, other_services_agent),
+            discovered_agents=_pair_snapshot(host, workspace_agent, services_agent)
+            + _pair_snapshot(other_host, other_workspace_agent, other_services_agent),
+        )
+    )
+    resolver.update_agents(ParsedAgentsResult())
+    assert resolver.get_system_services_agent_id(workspace_agent) == services_agent
+
+    resolver.forget_providers({"docker"})
+
+    assert resolver.get_system_services_agent_id(workspace_agent) is None
+    assert resolver.get_system_services_agent_id(other_workspace_agent) is None
+    reloaded = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    assert reloaded.get_system_services_agent_id(workspace_agent) is None
+
+
+def test_list_last_good_provider_names_names_every_instance_the_persisted_topology_attributes_hosts_to(
+    tmp_path: Path,
+) -> None:
+    """Startup drops the last-good hosts of providers this device no longer polls; this is the list it checks."""
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    assert resolver.list_last_good_provider_names() == set()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(AgentId.generate(),),
+            discovered_agents=_pair_snapshot(HostId.generate(), AgentId.generate(), AgentId.generate()),
+        )
+    )
+    assert resolver.list_last_good_provider_names() == {"docker"}
+    reloaded = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    assert reloaded.list_last_good_provider_names() == {"docker"}
+    reloaded.forget_providers({"docker"})
+    assert reloaded.list_last_good_provider_names() == set()
+
+
+def test_forget_providers_leaves_other_instances_hosts_alone(tmp_path: Path) -> None:
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    host = HostId.generate()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=_pair_snapshot(host, workspace_agent, services_agent),
+        )
+    )
+
+    resolver.forget_providers({"aws_" + "0" * 32})
+
+    assert resolver.get_system_services_agent_id(workspace_agent) == services_agent
+
+
 def _primary_system_services_agent(host_id: HostId, agent_id: AgentId) -> DiscoveredAgent:
     """An Imbue Studio primary machine agent: the system-services agent, which carries the machine labels.
 

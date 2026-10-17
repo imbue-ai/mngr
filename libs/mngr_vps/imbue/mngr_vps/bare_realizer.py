@@ -14,8 +14,7 @@ from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_comman
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
-from imbue.mngr.providers.ssh_utils import load_or_create_per_host_client_keypair
-from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
+from imbue.mngr.providers.ssh_utils import ensure_per_host_known_hosts_link
 from imbue.mngr_vps.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps.data_types import AgentEndpoint
 from imbue.mngr_vps.data_types import PlacementHandle
@@ -26,7 +25,7 @@ from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store import VpsHostStore
 from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.primitives import VPS_KNOWN_HOSTS_NAME
-from imbue.mngr_vps.primitives import VPS_SSH_KEY_NAME
+from imbue.mngr_vps.vps_keys import resolve_vps_root_keypair
 
 # Root-disk directory on the bare VM holding the host record + agent data -- the
 # bare analog of the per-host Docker volume. One host per VM, so a fixed path is
@@ -50,11 +49,12 @@ class BareRealizer(HostRealizer):
     """Places the agent directly on the VPS OS -- no Docker container.
 
     The agent is the VM's root account, reached at ``vps_ip:22`` with the
-    host's own per-host client key, minted and authorized by
-    ``realize_placement`` (hosts created before per-host keys existed only
-    authorize the provider-wide VPS keypair, which remains the read fallback;
-    the VPS host key was pinned at provision time either way, so no sshd
-    reconfiguration is needed). ``realize_placement`` also installs the
+    host's own per-host VPS-root client key -- the one the substrate minted at
+    create and cloud-init authorized on root, so the agent connection and the
+    provider's outer connection are the same key (hosts created before per-host
+    keys existed only authorize the legacy provider-wide key, which stays the
+    read fallback; the VPS host key was pinned at provision time either way, so
+    no sshd reconfiguration is needed). ``realize_placement`` installs the
     lightweight host packages and the mngr host_dir layout on the VM -- the
     same setup the container gets, applied to the OS -- and the host record
     lives in a plain directory on the root disk. There is no container to
@@ -77,14 +77,14 @@ class BareRealizer(HostRealizer):
         return BARE_HOST_STORE_DIR / HOST_DIR_SUBPATH
 
     def _agent_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
-        # Per host for VMs created after per-host client keys landed; older VMs
-        # only authorize the legacy provider-wide vps_ssh_key, which remains the
-        # read fallback for them.
-        return resolve_per_host_client_keypair(self.key_dir, host_id, VPS_SSH_KEY_NAME, VPS_KNOWN_HOSTS_NAME)
-
-    def _create_per_host_agent_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
-        """Mint (or load) this host's own agent client keypair (creation path only)."""
-        return load_or_create_per_host_client_keypair(self.key_dir, host_id, VPS_SSH_KEY_NAME, VPS_KNOWN_HOSTS_NAME)
+        # The agent key IS the host's VPS-root key (minted by the substrate at
+        # create); consumers handed only this key path derive the pinned-host-keys
+        # file as its sibling, so the per-host dir links ``known_hosts`` at the
+        # VPS store this key's endpoint (port 22) is pinned in.
+        keypair = resolve_vps_root_keypair(self.key_dir, host_id)
+        if not keypair.is_legacy_provider_key:
+            ensure_per_host_known_hosts_link(self.key_dir, host_id, VPS_KNOWN_HOSTS_NAME)
+        return keypair.private_key_path, keypair.public_key
 
     def _vps_known_hosts_path(self) -> Path:
         return self.key_dir / VPS_KNOWN_HOSTS_NAME
@@ -107,7 +107,7 @@ class BareRealizer(HostRealizer):
             is_strict_parsing=self.mngr_ctx.config.strict_host_record_parsing,
         )
 
-    # --- discovery / listing ----------------------------------------------
+    # discovery / listing
 
     def find_host_record(self, outer: OuterHostInterface) -> tuple[HostId, VpsHostRecord] | None:
         # No container to probe: read the record straight from the fixed store
@@ -180,15 +180,10 @@ class BareRealizer(HostRealizer):
         if known_hosts_cmd is not None:
             _run_on_outer(outer, known_hosts_cmd, label="add-known-hosts")
 
-        # Mint this host's own agent client key and authorize it alongside any
-        # caller-provided keys. The provider-wide vps key (already authorized by
-        # cloud-init) stays the management key; the agent connection uses this
-        # per-host key, so no provider-wide material is ever exported with a
-        # host's credentials.
-        _per_host_key_path, per_host_public_key = self._create_per_host_agent_ssh_keypair(ctx.host_id)
-        authorized_keys_cmd = build_add_authorized_keys_command(
-            _BARE_AGENT_SSH_USER, tuple(ctx.authorized_keys or ()) + (per_host_public_key,)
-        )
+        # The host's per-host VPS-root key is already authorized on root by the
+        # first-boot bootstrap and doubles as the agent key, so only the
+        # caller-provided extra keys need adding here.
+        authorized_keys_cmd = build_add_authorized_keys_command(_BARE_AGENT_SSH_USER, tuple(ctx.authorized_keys or ()))
         if authorized_keys_cmd is not None:
             _run_on_outer(outer, authorized_keys_cmd, label="add-authorized-keys")
 

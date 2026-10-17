@@ -423,6 +423,20 @@ def test_signout_revoke_falls_back_to_the_stored_token_when_refresh_fails(tmp_pa
     assert revoke_bearers == ["Bearer stale-at"]
 
 
+def test_signout_revoke_falls_back_to_the_stored_token_when_the_connector_is_unreachable(tmp_path: Path) -> None:
+    """An outage during the refresh is not a dead session, but signout must still drop the local tokens offline."""
+    store, account = _store_with_stale_session(tmp_path)
+    session = store.load_by_account(account)
+    assert session is not None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("simulated outage", request=request)
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+
+    assert _revoke_server_sessions(store, client, account, session, all_devices=False) is False
+
+
 def _client_whose_revoke_endpoints_fail(
     tmp_path: Path,
 ) -> tuple[

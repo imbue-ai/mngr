@@ -34,8 +34,10 @@ from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.client import RecycleHandle
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
+from imbue.mngr_ovh.iam_tags import IamResource
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
+from imbue.mngr_ovh.iam_tags import ORPHAN_HOST_ID_PLACEHOLDER_PREFIX
 from imbue.mngr_ovh.iam_tags import attach_tag
 from imbue.mngr_ovh.iam_tags import attach_tags
 from imbue.mngr_ovh.iam_tags import iam_region_code_for_endpoint
@@ -54,8 +56,10 @@ from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import parse_vps_build_args
+from imbue.mngr_vps.data_types import VpsListingEntry
 from imbue.mngr_vps.host_setup import apply_host_setup_on_outer
 from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.instance import listing_entry_from_host_id_marker
 from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsMemoryMib
@@ -79,6 +83,30 @@ _LEGACY_OVH_PLAN_SHAPES: Final[Mapping[str, VpsInstanceShape]] = MappingProxyTyp
 )
 
 
+def _listing_entries_from_iam_resources(resources: Sequence[IamResource]) -> list[VpsListingEntry]:
+    """Pair each of this provider's IAM VPS rows with its host id; rows without one are skipped.
+
+    A recycle-candidate orphan carries a ``host-orphan-from-order-*`` placeholder
+    in its ``mngr-host-id`` tag (written by ``_adopt_delivered_orphan``) until the
+    recycle path claims it, so it is an expected, possibly long-lived row with no
+    mngr host to discover -- skipped at debug, not warned about on every listing.
+    Any other row without a parseable host id is skipped with a warning by
+    ``listing_entry_from_host_id_marker``.
+    """
+    entries: list[VpsListingEntry] = []
+    for resource in resources:
+        if not resource.name:
+            continue
+        host_id_marker = resource.tags.get(MNGR_HOST_ID_TAG_KEY)
+        if host_id_marker is not None and host_id_marker.startswith(ORPHAN_HOST_ID_PLACEHOLDER_PREFIX):
+            logger.debug("Skipping recycle-candidate orphan {} ({}) in discovery", resource.urn, resource.name)
+            continue
+        entry = listing_entry_from_host_id_marker(resource.name, host_id_marker, resource.urn)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
 class OvhProvider(VpsProvider):
     """OVH classic-VPS provider built on top of ``VpsProvider``.
 
@@ -93,7 +121,7 @@ class OvhProvider(VpsProvider):
     ovh_client: OvhVpsClient = Field(frozen=True, description="OVH API client")
     ovh_config: OvhProviderConfig = Field(frozen=True, description="OVH-specific configuration")
 
-    _vps_iam_cache: list[str] | None = PrivateAttr(default=None)
+    _vps_iam_cache: list[VpsListingEntry] | None = PrivateAttr(default=None)
 
     def reset_caches(self) -> None:
         super().reset_caches()
@@ -124,13 +152,14 @@ class OvhProvider(VpsProvider):
 
     # Discovery -- list our VPSes via IAM v2 tags
 
-    def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return SSH hostnames for OVH VPSes tagged with this provider's name.
+    def _list_provider_vps_entries(self) -> list[VpsListingEntry]:
+        """Return the OVH VPSes tagged with this provider's name, with their host ids.
 
-        Each entry is an OVH ``serviceName`` like
-        ``vps-eec8860b.vps.ovh.us`` -- a DNS name that resolves to the
-        VPS's public IPv4, which is what paramiko / pyinfra ultimately
-        connect to.
+        Each hostname is an OVH ``serviceName`` like ``vps-eec8860b.vps.ovh.us``
+        -- a DNS name that resolves to the VPS's public IPv4, which is what
+        paramiko / pyinfra ultimately connect to. The host id is the
+        ``mngr-host-id`` IAM tag (see ``_listing_entries_from_iam_resources``
+        for the rows that are skipped).
         """
         if self._vps_iam_cache is not None:
             return list(self._vps_iam_cache)
@@ -145,9 +174,9 @@ class OvhProvider(VpsProvider):
         # let it propagate so `mngr list --on-error continue` records the
         # failure instead of silently dropping live hosts.
         resources = list_vps_resources_for_provider(self.ovh_client, provider_name=str(self.name))
-        hostnames = [r.name for r in resources if r.name]
-        self._vps_iam_cache = hostnames
-        return list(hostnames)
+        entries = _listing_entries_from_iam_resources(resources)
+        self._vps_iam_cache = entries
+        return list(entries)
 
     # Pending-order reconciliation -- adopt VPSes from previously-timed-out orders
 
@@ -256,7 +285,7 @@ class OvhProvider(VpsProvider):
           3. ``set_renew_at_expiration(..., True)`` so the VPS satisfies
              the recycle path's ``deleteAtExpiration`` eligibility filter.
         """
-        placeholder_host_id = f"host-orphan-from-order-{order_id}-{uuid.uuid4().hex}"
+        placeholder_host_id = f"{ORPHAN_HOST_ID_PLACEHOLDER_PREFIX}{order_id}-{uuid.uuid4().hex}"
         urn = vps_urn_for(service_name, region_code=region_code)
         attach_tag(self.ovh_client, urn, MNGR_PROVIDER_TAG_KEY, provider_name)
         attach_tag(self.ovh_client, urn, MNGR_HOST_ID_TAG_KEY, placeholder_host_id)
@@ -365,9 +394,10 @@ class OvhProvider(VpsProvider):
         unused: OVH provides no mechanism to inject host keys at install
         time. The locally-generated host key files are left on disk; they
         do no harm and keep the base ``create_host`` flow uniform.
-        ``vps_public_key`` is likewise unused here: OVH installs the SSH
-        public key via the rebuild API (``get_cached_public_key`` below),
-        not via the base cloud-init path that consumes it.
+        ``vps_public_key`` (the host's per-host VPS-root public key) is
+        likewise unused here: OVH installs it via the rebuild API
+        (``get_cached_public_key`` below, which resolves the uploaded id back
+        to that same key), not via the base cloud-init path that consumes it.
 
         The OS image is taken from ``OvhProviderConfig.default_image_name``;
         per-host image overrides are not supported via build args, matching
@@ -523,28 +553,29 @@ class OvhProvider(VpsProvider):
                 # the bootstrap sudo-copies the key to /root/.ssh so the
                 # rest of the provider (which operates as root via the
                 # base VpsProvider) works without per-call sudos.
-                vps_private_key_path, _ = self._get_vps_ssh_keypair()
+                vps_keypair = self._resolve_vps_ssh_keypair(host_id)
                 bootstrap_user = self.ovh_config.bootstrap_ssh_user
                 pin_host_key_via_tofu(
                     hostname=service_name,
                     port=22,
                     ssh_user=bootstrap_user,
-                    private_key_path=vps_private_key_path,
+                    private_key_path=vps_keypair.private_key_path,
                     known_hosts_path=self._vps_known_hosts_path(),
+                    host_id=host_id,
                     timeout_seconds=self.config.ssh_connect_timeout,
                 )
                 bootstrap_root_authorized_keys_via_user(
                     hostname=service_name,
                     port=22,
                     bootstrap_user=bootstrap_user,
-                    private_key_path=vps_private_key_path,
+                    private_key_path=vps_keypair.private_key_path,
                     known_hosts_path=self._vps_known_hosts_path(),
                     timeout_seconds=self.config.ssh_connect_timeout,
                 )
                 verify_root_ssh(
                     hostname=service_name,
                     port=22,
-                    private_key_path=vps_private_key_path,
+                    private_key_path=vps_keypair.private_key_path,
                     known_hosts_path=self._vps_known_hosts_path(),
                     timeout_seconds=self.config.ssh_connect_timeout,
                 )
@@ -561,7 +592,7 @@ class OvhProvider(VpsProvider):
                 # paths -- the recycle rebuild reinstalls the qemu agent) before
                 # the base VpsProvider takes over. Any failure raises and
                 # aborts provisioning, so no half-set-up host is handed back.
-                with self._make_outer_for_vps_ip(service_name) as outer:
+                with self._make_outer_for_vps_ip(service_name, host_id) as outer:
                     apply_host_setup_on_outer(
                         outer,
                         install_gvisor_runtime=self.config.install_gvisor_runtime,

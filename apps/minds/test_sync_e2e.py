@@ -14,6 +14,12 @@ settings Backup group is still a placeholder (see _configure_backups_via_app).
 Direct connector reads (via the plugin client) are used only to *wait* for
 server-side convergence, never to mutate.
 
+The cloud-connection tests come in both shapes: one drives two
+``ConnectionStore`` instances (the two "devices") over the real ``mngr
+imbue_cloud sync documents`` CLI with no Electron, pinning the store-level
+round trip on its own; the other adds a connection on one device and waits for
+it to reach the providers panel of the real Electron app on another.
+
 Isolation model: every test gets its own minds root name
 (``minds-ci-e2e<rand>``), so the app derives a private data root + mngr host
 dir + docker container prefix under the pytest-faked ``$HOME`` -- tests never
@@ -28,8 +34,12 @@ import shutil
 import subprocess
 import threading
 import time
+import tomllib
 import zipfile
 from collections.abc import Callable
+from collections.abc import Iterator
+from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 from typing import TypeVar
@@ -45,13 +55,24 @@ from pydantic import SecretStr
 from test_snapshot_resume import _ensure_restic_on_sandbox_host
 from test_snapshot_resume import _isolated_host_config_root
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.secret_wrapping import SecretWrappingError
 from imbue.minds.bootstrap import MindsPathRole
 from imbue.minds.bootstrap import minds_dir_for_role
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
+from imbue.minds.config.data_types import InstallationPaths
+from imbue.minds.desktop_client import dek_store
 from imbue.minds.desktop_client.backup_export import export_zip_path_for_host
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
+from imbue.minds.desktop_client.connections.data_types import CONNECTION_STATE_ACTIVE
+from imbue.minds.desktop_client.connections.data_types import CONNECTION_STATE_DELETED
+from imbue.minds.desktop_client.connections.data_types import ConnectionCredentials
+from imbue.minds.desktop_client.connections.primitives import CONNECTION_DOCUMENT_KIND
+from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
+from imbue.minds.desktop_client.connections.primitives import ConnectionId
+from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
 from imbue.minds.desktop_client.dek_store import unwrap_bundle_json
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import backend_origin_from_page
@@ -62,8 +83,11 @@ from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_def
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
 from imbue.minds.desktop_client.e2e_workspace_runner import workspace_coordinate_from_subdomain
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.mngr_settings.profile_paths import read_active_profile_dir
 from imbue.minds.testing import SyncE2EAccount
 from imbue.minds.testing import SyncE2EEnv
+from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
@@ -173,7 +197,7 @@ def _wait_until(description: str, timeout_seconds: float, probe: Callable[[], _T
     )
 
 
-# -- Docker-level setup helpers (pre/post the UI-driven story) ----------------
+# Docker-level setup helpers (pre/post the UI-driven story)
 
 
 def _run_docker(args: list[str], *, timeout: int = 60) -> str:
@@ -275,7 +299,7 @@ def _destroy_account_buckets_best_effort(runtime: _SyncE2ERuntime, account: Sync
             logger.warning("Could not delete test bucket {} (likely non-empty): {}", bucket.bucket_name, e)
 
 
-# -- Connector convergence probes (read-only waits, never mutations) -----------
+# Connector convergence probes (read-only waits, never mutations)
 
 
 def _record_for_agent(runtime: _SyncE2ERuntime, account: SyncE2EAccount, agent_id: str) -> SyncWorkspaceRecord | None:
@@ -324,7 +348,7 @@ def _unwrapped_dek(bundle: SyncKeyBundle, password: str) -> bytes:
     return unwrap_bundle_json(bundle.model_dump(), SecretStr(password))
 
 
-# -- Electron UI flows ---------------------------------------------------------
+# Electron UI flows
 
 
 def _create_unassociated_workspace(runtime: _SyncE2ERuntime) -> str:
@@ -344,6 +368,36 @@ def _create_unassociated_workspace(runtime: _SyncE2ERuntime) -> str:
     return agent_id
 
 
+def _run_mngr_for_profile(
+    args: Sequence[str], *, mngr_host_dir: Path, mngr_prefix: str, cwd: Path, timeout: int
+) -> subprocess.CompletedProcess[str]:
+    """Run ``mngr <args>`` from this checkout against one mngr profile (host dir + container prefix)."""
+    return subprocess.run(
+        ["uv", "run", "--project", str(_REPO_ROOT), "mngr", *args],
+        env={**os.environ, "MNGR_HOST_DIR": str(mngr_host_dir), "MNGR_PREFIX": mngr_prefix},
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _auth_signin_args(email: str, password: str, connector_url: str) -> list[str]:
+    """The headless ``mngr imbue_cloud auth signin`` argv."""
+    return [
+        "imbue_cloud",
+        "auth",
+        "signin",
+        "--account",
+        email,
+        "--password",
+        password,
+        "--connector-url",
+        connector_url.rstrip("/"),
+    ]
+
+
 def _agent_id_for_coordinate(runtime: _SyncE2ERuntime, coordinate: str) -> str:
     """Map a content-URL origin coordinate to its agent id.
 
@@ -360,23 +414,17 @@ def _agent_id_for_coordinate(runtime: _SyncE2ERuntime, coordinate: str) -> str:
     # default abort mode would fail the whole list on it, while continue mode
     # still emits every reachable provider's agents and signals the partial
     # failure through the exit code.
-    # Same invocation shape as _sign_in_headless's mngr subprocess: the APP's
+    # Same profile and cwd as _sign_in_headless's mngr subprocess: the APP's
     # own MNGR_HOST_DIR (where its agents' host records live -- pointing at the
     # isolated config root instead returns an empty listing), with the config
     # root as cwd so the project-config walk finds the pytest-opted-in
     # settings.toml.
-    result = subprocess.run(
-        ["uv", "run", "--project", str(_REPO_ROOT), "mngr", "list", "--format", "json", "--on-error", "continue"],
-        env={
-            **os.environ,
-            "MNGR_HOST_DIR": str(mngr_host_dir_for(runtime.root_name)),
-            "MNGR_PREFIX": runtime.mngr_prefix,
-        },
+    result = _run_mngr_for_profile(
+        ["list", "--format", "json", "--on-error", "continue"],
+        mngr_host_dir=mngr_host_dir_for(runtime.root_name),
+        mngr_prefix=runtime.mngr_prefix,
         cwd=runtime.host_config_root,
-        capture_output=True,
-        text=True,
         timeout=120,
-        check=False,
     )
     assert result.returncode in (0, 6), f"`mngr list` failed (exit {result.returncode}):\n{result.stderr[-4000:]}"
     data = json.loads(result.stdout)
@@ -411,31 +459,11 @@ def _sign_in_headless(runtime: _SyncE2ERuntime, page: Page, email: str, password
         _SIGN_IN_TIMEOUT_SECONDS,
         lambda: True if profile_config.is_file() else None,
     )
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "--project",
-            str(_REPO_ROOT),
-            "mngr",
-            "imbue_cloud",
-            "auth",
-            "signin",
-            "--account",
-            email,
-            "--password",
-            password,
-            "--connector-url",
-            str(runtime.connector.base_url).rstrip("/"),
-        ],
-        env={
-            **os.environ,
-            "MNGR_HOST_DIR": str(mngr_host_dir_for(runtime.root_name)),
-            "MNGR_PREFIX": runtime.mngr_prefix,
-        },
+    result = _run_mngr_for_profile(
+        _auth_signin_args(email, password, str(runtime.connector.base_url)),
+        mngr_host_dir=mngr_host_dir_for(runtime.root_name),
+        mngr_prefix=runtime.mngr_prefix,
         cwd=runtime.host_config_root,
-        capture_output=True,
-        text=True,
         timeout=_SIGN_IN_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, (
@@ -826,7 +854,7 @@ def _assert_zip_contains_sentinel(zip_path: Path, sentinel_content: str) -> None
         )
 
 
-# -- The tests -----------------------------------------------------------------
+# The tests
 
 
 @pytest.mark.minds_snapshot_resume
@@ -1138,3 +1166,336 @@ def test_master_password_lifecycle_rewraps_scrubs_and_restores(
             _assert_remote_row_visible(page, origin, agent_id)
     finally:
         _destroy_test_containers_best_effort(runtime)
+
+
+def _initialize_mngr_profile_and_sign_in(
+    mngr_host_dir: Path, mngr_prefix: str, sync_e2e_env: SyncE2EEnv, account: SyncE2EAccount
+) -> None:
+    """Create a private mngr profile in ``mngr_host_dir`` and sign the account into it headlessly.
+
+    The plugin's session store lives under the profile, which mngr creates on
+    its first invocation (``config list`` is the cheapest one: no provider
+    discovery). Both run from ``$HOME`` like the app's own ``mngr imbue_cloud``
+    subprocesses, so no project config (and no pytest config guard) is involved.
+    """
+    for args in (
+        ["config", "list"],
+        _auth_signin_args(account.email, account.password.get_secret_value(), sync_e2e_env.connector_url),
+    ):
+        result = _run_mngr_for_profile(
+            args,
+            mngr_host_dir=mngr_host_dir,
+            mngr_prefix=mngr_prefix,
+            cwd=Path.home(),
+            timeout=_SIGN_IN_TIMEOUT_SECONDS,
+        )
+        assert result.returncode == 0, (
+            f"mngr {args[0]} {args[1]} failed (exit {result.returncode}): "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+
+
+@contextmanager
+def _initialized_mngr_caller() -> Iterator[MngrCaller]:
+    """An initialized ``MngrCaller`` that is stopped on exit.
+
+    Every call leaves a replacement warm ``mngr`` process idle on its socket,
+    and only ``stop`` closes that socket; without it the concurrency group's
+    exit waits its full timeout for the process and then fails.
+    """
+    mngr_caller = MngrCaller()
+    with ConcurrencyGroup(name="connection-sync-e2e") as concurrency_group:
+        mngr_caller.initialize(concurrency_group)
+        try:
+            yield mngr_caller
+        finally:
+            mngr_caller.stop()
+
+
+@pytest.mark.minds_snapshot_resume
+@pytest.mark.timeout(600, func_only=False)
+def test_cloud_connection_syncs_across_devices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sync_e2e_env: SyncE2EEnv,
+    sync_e2e_account: SyncE2EAccount,
+) -> None:
+    """A cloud connection added on one device reaches another through the real connector.
+
+    Two ``ConnectionStore`` instances over separate data dirs (replica + key
+    store) play the two devices; they share one signed-in plugin session in a
+    private mngr host dir, since what is under test is the document replica,
+    not session isolation. Device A adds and pushes a Modal connection; the
+    connector holds only ciphertext; device B (unlocked with the same key
+    bundle) pulls and decrypts it; device B's delete tombstones the document
+    on the connector and device A's next pull drops the row.
+    """
+    configure_logging()
+    mngr_host_dir = tmp_path / "mngr_host_dir"
+    mngr_prefix = f"e2e{get_short_random_string()}"
+    # The warm mngr process the stores' CLI wrapper spawns inherits this env.
+    monkeypatch.setenv("MNGR_HOST_DIR", str(mngr_host_dir))
+    monkeypatch.setenv("MNGR_PREFIX", mngr_prefix)
+    _initialize_mngr_profile_and_sign_in(mngr_host_dir, mngr_prefix, sync_e2e_env, sync_e2e_account)
+
+    user_id = sync_e2e_account.user_id
+    email = sync_e2e_account.email
+    password = SecretStr(f"pw-{get_short_random_string()}")
+    token_id = f"ak-e2e-{get_short_random_string()}"
+    token_secret = SecretStr(f"as-e2e-{get_short_random_string()}")
+    credentials = ConnectionCredentials(token_id=token_id, token_secret=token_secret)
+    connection_id = ConnectionId.generate()
+    paths_a = InstallationPaths(data_dir=tmp_path / "device-a")
+    paths_b = InstallationPaths(data_dir=tmp_path / "device-b")
+    # Device A mints the account key and wraps it under the master password;
+    # device B unlocks with that bundle (the bundle's own push/pull is covered
+    # by the master-password lifecycle test above).
+    bundle = dek_store.set_master_password_for_account(paths_a, user_id, password)
+    assert bundle is not None
+    dek_store.unlock_account_with_bundle(paths_b, user_id, bundle, password)
+    connector = ImbueCloudConnectorClient(base_url=AnyUrl(sync_e2e_env.connector_url))
+
+    with _initialized_mngr_caller() as mngr_caller:
+        cli = ImbueCloudCli(mngr_caller=mngr_caller, connector_url=AnyUrl(sync_e2e_env.connector_url))
+        store_a = ConnectionStore(paths=paths_a, cli=cli, device_label="device-a")
+        store_b = ConnectionStore(paths=paths_b, cli=cli, device_label="device-b")
+
+        store_a.add_connection(
+            user_id,
+            connection_id,
+            ConnectionBackend.MODAL,
+            alias="e2e modal",
+            identifier=token_id,
+            placement={},
+            credentials=credentials,
+        )
+        pushed = store_a.push_connection(user_id, email, str(connection_id))
+        assert pushed.revision >= 1
+        assert not pushed.is_dirty
+
+        # The connector holds the metadata in the clear and the credentials only as ciphertext.
+        documents = connector.list_sync_documents(sync_e2e_account.access_token, CONNECTION_DOCUMENT_KIND)
+        assert [document.doc_id for document in documents] == [str(connection_id)]
+        stored = documents[0]
+        assert stored.state == CONNECTION_STATE_ACTIVE
+        assert stored.revision == pushed.revision
+        assert stored.metadata["alias"] == "e2e modal"
+        assert stored.metadata["backend"] == "modal"
+        assert stored.encrypted_payload is not None
+        assert token_secret.get_secret_value() not in stored.encrypted_payload
+
+        # Device B pulls the row and decrypts it under the shared key.
+        outcome_b = store_b.pull(user_id, email)
+        assert outcome_b.is_reached
+        assert outcome_b.is_changed
+        (record_b,) = store_b.list_active_connections(user_id)
+        assert record_b.revision == pushed.revision
+        decrypted = store_b.decrypt_credentials(user_id, record_b)
+        assert decrypted is not None
+        assert decrypted.to_plaintext_dict() == credentials.to_plaintext_dict()
+        view = store_b.view_for(user_id, record_b)
+        assert view is not None
+        assert view.instance_name == provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id)
+        assert view.alias == "e2e modal"
+
+        # Device B deletes: the connector keeps a payload-less tombstone, device A drops the row.
+        store_b.remove_connection(user_id, email, str(connection_id))
+        assert store_b.list_connections(user_id) == []
+        tombstones = connector.list_sync_documents(sync_e2e_account.access_token, CONNECTION_DOCUMENT_KIND)
+        assert [(document.doc_id, document.state, document.encrypted_payload) for document in tombstones] == [
+            (str(connection_id), CONNECTION_STATE_DELETED, None)
+        ]
+        outcome_a = store_a.pull(user_id, email)
+        assert outcome_a.is_reached
+        assert outcome_a.is_changed
+        assert store_a.list_connections(user_id) == []
+
+
+def _unlock_via_api(page: Page, origin: str, password: str) -> None:
+    """Enter the master password through the app's unlock API, from the app's own page.
+
+    Posts the same ``/_chrome/sync-unlock`` request the landing banner sends
+    (on the app's real session cookies), so the unlock does not wait on the
+    banner's render; the banner's own flow is what ``_unlock_via_banner``
+    drives in the other tests here.
+    """
+    _goto_landing(page, origin)
+    result = page.evaluate(
+        """(password) => fetch('/_chrome/sync-unlock', {
+               method: 'POST',
+               credentials: 'same-origin',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify({password}),
+           }).then((resp) => resp.text().then((text) => ({status: resp.status, body: text.slice(0, 1000)})))""",
+        password,
+    )
+    assert result["status"] == 200, f"Unlock failed: {result}"
+    logger.info("Unlocked the account through the unlock API")
+
+
+# One Playwright wait per poll of the providers panel; the timeout counts as
+# transient so _wait_until keeps polling until the sync convergence deadline.
+_PANEL_ROW_WAIT_SECONDS: Final[int] = 5
+
+
+def _wait_for_connection_in_panel(page: Page, origin: str, instance_name: str) -> str:
+    """Open the landing providers panel and wait for the connection's row; returns the row's text.
+
+    The panel body renders on the redraw after the toggle click, so the row is
+    awaited with a Playwright wait rather than read in the same tick. The panel
+    is opened only while closed (no provider row is on the page), so a landing
+    reload that resets it is re-opened on the next poll.
+    """
+    _goto_landing(page, origin)
+
+    def connection_row() -> str | None:
+        toggle = page.query_selector("#landing-providers button")
+        if toggle is None:
+            return None
+        if page.query_selector("#landing-providers [data-provider-name]") is None:
+            toggle.click()
+        row = page.wait_for_selector(
+            f'[data-connection-instance="{instance_name}"]', timeout=_PANEL_ROW_WAIT_SECONDS * 1000
+        )
+        return row.inner_text() if row is not None else None
+
+    try:
+        return _wait_until(
+            f"the connection {instance_name} to appear in the providers panel",
+            _SYNC_CONVERGENCE_TIMEOUT_SECONDS,
+            connection_row,
+        )
+    except AssertionError as e:
+        raise AssertionError(f"{e}; {_landing_state_snapshot(page)}") from None
+
+
+def _wait_for_device_provider_ok(page: Page, provider_name: str) -> str:
+    """Wait for the open providers panel's device section to report ``provider_name`` as OK; returns the row's text.
+
+    Discovery reaches the device provider through its CLI, so this also pins
+    the test's docker use to its own call window for the resource guard.
+    """
+
+    def provider_row() -> str | None:
+        row = page.query_selector(f'[data-provider-name="{provider_name}"]')
+        if row is None:
+            return None
+        text = row.inner_text()
+        return text if "OK" in text else None
+
+    return _wait_until(
+        f"the {provider_name} device provider to report OK in the providers panel",
+        _SYNC_CONVERGENCE_TIMEOUT_SECONDS,
+        provider_row,
+    )
+
+
+def _read_provider_block(mngr_host_dir: Path, instance_name: str) -> dict[str, object] | None:
+    """The ``[providers.<instance>]`` block of the app's active mngr profile, or None until it is written."""
+    profile_dir = read_active_profile_dir(mngr_host_dir)
+    if profile_dir is None or not (profile_dir / "settings.toml").is_file():
+        return None
+    providers = tomllib.loads((profile_dir / "settings.toml").read_text()).get("providers", {})
+    block = providers.get(instance_name)
+    return dict(block) if isinstance(block, dict) else None
+
+
+@pytest.mark.minds_snapshot_resume
+@pytest.mark.docker
+@pytest.mark.timeout(900, func_only=False)
+def test_cloud_connection_added_on_one_device_reaches_the_app_on_another(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sync_e2e_env: SyncE2EEnv,
+    sync_e2e_account: SyncE2EAccount,
+    snapshot_sandbox_dockerd: None,
+    xvfb_display: str,
+) -> None:
+    """A cloud connection added on one device reaches the app on another, end to end through the real app.
+
+    Device A (store-level, its own mngr profile) sets the master password and
+    pushes a Modal connection under the account. Device B is the real Electron
+    app on a fresh install: it signs in, its providers panel lists the
+    connection under the account (locked) beside this device's docker
+    provider, it unlocks, and then its mngr profile carries the connection's
+    provider block and ``mngr list`` on that profile names the instance. The
+    token is fake, so discovery reports the instance as errored (not
+    authorized) rather than healthy; what is under test is that the
+    connection reached the other device and became a provider there.
+    """
+    runtime = _prepare_runtime(tmp_path, monkeypatch, sync_e2e_env)
+    user_id = sync_e2e_account.user_id
+    email = sync_e2e_account.email
+    master_password = f"pw-{get_short_random_string()}"
+    connection_id = ConnectionId.generate()
+    instance_name = provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id)
+    alias = f"e2e modal {get_short_random_string()}"
+
+    # Device A: a private mngr profile signed into the account; the env
+    # overrides are scoped so the app below resolves its own host dir.
+    with monkeypatch.context() as device_a_env:
+        mngr_host_dir_a = tmp_path / "device-a-mngr"
+        mngr_prefix_a = f"e2ea{get_short_random_string()}"
+        device_a_env.setenv("MNGR_HOST_DIR", str(mngr_host_dir_a))
+        device_a_env.setenv("MNGR_PREFIX", mngr_prefix_a)
+        _initialize_mngr_profile_and_sign_in(mngr_host_dir_a, mngr_prefix_a, sync_e2e_env, sync_e2e_account)
+        paths_a = InstallationPaths(data_dir=tmp_path / "device-a")
+        bundle = dek_store.set_master_password_for_account(paths_a, user_id, SecretStr(master_password))
+        assert bundle is not None
+        with _initialized_mngr_caller() as mngr_caller:
+            cli_a = ImbueCloudCli(mngr_caller=mngr_caller, connector_url=AnyUrl(sync_e2e_env.connector_url))
+            cli_a.sync_bundle_push(email, bundle)
+            store_a = ConnectionStore(paths=paths_a, cli=cli_a, device_label="device-a")
+            store_a.add_connection(
+                user_id,
+                connection_id,
+                ConnectionBackend.MODAL,
+                alias=alias,
+                identifier="ak-e…fake",
+                placement={},
+                credentials=ConnectionCredentials(
+                    token_id=f"ak-e2e-{get_short_random_string()}",
+                    token_secret=SecretStr(f"as-e2e-{get_short_random_string()}"),
+                ),
+            )
+            pushed = store_a.push_connection(user_id, email, str(connection_id))
+            assert pushed.revision >= 1
+
+    # Device B: the real app on a fresh install.
+    with electron_app_session(runtime.template_path, find_free_port(), runtime.host_config_root) as (
+        _browser,
+        page,
+    ):
+        origin = _sign_in_headless(runtime, page, email, sync_e2e_account.password.get_secret_value())
+
+        # The connection reaches the panel (locked: no DEK here yet) before the
+        # unlock, the order a real user sees: the unlock banner only appears once
+        # the pulled connection marks the account locked on this device.
+        row_text = _wait_for_connection_in_panel(page, origin, instance_name)
+        assert alias in row_text
+        assert "Modal" in row_text
+        # The device section lists this device's docker provider alongside the account's connection.
+        _wait_for_device_provider_ok(page, "docker")
+        _unlock_via_api(page, origin, master_password)
+
+        mngr_host_dir_b = mngr_host_dir_for(runtime.root_name)
+        block = _wait_until(
+            f"the {instance_name} provider block in the app's mngr profile",
+            _SYNC_CONVERGENCE_TIMEOUT_SECONDS,
+            lambda: _read_provider_block(mngr_host_dir_b, instance_name),
+        )
+        assert block["backend"] == "modal"
+        assert block["user_id"] == instance_name.removeprefix("modal_")
+        listing = _run_mngr_for_profile(
+            ["list", "--provider", instance_name, "--format", "json"],
+            mngr_host_dir=mngr_host_dir_b,
+            mngr_prefix=runtime.mngr_prefix,
+            cwd=runtime.host_config_root,
+            timeout=_STATUS_FETCH_SETTLE_SECONDS,
+        )
+        # The fake token cannot authenticate, so the listing may fail; either way
+        # mngr resolved the instance from the materialized block (an unknown
+        # provider is refused before any Modal call, with a different message).
+        combined = listing.stdout + listing.stderr
+        assert "Unknown provider" not in combined and "unknown provider" not in combined, combined
+        assert listing.returncode == 0 or instance_name in combined, combined

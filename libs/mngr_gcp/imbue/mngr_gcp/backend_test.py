@@ -425,7 +425,7 @@ def test_find_instance_for_host_matches_by_host_id_metadata(temp_mngr_ctx: MngrC
     assert found["id"] == "i-match"
 
 
-def test_realizer_for_vps_ip_reads_bare_marker_from_gce_metadata(temp_mngr_ctx: MngrContext) -> None:
+def test_realizer_for_host_id_reads_bare_marker_from_gce_metadata(temp_mngr_ctx: MngrContext) -> None:
     """A GCE bare host (metadata ``mngr-isolation=none``) is probed with the BARE realizer.
 
     GCP stores the placement marker in metadata (not the normalized tag list), so the
@@ -434,19 +434,23 @@ def test_realizer_for_vps_ip_reads_bare_marker_from_gce_metadata(temp_mngr_ctx: 
     the provider config defaults to CONTAINER -- the fix for connecting to a bare host.
     """
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
     instances.list_result = [
         _instance(
             "i-bare",
             "RUNNING",
-            host_id=HostId.generate(),
+            host_id=host_id,
             labels={"mngr-provider": "gcp-test"},
             metadata={ISOLATION_METADATA_KEY: "none"},
             nat_ip="10.0.0.42",
         ),
     ]
-    realizer = provider._realizer_for_vps_ip("10.0.0.42")
+    realizer = provider._realizer_for_host_id(host_id)
     assert isinstance(realizer, BareRealizer)
-    assert realizer.agent_endpoint("10.0.0.42", HostId.generate()).port == 22
+    # The shared listing reads the host id from GCE metadata (labels cannot hold it).
+    assert [(entry.hostname, entry.host_id) for entry in provider._list_provider_vps_entries()] == [
+        ("10.0.0.42", host_id)
+    ]
 
 
 def test_find_instance_for_host_returns_none_when_no_metadata_match(temp_mngr_ctx: MngrContext) -> None:

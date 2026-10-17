@@ -4,7 +4,6 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from typing import Final
 
 from loguru import logger
 
@@ -68,15 +67,10 @@ from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store import VpsHostStore
 from imbue.mngr_vps.host_store import open_host_store
 from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
+from imbue.mngr_vps.primitives import CONTAINER_HOST_KEY_NAME
+from imbue.mngr_vps.primitives import CONTAINER_KNOWN_HOSTS_NAME
+from imbue.mngr_vps.primitives import CONTAINER_SSH_KEY_NAME
 from imbue.mngr_vps.primitives import load_or_create_per_host_host_keypair
-
-# Key-file names under ``key_dir`` for the container's client/host keys and its
-# known_hosts. The provider exposes thin accessors with the same names so the
-# imbue_cloud slice provider's ``_create_host_object`` override keeps working;
-# these constants are the single source of truth for the file names.
-CONTAINER_SSH_KEY_NAME: Final[str] = "container_ssh_key"
-CONTAINER_HOST_KEY_NAME: Final[str] = "container_host_key"
-CONTAINER_KNOWN_HOSTS_NAME: Final[str] = "container_known_hosts"
 
 
 def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:

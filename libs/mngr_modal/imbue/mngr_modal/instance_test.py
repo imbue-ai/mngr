@@ -34,6 +34,7 @@ from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
+from imbue.mngr_modal.errors import ModalHostKeyMissingError
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import ModalSnapshotEndpointTimeoutMngrError
 from imbue.mngr_modal.instance import HOST_VOLUME_INFIX
@@ -52,6 +53,9 @@ from imbue.mngr_modal.instance import await_snapshot_endpoint_url
 from imbue.mngr_modal.instance import build_sandbox_tags
 from imbue.mngr_modal.instance import check_host_name_is_unique
 from imbue.mngr_modal.instance import parse_sandbox_tags
+from imbue.mngr_modal.ssh_utils import load_or_create_per_host_client_keypair
+from imbue.mngr_modal.ssh_utils import per_host_key_dir
+from imbue.mngr_modal.ssh_utils import save_ssh_keypair
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
@@ -251,6 +255,54 @@ def expired_credentials_modal_provider(
 def test_modal_provider_name(modal_provider: ModalProviderInstance) -> None:
     """Modal provider should have the correct name."""
     assert modal_provider.name == ProviderInstanceName("modal-test")
+
+
+def test_client_keypair_prefers_the_per_host_key_over_the_shared_operator_key(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    keys_dir = modal_provider._keys_dir
+    save_ssh_keypair(keys_dir, "modal_ssh_key")
+    host_id = HostId.generate()
+    per_host_path, per_host_public_key = load_or_create_per_host_client_keypair(
+        keys_dir, host_id, "modal_ssh_key", "known_hosts"
+    )
+
+    resolved_path, resolved_public_key = modal_provider._get_ssh_keypair(host_id)
+
+    assert resolved_path == per_host_path == per_host_key_dir(keys_dir, host_id) / "modal_ssh_key"
+    assert resolved_public_key == per_host_public_key
+    sibling_link = per_host_key_dir(keys_dir, host_id) / "known_hosts"
+    assert sibling_link.is_symlink()
+    assert sibling_link.resolve() == (keys_dir / "known_hosts").resolve()
+
+
+def test_client_keypair_falls_back_to_the_shared_operator_key_read_only(modal_provider: ModalProviderInstance) -> None:
+    """A sandbox with no per-host key here is opened with the operator-installed shared key, and nothing is minted."""
+    keys_dir = modal_provider._keys_dir
+    shared_private_path, shared_public_path = save_ssh_keypair(keys_dir, "modal_ssh_key")
+    keyless_host_id = HostId.generate()
+
+    resolved_path, resolved_public_key = modal_provider._get_ssh_keypair(keyless_host_id)
+
+    assert resolved_path == shared_private_path
+    assert resolved_public_key == shared_public_path.read_text().strip()
+    assert not per_host_key_dir(keys_dir, keyless_host_id).exists()
+
+
+def test_client_keypair_raises_and_mints_nothing_when_no_key_opens_the_sandbox(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    """A read path never mints: a sandbox this machine holds no key for fails before any SSH attempt."""
+    keys_dir = modal_provider._keys_dir
+    keyless_host_id = HostId.generate()
+
+    with pytest.raises(ModalHostKeyMissingError, match=str(keyless_host_id)) as exc_info:
+        modal_provider._get_ssh_keypair(keyless_host_id)
+
+    assert exc_info.value.user_help_text is not None
+    assert "created it" in exc_info.value.user_help_text
+    assert not per_host_key_dir(keys_dir, keyless_host_id).exists()
+    assert not (keys_dir / "modal_ssh_key").exists()
 
 
 def test_modal_provider_supports_snapshots(modal_provider: ModalProviderInstance) -> None:

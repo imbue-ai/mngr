@@ -5,6 +5,7 @@ import pytest
 from click.testing import CliRunner
 from pydantic import AnyUrl
 
+from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.cli.hosts import _find_host_state_dirs
 from imbue.mngr_imbue_cloud.cli.hosts import _find_lease_by_ref
 from imbue.mngr_imbue_cloud.cli.hosts import _release_lease
@@ -81,7 +82,7 @@ def test_find_host_state_dirs_scans_provider_instances(tmp_path: Path, monkeypat
     (with_private_key_only / "ssh_key").write_text("fake-private-key")
     monkeypatch.setenv("MNGR_HOST_DIR", str(host_dir))
 
-    found = _find_host_state_dirs(_HOST_ID)
+    found = _find_host_state_dirs(HostId(_HOST_ID))
 
     assert found == [with_key]
 

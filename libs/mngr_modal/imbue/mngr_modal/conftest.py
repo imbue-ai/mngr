@@ -44,6 +44,7 @@ from imbue.mngr.utils.testing import worker_modal_environment_names
 from imbue.mngr.utils.testing import worker_modal_volume_names
 from imbue.mngr_modal.backend import ModalProviderBackend
 from imbue.mngr_modal.backend import STATE_VOLUME_SUFFIX
+from imbue.mngr_modal.backend import app_registry_key
 from imbue.mngr_modal.cleanup import delete_modal_apps_in_environment
 from imbue.mngr_modal.cleanup import delete_modal_environment
 from imbue.mngr_modal.cleanup import delete_modal_volumes_in_environment
@@ -218,7 +219,8 @@ def _cleanup_modal_test_resources(
     (`cleanup_old_modal_test_environments.py`), which runs on every push to
     main and pull request, is the safety net.
     """
-    ModalProviderBackend.close_app(app_name)
+    # Test provider instances carry no Modal token, so their app context is registered under the bare name.
+    ModalProviderBackend.close_app(app_registry_key(app_name, None))
 
     # Delete the volume using Modal SDK (must be done before environment deletion).
     _apply_cleanup_outcome(
@@ -407,13 +409,11 @@ def initial_snapshot_provider(
     _cleanup_modal_test_resources(app_name, volume_name, environment_name, is_env_owned_by_test=is_env_owned_by_test)
 
 
-# =============================================================================
 # Shared modal test fixtures
 #
 # These fixtures are importable by other packages (e.g., mngr_claude) via
 # pytest_plugins = ["imbue.mngr_modal.conftest"]. This avoids duplicating
 # modal test infrastructure across plugin packages.
-# =============================================================================
 
 
 # The developer's real ~/.modal.toml, resolved at import time -- before any
@@ -557,12 +557,10 @@ def temp_source_dir(tmp_path: Path) -> Path:
     return source_dir
 
 
-# =============================================================================
 # Modal cleanup fixtures
 #
 # These are importable by consuming packages via pytest_plugins so that
 # ModalProviderBackend state is properly cleaned up between tests.
-# =============================================================================
 
 
 @pytest.fixture(autouse=True)
@@ -745,12 +743,10 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
-# =============================================================================
 # Testing Modal Interface fixtures
 #
 # These fixtures provide a ModalProviderInstance backed by FakeModalInterface
 # for testing mngr_modal business logic without Modal credentials or SSH.
-# =============================================================================
 
 
 @pytest.fixture

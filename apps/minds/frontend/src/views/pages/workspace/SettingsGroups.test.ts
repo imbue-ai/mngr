@@ -151,7 +151,7 @@ function harness(
         color: "#aabbcc",
         palette: { blue: "#aabbcc", pink: "#e8a7a8" },
         is_stale: false,
-        is_leased_imbue_cloud: false,
+        is_account_owned_provider: false,
         leased_owner_email: "",
         has_account: false,
         account_email: "",
@@ -396,7 +396,9 @@ describe("the Updates settings group after an update that never went out", () =>
     recordFailureOnBacked();
 
     const backed = allText(updatesGroup(draw(BACKED)));
-    expect(backed).toContain("Couldn't start this workspace to run the update.");
+    expect(backed).toContain(
+      "Couldn't start this workspace to run the update.",
+    );
     expect(backed).toContain("ERROR: The box behind host-5821 is gone");
     expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
       "Couldn't start this workspace",
@@ -416,7 +418,7 @@ describe("the Updates settings group after an update that never went out", () =>
   });
 });
 
-describe("the Account settings group on a machine leased from Imbue Cloud", () => {
+describe("the Account settings group on a workspace on an account-owned provider", () => {
   /** The drawn Account section's text, whitespace collapsed, and whether it offers an Unlink. */
   function accountSection(root: m.Children): {
     text: string;
@@ -442,13 +444,35 @@ describe("the Account settings group on a machine leased from Imbue Cloud", () =
     const { draw } = harness();
     const section = accountSection(
       draw(UNBACKED, "account", {
-        is_leased_imbue_cloud: true,
+        is_account_owned_provider: true,
         leased_owner_email: "owner@example.com",
       }),
     );
 
     expect(section.text).toBe(
-      "Workspaces running in Imbue Cloud can't be moved to a different account. This workspace is owned by owner@example.com.",
+      "This workspace is owned by owner@example.com. This workspace runs on a provider owned by its account (Imbue Cloud, or one of the account's cloud connections), so its account link is fixed and cannot be changed.",
+    );
+    expect(section.hasUnlink).toBe(false);
+  });
+
+  it("names the linked account for a workspace on its own account's provider, with no Unlink", () => {
+    const { draw } = harness();
+    const section = accountSection(
+      draw(UNBACKED, "account", {
+        is_account_owned_provider: true,
+        has_account: true,
+        account_email: "me@example.com",
+        current_account: {
+          user_id: "user-1",
+          email: "me@example.com",
+          display_name: null,
+        },
+        leased_owner_email: "",
+      }),
+    );
+
+    expect(section.text).toBe(
+      "Linked to me@example.com. This workspace runs on a provider owned by its account (Imbue Cloud, or one of the account's cloud connections), so its account link is fixed and cannot be changed.",
     );
     expect(section.hasUnlink).toBe(false);
   });
@@ -457,13 +481,13 @@ describe("the Account settings group on a machine leased from Imbue Cloud", () =
     const { draw } = harness();
     const section = accountSection(
       draw(UNBACKED, "account", {
-        is_leased_imbue_cloud: true,
+        is_account_owned_provider: true,
         leased_owner_email: "",
       }),
     );
 
     expect(section.text).toBe(
-      "Workspaces running in Imbue Cloud can't be moved to a different account.",
+      "This workspace runs on a provider owned by its account (Imbue Cloud, or one of the account's cloud connections), so its account link is fixed and cannot be changed.",
     );
     expect(section.hasUnlink).toBe(false);
   });

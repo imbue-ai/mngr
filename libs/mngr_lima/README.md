@@ -64,3 +64,5 @@ This mode requires the btrfs disk layout, so it must be paired with `is_host_dat
 is_run_as_root = true
 is_host_data_volume_exposed = false  # required by is_run_as_root
 ```
+
+The root client key is minted per VM under the VM's own dir, `<profile>/providers/lima/<instance>/keys/hosts/<host id>/` (`root_ssh_key` / `.pub`), beside the VM's pre-injected sshd host key (`ssh_host_ed25519_key` / `.pub`) and its own `known_hosts`; the layout is published as `LIMA_HOST_ACCESS_MANIFEST` (`constants.py`) for consumers that carry a VM's access material to another machine. VMs created before per-host root keys existed authorize only the legacy provider-wide `keys/root_ssh_key`, which stays out of that material.

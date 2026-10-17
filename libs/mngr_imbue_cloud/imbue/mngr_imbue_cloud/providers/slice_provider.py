@@ -516,7 +516,7 @@ class SliceVpsDockerProvider(VpsProvider):
             )
             wait_for_sshd(hostname=box, port=vm_ssh_port, timeout_seconds=self.config.ssh_connect_timeout)
 
-            with self._make_outer_for_vps_ip(box) as outer:
+            with self._make_outer_for_vps_ip(box, host_id) as outer:
                 # The guest's sshd answers while its one-time first boot is
                 # still running; wait it out before any outer provisioning
                 # (which would otherwise race cloud-init's apt for the dpkg
@@ -787,7 +787,10 @@ class SliceVpsDockerProvider(VpsProvider):
         return Path(self.slice_config.pool_private_key_path)
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+        # Slices are reached with the tier's SSH CA certificate regardless of host,
+        # so the host id selects nothing here.
+        del host_id
         port = self._current_outer_port if self._current_outer_port is not None else 22
         pyinfra_host = create_pyinfra_host(
             hostname=vps_ip,

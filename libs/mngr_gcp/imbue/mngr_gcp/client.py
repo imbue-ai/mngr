@@ -822,7 +822,9 @@ class GcpVpsClient(VpsClientInterface):
         instance, merges the change, and writes back with the current
         fingerprint, retrying once on a ``412`` fingerprint conflict (a
         concurrent metadata write -- rare, but possible when two agents persist
-        at once). No-op when there is nothing to change. Used to mirror
+        at once). No-op when there is nothing to change, and when the instance
+        is gone (a ``404`` on the read or the write): a deleted instance has no
+        metadata to update. Used to mirror
         offline-discoverable metadata (host name, per-agent records) onto the
         instance so a stopped VM still lists its agents and resolves by name.
         AWS does the equivalent with EC2 tags; GCE labels are too restricted
@@ -831,7 +833,15 @@ class GcpVpsClient(VpsClientInterface):
         if not updates and not delete_keys:
             return
         for attempt in range(2):
-            instance = self._get_instance(instance_id)
+            try:
+                instance = self._get_instance(instance_id)
+            except VpsApiError as e:
+                # A deleted instance has no metadata to update: the destroy's record cleanup
+                # reaches here through a cached listing that still names the instance.
+                if e.status_code == 404:
+                    logger.debug("Instance {} is gone; nothing to write to its metadata", instance_id)
+                    return
+                raise
             items = {item.key: item.value for item in instance.metadata.items}
             items.update(updates)
             for key in delete_keys:
@@ -856,6 +866,9 @@ class GcpVpsClient(VpsClientInterface):
                 if e.status_code == 412 and attempt == 0:
                     logger.debug("GCE setMetadata fingerprint conflict on {}; retrying", instance_id)
                     continue
+                if e.status_code == 404:
+                    logger.debug("Instance {} vanished before its metadata write; nothing to update", instance_id)
+                    return
                 raise
 
     def get_instance_metadata(self, instance_id: VpsInstanceId) -> dict[str, str]:

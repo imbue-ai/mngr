@@ -38,6 +38,7 @@ from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import AbstractSet
 from typing import Any
 from typing import Final
 
@@ -64,15 +65,19 @@ from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 from imbue.minds.utils.secret_redaction import redact_url_credentials_in_text
 from imbue.mngr.api.discovery_aggregator import AggregatorDelta
 from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
+from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import DiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoverySchemaMismatchWarner
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
@@ -484,8 +489,28 @@ class EnvelopeStreamConsumer(MutableModel):
             "the snapshot advances no freshness. None (tests, embedded factories) fences nothing."
         ),
     )
+    is_provider_polled_here: Callable[[str], bool] | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Whether discovery on this device still polls a provider instance: an enabled block, or a backend's "
+            "own default. Discovery for one it does not is dropped: the events-file replay keeps a removed "
+            "instance's (or a suppressed default's) last snapshot in its window forever, and a poll that raced a "
+            "block's removal can still report its hosts, either of which would resurrect machines this device can "
+            "no longer reach. None (tests, embedded factories) drops nothing."
+        ),
+    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # Orders an observe event's vanished-instance check, aggregator apply and
+    # resolver provider update against ``forget_provider_instances`` (the
+    # materializer's thread). The aggregator orders incremental events against
+    # snapshot spans, not snapshots against each other, so a snapshot that passed
+    # the check just before its block was deleted would otherwise re-add the
+    # instance's hosts after the forget emptied them, and nothing would ever
+    # take them away again; its ``update_providers`` after the resolver's own
+    # forget would likewise leave a provider entry nothing ever removes.
+    _ingest_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # The shared span-aware, per-provider discovery reconciler. Every parsed
     # observe event is folded into it; its accumulated view is what we push into
     # the resolver and fan out as discovered/destroyed callbacks.
@@ -831,96 +856,106 @@ class EnvelopeStreamConsumer(MutableModel):
         if isinstance(event, FullDiscoverySnapshotEvent):
             logger.trace("Ignoring legacy full discovery snapshot; Imbue Studio consumes per-provider snapshots")
             return
-        # SSH info carries no agent/host membership, so the aggregator does not
-        # model it; record it here before folding the event in so the agents view
-        # we push below joins the info onto the agents on this host.
-        if isinstance(event, HostSSHInfoEvent):
-            self._record_host_ssh_info(event)
-        delta = self._aggregator.apply_event(event)
-        if isinstance(event, ProviderDiscoverySnapshotEvent):
-            # A clean snapshot re-arms the provider's error-log suppression (and
-            # logs a recovery line if its error was previously logged).
-            self._error_log_suppressor.record_provider_snapshot(event)
-            # A pre-start snapshot is events-file replay, and its error describes
-            # the gap while Imbue Studio was closed, not the present: the detached
-            # discovery producer keeps polling after the quit flow stops the
-            # docker state container, so the backlog's last docker snapshot
-            # reliably carries "state container is stopped" -- already outdated,
-            # since Imbue Studio restarts that container before this consumer runs.
-            # Drop the stale error (a genuinely-broken provider re-asserts it on
-            # the first fresh cycle); the snapshot's topology still merges below.
-            # The backlog holds one snapshot per cycle of downtime, so the drops
-            # are tallied by a collapser rather than logged one line apiece. Only
-            # a post-start snapshot ends the replay and logs what it dropped: a
-            # clean pre-start one must not, or a provider whose backlog errors
-            # flap (as they do across a multi-day gap) logs afresh after every
-            # clean cycle in between.
-            error = event.error
-            # Dropping the error must also drop the snapshot's claim to freshness.
-            # ``last_snapshot_at`` is what tells a consumer "discovery has reported this
-            # provider", and the cloud-tile state reads a recorded time plus no error as
-            # proof the provider is healthy -- so recording it here would launder a
-            # provider that was broken for the whole gap into a healthy one reporting
-            # zero hosts, and every workspace on it would render "unreachable" (a
-            # positive claim that discovery looked and the host was gone) instead of
-            # "connecting" (we do not know yet). That is exactly what happened to a
-            # leased, perfectly healthy staging host whose provider had been failing for
-            # ~25h. Leave freshness unset until a genuine post-start snapshot lands.
-            is_snapshot_state_current = True
-            if event.discovery_finished_at < self.started_at:
-                if error is not None:
-                    self._pre_start_drop_logger.record_dropped_error(
-                        provider_name=event.provider_name,
-                        error=error,
-                        snapshot_at=event.discovery_finished_at,
-                    )
-                    error = None
-                    is_snapshot_state_current = False
-            else:
-                self._pre_start_drop_logger.flush_provider(event.provider_name)
-                # A poll that straddled a sleep is the same case inside one
-                # lifetime: its error describes a window in which this process
-                # -- and the network in front of it -- was not there, not the
-                # provider. The socket it timed out on was opened before the lid
-                # closed and read after it opened, so what it reports is that
-                # the laptop went away, and consuming that as the provider's
-                # last word blames a backend that was never asked. Every reader
-                # of provider freshness is fenced here, at the ingress, rather
-                # than each remembering to ask the tracker. A clean poll that
-                # spanned the same sleep completed after the wake and is kept.
-                if error is not None and self._did_poll_straddle_a_sleep(event):
-                    logger.info(
-                        "Dropping provider error for {} from a discovery poll that straddled a sleep ({} to {}): {}",
-                        event.provider_name,
-                        event.discovery_started_at.isoformat(),
-                        event.discovery_finished_at.isoformat(),
-                        error.message,
-                    )
-                    error = None
-                    is_snapshot_state_current = False
-            # A per-provider snapshot is also a discovery event, so update_providers
-            # bumps last_event_at; merge just this provider's state + freshness.
-            # A clean snapshot additionally carries its full host-id set (with the
-            # unknown-state hosts, whose absence proves nothing) so the resolver
-            # can authoritatively prune this provider's vanished hosts from the
-            # last-good topology; an errored snapshot passes None -- its hosts
-            # are unreachable, not absent.
-            clean_snapshot_host_ids: tuple[str, ...] | None = None
-            if event.error is None:
-                clean_snapshot_host_ids = tuple(
-                    {str(host.host_id) for host in event.hosts} | {str(host_id) for host_id in event.unknown_host_ids}
+        with self._ingest_lock:
+            unpolled_provider_name = self._unpolled_provider_name(event)
+            if unpolled_provider_name is not None:
+                logger.info(
+                    "Dropping a {} discovery event for provider {}: this device does not poll it",
+                    event.type,
+                    unpolled_provider_name,
                 )
-            self.resolver.update_providers(
-                provider_name=event.provider_name,
-                provider=event.provider,
-                error=error,
-                last_snapshot_at=event.discovery_finished_at,
-                clean_snapshot_host_ids=clean_snapshot_host_ids,
-                is_snapshot_state_current=is_snapshot_state_current,
-                unread_host_ids=tuple(str(host_id) for host_id in event.unknown_host_ids),
-            )
-        else:
-            self._record_incremental_event(event)
+                return
+            # SSH info carries no agent/host membership, so the aggregator does not
+            # model it; record it here before folding the event in so the agents view
+            # we push below joins the info onto the agents on this host.
+            if isinstance(event, HostSSHInfoEvent):
+                self._record_host_ssh_info(event)
+            delta = self._aggregator.apply_event(event)
+            if isinstance(event, ProviderDiscoverySnapshotEvent):
+                # A clean snapshot re-arms the provider's error-log suppression (and
+                # logs a recovery line if its error was previously logged).
+                self._error_log_suppressor.record_provider_snapshot(event)
+                # A pre-start snapshot is events-file replay, and its error describes
+                # the gap while Imbue Studio was closed, not the present: the detached
+                # discovery producer keeps polling after the quit flow stops the
+                # docker state container, so the backlog's last docker snapshot
+                # reliably carries "state container is stopped" -- already outdated,
+                # since Imbue Studio restarts that container before this consumer runs.
+                # Drop the stale error (a genuinely-broken provider re-asserts it on
+                # the first fresh cycle); the snapshot's topology still merges below.
+                # The backlog holds one snapshot per cycle of downtime, so the drops
+                # are tallied by a collapser rather than logged one line apiece. Only
+                # a post-start snapshot ends the replay and logs what it dropped: a
+                # clean pre-start one must not, or a provider whose backlog errors
+                # flap (as they do across a multi-day gap) logs afresh after every
+                # clean cycle in between.
+                error = event.error
+                # Dropping the error must also drop the snapshot's claim to freshness.
+                # ``last_snapshot_at`` is what tells a consumer "discovery has reported this
+                # provider", and the cloud-tile state reads a recorded time plus no error as
+                # proof the provider is healthy -- so recording it here would launder a
+                # provider that was broken for the whole gap into a healthy one reporting
+                # zero hosts, and every workspace on it would render "unreachable" (a
+                # positive claim that discovery looked and the host was gone) instead of
+                # "connecting" (we do not know yet). That is exactly what happened to a
+                # leased, perfectly healthy staging host whose provider had been failing for
+                # ~25h. Leave freshness unset until a genuine post-start snapshot lands.
+                is_snapshot_state_current = True
+                if event.discovery_finished_at < self.started_at:
+                    if error is not None:
+                        self._pre_start_drop_logger.record_dropped_error(
+                            provider_name=event.provider_name,
+                            error=error,
+                            snapshot_at=event.discovery_finished_at,
+                        )
+                        error = None
+                        is_snapshot_state_current = False
+                else:
+                    self._pre_start_drop_logger.flush_provider(event.provider_name)
+                    # A poll that straddled a sleep is the same case inside one
+                    # lifetime: its error describes a window in which this process
+                    # -- and the network in front of it -- was not there, not the
+                    # provider. The socket it timed out on was opened before the lid
+                    # closed and read after it opened, so what it reports is that
+                    # the laptop went away, and consuming that as the provider's
+                    # last word blames a backend that was never asked. Every reader
+                    # of provider freshness is fenced here, at the ingress, rather
+                    # than each remembering to ask the tracker. A clean poll that
+                    # spanned the same sleep completed after the wake and is kept.
+                    if error is not None and self._did_poll_straddle_a_sleep(event):
+                        logger.info(
+                            "Dropping provider error for {} from a discovery poll that straddled a sleep ({} to {}): {}",
+                            event.provider_name,
+                            event.discovery_started_at.isoformat(),
+                            event.discovery_finished_at.isoformat(),
+                            error.message,
+                        )
+                        error = None
+                        is_snapshot_state_current = False
+                # A per-provider snapshot is also a discovery event, so update_providers
+                # bumps last_event_at; merge just this provider's state + freshness.
+                # A clean snapshot additionally carries its full host-id set (with the
+                # unknown-state hosts, whose absence proves nothing) so the resolver
+                # can authoritatively prune this provider's vanished hosts from the
+                # last-good topology; an errored snapshot passes None -- its hosts
+                # are unreachable, not absent.
+                clean_snapshot_host_ids: tuple[str, ...] | None = None
+                if event.error is None:
+                    clean_snapshot_host_ids = tuple(
+                        {str(host.host_id) for host in event.hosts}
+                        | {str(host_id) for host_id in event.unknown_host_ids}
+                    )
+                self.resolver.update_providers(
+                    provider_name=event.provider_name,
+                    provider=event.provider,
+                    error=error,
+                    last_snapshot_at=event.discovery_finished_at,
+                    clean_snapshot_host_ids=clean_snapshot_host_ids,
+                    is_snapshot_state_current=is_snapshot_state_current,
+                    unread_host_ids=tuple(str(host_id) for host_id in event.unknown_host_ids),
+                )
+            else:
+                self._record_incremental_event(event)
         self._push_agents_view()
         self._fire_membership_delta(delta)
         # A HostSSHInfoEvent changes no membership (empty delta), so the agents on
@@ -928,6 +963,61 @@ class EnvelopeStreamConsumer(MutableModel):
         # that their host's SSH info is known.
         if isinstance(event, HostSSHInfoEvent):
             self._refire_discovered_for_host(str(event.host_id))
+
+    def forget_provider_instances(self, provider_names: AbstractSet[str]) -> None:
+        """Drop the aggregator's membership for provider instances that no longer exist on this device.
+
+        The resolver forgets them on its own, but the aggregator is the source of
+        the agents view pushed on every later event, so without this the next push
+        would hand the forgotten hosts straight back. An empty, error-free
+        snapshot is the aggregator's own authoritative "this provider has nothing".
+        """
+        if not provider_names:
+            return
+        now = datetime.now(timezone.utc)
+        # The block is already gone from the settings file when this runs, so once
+        # the applies below hold the ingest lock, any event for the instance that
+        # the reader thread has not yet folded in fails its vanished check.
+        with self._ingest_lock:
+            deltas = [
+                self._aggregator.apply_event(
+                    make_provider_discovery_snapshot_event(
+                        provider_name=ProviderInstanceName(name),
+                        agents=(),
+                        hosts=(),
+                        discovery_started_at=now,
+                        discovery_finished_at=now,
+                    )
+                )
+                for name in sorted(provider_names)
+            ]
+        delta_removed_agents: list[AgentInstanceKey] = []
+        for delta in deltas:
+            delta_removed_agents.extend(delta.removed_agent_instances)
+            self._fire_membership_delta(delta)
+        if delta_removed_agents:
+            logger.info(
+                "Forgot {} agent(s) of provider instances that no longer exist here", len(delta_removed_agents)
+            )
+        self._push_agents_view()
+
+    def _unpolled_provider_name(self, event: DiscoveryEvent) -> str | None:
+        """The event's provider when discovery on this device does not poll it, else None."""
+        if self.is_provider_polled_here is None:
+            return None
+        if isinstance(event, ProviderDiscoverySnapshotEvent):
+            provider_name = str(event.provider_name)
+        elif isinstance(event, AgentDiscoveryEvent):
+            provider_name = str(event.agent.provider_name)
+        elif isinstance(event, HostDiscoveryEvent):
+            provider_name = str(event.host.provider_name)
+        elif isinstance(event, DiscoveryErrorEvent) and event.provider_name is not None:
+            provider_name = event.provider_name
+        else:
+            return None
+        if self.is_provider_polled_here(provider_name):
+            return None
+        return provider_name
 
     def _record_incremental_event(self, event: DiscoveryEvent) -> None:
         """Log a discovery error (if any) and bump the resolver's last-event time for a non-snapshot event.
@@ -1170,6 +1260,7 @@ def start_mngr_forward(
     config: ForwardSubprocessConfig,
     resolver: MngrCliBackendResolver,
     sleep_tracker: SleepTracker | None = None,
+    is_provider_polled_here: Callable[[str], bool] | None = None,
 ) -> tuple[EnvelopeStreamConsumer, str, str]:
     """Spawn the ``mngr forward`` subprocess and attach an envelope consumer.
 
@@ -1207,7 +1298,9 @@ def start_mngr_forward(
         env=env,
         cwd=str(Path.home()),
     )
-    consumer = EnvelopeStreamConsumer(resolver=resolver, sleep_tracker=sleep_tracker)
+    consumer = EnvelopeStreamConsumer(
+        resolver=resolver, sleep_tracker=sleep_tracker, is_provider_polled_here=is_provider_polled_here
+    )
     consumer.attach(process)
     return consumer, preauth_cookie, browser_bridge_token
 

@@ -11,19 +11,12 @@ from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.errors import ContentDomainError
 
-# Canonical set of AWS regions the Imbue Studio app offers for ``LaunchMode.AWS``.
-# This is the single source of truth used both to write one
-# ``[providers.aws-<region>]`` block per region into the mngr profile settings
-# at startup (``imbue.minds.bootstrap``) and to populate the create form's AWS
-# region dropdown (``imbue.minds.desktop_client.region_preference``). Imbue Studio
-# deliberately exposes only the US datacenters by default: every configured
-# region adds a provider that ``mngr list`` fans out to on each discovery
-# cycle, and the non-US regions roughly doubled listing latency for little
-# benefit to the current user base. ``mngr_aws`` resolves the newest Debian
-# AMI in whichever region a provider is configured for at create time, so this
-# set can be widened without any ``mngr_aws`` change. Lives in ``primitives``
-# (which never imports ``mngr``) so the early ``bootstrap`` module can read it
-# without violating its no-mngr-on-import contract.
+# The AWS regions offered when registering an AWS connection (a connection is
+# pinned to its region for life). Deliberately only the US datacenters by
+# default. ``mngr_aws`` resolves the newest Debian AMI in whichever region a
+# connection is configured for at create time, so this set can be widened
+# without any ``mngr_aws`` change. Lives in ``primitives`` (which never
+# imports ``mngr``).
 CONFIGURED_AWS_REGIONS: Final[tuple[str, ...]] = (
     "us-east-1",
     "us-east-2",
@@ -41,10 +34,11 @@ CONFIGURED_AWS_REGIONS: Final[tuple[str, ...]] = (
 DEFAULT_AWS_REGION: Final[str] = "us-east-1"
 
 # EC2 instance types the create form offers, (value, label) pairs. Floor is
-# 4 GB: the forever-claude-template build (uv sync + npm ci/build) is
-# documented to OOM/thrash on 2 GB (see ``_AWS_DEFAULT_INSTANCE_TYPE`` in
-# ``bootstrap``), so nothing smaller is offered. t3.large (8 GB) is the
-# known-good default. Values feed the ``--aws-instance-type=`` build arg.
+# 4 GB: the default-workspace-template build (uv sync + npm ci/build) OOMs or
+# thrashes on the 2 GB of mngr_aws's own t3.small default, so nothing smaller
+# is offered. t3.large (8 GB) is the known-good default
+# (``DEFAULT_AWS_INSTANCE_TYPE`` below). Values feed the
+# ``--aws-instance-type=`` build arg.
 CONFIGURED_AWS_INSTANCE_TYPES: Final[tuple[tuple[str, str], ...]] = (
     ("t3.medium", "t3.medium — 2 vCPU / 4 GB (cheapest; heavy builds may be slow)"),
     ("t3.large", "t3.large — 2 vCPU / 8 GB (recommended)"),
@@ -89,9 +83,9 @@ CONFIGURED_AZURE_VM_SIZES: Final[tuple[tuple[str, str], ...]] = (
 )
 DEFAULT_AZURE_VM_SIZE: Final[str] = "Standard_D2s_v6"
 
-# Curated placement choices for bring-your-own-key GCP / Azure accounts (GCE is
+# Curated placement choices for GCP / Azure connections (GCE is
 # zonal, so GCP offers zones; Azure offers regions). Small US-centric lists,
-# mirroring CONFIGURED_AWS_REGIONS; the account's pinned default comes first
+# mirroring CONFIGURED_AWS_REGIONS; the connection's pinned default comes first
 # in the create form via the option's data-default-region.
 CONFIGURED_GCP_ZONES: Final[tuple[str, ...]] = (
     "us-west1-a",
@@ -180,15 +174,15 @@ class LaunchMode(UpperCaseStrEnum):
     LIMA = auto()
     IMBUE_CLOUD = auto()
     AWS = auto()
-    # Runs the agent in a Modal sandbox using the local machine's own Modal token
-    # (``modal token new``) -- resolves the ``modal`` provider instance. Modal
-    # sandboxes are ephemeral (~1 day max), so it is surfaced as "Modal (1-day
-    # ephemeral)" and is testing-only.
+    # Runs the agent in a Modal sandbox on a Modal *connection* (a ``modal_<hex>``
+    # provider instance carrying the connection's own token). Modal sandboxes are
+    # ephemeral (~1 day max, or the shorter ``modal_sandbox_timeout_seconds`` a
+    # create names), which the create form says under the compute select.
     MODAL = auto()
-    # GCP / Azure are reachable ONLY through a bring-your-own-key cloud account
-    # (``byok-gcp-<slug>`` / ``byok-azure-<slug>`` provider blocks written by the
-    # accounts modal); the create form does not render them as ambient options,
-    # so no ambient region tables / provider blocks exist for them.
+    # GCP / Azure (like AWS and Modal) are reachable ONLY through a connection
+    # (``gcp_<hex>`` / ``azure_<hex>`` provider blocks the settings materializer
+    # writes); the create form does not render them as ambient options, so no
+    # ambient region tables / provider blocks exist for them.
     GCP = auto()
     AZURE = auto()
 
