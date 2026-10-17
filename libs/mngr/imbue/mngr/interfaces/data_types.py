@@ -428,7 +428,8 @@ class CertifiedHostData(FrozenModel):
         description=(
             "Whether the provider picks fresh host-side endpoints for the published ports on every start (Modal, "
             "whose tunnels belong to the sandbox a start creates; Imbue Cloud, which re-picks box ports on a "
-            "restore) rather than keeping them for the host's life (Docker, Lima, the VPS providers)"
+            "restore; Docker, whose dynamic host ports change on each start) rather than keeping them for the "
+            "host's life (Lima, the VPS providers)"
         ),
     )
 

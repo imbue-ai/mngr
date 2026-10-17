@@ -115,6 +115,7 @@ from imbue.mngr_docker.host_store import DockerHostStore
 from imbue.mngr_docker.host_store import HostRecord
 from imbue.mngr_docker.published_ports import build_published_port_publish_specs
 from imbue.mngr_docker.published_ports import choose_host_ports_for_shared_guest_ports
+from imbue.mngr_docker.published_ports import has_dynamic_host_port
 from imbue.mngr_docker.published_ports import read_published_endpoints_from_port_bindings
 from imbue.mngr_docker.sizing import apply_size_request
 from imbue.mngr_docker.sizing import clamp_cpus_to_daemon
@@ -1642,6 +1643,7 @@ kill -TERM 1
             created_at=now,
             updated_at=now,
             published_endpoints=tuple(published_endpoints),
+            is_published_endpoints_repicked_on_start=has_dynamic_host_port(self.config, declarations),
         )
 
         # Mint this host's own client + host keypairs up front so the setup
@@ -1839,6 +1841,10 @@ kill -TERM 1
             to_update(
                 host_data.field_ref().published_endpoints,
                 tuple(self._read_published_endpoints(container, config.published_ports)),
+            ),
+            to_update(
+                host_data.field_ref().is_published_endpoints_repicked_on_start,
+                has_dynamic_host_port(self.config, config.published_ports),
             ),
         )
 

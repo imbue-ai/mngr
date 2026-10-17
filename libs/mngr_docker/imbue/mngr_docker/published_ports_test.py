@@ -12,6 +12,7 @@ from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_docker.config import DockerProviderConfig
 from imbue.mngr_docker.published_ports import build_published_port_publish_specs
 from imbue.mngr_docker.published_ports import choose_host_ports_for_shared_guest_ports
+from imbue.mngr_docker.published_ports import has_dynamic_host_port
 from imbue.mngr_docker.published_ports import read_published_endpoints_from_port_bindings
 from imbue.mngr_docker.testing import make_docker_provider
 
@@ -47,6 +48,22 @@ def test_choose_host_ports_for_shared_guest_ports_pins_only_dual_protocol_ports_
 
 def test_choose_host_ports_for_shared_guest_ports_leaves_a_remote_daemon_to_docker() -> None:
     assert choose_host_ports_for_shared_guest_ports(_config("ssh://user@myserver"), [_UDP_59000, _TCP_59000]) == {}
+
+
+@pytest.mark.parametrize(
+    ("config", "declarations", "expected"),
+    [
+        (_config(""), [_UDP_59000, _TCP_59000], False),
+        (_config(""), [_UDP_59000, _TCP_59000, _TCP_8080], True),
+        (_config(""), [], False),
+        (_config("ssh://user@myserver"), [_UDP_59000, _TCP_59000], True),
+    ],
+    ids=["pinned pair", "pinned pair plus a dynamic port", "no declarations", "remote daemon"],
+)
+def test_has_dynamic_host_port_is_true_unless_every_declaration_is_pinned(
+    config: DockerProviderConfig, declarations: list[PublishedPortDeclaration], expected: bool
+) -> None:
+    assert has_dynamic_host_port(config, declarations) is expected
 
 
 def test_read_published_endpoints_from_port_bindings_resolves_each_declaration() -> None:

@@ -33,7 +33,7 @@ mngr docker resize my-host --cpus 4 --memory 8g
 ```
 
 Build arguments (`-b`) go straight to `docker build` and start arguments (`-s`) straight to `docker run`, so anything those CLIs support is available.
-Published ports are bound where sshd is (loopback for a local daemon, the daemon host for a remote one); the host port Docker picks is recorded on the host, kept across stop and start, and re-picked on a snapshot restore.
+Published ports are bound where sshd is (loopback for a local daemon, the daemon host for a remote one); the host port Docker picks is recorded on the host and re-read after every start, since Docker picks a fresh dynamic port on each `docker start` (and on a snapshot restore); only a guest port declared for both `tcp` and `udp` on a local daemon keeps one chosen host port for the host's life.
 
 ## Configuration
 
