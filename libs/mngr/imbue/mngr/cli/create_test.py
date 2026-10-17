@@ -60,8 +60,8 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import PortProtocol
-from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import parse_published_port_declarations
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME

@@ -55,13 +55,13 @@ from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.instance import attempt_cloud_resource_teardown
 from imbue.mngr_vps.interfaces import HostRealizer
-from imbue.mngr_vps.published_ports import vps_published_endpoints
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import VPS_HOST_KEY_NAME
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import isolation_from_marker
 from imbue.mngr_vps.primitives import read_host_public_key_with_legacy_fallback
 from imbue.mngr_vps.published_ports import reject_declarations_outside_firewall
+from imbue.mngr_vps.published_ports import vps_published_endpoints
 from imbue.mngr_vps.systemd import render_systemd_unit
 
 IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"

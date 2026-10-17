@@ -21,8 +21,8 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import RootModel
 from pydantic import SerializerFunctionWrapHandler
-from pydantic import model_serializer
 from pydantic import StrictBool
+from pydantic import model_serializer
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.data_types import ShareGatewayState
@@ -682,7 +682,11 @@ class IceServer(FrozenModel):
         # A STUN entry arrives without the two TURN fields and leaves the same way, so the list
         # reaches the viewer as the connector answered it.
         serialized = handler(self)
-        return {key: value for key, value in serialized.items() if key not in ("username", "credential") or value is not None}
+        return {
+            key: value
+            for key, value in serialized.items()
+            if key not in ("username", "credential") or value is not None
+        }
 
 
 class IceServersResponse(FrozenModel):

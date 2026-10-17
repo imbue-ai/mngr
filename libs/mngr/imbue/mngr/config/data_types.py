@@ -850,5 +850,3 @@ class CreateCliOptions(CommonCliOptions):
         # A template's TOML naturally writes a bare port as an integer (``publish = [59000]``);
         # the declaration parser reads strings, so each value is spelled out before validation.
         return tuple(str(item) for item in value)
-
-

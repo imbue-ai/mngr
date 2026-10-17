@@ -34,8 +34,8 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.interfaces.provider_instance import _build_agent_details_from_online_agent
 from imbue.mngr.interfaces.provider_instance import _discover_agents_on_host
-from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.interfaces.provider_instance import bounded_result_from_cached_hosts
+from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.interfaces.provider_instance import discover_hosts_within_per_host_timeout
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId

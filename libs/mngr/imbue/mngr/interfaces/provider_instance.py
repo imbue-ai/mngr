@@ -2,7 +2,6 @@ import time
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
-from collections.abc import Iterable
 from collections.abc import Iterator
 from concurrent.futures import Future
 from concurrent.futures import wait
