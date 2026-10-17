@@ -1987,3 +1987,34 @@ def test_a_role_setting_unknown_to_the_resolved_type_names_the_types_that_suppor
     """
     with pytest.raises(UserInputError, match="nor a setting of agent type 'wait'"):
         _role_stack_config(mngr_test_prefix, "wait", {"chat": {"output_style": "Engineering Subordinate"}}, ("chat",))
+
+
+def test_apply_create_template_publish_extend_stacks_across_templates(mngr_test_prefix: str) -> None:
+    """``publish__extend`` lets a base template declare a port and an overlay add another."""
+    ctx = _make_click_context(
+        params={
+            "template": ("screen", "extra-service"),
+            "publish": (),
+        },
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("screen"): CreateTemplate(options={"publish__extend": ["59000/udp", "59000/tcp"]}),
+            CreateTemplateName("extra-service"): CreateTemplate(options={"publish__extend": ["8080"]}),
+        },
+    )
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+    assert result["publish"] == ("59000/udp", "59000/tcp", "8080")
+
+
+def test_apply_create_template_publish_bare_assign_lands_as_tuple(mngr_test_prefix: str) -> None:
+    ctx = _make_click_context(params={"template": ("screen",), "publish": ()})
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("screen"): CreateTemplate(options={"publish": ["59000/udp"]}),
+        },
+    )
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+    assert result["publish"] == ("59000/udp",)

@@ -4,7 +4,9 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr_lima.constants import lima_host_data_disk_label
+from imbue.mngr_lima.data_types import LimaPortForward
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 from imbue.mngr_lima.lima_yaml import load_user_lima_yaml
 from imbue.mngr_lima.lima_yaml import merge_lima_yaml
@@ -222,6 +224,53 @@ def test_merge_lima_yaml_extends_provision_and_mounts_replaces_images() -> None:
     override = {"images": [{"location": "custom.qcow2"}]}
     merged = merge_lima_yaml(base, override)
     assert merged["images"] == [{"location": "custom.qcow2"}]
+
+
+def test_generate_default_lima_yaml_forwards_published_ports_ahead_of_the_ignore_rules(tmp_path: Path) -> None:
+    """Lima takes the first matching rule, so a published port's forwards must precede the catch-all ignores."""
+    config = generate_default_lima_yaml(
+        volume_host_path=tmp_path,
+        host_dir="/mngr",
+        published_port_forwards=[
+            LimaPortForward(guest_port=59000, host_port=40123, protocol=PortProtocol.UDP),
+            LimaPortForward(guest_port=59000, host_port=40123, protocol=PortProtocol.TCP),
+        ],
+    )
+
+    forward_rules = config["portForwards"][:-2]
+    assert config["portForwards"][-2:] == _EXPECTED_DISABLED_PORT_FORWARDS
+    assert forward_rules == [
+        {
+            "guestIPMustBeZero": True,
+            "guestIP": "0.0.0.0",
+            "guestPort": 59000,
+            "hostIP": "127.0.0.1",
+            "hostPort": 40123,
+            "proto": "udp",
+        },
+        {"guestIP": "127.0.0.1", "guestPort": 59000, "hostIP": "127.0.0.1", "hostPort": 40123, "proto": "udp"},
+        {
+            "guestIPMustBeZero": True,
+            "guestIP": "0.0.0.0",
+            "guestPort": 59000,
+            "hostIP": "127.0.0.1",
+            "hostPort": 40123,
+            "proto": "tcp",
+        },
+        {"guestIP": "127.0.0.1", "guestPort": 59000, "hostIP": "127.0.0.1", "hostPort": 40123, "proto": "tcp"},
+    ]
+    assert not any(rule.get("ignore") for rule in forward_rules)
+
+
+def test_merge_lima_yaml_keeps_published_port_forwards_against_a_user_override(tmp_path: Path) -> None:
+    base = generate_default_lima_yaml(
+        volume_host_path=tmp_path,
+        host_dir="/mngr",
+        published_port_forwards=[LimaPortForward(guest_port=59000, host_port=40123, protocol=PortProtocol.UDP)],
+    )
+    merged = merge_lima_yaml(base, {"portForwards": [{"guestPort": 8082, "hostPort": 8082}]})
+    assert merged["portForwards"] == base["portForwards"]
+    assert merged["portForwards"][0]["hostPort"] == 40123
 
 
 def test_merge_lima_yaml_forces_port_forwards_disabled() -> None:

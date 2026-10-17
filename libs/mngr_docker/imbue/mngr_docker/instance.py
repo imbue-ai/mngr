@@ -37,7 +37,6 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import HostRecordUnreadableError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -72,6 +71,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import LogLevel
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -79,6 +79,7 @@ from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import remove_host_key_record
+from imbue.mngr.providers.published_ports import reject_sshd_port_declarations
 from imbue.mngr.providers.ssh_host_setup import REQUIRED_HOST_PACKAGES
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
@@ -112,6 +113,9 @@ from imbue.mngr_docker.errors import DockerRuntimeNotRegisteredError
 from imbue.mngr_docker.host_store import ContainerConfig
 from imbue.mngr_docker.host_store import DockerHostStore
 from imbue.mngr_docker.host_store import HostRecord
+from imbue.mngr_docker.published_ports import build_published_port_publish_specs
+from imbue.mngr_docker.published_ports import choose_host_ports_for_shared_guest_ports
+from imbue.mngr_docker.published_ports import read_published_endpoints_from_port_bindings
 from imbue.mngr_docker.sizing import apply_size_request
 from imbue.mngr_docker.sizing import clamp_cpus_to_daemon
 from imbue.mngr_docker.sizing import docker_update_args
@@ -1079,15 +1083,19 @@ kill -TERM 1
         labels: dict[str, str],
         start_args: Sequence[str],
         volume_mount_args: Sequence[str] = (),
+        publish_specs: Sequence[str] = (),
     ) -> list[str]:
         """Build a docker run command with mandatory flags + user passthrough args.
 
         `volume_mount_args` is a list of literal docker CLI tokens (typically
         either `["-v", "<spec>"]` for the legacy shared mount or
         `["--mount", "<spec>"]` for the isolated subpath mount). Empty when
-        the host has no persistent volume.
+        the host has no persistent volume. `publish_specs` are the `-p` values
+        for the host's published ports, beside the one that publishes sshd.
         """
         cmd = ["run", "-d", "--name", container_name, "-p", build_ssh_publish_spec(self.config)]
+        for publish_spec in publish_specs:
+            cmd.extend(["-p", publish_spec])
 
         # Select a non-default container runtime (e.g. 'runsc' for gVisor) when configured.
         # The named runtime must be registered with the Docker daemon, otherwise this run
@@ -1112,6 +1120,7 @@ kill -TERM 1
         labels: dict[str, str],
         start_args: Sequence[str],
         volume_mount_args: Sequence[str] = (),
+        publish_specs: Sequence[str] = (),
     ) -> docker.models.containers.Container:
         """Create and start a container via docker run subprocess.
 
@@ -1123,6 +1132,7 @@ kill -TERM 1
             labels=labels,
             start_args=start_args,
             volume_mount_args=volume_mount_args,
+            publish_specs=publish_specs,
         )
         try:
             result = self._run_docker_creation_command(cmd)
@@ -1139,6 +1149,21 @@ kill -TERM 1
 
         container_id = result.stdout.strip()
         return self._docker_client.containers.get(container_id)
+
+    def _publish_specs_for_new_container(self, declarations: Sequence[PublishedPortDeclaration]) -> list[str]:
+        """The `-p` specs for a container about to be run, choosing shared host ports afresh each time."""
+        return build_published_port_publish_specs(
+            self.config, declarations, choose_host_ports_for_shared_guest_ports(self.config, declarations)
+        )
+
+    def _read_published_endpoints(
+        self, container: docker.models.containers.Container, declarations: Sequence[PublishedPortDeclaration]
+    ) -> list[PublishedEndpoint]:
+        """Where the container's published ports are reachable now, read from its live port bindings."""
+        if not declarations:
+            return []
+        container.reload()
+        return read_published_endpoints_from_port_bindings(container.ports, declarations, self._get_ssh_host())
 
     def _runtime_not_registered_error_or_none(self, error: ProcessError) -> DockerRuntimeNotRegisteredError | None:
         """Map a `docker run` `ProcessError` to a typed runtime error, when applicable.
@@ -1479,14 +1504,12 @@ kill -TERM 1
 
         Build args are passed through to 'docker build' (if provided).
         Start args are passed through to 'docker run' for resource limits,
-        volumes, ports, network, etc.
+        volumes, ports, network, etc. Published ports become `-p` specs beside
+        the one for sshd, and their host-side endpoints are read back from the
+        container once it runs.
         """
-        if published_ports:
-            raise PublishedPortUnsupportedError(
-                self.name,
-                str(published_ports[0]),
-                "this provider does not publish ports yet",
-            )
+        declarations = tuple(published_ports or ())
+        reject_sshd_port_declarations(self.name, declarations, CONTAINER_SSH_PORT)
         host_id = HostId.generate()
         logger.info("Creating host {} in {} ...", name, self.name)
 
@@ -1565,7 +1588,9 @@ kill -TERM 1
                         volume_mount_path=self._configured_volume_mount_path_str(),
                         host_dir=str(self.host_dir),
                     ),
+                    publish_specs=self._publish_specs_for_new_container(declarations),
                 )
+                published_endpoints = self._read_published_endpoints(container, declarations)
 
         except docker.errors.APIError as e:
             failure_reason = str(e)
@@ -1591,6 +1616,7 @@ kill -TERM 1
         self._container_cache_by_id[host_id] = container
         config = ContainerConfig(
             start_args=effective_start_args,
+            published_ports=declarations,
             image=base_image,
             is_isolated_host_volume=is_isolated,
             volume_mount_path=self._configured_volume_mount_path_str(),
@@ -1615,6 +1641,7 @@ kill -TERM 1
             tmux_session_prefix=self.mngr_ctx.config.prefix,
             created_at=now,
             updated_at=now,
+            published_endpoints=tuple(published_endpoints),
         )
 
         # Mint this host's own client + host keypairs up front so the setup
@@ -1779,7 +1806,7 @@ kill -TERM 1
                 host_name=host_name,
                 user_tags=user_tags,
                 config=config,
-                host_data=host_record.certified_host_data,
+                host_data=self._with_live_published_endpoints(host_record.certified_host_data, container, config),
             )
 
             self._evict_cached_host(host_id, replacement=restored_host)
@@ -1798,6 +1825,22 @@ kill -TERM 1
         # Use most recent snapshot
         sorted_snapshots = sorted(host_record.certified_host_data.snapshots, key=lambda s: s.created_at, reverse=True)
         return self._start_from_snapshot(host_id, SnapshotId(sorted_snapshots[0].id), host_record)
+
+    def _with_live_published_endpoints(
+        self,
+        host_data: CertifiedHostData,
+        container: docker.models.containers.Container,
+        config: ContainerConfig,
+    ) -> CertifiedHostData:
+        """The host's certified data with its published endpoints re-read from the container that just started."""
+        if not config.published_ports:
+            return host_data
+        return host_data.model_copy_update(
+            to_update(
+                host_data.field_ref().published_endpoints,
+                tuple(self._read_published_endpoints(container, config.published_ports)),
+            ),
+        )
 
     def _start_from_snapshot(
         self,
@@ -1863,6 +1906,9 @@ kill -TERM 1
                     volume_mount_path=config.volume_mount_path,
                     host_dir=self._effective_host_dir_str(config),
                 ),
+                # Replayed from the declarations, not the create's -p specs, so the
+                # restored container gets fresh host ports like its sshd does.
+                publish_specs=self._publish_specs_for_new_container(config.published_ports),
             )
         except (MngrError, docker.errors.DockerException) as e:
             raise MngrError(f"Failed to create container from snapshot: {e}") from e
@@ -1876,7 +1922,7 @@ kill -TERM 1
             host_name=host_name,
             user_tags=user_tags,
             config=config,
-            host_data=host_record.certified_host_data,
+            host_data=self._with_live_published_endpoints(host_record.certified_host_data, new_container, config),
         )
 
         self._evict_cached_host(host_id, replacement=restored_host)

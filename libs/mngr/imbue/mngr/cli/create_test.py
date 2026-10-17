@@ -57,7 +57,9 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import NewAgentLocation
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.editor import EditorSession
@@ -2448,3 +2450,54 @@ def test_compute_loader_provider_filter_git_url_source_skips_loader(
     result = _compute_loader_provider_filter(opts, address)
 
     assert result is None
+
+
+def test_parse_target_host_threads_publish_declarations(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """--publish values land on NewHostOptions.published_ports, parsed and in order."""
+    address = parse_new_agent_location("foo@.modal")
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().publish, ("59000/udp", "59000", "8080/TCP")),
+    )
+
+    result = _parse_target_host(
+        opts=opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=HostLifecycleOptions(),
+    )
+
+    assert isinstance(result, NewHostOptions)
+    assert result.published_ports == (
+        PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP),
+        PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.TCP),
+        PublishedPortDeclaration(guest_port=8080, protocol=PortProtocol.TCP),
+    )
+
+
+@pytest.mark.parametrize(
+    ("publish_values", "expected_message_fragment"),
+    [
+        (("59000/sctp",), "Invalid published port"),
+        (("0",), "between 1 and 65535"),
+        (("59000/udp", "59000/udp"), "declared more than once"),
+    ],
+)
+def test_parse_target_host_rejects_bad_publish_declarations_as_user_input_errors(
+    default_create_cli_opts: CreateCliOptions,
+    publish_values: tuple[str, ...],
+    expected_message_fragment: str,
+) -> None:
+    address = parse_new_agent_location("foo@.modal")
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().publish, publish_values),
+    )
+
+    with pytest.raises(UserInputError, match=expected_message_fragment):
+        _parse_target_host(
+            opts=opts,
+            address=address,
+            agent_and_host_loader=lambda: {},
+            lifecycle=HostLifecycleOptions(),
+        )

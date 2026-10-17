@@ -22,6 +22,7 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_gcp.errors import InvalidGceIdentifierError
@@ -33,6 +34,7 @@ from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
 from imbue.mngr_vps.primitives import VpsMemoryMib
 from imbue.mngr_vps.primitives import VpsVcpuCount
+from imbue.mngr_vps.published_ports import EVERY_SOURCE_CIDR
 from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
@@ -226,6 +228,13 @@ class GcpVpsClient(VpsClientInterface):
     )
     firewall_name: str = Field(default="mngr-gcp-ssh", description="Name of the mngr-managed SSH firewall rule")
     firewall_target_tag: str = Field(default="mngr-ssh", description="Network tag the firewall rule targets")
+    published_ports: tuple[PublishedPortDeclaration, ...] = Field(
+        default=(),
+        description=(
+            "Published-port declarations opened from every source by a second mngr-managed rule "
+            "(`<firewall_name>-published`) targeting the same tag"
+        ),
+    )
     associate_external_ip: bool = Field(default=True, description="Assign an ephemeral external IPv4 to instances")
     service_account_email: str | None = Field(default=None, description="Service account email to attach, or None")
     service_account_scopes: tuple[str, ...] = Field(
@@ -291,15 +300,72 @@ class GcpVpsClient(VpsClientInterface):
     # Firewall management (idempotent, tag-targeted, network-scoped)
 
     def _firewall_exists(self) -> bool:
-        """Return True iff the configured firewall rule exists (read-only lookup)."""
+        """Return True iff the configured SSH firewall rule exists (read-only lookup)."""
+        return self._firewall_rule_exists(self.firewall_name)
+
+    def _firewall_rule_exists(self, firewall_name: str) -> bool:
         try:
             with self._translate_gcp_errors():
-                self._firewalls().get(project=self.project_id, firewall=self.firewall_name)
+                self._firewalls().get(project=self.project_id, firewall=firewall_name)
         except VpsApiError as e:
             if e.status_code == 404:
                 return False
             raise
         return True
+
+    @property
+    def published_firewall_name(self) -> str:
+        """The rule that opens the published ports from every source, kept apart from the SSH allow-list rule."""
+        return f"{self.firewall_name}-published"
+
+    def _insert_firewall_rule_tolerating_race(self, firewall: compute_v1.Firewall) -> bool:
+        """Insert the rule; returns whether this call created it (False when a concurrent create won)."""
+        try:
+            with self._translate_gcp_errors():
+                operation = self._firewalls().insert(project=self.project_id, firewall_resource=firewall)
+                operation.result()
+        except VpsApiError as e:
+            if e.status_code != 409:
+                raise
+            return False
+        return True
+
+    def _ensure_published_ports_firewall(self) -> None:
+        """Create the published-ports rule when ports are declared and it does not exist yet.
+
+        Like the SSH rule, an existing rule is reused as-is (its ports are not re-patched), so a
+        changed ``firewall_published_ports`` needs the rule deleted (``mngr gcp cleanup``) and
+        prepared again.
+        """
+        if not self.published_ports or self._firewall_rule_exists(self.published_firewall_name):
+            return
+        protocols = sorted({declaration.protocol.value.lower() for declaration in self.published_ports})
+        firewall = compute_v1.Firewall(
+            name=self.published_firewall_name,
+            network=f"projects/{self.project_id}/global/networks/{self.network}",
+            direction="INGRESS",
+            source_ranges=[EVERY_SOURCE_CIDR],
+            target_tags=[self.firewall_target_tag],
+            allowed=[
+                compute_v1.Allowed(
+                    I_p_protocol=protocol,
+                    ports=[
+                        str(declaration.guest_port)
+                        for declaration in self.published_ports
+                        if declaration.protocol.value.lower() == protocol
+                    ],
+                )
+                for protocol in protocols
+            ],
+            description="Created by mngr gcp prepare for the published ports of mngr-managed instances",
+        )
+        self._insert_firewall_rule_tolerating_race(firewall)
+        logger.info(
+            "Ensured published-ports firewall rule {} (tag {}) in project {}",
+            self.published_firewall_name,
+            self.firewall_target_tag,
+            self.project_id,
+        )
 
     def _warn_about_cidrs_if_needed(self) -> None:
         """Emit a one-line warning when the effective CIDR set is empty or 0.0.0.0/0.
@@ -352,6 +418,7 @@ class GcpVpsClient(VpsClientInterface):
         instance-create permissions (no ``compute.firewalls.create``).
         """
         self._warn_about_cidrs_if_needed()
+        self._ensure_published_ports_firewall()
         if not self.allowed_ssh_cidrs:
             return FirewallPrepareResult(target_tag=self.firewall_target_tag, was_created=False)
         if self._firewall_exists():
@@ -366,17 +433,9 @@ class GcpVpsClient(VpsClientInterface):
             allowed=[compute_v1.Allowed(I_p_protocol="tcp", ports=["22", str(self.container_ssh_port)])],
             description="Created by mngr gcp prepare for SSH access to mngr-managed instances",
         )
-        was_created = True
-        try:
-            with self._translate_gcp_errors():
-                operation = self._firewalls().insert(project=self.project_id, firewall_resource=firewall)
-                operation.result()
-        except VpsApiError as e:
-            # A concurrent create (another host provisioning in parallel) wins
-            # the race; the rule now exists, which is exactly what we wanted.
-            if e.status_code != 409:
-                raise
-            was_created = False
+        # A concurrent create (another host provisioning in parallel) may win the
+        # race; the rule then exists, which is exactly what we wanted.
+        was_created = self._insert_firewall_rule_tolerating_race(firewall)
         logger.info(
             "Ensured firewall rule {} (tag {}) in project {}",
             self.firewall_name,
@@ -426,19 +485,24 @@ class GcpVpsClient(VpsClientInterface):
         for live mngr-managed instances first (see ``list_mngr_managed_instances``),
         so it never strands a running agent's SSH access.
         """
+        if self._firewall_rule_exists(self.published_firewall_name):
+            self._delete_firewall_rule_tolerating_race(self.published_firewall_name)
         if not self._firewall_exists():
             return None
+        self._delete_firewall_rule_tolerating_race(self.firewall_name)
+        return self.firewall_name
+
+    def _delete_firewall_rule_tolerating_race(self, firewall_name: str) -> None:
         try:
             with self._translate_gcp_errors():
-                operation = self._firewalls().delete(project=self.project_id, firewall=self.firewall_name)
+                operation = self._firewalls().delete(project=self.project_id, firewall=firewall_name)
                 operation.result()
         except VpsApiError as e:
             # A concurrent delete won the race; the rule is already gone, which
             # is the desired end state.
             if e.status_code != 404:
                 raise
-        logger.info("Deleted firewall rule {} in project {}", self.firewall_name, self.project_id)
-        return self.firewall_name
+        logger.info("Deleted firewall rule {} in project {}", firewall_name, self.project_id)
 
     # Instance Operations
 

@@ -168,7 +168,14 @@ When `is_host_volume_created` is `false`:
 
 This is useful when you don't need offline access to logs and want to avoid the overhead of volume management.
 
+## Published ports
+
+`mngr create --publish <port>` (or the create template key `publish`) gives the sandbox a tunnel for a TCP port the workload listens on, beside the SSH tunnel.
+The tunnel's host and port are read from the sandbox after every start (a snapshot restore creates a new sandbox with fresh tunnels) and recorded on the host, where `mngr list --format json` reports them under `host.published_endpoints`.
+Modal tunnels carry TCP only, so a `udp` declaration fails the create before any sandbox is created, and declaring port 22 is refused since it is the SSH tunnel.
+
 ## Limitations
 
 - Sandboxes have a maximum lifetime (timeout) after which they are automatically terminated by Modal. It is useful as a hard restriction on agent lifetime, but cannot be longer than 24 hours (currently)
+- Published ports are TCP only (Modal has no UDP tunnels)
 - Sandboxes cannot be stopped and resumed directly. Instead, snapshots are used to preserve state before termination. Snapshots can be taken on-demand or via snapshot-on-idle (periodic snapshots [future])

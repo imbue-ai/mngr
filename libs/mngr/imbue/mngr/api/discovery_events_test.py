@@ -298,8 +298,9 @@ def test_extract_agents_and_hosts_returns_ssh_info() -> None:
     details = make_test_agent_details(host_id=host_id, provider_name=ProviderInstanceName("modal"), ssh=ssh)
     _, _, host_ssh_infos = extract_agents_and_hosts_from_full_listing([details])
     assert len(host_ssh_infos) == 1
-    assert host_ssh_infos[0][0] == host_id
-    assert host_ssh_infos[0][1].host == "remote.example.com"
+    assert host_ssh_infos[0].host_id == host_id
+    assert host_ssh_infos[0].ssh.host == "remote.example.com"
+    assert host_ssh_infos[0].published_endpoints == ()
 
 
 def test_extract_agents_and_hosts_returns_empty_ssh_for_local() -> None:
@@ -2478,3 +2479,58 @@ def test_resolve_provider_names_survives_an_undecodable_byte_in_the_replay_windo
     with capture_loguru(level="WARNING") as log_output:
         assert resolve_provider_names_for_identifiers(temp_mngr_ctx, ["later-agent"]) == ("modal",)
     assert "does not match the current schema" in log_output.getvalue()
+
+
+def _make_remote_ssh_info() -> SSHInfo:
+    return SSHInfo(
+        user="root",
+        host="remote.example.com",
+        port=2222,
+        key_path=Path("/tmp/key"),
+        command="ssh -i /tmp/key -p 2222 root@remote.example.com",
+    )
+
+
+def _make_published_endpoint(host_port: int) -> PublishedEndpoint:
+    return PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="127.0.0.1", host_port=host_port)
+
+
+def test_extract_agents_and_hosts_carries_published_endpoints_beside_ssh_info() -> None:
+    endpoint = _make_published_endpoint(32768)
+    details = make_test_agent_details(
+        provider_name=ProviderInstanceName("docker"), ssh=_make_remote_ssh_info(), published_endpoints=[endpoint]
+    )
+    _, _, host_ssh_infos = extract_agents_and_hosts_from_full_listing([details])
+    assert len(host_ssh_infos) == 1
+    assert host_ssh_infos[0].published_endpoints == (endpoint,)
+
+
+def test_emit_host_ssh_info_writes_published_endpoints_and_parses_them_back(temp_config: MngrConfig) -> None:
+    host_id = HostId.generate()
+    endpoint = _make_published_endpoint(32768)
+    emit_host_ssh_info(temp_config, host_id, _make_remote_ssh_info(), published_endpoints=[endpoint])
+
+    line = get_discovery_events_path(temp_config).read_text().splitlines()[0]
+    data = json.loads(line)
+    assert data["published_endpoints"] == [
+        {"guest_port": 59000, "protocol": "UDP", "host": "127.0.0.1", "host_port": 32768}
+    ]
+    parsed = parse_discovery_event_line(line)
+    assert isinstance(parsed, HostSSHInfoEvent)
+    assert parsed.published_endpoints == [endpoint]
+
+
+def test_parse_host_ssh_info_event_without_published_endpoints_reads_as_none_published() -> None:
+    """A line written before the field existed parses with an empty list, not a rejection."""
+    timestamp, event_id = _make_envelope_fields()
+    event = HostSSHInfoEvent(
+        timestamp=timestamp,
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        host_id=HostId.generate(),
+        ssh=_make_remote_ssh_info(),
+    )
+    data = {key: value for key, value in event.model_dump(mode="json").items() if key != "published_endpoints"}
+    parsed = parse_discovery_event_line(json.dumps(data, separators=(",", ":")))
+    assert isinstance(parsed, HostSSHInfoEvent)
+    assert parsed.published_endpoints == []

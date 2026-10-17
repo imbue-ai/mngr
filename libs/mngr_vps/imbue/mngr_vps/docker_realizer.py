@@ -69,6 +69,7 @@ from imbue.mngr_vps.host_store import VpsHostStore
 from imbue.mngr_vps.host_store import open_host_store
 from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
 from imbue.mngr_vps.primitives import load_or_create_per_host_host_keypair
+from imbue.mngr_vps.published_ports import vps_publish_specs
 
 # Key-file names under ``key_dir`` for the container's client/host keys and its
 # known_hosts. The provider exposes thin accessors with the same names so the
@@ -378,7 +379,10 @@ class DockerRealizer(SnapshotCapableRealizer):
                 outer,
                 image=image,
                 name=container_name,
-                port_mappings={f"0.0.0.0:{self.config.container_ssh_port}": "22"},
+                publish_specs=[
+                    f"0.0.0.0:{self.config.container_ssh_port}:22",
+                    *vps_publish_specs(ctx.published_ports),
+                ],
                 volumes=[
                     f"{volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw",
                     # Snapshot helper IPC volume (host_backup writes request.json / reads result.json).

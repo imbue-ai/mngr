@@ -24,7 +24,6 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import LocalHostNotDestroyableError
 from imbue.mngr.errors import LocalHostNotStoppableError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
@@ -50,6 +49,9 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.volume import LocalVolume
+from imbue.mngr.providers.published_ports import identity_published_endpoints
+from imbue.mngr.providers.published_ports import merge_published_endpoints
+from imbue.mngr.providers.published_ports import record_published_endpoints_on_host
 from imbue.mngr.utils.deps import GIT
 from imbue.mngr.utils.deps import JQ
 from imbue.mngr.utils.deps import TMUX
@@ -249,14 +251,10 @@ class LocalProviderInstance(BaseProviderInstance):
         For the local provider, this always returns the same host representing
         the local computer. The name must be its recorded name or the
         ``localhost`` alias. The image and known_hosts parameters are ignored
-        since the local machine uses its own configuration.
+        since the local machine uses its own configuration. A published port
+        needs no publishing here: the workload binds it on this machine, so its
+        endpoint is the same port on loopback, merged into those recorded before.
         """
-        if published_ports:
-            raise PublishedPortUnsupportedError(
-                self.name,
-                str(published_ports[0]),
-                "this provider does not publish ports yet",
-            )
         TMUX.require()
         GIT.require()
         JQ.require()
@@ -269,6 +267,12 @@ class LocalProviderInstance(BaseProviderInstance):
 
             # Record BOOT activity for consistency. In this case it represents when mngr first created the local host
             host.record_activity(ActivitySource.BOOT)
+
+            if published_ports:
+                endpoints = merge_published_endpoints(
+                    host.get_published_endpoints(), identity_published_endpoints(published_ports)
+                )
+                record_published_endpoints_on_host(host, endpoints, is_repicked_on_start=False)
 
         return host
 

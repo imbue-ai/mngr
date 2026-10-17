@@ -17,6 +17,7 @@ from pydantic import PrivateAttr
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostCreationError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -26,10 +27,13 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.config import OfflineCapableVpsProviderConfig
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
@@ -680,3 +684,25 @@ def test_write_files_concurrently_surfaces_worker_failure() -> None:
 
     with pytest.raises(MngrError, match="upload failed"):
         _write_files_concurrently(_FailingVolume(), files)
+
+
+def test_validate_published_ports_for_create_refuses_a_port_the_firewall_was_not_prepared_for(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    configured = _MarkerProvider(
+        name=ProviderInstanceName("offline-test"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        config=OfflineCapableVpsProviderConfig(
+            backend=ProviderBackendName("offline-test"), firewall_published_ports=("59000/udp",)
+        ),
+        mngr_ctx=temp_mngr_ctx,
+        vps_client=ExternallyManagedVpsClient(),
+    )
+
+    configured._validate_published_ports_for_create(
+        [PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP)]
+    )
+    with pytest.raises(PublishedPortUnsupportedError, match="59000/tcp.*mngr offline-test prepare"):
+        configured._validate_published_ports_for_create(
+            [PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.TCP)]
+        )

@@ -2,9 +2,22 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.primitives import MAX_PORT_NUMBER
+from imbue.mngr.primitives import MIN_PORT_NUMBER
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr_lima.primitives import LimaCpuCount
 from imbue.mngr_lima.primitives import LimaDiskSize
 from imbue.mngr_lima.primitives import LimaMemoryGib
+
+
+class LimaPortForward(FrozenModel):
+    """One published port's `portForwards` rule: the guest port, the loopback host port chosen for it, and the protocol."""
+
+    guest_port: int = Field(ge=MIN_PORT_NUMBER, le=MAX_PORT_NUMBER, description="The declared port inside the VM")
+    host_port: int = Field(
+        ge=MIN_PORT_NUMBER, le=MAX_PORT_NUMBER, description="The loopback port on this machine lima forwards from"
+    )
+    protocol: PortProtocol = Field(description="The declared transport protocol")
 
 
 class LimaVmSize(FrozenModel):

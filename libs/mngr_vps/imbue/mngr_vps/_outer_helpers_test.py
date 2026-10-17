@@ -304,7 +304,7 @@ def test_run_container_returns_stripped_container_id() -> None:
         outer,
         image="alpine:latest",
         name="test-container",
-        port_mappings={},
+        publish_specs=[],
         volumes=[],
         labels={},
         extra_args=[],
@@ -319,7 +319,7 @@ def test_run_container_command_includes_all_pieces() -> None:
         outer,
         image="my-image:tag",
         name="my-container",
-        port_mappings={"127.0.0.1:8080": "80"},
+        publish_specs=["127.0.0.1:8080:80", "0.0.0.0:59000:59000/udp"],
         volumes=["/host/data:/data:rw"],
         labels={"com.imbue.mngr.host-id": "host-abc"},
         extra_args=["--restart", "always"],
@@ -331,7 +331,7 @@ def test_run_container_command_includes_all_pieces() -> None:
     # a service the outer binds on its docker bridge (the VPS-resident latchkey
     # gateway) is reachable from inside without an address known at create time.
     assert "--add-host host.docker.internal:host-gateway" in cmd
-    assert "-p 127.0.0.1:8080:80" in cmd
+    assert "-p 127.0.0.1:8080:80 -p 0.0.0.0:59000:59000/udp" in cmd
     assert "-v /host/data:/data:rw" in cmd
     assert "--label com.imbue.mngr.host-id=host-abc" in cmd
     assert "--restart always" in cmd

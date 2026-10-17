@@ -2,6 +2,7 @@ import os
 import platform
 import shlex
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -13,6 +14,7 @@ from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 from imbue.mngr_lima.constants import lima_host_data_disk_label
 from imbue.mngr_lima.constants import lima_host_data_disk_mount_path
+from imbue.mngr_lima.data_types import LimaPortForward
 
 
 def _get_default_image_url(
@@ -36,6 +38,39 @@ def _get_arch_string() -> str:
     if machine in ("aarch64", "arm64"):
         return "aarch64"
     return "x86_64"
+
+
+def _published_port_forward_rules(port_forwards: Sequence[LimaPortForward]) -> list[dict]:
+    """Lima portForwards entries forwarding each published port from host loopback into the guest.
+
+    Lima matches a guest socket against the first rule whose guestIP matches
+    literally, so each forward gets the same two guest-address variants the
+    ignore rules below use (a `0.0.0.0` bind and a `127.0.0.1` bind), both to
+    the one host port. These must precede the ignore rules to take effect.
+    """
+    rules: list[dict] = []
+    for port_forward in port_forwards:
+        protocol = port_forward.protocol.value.lower()
+        rules.append(
+            {
+                "guestIPMustBeZero": True,
+                "guestIP": "0.0.0.0",
+                "guestPort": port_forward.guest_port,
+                "hostIP": "127.0.0.1",
+                "hostPort": port_forward.host_port,
+                "proto": protocol,
+            }
+        )
+        rules.append(
+            {
+                "guestIP": "127.0.0.1",
+                "guestPort": port_forward.guest_port,
+                "hostIP": "127.0.0.1",
+                "hostPort": port_forward.host_port,
+                "proto": protocol,
+            }
+        )
+    return rules
 
 
 def _disable_port_forwards_rules() -> list[dict]:
@@ -78,6 +113,7 @@ def generate_default_lima_yaml(
     host_data_disk_size: str | None = None,
     root_authorized_public_key: str | None = None,
     volume_home_path: str | None = None,
+    published_port_forwards: Sequence[LimaPortForward] = (),
 ) -> dict:
     """Generate the default Lima YAML configuration.
 
@@ -108,11 +144,14 @@ def generate_default_lima_yaml(
             is symlinked to the btrfs data disk INSTEAD of host_dir; host_dir
             must then be a path inside it and is mkdir'd on the disk. Only
             meaningful together with host_data_disk_name.
+        published_port_forwards: The host's published ports, each forwarded from
+            its chosen loopback host port into the guest ahead of the rules that
+            ignore every other guest port.
     """
     image_url = custom_image_url or _get_default_image_url(config_image_url_aarch64, config_image_url_x86_64)
     arch = _get_arch_string()
 
-    port_forwards = _disable_port_forwards_rules()
+    port_forwards = _published_port_forward_rules(published_port_forwards) + _disable_port_forwards_rules()
     provision_script = _build_provisioning_script(
         host_private_key_pem,
         host_public_key_openssh,

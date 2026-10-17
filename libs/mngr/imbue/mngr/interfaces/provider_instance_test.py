@@ -25,6 +25,7 @@ from imbue.mngr.interfaces.data_types import BoundedHostRead
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import HostAgentsRead
 from imbue.mngr.interfaces.data_types import HostBootInfo
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostResources
@@ -462,7 +463,7 @@ def test_discover_agents_on_host_disconnects(host_id: HostId, provider: MockProv
     result = _discover_agents_on_host(provider, host_id)
 
     # A plain HostInterface (not online) has no SSH endpoint to report.
-    assert result == ([], None)
+    assert result == HostAgentsRead(agents=(), ssh_info=None)
     mock_host.disconnect.assert_called_once()
 
 
@@ -681,12 +682,15 @@ class _PerHostGatedProvider(MockProviderInstance):
         self,
         host_ref: DiscoveredHost,
         timeout_seconds: float,
-    ) -> tuple[list[DiscoveredAgent], SSHInfo | None]:
+    ) -> HostAgentsRead:
         with self._record_lock:
             self._read_timeouts_by_host_id.setdefault(str(host_ref.host_id), []).append(timeout_seconds)
         if self.gated_host_id is not None and host_ref.host_id == self.gated_host_id:
             self._gate.wait()
-        return list(self.agents_by_host_id.get(str(host_ref.host_id), [])), self.mock_host_ssh_info
+        return HostAgentsRead(
+            agents=tuple(self.agents_by_host_id.get(str(host_ref.host_id), [])),
+            ssh_info=self.mock_host_ssh_info,
+        )
 
     def read_count_for_host(self, host_id: HostId) -> int:
         with self._record_lock:
@@ -1324,10 +1328,10 @@ def test_discover_agents_on_host_triggers_healing_for_online_hosts(
     mock_host.discover_agents.return_value = [live_agent]
     provider.mock_hosts = [mock_host]
 
-    agents, ssh_info = _discover_agents_on_host(provider, host_id)
+    host_read = _discover_agents_on_host(provider, host_id)
 
-    assert agents == [live_agent]
-    assert ssh_info is None
+    assert host_read.agents == (live_agent,)
+    assert host_read.ssh_info is None
     assert provider.persisted_agent_data_calls == [(host_id, dict(live_agent.certified_data))]
 
 

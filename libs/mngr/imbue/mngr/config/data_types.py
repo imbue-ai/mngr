@@ -822,6 +822,7 @@ class CreateCliOptions(CommonCliOptions):
     snapshot: str | None
     build_arg: tuple[str, ...]
     start_arg: tuple[str, ...]
+    publish: tuple[str, ...]
     post_host_create_command: tuple[str, ...]
     post_host_create_outer_command: tuple[str, ...]
     reconnect: bool

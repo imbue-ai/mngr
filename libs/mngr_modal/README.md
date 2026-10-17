@@ -26,9 +26,13 @@ mngr create @.modal -b --file=path/to/Dockerfile
 
 # Block outbound network access
 mngr create @.modal -b offline
+
+# Give the sandbox a tunnel for a TCP port the workload listens on (UDP is not available on Modal)
+mngr create @.modal --publish 8080
 ```
 
 See `mngr create --help` for all available options.
+A published port's tunnel host and port are recorded on the host and reported by `mngr list --format json` under `host.published_endpoints`; every sandbox start (including a snapshot restore) allocates fresh tunnels and re-records them.
 
 ## Configuration
 

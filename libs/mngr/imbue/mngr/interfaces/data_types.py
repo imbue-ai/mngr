@@ -416,6 +416,20 @@ class CertifiedHostData(FrozenModel):
         default=None,
         description="Build log output if the host failed during creation",
     )
+    published_endpoints: tuple[PublishedEndpoint, ...] = Field(
+        default=(),
+        description=(
+            "Where each port the host was created with --publish is reachable from the mngr client that "
+            "created it; kept beside the SSH info so a stopped host still reports what it publishes once started"
+        ),
+    )
+    is_published_endpoints_repicked_on_start: bool = Field(
+        default=False,
+        description=(
+            "Whether the provider picks fresh host ports for the published endpoints on every start (Imbue Cloud) "
+            "rather than keeping them for the host's life (Docker, Lima, the VPS providers, Modal)"
+        ),
+    )
 
 
 class SnapshotInfo(FrozenModel):
@@ -787,12 +801,25 @@ class HostLifecycleOptions(FrozenModel):
         )
 
 
+class HostAgentsRead(FrozenModel):
+    """What one live (or offline-fallback) read of a host answers: its agents and how to reach it."""
+
+    agents: tuple[DiscoveredAgent, ...] = Field(description="The host's agents")
+    ssh_info: SSHInfo | None = Field(description="The host's SSH endpoint, or None when it has none to offer")
+    published_endpoints: tuple[PublishedEndpoint, ...] = Field(
+        default=(), description="Where the host's published ports are reachable; empty when it has none"
+    )
+
+
 class BoundedHostRead(FrozenModel):
     """One host's read in a per-host-bounded discovery poll."""
 
     host: DiscoveredHost = Field(description="The host as this read found it")
     agents: tuple[DiscoveredAgent, ...] = Field(description="The host's agents")
     ssh_info: SSHInfo | None = Field(description="The host's SSH endpoint, or None when it has none to offer")
+    published_endpoints: tuple[PublishedEndpoint, ...] = Field(
+        default=(), description="Where the host's published ports are reachable; empty when it has none"
+    )
 
 
 class BoundedProviderDiscoveryResult(FrozenModel):
@@ -815,6 +842,10 @@ class BoundedProviderDiscoveryResult(FrozenModel):
     # for providers that surface no SSH info (local hosts, or providers that don't populate it).
     host_ssh_infos: tuple[tuple[HostId, SSHInfo], ...] = Field(
         default=(), description="Per-host SSH info to emit as HOST_SSH_INFO events"
+    )
+    host_published_endpoints: tuple[tuple[HostId, tuple[PublishedEndpoint, ...]], ...] = Field(
+        default=(),
+        description="Per-host published endpoints, emitted beside the host's SSH info in its HOST_SSH_INFO event",
     )
     unknown_host_ids: tuple[HostId, ...] = Field(
         default=(), description="Hosts whose read exceeded the per-host timeout (state explicitly unknown)"

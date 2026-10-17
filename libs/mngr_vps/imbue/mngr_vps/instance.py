@@ -29,7 +29,6 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
@@ -90,6 +89,7 @@ from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import remove_host_key_record
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
+from imbue.mngr.providers.published_ports import reject_sshd_port_declarations
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
@@ -150,6 +150,7 @@ from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import isolation_marker_value
 from imbue.mngr_vps.primitives import load_or_create_per_host_host_keypair
 from imbue.mngr_vps.primitives import per_host_key_dir
+from imbue.mngr_vps.published_ports import vps_published_endpoints
 from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.sizing import host_resources_for_shape
 from imbue.mngr_vps.vps_client import VpsClientInterface
@@ -220,6 +221,8 @@ def build_vps_tags(
 # step targeted was already gone -- a benign outcome that should not be recorded as
 # a cleanup failure.
 _VPS_RESOURCE_ALREADY_GONE_STATUS_CODES: Final = (404, 410)
+# The agent's sshd inside the container, which the realizer publishes at ``container_ssh_port``.
+CONTAINER_SSHD_GUEST_PORT: Final[int] = 22
 
 
 def is_vps_resource_already_gone(error: MngrError) -> bool:
@@ -486,6 +489,15 @@ class VpsProvider(BaseProviderInstance):
         ``mngr create``.
         """
 
+    def _validate_published_ports_for_create(self, declarations: Sequence[PublishedPortDeclaration]) -> None:
+        """Hook called by ``create_host`` before the first provider write, with the validated declarations.
+
+        Default no-op: a provider with no managed firewall (OVH, Vultr) publishes every
+        declared port on the VM's public address as it is. Providers whose ``prepare`` step
+        opens ingress (AWS, GCP, Azure) override it to refuse a declaration their firewall was
+        not prepared for, so no half-published host is created (D3).
+        """
+
     def _validate_external_store_ready(self) -> None:
         """Hook called by ``create_host`` before the first provider write.
 
@@ -720,12 +732,8 @@ class VpsProvider(BaseProviderInstance):
         snapshot: SnapshotName | None = None,
         published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> Host:
-        if published_ports:
-            raise PublishedPortUnsupportedError(
-                self.name,
-                str(published_ports[0]),
-                "this provider does not publish ports yet",
-            )
+        declarations = tuple(published_ports or ())
+        reject_sshd_port_declarations(self.name, declarations, CONTAINER_SSHD_GUEST_PORT)
         host_id = HostId.generate()
         logger.info("Creating VPS host {} ({}) ...", name, host_id)
 
@@ -778,6 +786,7 @@ class VpsProvider(BaseProviderInstance):
         # state bucket -- surfaces cleanly: no instance created, no SSH key
         # uploaded, and no "Host creation failed, attempting cleanup..." path.
         self._validate_provider_args_for_create()
+        self._validate_published_ports_for_create(declarations)
         self._validate_external_store_ready()
 
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
@@ -821,6 +830,7 @@ class VpsProvider(BaseProviderInstance):
                     lifecycle=lifecycle,
                     known_hosts=known_hosts,
                     authorized_keys=authorized_keys,
+                    published_ports=declarations,
                 )
 
             logger.info("VPS host {} created successfully (VPS: {}, IP: {})", name, vps_instance_id, vps_ip)
@@ -882,6 +892,7 @@ class VpsProvider(BaseProviderInstance):
         # sshd_config.d drop-in plus the CA material it names, for certificate
         # management access); empty for providers whose agents need none.
         extra_ssh_config_files: tuple[ContainerFile, ...] = (),
+        published_ports: Sequence[PublishedPortDeclaration] = (),
     ) -> Host:
         """Build the container and finalize host state on an already-reachable VPS.
 
@@ -917,6 +928,7 @@ class VpsProvider(BaseProviderInstance):
                 tags=tags,
                 known_hosts=known_hosts,
                 authorized_keys=authorized_keys,
+                published_ports=tuple(published_ports),
                 extra_ssh_config_files=extra_ssh_config_files,
             ),
         )
@@ -954,6 +966,7 @@ class VpsProvider(BaseProviderInstance):
             vps_instance_id=vps_instance_id,
             vps_ssh_key_id=vps_ssh_key_id,
             vps_host_public_key=vps_host_public_key,
+            published_ports=tuple(published_ports),
         )
 
     def teardown_container_on_existing_vps(self, outer: OuterHostInterface, host_id: HostId) -> None:
@@ -1241,6 +1254,7 @@ class VpsProvider(BaseProviderInstance):
         vps_instance_id: VpsInstanceId,
         vps_ssh_key_id: str,
         vps_host_public_key: str,
+        published_ports: tuple[PublishedPortDeclaration, ...] = (),
     ) -> Host:
         """Create the Host object, configure activity watching, and persist state."""
         # The container realizer fills the handle in; a bare placement's handle is
@@ -1266,6 +1280,7 @@ class VpsProvider(BaseProviderInstance):
             user_tags=dict(tags) if tags else {},
             created_at=now,
             updated_at=now,
+            published_endpoints=tuple(vps_published_endpoints(vps_ip, published_ports)),
         )
         host.record_activity(ActivitySource.BOOT)
         host.set_certified_data(host_data)
@@ -1285,6 +1300,7 @@ class VpsProvider(BaseProviderInstance):
                 plan=plan,
                 shape=shape,
                 start_args=effective_start_args,
+                published_ports=published_ports,
                 image=base_image,
                 container_name=handle.container_name,
                 volume_name=handle.volume_name,

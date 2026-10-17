@@ -45,7 +45,6 @@ from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
-from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
@@ -106,6 +105,7 @@ from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import remove_host_key_record
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
+from imbue.mngr.providers.published_ports import reject_sshd_port_declarations
 from imbue.mngr.providers.ssh_host_setup import REQUIRED_HOST_PACKAGES
 from imbue.mngr.providers.ssh_host_setup import SSHD_START_OPTIONS
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
@@ -125,6 +125,9 @@ from imbue.mngr_modal.errors import ModalSandboxDiedMngrError
 from imbue.mngr_modal.errors import ModalSandboxTimeoutMngrError
 from imbue.mngr_modal.errors import ModalSnapshotEndpointTimeoutMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
+from imbue.mngr_modal.published_ports import published_endpoints_from_tunnels
+from imbue.mngr_modal.published_ports import reject_udp_declarations
+from imbue.mngr_modal.published_ports import sandbox_unencrypted_ports
 from imbue.mngr_modal.routes.deployment import DEPLOY_MAX_DURATION_SECONDS
 from imbue.mngr_modal.routes.deployment import ensure_function_deployed
 from imbue.mngr_modal.routes.deployment import get_function_url
@@ -138,6 +141,7 @@ from imbue.mngr_modal.ssh_utils import resolve_per_host_host_keypair
 from imbue.mngr_modal.ssh_utils import wait_for_sshd_with_retry
 from imbue.mngr_modal.volume import ModalVolume
 from imbue.modal_proxy.data_types import StreamType
+from imbue.modal_proxy.data_types import TunnelInfo
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyImageBuildError
@@ -388,6 +392,10 @@ class SandboxConfig(HostConfig):
     docker_build_args: tuple[str, ...] = Field(
         default_factory=tuple,
         description="Docker build args as KEY=VALUE pairs, supplied to the image build as docker build --build-arg does",
+    )
+    published_ports: tuple[PublishedPortDeclaration, ...] = Field(
+        default_factory=tuple,
+        description="The --publish declarations (TCP only), each given a sandbox tunnel on every sandbox start",
     )
 
     @property
@@ -679,7 +687,7 @@ class ModalProviderInstance(BaseProviderInstance):
                 cpu=config.cpu,
                 # Memory is in GB but Modal expects MB
                 memory=int(config.memory * 1024),
-                unencrypted_ports=[CONTAINER_SSH_PORT],
+                unencrypted_ports=sandbox_unencrypted_ports(CONTAINER_SSH_PORT, config.published_ports),
                 gpu=config.gpu,
                 region=config.region,
                 cidr_allowlist=config.effective_cidr_allowlist,
@@ -1239,8 +1247,8 @@ class ModalProviderInstance(BaseProviderInstance):
         retry=retry_if_exception_type(ModalProxyError),
         reraise=True,
     )
-    def _get_ssh_info_from_sandbox(self, sandbox: SandboxInterface, *, tunnel_timeout: int) -> tuple[str, int]:
-        """Extract SSH connection info from a running sandbox.
+    def _get_tunnels_from_sandbox(self, sandbox: SandboxInterface, *, tunnel_timeout: int) -> dict[int, TunnelInfo]:
+        """Read a running sandbox's tunnels: the SSH one and one per published port.
 
         ``tunnel_timeout`` is forwarded to the Modal SDK's ``tunnels()`` call
         and controls how many seconds the backend will wait for the sandbox to
@@ -1250,13 +1258,11 @@ class ModalProviderInstance(BaseProviderInstance):
         """
         try:
             with log_span("Waiting for the Modal sandbox's SSH tunnel", tunnel_timeout_seconds=tunnel_timeout):
-                tunnels = sandbox.tunnels(timeout=tunnel_timeout)
+                return dict(sandbox.tunnels(timeout=tunnel_timeout))
         except ModalProxyError as e:
             if _is_sandbox_timeout(e):
                 raise ModalSandboxTimeoutMngrError("Sandbox failed to come online fast enough") from e
             raise
-        ssh_tunnel = tunnels[CONTAINER_SSH_PORT]
-        return ssh_tunnel.tcp_socket
 
     def _wait_for_sshd(
         self, hostname: str, port: int, host_id: HostId, timeout_seconds: float = SSH_CONNECT_TIMEOUT
@@ -1353,8 +1359,17 @@ class ModalProviderInstance(BaseProviderInstance):
             # Get SSH connection info.
             # Use the sandbox timeout as the tunnel timeout so that the tunnel
             # request waits long enough for image builds and container startup.
-            ssh_host, ssh_port = self._get_ssh_info_from_sandbox(sandbox, tunnel_timeout=config.timeout)
+            tunnels = self._get_tunnels_from_sandbox(sandbox, tunnel_timeout=config.timeout)
+            ssh_host, ssh_port = tunnels[CONTAINER_SSH_PORT].tcp_socket
             logger.trace("Found SSH endpoint available", ssh_host=ssh_host, ssh_port=ssh_port)
+            # Every sandbox start allocates fresh tunnels, so the published endpoints
+            # recorded on the host are the ones this sandbox got.
+            host_data = host_data.model_copy_update(
+                to_update(
+                    host_data.field_ref().published_endpoints,
+                    tuple(published_endpoints_from_tunnels(tunnels, config.published_ports)),
+                ),
+            )
 
             # Get SSH keypairs
             private_key_path, client_public_key = self._get_ssh_keypair(host_id)
@@ -1981,14 +1996,12 @@ log "=== Shutdown script completed ==="
         """Create a new Modal sandbox host.
 
         If snapshot is provided, the host is created from the snapshot image
-        instead of building a new one.
+        instead of building a new one. Published ports become sandbox tunnels
+        (TCP only; a UDP declaration fails here, before any sandbox exists).
         """
-        if published_ports:
-            raise PublishedPortUnsupportedError(
-                self.name,
-                str(published_ports[0]),
-                "this provider does not publish ports yet",
-            )
+        declarations = tuple(published_ports or ())
+        reject_udp_declarations(self.name, declarations)
+        reject_sshd_port_declarations(self.name, declarations, CONTAINER_SSH_PORT)
         # Generate host ID
         host_id = HostId.generate()
 
@@ -2009,7 +2022,10 @@ log "=== Shutdown script completed ==="
         logger.info("Creating host {} in {} ...", name, self.name)
 
         # Parse build arguments (including --file if specified)
-        config = self._parse_build_args(build_args)
+        parsed_config = self._parse_build_args(build_args)
+        config = parsed_config.model_copy_update(
+            to_update(parsed_config.field_ref().published_ports, declarations),
+        )
         base_image = str(image) if image else config.image
         dockerfile_path = Path(config.dockerfile) if config.dockerfile else None
         context_dir_path = Path(config.context_dir) if config.context_dir else None
