@@ -309,14 +309,17 @@ class GcpVpsClient(VpsClientInterface):
         return self._firewall_rule_exists(self.firewall_name)
 
     def _firewall_rule_exists(self, firewall_name: str) -> bool:
+        return self._get_firewall_rule_or_none(firewall_name) is not None
+
+    def _get_firewall_rule_or_none(self, firewall_name: str) -> compute_v1.Firewall | None:
+        """The named rule, or None when the project has no rule of that name (read-only lookup)."""
         try:
             with self._translate_gcp_errors():
-                self._firewalls().get(project=self.project_id, firewall=firewall_name)
+                return self._firewalls().get(project=self.project_id, firewall=firewall_name)
         except VpsApiError as e:
             if e.status_code == 404:
-                return False
+                return None
             raise
-        return True
 
     @property
     def published_firewall_name(self) -> str:
@@ -395,15 +398,6 @@ class GcpVpsClient(VpsClientInterface):
             self.firewall_target_tag,
             self.project_id,
         )
-
-    def _get_firewall_rule_or_none(self, firewall_name: str) -> compute_v1.Firewall | None:
-        try:
-            with self._translate_gcp_errors():
-                return self._firewalls().get(project=self.project_id, firewall=firewall_name)
-        except VpsApiError as e:
-            if e.status_code == 404:
-                return None
-            raise
 
     def _warn_about_cidrs_if_needed(self) -> None:
         """Emit a one-line warning when the effective CIDR set is empty or 0.0.0.0/0.
