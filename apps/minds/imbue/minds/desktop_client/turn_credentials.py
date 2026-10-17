@@ -79,11 +79,17 @@ class _ConnectorIceServersBody(WireModel):
     expires_at: datetime
 
 
-class _ConnectorRefusalBody(WireModel):
-    """The connector's structured refusal, as much of it as the log line needs."""
+class _ConnectorRefusalDetail(WireModel):
+    """The structured ``detail`` of a connector refusal (``raise_as_http``), as much of it as the log line needs."""
 
-    error: str | None = None
-    error_class: str | None = None
+    code: str | None = None
+    message: str | None = None
+
+
+class _ConnectorRefusalBody(WireModel):
+    """A connector error body: FastAPI's ``{"detail": ...}`` envelope, the detail a string or a structured object."""
+
+    detail: _ConnectorRefusalDetail | str | None = None
 
 
 @pure
@@ -110,11 +116,14 @@ def credential_from_connector_response(status_code: int, body_text: str, now: da
 
 
 def _describe_refusal(body_text: str) -> str:
+    """The refusal's ``code`` (``quota_exceeded``, ``turn_quota_exceeded``, ``turn_rate_limited``), else its message."""
     try:
         body = _ConnectorRefusalBody.model_validate_json(body_text)
     except ValidationError:
         return body_text[:200]
-    return body.error_class or body.error or body_text[:200]
+    if isinstance(body.detail, _ConnectorRefusalDetail):
+        return body.detail.code or body.detail.message or body_text[:200]
+    return body.detail or body_text[:200]
 
 
 class TurnCredentialClientInterface(MutableModel, ABC):

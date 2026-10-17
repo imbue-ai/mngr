@@ -69,10 +69,18 @@ def test_a_200_answer_becomes_a_credential_with_the_servers_unchanged() -> None:
 
 
 @pytest.mark.parametrize("status_code", [403, 429])
-def test_a_structured_refusal_is_a_refusal_naming_its_class(status_code: int) -> None:
-    body = json.dumps({"error": "plan cannot share", "error_class": "turn_quota_exceeded"})
+def test_a_structured_refusal_is_a_refusal_naming_its_code(status_code: int) -> None:
+    # The connector's refusals are FastAPI HTTPExceptions: a {"detail": {...}} envelope.
+    body = json.dumps({"detail": {"code": "turn_quota_exceeded", "limit_bytes": 1, "message": "quota exceeded"}})
     with pytest.raises(TurnCredentialRefusedError, match="turn_quota_exceeded"):
         credential_from_connector_response(status_code, body, _T0)
+
+
+def test_a_refusal_with_a_plain_string_detail_or_no_json_is_described_by_its_text() -> None:
+    with pytest.raises(TurnCredentialRefusedError, match="plan cannot share"):
+        credential_from_connector_response(403, json.dumps({"detail": "plan cannot share"}), _T0)
+    with pytest.raises(TurnCredentialRefusedError, match="forbidden"):
+        credential_from_connector_response(403, "forbidden", _T0)
 
 
 @pytest.mark.parametrize("status_code", [401, 500, 503])
