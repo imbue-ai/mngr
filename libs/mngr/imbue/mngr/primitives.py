@@ -787,8 +787,6 @@ class PublishedPortDeclaration(FrozenModel):
     host needs to know them. See ``specs/published-ports/spec.md``.
     """
 
-    model_config = ConfigDict(extra="ignore")
-
     guest_port: int = Field(
         ge=MIN_PORT_NUMBER, le=MAX_PORT_NUMBER, description="The port the workload binds inside the host"
     )
