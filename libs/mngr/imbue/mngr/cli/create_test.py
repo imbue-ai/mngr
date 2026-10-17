@@ -2477,6 +2477,15 @@ def test_compute_loader_provider_filter_git_url_source_skips_loader(
     assert result is None
 
 
+def test_create_cli_options_spell_template_publish_integers_as_strings(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """A template's TOML writes a bare port as an integer (``publish = [59000]``); the option
+    spells it out so the declaration parser reads it like the CLI's text."""
+    opts = CreateCliOptions(**{**default_create_cli_opts.model_dump(), "publish": (59000, "8080/udp")})
+    assert opts.publish == ("59000", "8080/udp")
+
+
 def test_parse_target_host_threads_publish_declarations(
     default_create_cli_opts: CreateCliOptions,
 ) -> None:

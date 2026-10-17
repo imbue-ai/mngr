@@ -843,3 +843,12 @@ class CreateCliOptions(CommonCliOptions):
     tmux_width: int | None
     tmux_height: int | None
     tmux_window_size: str | None
+
+    @field_validator("publish", mode="before")
+    @classmethod
+    def _normalize_publish(cls, value: tuple[str | int, ...] | list[str | int]) -> tuple[str, ...]:
+        # A template's TOML naturally writes a bare port as an integer (``publish = [59000]``);
+        # the declaration parser reads strings, so each value is spelled out before validation.
+        return tuple(str(item) for item in value)
+
+
