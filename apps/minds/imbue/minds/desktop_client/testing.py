@@ -96,6 +96,8 @@ from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_apply_window import AGENTS_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import AGENTS_END_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import AGENTS_FAILED_SENTINEL
+from imbue.minds.desktop_client.update_apply_window import BUSY_BEGIN_SENTINEL
+from imbue.minds.desktop_client.update_apply_window import BUSY_END_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_END_SENTINEL
 from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
@@ -1166,16 +1168,19 @@ def ready_machine_launch_stdout(
     return skill_chat_launch_stdout(skill_name, script_exit_code=2, fallback_stdout="")
 
 
-def update_run_probe_stdout(*, run: str = "", agents: str | None = "") -> str:
+def update_run_probe_stdout(*, run: str = "", agents: str | None = "", busy: str | None = "") -> str:
     """One workspace's answer to the update run probe, in the wire format.
 
     Section bodies pass through verbatim (no newline added); ``agents=None``
-    renders the listing-failed sentinel.
+    renders the listing-failed sentinel, and ``busy=None`` leaves the busy-chat
+    section out altogether.
     """
     agent_section = f"{AGENTS_FAILED_SENTINEL}\n" if agents is None else agents
+    busy_section = "" if busy is None else f"{BUSY_BEGIN_SENTINEL}\n{busy}{BUSY_END_SENTINEL}\n"
     return (
         f"{RUN_BEGIN_SENTINEL}\n{run}{RUN_END_SENTINEL}\n"
         f"{AGENTS_BEGIN_SENTINEL}\n{agent_section}{AGENTS_END_SENTINEL}\n"
+        f"{busy_section}"
     )
 
 

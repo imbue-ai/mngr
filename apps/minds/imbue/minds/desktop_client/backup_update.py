@@ -10,10 +10,11 @@ Runs as a tracked workspace operation (the ``workspace_operations`` registry,
 like restart) so the settings view can poll step-level progress:
 
 1. Gate + wait: poll the workspace's gate probe until no backup tick is in
-   flight. Actively-RUNNING chat agents block the *code* path -- the caller
-   passes ``is_stop_chats`` (the "Stop all chats and retry" flow) to have the
-   apply script stop them first. Waiting is unbounded and cancellable (the
-   cancel just stops polling; nothing has been mutated yet).
+   flight. RUNNING chat agents, and idle ones busy with a pending background
+   task, block the *code* path -- the caller passes ``is_stop_chats`` (the
+   "Stop all chats and retry" flow) to have the apply script stop them
+   first. Waiting is unbounded and cancellable (the cancel just stops
+   polling; nothing has been mutated yet).
 2. Apply: one exec runs the mutating script (stash / checkout tag / commit /
    ``uv sync --all-packages`` / restart / verify), which auto-rolls-back via
    ``git revert``

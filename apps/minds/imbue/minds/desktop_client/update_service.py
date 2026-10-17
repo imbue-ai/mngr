@@ -325,7 +325,9 @@ class WorkspaceUpdateService(MutableModel):
     def is_workspace_quiet(self, agent_id: AgentId) -> bool:
         """Whether no chats are running in the workspace, per the backup flow's gate probe.
 
-        An unanswered probe counts as busy: bouncing the services under a chat is the expensive mistake.
+        A chat whose agent is idle but busy (it will resume on its own when a background task
+        it started finishes) counts as running. An unanswered probe counts as busy: bouncing
+        the services under a chat is the expensive mistake.
         """
         command = build_workspace_script_command(BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", str(agent_id)))
         result = self.mngr_caller.call(

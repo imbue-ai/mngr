@@ -87,7 +87,8 @@ class UpdateActivity(UpperCaseStrEnum):
     """The run's chat exists and is preparing in its own branch and worktree; the live workspace is untouched."""
     WAITING = auto()
     """The run's chat agent is alive but idle: its record says it is holding
-    for the user, or the poll read it idle across consecutive polls."""
+    for the user, or the poll read it idle across consecutive polls. An agent
+    whose chat is busy (a turn in flight or a background task pending) is not idle."""
     APPLYING = auto()
     """The merge-and-reveal is landing. The system-interface outage this causes is expected."""
     STALLED = auto()

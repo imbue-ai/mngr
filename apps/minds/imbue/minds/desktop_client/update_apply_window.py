@@ -31,6 +31,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_command
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr_command
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import ProbeGracePurpose
@@ -77,6 +78,15 @@ AGENTS_END_SENTINEL: Final[str] = "MNGR_UPDATE_AGENTS_END"
 # Printed when the in-container ``mngr`` could not answer (an apply replaces it mid-run),
 # so "could not look" is never mistaken for "no agents".
 AGENTS_FAILED_SENTINEL: Final[str] = "MNGR_UPDATE_AGENTS_FAILED"
+BUSY_BEGIN_SENTINEL: Final[str] = "MNGR_UPDATE_BUSY_BEGIN"
+BUSY_END_SENTINEL: Final[str] = "MNGR_UPDATE_BUSY_END"
+
+# The template's background-task CLI, relative to the work_dir; a template that predates it prints nothing.
+BACKGROUND_TASKS_SCRIPT_PATH: Final[str] = "system/scripts/background_tasks.py"
+
+# The CLI's share of the probe's budget: against a restarting chat app it can spend 3s connecting and
+# 10s reading before it falls back to the marker files. One cut off prints nothing, so no chat reads busy.
+_BACKGROUND_TASKS_TIMEOUT_SECONDS: Final[int] = 10
 
 
 class UpdateAgentLiveness(UpperCaseStrEnum):
@@ -102,9 +112,10 @@ class UpdateRunProbe(FrozenModel):
     )
     is_agent_waiting: bool = Field(
         default=False,
-        description="Whether the run reads as alive but idle: its chat agent reported WAITING, and so did any "
-        "worker the record names (or that worker is gone). An agent whose state could not be read reads as "
-        "running rather than waiting, on the same bias as the rest",
+        description="Whether the run reads as alive but idle: its chat agent reported WAITING with its chat not "
+        "busy (no turn in flight and no background task pending), and so did any worker the record names (or that "
+        "worker is gone). An agent whose state could not be read reads as running rather than waiting, on the same "
+        "bias as the rest",
     )
 
     @property
@@ -126,18 +137,32 @@ class UpdateRunProbe(FrozenModel):
 
 
 def build_update_run_probe_args(workspace_address: str) -> list[str]:
-    """Build the ``mngr`` CLI args for the combined run-status + agent probe.
+    """Build the ``mngr`` CLI args for the combined run-status + agent + busy-chat probe.
 
-    One exec for both facts because this runs on the stuck-edge callback thread. The
+    One exec for every fact because this runs on the stuck-edge callback thread. The
     listing is unfiltered and matched app-side so a chat name never lands in a CEL filter.
     """
-    inner_list = build_in_workspace_mngr_command(["list", "--format", "{name}\t{state}"])
+    inner_list = build_in_workspace_mngr_command(["list", "--format", "{name}\t{state}\t{id}\t{labels.chat_id}"])
+    inner_busy = build_in_workspace_command(
+        [
+            "timeout",
+            str(_BACKGROUND_TASKS_TIMEOUT_SECONDS),
+            "python3",
+            BACKGROUND_TASKS_SCRIPT_PATH,
+            "list",
+            "--format",
+            "tsv",
+        ]
+    )
     # The bare `echo` keeps the end sentinel on its own line when the record has no trailing newline.
     script = (
         f"echo {RUN_BEGIN_SENTINEL}; cat {shlex.quote(RUN_STATUS_PATH)} 2>/dev/null; echo; echo {RUN_END_SENTINEL}; "
         f"echo {AGENTS_BEGIN_SENTINEL}; "
         f"{inner_list} 2>/dev/null || echo {AGENTS_FAILED_SENTINEL}; "
-        f"echo {AGENTS_END_SENTINEL}"
+        f"echo {AGENTS_END_SENTINEL}; "
+        f"echo {BUSY_BEGIN_SENTINEL}; "
+        f"{inner_busy} 2>/dev/null || true; "
+        f"echo {BUSY_END_SENTINEL}"
     )
     return ["exec", "--agent", workspace_address, script, "--no-start"]
 
@@ -154,17 +179,79 @@ def _section(lines: list[str], begin: str, end: str) -> list[str] | None:
     return lines[begin_index + 1 : end_index]
 
 
-def _state_of(listing_lines: list[str], agent_name: str) -> str | None:
-    """The listed lifecycle state of ``agent_name``, or None when it is not listed."""
+class _ListedAgent(FrozenModel):
+    """One agent as the probe's listing gives it."""
+
+    name: str = Field(description="The agent's name")
+    state: str = Field(description="Its lifecycle state as listed; '' when the line carried none")
+    agent_id: str = Field(description="Its id; '' when the line carried none")
+    chat_id: str = Field(description="Its ``chat_id`` label; '' when it has none or the line carried none")
+
+
+class _BusyAgents(FrozenModel):
+    """The agents whose chats the workspace reports busy, i.e. that will resume on their own."""
+
+    names: frozenset[str] = Field(description="Busy agents the chat app named")
+    agent_ids: frozenset[str] = Field(
+        description="Busy agents known only by id: the CLI's file fallback, which takes a chat's id as its agent's"
+    )
+    chat_ids: frozenset[str] = Field(
+        description="The busy chats the file fallback reports, matched against each agent's ``chat_id`` label so "
+        "an agent the chat was handed off to counts too"
+    )
+
+    def includes(self, agent: _ListedAgent) -> bool:
+        return (
+            agent.name in self.names
+            or (bool(agent.agent_id) and agent.agent_id in self.agent_ids)
+            or (bool(agent.chat_id) and agent.chat_id in self.chat_ids)
+        )
+
+
+def _listed_agent(listing_lines: list[str], agent_name: str) -> _ListedAgent | None:
+    """``agent_name`` as listed, or None when it is not listed."""
     for line in listing_lines:
-        name, _, state = line.partition("\t")
+        name, _, rest = line.partition("\t")
         if name.strip() == agent_name:
-            return state.strip()
+            state, _, rest = rest.partition("\t")
+            agent_id, _, chat_id = rest.partition("\t")
+            return _ListedAgent(
+                name=agent_name, state=state.strip(), agent_id=agent_id.strip(), chat_id=chat_id.strip()
+            )
     return None
 
 
+def _parse_busy_agents(busy_lines: list[str] | None) -> _BusyAgents:
+    """The busy agents in ``background_tasks.py list --format tsv`` output; none when it printed nothing.
+
+    Each line is one chat with pending tasks: chat id, active agent id, active agent name,
+    ``true``/``false`` busy, task count. A template that predates the CLI prints nothing,
+    so its agents read as not busy.
+    """
+    names: set[str] = set()
+    agent_ids: set[str] = set()
+    chat_ids: set[str] = set()
+    for line in busy_lines or []:
+        fields = [field.strip() for field in line.split("\t")]
+        if len(fields) < 4 or fields[3] != "true":
+            continue
+        if fields[2]:
+            names.add(fields[2])
+            continue
+        if fields[1]:
+            agent_ids.add(fields[1])
+        if fields[0]:
+            chat_ids.add(fields[0])
+    return _BusyAgents(names=frozenset(names), agent_ids=frozenset(agent_ids), chat_ids=frozenset(chat_ids))
+
+
+def _is_idle(agent: _ListedAgent, busy_agents: _BusyAgents) -> bool:
+    """Whether nothing will move ``agent`` but the user: WAITING, with no turn or background task to resume it."""
+    return agent.state == AgentLifecycleState.WAITING.value and not busy_agents.includes(agent)
+
+
 def _classify_agent_listing(
-    listing_lines: list[str], chat_agent_name: str, worker_agent_name: str
+    listing_lines: list[str], chat_agent_name: str, worker_agent_name: str, busy_agents: _BusyAgents
 ) -> tuple[UpdateAgentLiveness, bool]:
     """The run's chat agent's liveness (and whether the run is WAITING) from the listing.
 
@@ -172,24 +259,23 @@ def _classify_agent_listing(
     attributed to the run, and GONE would unlock a live run's row. An answered listing
     that does not carry the name is GONE, since an ended chat stays listed.
 
-    An idle lead is only "waiting" when its named worker is not moving either: the lead
-    sits idle for most of the run while a background worker does the merge.
+    An idle lead is only "waiting" when it is not busy and its named worker is not moving
+    either: the lead sits idle for most of the run while a background worker does the
+    merge, or while a command it started in the background runs.
     """
     stripped = [line.strip() for line in listing_lines if line.strip()]
     if AGENTS_FAILED_SENTINEL in stripped:
         return UpdateAgentLiveness.UNKNOWN, False
     if not chat_agent_name:
         return UpdateAgentLiveness.UNKNOWN, False
-    chat_state = _state_of(stripped, chat_agent_name)
-    if chat_state is None or chat_state in _ENDED_AGENT_STATES:
+    chat_agent = _listed_agent(stripped, chat_agent_name)
+    if chat_agent is None or chat_agent.state in _ENDED_AGENT_STATES:
         return UpdateAgentLiveness.GONE, False
-    if chat_state != AgentLifecycleState.WAITING.value:
+    if not _is_idle(chat_agent, busy_agents):
         return UpdateAgentLiveness.ALIVE, False
-    worker_state = _state_of(stripped, worker_agent_name) if worker_agent_name else None
+    worker = _listed_agent(stripped, worker_agent_name) if worker_agent_name else None
     is_worker_moving = (
-        worker_state is not None
-        and worker_state not in _ENDED_AGENT_STATES
-        and worker_state != AgentLifecycleState.WAITING.value
+        worker is not None and worker.state not in _ENDED_AGENT_STATES and not _is_idle(worker, busy_agents)
     )
     return UpdateAgentLiveness.ALIVE, not is_worker_moving
 
@@ -209,7 +295,8 @@ def parse_update_run_probe(stdout: str, chat_agent_name: str) -> UpdateRunProbe:
     if agent_lines is None:
         liveness, is_waiting = UpdateAgentLiveness.UNKNOWN, False
     else:
-        liveness, is_waiting = _classify_agent_listing(agent_lines, chat_agent_name, worker_agent_name)
+        busy_agents = _parse_busy_agents(_section(lines, BUSY_BEGIN_SENTINEL, BUSY_END_SENTINEL))
+        liveness, is_waiting = _classify_agent_listing(agent_lines, chat_agent_name, worker_agent_name, busy_agents)
     return UpdateRunProbe(
         is_probe_answered=True,
         run_status=run_status,

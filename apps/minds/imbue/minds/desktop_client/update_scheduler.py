@@ -54,7 +54,7 @@ class ScheduledRunConditions(FrozenModel):
     )
     is_run_in_flight: bool = Field(description="Whether an update is already running there")
     is_reachable: bool = Field(description="Whether the workspace's host is known and startable")
-    is_quiet: bool = Field(description="Whether no chats are currently running in it")
+    is_quiet: bool = Field(description="Whether no chats are currently running or busy in it")
 
 
 def decide_skip_reason(conditions: ScheduledRunConditions, *, is_target_named: bool) -> UpdateSkipReason | None:

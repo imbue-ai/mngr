@@ -150,7 +150,10 @@ class BackupOperationStatusResponse(FrozenModel):
     )
     blocked_chats: tuple[str, ...] = Field(
         default=(),
-        description="Chat agents whose RUNNING state blocked the update (offer 'Stop all chats and retry')",
+        description=(
+            "Chat agents that blocked the update because they were RUNNING, or idle but busy with a pending "
+            "background task (offer 'Stop all chats and retry')"
+        ),
     )
     is_cancellable: bool = Field(
         default=False,
@@ -173,7 +176,10 @@ class BackupServiceUpdateRequest(ApiRequestModel):
 
     stop_chats: bool = Field(
         default=False,
-        description="Stop actively-RUNNING chat agents first (the 'Stop all chats and retry' flow)",
+        description=(
+            "Stop RUNNING chat agents, and idle ones busy with a pending background task, first, ending those "
+            "tasks (the 'Stop all chats and retry' flow)"
+        ),
     )
 
 
@@ -182,7 +188,10 @@ class BackupRestoreRequest(ApiRequestModel):
 
     stop_chats: bool = Field(
         default=False,
-        description="Stop actively-RUNNING chat agents first (the 'Stop chats and try again' flow)",
+        description=(
+            "Stop RUNNING chat agents, and idle ones busy with a pending background task, first, ending those "
+            "tasks (the 'Stop chats and try again' flow)"
+        ),
     )
     update_after: bool = Field(
         default=True,

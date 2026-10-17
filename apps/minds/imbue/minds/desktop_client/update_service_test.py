@@ -500,6 +500,46 @@ def test_a_cleared_hold_comes_off_a_row_whose_agent_is_idle_again(
     assert state.hold_detail == ""
 
 
+@pytest.mark.witnesses("workspace-updates.idle-lead-on-a-background-task-is-not-waiting")
+@pytest.mark.parametrize(
+    ("busy_section", "starting_activity", "expected_activity"),
+    (
+        ("lead-1\tlead-1\tupdate-x\ttrue\t1\n", UpdateActivity.RUNNING, UpdateActivity.RUNNING),
+        ("lead-1\tlead-1\tupdate-x\ttrue\t1\n", UpdateActivity.WAITING, UpdateActivity.RUNNING),
+        ("", UpdateActivity.RUNNING, UpdateActivity.WAITING),
+    ),
+    ids=["busy-stays-running", "busy-returns-to-running", "not-busy-surfaces-waiting"],
+)
+def test_a_lead_parked_on_a_background_task_with_its_worker_idle_is_not_reported_as_waiting(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    busy_section: str,
+    starting_activity: UpdateActivity,
+    expected_activity: UpdateActivity,
+) -> None:
+    """Both agents read WAITING, but the lead's chat will resume on its own, so nobody is waiting on the user."""
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0,
+            stdout=update_run_probe_stdout(
+                run=json.dumps({"chat_agent_name": "update-x", "worker_agent_name": "update-self"}) + "\n",
+                agents="update-x\tWAITING\tlead-1\nupdate-self\tWAITING\tworker-1\n",
+                busy=busy_section,
+            ),
+        )
+    )
+    service = _build_service(tmp_path, root_concurrency_group, host_state=HostState.RUNNING, caller=caller)
+    agent_id = AgentId.generate()
+    service.state_store.try_begin_run(agent_id, chat_agent_name="update-x")
+    service.state_store.set_activity(agent_id, UpdateActivity.RUNNING)
+    service.state_store.set_activity(agent_id, starting_activity)
+
+    service.poll_in_flight_runs()
+    service.poll_in_flight_runs()
+
+    assert service.state_store.get(agent_id).activity is expected_activity
+
+
 def test_the_poll_adopts_the_records_own_start_as_the_runs_identity(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:

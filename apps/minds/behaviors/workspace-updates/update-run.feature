@@ -110,6 +110,15 @@ Feature: Running an update
       And the workspace reports the run's agent as alive but idle and that worker as working
       Then the app still reports that update as preparing
 
+    @idle-lead-on-a-background-task-is-not-waiting
+    Example: A run whose agent is idle only because it waits on a background task is still reported as updating
+      An agent that ended its turn to wait for a command it started in the background will resume on its own when that command finishes, so nothing is waiting on the user.
+      A workspace whose template cannot report background tasks reports none.
+      Given a workspace with an update in flight
+      And the workspace repeatedly reports the run's agent as alive but idle
+      And the workspace reports that agent's conversation as waiting on a background task
+      Then the app still reports that update as preparing
+
     @hold-is-reported-with-its-detail
     Example: A run that has stopped for the user's decision says what it is waiting on
       A recorded hold is the run's own statement, so it is surfaced without waiting for repeated idleness; its one line of detail, written for the user, is what the app shows.

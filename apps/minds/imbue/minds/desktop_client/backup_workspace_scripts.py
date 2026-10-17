@@ -11,16 +11,18 @@ out of arbitrarily noisy output:
   of the ``host-backup`` program and the current ``data/.secrets/restic.env``
   (sha256 + content, so Imbue Studio can compare against its canonical copy and adopt
   externally configured envs).
-- the *gate probe* script: reports which chat agents are actively RUNNING
-  (agents sharing the repo-root work_dir, excluding the ``main``-type
-  services agent -- worktree/worker agents live elsewhere and never count)
-  and whether a backup tick is currently in flight.
+- the *gate probe* script: reports which chat agents are actively RUNNING,
+  or WAITING with their chat busy per the template's background-task CLI
+  when it has one (agents sharing the repo-root work_dir, excluding the
+  ``main``-type services agent -- worktree/worker agents live elsewhere and
+  never count) and whether a backup tick is currently in flight.
 - the *apply update* script: the single mutating step -- stash, check out
   the backup-service code (``system/services/host_backup``,
   ``system/libs/host_backup``, or ``libs/host_backup``
   on pre-declutter workspaces) at the target tag, commit ``backup-update: <tag>``,
   ``uv sync --all-packages``, restart the service, verify it comes back, and auto-rollback
-  (``git revert``) on failure. Optionally stops running chats first.
+  (``git revert``) on failure. Optionally stops running chats first, ending
+  the background commands that would wake them again.
 - the *restore* script: rewinds the whole backup root to a chosen restic
   snapshot, in place -- gate on chats/ticks, stop every supervisord service
   (they all run from and write into the tree this restore rewrites), take
@@ -90,6 +92,7 @@ import base64 as _b64
 import hashlib as _hashlib
 import json as _json
 import os as _os
+import signal as _signal
 import subprocess as _subprocess
 import sys as _sys
 import time as _time
@@ -107,6 +110,8 @@ BACKUP_CODE_PATH = next(
     "libs/host_backup",
 )
 RESTIC_ENV_PATH = "data/.secrets/restic.env"
+# The template's background-task CLI; a workspace whose template predates it has no busy chats to report.
+BACKGROUND_TASKS_CLI_PATH = "system/scripts/background_tasks.py"
 GIT_IDENTITY = ["-c", "user.name=minds-backup-update", "-c", "user.email=backup-update@minds.local"]
 TICK_COMPLETION_TYPES = (
     "RESTIC_BACKUP_SUCCEEDED",
@@ -363,8 +368,72 @@ def _read_restic_env():
     }
 
 
+def _read_background_chats():
+    """The chats with pending background tasks, as the template's CLI lists them.
+
+    Each is the CLI's JSON record: the chat's active agent (``active_agent_name`` empty and
+    ``active_agent_id`` the chat's own id when the CLI read the marker files rather than
+    the chat app), whether the chat is busy (its agent will resume on its own), and its
+    tasks. A workspace without the CLI has none, and so does a CLI that fails, noted on stderr.
+    """
+    if not _os.path.isfile(BACKGROUND_TASKS_CLI_PATH):
+        return []
+    listed = _run([_sys.executable, BACKGROUND_TASKS_CLI_PATH, "list", "--format", "json"], timeout=60)
+    if listed.returncode != 0:
+        _sys.stderr.write(
+            "%s list failed (exit %d), so no chat reads as busy: %s\n"
+            % (BACKGROUND_TASKS_CLI_PATH, listed.returncode, (listed.stderr or listed.stdout).strip()[-300:])
+        )
+        return []
+    try:
+        payload = _json.loads(listed.stdout)
+    except ValueError:
+        _sys.stderr.write(
+            "%s list printed no JSON, so no chat reads as busy: %s\n"
+            % (BACKGROUND_TASKS_CLI_PATH, listed.stdout.strip()[-300:])
+        )
+        return []
+    chats = payload.get("chats") if isinstance(payload, dict) else None
+    return [chat for chat in chats if isinstance(chat, dict)] if isinstance(chats, list) else []
+
+
+def _background_chats_of(agent, background_chats):
+    """The background chats whose active agent is ``agent``, matched by name or by id.
+
+    A chat the CLI read from the marker files names no agent and gives its own id as its
+    agent's, which is the id of the chat's first agent; an agent the chat was handed off to
+    is matched to it by its ``chat_id`` label instead.
+    """
+    name = str(agent.get("name") or "")
+    agent_id = str(agent.get("id") or "")
+    labels = agent.get("labels")
+    chat_label = str(labels.get("chat_id") or "") if isinstance(labels, dict) else ""
+    return [
+        chat
+        for chat in background_chats
+        if (name and chat.get("active_agent_name") == name)
+        or (agent_id and chat.get("active_agent_id") == agent_id)
+        or (chat_label and not chat.get("active_agent_name") and chat.get("chat_id") == chat_label)
+    ]
+
+
+def _runner_pids(background_chats):
+    """The ``run_in_background.py`` runners of these chats; Claude's own tasks die with Claude."""
+    return [
+        task["pid"]
+        for chat in background_chats
+        for task in chat.get("background_tasks") or []
+        if isinstance(task, dict) and task.get("source") == "run_in_background" and isinstance(task.get("pid"), int)
+    ]
+
+
 def _list_running_chats():
-    """Return (chats, error). Chats = RUNNING agents in this work_dir, excluding type=main."""
+    """Return (gate, error); the gate is None when the chats could not be listed.
+
+    The gate's ``chats`` are the agents in this work_dir, excluding type=main, that are RUNNING,
+    or WAITING with their chat busy (they will resume on their own). ``runner_pids_by_chat``
+    holds each chat's runners, the background commands that would wake it again after a stop.
+    """
     listed = _run_mngr(["list", "--format", "json", "--provider", "local"], timeout=180)
     if listed.returncode != 0:
         return None, "mngr list failed: %s" % (listed.stderr or listed.stdout).strip()[-500:]
@@ -382,8 +451,10 @@ def _list_running_chats():
             break
     if payload is None:
         return None, "mngr list produced no JSON payload"
+    background_chats = _read_background_chats()
     cwd = _os.path.realpath(_os.getcwd())
     chats = []
+    runner_pids_by_chat = {}
     for agent in payload.get("agents", []):
         if not isinstance(agent, dict):
             continue
@@ -392,10 +463,23 @@ def _list_running_chats():
             continue
         if agent.get("type") == "main":
             continue
-        if agent.get("state") != "RUNNING":
+        own_background_chats = _background_chats_of(agent, background_chats)
+        is_busy = any(chat.get("is_busy") is True for chat in own_background_chats)
+        if agent.get("state") != "RUNNING" and not (agent.get("state") == "WAITING" and is_busy):
             continue
-        chats.append(str(agent.get("name") or agent.get("id") or "unknown"))
-    return chats, ""
+        chat_name = str(agent.get("name") or agent.get("id") or "unknown")
+        chats.append(chat_name)
+        runner_pids_by_chat[chat_name] = _runner_pids(own_background_chats)
+    return {"chats": chats, "runner_pids_by_chat": runner_pids_by_chat}, ""
+
+
+def _end_runners(runner_pids):
+    """End each runner and its command; a runner leads its own session, so its group is both."""
+    for pid in runner_pids:
+        try:
+            _os.killpg(pid, _signal.SIGTERM)
+        except ProcessLookupError:
+            pass
 
 
 def _backup_events_path(agent_id):
@@ -458,7 +542,7 @@ def _is_backup_tick_in_flight(agent_id):
 
 
 def _gate_chats_and_wait_for_tick(agent_id, is_stop_chats, is_chat_gate_skipped=False):
-    """Gate a mutating script: no RUNNING chats (optionally stop them), no in-flight tick.
+    """Gate a mutating script: no running or busy chats (optionally stop them), no in-flight tick.
 
     Returns (status, extra, detail) with status in ok | blocked | failed;
     ``extra`` carries payload fields (e.g. running_chats) for the result.
@@ -467,11 +551,13 @@ def _gate_chats_and_wait_for_tick(agent_id, is_stop_chats, is_chat_gate_skipped=
     the tick wait still applies -- it needs no workspace code to answer.
     """
     if not is_chat_gate_skipped:
-        chats, gate_error = _list_running_chats()
-        if chats is None:
+        gate, gate_error = _list_running_chats()
+        if gate is None:
             return "failed", {}, "cannot determine running chats: %s" % gate_error
-        if chats and is_stop_chats:
-            for chat_name in chats:
+        if gate["chats"] and is_stop_chats:
+            for chat_name in gate["chats"]:
+                # First, so no runner reports its killed command and wakes the chat again.
+                _end_runners(gate["runner_pids_by_chat"].get(chat_name, []))
                 stopped = _run_mngr(["stop", chat_name], timeout=180)
                 if stopped.returncode != 0:
                     detail = "could not stop chat %s: %s" % (
@@ -479,11 +565,11 @@ def _gate_chats_and_wait_for_tick(agent_id, is_stop_chats, is_chat_gate_skipped=
                         (stopped.stderr or stopped.stdout).strip()[-300:],
                     )
                     return "failed", {}, detail
-            chats, gate_error = _list_running_chats()
-            if chats is None:
+            gate, gate_error = _list_running_chats()
+            if gate is None:
                 return "failed", {}, "cannot re-check running chats: %s" % gate_error
-        if chats:
-            return "blocked", {"running_chats": chats}, "chat agents are running"
+        if gate["chats"]:
+            return "blocked", {"running_chats": gate["chats"]}, "chat agents are running"
     wait_deadline = _time.monotonic() + TICK_WAIT_TIMEOUT_SECONDS
     while _is_backup_tick_in_flight(agent_id):
         if _time.monotonic() >= wait_deadline:
@@ -562,12 +648,12 @@ BACKUP_GATE_PROBE_SCRIPT: Final[str] = (
 def _main():
     agent_id = _arg_value("--agent-id")
     result = {"schema": 1}
-    chats, gate_error = _list_running_chats()
-    if chats is None:
+    gate, gate_error = _list_running_chats()
+    if gate is None:
         result["gate_error"] = gate_error
         result["running_chats"] = []
     else:
-        result["running_chats"] = chats
+        result["running_chats"] = gate["chats"]
     result["backup_tick_in_flight"] = _is_backup_tick_in_flight(agent_id)
     _emit("MINDS_BACKUP_GATE_JSON:", result)
 
@@ -621,7 +707,7 @@ def _main():
         "stash_conflict": False,
     }
 
-    # Gate: no actively-RUNNING chat agents in this work_dir (optionally
+    # Gate: no running or busy chat agents in this work_dir (optionally
     # stopping them first), then wait out any in-flight backup tick.
     gate_status, gate_extra, gate_detail = _gate_chats_and_wait_for_tick(agent_id, is_stop_chats)
     result.update(gate_extra)

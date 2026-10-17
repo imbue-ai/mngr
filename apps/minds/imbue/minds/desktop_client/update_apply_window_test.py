@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import sys
 import threading
 from datetime import datetime
 from datetime import timedelta
@@ -192,6 +193,114 @@ def test_an_idle_lead_reads_as_waiting_only_when_its_named_worker_is_not_moving(
 
     assert probe.agent_liveness is UpdateAgentLiveness.ALIVE
     assert probe.is_agent_waiting is is_waiting
+
+
+def _busy_line(*, agent_id: str, agent_name: str, is_busy: bool = True) -> str:
+    """One line of ``background_tasks.py list --format tsv``: a chat with one pending task."""
+    return f"{agent_id}\t{agent_id}\t{agent_name}\t{'true' if is_busy else 'false'}\t1\n"
+
+
+_LEAD_ID = "agent-5f0c2a7e91d84b3c"
+
+
+@pytest.mark.witnesses("workspace-updates.idle-lead-on-a-background-task-is-not-waiting")
+@pytest.mark.parametrize(
+    ("busy", "is_waiting"),
+    (
+        (_busy_line(agent_id=_LEAD_ID, agent_name=_CHAT), False),
+        # The CLI's file fallback knows no names and takes the chat's id for its agent's.
+        (_busy_line(agent_id=_LEAD_ID, agent_name=""), False),
+        (_busy_line(agent_id=_LEAD_ID, agent_name=_CHAT, is_busy=False), True),
+        (_busy_line(agent_id="agent-other", agent_name="other-chat"), True),
+        ("", True),
+        # A template that predates the CLI: the section is there but empty, or missing altogether.
+        (None, True),
+    ),
+    ids=["busy-by-name", "busy-by-id", "not-busy", "another-chat-busy", "no-busy-chats", "no-section"],
+)
+def test_an_idle_lead_reads_as_waiting_only_when_its_chat_is_not_busy(busy: str | None, is_waiting: bool) -> None:
+    stdout = update_run_probe_stdout(agents=f"{_CHAT}\tWAITING\t{_LEAD_ID}\n", busy=busy)
+    probe = parse_update_run_probe(stdout, _CHAT)
+
+    assert probe.agent_liveness is UpdateAgentLiveness.ALIVE
+    assert probe.is_agent_waiting is is_waiting
+
+
+def test_an_idle_lead_its_chat_was_handed_off_to_reads_busy_from_the_file_fallback() -> None:
+    """With the chat app down the CLI knows a chat only by its id, which is the id of the chat's first agent, not
+    of the lead it was handed off to; the lead's ``chat_id`` label still ties it to its chat."""
+    first_agent_id = "agent-0d9e1b6a73c24f58"
+    stdout = update_run_probe_stdout(
+        agents=f"{_CHAT}\tWAITING\t{_LEAD_ID}\t{first_agent_id}\n",
+        busy=_busy_line(agent_id=first_agent_id, agent_name=""),
+    )
+    probe = parse_update_run_probe(stdout, _CHAT)
+
+    assert probe.agent_liveness is UpdateAgentLiveness.ALIVE
+    assert probe.is_agent_waiting is False
+
+
+def test_an_idle_lead_whose_idle_worker_is_busy_is_not_waiting() -> None:
+    """A worker parked on its own background command will resume, so the lead is still waiting on it."""
+    stdout = update_run_probe_stdout(
+        run=_delegated_record_json(),
+        agents=f"{_CHAT}\tWAITING\t{_LEAD_ID}\nupdate-self\tWAITING\tagent-worker\n",
+        busy=_busy_line(agent_id="agent-worker", agent_name=""),
+    )
+    probe = parse_update_run_probe(stdout, _CHAT)
+
+    assert probe.is_agent_waiting is False
+
+
+# Stands in for coreutils `timeout`, which a workspace has and a macOS dev machine may not: runs the command it is given.
+_PASS_THROUGH_TIMEOUT_FUNCTION = '() { shift; "$@"; }'
+
+
+def _run_probe_script_with_a_busy_lead(tmp_path: Path, *, is_cli_present: bool, timeout_function: str) -> str:
+    """Run the real probe script in a work dir whose `mngr` lists the lead WAITING and whose CLI stand-in, if any,
+    reports the lead's chat busy; `timeout_function` is the body of the `timeout` it runs the CLI through."""
+    if is_cli_present:
+        cli = tmp_path / "system" / "scripts" / "background_tasks.py"
+        cli.parent.mkdir(parents=True)
+        cli.write_text(f"import sys\nsys.stdout.write({_busy_line(agent_id=_LEAD_ID, agent_name=_CHAT)!r})\n")
+    script = build_update_run_probe_args(AgentId.generate())[3]
+
+    # The listing comes from a `mngr` function, so no real mngr on the image's tool path is reached.
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin",
+            "BASH_FUNC_mngr%%": f"() {{ printf '{_CHAT}\\tWAITING\\t{_LEAD_ID}\\n'; }}",
+            "BASH_FUNC_timeout%%": timeout_function,
+        },
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+@pytest.mark.parametrize(("is_cli_present", "is_waiting"), ((True, False), (False, True)), ids=["cli", "no-cli"])
+def test_the_probe_script_reads_busy_chats_from_the_templates_cli_when_it_has_one(
+    tmp_path: Path, is_cli_present: bool, is_waiting: bool
+) -> None:
+    stdout = _run_probe_script_with_a_busy_lead(
+        tmp_path, is_cli_present=is_cli_present, timeout_function=_PASS_THROUGH_TIMEOUT_FUNCTION
+    )
+    probe = parse_update_run_probe(stdout, _CHAT)
+
+    assert probe.agent_liveness is UpdateAgentLiveness.ALIVE
+    assert probe.is_agent_waiting is is_waiting
+
+
+def test_the_probe_script_reads_no_busy_chats_from_a_cli_cut_off_by_its_time_limit(tmp_path: Path) -> None:
+    """A CLI stuck on a restarting chat app must not hold the probe past its own timeout: it runs under `timeout`,
+    and one that was cut off (exit 124, nothing printed) marks no one busy while the listing still answers."""
+    stdout = _run_probe_script_with_a_busy_lead(tmp_path, is_cli_present=True, timeout_function="() { return 124; }")
+    probe = parse_update_run_probe(stdout, _CHAT)
+
+    assert probe.agent_liveness is UpdateAgentLiveness.ALIVE
+    assert probe.is_agent_waiting is True
 
 
 def test_a_worker_named_by_another_runs_record_does_not_vouch_for_this_one() -> None:

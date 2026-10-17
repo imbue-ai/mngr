@@ -10,6 +10,7 @@ The restore-script tests additionally run against a real local restic repo.
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -445,6 +446,187 @@ def test_gate_probe_answers_in_a_machine_whose_own_mngr_config_it_cannot_parse(t
     assert payload is not None, run
     assert "gate_error" not in payload, payload
     assert payload["running_chats"] == ["chat-1"]
+
+
+def _busy_and_idle_chat_agents(repo: Path) -> list[dict[str, str]]:
+    """One chat RUNNING, two WAITING on a background task (named, and known only by id), one WAITING
+    for the user, one stopped with its task's marker still live, and a busy worker in its own worktree."""
+    return [
+        {"name": "chat-1", "id": "agent-1", "type": "claude", "state": "RUNNING", "work_dir": str(repo)},
+        {"name": "chat-2", "id": "agent-2", "type": "claude", "state": "WAITING", "work_dir": str(repo)},
+        {"name": "chat-3", "id": "agent-3", "type": "claude", "state": "WAITING", "work_dir": str(repo)},
+        {"name": "chat-4", "id": "agent-4", "type": "claude", "state": "WAITING", "work_dir": str(repo)},
+        {"name": "chat-5", "id": "agent-5", "type": "claude", "state": "STOPPED", "work_dir": str(repo)},
+        {"name": "worker-1", "id": "agent-6", "type": "worker", "state": "WAITING", "work_dir": str(repo / "wt")},
+    ]
+
+
+def _background_chat(agent_id: str, agent_name: str, *, is_busy: bool, tasks: list[dict[str, object]]) -> dict:
+    """One chat in ``background_tasks.py list --format json``, whose chat id is its active agent's id."""
+    return {
+        "chat_id": agent_id,
+        "active_agent_id": agent_id,
+        "active_agent_name": agent_name,
+        "is_busy": is_busy,
+        "background_tasks": tasks,
+    }
+
+
+def _task(source: str, pid: int) -> dict[str, object]:
+    task: dict[str, object] = {
+        "source": source,
+        "id": f"{source}-{pid}",
+        "description": "a long build",
+        "started_at": "",
+        "pid": pid,
+    }
+    if source == "harness":
+        task["harness"] = "claude"
+    return task
+
+
+def _background_chats_json(*, runner_pid: int = 1, claude_task_pid: int = 1, other_runner_pid: int = 1) -> str:
+    """The CLI's answer for the agents above: chat-2 named by the chat app, chat-3 known only by its
+    chat id (the file fallback), chat-4's chat no longer busy, and chat-5 and the worker busy on
+    runners of their own (``other_runner_pid``)."""
+    chats = [
+        _background_chat(
+            "agent-2",
+            "chat-2",
+            is_busy=True,
+            tasks=[_task("run_in_background", runner_pid), _task("harness", claude_task_pid)],
+        ),
+        _background_chat("agent-3", "", is_busy=True, tasks=[_task("harness", claude_task_pid)]),
+        _background_chat("agent-4", "chat-4", is_busy=False, tasks=[_task("harness", claude_task_pid)]),
+        _background_chat("agent-5", "", is_busy=True, tasks=[_task("run_in_background", other_runner_pid)]),
+        _background_chat("agent-6", "worker-1", is_busy=True, tasks=[_task("run_in_background", other_runner_pid)]),
+    ]
+    return json.dumps({"source": "chat_app", "chats": chats})
+
+
+def _commit_background_tasks_cli(repo: Path, output: str) -> None:
+    """Give the workspace a stand-in for the template's background-task CLI that prints ``output``."""
+    cli = repo / "system" / "scripts" / "background_tasks.py"
+    cli.parent.mkdir(parents=True)
+    cli.write_text(f"import sys\nsys.stdout.write({output!r})\n")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "add the background-task cli")
+
+
+@pytest.mark.parametrize(
+    ("is_cli_present", "expected_chats"), ((True, ["chat-1", "chat-2", "chat-3"]), (False, ["chat-1"]))
+)
+def test_gate_probe_counts_a_waiting_chat_whose_chat_is_busy_as_running(
+    tmp_path: Path, is_cli_present: bool, expected_chats: list[str]
+) -> None:
+    """A chat parked on a background task resumes on its own; a template without the CLI has only mngr list."""
+    repo = _make_workspace_repo(tmp_path)
+    if is_cli_present:
+        _commit_background_tasks_cli(repo, _background_chats_json())
+    agents_json = json.dumps({"agents": _busy_and_idle_chat_agents(repo), "errors": []})
+    stub_bin = _make_stub_bin(tmp_path, agents_json=agents_json)
+
+    run = _run_script(repo, BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"), extra_path=stub_bin)
+
+    payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
+    assert payload is not None, run
+    assert "gate_error" not in payload, payload
+    assert payload["running_chats"] == expected_chats
+
+
+def test_gate_probe_counts_a_chat_handed_off_to_another_agent_as_busy_from_the_file_fallback(tmp_path: Path) -> None:
+    """With the chat app down the CLI knows a chat only by its own id, the id of the chat's first agent; the agent
+    the chat was handed off to is tied to it by its ``chat_id`` label."""
+    repo = _make_workspace_repo(tmp_path)
+    fallback_answer = {
+        "source": "files",
+        "chats": [_background_chat("agent-first", "", is_busy=True, tasks=[_task("run_in_background", 1)])],
+    }
+    _commit_background_tasks_cli(repo, json.dumps(fallback_answer))
+    agents = [
+        {"name": "chat-first", "id": "agent-first", "state": "STOPPED", "labels": {"chat_id": "agent-first"}},
+        {"name": "chat-successor", "id": "agent-successor", "state": "WAITING", "labels": {"chat_id": "agent-first"}},
+        {"name": "chat-other", "id": "agent-other", "state": "WAITING", "labels": {"chat_id": "agent-other"}},
+    ]
+    listed = [{**agent, "type": "claude", "work_dir": str(repo)} for agent in agents]
+    stub_bin = _make_stub_bin(tmp_path, agents_json=json.dumps({"agents": listed, "errors": []}))
+
+    run = _run_script(repo, BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"), extra_path=stub_bin)
+
+    payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["running_chats"] == ["chat-successor"]
+
+
+def _write_stateful_mngr_uv_stub(stub_bin: Path, agents: list[dict[str, str]], stop_log: Path) -> None:
+    """A `uv` whose `mngr stop <name>` logs the name and leaves that agent listed STOPPED afterwards."""
+    uv_stub = stub_bin / "uv"
+    uv_stub.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        f"agents = {agents!r}\n"
+        f"stop_log = {str(stop_log)!r}\n"
+        "args = sys.argv[1:]\n"
+        "if args[:3] == ['run', 'mngr', 'stop']:\n"
+        "    with open(stop_log, 'a') as handle:\n"
+        "        handle.write(args[3] + '\\n')\n"
+        "    sys.exit(0)\n"
+        "if args[:3] == ['run', 'mngr', 'list']:\n"
+        "    try:\n"
+        "        stopped = open(stop_log).read().split()\n"
+        "    except OSError:\n"
+        "        stopped = []\n"
+        "    for agent in agents:\n"
+        "        if agent['name'] in stopped:\n"
+        "            agent['state'] = 'STOPPED'\n"
+        "    print(json.dumps({'agents': agents, 'errors': []}))\n"
+        "sys.exit(0)\n"
+    )
+    uv_stub.chmod(0o755)
+
+
+def _start_session_leader() -> subprocess.Popen[bytes]:
+    """A process leading its own session, as a ``run_in_background.py`` runner does."""
+    return subprocess.Popen(["sleep", "36284"], start_new_session=True)
+
+
+def test_apply_update_with_stop_chats_stops_busy_chats_and_ends_their_runners(tmp_path: Path) -> None:
+    """A runner outlives its agent's stop and its report would wake the chat mid-update; Claude's own tasks
+    die with Claude, so they are left alone, as are the runners of chats the update does not stop."""
+    runner = _start_session_leader()
+    claude_task = _start_session_leader()
+    other_runner = _start_session_leader()
+    try:
+        repo = _make_workspace_repo(tmp_path)
+        _commit_background_tasks_cli(
+            repo,
+            _background_chats_json(
+                runner_pid=runner.pid, claude_task_pid=claude_task.pid, other_runner_pid=other_runner.pid
+            ),
+        )
+        run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
+        stub_bin = _make_stub_bin(tmp_path)
+        stop_log = tmp_path / "stopped.txt"
+        _write_stateful_mngr_uv_stub(stub_bin, _busy_and_idle_chat_agents(repo), stop_log)
+
+        run = _run_script(
+            repo,
+            BACKUP_APPLY_UPDATE_SCRIPT,
+            ("--minds-version", "1.0.0", "--agent-id", "agent-x", "--stop-chats"),
+            extra_path=stub_bin,
+        )
+
+        payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
+        assert payload is not None, run
+        assert payload["status"] == "ok", payload
+        assert stop_log.read_text().split() == ["chat-1", "chat-2", "chat-3"]
+        assert runner.wait(timeout=5) == -signal.SIGTERM
+        assert claude_task.poll() is None
+        assert other_runner.poll() is None
+    finally:
+        for process in (runner, claude_task, other_runner):
+            process.kill()
+            process.wait()
 
 
 def test_gate_probe_detects_in_flight_backup_tick(tmp_path: Path) -> None:
