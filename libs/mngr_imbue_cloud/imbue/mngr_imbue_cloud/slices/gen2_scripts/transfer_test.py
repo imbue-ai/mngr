@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -12,7 +13,12 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import Gen2SliceCidata
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_CONTAINER_SSH_PORT_PLACEHOLDER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_NO_DISK_MARKER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_NO_UNITS_MARKER
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_PUBLISHED_PORTS_ENV_KEY
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_PUBLISHED_PORTS_PLACEHOLDER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_VM_SSH_PORT_PLACEHOLDER
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import Gen2Reservation
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortDeclaration
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortProtocol
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.testing import assert_valid_bash
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.transfer import GEN2_RESIZE_APPLIED_MARKER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.transfer import RESTORE_NO_PORTS_MARKER
@@ -34,9 +40,16 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.transfer import script_prelude
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.transfer import transfer_dir
 
 _INSTANCE = "mngr-slice-test-" + "a" * 32
+_SCREEN_DECLARATIONS = (
+    SlicePortDeclaration(guest_port=59000, protocol=SlicePortProtocol.UDP),
+    SlicePortDeclaration(guest_port=59000, protocol=SlicePortProtocol.TCP),
+)
 
 
-def _render_reserve_script(cidata: Gen2SliceCidata | None = None) -> str:
+def _render_reserve_script(
+    cidata: Gen2SliceCidata | None = None,
+    published_port_declarations: tuple[SlicePortDeclaration, ...] = (),
+) -> str:
     payload = base64.b64encode(b"payload").decode()
     return render_gen2_restore_reserve_script(
         instance_name=_INSTANCE,
@@ -48,6 +61,7 @@ def _render_reserve_script(cidata: Gen2SliceCidata | None = None) -> str:
         expected_meta_sha="cc33",
         env_template_b64=payload,
         cidata=cidata,
+        published_port_declarations=published_port_declarations,
     )
 
 
@@ -138,6 +152,22 @@ def test_gen2_restore_reserve_claims_budgets_ports_and_ordinal_without_enabling(
     assert GEN2_VM_SSH_PORT_PLACEHOLDER in script
     assert GEN2_CONTAINER_SSH_PORT_PLACEHOLDER in script
     assert "substitute_ordinal_tokens" in script
+    # No declarations: only the two sshd ports are picked and printed.
+    assert "published_port_0" not in script
+    assert f'echo "{RESTORE_RESERVED_MARKER} $vm_port $container_port $ordinal$published_ports_suffix"' in script
+
+
+def test_gen2_restore_reserve_repicks_one_box_port_per_declared_guest_port() -> None:
+    script = _render_reserve_script(published_port_declarations=_SCREEN_DECLARATIONS)
+    assert_valid_bash(script)
+    # Like the carve: TCP and UDP listeners and every recorded port count as used.
+    assert "ss -Htln" in script
+    assert "ss -Hlun" in script
+    assert "grep -oE '\"host_port\":[0-9]+'" in script
+    assert "published_port_0=$(pick_port)" in script
+    assert "published_port_1=$(pick_port)" not in script
+    assert "| substitute_published_port_tokens" in script
+    assert f'{RESTORE_NO_PORTS_MARKER}" >&2; exit 3' in script
 
 
 def test_gen2_restore_reserve_default_path_is_byte_identical_to_the_pinned_renderer() -> None:
@@ -145,7 +175,7 @@ def test_gen2_restore_reserve_default_path_is_byte_identical_to_the_pinned_rende
     # opt-in parameter (a supplied cidata) must leave the default rendering
     # untouched.
     digest = hashlib.sha256(_render_reserve_script().encode()).hexdigest()
-    assert digest == snapshot("bc1d252de1ea9a4adc05c487ad6a4c48fdabb211049dd1cf1493920b697eda69")
+    assert digest == snapshot("dc784cf2b3b27db4f3dfbf3b671d4d1d48fe5c966d4da67affcc19bda18bce37")
 
 
 def test_gen2_restore_reserve_with_supplied_cidata_skips_the_meta_tar() -> None:
@@ -239,6 +269,17 @@ def test_gen2_resize_in_place_rechecks_budgets_and_grows_the_disk() -> None:
     # The env rewrite preserves the recorded placement + ports and is atomic.
     assert "substitute_ordinal_tokens" in script
     assert 'mv "$slice_dir/env.tmp" "$slice_dir/env"' in script
+    # The published ports are carried over verbatim from the recorded env (a
+    # resize never re-picks them), through a whole-value placeholder.
+    assert (
+        f"published_ports=$(grep -s '^{GEN2_PUBLISHED_PORTS_ENV_KEY}=' \"$slice_dir/env\" | cut -d= -f2- || true)"
+        in script
+    )
+    assert f'sed "s|{GEN2_PUBLISHED_PORTS_PLACEHOLDER}|$published_ports|g"' in script
+    env_template_match = re.search(r"echo '?([A-Za-z0-9+/=]+)'? \| base64 -d", script)
+    assert env_template_match is not None
+    env_template = base64.b64decode(env_template_match.group(1)).decode()
+    assert f"{GEN2_PUBLISHED_PORTS_ENV_KEY}={GEN2_PUBLISHED_PORTS_PLACEHOLDER}\n" in env_template
     # Grow-only: the qcow2 is resized only when the target exceeds its
     # current virtual size.
     assert 'qemu-img resize -q "$slice_dir/datadisk.qcow2" 56G' in script
@@ -284,14 +325,19 @@ def test_gen2_virtual_size_parse_reads_the_top_level_key_only(tmp_path: Path) ->
 
 
 def test_parse_gen2_resize_applied_line_extracts_ports_and_ordinal() -> None:
-    assert parse_gen2_resize_applied_line("noise\nMNGR_RESIZE_APPLIED 23000 23001 5\n") == snapshot((23000, 23001, 5))
+    assert parse_gen2_resize_applied_line("noise\nMNGR_RESIZE_APPLIED 23000 23001 5\n") == Gen2Reservation(
+        vm_ssh_host_port=23000, container_ssh_host_port=23001, ordinal=5
+    )
     assert parse_gen2_resize_applied_line("MNGR_RESIZE_APPLIED 23000") is None
     assert parse_gen2_resize_applied_line("") is None
 
 
-def test_parse_gen2_restore_reserved_line_extracts_ports_and_ordinal() -> None:
-    assert parse_gen2_restore_reserved_line("noise\nMNGR_RESTORE_RESERVED 23000 23001 5\n") == snapshot(
-        (23000, 23001, 5)
+def test_parse_gen2_restore_reserved_line_extracts_ports_ordinal_and_published_ports() -> None:
+    assert parse_gen2_restore_reserved_line("noise\nMNGR_RESTORE_RESERVED 23000 23001 5\n") == Gen2Reservation(
+        vm_ssh_host_port=23000, container_ssh_host_port=23001, ordinal=5
+    )
+    assert parse_gen2_restore_reserved_line("MNGR_RESTORE_RESERVED 23000 23001 5 23002 23003\n") == Gen2Reservation(
+        vm_ssh_host_port=23000, container_ssh_host_port=23001, ordinal=5, published_host_ports=(23002, 23003)
     )
     assert parse_gen2_restore_reserved_line("MNGR_RESTORE_RESERVED 23000 23001") is None
     assert parse_gen2_restore_reserved_line("") is None

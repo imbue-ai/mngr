@@ -21,3 +21,7 @@ class MalformedBoxOutputError(Gen2ScriptError):
 
 class EmptySshCaPublicKeyError(Gen2ScriptError, ValueError):
     """Raised when SSH CA trust files are requested for an empty CA public key."""
+
+
+class MalformedPublishedPortsError(Gen2ScriptError, ValueError):
+    """Raised when a slice's recorded published-ports value is not the JSON list the renderers write."""

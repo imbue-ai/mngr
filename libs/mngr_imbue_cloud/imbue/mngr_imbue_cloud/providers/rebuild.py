@@ -11,6 +11,8 @@ from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvid
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProviderConfig
 from imbue.mngr_imbue_cloud.slices.bare_metal import GEN2_CONTAINER_TMPFS_START_ARGS
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_machine_guest_memory_mib
+from imbue.mngr_imbue_cloud.slices.published_ports import build_slice_container_publish_start_args
+from imbue.mngr_imbue_cloud.slices.published_ports import slice_declarations_from_wire
 from imbue.mngr_imbue_cloud.slices.qemu_slice_client import QemuSliceVpsClient
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_vps.config import VpsProviderConfig
@@ -117,15 +119,20 @@ def build_slice_rebuild_config(
     slice's guest ships the gVisor runtime in its image, so the rebuilt container
     runs under the account config's ``docker_runtime`` (the per-account block
     sets ``runsc``) with its hardening ``default_start_args`` plus the slice
-    ``/run`` tmpfs -- exactly the shape the bake creates.
+    ``/run`` tmpfs and the lease's published-port ``-p`` flags -- exactly the
+    shape the bake creates.
     """
     # A sized machine gets its rebuilt container capped, exactly as the bake caps
-    # the original one (from the guest's MemTotal).
+    # the original one (from the guest's MemTotal), and republishes the lease's
+    # ports inside the VM (the box's DNAT rules for them are fixed at carve).
+    publish_start_args = build_slice_container_publish_start_args(
+        slice_declarations_from_wire(lease_result.published_ports)
+    )
     return SliceVpsDockerProviderConfig(
         **_delegated_vps_fields(config, _SLICE_DELEGATED_FIELDS),
         box_public_address=lease_result.vps_address,
         slice_memory_mib=_slice_memory_mib_from_lease(lease_result),
-        default_start_args=tuple(config.default_start_args) + GEN2_CONTAINER_TMPFS_START_ARGS,
+        default_start_args=tuple(config.default_start_args) + GEN2_CONTAINER_TMPFS_START_ARGS + publish_start_args,
     )
 
 

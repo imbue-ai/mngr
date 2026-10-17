@@ -1,0 +1,1 @@
+`mngr create --format json` reports `published_endpoints`: the host-side endpoints of the create's `--publish` declarations (`specs/published-ports/spec.md`), an empty list when none were declared, so pool-bake tooling can record them on the pool row without a second `mngr list` round-trip.

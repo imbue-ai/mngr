@@ -119,6 +119,27 @@ class PaidListEntry(WireModel):
     updated_at: str = Field(description="When is_paid was last changed")
 
 
+class PublishedPortProtocol(WireEnum):
+    """The transport protocol of a published port as the connector spells it (``tcp`` / ``udp``).
+
+    ``unknown`` is never sent: it is the client-side coercion of a protocol
+    this client version does not recognize, and such an entry is reported as
+    no endpoint rather than guessed at.
+    """
+
+    TCP = auto()
+    UDP = auto()
+    UNKNOWN = auto()
+
+
+class PublishedPortInfo(WireModel):
+    """One published port of a leased slice (specs/published-ports): the declared guest port and the box port forwarding to it."""
+
+    guest_port: int = Field(description="The declared port inside the workspace container")
+    protocol: PublishedPortProtocol = Field(description="The declared transport protocol")
+    host_port: int = Field(description="The box port DNAT'd to the guest port; re-picked on every restore")
+
+
 class LeaseResult(WireModel):
     """Server response from POST /hosts/lease."""
 
@@ -170,6 +191,13 @@ class LeaseResult(WireModel):
         description=(
             "The machine's data-disk size in GB (grow-only; specs/slice-fleet). None against a connector "
             "too old to return it."
+        ),
+    )
+    published_ports: tuple[PublishedPortInfo, ...] = Field(
+        default=(),
+        description=(
+            "The slice's published ports (specs/published-ports), reachable at vps_address; empty for a "
+            "host baked without them or against a connector too old to return them."
         ),
     )
 
@@ -253,6 +281,13 @@ class WorkspaceInfo(WireModel):
             "grow is pending (or against an older connector)."
         ),
     )
+    published_ports: tuple[PublishedPortInfo, ...] = Field(
+        default=(),
+        description=(
+            "The slice's published ports at its current placement (specs/published-ports); empty once "
+            "fully stopped (like the sshd ports), for a host baked without them, or against an older connector."
+        ),
+    )
 
 
 class LeasedHostInfo(WireModel):
@@ -275,6 +310,10 @@ class LeasedHostInfo(WireModel):
     )
     container_host_public_key: str | None = Field(
         default=None, description="The docker container sshd host public key, if known"
+    )
+    published_ports: tuple[PublishedPortInfo, ...] = Field(
+        default=(),
+        description="The slice's published ports (specs/published-ports); empty for a host baked without them",
     )
 
 

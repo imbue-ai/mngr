@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
@@ -46,7 +47,11 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
+from imbue.mngr.primitives import PublishedPortDeclaration
+from imbue.mngr.primitives import parse_published_port_declarations
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
@@ -83,6 +88,8 @@ from imbue.mngr_imbue_cloud.providers.testing import load_pins_by_endpoint
 from imbue.mngr_imbue_cloud.providers.testing import make_workspace_info
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
+from imbue.mngr_imbue_cloud.wire_types import PublishedPortInfo
+from imbue.mngr_imbue_cloud.wire_types import PublishedPortProtocol
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 from imbue.mngr_vps.container_setup import RUNNING_CONTAINER_STATE
@@ -169,6 +176,10 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
         host_name="unreachable-host",
         attributes={"cpus": 2, "memory_gb": 8},
         leased_at="2025-01-01T00:00:00Z",
+        published_ports=(
+            PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22012),
+            PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UNKNOWN, host_port=22012),
+        ),
     )
     host_ref = DiscoveredHost(
         host_id=host_id,
@@ -213,6 +224,11 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
     assert host_details.resource is not None
     assert host_details.resource.cpu.count == 2
     assert host_details.resource.memory_gb == 8.0
+    # The lease's published ports are reported at the box's address; an entry
+    # whose protocol this client does not know is left out, never guessed.
+    assert host_details.published_endpoints == [
+        PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="203.0.113.42", host_port=22012)
+    ]
     # One agent_details per agent_ref, all attached to the offline host.
     assert len(agent_details_list) == 1
     assert agent_details_list[0].id == agent_id
@@ -1241,6 +1257,7 @@ class _FastPathGuardProvider(_NoWorkspacesMixin, ImbueCloudProvider):
     """Reaches the ``fast_mode=require`` start-arg guard without real account/lease I/O."""
 
     _did_reach_fast_path: bool = False
+    _fast_path_published_ports: tuple[PublishedPortDeclaration, ...] = ()
 
     def _require_account(self, override: str | None = None) -> ImbueCloudAccount:
         return ImbueCloudAccount("tester@imbue.com")
@@ -1255,8 +1272,10 @@ class _FastPathGuardProvider(_NoWorkspacesMixin, ImbueCloudProvider):
         attributes: LeaseAttributes,
         token: SecretStr,
         region: str | None,
+        published_ports: Sequence[PublishedPortDeclaration],
     ) -> Host:
         self._did_reach_fast_path = True
+        self._fast_path_published_ports = tuple(published_ports)
         return cast(Host, OfflineHost.model_construct())
 
 
@@ -1291,6 +1310,15 @@ def test_fast_path_allows_start_args_the_baked_container_already_carries(temp_mn
     )
     assert provider._did_reach_fast_path
     assert isinstance(host, OfflineHost)
+
+
+def test_create_host_carries_the_declared_ports_into_the_lease(temp_mngr_ctx: MngrContext) -> None:
+    """The declared ports travel with the lease request (specs/published-ports): the
+    connector only leases a host baked with exactly this set."""
+    provider = _make_fast_path_guard_provider(temp_mngr_ctx)
+    declarations = parse_published_port_declarations(["59000/udp", "59000/tcp"])
+    provider.create_host(HostName("mind-test"), build_args=list(_FAST_PATH_BUILD_ARGS), published_ports=declarations)
+    assert provider._fast_path_published_ports == declarations
 
 
 def test_fast_path_rejects_start_args_the_baked_container_cannot_honor(temp_mngr_ctx: MngrContext) -> None:
@@ -2165,13 +2193,21 @@ def test_persist_lease_meta_records_the_lease_endpoints(tmp_path: Path, temp_mng
         agent_id=str(AgentId.generate()),
         host_id=str(host_id),
         host_name="fresh-host",
+        published_ports=(PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=23012),),
     )
 
     provider._persist_lease_meta(host_id, lease_result)
 
     assert json.loads((tmp_path / "lease.json").read_text())["host_db_id"] == "lease-db-id"
+    # The published endpoints are recorded beside the two sshd endpoints: a
+    # restore re-picks all of them together.
     assert load_bound_endpoints(tmp_path) == BoundEndpoints(
-        vps_address="203.0.113.99", ssh_port=23010, container_ssh_port=23011
+        vps_address="203.0.113.99",
+        ssh_port=23010,
+        container_ssh_port=23011,
+        published_endpoints=(
+            PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="203.0.113.99", host_port=23012),
+        ),
     )
 
 

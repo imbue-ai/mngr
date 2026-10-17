@@ -15,6 +15,7 @@ Authentication semantics:
 
 import os
 from collections.abc import Mapping
+from collections.abc import Sequence
 from functools import cache
 from importlib import metadata
 from typing import Any
@@ -36,6 +37,7 @@ from tenacity import wait_random_exponential
 
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
@@ -662,6 +664,9 @@ class ImbueCloudConnectorClient(MutableModel):
         host_name: str,
         # Hard datacenter requirement: only a host in this region is eligible.
         region: str | None = None,
+        # The create's declared ports (specs/published-ports): the connector
+        # leases only a host baked with exactly this set.
+        published_ports: Sequence[PublishedPortDeclaration] = (),
     ) -> LeaseResult:
         body: dict[str, object] = {
             "attributes": attributes.to_request_dict(),
@@ -677,6 +682,13 @@ class ImbueCloudConnectorClient(MutableModel):
         # unconstrained.
         if region is not None:
             body["region"] = region
+        # Only sent when declared, so a create without declarations keeps the
+        # body an older connector already accepts.
+        if published_ports:
+            body["published_ports"] = [
+                {"guest_port": declaration.guest_port, "protocol": declaration.protocol.value.lower()}
+                for declaration in published_ports
+            ]
         # A post-send retry could double-lease the pool host.
         response = self._send(
             "POST",

@@ -1970,9 +1970,11 @@ def _build_create_result_data(result: CreateAgentResult) -> dict[str, Any]:
     host it adds the agent SSH connection (``ssh_user`` / ``ssh_host`` /
     ``ssh_port`` / ``ssh_key_path``); when the provider exposes a separate
     outer/management sshd (e.g. a slice's VM-root port reached via a
-    box-forwarded port) it also adds ``outer_ssh_port``. Pool-bake tooling
-    consumes these to build a pool row -- and to reach the host for any
-    post-bake SSH steps -- without a second ``mngr list`` round-trip.
+    box-forwarded port) it also adds ``outer_ssh_port``; ``published_endpoints``
+    carries the host-side endpoints of the create's ``--publish`` declarations
+    (empty when none). Pool-bake tooling consumes these to build a pool row --
+    and to reach the host for any post-bake SSH steps -- without a second
+    ``mngr list`` round-trip.
     """
     result_data: dict[str, Any] = {
         "agent_id": str(result.agent.id),
@@ -1997,6 +1999,11 @@ def _build_create_result_data(result: CreateAgentResult) -> dict[str, Any]:
         result_data["outer_host_public_key"] = outer_host_public_key
     if container_host_public_key is not None:
         result_data["container_host_public_key"] = container_host_public_key
+    # The host-side endpoints of the create's --publish declarations
+    # (specs/published-ports), so the pool bake can record them on the row.
+    result_data["published_endpoints"] = [
+        endpoint.model_dump(mode="json") for endpoint in result.host.get_published_endpoints()
+    ]
     return result_data
 
 
