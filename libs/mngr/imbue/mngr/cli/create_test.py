@@ -2482,7 +2482,7 @@ def test_create_cli_options_spell_template_publish_integers_as_strings(
 ) -> None:
     """A template's TOML writes a bare port as an integer (``publish = [59000]``); the option
     spells it out so the declaration parser reads it like the CLI's text."""
-    opts = CreateCliOptions(**{**default_create_cli_opts.model_dump(), "publish": (59000, "8080/udp")})
+    opts = CreateCliOptions.model_validate({**default_create_cli_opts.model_dump(), "publish": (59000, "8080/udp")})
     assert opts.publish == ("59000", "8080/udp")
 
 
