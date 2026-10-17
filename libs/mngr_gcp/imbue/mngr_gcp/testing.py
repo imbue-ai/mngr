@@ -213,6 +213,7 @@ class FakeFirewallsClient:
         self.insert_error: Exception | None = None
         self.deleted: list[str] = []
         self.delete_error: Exception | None = None
+        self.patched: list[tuple[str, compute_v1.Firewall]] = []
 
     def get(self, *, project: str, firewall: str) -> compute_v1.Firewall:
         # ``existing`` is the preset SSH rule (a nameless preset matches any lookup); other
@@ -231,6 +232,10 @@ class FakeFirewallsClient:
     def delete(self, *, project: str, firewall: str) -> FakeOperation:
         self.deleted.append(firewall)
         return FakeOperation(error=self.delete_error)
+
+    def patch(self, *, project: str, firewall: str, firewall_resource: compute_v1.Firewall) -> FakeOperation:
+        self.patched.append((firewall, firewall_resource))
+        return FakeOperation()
 
 
 class FakeMachineTypesClient:

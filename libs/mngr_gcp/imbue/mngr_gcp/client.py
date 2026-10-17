@@ -184,6 +184,11 @@ class FirewallPrepareResult(FrozenModel):
     )
 
 
+def _allowed_as_set(allowed: Sequence[compute_v1.Allowed]) -> set[tuple[str, tuple[str, ...]]]:
+    """A firewall rule's ``allowed`` list as a comparable set of (protocol, sorted ports)."""
+    return {(str(entry.I_p_protocol).lower(), tuple(sorted(entry.ports))) for entry in allowed}
+
+
 class GcpVpsClient(VpsClientInterface):
     """GCE client implementing the VPS provider interface via google-cloud-compute.
 
@@ -330,42 +335,71 @@ class GcpVpsClient(VpsClientInterface):
             return False
         return True
 
-    def _ensure_published_ports_firewall(self) -> None:
-        """Create the published-ports rule when ports are declared and it does not exist yet.
-
-        Like the SSH rule, an existing rule is reused as-is (its ports are not re-patched), so a
-        changed ``firewall_published_ports`` needs the rule deleted (``mngr gcp cleanup``) and
-        prepared again.
-        """
-        if not self.published_ports or self._firewall_rule_exists(self.published_firewall_name):
-            return
+    def _published_ports_allowed(self) -> list[compute_v1.Allowed]:
+        """The published-ports rule's ``allowed`` list: one entry per protocol with its declared ports."""
         protocols = sorted({declaration.protocol.value.lower() for declaration in self.published_ports})
-        firewall = compute_v1.Firewall(
-            name=self.published_firewall_name,
-            network=f"projects/{self.project_id}/global/networks/{self.network}",
-            direction="INGRESS",
-            source_ranges=[EVERY_SOURCE_CIDR],
-            target_tags=[self.firewall_target_tag],
-            allowed=[
-                compute_v1.Allowed(
-                    I_p_protocol=protocol,
-                    ports=[
-                        str(declaration.guest_port)
-                        for declaration in self.published_ports
-                        if declaration.protocol.value.lower() == protocol
-                    ],
+        return [
+            compute_v1.Allowed(
+                I_p_protocol=protocol,
+                ports=[
+                    str(declaration.guest_port)
+                    for declaration in self.published_ports
+                    if declaration.protocol.value.lower() == protocol
+                ],
+            )
+            for protocol in protocols
+        ]
+
+    def _ensure_published_ports_firewall(self) -> None:
+        """Create the published-ports rule when ports are declared, or patch its ports when they changed.
+
+        Unlike the SSH rule, an existing rule is converged on the config: the create-time gate
+        admits exactly the config's ``firewall_published_ports``, so a rule left at an older set
+        would let a create publish a port nothing can reach.
+        """
+        if not self.published_ports:
+            return
+        allowed = self._published_ports_allowed()
+        existing = self._get_firewall_rule_or_none(self.published_firewall_name)
+        if existing is None:
+            firewall = compute_v1.Firewall(
+                name=self.published_firewall_name,
+                network=f"projects/{self.project_id}/global/networks/{self.network}",
+                direction="INGRESS",
+                source_ranges=[EVERY_SOURCE_CIDR],
+                target_tags=[self.firewall_target_tag],
+                allowed=allowed,
+                description="Created by mngr gcp prepare for the published ports of mngr-managed instances",
+            )
+            self._insert_firewall_rule_tolerating_race(firewall)
+        elif _allowed_as_set(existing.allowed) != _allowed_as_set(allowed):
+            with self._translate_gcp_errors():
+                operation = self._firewalls().patch(
+                    project=self.project_id,
+                    firewall=self.published_firewall_name,
+                    firewall_resource=compute_v1.Firewall(allowed=allowed),
                 )
-                for protocol in protocols
-            ],
-            description="Created by mngr gcp prepare for the published ports of mngr-managed instances",
-        )
-        self._insert_firewall_rule_tolerating_race(firewall)
+                operation.result()
+            logger.info(
+                "Patched published-ports firewall rule {} in project {} to the configured ports",
+                self.published_firewall_name,
+                self.project_id,
+            )
         logger.info(
             "Ensured published-ports firewall rule {} (tag {}) in project {}",
             self.published_firewall_name,
             self.firewall_target_tag,
             self.project_id,
         )
+
+    def _get_firewall_rule_or_none(self, firewall_name: str) -> compute_v1.Firewall | None:
+        try:
+            with self._translate_gcp_errors():
+                return self._firewalls().get(project=self.project_id, firewall=firewall_name)
+        except VpsApiError as e:
+            if e.status_code == 404:
+                return None
+            raise
 
     def _warn_about_cidrs_if_needed(self) -> None:
         """Emit a one-line warning when the effective CIDR set is empty or 0.0.0.0/0.
