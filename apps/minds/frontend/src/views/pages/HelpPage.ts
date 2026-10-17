@@ -5,7 +5,6 @@
 // via route params or a staged pending-launch from the open_help flow.
 
 import m from "mithril";
-import { getAppContext } from "../../app-context";
 import {
   HelpModel,
   isHelpLaunchStagedFor,
@@ -16,6 +15,17 @@ import { Button } from "../components/Button";
 import { Icon16 } from "../components/Icon";
 import { machineVerdict } from "../components/MachineVerdict";
 import { Spinner } from "../components/Spinner";
+
+function closeHelpSurface(): void {
+  // Mirror ShellState.closeAppOverlay: return to the opener via history, else
+  // fall back to the workspace this help was opened over (else Home).
+  if (window.history.length > 1) {
+    window.history.back();
+    return;
+  }
+  const workspace = m.route.param("workspace");
+  m.route.set(workspace ? `/workspace/${workspace}` : "/");
+}
 
 function modeChoice(model: HelpModel): m.Children {
   if (model.launch.isAgentReport) return null;
@@ -363,7 +373,7 @@ function HelpPageComponent(): m.Component {
     });
     model = new HelpModel({
       onClose: () => {
-        if (!openArrivedReport()) getAppContext().shell.closeAppOverlay();
+        if (!openArrivedReport()) closeHelpSurface();
       },
       redraw: () => m.redraw(),
     });

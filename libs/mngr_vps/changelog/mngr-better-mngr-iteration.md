@@ -1,0 +1,1 @@
+Outer-box docker builds now forward env-sourced BuildKit secrets: for every `--secret ...,env=NAME` build arg, NAME's value in the creating process's environment reaches the `docker build` on the outer through its environment, so such a secret works on a vultr, OVH, or slice build exactly as it does on a local one.

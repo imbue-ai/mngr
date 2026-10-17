@@ -1,0 +1,1 @@
+Runbooks updated for the seed-side base-image override (imbue-ai/mngr-internal#1143): the gen-2 cutover runbook and the pool-hosts runbook say that a first-of-tag seed of a tag through `minds-v0.6.2` builds against the base its snapshot covers, and `next_deploy.md` drops the interim tar-copy workaround for `minds-v0.6.2` bakes.

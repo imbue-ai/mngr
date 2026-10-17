@@ -1,0 +1,1 @@
+Slice-fleet gen-2 phase 4: new operator runbook `docs/deploy/gen2-telemetry.md` covering the on-box telemetry collector, the signal vocabulary, `observability provision-alerts`, and the end-to-end verification checklist.

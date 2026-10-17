@@ -1,0 +1,1 @@
+Price Claude Fable 5.1 (`claude-fable-5-1`) in the Agent SDK's per-turn cost estimate. It shares Fable 5's input, output, and cache-write rates but its cache reads cost a quarter as much, so it gets its own entry, matched ahead of the bare `fable` family substring that would otherwise claim it.

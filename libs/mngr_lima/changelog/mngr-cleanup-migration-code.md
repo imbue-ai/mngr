@@ -1,0 +1,1 @@
+Removed the two helpers that only the retired slice-fleet key repair used: `patch_root_authorized_keys_block_in_lima_yaml` (the in-place rewrite of a stored `lima.yaml`'s truncating root-key step) and the public `build_root_authorized_keys_block`, which is now private to the yaml generator. The desktop lima provider itself is unchanged.

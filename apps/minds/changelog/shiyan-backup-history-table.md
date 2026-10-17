@@ -1,0 +1,5 @@
+Added a read-only backup history UI. The workspace Settings "Backups" section now shows a "Recent backups" table listing the newest snapshots, each with a relative timestamp and a per-snapshot Download action; when a workspace has more than five backups, a "View all N backups" footer opens a dedicated full backup-history page (its own route, template, and JS) that pages through every snapshot with client-side Newer/Older controls.
+
+Both surfaces load from the existing `GET /api/v1/workspaces/<id>/backups` response, which now returns snapshots newest-first so neither has to re-sort; the history page pages that list in the browser rather than calling a separate paged snapshots API. Listing and exporting snapshots run restic on this machine, so viewing history and downloading a backup work even while the workspace is offline. A shared row builder (`backup_table.js`) renders both tables so they cannot drift.
+
+Per-snapshot download now lives with the backup it belongs to: the stray "download" link on the Landing page workspace rows is removed, and downloading a specific backup happens from the Settings table or the history page.

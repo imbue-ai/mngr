@@ -1,0 +1,1 @@
+- The next-deploy checklist's analytics backfill item now sizes the backfill from the ingest's 72-hour per-run cap and records the staging rehearsal of 2026-10-14: how to drive the backfill on demand without overlapping runs, and why no manual `lake_maintenance` call is needed between runs now that a backfill-sized run merges the lake's per-hour files itself.

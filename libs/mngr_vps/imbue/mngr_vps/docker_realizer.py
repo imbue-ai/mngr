@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from loguru import logger
 
@@ -14,20 +15,16 @@ from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import OuterHostInterface
-from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import LogLevel
-from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_listing
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
-from imbue.mngr.providers.ssh_host_setup import log_client_key_configuration
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import load_or_create_per_host_client_keypair
 from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
-from imbue.mngr.utils.docker_build_progress import DockerBuildProgressParser
 from imbue.mngr_vps.container_setup import CONTAINER_ENTRYPOINT_CMD
 from imbue.mngr_vps.container_setup import HOME_SUBPATH
 from imbue.mngr_vps.container_setup import HOST_DIR_SUBPATH
@@ -71,10 +68,15 @@ from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store import VpsHostStore
 from imbue.mngr_vps.host_store import open_host_store
 from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
-from imbue.mngr_vps.primitives import CONTAINER_HOST_KEY_NAME
-from imbue.mngr_vps.primitives import CONTAINER_KNOWN_HOSTS_NAME
-from imbue.mngr_vps.primitives import CONTAINER_SSH_KEY_NAME
 from imbue.mngr_vps.primitives import load_or_create_per_host_host_keypair
+
+# Key-file names under ``key_dir`` for the container's client/host keys and its
+# known_hosts. The provider exposes thin accessors with the same names so the
+# imbue_cloud slice provider's ``_create_host_object`` override keeps working;
+# these constants are the single source of truth for the file names.
+CONTAINER_SSH_KEY_NAME: Final[str] = "container_ssh_key"
+CONTAINER_HOST_KEY_NAME: Final[str] = "container_host_key"
+CONTAINER_KNOWN_HOSTS_NAME: Final[str] = "container_known_hosts"
 
 
 def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
@@ -190,7 +192,7 @@ class DockerRealizer(SnapshotCapableRealizer):
             return subvolume_path / HOME_SUBPATH / host_dir_in_home
         return subvolume_path / HOST_DIR_SUBPATH
 
-    # container identity (keys + known_hosts)
+    # --- container identity (keys + known_hosts) ---------------------------
 
     def _container_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
         # Per host for containers created after per-host client keys landed;
@@ -232,7 +234,7 @@ class DockerRealizer(SnapshotCapableRealizer):
             is_strict_parsing=self.mngr_ctx.config.strict_host_record_parsing,
         )
 
-    # discovery / listing
+    # --- discovery / listing ----------------------------------------------
 
     def find_host_record(self, outer: OuterHostInterface) -> tuple[HostId, VpsHostRecord] | None:
         host_id = _read_host_id_label_from_vps(outer)
@@ -265,7 +267,7 @@ class DockerRealizer(SnapshotCapableRealizer):
     ) -> str:
         return exec_in_container(outer, self._require_container_name(handle), script, timeout_seconds=timeout_seconds)
 
-    # placement creation
+    # --- placement creation ------------------------------------------------
 
     def _setup_container_ssh(
         self,
@@ -283,13 +285,6 @@ class DockerRealizer(SnapshotCapableRealizer):
         # container authorizes per-host material (never the provider-wide pair).
         _container_key_path, container_public_key = self._create_per_host_container_ssh_keypair(host_id)
         container_host_key_path, container_host_public_key = self._container_host_keypair(host_id)
-        log_client_key_configuration(
-            host_id,
-            self.provider_name,
-            self.mngr_ctx.get_profile_user_id(),
-            container_public_key,
-            authorized_keys_entries,
-        )
         setup_container_ssh(
             outer,
             container_name,
@@ -323,20 +318,14 @@ class DockerRealizer(SnapshotCapableRealizer):
         git_depth: int | None,
     ) -> str:
         """Build a Docker image on the VPS from the provided build args."""
-        build_step = ProgressStepId("vps.build_image")
-        stage_parser = DockerBuildProgressParser(reporter=self.mngr_ctx.progress_reporter, step_id=build_step)
-        with self.mngr_ctx.progress_reporter.step(
-            build_step, "Building the image on the machine", CreatePhase.CREATING_HOST.step_id
-        ):
-            return build_image_on_outer_from_build_args(
-                outer,
-                self.mngr_ctx.concurrency_group,
-                host_id=host_id,
-                docker_build_args=docker_build_args,
-                git_depth=git_depth,
-                builder=self.config.builder,
-                on_build_line=stage_parser.feed_line,
-            )
+        return build_image_on_outer_from_build_args(
+            outer,
+            self.mngr_ctx.concurrency_group,
+            host_id=host_id,
+            docker_build_args=docker_build_args,
+            git_depth=git_depth,
+            builder=self.config.builder,
+        )
 
     def realize_placement(self, outer: OuterHostInterface, ctx: RealizePlacementContext) -> RealizedPlacement:
         host_id = ctx.host_id
@@ -371,14 +360,7 @@ class DockerRealizer(SnapshotCapableRealizer):
             image = self._build_image_on_vps(outer, host_id, image, ctx.docker_build_args, ctx.git_depth)
         else:
             logger.log(LogLevel.BUILD.value, "Pulling Docker image {} on VPS...", image, source="vps")
-            with (
-                self.mngr_ctx.progress_reporter.step(
-                    ProgressStepId("vps.pull_image"),
-                    "Pulling the image on the machine",
-                    CreatePhase.CREATING_HOST.step_id,
-                ),
-                log_span("Pulling Docker image on VPS"),
-            ):
+            with log_span("Pulling Docker image on VPS"):
                 pull_image(outer, image, timeout_seconds=300.0)
 
         container_name = f"{self.mngr_ctx.config.prefix}{ctx.name}"
@@ -391,12 +373,7 @@ class DockerRealizer(SnapshotCapableRealizer):
         }
         logger.log(LogLevel.BUILD.value, "Starting Docker container on VPS...", source="vps")
         snapshots_dir_on_outer = self.config.btrfs_mount_path / "snapshots"
-        with (
-            self.mngr_ctx.progress_reporter.step(
-                ProgressStepId("vps.start_container"), "Starting the container", CreatePhase.CREATING_HOST.step_id
-            ),
-            log_span("Starting Docker container"),
-        ):
+        with log_span("Starting Docker container"):
             container_id = run_container(
                 outer,
                 image=image,
@@ -454,7 +431,7 @@ class DockerRealizer(SnapshotCapableRealizer):
             container_ssh_host_public_key=container_host_public_key,
         )
 
-    # placement lifecycle
+    # --- placement lifecycle ----------------------------------------------
 
     def start_activity_watcher(self, outer: OuterHostInterface, handle: PlacementHandle) -> None:
         container_name = self._require_container_name(handle)

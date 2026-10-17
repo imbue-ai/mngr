@@ -1,4 +1,3 @@
-import copy
 import json
 import threading
 import time
@@ -6,14 +5,11 @@ from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Iterable
-from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
-from contextlib import contextmanager
 from datetime import datetime
 from enum import auto
 from pathlib import Path
-from typing import AbstractSet
 from typing import Final
 
 from loguru import logger
@@ -944,13 +940,6 @@ class _HostTransitionRetention(FrozenModel):
     set_at_monotonic: float = Field(description="time.monotonic() when captured, for the safety cap")
 
 
-# Private attributes that are machinery rather than state the resolver answers
-# from, so changing them never wakes the change callbacks.
-_UNOBSERVED_PRIVATE_ATTRS: Final[frozenset[str]] = frozenset(
-    {"_lock", "_on_change_callbacks", "_logged_malformed_color_agents"}
-)
-
-
 class MngrCliBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from continuously-updated state.
 
@@ -1097,37 +1086,13 @@ class MngrCliBackendResolver(BackendResolverInterface):
             except (OSError, RuntimeError) as e:
                 logger.warning("Resolver change callback failed: {}", e)
 
-    def _observable_state_locked(self) -> dict[str, object]:
-        """Copy every private attribute except ``_UNOBSERVED_PRIVATE_ATTRS`` for comparison. Must hold ``self._lock``.
-
-        Covering every private attribute by default means new state needs no
-        registration to wake listeners. The copy is one level deep, so state
-        must be updated by replacing a container's entries, never by editing a
-        nested value in place.
-        """
-        private_state = self.__pydantic_private__
-        assert private_state is not None
-        return {
-            name: copy.copy(value) for name, value in private_state.items() if name not in _UNOBSERVED_PRIVATE_ATTRS
-        }
-
-    @contextmanager
-    def _changing_state(self) -> Iterator[None]:
-        """Hold ``self._lock`` for a mutation, then fire change callbacks if observable state differs."""
-        with self._lock:
-            state_before = self._observable_state_locked()
-            yield
-            is_changed = self._observable_state_locked() != state_before
-        if is_changed:
-            self._fire_on_change()
-
     def notify_change(self) -> None:
-        """Public wake-up for the chrome listeners after an external state mutation.
+        """Public wake-up for SSE listeners after external state mutations.
 
         ``_fire_on_change`` is fired internally on agent/service updates, but
-        some state the chrome derives from lives outside this resolver (the
-        request inbox, the signed-in accounts). Producers of that state call
-        this so the listeners re-derive now instead of at the next poll tick.
+        the request inbox lives outside this resolver. Inbox mutations
+        (new request events, mirrored response events) call this so chrome
+        SSE consumers don't have to wait for the next 30s poll tick.
         """
         self._fire_on_change()
 
@@ -1147,7 +1112,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """
         path = self.last_good_agents_path
         topology_to_write: _LastGoodAgentTopology | None = None
-        with self._changing_state():
+        with self._lock:
             self._agents_result = result
             self._initial_discovery_done = True
             self._sweep_host_state_overrides_locked(result.host_state_by_host_id)
@@ -1161,13 +1126,14 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
         if path is not None and topology_to_write is not None:
             _write_last_good_agent_topology(path, topology_to_write)
+        self._fire_on_change()
 
     def _sweep_host_state_overrides_locked(self, discovery_state_by_host_id: Mapping[str, HostState]) -> None:
         """Drop optimistic overrides that the fresh snapshot has confirmed or that have expired.
 
         Keeps the override map bounded to genuinely-still-pending overrides (so a
         host that has since left discovery never lingers) without firing on-change
-        itself -- the surrounding ``update_agents`` fires at most once. Must be
+        itself -- the surrounding ``update_agents`` already fires once. Must be
         called with ``self._lock`` held.
         """
         now = time.monotonic()
@@ -1214,7 +1180,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         the caller), so an override is dropped once discovery reports the same
         display name (and host name, if the slug changed). Keeps the map bounded to
         genuinely-still-pending renames without firing on-change itself -- the
-        surrounding ``update_agents`` fires at most once. Must hold ``self._lock``.
+        surrounding ``update_agents`` already fires once. Must hold ``self._lock``.
         """
         now = time.monotonic()
         for agent_id_str in tuple(self._workspace_name_override_by_agent_id):
@@ -1332,7 +1298,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """
         path = self.last_good_agents_path
         topology_to_write: _LastGoodAgentTopology | None = None
-        with self._changing_state():
+        with self._lock:
             if provider is not None:
                 self._provider_by_name[provider_name] = provider
             if error is not None:
@@ -1365,49 +1331,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
         if path is not None and topology_to_write is not None:
             _write_last_good_agent_topology(path, topology_to_write)
-
-    def list_last_good_provider_names(self) -> set[str]:
-        """The provider instances the persisted last-good topology attributes hosts to."""
-        with self._lock:
-            return {
-                str(record.provider_name) for records in self._last_good_agents_by_host.values() for record in records
-            }
-
-    def forget_providers(self, provider_names: AbstractSet[str]) -> None:
-        """Drop every trace of provider instances that no longer exist on this device.
-
-        A connection that was removed (or re-homed to another device) or an
-        account that signed out takes its ``[providers.*]`` block with it, so
-        no snapshot for the instance ever arrives again: nothing would otherwise
-        prune its hosts from the last-good topology, and they would keep
-        rendering as running machines of this device forever (and surviving
-        restarts through the persisted topology).
-        """
-        if not provider_names:
-            return
-        names = {ProviderInstanceName(name) for name in provider_names}
-        path = self.last_good_agents_path
-        topology_to_write: _LastGoodAgentTopology | None = None
-        with self._changing_state():
-            for name in names:
-                self._provider_by_name.pop(name, None)
-                self._error_by_provider_name.pop(name, None)
-                self._last_snapshot_at_by_provider.pop(name, None)
-                self._last_completed_poll_at_by_provider.pop(name, None)
-                self._unread_host_ids_by_provider.pop(name, None)
-                self._clean_snapshot_host_ids_by_provider.pop(name, None)
-            is_topology_changed = False
-            for host_id_str in tuple(self._last_good_agents_by_host):
-                records = self._last_good_agents_by_host[host_id_str]
-                if not any(record.provider_name in names for record in records):
-                    continue
-                del self._last_good_agents_by_host[host_id_str]
-                is_topology_changed = True
-                logger.info("Forgot last-good host {}: its provider instance no longer exists here", host_id_str)
-            if is_topology_changed and path is not None:
-                topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
-        if path is not None and topology_to_write is not None:
-            _write_last_good_agent_topology(path, topology_to_write)
+        self._fire_on_change()
 
     def _prune_last_good_for_clean_snapshot_locked(
         self, provider_name: ProviderInstanceName, snapshot_host_ids: tuple[str, ...]
@@ -1442,9 +1366,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
     def record_discovery_event_received(self, event_at: datetime) -> None:
         """Bump ``_last_event_at`` for an incremental (non-snapshot) discovery event."""
-        with self._changing_state():
+        with self._lock:
             if self._last_event_at is None or event_at > self._last_event_at:
                 self._last_event_at = event_at
+        self._fire_on_change()
 
     def list_providers(self) -> tuple[DiscoveredProvider, ...]:
         """Return the providers from the most recent per-provider discovery snapshots."""
@@ -1514,12 +1439,13 @@ class MngrCliBackendResolver(BackendResolverInterface):
         ``share_kinds`` maps each service name to how the Share tab offers it;
         services absent from it did not say.
         """
-        with self._changing_state():
-            self._services_by_agent[str(agent_id)] = dict(services)
+        with self._lock:
+            self._services_by_agent[str(agent_id)] = services
             self._labels_by_agent[str(agent_id)] = dict(labels or {})
             self._icons_by_agent[str(agent_id)] = dict(icons or {})
             self._display_names_by_agent[str(agent_id)] = dict(display_names or {})
             self._share_kinds_by_agent[str(agent_id)] = dict(share_kinds or {})
+        self._fire_on_change()
 
     def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
         with self._lock:
@@ -1716,23 +1642,27 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
     def set_host_state_override(self, host_id: HostId, state: HostState) -> None:
         """Optimistically override ``host_id``'s state until discovery confirms it; fires on-change."""
-        logger.info("set_host_state_override({}, {})", host_id, state.value)
-        with self._changing_state():
+        with self._lock:
             self._host_state_override_by_host_id[str(host_id)] = _HostStateOverride(
                 state=state, set_at_monotonic=time.monotonic()
             )
+        logger.info("set_host_state_override({}, {})", host_id, state.value)
+        self._fire_on_change()
 
     def clear_host_state_override(self, host_id: HostId) -> None:
         """Drop any optimistic override for ``host_id``; fires on-change only if one was present."""
-        with self._changing_state():
-            self._host_state_override_by_host_id.pop(str(host_id), None)
+        with self._lock:
+            existed = self._host_state_override_by_host_id.pop(str(host_id), None) is not None
+        if existed:
+            self._fire_on_change()
 
     def set_workspace_name_override(self, agent_id: AgentId, display_name: str, host_name: str | None) -> None:
         """Optimistically override ``agent_id``'s workspace name until discovery confirms it; fires on-change."""
-        with self._changing_state():
+        with self._lock:
             self._workspace_name_override_by_agent_id[str(agent_id)] = _WorkspaceNameOverride(
                 display_name=display_name, host_name=host_name, set_at_monotonic=time.monotonic()
             )
+        self._fire_on_change()
 
     def _fresh_workspace_name_override_locked(self, agent_id_str: str) -> _WorkspaceNameOverride | None:
         """Return the still-fresh name override for an agent, dropping it if its TTL has elapsed. Must hold self._lock."""
@@ -1843,15 +1773,18 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
     def set_workspace_color_override(self, agent_id: AgentId, color_hex: str) -> None:
         """Optimistically report ``color_hex`` for ``agent_id`` until discovery confirms it; fires on-change."""
-        with self._changing_state():
+        with self._lock:
             self._workspace_color_override_by_agent_id[str(agent_id)] = _WorkspaceColorOverride(
                 color_hex=color_hex, set_at_monotonic=time.monotonic()
             )
+        self._fire_on_change()
 
     def clear_workspace_color_override(self, agent_id: AgentId) -> None:
         """Drop ``agent_id``'s optimistic color, firing on-change when there was one."""
-        with self._changing_state():
-            self._workspace_color_override_by_agent_id.pop(str(agent_id), None)
+        with self._lock:
+            existed = self._workspace_color_override_by_agent_id.pop(str(agent_id), None) is not None
+        if existed:
+            self._fire_on_change()
 
     def set_workspace_color_locally(self, agent_id: AgentId, color_hex: str) -> bool:
         """Optimistically update the cached ``color`` label for an agent.
@@ -1863,11 +1796,11 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
         ``color_hex`` must already be normalized (``#rrggbb`` lowercase);
         the caller is responsible for validation. Returns True if the
-        agent's cached label now reads ``color_hex``, False
+        snapshot was updated and ``_fire_on_change`` was called, False
         if the agent is not in the current snapshot (in which case the
         next discovery emit will pick up the on-disk label anyway).
         """
-        with self._changing_state():
+        with self._lock:
             updated_agents: list[DiscoveredAgent] = []
             found = False
             for agent in self._agents_result.discovered_agents:
@@ -1886,6 +1819,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 to_update(self._agents_result.field_ref().discovered_agents, tuple(updated_agents))
             )
             self._logged_malformed_color_agents.discard(str(agent_id))
+        self._fire_on_change()
         return True
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
@@ -1968,18 +1902,21 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def mark_host_lifecycle_transition_started(self, host_id: HostId) -> None:
         """Capture ``host_id``'s current agents so its row survives the transition; fires on-change."""
         host_id_str = str(host_id)
-        with self._changing_state():
+        with self._lock:
             captured = tuple(
                 agent for agent in self._agents_result.discovered_agents if str(agent.host_id) == host_id_str
             )
             self._transition_retention_by_host_id[host_id_str] = _HostTransitionRetention(
                 agents=captured, set_at_monotonic=time.monotonic()
             )
+        self._fire_on_change()
 
     def clear_host_lifecycle_transition(self, host_id: HostId) -> None:
         """Drop any transition retention for ``host_id``; fires on-change only if one was present."""
-        with self._changing_state():
-            self._transition_retention_by_host_id.pop(str(host_id), None)
+        with self._lock:
+            existed = self._transition_retention_by_host_id.pop(str(host_id), None) is not None
+        if existed:
+            self._fire_on_change()
 
     def has_completed_initial_discovery(self) -> bool:
         with self._lock:

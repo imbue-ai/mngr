@@ -1,0 +1,1 @@
+Added the `rsync` resource mark to the two streaming release tests that invoke rsync without declaring it. The resource guard fails a test that touches a guarded resource it is not marked for, so these could only ever fail once the release suite ran them.

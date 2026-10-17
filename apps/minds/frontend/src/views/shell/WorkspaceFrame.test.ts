@@ -1,12 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type {
-  WorkspaceLinkHandlingReport,
-  WorkspaceLinkPromises,
-} from "../../electron-bridge";
+import type { WorkspaceLinkHandlingReport } from "../../electron-bridge";
 import type { PermissionResolutionEntry } from "./WorkspaceFrame";
 import {
   FrameLinkHandling,
-  WORKSPACE_FRAME_ALLOW,
   WORKSPACE_ORIGIN_FAMILY,
   buildEmbedHandlers,
   fetchPermissionResolutionEntries,
@@ -44,22 +40,6 @@ describe("WORKSPACE_ORIGIN_FAMILY", () => {
     expect(
       WORKSPACE_ORIGIN_FAMILY.test("agent-abc.localhost.example.com"),
     ).toBe(false);
-  });
-});
-
-describe("WORKSPACE_FRAME_ALLOW", () => {
-  it("delegates the clipboard, fullscreen, and an audio input to every workspace page", () => {
-    const directives = WORKSPACE_FRAME_ALLOW.split(";").map((part) =>
-      part.trim(),
-    );
-    expect(directives).toEqual(
-      expect.arrayContaining([
-        "clipboard-read *",
-        "clipboard-write *",
-        "fullscreen *",
-        "microphone *",
-      ]),
-    );
   });
 });
 
@@ -124,28 +104,13 @@ function makeContract() {
     TEAR_OUT: "minds:tear-out",
     OPEN_LINK: "minds:open-link",
     OPEN_EXTERNAL: "minds:open-external",
-    OPEN_LOCAL_FILES: "minds:open-local-files",
-    HIGHLIGHT_CHROME: "minds:highlight-chrome",
-    CHROME_ANCHORS: [
-      "workspace-switcher",
-      "permissions",
-      "settings",
-      "share",
-      "help",
-    ],
     REQUEST_ID_PATTERN,
-  } as unknown as Parameters<typeof buildEmbedHandlers>[0]["contract"];
+  } as Parameters<typeof buildEmbedHandlers>[0]["contract"];
 }
 
 const WORKSPACE_AGENT_ID = "agent-ab12";
 
-function makeHandlers(
-  options: {
-    canPopOut?: boolean;
-    isRelaying?: boolean;
-    opensExternalLinks?: boolean;
-  } = {},
-) {
+function makeHandlers(options: { canPopOut?: boolean; isRelaying?: boolean; opensExternalLinks?: boolean } = {}) {
   const contract = makeContract();
   const navigations: { path: string; params?: Record<string, string> }[] = [];
   const popupOpens: (string | null)[] = [];
@@ -156,9 +121,8 @@ function makeHandlers(
   const relayStops: string[] = [];
   const popoutCalls: unknown[] = [];
   let frontCount = 0;
-  const readyAnnouncements: WorkspaceLinkPromises[] = [];
+  const readyAnnouncements: boolean[] = [];
   const externalLinks: string[] = [];
-  const highlights: (string | null)[] = [];
   const handlers = buildEmbedHandlers({
     contract,
     navigate: (path, params) => navigations.push({ path, params }),
@@ -179,27 +143,16 @@ function makeHandlers(
     },
     workspaceAgentId: () => WORKSPACE_AGENT_ID,
     openRequestPopup: (requestId) => popupOpens.push(requestId),
-    onWorkspaceReady: (promises) => readyAnnouncements.push(promises),
-    openExternalLink:
-      options.opensExternalLinks === true
-        ? (url) => externalLinks.push(url)
-        : null,
-    highlightChrome: (anchor) => highlights.push(anchor),
+    onWorkspaceReady: (opensLinks) => readyAnnouncements.push(opensLinks),
+    openExternalLink: options.opensExternalLinks === true ? (url) => externalLinks.push(url) : null,
     popout:
       options.canPopOut === true
         ? {
             open: (request) => popoutCalls.push(["open", request]),
             beginDrag: (request) => popoutCalls.push(["drag", request]),
             endDrag: (workspaceId, windowId, isDetached, isCancelled) =>
-              popoutCalls.push([
-                "ended",
-                workspaceId,
-                windowId,
-                isDetached,
-                isCancelled,
-              ]),
-            detachedWindows: (windows) =>
-              popoutCalls.push(["detached", windows]),
+              popoutCalls.push(["ended", workspaceId, windowId, isDetached, isCancelled]),
+            detachedWindows: (windows) => popoutCalls.push(["detached", windows]),
           }
         : null,
   });
@@ -217,41 +170,23 @@ function makeHandlers(
     frontCount: () => frontCount,
     readyAnnouncements,
     externalLinks,
-    highlights,
   };
 }
 
 describe("buildEmbedHandlers", () => {
   it("reports a workspace's readiness announcement, which is what releases a held chat ask", () => {
-    const { contract, handlers, readyAnnouncements, navigations } =
-      makeHandlers();
+    const { contract, handlers, readyAnnouncements, navigations } = makeHandlers();
     handlers[contract.WORKSPACE_READY]({});
-    expect(readyAnnouncements).toEqual([
-      { opensLinks: false, opensCustomSchemeLinks: false },
-    ]);
+    expect(readyAnnouncements).toEqual([false]);
     expect(navigations).toEqual([]);
   });
 
-  it("reads opensLinks and opensCustomSchemeLinks off the announcement, each a promise only when literally true", () => {
+  it("reads opensLinks off the announcement, as a promise only when it is literally true", () => {
     const { contract, handlers, readyAnnouncements } = makeHandlers();
     handlers[contract.WORKSPACE_READY]({ opensLinks: true });
     handlers[contract.WORKSPACE_READY]({ opensLinks: false });
     handlers[contract.WORKSPACE_READY]({ opensLinks: "true" });
-    handlers[contract.WORKSPACE_READY]({
-      opensLinks: true,
-      opensCustomSchemeLinks: true,
-    });
-    handlers[contract.WORKSPACE_READY]({
-      opensLinks: true,
-      opensCustomSchemeLinks: "true",
-    });
-    expect(readyAnnouncements).toEqual([
-      { opensLinks: true, opensCustomSchemeLinks: false },
-      { opensLinks: false, opensCustomSchemeLinks: false },
-      { opensLinks: false, opensCustomSchemeLinks: false },
-      { opensLinks: true, opensCustomSchemeLinks: true },
-      { opensLinks: true, opensCustomSchemeLinks: false },
-    ]);
+    expect(readyAnnouncements).toEqual([true, false, false]);
   });
 
   it("answers a readiness announcement with what this chrome can do", () => {
@@ -260,43 +195,15 @@ describe("buildEmbedHandlers", () => {
     const browser = makeHandlers();
     browser.handlers[browser.contract.WORKSPACE_READY]({});
     expect(browser.acks).toEqual([browser.contract.EMBEDDER_CAPABILITIES]);
-    expect(browser.ackPayloads).toEqual([
-      {
-        canPopOut: false,
-        opensExternalLinks: false,
-        opensCustomSchemeLinks: false,
-        opensLocalFiles: true,
-      },
-    ]);
+    expect(browser.ackPayloads).toEqual([{ canPopOut: false, opensExternalLinks: false }]);
     const desktop = makeHandlers({ canPopOut: true, opensExternalLinks: true });
     desktop.handlers[desktop.contract.WORKSPACE_READY]({});
-    expect(desktop.ackPayloads).toEqual([
-      {
-        canPopOut: true,
-        opensExternalLinks: true,
-        opensCustomSchemeLinks: true,
-        opensLocalFiles: true,
-      },
-    ]);
-  });
-
-  it("opens the Permissions pane at Local files when the workspace asks, and answers nothing", () => {
-    const { contract, handlers, navigations, sent } = makeHandlers();
-    handlers[contract.OPEN_LOCAL_FILES]({});
-    expect(navigations).toEqual([
-      {
-        path: `/workspace/${WORKSPACE_AGENT_ID}/options`,
-        params: { tab: "permissions", section: "local-files" },
-      },
-    ]);
-    expect(sent).toEqual([]);
+    expect(desktop.ackPayloads).toEqual([{ canPopOut: true, opensExternalLinks: true }]);
   });
 
   it("hands an external link the workspace could not open itself to main, and ignores it where main cannot open one", () => {
     const desktop = makeHandlers({ opensExternalLinks: true });
-    desktop.handlers[desktop.contract.OPEN_EXTERNAL]({
-      url: "mailto:someone@example.com",
-    });
+    desktop.handlers[desktop.contract.OPEN_EXTERNAL]({ url: "mailto:someone@example.com" });
     expect(desktop.externalLinks).toEqual(["mailto:someone@example.com"]);
     const browser = makeHandlers();
     expect(browser.handlers[browser.contract.OPEN_EXTERNAL]).toBeUndefined();
@@ -305,34 +212,13 @@ describe("buildEmbedHandlers", () => {
   it("hands the pull-out asks to main with the mounted workspace's id, and ignores them where nothing can pop out", () => {
     const desktop = makeHandlers({ canPopOut: true });
     const { contract, handlers, popoutCalls } = desktop;
-    const size = {
-      windowId: "win-0123",
-      title: "Notes",
-      width: 640,
-      height: 480,
-    };
+    const size = { windowId: "win-0123", title: "Notes", width: 640, height: 480 };
     handlers[contract.POP_OUT_WINDOW]({ ...size, extra: "dropped" });
-    handlers[contract.WINDOW_DRAG_STARTED]({
-      ...size,
-      grabX: 12,
-      grabY: 8,
-      extra: "dropped",
-    });
-    handlers[contract.WINDOW_DRAG_ENDED]({
-      windowId: "win-0123",
-      isDetached: true,
-      isCancelled: false,
-    });
-    handlers[contract.WINDOW_DRAG_ENDED]({
-      windowId: "win-0123",
-      isDetached: false,
-      isCancelled: true,
-    });
+    handlers[contract.WINDOW_DRAG_STARTED]({ ...size, grabX: 12, grabY: 8, extra: "dropped" });
+    handlers[contract.WINDOW_DRAG_ENDED]({ windowId: "win-0123", isDetached: true, isCancelled: false });
+    handlers[contract.WINDOW_DRAG_ENDED]({ windowId: "win-0123", isDetached: false, isCancelled: true });
     // A shell that does not say whether it cancelled.
-    handlers[contract.WINDOW_DRAG_ENDED]({
-      windowId: "win-0123",
-      isDetached: false,
-    });
+    handlers[contract.WINDOW_DRAG_ENDED]({ windowId: "win-0123", isDetached: false });
     const request = { workspaceId: WORKSPACE_AGENT_ID, ...size };
     expect(popoutCalls).toEqual([
       ["open", request],
@@ -343,26 +229,15 @@ describe("buildEmbedHandlers", () => {
     ]);
     const browser = makeHandlers();
     expect(browser.handlers[browser.contract.POP_OUT_WINDOW]).toBeUndefined();
-    expect(
-      browser.handlers[browser.contract.WINDOW_DRAG_STARTED],
-    ).toBeUndefined();
-    expect(
-      browser.handlers[browser.contract.WINDOW_DRAG_ENDED],
-    ).toBeUndefined();
+    expect(browser.handlers[browser.contract.WINDOW_DRAG_STARTED]).toBeUndefined();
+    expect(browser.handlers[browser.contract.WINDOW_DRAG_ENDED]).toBeUndefined();
     expect(browser.handlers[browser.contract.DETACHED_WINDOWS]).toBeUndefined();
   });
 
   it("reads the detached set as window ids with their titles, dropping off-shape entries", () => {
-    const { contract, handlers, popoutCalls } = makeHandlers({
-      canPopOut: true,
-    });
+    const { contract, handlers, popoutCalls } = makeHandlers({ canPopOut: true });
     handlers[contract.DETACHED_WINDOWS]({
-      windows: [
-        { windowId: "win-1", title: "A" },
-        { windowId: "win-2" },
-        "junk",
-        { title: "no id" },
-      ],
+      windows: [{ windowId: "win-1", title: "A" }, { windowId: "win-2" }, "junk", { title: "no id" }],
     });
     expect(popoutCalls).toEqual([
       [
@@ -393,7 +268,8 @@ describe("buildEmbedHandlers", () => {
   });
 
   it("arms the relay for a sign-in and acks whether it is relaying, only once the relay answered", async () => {
-    const { contract, handlers, relayArms, sent, navigations } = makeHandlers();
+    const { contract, handlers, relayArms, sent, navigations } =
+      makeHandlers();
     const url = "https://claude.ai/oauth/authorize?state=s-1";
     handlers[contract.PROVIDER_SIGN_IN]({ url, flowId: "flow-7c" });
     expect(relayArms).toEqual([{ flowId: "flow-7c", url }]);
@@ -465,16 +341,6 @@ describe("buildEmbedHandlers", () => {
         params: { tab: "share" },
       },
     ]);
-  });
-
-  it("rings the chrome control a tour names, and clears the ring on null or on an anchor it does not know", () => {
-    const { contract, handlers, highlights } = makeHandlers();
-    handlers[contract.HIGHLIGHT_CHROME]({ anchor: "share" });
-    handlers[contract.HIGHLIGHT_CHROME]({ anchor: "help" });
-    handlers[contract.HIGHLIGHT_CHROME]({ anchor: null });
-    // Unreachable through the real endpoint (the validator rejects it); pins the handler's own fallback.
-    handlers[contract.HIGHLIGHT_CHROME]({ anchor: "sidebar" });
-    expect(highlights).toEqual(["share", "help", null, null]);
   });
 
   it("floats help over this workspace, without opening the popup", () => {
@@ -583,36 +449,14 @@ describe("FrameLinkHandling", () => {
 
   const WORKSPACE = "agent-0a1b2c3d";
   const LINK = "http://localhost:3000/preview";
-  const OPENS_LINKS: WorkspaceLinkPromises = {
-    opensLinks: true,
-    opensCustomSchemeLinks: false,
-  };
-  const OPENS_NO_LINKS: WorkspaceLinkPromises = {
-    opensLinks: false,
-    opensCustomSchemeLinks: false,
-  };
 
-  it("tells main what the frame shows, and whether its page promised to open links, custom-scheme ones included", () => {
+  it("tells main what the frame shows, and whether its page promised to open links", () => {
     const { handling, reports } = makeLinkHandling();
     handling.frameArmed(WORKSPACE, true);
-    handling.pageReady(OPENS_LINKS);
-    handling.pageReady({ opensLinks: true, opensCustomSchemeLinks: true });
+    handling.pageReady(true);
     expect(reports).toEqual([
-      {
-        workspaceId: WORKSPACE,
-        opensLinks: false,
-        opensCustomSchemeLinks: false,
-      },
-      {
-        workspaceId: WORKSPACE,
-        opensLinks: true,
-        opensCustomSchemeLinks: false,
-      },
-      {
-        workspaceId: WORKSPACE,
-        opensLinks: true,
-        opensCustomSchemeLinks: true,
-      },
+      { workspaceId: WORKSPACE, opensLinks: false },
+      { workspaceId: WORKSPACE, opensLinks: true },
     ]);
   });
 
@@ -624,9 +468,9 @@ describe("FrameLinkHandling", () => {
     handling.openLink(LINK);
     handling.frameArmed(WORKSPACE, true);
     handling.openLink(LINK);
-    handling.pageReady(OPENS_NO_LINKS);
+    handling.pageReady(false);
     handling.openLink(LINK);
-    handling.pageReady(OPENS_LINKS);
+    handling.pageReady(true);
     handling.openLink(LINK);
     expect(sent).toEqual([LINK]);
     expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
@@ -640,18 +484,14 @@ describe("FrameLinkHandling", () => {
   it("forgets the promise when the frame goes to a new page, until that page announces", () => {
     const { handling, reports, sent } = makeLinkHandling();
     handling.frameArmed(WORKSPACE, true);
-    handling.pageReady(OPENS_LINKS);
+    handling.pageReady(true);
     // A reload (or a new workspace): the page that promised is gone, and a URL
     // sent before the next one listens would be lost.
     handling.frameArmed(WORKSPACE, true);
     handling.openLink(LINK);
     expect(sent).toEqual([]);
-    expect(reports.at(-1)).toEqual({
-      workspaceId: WORKSPACE,
-      opensLinks: false,
-      opensCustomSchemeLinks: false,
-    });
-    handling.pageReady(OPENS_LINKS);
+    expect(reports.at(-1)).toEqual({ workspaceId: WORKSPACE, opensLinks: false });
+    handling.pageReady(true);
     handling.openLink(LINK);
     expect(sent).toEqual([LINK]);
   });
@@ -660,7 +500,7 @@ describe("FrameLinkHandling", () => {
     // Every redraw re-arms the frame; only a change is worth an IPC.
     const { handling, reports, sent } = makeLinkHandling();
     handling.frameArmed(WORKSPACE, true);
-    handling.pageReady(OPENS_LINKS);
+    handling.pageReady(true);
     handling.frameArmed(WORKSPACE, false);
     handling.frameArmed(WORKSPACE, false);
     handling.openLink(LINK);
@@ -671,7 +511,7 @@ describe("FrameLinkHandling", () => {
   it("reports no workspace once the frame unmounts, and sends nothing after", () => {
     const { handling, reports, sent } = makeLinkHandling();
     handling.frameArmed(WORKSPACE, true);
-    handling.pageReady(OPENS_LINKS);
+    handling.pageReady(true);
     handling.unmounted();
     handling.openLink(LINK);
     expect(reports.at(-1)).toBeNull();

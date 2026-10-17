@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 from typing import Final
 
-import httpx2
+import httpx
 from flask import Flask
 from flask import current_app
 from pydantic import ConfigDict
@@ -29,9 +29,6 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_trim import BackupTrimManager
-from imbue.minds.desktop_client.connection_operations import ConnectionOperationRegistry
-from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
-from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
@@ -61,8 +58,8 @@ from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
+from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
-from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
@@ -86,22 +83,17 @@ class DesktopClientState(MutableModel):
 
     auth_store: AuthStoreInterface = Field(frozen=True, description="Cookie/session auth store")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Agent/host discovery resolver")
-    http_client: httpx2.Client | None = Field(
+    http_client: httpx.Client | None = Field(
         default=None,
         description=(
             "HTTP client for the share-URL readiness probe (its only consumer), created by the "
-            "runtime verifying certificate chains but not hostnames -- Python's ssl cannot match "
-            "the underscore labels (system_interface-<rand>) of workspaces built before labels "
-            "became strict hostname labels. Injected in tests."
+            "runtime with TLS verification disabled -- Python's ssl cannot wildcard-match "
+            "underscore hostnames like system_interface--..., so a verifying probe never goes "
+            "ready on links browsers accept. Injected in tests."
         ),
     )
     agent_creator: AgentCreator | None = Field(
         default=None, frozen=True, description="In-flight agent create attempt manager"
-    )
-    welcome_chat_seeder: WelcomeChatSeeder | None = Field(
-        default=None,
-        frozen=True,
-        description="Seeds each new workspace's welcome chat once, with or without the creation page",
     )
     imbue_cloud_cli: ImbueCloudCli | None = Field(
         default=None, frozen=True, description="imbue_cloud plugin CLI wrapper"
@@ -183,14 +175,6 @@ class DesktopClientState(MutableModel):
             "being unsupported"
         ),
     )
-    connection_store: ConnectionStore | None = Field(
-        default=None, frozen=True, description="Per-account cloud connection replicas + the local profile"
-    )
-    provider_materializer: ProviderSettingsMaterializer | None = Field(
-        default=None,
-        frozen=True,
-        description="The single writer of account/connection provider blocks (bounces discovery on change)",
-    )
     pending_requests: PendingRequestsInterface | None = Field(
         default=None,
         frozen=True,
@@ -247,9 +231,7 @@ class DesktopClientState(MutableModel):
         default=None, frozen=True, description="Central Imbue Studio API key for /api/v1 + WebDAV"
     )
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = Field(
-        default=None,
-        frozen=True,
-        description="Handle on the mngr latchkey forward child started at launch and stopped by the shutdown teardown",
+        default=None, frozen=True, description="Detached mngr latchkey forward supervisor handle"
     )
     machine_operator: MachineOperator | None = Field(
         default=None,
@@ -283,11 +265,6 @@ class DesktopClientState(MutableModel):
     shutdown_event: threading.Event = Field(
         default_factory=threading.Event, description="Cross-thread flag SSE handlers poll to exit on shutdown"
     )
-    connection_operations: ConnectionOperationRegistry = Field(
-        default_factory=ConnectionOperationRegistry,
-        frozen=True,
-        description="The in-flight and recently finished connection registrations and credential updates",
-    )
     workspace_operation_registry: WorkspaceOperationRegistryInterface = Field(
         default_factory=InMemoryWorkspaceOperationRegistry,
         description="In-memory registry tracking in-process workspace operations (restart) + their logs",
@@ -316,6 +293,11 @@ class DesktopClientState(MutableModel):
             "Dispatches and closes out workspace template updates; None for apps built without "
             "an mngr caller (minimal tests), where every update route answers 503"
         ),
+    )
+    update_scheduler: UpdateScheduler | None = Field(
+        default=None,
+        frozen=True,
+        description="Runs the scheduled updates inside the update window; None whenever the service is",
     )
     active_share_cache: ActiveShareCache = Field(
         default_factory=ActiveShareCache,
@@ -346,11 +328,6 @@ class DesktopClientState(MutableModel):
             "(invalidated by the sharing PUT/DELETE handlers)"
         ),
     )
-
-    def invalidate_sharing_caches(self, host_id: str) -> None:
-        """Drop the readiness poll's cached share lookup and gateway verdict for one machine."""
-        self.active_share_cache.invalidate(host_id)
-        self.gateway_status_cache.invalidate(host_id)
 
 
 def set_state(app: Flask, state: DesktopClientState) -> None:

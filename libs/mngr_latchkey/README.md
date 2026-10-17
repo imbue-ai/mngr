@@ -34,13 +34,10 @@ and stops it on `SIGINT`/`SIGTERM` (coupled lifetime). It announces this
 computer to every remote host's machine under a device id (`--device-id`, or
 `MNGR_LATCHKEY_DEVICE_ID`, falling back to the mngr local host id; an embedder
 such as the desktop app passes its own device id), which is how a workspace
-tells the user's desktops apart (see [Desktops](#desktops)). With
-`--parent-pid <pid>` it also exits on its own once that process is gone: an
-embedder that runs the forward as a child passes its own pid, so a forward
-never outlives the app that started it, even when the app crashes instead of
-stopping it. Any in-flight agents lose their gateway endpoint until the next
-`mngr latchkey forward` is started; the per-host permissions files survive
-across restarts.
+tells the user's desktops apart (see [Desktops](#desktops)). Any in-flight
+agents lose their gateway endpoint until the next `mngr latchkey
+forward` is started; the per-host permissions files survive across
+restarts.
 
 While running, the supervisor also health-checks the shared gateway
 subprocess: if it dies mid-session it is respawned on its original
@@ -112,11 +109,9 @@ CLI flag > env var > settings.toml > built-in default.
   `latchkey gateway` subprocess's output is routed through the same log
   (each line at `DEBUG`, prefixed with `[latchkey gateway]`), so it is
   timestamped and rotated too rather than living in a separate unrotated
-  file. When a gateway spawn never binds its port, the gateway's last 20
-  output lines are also logged at `WARNING` (with its listen password and
-  encryption key redacted), next to the bind-timeout error.
+  file.
 
-- `latchkey_forward.log` -- the raw stdout/stderr capture of the
+- `latchkey_forward.log` -- the raw stdout/stderr capture of the detached
   supervisor process. Its file descriptor is handed straight to the
   process, so it cannot be rotated mid-write; instead the supervisor is
   spawned with `--quiet`, so in steady state it logs nothing here (all
@@ -155,13 +150,6 @@ kill <stray-pid>
 `SIGTERM` runs the supervisor's teardown, which stops its `mngr observe` child,
 its reverse tunnels and the shared gateway subprocess, so killing the
 supervisor leaves nothing behind to clean up by hand.
-
-A forward an embedder started (the Imbue Studio desktop client's, say) ends
-with the embedder: it is stopped on the embedder's teardown, exits on its own
-once the pid it was given with `--parent-pid` is gone, and is replaced by the
-embedder's next start either way. One still running after its embedder has
-quit is therefore from an older build or a crash that beat its watch, and is
-safe to kill as above; the next start of the embedder would do the same.
 
 ### A remote host's gateway keeps failing to wire
 
@@ -1030,18 +1018,13 @@ since the caller's password authenticates it to the VPS gateway and its
 override would let it choose the policy the desktop evaluates it against.
 Native VPS requests carry no override and are authorized by the machine's own
 `~/.latchkey/permissions.json` (seeded at provisioning, then rewritten by the
-full permission snapshot the desktop pushes on every edit). A
-`GET /permissions/self` that names no desktop is not forwarded: the VPS gateway
-answers it from that file, the policy in force for the caller, so reading it
-needs no desktop. Which desktop a request goes to is described under
-[Desktops](#desktops).
+full permission snapshot the desktop pushes on every edit). Which desktop a
+request goes to is described under [Desktops](#desktops).
 
 The workspace therefore always has one gateway URL and one agent-side skill.
 If the user's computer is offline, third-party calls through the VPS gateway
-continue to work, and so does an agent reading its own permissions
-(`GET /permissions/self`), while the other desktop-owned extension routes fail
-with a clear HTTP 503 (no desktop connected) or 502 (a desktop that stopped
-answering) response.
+continue to work, while desktop-owned extension routes fail with a clear HTTP
+503 (no desktop connected) or 502 (a desktop that stopped answering) response.
 That includes calls carrying an *expiring* credential -- an OAuth connection or
 Zoom: the store the VPS gateway runs on is the machine's own, so it renews the
 tokens in it itself rather than waiting for the desktop to (see
@@ -1103,8 +1086,7 @@ The extension exposes the desktops it knows and lets a caller pick among them:
   or `/minds-api-proxy` request names where it goes:
   * absent: the most recently announced desktop, which is what every
     workspace built before the header did (503 when none has ever announced
-    itself) -- except `GET /permissions/self`, which the VPS gateway answers
-    itself;
+    itself);
   * one device id: that desktop (503 for one the gateway does not know);
   * `*`: every desktop the gateway knows, or a comma-separated list of device
     ids: each named desktop the gateway knows (the others are ignored). When
@@ -1346,30 +1328,26 @@ curl -X DELETE "${auth[@]}" "$GATEWAY_URL/permission-requests/$REQUEST_ID"
 
 ## Embedding
 
-Embedders (such as the Imbue Studio desktop client) want exactly one
-``mngr latchkey forward`` per latchkey directory, running only while they
-do. The :class:`LatchkeyForwardSupervisor` does exactly that:
+Embedders (such as the Imbue Studio desktop client) typically want a single
+detached ``mngr latchkey forward`` supervisor that survives embedder
+restarts and adopts the existing one instead of double-spawning. The
+:class:`LatchkeyForwardSupervisor` does exactly that:
 
 ```python
-import os
-
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 supervisor = LatchkeyForwardSupervisor(
     mngr_binary="/path/to/mngr",          # default: ``mngr`` on PATH
     latchkey_binary="/path/to/latchkey",  # default: ``latchkey`` on PATH
     latchkey_directory=root_dir,
-    parent_pid=os.getpid(),               # the forward exits when we are gone
 )
-supervisor.restart()  # replaces a stale owner an earlier run left behind
+supervisor.ensure_running()  # idempotent; spawns or adopts as needed
 # ... do whatever the embedder does ...
-supervisor.stop()  # tears down the forward, the gateway, and every tunnel
+# Optional: ``supervisor.stop()`` to terminate the detached process and
+# tear down the gateway. Omitting this leaves the supervisor running
+# detached, which is what Imbue Studio does so the gateway survives a
+# desktop-client restart.
 ```
-
-The forward is a child of the embedder, not a detached daemon: ``stop()`` on
-the embedder's teardown is the clean path, ``parent_pid`` covers the embedder
-dying without one, and ``restart()`` on the next start replaces whatever both
-missed.
 
 ## Python API
 

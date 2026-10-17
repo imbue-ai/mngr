@@ -25,7 +25,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from uuid import uuid4
 
-import httpx2
+import httpx
 import pytest
 from loguru import logger
 from pydantic import AnyUrl
@@ -37,14 +37,12 @@ from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.bootstrap import MINDS_DATA_HOME_ENV_VAR
 from imbue.minds.deployment_tests.helpers import create_verified_user_via_admin_api
 from imbue.minds.deployment_tests.helpers import delete_user_via_admin_api
-from imbue.minds.testing import RunningWorkspaceContainer
 from imbue.minds.testing import SYNC_E2E_CONNECTOR_URL_ENV
 from imbue.minds.testing import SYNC_E2E_LITELLM_URL_ENV
 from imbue.minds.testing import SYNC_E2E_SUPERTOKENS_API_KEY_ENV
 from imbue.minds.testing import SYNC_E2E_SUPERTOKENS_URI_ENV
 from imbue.minds.testing import SyncE2EAccount
 from imbue.minds.testing import SyncE2EEnv
-from imbue.minds.testing import resume_snapshot_workspace
 from imbue.minds.utils.snapshot_container_states_testing import DockerContainerState
 from imbue.minds.utils.snapshot_container_states_testing import read_snapshot_container_states
 from imbue.minds.utils.snapshot_container_states_testing import record_snapshot_container_states
@@ -200,20 +198,6 @@ def snapshot_sandbox_dockerd() -> None:
     record_snapshot_container_states(_SNAPSHOT_CONTAINER_STATES_PATH, _read_container_states_from_dockerd)
 
 
-@pytest.fixture(scope="session")
-def running_workspace(
-    snapshot_container_states: Mapping[str, DockerContainerState],
-) -> RunningWorkspaceContainer:
-    """The minds snapshot's workspace container, resumed, once its system_interface serves.
-
-    A real workspace built from the default workspace template, for
-    ``minds_snapshot_resume`` tests that work inside one -- run a workspace
-    program there with ``run_workspace_program_in_container``. Session-scoped
-    and shared, so a test must leave it as it found it (no agents left RUNNING).
-    """
-    return resume_snapshot_workspace(snapshot_container_states)
-
-
 def _ensure_snapshot_sandbox_dockerd_up() -> None:
     """Start the snapshot sandbox's ``dockerd`` unless it is already answering."""
     docker_info = subprocess.run(["docker", "info"], capture_output=True)
@@ -352,5 +336,5 @@ def sync_e2e_account(sync_e2e_env: SyncE2EEnv) -> Iterator[SyncE2EAccount]:
             api_key=sync_e2e_env.supertokens_api_key,
             user_id=NonEmptyStr(str(user_id)),
         )
-    except httpx2.HTTPError as e:
+    except httpx.HTTPError as e:
         logger.warning("Could not delete sync e2e account {}: {}", email, e)

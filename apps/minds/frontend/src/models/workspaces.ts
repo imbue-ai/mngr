@@ -10,7 +10,6 @@
 // legacy-coordinate resolution.
 
 import type { UiWorkspaceEntry, UiWorkspacesMessage } from "../channel/messages";
-import type { RemoteTileState } from "../generated/ui";
 
 export interface AccentCacheEntry {
   accent: string | null;
@@ -21,10 +20,7 @@ export class WorkspacesStore {
   workspaces: readonly UiWorkspaceEntry[] = [];
   destroyingAgentIds: readonly string[] = [];
   restorableWorkspaceIds: readonly string[] = [];
-  /** agent id -> the derived access state (and its detail) of each remote tile. */
-  remoteWorkspaceStates: Readonly<Record<string, RemoteTileState>> = {};
-  /** account id ('local' for the device) -> how many rows that account's windows list, every account's. */
-  workspaceCountByAccountId: Readonly<Record<string, number>> = {};
+  remoteWorkspaceStates: Readonly<Record<string, string>> = {};
 
   private accentByAnyId = new Map<string, AccentCacheEntry>();
   private agentIdByHostId = new Map<string, string>();
@@ -34,8 +30,7 @@ export class WorkspacesStore {
     this.workspaces = message.workspaces;
     this.destroyingAgentIds = message.destroying_agent_ids;
     this.restorableWorkspaceIds = message.restorable_workspace_ids;
-    this.remoteWorkspaceStates = message.remote_workspace_states;
-    this.workspaceCountByAccountId = message.workspace_count_by_account_id ?? {};
+    this.remoteWorkspaceStates = message.remote_workspace_states as Record<string, string>;
     for (const entry of message.workspaces) {
       const cached: AccentCacheEntry = {
         accent: entry.accent || null,

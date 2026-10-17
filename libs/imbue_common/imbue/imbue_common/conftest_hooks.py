@@ -127,8 +127,6 @@ _SHARED_MARKERS: Final[list[str]] = [
     "flaky: marks tests as known-flaky (retried by offload with a separate retry count)",
     "witnesses(coordinate, partial=None): marks a test as verifying the behavior unit at the given"
     " coordinate (see the behaviors skill); partial= notes what the test does not cover",
-    "smoke: marks a test that runs after a deploy or release against the published artifact and the"
-    " deployed production environment; never collected by any other test selection",
 ]
 
 # Additional markers registered by projects via register_marker().
@@ -303,9 +301,7 @@ def _compute_max_duration() -> float:
     - unit tests: fast, local, no network (run together with integration tests)
     - integration tests: local, no network, used for coverage calculation
     - acceptance tests: run on every PR, have network/Modal/etc access
-    - release tests: comprehensive tests for release readiness, not run per-PR. mngr's run in the
-      `mngr Release Tests` workflow and TMR; minds' run from the minds jobs in `ci.yml`, behind its
-      `run_minds_release_tests` dispatch input
+    - release tests: comprehensive tests for release readiness, run via the Release Tests workflow (manual dispatch and `v*` tag pushes) and TMR, rather than per-PR
     """
     if "PYTEST_MAX_DURATION_SECONDS" in os.environ:
         return float(os.environ["PYTEST_MAX_DURATION_SECONDS"])

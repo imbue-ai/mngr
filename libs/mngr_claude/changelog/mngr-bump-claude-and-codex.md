@@ -1,0 +1,1 @@
+Move the dialog registry's `CLAUDE_CODE_VERSION` snapshot from 2.1.227 to 2.1.269, the new pin in the shared mngr Dockerfile. Every dialog pattern and option label in `dialogs.py` was re-checked against the 2.1.269 binary before the constant moved: all of them still appear in it verbatim, so no pattern changed.

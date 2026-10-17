@@ -11,7 +11,6 @@ from typing import Final
 from typing import Generator
 from typing import Mapping
 from typing import Sequence
-from typing import final
 from uuid import uuid4
 
 from loguru import logger
@@ -31,30 +30,25 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import determine_lifecycle_probe_result
-from imbue.mngr.hosts.common import find_agent_session_name
-from imbue.mngr.hosts.common import find_first_pane_info
 from imbue.mngr.hosts.common import get_agent_state_dir_path
-from imbue.mngr.hosts.common import get_command_basename
+from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
 from imbue.mngr.hosts.tmux import AGENT_PANE_ID_OPTION
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
-from imbue.mngr.hosts.tmux import quote_tmux_text_argument
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.agent import SupportsKeyChordMixin
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
-from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import LifecycleProbeResult
-from imbue.mngr.primitives import RUNNING_AGENT_LIFECYCLE_STATES
 from imbue.mngr.primitives import read_checked_out_branch
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.polling import poll_until
@@ -68,19 +62,6 @@ _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 10.0
 SEND_COMMAND_TIMEOUT_SECONDS: Final[float] = 15.0
 
 _MESSAGE_LOCK_POLL_INTERVAL_SECONDS: Final[float] = 0.05
-
-
-@pure
-def build_clear_pane_modes_tmux_subcommand(target_arg: str) -> str:
-    """The tmux subcommand that leaves any pane mode, for chaining ahead of a keystroke write with ``\\;``.
-
-    tmux parses a whole ``\\;`` list before running any of it, and ``copy-mode -q`` only exists
-    from tmux 3.2, so a bare ``copy-mode -q`` would make older tmux reject the write chained after
-    it. ``if-shell -F`` checks the format inside the same tmux process and parses the inner command
-    only when the pane really is in a mode.
-    """
-    clear_modes = shlex.quote(f"copy-mode -q -t {target_arg}")
-    return f"if-shell -F -t {target_arg} '#{{pane_in_mode}}' {clear_modes}"
 
 
 @pure
@@ -133,7 +114,7 @@ def build_stderr_tee_redirect(quoted_log_path: str) -> str:
     log is truncated per launch (no ``-a``), which bounds it without rotation.
 
     Process substitution is a bash/zsh/ksh feature, not POSIX, so the agent pane's shell
-    must be one of those (see ``_build_sourced_launch_steps``). The shell does not wait for
+    must be one of those (see ``_build_agent_launch_steps``). The shell does not wait for
     the substitution to finish, so the last lines can reach the file a moment after the
     command exits; readers that need them promptly should poll.
     """
@@ -283,7 +264,12 @@ class BaseAgent(AgentInterface[AgentConfigT]):
     def is_running(self) -> bool:
         """Check if the agent is currently running by checking lifecycle state."""
         state = self.get_lifecycle_state()
-        is_running = state in RUNNING_AGENT_LIFECYCLE_STATES
+        is_running = state in (
+            AgentLifecycleState.RUNNING,
+            AgentLifecycleState.WAITING,
+            AgentLifecycleState.REPLACED,
+            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+        )
         logger.trace("Determined agent {} is_running={} (lifecycle_state={})", self.name, is_running, state)
         return is_running
 
@@ -295,31 +281,42 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """
         return self.probe_lifecycle().state
 
-    @final
     def probe_lifecycle(self) -> LifecycleProbeResult:
         """Get the lifecycle state and the agent's main process PID in one probe.
 
-        Reads the host's tmux panes and process table, then delegates to
-        ``probe_lifecycle_from_snapshot``, the method subclasses override (a listing
-        calls it directly with a snapshot shared across the host's agents). The PID
+        Collects tmux state and ps output via SSH (a single probe, shared with
+        get_lifecycle_state), then delegates to the shared pure function. The PID
         is that of the running agent process (e.g. ``claude``) when the agent is
         RUNNING/WAITING, else None. It is a PID in the agent host's namespace, so
-        callers watching the process for spontaneous death must only do so when that
-        host is the local machine.
-        """
-        return self.probe_lifecycle_from_snapshot(self.host.read_lifecycle_snapshot())
-
-    def probe_lifecycle_from_snapshot(self, lifecycle_snapshot: HostLifecycleSnapshot | None) -> LifecycleProbeResult:
-        """Determine the lifecycle state and PID from a host snapshot.
-
-        A snapshot that could not be read is UNKNOWN, never STOPPED or DONE: a host too loaded
-        to answer in time says nothing about whether this agent is still running.
+        callers watching the process for spontaneous death must only do so when
+        that host is the local machine.
         """
         try:
-            readable_snapshot = self._read_snapshot_after_migrating_unnamed_primary_window(lifecycle_snapshot)
-            if readable_snapshot is None:
-                logger.trace("Determined agent {} lifecycle state: UNKNOWN (tmux panes unreadable)", self.name)
-                return LifecycleProbeResult(state=AgentLifecycleState.UNKNOWN)
+            # Get pane state and pid in one command.
+            result = self.host.execute_idempotent_command(
+                self._build_lifecycle_probe_command(),
+                timeout_seconds=5.0,
+            )
+            tmux_info = result.stdout.strip() if result.success else None
+
+            # Migrate pre-upgrade agents whose primary window predates named-window
+            # targeting: if the by-name probe missed but the session exists, rename
+            # its primary window to the configured name and probe once more.
+            if not tmux_info:
+                is_migrated = self._migrate_unnamed_primary_window()
+                if is_migrated:
+                    reprobe_result = self.host.execute_idempotent_command(
+                        self._build_lifecycle_probe_command(),
+                        timeout_seconds=5.0,
+                    )
+                    tmux_info = reprobe_result.stdout.strip() if reprobe_result.success else None
+
+            # Get ps output for descendant process detection
+            ps_result = self.host.execute_idempotent_command(
+                "ps -e -o pid=,ppid=,comm= 2>/dev/null",
+                timeout_seconds=5.0,
+            )
+            ps_output = ps_result.stdout if ps_result.success else ""
 
             # Check if the active file exists
             is_active = self._check_file_exists(self._get_agent_dir() / "active")
@@ -328,44 +325,36 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             is_type_known = check_agent_type_known(str(self.agent_type), self.mngr_ctx.config)
 
             probe = determine_lifecycle_probe_result(
-                tmux_info=self._find_primary_pane_info(readable_snapshot),
+                tmux_info=tmux_info if tmux_info else None,
                 is_active=is_active,
                 is_blocked_on_dialog=self.is_blocked_on_dialog() if is_active else False,
                 expected_process_name=expected_process_name,
-                ps_output=readable_snapshot.ps_output,
+                ps_output=ps_output,
                 is_agent_type_known=is_type_known,
             )
             logger.trace("Determined agent {} lifecycle state: {} (pid={})", self.name, probe.state, probe.pid)
             return probe
         except HostConnectionError:
-            logger.trace("Determined agent {} lifecycle state: UNKNOWN (host connection error)", self.name)
-            return LifecycleProbeResult(state=AgentLifecycleState.UNKNOWN)
+            logger.trace("Determined agent {} lifecycle state: STOPPED (host connection error)", self.name)
+            return LifecycleProbeResult(state=AgentLifecycleState.STOPPED)
 
-    def _read_snapshot_after_migrating_unnamed_primary_window(
-        self, lifecycle_snapshot: HostLifecycleSnapshot | None
-    ) -> HostLifecycleSnapshot | None:
-        """The snapshot to read this agent from, re-read once if its pre-upgrade primary window was just renamed.
+    def _build_lifecycle_probe_command(self) -> str:
+        """Build the command that probes the agent's primary window for lifecycle state.
 
-        A session that exists but has no window by the configured name predates named-window
-        targeting; renaming its primary window lets name-based targeting resolve again.
+        The session is found by the agent id it carries, falling back to the session named after
+        this agent: a rename moves the session before it rewrites data.json, so the name this
+        agent was loaded with can already be gone while the agent runs on.
         """
-        if lifecycle_snapshot is None or self._find_session_name(lifecycle_snapshot) is None:
-            return lifecycle_snapshot
-        if self._find_primary_pane_info(lifecycle_snapshot) is not None:
-            return lifecycle_snapshot
-        if not self._migrate_unnamed_primary_window():
-            return lifecycle_snapshot
-        return self.host.read_lifecycle_snapshot()
-
-    def _find_session_name(self, lifecycle_snapshot: HostLifecycleSnapshot) -> str | None:
-        return find_agent_session_name(lifecycle_snapshot.panes, self.id, self.session_name)
-
-    def _find_primary_pane_info(self, lifecycle_snapshot: HostLifecycleSnapshot) -> str | None:
-        """The agent's primary window's ``dead|command|pid``, or None when it has no such window."""
-        session_name = self._find_session_name(lifecycle_snapshot)
-        if session_name is None:
-            return None
-        return find_first_pane_info(lifecycle_snapshot.panes, session_name, str(self.tmux_target.window))
+        # CLEANUP: drop the name fallback once no running session predates the AGENT_ID_OPTION
+        # stamp, i.e. once every host has restarted its agents on an mngr that sets it.
+        id_filter = shlex.quote(f"id={self.id}")
+        return (
+            f"session=$(tmux list-sessions -F '#{{{AGENT_ID_OPTION}}}|#{{session_name}}' 2>/dev/null"
+            f" | awk -F'|' -v {id_filter} '$1 == id {{print $2; exit}}'); "
+            f'[ -n "$session" ] || session={shlex.quote(self.session_name)}; '
+            f'tmux list-panes -t "=$session:"{shlex.quote(str(self.tmux_target.window))} '
+            f"-F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1"
+        )
 
     def _migrate_unnamed_primary_window(self) -> bool:
         """One-time migration for in-flight agents created before named-window targeting.
@@ -397,15 +386,22 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         result = self.host.execute_idempotent_command(rename_command, timeout_seconds=5.0)
         return result.success
 
+    def _get_command_basename(self, command: CommandString) -> str:
+        """Extract the basename from a command string.
+
+        Strips leading shell subshell syntax (e.g. '( script.sh ... ) &')
+        to find the actual command name.
+        """
+        stripped = str(command).lstrip("( ")
+        return stripped.split()[0].split("/")[-1] if stripped else ""
+
     def get_expected_process_name(self) -> str:
         """Get the expected process name for lifecycle state detection.
 
-        The class's ``fixed_process_name`` when it sets one (for agents launched through a complex
-        shell command, e.g. with exports and fallbacks), else the command's first word.
+        Subclasses can override this to return a hardcoded process name
+        when the command is complex (e.g., shell wrappers with exports).
         """
-        if self.fixed_process_name is not None:
-            return self.fixed_process_name
-        return get_command_basename(self.get_command())
+        return self._get_command_basename(self.get_command())
 
     def _check_file_exists(self, path: Path) -> bool:
         """Check if a file exists on the host."""
@@ -513,7 +509,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             return self._capture_pane_content(other_window.as_shell_arg(), include_scrollback=include_scrollback)
         return self._capture_pane_content(self.tmux_target, include_scrollback=include_scrollback)
 
-    def _send_target_arg(self, tmux_target: TmuxWindowTarget | str) -> str:
+    def _send_target_arg(self, tmux_target: TmuxWindowTarget) -> str:
         """The tmux ``-t`` argument every send should use: the agent's own pane, by ID.
 
         ``session:window`` resolves to whichever pane is ACTIVE, so one split silently delivers
@@ -534,11 +530,9 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         inherited that ID. Reading it is one tmux call, and that is the price of addressing the
         pane that exists now rather than the one that did.
 
-        A send resolves once and hands the resulting string to every step after it; a string is
-        returned unchanged, since it is a target this already resolved.
+        Callers that read the pane in a loop (the readiness and dialog polls) should resolve once
+        and pass the result down, rather than paying this per iteration.
         """
-        if isinstance(tmux_target, str):
-            return tmux_target
         session_arg = shlex.quote(f"={tmux_target.session_name}:")
         result = self.host.execute_stateful_command(
             f"tmux show-options -v -t {session_arg} {AGENT_PANE_ID_OPTION}",
@@ -556,12 +550,12 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         after it disappears, leaving the text sitting there unsent rather than failing.
 
         Users reach copy-mode by accident constantly -- with ``mouse on``, one wheel-up enters it
-        with no obvious indicator. ``copy-mode -q`` clears every mode type in one call. Best
+        with no obvious indicator. ``copy-mode -q`` clears every mode type in one call and is a
+        silent no-op when the pane is in none, so it needs no ``#{pane_in_mode}`` check. Best
         effort: if it fails, the send that follows will report the real problem.
         """
         self.host.execute_stateful_command(
-            f"tmux {build_clear_pane_modes_tmux_subcommand(target_arg)}",
-            timeout_seconds=self.send_command_timeout_seconds,
+            f"tmux copy-mode -q -t {target_arg}", timeout_seconds=self.send_command_timeout_seconds
         )
 
     def _run_send_command(self, command: str, failed_step: str) -> None:
@@ -589,7 +583,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """
         return capture_tmux_pane_content(
             self.host,
-            self._send_target_arg(tmux_target),
+            tmux_target if isinstance(tmux_target, str) else self._send_target_arg(tmux_target),
             timeout_seconds=_CAPTURE_PANE_TIMEOUT_SECONDS,
             include_scrollback=include_scrollback,
             include_styles=include_styles,
@@ -850,9 +844,7 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         with self._message_lock(), log_span("Pressing key chord {} to agent {}", key, self.name):
             target_arg = self._send_target_arg(self.tmux_target)
             self._clear_pane_modes(target_arg)
-            self._run_send_command(
-                f"tmux send-keys -t {target_arg} {quote_tmux_text_argument(key)}", f"tmux send-keys {key}"
-            )
+            self._run_send_command(f"tmux send-keys -t {target_arg} {shlex.quote(key)}", f"tmux send-keys {key}")
 
     def send_message(self, message: str) -> None:
         """Send a message to the running agent.
@@ -877,22 +869,18 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         to re-check the agent before sending.
         """
         with log_span("Sending message to agent {} (length={})", self.name, len(message)):
-            target_arg = self._send_target_arg(self.tmux_target)
-            self._preflight_send_message(target_arg)
-            self._send_message_simple(target_arg, message)
+            self._preflight_send_message(self.tmux_target)
+            self._send_message_simple(self.tmux_target, message)
 
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget | str) -> str | None:
-        """Run preflight checks before sending a message, returning the input-box pane content they last saw, if any.
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
+        """Run preflight checks before sending a message.
 
-        Called at the start of send_message. Default is a no-op that saw nothing.
+        Called at the start of send_message. Default is a no-op.
         Subclasses can override to perform checks (e.g., dialog detection)
-        and raise an appropriate error to abort the send. A subclass that reads the pane returns
-        what it read once nothing held the input, so the send can check readiness and leftover
-        input against that screen instead of capturing it again.
+        and raise an appropriate error to abort the send.
         """
-        return None
 
-    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget | str, message: str) -> str:
+    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> str:
         """Send literal text to a tmux pane, choosing the best method by length.
 
         Returns the resolved tmux target it sent to, so a caller following up with Enter can
@@ -911,28 +899,19 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         shell pane counts: readline and zle both enable it by default, so a ``CommandAgent``
         running a shell takes a multi-line message as one line-buffer edit that the Enter after
         it runs, rather than running each of its lines as the LF-turned-CR arrived.
-
-        Leaving any pane mode (see ``_clear_pane_modes``) rides in the same tmux invocation as the
-        write, since each invocation is a process spawn and those are slow under gVisor.
         """
         target_arg = self._send_target_arg(tmux_target)
-        clear_pane_modes = build_clear_pane_modes_tmux_subcommand(target_arg)
+        self._clear_pane_modes(target_arg)
         if len(message) < LONG_MESSAGE_THRESHOLD:
-            self._run_send_command(
-                f"tmux {clear_pane_modes} \\; send-keys -t {target_arg} -l -- {quote_tmux_text_argument(message)}",
-                "tmux send-keys",
-            )
+            self._run_send_command(f"tmux send-keys -t {target_arg} -l -- {shlex.quote(message)}", "tmux send-keys")
         else:
             tmp_path = Path(f"/tmp/mngr-msg-buffer-{self.session_name}.txt")
             quoted_buffer = shlex.quote(f"mngr-{self.session_name}")
             quoted_path = shlex.quote(str(tmp_path))
             try:
                 self.host.write_text_file(tmp_path, message)
-                self._run_send_command(
-                    f"tmux load-buffer -b {quoted_buffer} {quoted_path} \\; {clear_pane_modes} \\; "
-                    f"paste-buffer -p -b {quoted_buffer} -t {target_arg}",
-                    "tmux load-buffer/paste-buffer",
-                )
+                self._run_send_command(f"tmux load-buffer -b {quoted_buffer} {quoted_path}", "tmux load-buffer")
+                self._run_send_command(f"tmux paste-buffer -p -b {quoted_buffer} -t {target_arg}", "tmux paste-buffer")
             finally:
                 self.host.execute_idempotent_command(
                     f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}",
@@ -940,7 +919,7 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
                 )
         return target_arg
 
-    def _send_message_simple(self, tmux_target: TmuxWindowTarget | str, message: str) -> None:
+    def _send_message_simple(self, tmux_target: TmuxWindowTarget, message: str) -> None:
         """Send a message directly without waiting for paste confirmation."""
         target_arg = self._send_tmux_literal_keys(tmux_target, message)
 

@@ -139,7 +139,7 @@ describe("UiChannelClient", () => {
     const { client, sockets } = makeClient();
     client.start();
     sockets[0].open();
-    client.setClientState("/settings", null, "local");
+    client.setClientState("/settings", null);
     const frames = sockets[0].sent.map(
       (raw) => JSON.parse(raw) as { type: string; route: string },
     );
@@ -153,22 +153,14 @@ describe("UiChannelClient", () => {
     sockets[0].open();
     const framesAfterOpen = sockets[0].sent.length;
 
-    client.setClientState("/settings", null, "local");
-    client.setClientState("/settings", null, "local");
-    client.setClientState("/settings", null, "local");
+    client.setClientState("/settings", null);
+    client.setClientState("/settings", null);
+    client.setClientState("/settings", null);
 
     expect(sockets[0].sent.length).toBe(framesAfterOpen + 1);
 
-    client.setClientState("/workspace/agent-1", "agent-1", "local");
+    client.setClientState("/workspace/agent-1", "agent-1");
     expect(sockets[0].sent.length).toBe(framesAfterOpen + 2);
-
-    // The account alone changing is a change the server has to hear: it scopes the frames to it.
-    client.setClientState("/workspace/agent-1", "agent-1", "user-1");
-    expect(sockets[0].sent.length).toBe(framesAfterOpen + 3);
-    expect(
-      (JSON.parse(sockets[0].sent.at(-1) ?? "{}") as { account_id: string })
-        .account_id,
-    ).toBe("user-1");
   });
 
   it("reports the window's live focus state on client_state frames", () => {
@@ -184,7 +176,7 @@ describe("UiChannelClient", () => {
     expect(opened.has_focus).toBe(true);
 
     hasFocus = false;
-    client.setClientState("/settings", null, "local");
+    client.setClientState("/settings", null);
     const afterBlur = JSON.parse(sockets[0].sent.at(-1) ?? "{}") as {
       has_focus: boolean;
     };
@@ -199,13 +191,10 @@ describe("UiChannelClient", () => {
     type Frame = { window_kind: string; is_screen_locked: boolean };
     const lastFrame = (): Frame => JSON.parse(sockets[0].sent.at(-1) ?? "{}") as Frame;
 
-    client.setClientState("/workspace/agent-1", "agent-1", "local");
-    expect(lastFrame()).toMatchObject({
-      window_kind: "main",
-      is_screen_locked: false,
-    });
+    client.setClientState("/workspace/agent-1", "agent-1");
+    expect(lastFrame()).toMatchObject({ window_kind: "main", is_screen_locked: false });
 
-    client.setClientState("/popout/agent-1/win-1", "agent-1", "local");
+    client.setClientState("/popout/agent-1/win-1", "agent-1");
     expect(lastFrame().window_kind).toBe("popout");
 
     // The lock changes nothing the route dedup sees, so it is resent explicitly.

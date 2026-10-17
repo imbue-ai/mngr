@@ -30,12 +30,6 @@ from imbue.mngr_imbue_cloud.wire import WireModel
 # preserve-on-absent merge without a bump.
 SUPPORTED_RECORD_FORMAT: int = 1
 
-# The newest account-document semantics this client understands; the same
-# read-only rule as SUPPORTED_RECORD_FORMAT, applied per document. The
-# plugin itself never interprets documents, so this exists for the consumers
-# (minds) to compare against a document's wire ``document_format``.
-SUPPORTED_DOCUMENT_FORMAT: int = 1
-
 
 class WorkspaceStatus(WireEnum):
     """Wire lifecycle status of a remote workspace (GET /workspaces).
@@ -341,23 +335,6 @@ class ShareInfo(WireModel):
         default=None, description="Opaque per-share relay token; returned once at share-enable"
     )
     last_tunnel_login_at: str | None = Field(default=None, description="Last relay tunnel Login stamp (any relay)")
-    last_seen_at: str | None = Field(
-        default=None,
-        description=(
-            "When the workspace's tunnel last proved itself alive (a relay Login or heartbeat, stamped at most "
-            "once per fifteen minutes); None for a share not seen since the connector started recording it, or "
-            "against a connector that predates the field"
-        ),
-    )
-    created_at: str | None = Field(default=None, description="When the share row was created (connector timestamp)")
-    updated_at: str | None = Field(default=None, description="When the share row last changed (connector timestamp)")
-    entry_label: str | None = Field(
-        default=None,
-        description="The workspace's shell-service origin label the hosted chrome enters at; None until recorded",
-    )
-    share_label: str | None = Field(
-        default=None, description="The minted leading label of a workspace-keyed share's domain; None on a legacy row"
-    )
     cert_not_after: str | None = Field(default=None, description="Expiry of the newest issued certificate")
     chrome_origin: str | None = Field(
         default=None,
@@ -574,13 +551,6 @@ class AccountUsageInfo(WireModel):
             "machines); None against an older connector."
         ),
     )
-    shared_workspaces: int | None = Field(
-        default=None,
-        description=(
-            "Active shares currently counted against max_shared_workspaces (a share of a destroyed or "
-            "missing workspace counts until it is retired); None against an older connector."
-        ),
-    )
 
 
 class AccountInfo(WireModel):
@@ -640,24 +610,13 @@ class ContactEntry(UserIdentity):
 class AdminAccountInfo(AccountInfo):
     """The operator view of an account, from GET /admin/accounts/{email}.
 
-    Extends the user-facing shape with the suspension state and the deletion
-    marks, which are operator-facing only (the connector never sends them on
-    ``GET /account``).
+    Extends the user-facing shape with the suspension state, which is
+    operator-facing only (the connector never sends it on ``GET /account``).
     """
 
     suspended_at: str | None = Field(default=None, description="When the account was suspended (None = not suspended)")
     suspended_reason: str | None = Field(
         default=None, description="Operator-recorded suspension reason (internal; never shown to the user)"
-    )
-    deleted_at: str | None = Field(
-        default=None, description="When the account was marked deleted (None = not deleted, or an older connector)"
-    )
-    deleted_by: str | None = Field(
-        default=None, description="Who asked for the deletion, 'holder' or 'operator' (None = not deleted)"
-    )
-    finalized_at: str | None = Field(
-        default=None,
-        description="When the deleted account was finalized (None = not deleted, or still in its grace period)",
     )
 
 
@@ -773,46 +732,3 @@ class SyncKeyBundle(WireModel):
     wrapped_dek: str = Field(description="Base64 password-wrapped DEK (opaque here)")
     key_epoch: int = Field(description="Bumped only on compromise recovery")
     updated_at: str = Field(default="", description="Server timestamp (response only)")
-
-
-class SyncDocument(WireModel):
-    """Wire form of one per-account document (transport-only; the plugin never decrypts or interprets).
-
-    Mirrors the connector's ``AccountDocumentModel``: a plaintext ``metadata``
-    object plus the base64 of the client-encrypted payload, keyed by
-    ``(kind, doc_id)`` within the account. ``state`` is passed through as its
-    lowercase wire string -- the producing (minds) and validating (connector)
-    ends own the vocabulary.
-    """
-
-    kind: str = Field(description="Document kind, e.g. 'connection' (lowercase letters and underscores)")
-    doc_id: str = Field(description="Document id within its kind")
-    metadata: dict[str, Any] = Field(
-        description=(
-            "Plaintext JSON object the server stores whole and never interprets. Required: a push sends only "
-            "the fields set on the document and the server replaces the stored object whole, so an unset "
-            "value would wipe it."
-        )
-    )
-    encrypted_payload: str | None = Field(
-        default=None,
-        description=(
-            "Base64 of the client-encrypted payload (opaque here). Omitted from a push, the server keeps "
-            "the stored blob; sent as null, it clears it."
-        ),
-    )
-    state: str = Field(description="Lifecycle state: 'active' or 'deleted' (tombstone)")
-    revision: int = Field(description="Per-row monotonic revision; pushes are CAS on this (a new row is 1)")
-    document_format: int = Field(
-        default=1,
-        description=(
-            "Semantic format of the document (missing = 1). A client whose SUPPORTED_DOCUMENT_FORMAT is "
-            "below this treats the document as read-only; the server rejects pushes carrying a value "
-            "below the stored row's (409 document_format_too_new)."
-        ),
-    )
-    created_at: str = Field(default="", description="Server timestamp (response only)")
-    updated_at: str = Field(default="", description="Server timestamp (response only)")
-    deleted_at: str | None = Field(
-        default=None, description="Server tombstone stamp (response only; set while state is 'deleted')"
-    )

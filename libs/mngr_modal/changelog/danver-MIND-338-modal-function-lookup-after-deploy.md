@@ -1,0 +1,7 @@
+Deploying a Modal route endpoint no longer races other deploys to create the app it publishes into.
+
+Creating a host makes sure its Modal app publishes mngr's `snapshot_and_shutdown` endpoint, deploying it when the app does not already carry the current version. On an app that does not exist yet, concurrent creates all deploy at once, and Modal's app creation inside `modal deploy` is not atomic: the deploys mint rival apps and then fight over the one name. That refusal is neither of the two concurrent-modification shapes the deploy-lock retry rides through, so the losers simply fail, and the name can end up owned by an app that a given deploy never published into.
+
+The deploy now takes the app through Modal's atomic get-or-create before publishing into it, so a deploy is never what brings an app into existence. Measured against real Modal, concurrent first deploys of one app went from 5 failures in 6 to 50 successes in 50.
+
+Fixed: a `snapshot_and_shutdown` deploy that was the first thing to touch its app's state volume created it at Modal's default version, and every host create in that app then failed to open it -- `get_volume_for_app` asks for version 2 and Modal refuses a mismatch. The route script now requests the version the backend opens, so whichever side creates the volume first, the other can use it. The backend had always created it first until the endpoint was published ahead of the creates, which is when this surfaced.

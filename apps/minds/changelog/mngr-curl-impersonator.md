@@ -1,0 +1,5 @@
+- The latchkey gateway can now make Chrome-impersonating requests on demand. minds bundles a "dispatch curl" (plus the Chrome-TLS-impersonating curl it fronts) from the datalib release into `resources/curl/` and points the gateway's `LATCHKEY_CURL` at it. Requests that carry the marker header `X-Imbue-Impersonate:` are routed to the impersonator (to clear Cloudflare-style TLS fingerprinting); every other request passes through to the system curl unchanged, so existing callers and credential checks are unaffected.
+
+- The signature is a value-less, namespaced header (`-H "X-Imbue-Impersonate:"`). On a real curl it is a no-op (removing a header curl never sends), so it never alters a request even if it reaches a non-dispatch curl.
+
+- The bundled binaries are downloaded per platform by `scripts/download-binaries.js` (macOS arm64 and Linux x86_64; SHA256-verified). When the binaries aren't present (unsupported platform, or the download not yet pinned), minds falls back to the system curl exactly as before.

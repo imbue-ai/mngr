@@ -14,21 +14,24 @@ dependencies = [
     "concurrency-group",
     "cryptography>=42.0",
     "flask>=3.0",
-    "httpx2>=2.13.1",
+    "httpx>=0.27.0",
     "imbue-common",
     "itsdangerous>=2.2.0",
     "loguru",
     "imbue-mngr",
-    # The cloud backends minds writes connection provider blocks for.
+    # The bring-your-own-key cloud backends minds writes provider blocks for.
     "imbue-mngr-aws",
     "imbue-mngr-azure",
     "imbue-mngr-gcp",
-    # The local compute providers (LaunchMode.DOCKER and LaunchMode.LIMA).
+    # The local-container compute provider (LaunchMode.DOCKER).
     "imbue-mngr-docker",
-    "imbue-mngr-lima",
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
     "imbue-mngr-latchkey",
+    # The local-VM compute provider (LaunchMode.LIMA); also runs `mngr lima resize`.
+    "imbue-mngr-lima",
+    # minds writes an enabled modal provider block into its mngr settings, and
+    # mngr rejects an enabled provider whose backend plugin is not installed.
     "imbue-mngr-modal",
     # Folder sync runs `mngr pair`.
     "imbue-mngr-pair",
@@ -42,9 +45,6 @@ dependencies = [
     "imbue-mngr-codex",
     "imbue-mngr-opencode",
     "imbue-mngr-pi-coding",
-    # The plugin whose [plugins.autocompact] section the default workspace
-    # template configures; mngr rejects that section's fields without it.
-    "imbue-mngr-autocompact",
     "modal>=1.4.3",
     "paramiko>=3.0",
     "playwright>=1.40.0",
@@ -80,7 +80,6 @@ build-backend = "hatchling.build"
 concurrency-group = { workspace = true }
 imbue-mngr = { workspace = true }
 imbue-mngr-antigravity = { workspace = true }
-imbue-mngr-autocompact = { workspace = true }
 imbue-mngr-aws = { workspace = true }
 imbue-mngr-azure = { workspace = true }
 imbue-mngr-gcp = { workspace = true }
@@ -115,7 +114,6 @@ exclude = [
   "**/conftest.py",
   "**/testing.py",
   "**/utils/snapshot_container_states_testing.py",
-  "**/desktop_client/update_program_stubs_testing.py",
 ]
 
 # Build the frontend bundle (frontend/ -> static/ui/) when packaging a real
@@ -172,9 +170,6 @@ omit = [
   # pure orchestration (ensure.py) is covered via mock_lima_image_test.
   "*/imbue/minds/lima_image/desync.py",
   "*/imbue/minds/lima_image/manifest_fetcher.py",
-  # The workspace programs run inside a workspace, as a zip application in a
-  # subprocess that coverage cannot trace; their tests run them exactly that way.
-  "*/imbue/minds/workspace_programs/*",
 ]
 
 [tool.inline-snapshot]

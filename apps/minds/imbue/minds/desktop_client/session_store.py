@@ -27,14 +27,13 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
-from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.errors import WorkspaceSyncError
+from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.mngr_imbue_cloud.config import get_active_profile_dir
 from imbue.mngr_imbue_cloud.config import get_sessions_dir
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
@@ -200,7 +199,8 @@ class MultiAccountSessionStore(MutableModel):
         """The plugin's sessions dir, or None while it cannot be resolved yet.
 
         Resolution needs the host dir's ``config.toml`` (for the active
-        profile id); a miss is retried on the next read rather than cached.
+        profile id), which the app writes on mngr initialization -- so a miss
+        is retried on the next read rather than cached.
         """
         if self.mngr_host_dir is None:
             return None
@@ -318,30 +318,6 @@ class MultiAccountSessionStore(MutableModel):
                 return _build_session(account, workspace_ids)
         return None
 
-    def get_owner_user_id_for_workspace(self, workspace_any_id: str) -> str | None:
-        """The account a workspace (by either coordinate) is associated with, signed in here or not.
-
-        None for a workspace with no record. The association is record existence,
-        so it names an account whose session is gone from this device as readily
-        as a signed-in one: the window scoping lists such a workspace under its
-        account, not under the device. A ``host-`` coordinate (a restored window's
-        URL) is mapped through the records too, so a workspace discovery does not
-        report resolves all the same.
-        """
-        if self.record_store is None:
-            return None
-        agent_id = (
-            self.record_store.active_agent_id_for_host(workspace_any_id)
-            if workspace_any_id.startswith("host-")
-            else workspace_any_id
-        )
-        if agent_id is None:
-            return None
-        for user_id, workspace_ids in self._associations_view().items():
-            if agent_id in workspace_ids:
-                return user_id
-        return None
-
     def is_any_signed_in(self) -> bool:
         """Whether at least one account is currently signed in (per the plugin)."""
         return bool(self._identity_by_user_id())
@@ -369,29 +345,27 @@ class MultiAccountSessionStore(MutableModel):
         display_name: str,
         color: str | None,
         is_cloud_row: bool,
-        provider_kind: str | None = None,
     ) -> None:
         """Create-path association: seed the record now, queued for push.
 
         Runs right after ``mngr create`` returns the canonical ids -- before
         discovery has seen the workspace -- so the record starts with the form
-        metadata plus whatever this device already holds: the provider is the
-        instance the create addressed (``provider_kind``; a cloud row without
-        one is the account's Imbue Cloud instance), and its per-host material
-        was written before create returned, so the first push carries the
-        secrets when the account is unlocked: a device that pulls before the
-        reconcile's refresh already sees a record it can unlock and a machine
-        it can open. The refresh still enriches whatever is missing (a local
-        row's provider, a backup env written later). Never blocks or fails
-        creation: a push failure just leaves the row dirty for the reconcile.
+        metadata plus whatever this device already holds: a cloud row's
+        provider is known from the account, and its SSH key and pins were
+        written by the lease before create returned, so the first push carries
+        the secrets when the account is unlocked: a device that pulls before
+        the reconcile's refresh already sees a record it can unlock and a
+        machine it can open. The refresh still enriches whatever is missing (a
+        local row's provider, a backup env written later). Never blocks or
+        fails creation: a push failure just leaves the row dirty for the
+        reconcile.
         """
         if self.record_store is None:
             logger.warning("Machine sync is not configured; created machine {} stays private", agent_id)
             return
         account = self._require_account(user_id)
-        if provider_kind is None:
-            provider_kind = imbue_cloud_provider_name_for_user(str(account.user_id)) if is_cloud_row else ""
-        built_secrets = self.record_store.build_encrypted_secrets(user_id, agent_id, host_id, provider_kind, None)
+        provider_kind = imbue_cloud_provider_name_for_account(str(account.email)) if is_cloud_row else ""
+        built_secrets = self.record_store.build_encrypted_secrets(user_id, agent_id, host_id, None)
         seed = ReplicaRecord(
             host_id=host_id,
             agent_id=agent_id,
@@ -413,16 +387,6 @@ class MultiAccountSessionStore(MutableModel):
         account = self._require_account(user_id)
         self.record_store.disassociate_workspace_or_raise(user_id, account.email, agent_id)
         logger.info("Disassociated machine {} from user {}", agent_id, user_id[:8])
-
-
-def get_owning_account_id_for_workspace(
-    session_store: MultiAccountSessionStore | None,
-    workspace_any_id: str,
-) -> str:
-    """The account whose windows list a workspace: its association's, else the device's."""
-    if session_store is None:
-        return LOCAL_PROFILE_USER_ID
-    return session_store.get_owner_user_id_for_workspace(workspace_any_id) or LOCAL_PROFILE_USER_ID
 
 
 def _build_session(account: ImbueCloudAuthAccount, workspace_ids: list[str]) -> AccountSession:

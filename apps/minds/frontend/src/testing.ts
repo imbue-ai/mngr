@@ -2,25 +2,16 @@
 // Deliberately NOT named *.test.ts so vitest does not collect it as a suite.
 
 import m from "mithril";
-import { getAppContext, registerAppContext } from "./app-context";
 import type {
   UiAccountEntry,
   UiAccountsMessage,
   UiNotificationEntry,
-  UiWorkspaceUpdate,
   UiWorkspacesMessage,
 } from "./channel/messages";
-import { createEmptyStores } from "./models/boot";
-import type { BrowserImportResult } from "./models/browserImport";
-import type {
-  ConnectionBackendOption,
-  CreateFormDefaults,
-} from "./models/create";
+import type { CreateFormDefaults } from "./models/create";
 import { createAppQueryClient } from "./models/queryClient";
 import type { SettingsOverview } from "./models/settings";
 import type { SharePanelModelOptions } from "./models/sharePanel";
-import type { SharedWorkspaceRow } from "./models/sharedWorkspaces";
-import { ShellState } from "./views/shell/shell-state";
 
 /** Render a component to its root vnode by instantiating the closure and
  * calling view() directly -- the inner-app idiom of testing render logic
@@ -116,111 +107,57 @@ export function workspacesMessage(
   };
 }
 
-/** The accounts frame listing the signed-in `accounts` (and `signedOutAccounts`), as a window on `accountId` receives it. */
+/** The accounts frame listing `accounts`, labelled with the default one as
+ * the server labels it. */
 export function accountsMessage(
   accounts: UiAccountEntry[] = [accountEntry()],
-  accountId = "local",
-  signedOutAccounts: UiAccountEntry[] = [],
 ): UiAccountsMessage {
+  const labelled =
+    accounts.find((account) => account.is_default) ?? accounts[0];
   return {
     type: "accounts",
-    account_id: accountId,
     has_accounts: accounts.length > 0,
+    account_email: labelled?.email ?? "",
+    extra_account_count: Math.max(accounts.length - 1, 0),
     accounts,
-    signed_out_accounts: signedOutAccounts,
   };
 }
 
-/** One signed-in account entry: alice. */
+/** One signed-in account entry: alice, the default account. */
 export function accountEntry(
   overrides: Partial<UiAccountEntry> = {},
 ): UiAccountEntry {
   return {
     user_id: "user-1",
     email: "alice@example.com",
-    display_name: "",
     workspace_count: 0,
+    is_default: true,
+    is_enabled: true,
     ...overrides,
   };
 }
 
-/** A second account signed in beside accountEntry's. */
+/** A second, non-default account signed in beside accountEntry's. */
 export function secondAccountEntry(): UiAccountEntry {
   return accountEntry({
     user_id: "user-2",
     email: "bob@example.com",
+    is_default: false,
   });
 }
 
-/** One shared-workspaces page row: an active share of a workspace this device runs. */
-export function sharedWorkspaceRow(
-  overrides: Partial<SharedWorkspaceRow> = {},
-): SharedWorkspaceRow {
+/** A create-form defaults payload with accountEntry's account as the default and Imbue Cloud selected. */
+export function createFormDefaults(overrides: Partial<CreateFormDefaults> = {}): CreateFormDefaults {
   return {
-    host_id: "host-" + "a".repeat(32),
-    workspace_id: "agent-live",
-    account_email: "alice@example.com",
-    display_name: "alpha",
-    workspace_domain: "abc.owner.us1.shares.example",
-    device_label: "This device",
-    share_state: "active",
-    record_state: "active",
-    created_display: "2026-09-01",
-    last_seen_display: "Connected now",
-    is_likely_leaked: false,
-    is_hosted_here: true,
-    ...overrides,
-  };
-}
-
-/** The connection backends as the server tables them: three with a pinned region, Modal placed per create. */
-export const CONNECTION_BACKEND_OPTIONS: readonly ConnectionBackendOption[] = [
-  {
-    name: "aws",
-    label: "AWS",
-    is_region_pinned: true,
-    is_local_profile_supported: true,
-  },
-  {
-    name: "gcp",
-    label: "GCP",
-    is_region_pinned: true,
-    is_local_profile_supported: false,
-  },
-  {
-    name: "azure",
-    label: "Azure",
-    is_region_pinned: true,
-    is_local_profile_supported: true,
-  },
-  {
-    name: "modal",
-    label: "Modal",
-    is_region_pinned: false,
-    is_local_profile_supported: true,
-  },
-];
-
-/** A create-form defaults payload for a window on accountEntry's account, with Imbue Cloud selected. */
-export function createFormDefaults(
-  overrides: Partial<CreateFormDefaults> = {},
-): CreateFormDefaults {
-  return {
-    account: {
-      user_id: "user-1",
-      email: "alice@example.com",
-      state: "SIGNED_IN",
-      is_connection_owner_eligible: true,
-    },
+    accounts: [{ user_id: "user-1", email: "alice@example.com" }],
+    default_account_id: "user-1",
     launch_modes: ["IMBUE_CLOUD", "LIMA", "DOCKER"],
     selected_launch_mode: "IMBUE_CLOUD",
     docker_runtimes: ["RUNC", "RUNSC"],
     selected_docker_runtime: "RUNSC",
     backup_providers: ["IMBUE_CLOUD", "API_KEY", "CONFIGURE_LATER"],
     selected_backup_provider: "IMBUE_CLOUD",
-    region_options_by_launch_mode: {
-      IMBUE_CLOUD: ["US-EAST-VA", "US-WEST-OR"],
-    },
+    region_options_by_launch_mode: { IMBUE_CLOUD: ["US-EAST-VA", "US-WEST-OR"] },
     region_selected_by_launch_mode: { IMBUE_CLOUD: "US-WEST-OR" },
     instance_types_by_backend: {},
     default_instance_type_by_backend: {},
@@ -230,7 +167,7 @@ export function createFormDefaults(
       MODAL: { cpu_count: 2, memory_gb: 4, disk_gb: null },
     },
     cloud_accounts: [],
-    connection_backends: [...CONNECTION_BACKEND_OPTIONS],
+    byok_clouds_enabled: false,
     git_url: "https://github.com/imbue-ai/default-workspace-template.git",
     branch: "minds-v9.9.9",
     color: "#0b292b",
@@ -276,24 +213,7 @@ export function settingsOverview(
     version: "v-one",
     update_window_start_hour: 2,
     update_window_end_hour: 5,
-    is_auto_update_enabled: false,
-    auto_update_prompt_decision: null,
     ...overrides,
-  };
-}
-
-/** The `POST /ui/api/settings/browser-import` outcome of an import the OS
- * refused: the Chrome profile is there, but could not be read. On a Mac
- * (the default) the app lacks Full Disk Access; elsewhere it is a plain
- * permission problem. */
-export function unreadableChromeProfileOutcome(
-  isFullDiskAccessNeeded = true,
-): BrowserImportResult {
-  return {
-    is_success: false,
-    detail: "The Google Chrome profile could not be read: EPERM.",
-    error_code: "CHROME_PROFILE_NOT_READABLE",
-    is_full_disk_access_needed: isFullDiskAccessNeeded,
   };
 }
 
@@ -325,73 +245,6 @@ export function jsonResponse(payload: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
-
-/** Publish a workspace list holding only `agentId`, at `liveness`, to the registered app context. */
-export function publishWorkspaceLiveness(
-  agentId: string,
-  liveness: UiWorkspacesMessage["workspaces"][number]["liveness"],
-): void {
-  getAppContext().stores.workspaces.applyWorkspacesMessage(
-    workspacesMessage({ workspaces: [{ ...workspacesMessage().workspaces[0], id: agentId, liveness }] }),
-  );
-}
-
-/** A workspace read as a minor release behind and idle, with backups to fall back on. */
-export const OUT_OF_DATE_UPDATE: UiWorkspaceUpdate = {
-  availability: "OUT_OF_DATE",
-  current_version: "minds-v0.3.9",
-  supported_version: "minds-v0.4.1",
-  is_workspace_readable: true,
-  activity: "IDLE",
-  is_backup_configured: true,
-};
-
-/** An armed schedule's window fields for a window that opens at `startHour`
- * in the test machine's local time, as the workspace's file carries it (UTC):
- * the UTC start of the window open now, else the next to open, as the app writes it. */
-export function scheduleWindowAtLocalHour(
-  startHour: number,
-  lengthHours: number,
-): Pick<UiWorkspaceUpdate, "schedule_window_start_minute_utc" | "schedule_window_length_minutes"> {
-  const now = new Date();
-  const opening = new Date(now);
-  opening.setHours(startHour, 0, 0, 0);
-  if (now.getTime() >= opening.getTime() + lengthHours * 60 * 60 * 1000) opening.setDate(opening.getDate() + 1);
-  return {
-    schedule_window_start_minute_utc: opening.getUTCHours() * 60 + opening.getUTCMinutes(),
-    schedule_window_length_minutes: lengthHours * 60,
-  };
-}
-
-/** A shell registered as the app's context, its updates store holding `updates`
- * as a `workspace_updates` frame would leave it. */
-export function updatesShell(
-  updates: Record<string, UiWorkspaceUpdate>,
-  isAutoUpdateEnabled: boolean,
-): ShellState {
-  const shell = new ShellState(createEmptyStores());
-  registerAppContext({ stores: shell.stores, shell });
-  shell.stores.updates.applyUpdatesMessage({
-    type: "workspace_updates",
-    updates,
-    update_window: "2:00 AM-5:00 AM",
-    is_auto_update_enabled: isAutoUpdateEnabled,
-  });
-  return shell;
-}
-
-/** A `fetch` that answers with `respond` and records every URL it was asked for. */
-export function recordingFetch(
-  respond: (url: string) => Promise<Response> = () =>
-    Promise.resolve(jsonResponse({})),
-): { fetchImpl: (url: string) => Promise<Response>; requests: string[] } {
-  const requests: string[] = [];
-  const fetchImpl = (url: string): Promise<Response> => {
-    requests.push(url);
-    return respond(url);
-  };
-  return { fetchImpl, requests };
 }
 
 /** Run `run` with `globalThis.fetch` swapped for a stub that mimics the
@@ -556,9 +409,4 @@ export function withAttr(node: unknown, name: string): AnyVnode[] {
   return collectVnodes(node).filter(
     (vnode) => attrsOf(vnode)[name] !== undefined,
   );
-}
-
-/** The vnode with this `id`, from a tree or an already collected list. */
-export function byId(node: unknown, id: string): AnyVnode | undefined {
-  return collectVnodes(node).find((vnode) => attrsOf(vnode).id === id);
 }

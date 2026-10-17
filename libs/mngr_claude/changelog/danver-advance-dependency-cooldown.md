@@ -1,0 +1,3 @@
+`anthropic` 1.3.0 adds a `toolset_name` field to `ToolUseBlock`, so mngr's stream-json dump now carries `"toolset_name":null` alongside the `"caller":null` it already emitted. Added to the list of known wire-shape departures from the real `claude` binary in the `stream_json` module docstring; the only consumer is mngr's own lenient parser, which accepts the field present, absent, or null.
+
+pytest 9.1 no longer honours `pytest_plugins` outside the rootdir conftest, which is how this package borrowed mngr_modal's Modal test fixtures whenever the suite is run from the monorepo root. It now calls mngr_modal's `register_modal_test_fixtures`, mirroring the existing `register_plugin_test_fixtures`.

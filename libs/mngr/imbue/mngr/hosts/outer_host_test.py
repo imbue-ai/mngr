@@ -8,12 +8,9 @@ import subprocess
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
-from typing import Final
 from typing import cast
 
 import pytest
-from paramiko import AuthenticationException
-from paramiko import BadAuthenticationType
 from paramiko import ChannelException
 from paramiko import SFTPAttributes
 from paramiko import SFTPClient
@@ -40,7 +37,6 @@ from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
-from imbue.mngr.hosts.outer_host import is_ssh_auth_timeout
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import is_unreachable_peer_connect_error
 from imbue.mngr.interfaces.data_types import FileType
@@ -555,21 +551,21 @@ class _FakePyinfraHostRecoveringOnConnect:
         self.connected = True
 
 
-class _FakePyinfraHostFailingOnCommand:
-    """Pyinfra-host stand-in whose first ``run_shell_command`` raises a given error.
+class _FakePyinfraHostResettingOnCommand:
+    """Pyinfra-host stand-in whose first ``run_shell_command`` is reset by the peer.
 
-    The shape a dead-but-believed-in transport presents: the failure arrives
-    from the command rather than from the connect.
+    The shape a transport cached across a laptop sleep presents when it is next
+    used: the connection this side still believes in is gone, and the reset
+    arrives from the command rather than from the connect.
     """
 
-    def __init__(self, failure_count: int, error: OSError) -> None:
+    def __init__(self, failure_count: int) -> None:
         self.connected = True
         self.name = "fake-ssh-host"
         self.connector_cls = type("SSHConnector", (), {})
         self.command_call_count = 0
         self.disconnect_call_count = 0
         self._failure_count = failure_count
-        self._error = error
 
     def connect(self, raise_exceptions: bool = False) -> None:
         self.connected = True
@@ -581,26 +577,20 @@ class _FakePyinfraHostFailingOnCommand:
     def run_shell_command(self, command: Any, **kwargs: Any) -> tuple[bool, Any]:
         self.command_call_count += 1
         if self.command_call_count <= self._failure_count:
-            raise self._error
+            raise ConnectionResetError(54, "Connection reset by peer")
         return True, CommandOutput([])
 
 
-_DEAD_CONNECTION_ERRORS: Final[tuple[Any, ...]] = (
-    pytest.param(ConnectionResetError(54, "Connection reset by peer"), id="connection-reset"),
-    pytest.param(OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"), id="local-address-lost"),
-)
+def test_run_shell_command_reconnects_after_the_peer_resets_the_connection(temp_mngr_ctx: MngrContext) -> None:
+    """A reset mid-command rebuilds the connection and retries, rather than surfacing.
 
-
-@pytest.mark.parametrize("error", _DEAD_CONNECTION_ERRORS)
-def test_run_shell_command_reconnects_after_the_connection_dies(temp_mngr_ctx: MngrContext, error: OSError) -> None:
-    """A connection that dies mid-command is rebuilt and the command retried, rather than surfacing.
-
-    The death arrives as ``ConnectionResetError`` (the peer reset it) or as a
-    bare ``OSError(EADDRNOTAVAIL)`` (this machine's address for it vanished);
-    the message of each is the errno text rather than "Socket is closed", so
-    neither is caught by a message match.
+    Regression guard for a stale transport across a laptop sleep. The reset
+    arrives as ``ConnectionResetError``, whose message is the errno text rather
+    than "Socket is closed", so it used to miss both the transient classifier
+    and the disconnect-before-retry branch -- and escaped the CLI as a raw
+    paramiko traceback, failing a restart of a machine that was fine.
     """
-    fake = _FakePyinfraHostFailingOnCommand(failure_count=1, error=error)
+    fake = _FakePyinfraHostResettingOnCommand(failure_count=1)
     outer = OuterHost(
         id=HostId.generate(),
         connector=PyinfraConnector(cast(PyinfraHost, fake)),
@@ -615,18 +605,15 @@ def test_run_shell_command_reconnects_after_the_connection_dies(temp_mngr_ctx: M
     assert fake.disconnect_call_count == 1
 
 
-@pytest.mark.parametrize("error", _DEAD_CONNECTION_ERRORS)
-def test_a_dead_connection_that_outlives_the_retries_is_translated_not_raw(
-    local_outer_host: OuterHost, error: OSError
-) -> None:
-    """A dead connection that survives the retry budget leaves as a domain error, not a paramiko traceback.
+def test_a_reset_that_outlives_the_retries_is_translated_not_raw(local_outer_host: OuterHost) -> None:
+    """A reset that survives the retry budget leaves as a domain error, not a paramiko traceback.
 
     Exercised at the translation boundary rather than through the retry, which
     would spend its real ~10s backoff to reach the same assertion.
     """
     with pytest.raises(HostConnectionError, match="closed"):
         with local_outer_host._translate_ssh_errors(failed="failed", closed="closed", timed_out="timed out"):
-            raise error
+            raise ConnectionResetError(54, "Connection reset by peer")
 
 
 def test_an_sftp_desync_that_outlives_the_retries_is_translated_not_raw(local_outer_host: OuterHost) -> None:
@@ -799,7 +786,6 @@ def test_is_transient_ssh_connect_error_matches_transient_handshake_connect_erro
         (EOFError(), True),
         (TimeoutError("Timed out reading output"), True),
         (ConnectionResetError(54, "Connection reset by peer"), True),
-        (OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"), True),
         (SFTPError("Garbage packet received"), True),
         (ValueError("not transient"), False),
     ],
@@ -812,7 +798,6 @@ def test_is_transient_ssh_connect_error_matches_transient_handshake_connect_erro
         "eof-error",
         "timeout-error",
         "connection-reset",
-        "local-address-lost",
         "sftp-stream-desync",
         "non-os-error",
     ],
@@ -835,10 +820,6 @@ def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> Non
     next used, and the errno text ("[Errno 54] Connection reset by peer")
     slips past the "Socket is closed" match -- so `mngr start` on a machine
     that was fine died with a raw paramiko traceback instead of reconnecting.
-
-    ``EADDRNOTAVAIL`` is a third: a network switch or sleep/wake removes the
-    local address an established connection was bound to, the kernel drops it
-    with that errno, and paramiko re-raises it bare from the next channel open.
     """
     assert is_transient_ssh_error(exception) is expected
 
@@ -854,7 +835,6 @@ def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> Non
         (OSError(errno.EHOSTDOWN, "Host is down"), True),
         (ConnectionResetError(54, "Connection reset by peer"), False),
         (OSError("Socket is closed"), False),
-        (OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"), False),
         (OSError(errno.EACCES, "Permission denied"), False),
     ],
     ids=[
@@ -866,7 +846,6 @@ def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> Non
         "host-down",
         "connection-reset",
         "socket-closed",
-        "local-address-lost",
         "permission-denied",
     ],
 )
@@ -877,60 +856,6 @@ def test_is_unreachable_peer_connect_error(exception: OSError, expected: bool) -
     (``is_dead_ssh_connection_error``) and must not match.
     """
     assert is_unreachable_peer_connect_error(exception) is expected
-
-
-def _connect_error_raised_while_handling(handled: BaseException) -> ConnectError:
-    """A pyinfra ``ConnectError`` chained the way pyinfra raises it: inside the ``except`` block that caught ``handled``."""
-    error = ConnectError(f"Authentication error (username=root) ({handled})")
-    error.__context__ = handled
-    return error
-
-
-def _connect_error_raised_from_none(handled: BaseException) -> ConnectError:
-    """Like ``_connect_error_raised_while_handling``, but with the context suppressed as ``raise ... from None`` does."""
-    error = _connect_error_raised_while_handling(handled)
-    error.__suppress_context__ = True
-    return error
-
-
-@pytest.mark.parametrize(
-    ("exception", "expected"),
-    [
-        pytest.param(AuthenticationException("Authentication timeout."), True, id="bare-timeout"),
-        pytest.param(
-            _connect_error_raised_while_handling(AuthenticationException("Authentication timeout.")),
-            True,
-            id="timeout-behind-implicit-context",
-        ),
-        pytest.param(AuthenticationException("Authentication failed."), False, id="bare-rejection"),
-        pytest.param(
-            _connect_error_raised_while_handling(AuthenticationException("Authentication failed.")),
-            False,
-            id="rejection-behind-implicit-context",
-        ),
-        pytest.param(
-            _connect_error_raised_while_handling(BadAuthenticationType("Bad authentication type", ["password"])),
-            False,
-            id="bad-auth-type",
-        ),
-        pytest.param(
-            _connect_error_raised_from_none(AuthenticationException("Authentication timeout.")),
-            False,
-            id="timeout-behind-suppressed-context",
-        ),
-        pytest.param(
-            ConnectError("Authentication error (username=root) (Authentication timeout.)"), False, id="text-only"
-        ),
-    ],
-)
-def test_is_ssh_auth_timeout(exception: BaseException, expected: bool) -> None:
-    """Only paramiko's own timeout exception counts, found through the links Python's traceback would show.
-
-    A refusal is the same paramiko class with a different message, a subclass is
-    always a refusal, and a message that merely mentions the timeout without
-    paramiko's exception behind it is not evidence of one.
-    """
-    assert is_ssh_auth_timeout(exception) is expected
 
 
 class _FakeSftpSetupChannel:
@@ -1298,7 +1223,7 @@ def test_read_file_tail_from_offset_disconnects_a_dead_transport_before_retrying
     )
 
     with pytest.raises(HostConnectionError, match="second attempt"):
-        outer._read_file_tail_from_offset_with_transient_retry("/agent/events/events.jsonl", 0, None, None)
+        outer._read_file_tail_from_offset_with_transient_retry("/agent/events/events.jsonl", 0, None)
 
     assert transport.open_call_count == 2
     assert fake.disconnect_call_count == 1
@@ -1411,7 +1336,7 @@ def test_read_file_tail_from_offset_pipelines_a_whole_file_in_request_sized_read
     fake_sftp = _FakeSftpClient(content)
     outer = _make_outer_host_with_fake_sftp(temp_mngr_ctx, fake_sftp)
 
-    whole_file = outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None, None)
+    whole_file = outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None)
     assert whole_file.content == content
     whole_file_reader = fake_sftp.opened_files[-1]
     assert whole_file_reader.prefetched_file_sizes == [len(content)]
@@ -1421,44 +1346,12 @@ def test_read_file_tail_from_offset_pipelines_a_whole_file_in_request_sized_read
 
     delta_size = 100
     delta = outer._read_file_tail_from_offset_via_paramiko(
-        "/agent/events/events.jsonl", len(content) - delta_size, None, None
+        "/agent/events/events.jsonl", len(content) - delta_size, None
     )
     assert delta.content == content[-delta_size:]
     assert fake_sftp.opened_files[-1].prefetched_file_sizes == []
     # Unsized, paramiko would fill an 8 KiB buffer per synchronous request.
     assert fake_sftp.opened_files[-1].requested_read_sizes == [delta_size]
-
-
-def test_read_file_tail_from_offset_reads_and_prefetches_no_more_than_the_byte_cap(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """A capped read returns the requested range only, and prefetches no further, so a huge file can be read in pieces."""
-    content = bytes(range(256)) * 1_000
-    fake_sftp = _FakeSftpClient(content)
-    outer = _make_outer_host_with_fake_sftp(temp_mngr_ctx, fake_sftp)
-    start_byte = 1_000
-    max_byte_count = 100_000
-
-    piece = outer._read_file_tail_from_offset_via_paramiko(
-        "/agent/events/events.jsonl", start_byte, max_byte_count, None
-    )
-
-    assert piece.file_size == len(content)
-    assert piece.content == content[start_byte : start_byte + max_byte_count]
-    assert fake_sftp.opened_files[-1].prefetched_file_sizes == [start_byte + max_byte_count]
-
-
-def test_a_local_read_is_capped_at_the_byte_cap(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
-    path = tmp_path / "events.jsonl"
-    path.write_bytes(b"0123456789")
-    outer = OuterHost(
-        id=HostId.generate(), connector=PyinfraConnector(create_local_pyinfra_host()), mngr_ctx=temp_mngr_ctx
-    )
-
-    piece = outer.read_file_tail_from_offset(path, 2, max_byte_count=3)
-
-    assert piece.file_size == 10
-    assert piece.content == b"234"
 
 
 def test_read_file_tail_from_offset_stops_at_the_size_it_reported(temp_mngr_ctx: MngrContext) -> None:
@@ -1474,7 +1367,7 @@ def test_read_file_tail_from_offset_stops_at_the_size_it_reported(temp_mngr_ctx:
     fake_sftp = _GrowingFakeSftpClient(content, appended)
     outer = _make_outer_host_with_fake_sftp(temp_mngr_ctx, fake_sftp)
 
-    tail = outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None, None)
+    tail = outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None)
 
     assert fake_sftp.stat_size == len(content)
     assert tail.file_size == len(content)
@@ -1533,4 +1426,4 @@ def test_read_file_tail_from_offset_raises_file_not_found_when_the_file_vanishes
     outer = _make_outer_host_with_fake_sftp(temp_mngr_ctx, _FakeSftpClientVanishingOnOpen(b"first line\n"))
 
     with pytest.raises(FileNotFoundError):
-        outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None, None)
+        outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None)

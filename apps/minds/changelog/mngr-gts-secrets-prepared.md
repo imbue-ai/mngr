@@ -1,0 +1,1 @@
+The next-deploy checklist records that the staging and production `sharing` Vault entries were prepared for Google Trust Services (accounts registered, Let's Encrypt accounts migrated, GTS first in `ACME_CA_LIST`), and now lists only what the next connector deploy has to confirm.

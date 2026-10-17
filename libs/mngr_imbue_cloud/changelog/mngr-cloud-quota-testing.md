@@ -1,0 +1,3 @@
+Added `mngr imbue_cloud tunnels enable-sharing <agent_id> <service_name> <service_url> --policy <json>` (and `ImbueCloudConnectorClient.enable_sharing`), wrapping the connector's new one-call `POST /sharing/enable`: tunnel ensure + service add + Access policy in a single request, emitting the resulting tunnel (with cloudflared token) and service JSON.
+
+Merged the speed-up-sharing work into the cloud-quota branch stack: `mngr imbue_cloud tunnels find-by-agent <agent_id>` and `ImbueCloudConnectorClient.find_tunnel_for_agent` resolve a single agent's tunnel via the connector's O(1) `GET /tunnels/by-agent/{agent_id}` endpoint, with a transparent fallback to the old `GET /tunnels` enumeration when the connector predates the endpoint.

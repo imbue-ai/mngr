@@ -1,0 +1,1 @@
+Marked the two host-volume acceptance tests (`test_host_volume_is_symlinked_and_persists_data`, `test_host_volume_data_readable_via_volume_interface`) as flaky: Modal's per-workspace VolumeListFiles rate limit can stay exceeded longer than the volume layer's in-process retry budget under the parallel acceptance fan-out, so offload now retries them automatically.

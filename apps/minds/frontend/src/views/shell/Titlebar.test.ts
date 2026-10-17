@@ -1,10 +1,8 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createEmptyStores } from "../../models/boot";
 import { RequestsStore } from "../../models/requests";
 import { NotificationsStore } from "../../models/notifications";
 import type { ShellState } from "./shell-state";
-import { EXISTING_LOGIN_LABEL, startFlow } from "../../models/startFlow";
 import { Titlebar } from "./Titlebar";
 import { TrafficLights } from "./TrafficLights";
 import type { AnyVnode } from "../../testing";
@@ -52,8 +50,6 @@ interface RenderTitlebarOptions {
   /** The shell's platform flags; a Mac by default, as the other cases assume. */
   isMac?: boolean;
   isTrafficLightsDrawn?: boolean;
-  /** The chrome control a workspace's tour asked to have ringed. */
-  highlightedChromeAnchor?: string | null;
 }
 
 /** Render the titlebar without a DOM. `window` is stubbed because the Electron
@@ -72,10 +68,8 @@ function renderTitlebar(
     isTrafficLightsDrawn: options.isTrafficLightsDrawn ?? false,
     panelRouteBehindOverlay: options.panelRouteBehindOverlay ?? null,
     stores: {
-      ...createEmptyStores(),
       workspaces: {
         accentEntry: () => ({ name: "alpha" }),
-        entryByAnyId: () => null,
         toAgentScopedId: (anyId: string) => anyId,
       },
       // Real stores keep the request badge independent from the reminder feed.
@@ -98,12 +92,12 @@ function renderTitlebar(
         });
         return store;
       })(),
+      health: { isContentAssumedReady: () => true },
     },
     openSidebar: () => undefined,
     displayedWorkspaceAnyId: WORKSPACE_ID,
     isNotificationsOpen: options.isNotificationsOpen ?? false,
     switchToNotifications: options.switchToNotifications ?? (() => undefined),
-    highlightedChromeAnchor: options.highlightedChromeAnchor ?? null,
   } as unknown as ShellState;
   const instance = Titlebar() as unknown as m.Component;
   const routePath =
@@ -411,40 +405,6 @@ describe("Titlebar workspace tab strip", () => {
   });
 });
 
-describe("Titlebar chrome ring", () => {
-  const ANCHOR_BUTTON_IDS: Record<string, string> = {
-    "workspace-switcher": "workspace-switcher-btn",
-    permissions: "ws-tab-permissions",
-    settings: "ws-tab-settings",
-    share: "ws-tab-share",
-    help: "help-toggle",
-  };
-
-  it("rings exactly the control a workspace's tour named, and none otherwise", () => {
-    for (const [anchor, buttonId] of Object.entries(ANCHOR_BUTTON_IDS)) {
-      const root = renderTitlebar("", { highlightedChromeAnchor: anchor });
-      for (const [otherAnchor, otherId] of Object.entries(ANCHOR_BUTTON_IDS)) {
-        const tokens = classTokensOf(
-          renderComponentVnode(tabButton(root, otherId)),
-        );
-        expect(
-          tokens.includes("animate-pulse"),
-          `${otherId} while ${anchor} is ringed`,
-        ).toBe(otherAnchor === anchor);
-      }
-      expect(
-        classTokensOf(renderComponentVnode(tabButton(root, buttonId))),
-      ).toEqual(expect.arrayContaining(["ring-2", "ring-accent"]));
-    }
-    const unringed = renderTitlebar("");
-    for (const buttonId of Object.values(ANCHOR_BUTTON_IDS)) {
-      expect(
-        classTokensOf(renderComponentVnode(tabButton(unringed, buttonId))),
-      ).not.toContain("animate-pulse");
-    }
-  });
-});
-
 describe("Titlebar on a creation page", () => {
   const CREATING_PATH = "/creating/create-attempt-0123abcd";
 
@@ -540,28 +500,5 @@ describe("Titlebar window controls", () => {
     expect(collectVnodes(root).find((vnode) => vnode.tag === TrafficLights)).toBeUndefined();
     const buttonCluster = windowButtonCluster(root);
     expect(classTokensOf(buttonCluster)).not.toContain("hidden");
-  });
-});
-
-describe("the start flow's titlebar", () => {
-  afterEach(() => {
-    startFlow.logInExisting = null;
-  });
-
-  it("offers the returning user's log-in at its right while a start page is up, and presses the page's", () => {
-    const presses: string[] = [];
-    startFlow.logInExisting = () => presses.push("log-in");
-    const root = renderTitlebar("", { routePath: "/start" });
-    expect(attrsOf(root)["data-titlebar-kind"]).toBe("start");
-    const logIn = collectVnodes(root).find((vnode) => attrsOf(vnode).id === "start-log-in") as AnyVnode;
-    expect(logIn).toBeDefined();
-    expect(collectVnodes(logIn).some((vnode) => vnode.children === EXISTING_LOGIN_LABEL)).toBe(true);
-    (attrsOf(logIn).onclick as () => void)();
-    expect(presses).toEqual(["log-in"]);
-  });
-
-  it("offers no log-in when no start page is up to run it", () => {
-    const root = renderTitlebar("", { routePath: "/start" });
-    expect(collectVnodes(root).find((vnode) => attrsOf(vnode).id === "start-log-in")).toBeUndefined();
   });
 });

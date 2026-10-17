@@ -3,15 +3,11 @@ import threading
 from pathlib import Path
 
 import pytest
-from azure.identity import AzureCliCredential
 from azure.identity import DefaultAzureCredential
-from azure.identity import ManagedIdentityCredential
-from pydantic import SecretStr
 from pydantic import ValidationError
 
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.config import read_az_cli_default_subscription
-from imbue.mngr_azure.errors import AzureCredentialConfigError
 
 
 def _write_az_profile(config_dir: Path, subscriptions: list[dict[str, object]]) -> None:
@@ -139,57 +135,9 @@ def test_get_subscription_id_raises_when_unresolvable(monkeypatch: pytest.Monkey
         config.get_subscription_id()
 
 
-def test_get_credential_returns_default_azure_credential(unset_azure_token_credentials: None) -> None:
+def test_get_credential_returns_default_azure_credential() -> None:
     config = AzureProviderConfig(subscription_id="sub-123")
     assert isinstance(config.get_credential(), DefaultAzureCredential)
-
-
-def test_use_managed_identity_defaults_to_false() -> None:
-    assert AzureProviderConfig().use_managed_identity is False
-
-
-def test_get_credential_excludes_managed_identity_by_default(unset_azure_token_credentials: None) -> None:
-    credential = AzureProviderConfig(subscription_id="sub-123").get_credential()
-    assert not any(isinstance(chained, ManagedIdentityCredential) for chained in credential.credentials)
-
-
-def test_get_credential_keeps_managed_identity_when_opted_in(unset_azure_token_credentials: None) -> None:
-    credential = AzureProviderConfig(subscription_id="sub-123", use_managed_identity=True).get_credential()
-    assert any(isinstance(chained, ManagedIdentityCredential) for chained in credential.credentials)
-
-
-def test_get_credential_pins_the_az_login_to_the_blocks_tenant_and_subscription() -> None:
-    config = AzureProviderConfig(subscription_id="sub-123", tenant_id="tenant-1", use_azure_cli_login=True)
-
-    credential = config.get_credential()
-
-    assert isinstance(credential, AzureCliCredential)
-    assert credential.tenant_id == "tenant-1"
-    assert credential.subscription == "sub-123"
-
-
-@pytest.mark.parametrize(
-    ("config", "expected_message"),
-    [
-        (
-            AzureProviderConfig(
-                subscription_id="sub-123", tenant_id="tenant-1", use_azure_cli_login=True, client_secret=SecretStr("s")
-            ),
-            "mutually exclusive",
-        ),
-        (
-            AzureProviderConfig(subscription_id="sub-123", use_azure_cli_login=True),
-            "needs tenant_id and subscription_id",
-        ),
-        (AzureProviderConfig(tenant_id="tenant-1", use_azure_cli_login=True), "needs tenant_id and subscription_id"),
-    ],
-    ids=["with-secret", "no-tenant", "no-subscription"],
-)
-def test_get_credential_refuses_an_incomplete_or_contradictory_az_login_block(
-    config: AzureProviderConfig, expected_message: str
-) -> None:
-    with pytest.raises(AzureCredentialConfigError, match=expected_message):
-        config.get_credential()
 
 
 def test_resolve_state_storage_account_name_derives_valid_name() -> None:
@@ -217,7 +165,7 @@ def test_resolve_state_storage_account_name_honors_explicit_override() -> None:
     assert config.resolve_state_storage_account_name("sub-123") == "mngrstmyteam"
 
 
-def test_build_state_bucket_uses_resolved_name_and_scope(unset_azure_token_credentials: None) -> None:
+def test_build_state_bucket_uses_resolved_name_and_scope() -> None:
     config = AzureProviderConfig(subscription_id="sub-123", resource_group="mngr", default_region="westus")
     bucket = config.build_state_bucket("sub-123")
     assert bucket.account_name == config.resolve_state_storage_account_name("sub-123")

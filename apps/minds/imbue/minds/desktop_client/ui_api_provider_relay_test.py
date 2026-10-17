@@ -3,7 +3,7 @@ import socket
 from pathlib import Path
 from urllib.parse import urlencode
 
-import httpx2
+import httpx
 from flask import Flask
 from flask.testing import FlaskClient
 
@@ -13,7 +13,6 @@ from imbue.minds.desktop_client.mock_sign_in_browser_test import RecordingSignIn
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.testing import scripted_chat_callback_server
 from imbue.mngr.utils.testing import find_free_port
-from imbue.mngr_forward.tls import local_ca_cert_path
 
 _WORKSPACE_ID = "agent-" + "4c" * 16
 _FLOW_ID = "5e0a9f6c1b2d4e8fa7c3b19d0e6f2a41"
@@ -25,11 +24,6 @@ def _sign_in_url(callback_port: int) -> str:
     return f"https://claude.ai/oauth/authorize?{urlencode(query)}"
 
 
-def _mngr_host_dir(tmp_path: Path) -> Path:
-    """The host dir the app under test runs the plugin under, where the plugin stand-in writes its CA."""
-    return tmp_path / "mngr"
-
-
 def _build_client(
     tmp_path: Path, opener: RecordingSignInBrowsers, is_authenticated: bool = True, mngr_forward_port: int = 8421
 ) -> tuple[FlaskClient, Flask]:
@@ -38,7 +32,6 @@ def _build_client(
         is_authenticated=is_authenticated,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie="preauth-cookie-3f1e",
-        mngr_host_dir=_mngr_host_dir(tmp_path),
         minds_config=MindsConfig(data_dir=tmp_path / "minds"),
         sign_in_browsers=opener,
     )
@@ -63,7 +56,7 @@ def test_provider_relay_listens_on_the_callback_port_and_opens_the_page_in_the_c
 
     try:
         status, body = _arm(client, url)
-        refused = httpx2.get(f"http://127.0.0.1:{callback_port}/callback?state=state-forged-11", timeout=10.0)
+        refused = httpx.get(f"http://127.0.0.1:{callback_port}/callback?state=state-forged-11", timeout=10.0)
     finally:
         get_state(app).provider_relay_registry.stop_all()
 
@@ -75,16 +68,14 @@ def test_provider_relay_listens_on_the_callback_port_and_opens_the_page_in_the_c
 
 def test_a_relayed_callback_ends_on_the_signed_in_page_and_raises_the_app(tmp_path: Path) -> None:
     answer = {"state": "ok", "detail": None, "account_id": "acct-5d", "provider_name": "Anthropic"}
-    with scripted_chat_callback_server(
-        200, json.dumps(answer).encode(), local_ca_cert_path(_mngr_host_dir(tmp_path))
-    ) as (forward_port, recorded):
+    with scripted_chat_callback_server(200, json.dumps(answer).encode()) as (forward_port, recorded):
         client, app = _build_client(tmp_path, RecordingSignInBrowsers(), mngr_forward_port=forward_port)
         broadcaster = get_state(app).ui_channel_broadcaster
         frames = broadcaster.register()
         callback_port = find_free_port()
         try:
             _arm(client, _sign_in_url(callback_port))
-            page = httpx2.get(f"http://127.0.0.1:{callback_port}/callback?code=c-81&state={_STATE}", timeout=30.0)
+            page = httpx.get(f"http://127.0.0.1:{callback_port}/callback?code=c-81&state={_STATE}", timeout=30.0)
         finally:
             get_state(app).provider_relay_registry.stop_all()
             broadcaster.unregister(frames)

@@ -3,10 +3,9 @@ import socket
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
 from urllib.parse import urlencode
 
-import httpx2
+import httpx
 import pytest
 
 from imbue.minds.desktop_client.mock_provider_relay_test import RecordingSignInCallbackForwarder
@@ -25,7 +24,6 @@ from imbue.minds.desktop_client.provider_relay import decide_relay_request
 from imbue.minds.desktop_client.provider_relay import page_for_result
 from imbue.minds.desktop_client.provider_relay import parse_provider_sign_in_url
 from imbue.minds.desktop_client.testing import scripted_chat_callback_server
-from imbue.minds.desktop_client.testing import write_forward_ca_for_test
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import find_free_port
@@ -230,8 +228,8 @@ def _armed_relay(
         relay.stop()
 
 
-def _get(relay: ProviderSignInRelay, path_and_query: str) -> httpx2.Response:
-    return httpx2.get(f"http://127.0.0.1:{relay.callback.port}{path_and_query}", timeout=10.0, follow_redirects=False)
+def _get(relay: ProviderSignInRelay, path_and_query: str) -> httpx.Response:
+    return httpx.get(f"http://127.0.0.1:{relay.callback.port}{path_and_query}", timeout=10.0, follow_redirects=False)
 
 
 def test_relay_refuses_everything_but_the_callback_and_forwards_nothing() -> None:
@@ -240,42 +238,12 @@ def test_relay_refuses_everything_but_the_callback_and_forwards_nothing() -> Non
     with _armed_relay(forwarder, handled) as relay:
         wrong_path = _get(relay, f"/auth/callback?code=c-1&state={_STATE}")
         stale = _get(relay, "/callback?code=c-1&state=state-forged-0a")
-        posted = httpx2.post(f"http://127.0.0.1:{relay.callback.port}/callback?state={_STATE}", timeout=10.0)
+        posted = httpx.post(f"http://127.0.0.1:{relay.callback.port}/callback?state={_STATE}", timeout=10.0)
 
     assert [wrong_path.status_code, stale.status_code, posted.status_code] == [404, 400, 405]
     assert "This sign-in page is out of date" in stale.text
     assert forwarder.forwarded() == []
     assert not handled.is_set()
-
-
-def test_relay_answers_a_post_carrying_a_body_with_its_page_rather_than_a_reset() -> None:
-    forwarder = RecordingSignInCallbackForwarder(result=_SIGNED_IN)
-    with _armed_relay(forwarder, threading.Event()) as relay:
-        answers = [
-            httpx2.post(
-                f"http://127.0.0.1:{relay.callback.port}/callback?state={_STATE}",
-                content=b"code=c-1&" + b"x" * 32 * 1024,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                timeout=10.0,
-            )
-            for _ in range(5)
-        ]
-
-    assert [answer.status_code for answer in answers] == [405] * 5
-    assert forwarder.forwarded() == []
-
-
-def test_relay_answers_a_request_whose_content_length_is_not_a_number() -> None:
-    forwarder = RecordingSignInCallbackForwarder(result=_SIGNED_IN)
-    with _armed_relay(forwarder, threading.Event()) as relay:
-        with socket.create_connection(("127.0.0.1", relay.callback.port), timeout=10.0) as client:
-            client.sendall(
-                f"POST /callback?state={_STATE} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: abc\r\n\r\n".encode()
-            )
-            status_line = client.makefile("rb").readline()
-
-    assert status_line.startswith(b"HTTP/1.0 405 ")
-    assert forwarder.forwarded() == []
 
 
 def test_relay_answers_the_callback_with_its_own_page_saying_how_the_sign_in_ended() -> None:
@@ -307,7 +275,7 @@ def test_relay_escapes_the_workspaces_reason_for_a_failure() -> None:
 def test_relay_passes_the_callback_on_once_even_when_the_browser_sends_it_again() -> None:
     forwarder = RecordingSignInCallbackForwarder(result=_SIGNED_IN, is_holding=True)
     with _armed_relay(forwarder, threading.Event()) as relay:
-        first: list[httpx2.Response] = []
+        first: list[httpx.Response] = []
         in_flight = threading.Thread(target=lambda: first.append(_get(relay, f"/callback?code=c-1&state={_STATE}")))
         in_flight.start()
         try:
@@ -484,29 +452,25 @@ def test_registry_rate_limits_opening_sign_in_pages_per_workspace() -> None:
     assert claims == [True, False, True]
 
 
-def _forwarder(port: int, ca_cert_path: Path) -> WorkspaceChatSignInForwarder:
+def _forwarder(port: int) -> WorkspaceChatSignInForwarder:
     return WorkspaceChatSignInForwarder(
         mngr_forward_port=port,
         preauth_cookie="preauth-7d20",
-        ca_cert_path=ca_cert_path,
         workspace_id=_WORKSPACE_ID,
         chat_service_label="chat-k3m9",
         flow_id=_FLOW_ID,
     )
 
 
-def test_workspace_forwarder_posts_the_callback_to_the_chat_app_as_the_owner_and_reads_how_the_sign_in_ended(
-    tmp_path: Path,
-) -> None:
+def test_workspace_forwarder_posts_the_callback_to_the_chat_app_as_the_owner_and_reads_how_the_sign_in_ended() -> None:
     answer = {
         "state": "failed",
         "detail": "You didn't approve access.",
         "account_id": None,
         "provider_name": "Anthropic",
     }
-    ca_cert_path = tmp_path / "forward-ca.pem"
-    with scripted_chat_callback_server(200, json.dumps(answer).encode(), ca_cert_path) as (port, recorded):
-        result = _forwarder(port, ca_cert_path).forward(f"/callback?error=access_denied&state={_STATE}")
+    with scripted_chat_callback_server(200, json.dumps(answer).encode()) as (port, recorded):
+        result = _forwarder(port).forward(f"/callback?error=access_denied&state={_STATE}")
 
     assert result == SignInCallbackResult(
         outcome=SignInOutcome.FAILED, provider_name="Anthropic", detail="You didn't approve access."
@@ -526,25 +490,19 @@ def test_workspace_forwarder_posts_the_callback_to_the_chat_app_as_the_owner_and
         pytest.param(200, b'{"state": "exploded", "provider_name": "Anthropic"}', id="unknown-state"),
     ],
 )
-def test_workspace_forwarder_raises_when_the_chat_app_does_not_answer_the_callback(
-    status: int, body: bytes, tmp_path: Path
-) -> None:
-    ca_cert_path = tmp_path / "forward-ca.pem"
-    with scripted_chat_callback_server(status, body, ca_cert_path) as (port, _recorded):
+def test_workspace_forwarder_raises_when_the_chat_app_does_not_answer_the_callback(status: int, body: bytes) -> None:
+    with scripted_chat_callback_server(status, body) as (port, _recorded):
         with pytest.raises(SignInForwardError):
-            _forwarder(port, ca_cert_path).forward("/callback")
+            _forwarder(port).forward("/callback")
 
 
-def test_workspace_forwarder_reports_a_callback_the_chat_app_no_longer_takes(tmp_path: Path) -> None:
+def test_workspace_forwarder_reports_a_callback_the_chat_app_no_longer_takes() -> None:
     body = b'{"detail": "that sign-in is no longer active"}'
-    ca_cert_path = tmp_path / "forward-ca.pem"
-    with scripted_chat_callback_server(409, body, ca_cert_path) as (port, _recorded):
+    with scripted_chat_callback_server(409, body) as (port, _recorded):
         with pytest.raises(SignInCallbackRefusedError, match="no longer active"):
-            _forwarder(port, ca_cert_path).forward("/callback")
+            _forwarder(port).forward("/callback")
 
 
-def test_workspace_forwarder_raises_when_the_workspace_is_unreachable(tmp_path: Path) -> None:
-    ca_cert_path = tmp_path / "forward-ca.pem"
-    write_forward_ca_for_test(ca_cert_path)
+def test_workspace_forwarder_raises_when_the_workspace_is_unreachable() -> None:
     with pytest.raises(SignInForwardError, match="could not be reached"):
-        _forwarder(find_free_port(), ca_cert_path).forward("/callback")
+        _forwarder(find_free_port()).forward("/callback")

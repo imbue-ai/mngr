@@ -9,9 +9,8 @@ forwarding logic lives in the ``mngr_forward`` plugin now; this command:
 2. Builds the slimmed Imbue Studio bare-origin Flask app and runs it on
    ``--port`` (default 8420).
 3. Emits a ``mngr_forward_started`` JSONL event on stdout carrying the
-   preauth cookie value and the path of the proxy's local CA certificate,
-   so the Electron shell can pre-set ``mngr_forward_session=<value>`` on
-   ``localhost:<mngr-forward-port>`` and pin the proxy's TLS to that CA
+   preauth cookie value, so the Electron shell can pre-set
+   ``mngr_forward_session=<value>`` on ``localhost:<mngr-forward-port>``
    before the first agent-subdomain navigation.
 
 Agents reach the Imbue Studio API via the latchkey gateway's bundled
@@ -22,18 +21,12 @@ provisioned where the container reaches it over its docker bridge).
 """
 
 import os
-import platform
 import secrets
 import tempfile
 import threading
 import webbrowser
 from collections.abc import Callable
-from collections.abc import Mapping
-from collections.abc import Sequence
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
-from typing import AbstractSet
 from typing import Final
 
 import click
@@ -47,7 +40,6 @@ from imbue.minds.bootstrap import resolve_effective_mngr_host_dir
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
-from imbue.minds.cli.latchkey_bundle_diagnostics import log_latchkey_bundle_diagnostics
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
 from imbue.minds.config.data_types import InstallationPaths
@@ -58,44 +50,27 @@ from imbue.minds.config.loader import resolve_client_config_path
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clones
 from imbue.minds.desktop_client.api_key_store import generate_api_key
-from imbue.minds.desktop_client.api_socket import ApiSocketError
-from imbue.minds.desktop_client.api_socket import prepare_socket_path
-from imbue.minds.desktop_client.api_socket import resolve_api_socket_location
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.app import start_discovery_health_watchdog_loop
 from imbue.minds.desktop_client.app import start_folder_syncs
 from imbue.minds.desktop_client.app import start_sleep_heartbeat_loop
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.app import start_workspace_update_loops
-from imbue.minds.desktop_client.app_record import app_record_path
-from imbue.minds.desktop_client.app_record import build_app_record
-from imbue.minds.desktop_client.app_record import parse_launch_command_from_environ
-from imbue.minds.desktop_client.app_record import remove_app_record
-from imbue.minds.desktop_client.app_record import write_app_record
 from imbue.minds.desktop_client.auth import FileAuthStore
-from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.backup_reaper import make_quota_evictor
-from imbue.minds.desktop_client.connections.account_lifecycle import list_signed_in_accounts_from_session_store
-from imbue.minds.desktop_client.connections.account_lifecycle import sign_out_dead_account
-from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
-from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
-from imbue.minds.desktop_client.connections.provider_settings import is_provider_polled_here
-from imbue.minds.desktop_client.connections.provider_settings import read_signed_in_accounts_from_index_or_none
 from imbue.minds.desktop_client.device_identity import get_or_create_device_id
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import SupervisorProducerRemediator
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.environment_signals import SleepTracker
-from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.forward_identity import FORWARD_HEADERS_FILENAME
 from imbue.minds.desktop_client.forward_identity import ForwardHeadersFile
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.forward_identity import remove_legacy_forward_identity_file
-from imbue.minds.desktop_client.full_disk_access_probe import start_full_disk_access_probe
 from imbue.minds.desktop_client.identity_records import IDENTITY_CACHE_FILENAME
 from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -119,14 +94,12 @@ from imbue.minds.desktop_client.lima_image_prefetch import is_lima_image_cache_d
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_prefetcher
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_source
 from imbue.minds.desktop_client.lima_image_prefetch import resolve_release_tag_commit
-from imbue.minds.desktop_client.local_prerequisites import host_platform_from_system
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
 from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.shared_workspaces import clear_materials_of_shares_retired_elsewhere
 from imbue.minds.desktop_client.startup_reconcile import PendingCreateAttemptDiscoverySweep
 from imbue.minds.desktop_client.startup_reconcile import StartupHostReconciler
 from imbue.minds.desktop_client.state import get_state
@@ -134,7 +107,6 @@ from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forwar
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
 from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_defaults_opt_in
@@ -144,6 +116,7 @@ from imbue.minds.desktop_client.workspace_recovery import ProviderErrorConnectiv
 from imbue.minds.desktop_client.workspace_recovery import WorkspaceSshEndpointSource
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import start_active_env_state_container
+from imbue.minds.mngr_settings.imbue_cloud_accounts import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
@@ -158,7 +131,6 @@ from imbue.mngr.api.discovery_events import get_discovery_events_dir
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.utils.logging import get_default_cli_events_log_dir
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
-from imbue.mngr_forward.tls import local_ca_cert_path
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -181,7 +153,7 @@ _MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 120.0
 
 # Env var read by the bundled ``minds-api-proxy`` gateway extension to
 # decide where to forward inbound proxy requests. Published to the
-# ``mngr latchkey forward`` supervisor (and from there to the
+# detached ``mngr latchkey forward`` supervisor (and from there to the
 # gateway, and from there to the extension) on every Imbue Studio startup so
 # the proxy always points at the current bare-origin port, even when
 # Imbue Studio re-binds to a different port across restarts.
@@ -273,13 +245,13 @@ def run(
     # package.json / "unknown" for bare source runs (see imbue.minds.build_info).
     # The anonymous user id (no PII) is persisted per install and attached to every event so Sentry
     # can count the distinct installs affected by each issue. The same value is shared with the
-    # ``mngr latchkey forward`` child (below) so both processes count as one install.
+    # detached ``mngr latchkey forward`` daemon (below) so both processes count as one install.
     anonymous_user_id = resolve_anonymous_user_id(data_directory)
     # Resolved up front (and reused below for the state container + the ``mngr forward``
     # consumer): the Sentry attachment sweep needs the discovery events dir under it.
     mngr_host_dir = resolve_effective_mngr_host_dir()
     # Built before Sentry setup so the attachment sweep knows the latchkey plugin
-    # data dir (the ``mngr latchkey forward`` child's logs live there).
+    # data dir (the detached ``mngr latchkey forward`` daemon's logs live there).
     latchkey = _build_latchkey(data_directory=data_directory)
     setup_sentry(
         environment=resolve_sentry_environment(),
@@ -304,31 +276,20 @@ def run(
     logger.info("  connector_url: {}", client_env_config.connector_url)
     logger.info("  litellm_proxy_url: {}", client_env_config.litellm_proxy_url)
 
+    # Bootstrap couldn't write provider entries without the connector URL,
+    # so the reconcile happens here once we've loaded the client config.
+    # Its "settings modified" return is deliberately unused: the latchkey
+    # forward supervisor is restarted unconditionally below, so any provider-set
+    # change written here is picked up by the fresh observe process.
+    reconcile_imbue_cloud_providers_from_sessions(connector_url_str, root=MindsRoot(root_name))
+
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
     backend_resolver = MngrCliBackendResolver(
         last_good_agents_path=paths.data_dir / "last_good_agent_topology.json",
     )
-    try:
-        latchkey.initialize()
-    except LatchkeyError:
-        log_latchkey_bundle_diagnostics(latchkey.latchkey_binary)
-        raise
-
-    # The same-machine API socket doubles as this tier's single-instance guard:
-    # a second Imbue Studio for the tier is refused here, before anything below
-    # (the latchkey forward restart, ``mngr forward``, the consumer threads)
-    # could disturb the one already running. The socket itself is bound once
-    # the app is ready to serve.
-    tier = MindsRoot(root_name).tier
-    socket_location = resolve_api_socket_location(state_dir=data_directory, tier=tier)
-    try:
-        prepare_socket_path(socket_location.path)
-    except ApiSocketError as exc:
-        raise click.ClickException(str(exc)) from exc
-    if socket_location.is_fallback:
-        logger.info("The canonical API socket path is too long for this platform; using {}", socket_location.path)
+    latchkey.initialize()
 
     # Mint a fresh central Imbue Studio API key for this process. The same
     # value is handed to the latchkey gateway's ``minds-api-proxy``
@@ -359,14 +320,14 @@ def run(
     except DockerCleanupError as exc:
         logger.warning("Could not start the Docker state container at launch: {}", exc)
 
-    # Spawn the ``mngr latchkey forward`` supervisor as a child of this process.
-    # It owns the shared latchkey gateway + per-agent reverse tunnels, and its
-    # lifetime is coupled to ours: the shutdown teardown stops it, and it
-    # watches our pid so it also exits if we die without one. On every Imbue
-    # Studio start a stale owner is replaced (see
-    # ``_restart_mngr_latchkey_forward_supervisor``) so the forward always runs
-    # the current code with the current env; the reverse tunnels are
-    # re-established as discovery re-fires.
+    # Spawn a detached ``mngr latchkey forward`` supervisor. It owns the
+    # shared latchkey gateway + per-agent reverse tunnels. On every Imbue Studio
+    # start it is terminated and respawned (see
+    # ``_restart_mngr_latchkey_forward_supervisor``) so it always runs the
+    # current code with the current env; the reverse tunnels are
+    # re-established as discovery re-fires. We do *not* terminate it on
+    # Imbue Studio shutdown -- it keeps running detached so agents in
+    # containers/VMs keep working across desktop-client restarts.
     gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
 
     # Read-or-create eagerly so this install always has a real identity from
@@ -381,7 +342,7 @@ def run(
         mngr_binary=MNGR_BINARY,
         latchkey_binary=latchkey.latchkey_binary,
         latchkey_directory=latchkey.latchkey_directory,
-        # Spawn the supervisor (and its `mngr observe` discovery
+        # Spawn the detached supervisor (and its `mngr observe` discovery
         # producer grandchild) from $HOME, like every other laptop-side mngr
         # invocation -- notably the `mngr forward` consumer below. Without this
         # it inherits Imbue Studio's cwd, which in a dev checkout is the monorepo root:
@@ -393,9 +354,6 @@ def run(
         # What this computer announces itself as to each remote workspace's
         # machine, so a workspace can tell the user's desktops apart.
         device_id=str(device_id),
-        # The forward exits on its own when this process is gone, so a crash
-        # here never leaves a gateway and its tunnels running headless.
-        parent_pid=os.getpid(),
         extra_env={
             MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{port}",
             MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
@@ -421,6 +379,16 @@ def run(
         is_error_reporting_enabled=minds_config.get_report_unexpected_errors(),
     )
 
+    # Background thread: supervisor restart must complete before the
+    # gateway-client pre-warm reads the on-disk forward record, or it
+    # caches the previous supervisor's stale port for the rest of the
+    # process lifetime.
+    root_concurrency_group.start_new_thread(
+        _restart_supervisor_then_prewarm_gateway_client,
+        args=(latchkey_forward_supervisor, gateway_client),
+        name="mngr-latchkey-supervisor-and-gateway-init",
+    )
+
     # Watch our *grandparent* (typically Electron) rather than our immediate
     # parent (the ``uv run`` wrapper, which doesn't propagate Electron's
     # death). When Electron crashes or is killed without running its
@@ -437,11 +405,6 @@ def run(
     # staleness baseline) is downstream of it.
     sleep_tracker = SleepTracker()
     start_sleep_heartbeat_loop(sleep_tracker, root_concurrency_group)
-
-    # A read of a Full Disk Access protected file, whose refusal is what puts
-    # Imbue Studio on the System Settings list a user grants that permission
-    # from (see full_disk_access_probe.py). Nothing waits for it.
-    start_full_disk_access_probe(root_concurrency_group, host_platform_from_system(platform.system()))
 
     # Connectivity detector: answers whether this device can reach anything, and
     # whether the network it is on passes SSH at all. Probed only when a decision
@@ -558,21 +521,12 @@ def run(
         connector_url=client_env_config.connector_url,
         accounts_base_url=client_env_config.accounts_base_url,
     )
-    connection_store = ConnectionStore(
-        paths=paths,
-        cli=imbue_cloud_cli,
-        device_label=read_device_label(),
-    )
-    # Before anything reads the replicas: a registration the previous process
-    # died inside would otherwise be materialized and offered, never synced.
-    connection_store.discard_unregistered_connections()
     workspace_record_store = WorkspaceRecordStore(
         paths=paths,
         mngr_host_dir=mngr_host_dir,
         cli=imbue_cloud_cli,
         device_id=device_id,
         device_label=read_device_label(),
-        connection_store=connection_store,
     )
     session_store = MultiAccountSessionStore(
         data_dir=data_directory,
@@ -583,56 +537,6 @@ def run(
         # fingerprinting the plugin's on-disk sessions directory.
         mngr_host_dir=mngr_host_dir,
     )
-    # The single writer of the account and connection provider blocks. Every
-    # write that changes the settings file bounces the observe child, since a
-    # running ``mngr observe`` read the provider set once at launch. The
-    # envelope consumer is created further down, once the forward subprocess
-    # exists, so the removal hook reaches it through this holder.
-    forward_consumer_holder: list[EnvelopeStreamConsumer] = []
-    provider_materializer = ProviderSettingsMaterializer(
-        root_name=root_name,
-        connection_store=connection_store,
-        connector_url=connector_url_str,
-        list_accounts=lambda: list_signed_in_accounts_from_session_store(session_store),
-        on_settings_changed=lambda: bounce_latchkey_forward_supervisor(latchkey_forward_supervisor),
-        on_provider_instances_removed=lambda names: _forget_provider_instances(
-            names, backend_resolver, forward_consumer_holder
-        ),
-    )
-    # Materialize once, synchronously, from the plugin's session index and
-    # the local replicas (no network: a pull happens later in the sync pass),
-    # before anything below spawns a discovery observer: observers read the
-    # provider set at launch, so writing it first avoids a startup bounce.
-    # The index file is read directly rather than through the session store
-    # because that would wait for the warm mngr process's import before the
-    # forward could even be spawned.
-    provider_materializer.materialize_without_bounce(
-        lambda: read_signed_in_accounts_from_index_or_none(MindsRoot(root_name))
-    )
-    # The persisted last-good topology may still attribute hosts to providers
-    # this device no longer polls (a block removed by an older build, an app
-    # killed between the settings write and the forget, a suppressed default):
-    # no snapshot will ever prune them, so they are dropped here, before the
-    # observer below can replay their last snapshot.
-    backend_resolver.forget_providers(
-        {
-            name
-            for name in backend_resolver.list_last_good_provider_names()
-            if not is_provider_polled_here(MindsRoot(root_name), name)
-        }
-    )
-
-    # Background thread: supervisor restart must complete before the
-    # gateway-client pre-warm reads the on-disk forward record, or it
-    # caches the previous supervisor's stale port for the rest of the
-    # process lifetime. Started only now, after the materializer, because
-    # the observe producer it spawns reads the provider set once at startup.
-    root_concurrency_group.start_new_thread(
-        _restart_supervisor_then_prewarm_gateway_client,
-        args=(latchkey_forward_supervisor, gateway_client),
-        name="mngr-latchkey-supervisor-and-gateway-init",
-    )
-
     backup_reaper = BackupReaperManager(
         paths=paths,
         record_store=workspace_record_store,
@@ -650,11 +554,23 @@ def run(
     forward_identity = ForwardIdentityPublisher(
         session_store=session_store,
         headers_file=forward_headers_file,
-        # Bound lazily: the scheduler is built further down, once the agent creator
-        # it needs exists, and holds this publisher.
+        # Bound lazily: the scheduler is built just below and holds this publisher.
         on_shared_workspaces_changed=lambda: sync_scheduler.kick(),
     )
     forward_identity.rebuild()
+    sync_scheduler = WorkspaceSyncScheduler(
+        record_store=workspace_record_store,
+        session_store=session_store,
+        resolver=backend_resolver,
+        forward_identity=forward_identity,
+        # Newly-materialized SSH material (a cloud workspace unlocked/synced
+        # from another install) is picked up lazily by discovery; bouncing the
+        # observe child makes the workspace reachable now instead of on the
+        # next poll.
+        on_ssh_material_written=lambda: bounce_latchkey_forward_supervisor(latchkey_forward_supervisor),
+        backup_reaper=backup_reaper,
+    )
+    sync_scheduler.start(root_concurrency_group)
     # The one answer to "what permission requests are pending?": gateway-backed
     # reads plus the verdict index seeded from the response event log.
     pending_requests = GatewayPendingRequests.load(gateway_client=gateway_client, data_dir=data_directory)
@@ -689,12 +605,7 @@ def run(
         # provider's last word: its error says the laptop went away, not the
         # backend.
         sleep_tracker=sleep_tracker,
-        # A removed connection's (or signed-out account's, or a suppressed
-        # default's) last snapshot stays in the events-file replay window; its
-        # hosts must not come back here.
-        is_provider_polled_here=lambda name: is_provider_polled_here(MindsRoot(root_name), name),
     )
-    forward_consumer_holder.append(consumer)
 
     # App-global discovery-pipeline health watchdog. Detects a stalled pipeline
     # (a producer stall via the resolver's snapshot-freshness age; a consumer
@@ -807,12 +718,6 @@ def run(
         PendingCreateAttemptDiscoverySweep(store=pending_create_attempt_store, backend_resolver=backend_resolver)
     )
 
-    # Shared by the agent creator (it seeds a finished attempt's held conversation) and the creation
-    # page's route (it hands the conversation over, and waits on the seed while the page is open).
-    welcome_chat_seeder = WelcomeChatSeeder(mngr_caller=mngr_caller, backend_resolver=backend_resolver)
-    # The proxy signs its TLS leaves with the local CA it keeps under this host
-    # dir, which is the one it was spawned with; every probe of it pins that CA.
-    forward_ca_cert_path = local_ca_cert_path(mngr_host_dir)
     agent_creator = AgentCreator(
         paths=paths,
         server_port=port,
@@ -821,7 +726,6 @@ def run(
         root_concurrency_group=root_concurrency_group,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
-        mngr_forward_ca_cert_path=forward_ca_cert_path,
         system_interface_health_tracker=system_interface_health_tracker,
         lima_image_gate=lima_image_gate,
         pending_create_attempt_store=pending_create_attempt_store,
@@ -830,49 +734,11 @@ def run(
         # workspace list re-renders its creating/interrupted/failed rows
         # without waiting for a discovery tick.
         on_create_attempts_changed=backend_resolver.notify_change,
-        on_create_attempt_done=welcome_chat_seeder.seed_held,
         backup_quota_evictor_factory=lambda account_email: _resolve_backup_quota_evictor(
             session_store, workspace_record_store, paths, imbue_cloud_cli, account_email
         ),
     )
 
-    # The sync loop holds the agent creator (a create in flight defers an
-    # account's retirement), so it is built once the creator exists; its first
-    # pass waits for discovery, which the forward spawned above is still warming.
-    sync_scheduler = WorkspaceSyncScheduler(
-        record_store=workspace_record_store,
-        session_store=session_store,
-        resolver=backend_resolver,
-        forward_identity=forward_identity,
-        on_shares_retired_elsewhere=lambda no_longer_shared: _clear_shares_retired_elsewhere(
-            no_longer_shared, imbue_cloud_cli, session_store, backend_resolver
-        ),
-        # Newly-materialized SSH material (a cloud workspace unlocked/synced
-        # from another install) and a refreshed account session are picked up
-        # lazily by discovery; bouncing the observe child makes the workspace
-        # reachable (or the account's error clear) now instead of on the next
-        # poll.
-        on_discovery_bounce_needed=lambda: bounce_latchkey_forward_supervisor(latchkey_forward_supervisor),
-        backup_reaper=backup_reaper,
-        connection_store=connection_store,
-        provider_materializer=provider_materializer,
-        imbue_cloud_cli=imbue_cloud_cli,
-        agent_creator=agent_creator,
-        # A session the connector refuses to refresh is signed out locally: the
-        # plugin drops its tokens and the materializer removes the account's
-        # providers, so discovery stops erroring on it every poll. The wake
-        # goes through the resolver because the UI publisher does not exist
-        # yet; create_desktop_client subscribes it to the resolver's changes.
-        on_account_session_dead=lambda user_id: sign_out_dead_account(
-            user_id,
-            imbue_cloud_cli,
-            session_store,
-            connection_store,
-            provider_materializer,
-            backend_resolver.notify_change,
-        ),
-    )
-    sync_scheduler.start(root_concurrency_group)
     # One-shot startup reconcile for orphaned Lima/Docker hosts: adopts
     # finished-but-unassociated workspaces, destroys stale half-built hosts
     # past the grace window, and gc's stale FAILED/DESTROYED host records.
@@ -915,16 +781,14 @@ def run(
         concurrency_group=root_concurrency_group,
     ).start()
 
-    # Emit the started event so Electron can pre-set the cookie and pin the
-    # proxy's CA before the first navigation. ``minds run`` itself does not
-    # open the browser at the agent subdomain -- it opens the Imbue Studio
-    # bare-origin URL.
+    # Emit the started event so Electron can pre-set the cookie before the
+    # first navigation. ``minds run`` itself does not open the browser at
+    # the agent subdomain — it opens the Imbue Studio bare-origin URL.
     emit_event(
         "mngr_forward_started",
         {
             "preauth_cookie": preauth_cookie,
             "mngr_forward_port": mngr_forward_port,
-            "ca_cert_path": str(forward_ca_cert_path),
         },
         output_format,
     )
@@ -945,7 +809,6 @@ def run(
         imbue_cloud_cli=imbue_cloud_cli,
         notification_dispatcher=notification_dispatcher,
         paths=paths,
-        welcome_chat_seeder=welcome_chat_seeder,
         envelope_stream_consumer=consumer,
         session_store=session_store,
         minds_config=minds_config,
@@ -978,8 +841,6 @@ def run(
         device_id=str(device_id),
         identity_cache=identity_cache,
         forward_identity=forward_identity,
-        connection_store=connection_store,
-        provider_materializer=provider_materializer,
     )
 
     # Background loop driving the discovery-pipeline watchdog: polls snapshot
@@ -1002,7 +863,6 @@ def run(
         backend_resolver=backend_resolver,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
-        mngr_forward_ca_cert_path=forward_ca_cert_path,
         root_concurrency_group=root_concurrency_group,
         # The same tracker the failure runs are aged against, so the first pass
         # after a wake establishes that wake before it convicts anything of the
@@ -1057,49 +917,14 @@ def run(
         thread = threading.Thread(target=_sleep_then_open, args=(minds_login_url,), daemon=True)
         thread.start()
 
-    # The ``app.json`` record beside the API socket. A second Imbue Studio for
-    # this tier was refused at the socket probe above, so a running instance's
-    # record is never overwritten by a start that then fails. The record is
-    # advisory (a crash leaves it behind), so it is written before the socket
-    # binds and removed on the way out.
-    record_path = app_record_path(data_directory)
-    write_app_record(
-        record_path,
-        build_app_record(
-            tier=tier,
-            root_name=root_name,
-            version=resolve_release_id(),
-            socket_path=socket_location.path,
-            http_url=f"http://127.0.0.1:{port}",
-            launch=parse_launch_command_from_environ(os.environ),
-            started_at=datetime.now(timezone.utc),
-        ),
-    )
-
     # ``desktop_client_runtime`` owns the shared HTTP client + geo-detection
     # startup and the ordered shutdown teardown (close client, terminate
     # consumers, stop the mngr caller, drain the root concurrency group).
     # ``serve_desktop_client`` runs the graceful cheroot server until
     # SIGINT/SIGTERM, flipping ``shutdown_event`` + waking the SSE handlers
     # before the server drains so streams end cleanly with no tracebacks.
-    try:
-        with desktop_client_runtime(get_state(app), is_externally_managed_client=False):
-            serve_desktop_client(app, get_state(app), host=host, port=port, api_socket_path=socket_location.path)
-    finally:
-        remove_app_record(record_path)
-
-
-def _clear_shares_retired_elsewhere(
-    no_longer_shared_by_user_id: Mapping[str, Sequence[str]],
-    imbue_cloud_cli: ImbueCloudCli,
-    session_store: MultiAccountSessionStore,
-    backend_resolver: BackendResolverInterface,
-) -> None:
-    cleared = clear_materials_of_shares_retired_elsewhere(
-        no_longer_shared_by_user_id, imbue_cloud_cli, session_store, backend_resolver
-    )
-    if cleared:
-        logger.info("Cleared the share materials of {} workspace(s) whose share was retired elsewhere", len(cleared))
+    with desktop_client_runtime(get_state(app), is_externally_managed_client=False):
+        serve_desktop_client(app, get_state(app), host=host, port=port)
 
 
 def _resolve_backup_quota_evictor(
@@ -1198,18 +1023,20 @@ def _restart_supervisor_then_prewarm_gateway_client(
 
 
 def _restart_mngr_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor) -> None:
-    """Start the ``mngr latchkey forward`` supervisor on Imbue Studio startup, replacing any stale owner.
+    """Restart the detached ``mngr latchkey forward`` supervisor on Imbue Studio startup.
 
     Uses :meth:`LatchkeyForwardSupervisor.restart` rather than
-    ``ensure_running``: the forward is a child of this process and is stopped on
-    shutdown, so a live owner at startup is one an earlier run left behind (a
-    crash that beat its parent-pid watch, or an older build), and it is
-    terminated and replaced rather than adopted, unless another Imbue Studio
-    claims the directory first in the gap between the two. Spawning fresh on
-    every start is also what keeps ``LATCHKEY_EXTENSION_MINDS_API_URL`` in sync
-    with the current bare-origin port -- Imbue Studio re-binds its server on
-    every start, and the spawn re-publishes the env var (baked into the
-    supervisor's ``extra_env`` at construction time in ``run``).
+    ``ensure_running`` so that Imbue Studio upgrades run with a freshly-spawned
+    supervisor: an older supervisor running stale code from a previous
+    Imbue Studio version is terminated and replaced on every Imbue Studio start, unless
+    another Imbue Studio claims the directory first in the gap between the two. A running supervisor that Imbue Studio is happy
+    to adopt does not exist in practice -- the supervisor's lifetime
+    is tied to the gateway it owns, and the gateway has only Imbue Studio as a
+    consumer today. Restarting on every Imbue Studio start is also what
+    keeps ``LATCHKEY_EXTENSION_MINDS_API_URL`` in sync with the
+    current bare-origin port -- Imbue Studio re-binds its server on every
+    start, and the supervisor restart re-publishes the env var (baked
+    into the supervisor's ``extra_env`` at construction time in ``run``).
 
     Failures are logged as warnings rather than raised: a broken
     supervisor degrades latchkey to "unreachable from inside agents"
@@ -1218,18 +1045,6 @@ def _restart_mngr_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervi
     try:
         info = supervisor.restart()
     except LatchkeyError as e:
-        logger.warning("Could not start the mngr latchkey forward supervisor: {}", e)
+        logger.warning("Could not start detached mngr latchkey forward supervisor: {}", e)
         return
     logger.info("mngr latchkey forward supervisor running (pid={})", info.pid)
-
-
-def _forget_provider_instances(
-    provider_names: AbstractSet[str],
-    backend_resolver: MngrCliBackendResolver,
-    forward_consumer_holder: Sequence[EnvelopeStreamConsumer],
-) -> None:
-    """Drop every discovery trace of provider instances the materializer just deleted: the aggregator first, so no
-    later push hands their hosts back, then the resolver and its persisted last-good topology."""
-    for consumer in forward_consumer_holder:
-        consumer.forget_provider_instances(provider_names)
-    backend_resolver.forget_providers(provider_names)

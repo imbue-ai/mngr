@@ -321,7 +321,8 @@ def _read_settings_stamp() -> _ProviderSettingsStamp | None:
     context, so a stamp can be taken *before* a load as well as after one.
 
     None is a stamp like any other: it says the file was not there, so a file
-    appearing reads as a change, and a file that is never there never does.
+    appearing (mngr initialising after this process started) reads as a change,
+    and a file that is never there never does.
     """
     try:
         settings_path = get_user_config_path(get_or_create_profile_dir(read_default_host_dir()))

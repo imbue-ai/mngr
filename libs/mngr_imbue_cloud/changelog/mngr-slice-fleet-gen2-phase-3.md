@@ -1,0 +1,5 @@
+Slice-fleet-gen2 phase 3: `BareMetalServer` gains `wg_public_key` (since renamed `wireguard_public_key`) -- the box's WireGuard public key, generated on-box at gen-2 prep and recorded on the row so operator client configs (`minds-admin wg config`, since renamed `minds-admin wireguard config`) can pin each box peer without touching the box.
+
+The gen-2 template unit's qemu invocation now pins trixie's `_4M` OVMF build (`/usr/share/OVMF/OVMF_CODE_4M.fd`, the new `GEN2_OVMF_CODE_PATH` constant, also consumed by the minds-admin prep's fail-loud existence check) -- trixie's ovmf package ships only the `_4M` firmware images.
+
+The gen-2 per-VM nftables rules gain two day-one egress controls: an anti-spoofing drop (only the VM's own /30 address may leave its tap, so reflection/amplification participation is structurally impossible) and a direct-to-MX SMTP block (outbound TCP 25 dropped into a new per-VM `smtp_blocked` named counter; authenticated submission via 587/465 stays open). Every tenant shares the box's masqueraded public IP, so one spammer would otherwise poison the address for the whole box.

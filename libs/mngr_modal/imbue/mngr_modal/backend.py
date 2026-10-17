@@ -22,7 +22,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderCredentialSourceMissingError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -33,10 +32,6 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
-from imbue.mngr_modal.config import modal_config_path
-from imbue.mngr_modal.config import read_modal_profile_token
-from imbue.mngr_modal.errors import ModalConfigError
-from imbue.mngr_modal.errors import ModalProfileNotFoundError
 from imbue.mngr_modal.instance import ModalProviderApp
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.plugin import MODAL_BACKEND_NAME
@@ -268,40 +263,19 @@ def _exit_modal_app_context(handle: ModalAppContextHandle) -> None:
             handle.output_capture_context.__exit__(None, None, None)
 
 
-def app_registry_key(app_name: str, credential_identity: str | None) -> str:
-    """The key an app context is registered under: the app name, qualified by the credentials that opened it.
-
-    Two provider instances sharing an ``app_name`` but authenticating with
-    different Modal tokens must not share one app context (the context holds the
-    client its app was looked up through), so the token id -- public, not the
-    secret -- qualifies the key. Instances on the SDK's default credentials
-    (``None``) keep the bare app name.
-    """
-    if credential_identity is None:
-        return app_name
-    return f"{app_name}@{credential_identity}"
-
-
-def _credential_identity_of(modal_interface: ModalInterface, config: ModalProviderConfig) -> str | None:
-    """The public token id a provider instance's Modal calls authenticate with, or None for the SDK default."""
-    if isinstance(modal_interface, DirectModalInterface):
-        return modal_interface.token_id
-    return config.token_id
-
-
 class ModalProviderBackend(ProviderBackendInterface):
     """Backend for creating Modal sandbox provider instances.
 
     The Modal provider backend creates provider instances that manage Modal sandboxes
     as hosts. Each sandbox runs sshd and is accessed via SSH/pyinfra.
 
-    This class maintains a class-level registry of Modal app contexts keyed by app
-    name (qualified by the credentials that opened it, see ``app_registry_key``).
+    This class maintains a class-level registry of Modal app contexts by app name.
     This ensures we only create one app per unique app_name, even if multiple
     ModalProviderInstance objects are created with the same app_name.
     """
 
-    # Class-level registry of app contexts, keyed by app_registry_key.
+    # Class-level registry of app contexts by app name.
+    # Maps app_name -> (AppInterface, ModalAppContextHandle)
     _app_registry: ClassVar[dict[str, tuple[AppInterface, ModalAppContextHandle]]] = {}
 
     @classmethod
@@ -312,16 +286,14 @@ class ModalProviderBackend(ProviderBackendInterface):
         is_persistent: bool,
         modal_interface: ModalInterface,
         is_environment_creation_allowed: bool = False,
-        credential_identity: str | None = None,
     ) -> tuple[AppInterface, ModalAppContextHandle]:
         """Get or create a Modal app with output capture.
 
         Creates an ephemeral app via ``modal_interface.app_create(name)`` and
         enters its ``run()`` context. Apps are cached in the class-level
-        registry under ``app_registry_key(app_name, credential_identity)``, so
-        repeated calls return the same app. Output capture comes from
-        ``modal_interface.enable_output_capture()`` so the same body works
-        against any ``ModalInterface`` implementation.
+        registry by name, so repeated calls return the same app. Output
+        capture comes from ``modal_interface.enable_output_capture()`` so the
+        same body works against any ``ModalInterface`` implementation.
 
         ``environment_name`` scopes all Modal resources (apps, volumes,
         sandboxes) to a user, isolating between mngr installations sharing
@@ -338,9 +310,8 @@ class ModalProviderBackend(ProviderBackendInterface):
         Raises ``ModalProxyNotFoundError`` if the environment does not exist
         and ``is_environment_creation_allowed`` is False.
         """
-        registry_key = app_registry_key(app_name, credential_identity)
-        if registry_key in cls._app_registry:
-            return cls._app_registry[registry_key]
+        if app_name in cls._app_registry:
+            return cls._app_registry[app_name]
 
         with log_span("Creating ephemeral Modal app with output capture: {} (env: {})", app_name, environment_name):
             with log_span("Enabling Modal output capture"):
@@ -385,12 +356,12 @@ class ModalProviderBackend(ProviderBackendInterface):
                 volume_name=volume_name,
                 volume=None,
             )
-            cls._app_registry[registry_key] = (app, context_handle)
+            cls._app_registry[app_name] = (app, context_handle)
         return app, context_handle
 
     @classmethod
-    def get_volume_for_app(cls, registry_key: str, modal_interface: ModalInterface) -> VolumeInterface:
-        """Get or create the state volume for the app registered under ``registry_key``.
+    def get_volume_for_app(cls, app_name: str, modal_interface: ModalInterface) -> VolumeInterface:
+        """Get or create the state volume for an app.
 
         The volume is used to persist host records (including snapshots) across
         sandbox termination. This allows multiple mngr instances to share state
@@ -403,10 +374,10 @@ class ModalProviderBackend(ProviderBackendInterface):
 
         Raises MngrError if the app has not been created yet.
         """
-        if registry_key not in cls._app_registry:
-            raise MngrError(f"App {registry_key} not found in registry")
+        if app_name not in cls._app_registry:
+            raise MngrError(f"App {app_name} not found in registry")
 
-        _, context_handle = cls._app_registry[registry_key]
+        _, context_handle = cls._app_registry[app_name]
 
         # Return cached volume if already created
         if context_handle.volume is not None:
@@ -435,20 +406,20 @@ class ModalProviderBackend(ProviderBackendInterface):
             volume_name=context_handle.volume_name,
             volume=volume,
         )
-        app, _ = cls._app_registry[registry_key]
-        cls._app_registry[registry_key] = (app, updated_handle)
+        app, _ = cls._app_registry[app_name]
+        cls._app_registry[app_name] = (app, updated_handle)
 
         return volume
 
     @classmethod
-    def close_app(cls, registry_key: str) -> None:
-        """Close the Modal app context registered under ``registry_key``.
+    def close_app(cls, app_name: str) -> None:
+        """Close a Modal app context.
 
         Exits the app.run() context manager and removes the app from the registry.
         This makes the app ephemeral and prevents accumulation.
         """
-        if registry_key in cls._app_registry:
-            _, context_handle = cls._app_registry.pop(registry_key)
+        if app_name in cls._app_registry:
+            _, context_handle = cls._app_registry.pop(app_name)
             _exit_modal_app_context(context_handle)
 
     @classmethod
@@ -486,52 +457,20 @@ class ModalProviderBackend(ProviderBackendInterface):
         return MODAL_START_ARGS_HELP
 
     @staticmethod
-    def _resolve_modal_interface(name: ProviderInstanceName, config: ProviderInstanceConfig) -> ModalInterface:
+    def _resolve_modal_interface(config: ProviderInstanceConfig) -> ModalInterface:
         """Validate ``config`` is a ``ModalProviderConfig`` and pick the matching ``ModalInterface``.
 
         Shared by ``build_provider_instance`` and ``bootstrap_for_host_creation``; both call
         sites need the same isinstance guard and the same ``match config.mode`` dispatch.
         Factoring it out keeps the per-mode dispatch in exactly one place so adding a new
         ``ModalMode`` variant only needs editing here.
-
-        A ``modal_profile`` is resolved here, on every construction, from this machine's
-        ``~/.modal.toml`` into the same token pair an explicit ``token_id`` /
-        ``token_secret`` would carry; a profile the machine lacks raises
-        ``ProviderCredentialSourceMissingError`` so discovery keeps re-checking until
-        ``modal token new --profile <name>`` has run.
         """
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
 
         match config.mode:
             case ModalMode.DIRECT:
-                # Checked here on the merged config, not per config layer: the two halves may
-                # legitimately come from different layers (the secret from the environment).
-                if (config.token_id is None) != (config.token_secret is None):
-                    raise ModalConfigError(
-                        "token_id and token_secret must be set together: a Modal token is the pair, and one "
-                        "half alone would silently fall back to the SDK's own credential resolution"
-                    )
-                if config.modal_profile is None:
-                    return DirectModalInterface(token_id=config.token_id, token_secret=config.token_secret)
-                if config.token_id is not None:
-                    raise ModalConfigError(
-                        "modal_profile and token_id / token_secret are mutually exclusive: an instance "
-                        "authenticates either through the named profile or through its own token, never both"
-                    )
-                try:
-                    profile_token = read_modal_profile_token(config.modal_profile, modal_config_path())
-                except ModalProfileNotFoundError as e:
-                    raise ProviderCredentialSourceMissingError(
-                        name,
-                        reason=str(e),
-                        short_remediation=e.short_remediation,
-                        short_reason=f"Modal profile {config.modal_profile!r} is not set up on this machine",
-                        user_help_text=(
-                            f"{e}\nSet it up on this machine, or edit the connection to use another credential."
-                        ),
-                    ) from e
-                return DirectModalInterface(token_id=profile_token.token_id, token_secret=profile_token.token_secret)
+                return DirectModalInterface()
             case ModalMode.PROXIED:
                 # Not implemented: Modal is imbue-internal + sandboxes are ephemeral (~1 day), so it
                 # isn't offered for public/keyless use -- anyone running it authenticates directly (DIRECT).
@@ -556,7 +495,7 @@ class ModalProviderBackend(ProviderBackendInterface):
         which creates the environment if missing; the subsequent
         ``build_provider_instance`` call then succeeds normally.
         """
-        modal_interface = ModalProviderBackend._resolve_modal_interface(name, config)
+        modal_interface = ModalProviderBackend._resolve_modal_interface(config)
         return ModalProviderBackend._construct_modal_provider(
             name, config, mngr_ctx, modal_interface, is_environment_creation_allowed=False
         )
@@ -580,7 +519,7 @@ class ModalProviderBackend(ProviderBackendInterface):
         ``build_provider_instance`` call in the create path reuses the cached
         app via ``_get_or_create_app``.
         """
-        modal_interface = ModalProviderBackend._resolve_modal_interface(name, config)
+        modal_interface = ModalProviderBackend._resolve_modal_interface(config)
         ModalProviderBackend._construct_modal_provider(
             name, config, mngr_ctx, modal_interface, is_environment_creation_allowed=True
         )
@@ -613,10 +552,6 @@ class ModalProviderBackend(ProviderBackendInterface):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
 
         environment_name, app_name, host_dir = ModalProviderBackend._derive_modal_names(name, config, mngr_ctx)
-        # The token that opened the app qualifies its registry entry, whether the block
-        # carries it or a profile supplied it.
-        credential_identity = _credential_identity_of(modal_interface, config)
-        registry_key = app_registry_key(app_name, credential_identity)
 
         # Create the ModalProviderApp that manages the Modal app and its resources
         try:
@@ -626,9 +561,8 @@ class ModalProviderBackend(ProviderBackendInterface):
                 config.is_persistent,
                 modal_interface,
                 is_environment_creation_allowed=is_environment_creation_allowed,
-                credential_identity=credential_identity,
             )
-            volume = ModalProviderBackend.get_volume_for_app(registry_key, modal_interface)
+            volume = ModalProviderBackend.get_volume_for_app(app_name, modal_interface)
 
             modal_app = ModalProviderApp(
                 app_name=app_name,
@@ -636,7 +570,7 @@ class ModalProviderBackend(ProviderBackendInterface):
                 app=app,
                 volume=volume,
                 modal_interface=modal_interface,
-                close_callback=lambda: ModalProviderBackend.close_app(registry_key),
+                close_callback=lambda: ModalProviderBackend.close_app(app_name),
                 get_output_callback=lambda: context_handle.output_buffer.getvalue(),
             )
         except ModalProxyAuthError as e:
@@ -646,11 +580,10 @@ class ModalProviderBackend(ProviderBackendInterface):
             raise ProviderNotAuthorizedError(
                 name,
                 reason="Modal token missing or invalid",
-                short_remediation=f"run `modal token new`, or set providers.{name}.token_id / token_secret",
+                short_remediation="run `modal token new`",
                 user_help_text=(
                     "Modal is not authorized: run `modal token new` to authenticate (or set "
-                    "MODAL_TOKEN_ID / MODAL_TOKEN_SECRET), give this provider instance its own token via "
-                    f"`token_id` / `token_secret` in [providers.{name}], or disable it with "
+                    "MODAL_TOKEN_ID / MODAL_TOKEN_SECRET), or disable this provider with "
                     f"`mngr config set --scope local providers.{name}.is_enabled false`."
                 ),
             ) from e

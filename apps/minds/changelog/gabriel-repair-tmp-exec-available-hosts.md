@@ -1,0 +1,3 @@
+The `workspace-tmp-exec.md` rollout guide now covers available pool hosts, which `minds-admin repair-tmp-exec` can now repair: how the repair differs on a parked host, what a lease landing mid-repair does, and the survey and canary steps that include them.
+
+Both rollout guides (`workspace-tmp-exec.md` and `gvisor-oom-headroom.md`) now record the 2026-09-30 production sweep of `install-vm-memory-units`, `hotpatch-earlyoom` and `repair-tmp-exec` over all 305 leased and available rows, including the workspaces it could not repair and why, and what the sweep showed the `/tmp` repair still needs (a check that the container can relaunch its services agent, and a record of hand-started programs the restart ends).

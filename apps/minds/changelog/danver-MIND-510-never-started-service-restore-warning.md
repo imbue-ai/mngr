@@ -1,0 +1,5 @@
+A backup restore no longer warns that a service "has not come back up" when that service was already not running before the restore started, and no longer spends the full 60-second service-recovery wait on one.
+
+The restore's post-restore check used to compare the workspace's services against a single absolute standard: anything supervisord did not report as running or cleanly exited was a service that failed to come back. A program that was already down when the restore began -- one that is crash-looping, or one shipped switched off and started for the first time by the restore's own `supervisorctl restart all` -- therefore ended every restore with a warning naming it, and made the "everything is back" sample the recovery wait polls for unreachable, so each restore burned the whole wait before reporting.
+
+The check now takes a reading of the services before it stops anything, and reports only the ones that were up then and are not up afterwards. The system interface is unaffected: it must be up after a restore whatever its state before, and a restore still fails if it is not.

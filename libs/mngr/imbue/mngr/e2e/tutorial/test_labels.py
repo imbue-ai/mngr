@@ -5,7 +5,6 @@ import json
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
-from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.skitwright.expect import expect
 
 
@@ -362,7 +361,7 @@ def test_exec_filtered_remote_disk(e2e: E2eSession) -> None:
         e2e.run(
             "mngr create my-task --provider modal --target-path /workspace --type command --no-connect --no-ensure-clean -- sleep 100942",
             comment="create a remote Modal agent to filter and exec on",
-            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+            timeout=120.0,
         )
     ).to_succeed()
     # The list+exec pipeline reaches the remote Modal host over SSH, so it needs

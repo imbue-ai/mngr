@@ -63,13 +63,10 @@ describe("WorkspacesStore", () => {
     expect(store.workspaceFrameUrl("host-bb22", "win-0123")).toBe(
       "/forward-bridge?next=" + encodeURIComponent(gotoNext),
     );
-    const bridgeNext = new URL(
-      store.workspaceFrameUrl("agent-aa11", "win-0123"),
-      "http://x",
-    ).searchParams.get("next");
-    const soloNext = new URL(bridgeNext ?? "", "http://x").searchParams.get(
+    const bridgeNext = new URL(store.workspaceFrameUrl("agent-aa11", "win-0123"), "http://x").searchParams.get(
       "next",
     );
+    const soloNext = new URL(bridgeNext ?? "", "http://x").searchParams.get("next");
     expect(soloNext).toBe("/?solo=win-0123");
   });
 
@@ -105,33 +102,20 @@ describe("WorkspacesStore", () => {
 });
 
 describe("AccountsStore", () => {
-  it("takes the account lists from the frame and names each account for the switcher", () => {
+  it("takes the launcher label and the account list from the same frame", () => {
     const store = new AccountsStore();
     store.applyAccountsMessage(accountsMessage([accountEntry()]));
 
     store.applyAccountsMessage(
-      accountsMessage(
-        [accountEntry({ display_name: "Alice A." }), secondAccountEntry()],
-        "user-1",
-        [accountEntry({ user_id: "user-gone", email: "gone@example.com" })],
-      ),
+      accountsMessage([accountEntry(), secondAccountEntry()]),
     );
 
+    expect(store.accountEmail).toBe("alice@example.com");
+    expect(store.extraAccountCount).toBe(1);
     expect(store.accounts.map((account) => account.email)).toEqual([
       "alice@example.com",
       "bob@example.com",
     ]);
-    expect(store.signedOutAccounts.map((account) => account.user_id)).toEqual([
-      "user-gone",
-    ]);
-    expect(store.isSignedIn("user-1")).toBe(true);
-    expect(store.isSignedIn("user-gone")).toBe(false);
-    // A display name leads; an account without one is its email; the device and an unknown id are named plainly.
-    expect(store.labelFor("user-1")).toBe("Alice A.");
-    expect(store.labelFor("user-2")).toBe("bob@example.com");
-    expect(store.labelFor("user-gone")).toBe("gone@example.com");
-    expect(store.labelFor("local")).toBe("This device");
-    expect(store.labelFor("user-unknown")).toBe("user-unknown");
   });
 });
 
@@ -336,7 +320,6 @@ describe("boot seeding", () => {
         is_mac: true,
         mngr_forward_origin: "http://localhost:8421",
         is_onboarding_complete: false,
-        account_id: "user-1",
       },
       schema_version: 1,
       snapshot: {
@@ -347,8 +330,7 @@ describe("boot seeding", () => {
         ]),
         providers: {
           type: "providers",
-          accounts: [],
-          device_providers: [],
+          providers: [],
           last_event_at: null,
           last_full_snapshot_at: null,
         },
@@ -370,6 +352,7 @@ describe("boot seeding", () => {
               availability: "OUT_OF_DATE",
               current_version: "minds-v0.3.9",
               supported_version: "minds-v0.4.1",
+              is_version_from_label: false,
               activity: "IDLE",
             },
           },
@@ -382,11 +365,8 @@ describe("boot seeding", () => {
       },
     });
     expect(boot.seed.isMac).toBe(true);
-    expect(boot.seed.accountId).toBe("user-1");
     expect(boot.stores.workspaces.workspaces).toHaveLength(1);
-    expect(
-      boot.stores.accounts.accounts.map((account) => account.email),
-    ).toEqual(["a@b.c", "bob@example.com"]);
+    expect(boot.stores.accounts.accountEmail).toBe("a@b.c");
     expect(boot.stores.requests.requestIds).toEqual(["evt-9"]);
     expect(boot.stores.notifications.entries.map((entry) => entry.id)).toEqual([
       "evt-9",
@@ -403,8 +383,7 @@ describe("boot seeding", () => {
         accounts: accountsMessage([accountEntry({ email: "a@b.c" })]),
         providers: {
           type: "providers",
-          accounts: [],
-          device_providers: [],
+          providers: [],
           last_event_at: null,
           last_full_snapshot_at: null,
         },
@@ -419,6 +398,7 @@ describe("boot seeding", () => {
               availability: "OUT_OF_DATE",
               current_version: "minds-v0.3.9",
               supported_version: "minds-v0.4.1",
+              is_version_from_label: false,
               activity: "IDLE",
             },
           },
@@ -430,9 +410,7 @@ describe("boot seeding", () => {
     expect(stores.requests.requestIds).toEqual(["evt-1"]);
     expect(stores.notifications.unresolvedCount).toBe(1);
     expect(stores.accounts.hasAccounts).toBe(true);
-    expect(stores.accounts.accounts.map((account) => account.email)).toEqual([
-      "a@b.c",
-    ]);
+    expect(stores.accounts.accountEmail).toBe("a@b.c");
     expect(stores.health.appEnvironmentCondition()).toBe("OFFLINE");
     // A store the bootstrap snapshot skipped would badge every machine
     // "version unknown" until the first pushed frame.

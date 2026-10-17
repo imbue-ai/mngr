@@ -1,0 +1,1 @@
+The agent env file writer's behavior of leaving a value that references another variable (`${HOME}/venvs/${MNGR_AGENT_NAME}`) unquoted, so that sourcing the file expands the reference, is now pinned by a test: `mngr tmr` relies on it to give each agent its own virtualenv path from one static `--env`-style value.

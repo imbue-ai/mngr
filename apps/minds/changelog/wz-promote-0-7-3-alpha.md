@@ -1,0 +1,1 @@
+- Promoted minds 0.7.3 to the alpha channels: the desktop channel moves to ToDesktop build `260925cpjm6e86d` (100%, mac and linux) and the web channel pins browser creates to `minds-v0.7.3`, which the production pool holds 20 available rows at, ten in each region. Beta and stable stay on 0.6.2, and their web channels stay on `minds-v0.7.0`.

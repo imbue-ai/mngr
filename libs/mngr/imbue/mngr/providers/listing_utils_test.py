@@ -2,12 +2,9 @@
 
 import json
 import os
-import shlex
 import subprocess
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-from typing import Final
 
 import pytest
 
@@ -357,73 +354,41 @@ def test_parse_listing_collection_output_empty() -> None:
     assert result.get("agents", []) == []
 
 
-_LISTING_AGENT_IDS: Final[tuple[str, ...]] = ("agent-a", "agent-b", "agent-c")
-_LABEL_CONTAINER_ID: Final[str] = "fake-cid"
-_RUNNING_INSPECTION: Final[str] = "running 0"
+def _run_outer_listing_against_fake_docker(
+    tmp_path: Path, *, is_exec_killed_after_first_agent: bool
+) -> tuple[int, dict[str, Any]]:
+    """Run the outer listing script with a fake ``docker`` that reports a running container.
 
-
-def _make_listing_host_dir(tmp_path: Path) -> Path:
-    """A host_dir holding a host record and three agent records, as the outer listing reads them."""
+    The fake ``docker exec`` runs the real inner listing against a real host_dir
+    holding three agents. When ``is_exec_killed_after_first_agent`` is set, it
+    relays only the output up to the end of the first agent and then exits 137,
+    as ``docker exec`` does when the container is killed mid-listing (a
+    workspace being stopped). Returns the outer script's exit code and its parsed
+    output.
+    """
     host_dir = tmp_path / "home" / "user" / ".mngr"
     host_dir.mkdir(parents=True)
     (host_dir / "data.json").write_text(json.dumps({"host_id": "host-abc"}))
-    for agent_id in _LISTING_AGENT_IDS:
+    for agent_id in ("agent-a", "agent-b", "agent-c"):
         (host_dir / "agents" / agent_id).mkdir(parents=True)
         (host_dir / "agents" / agent_id / "data.json").write_text(json.dumps({"id": agent_id, "name": agent_id}))
-    return host_dir
-
-
-def _run_outer_listing_against_fake_docker(
-    tmp_path: Path,
-    host_dir: Path,
-    *,
-    is_exec_killed_after_first_agent: bool = False,
-    known_container_id: str | None = None,
-    unchanged_fingerprint: str | None = None,
-    # What ``docker inspect`` answers per container id; an id missing here is one docker does not know.
-    inspection_by_container_id: Mapping[str, str] | None = None,
-) -> tuple[int, dict[str, Any], list[str]]:
-    """Run the outer listing script with a fake ``docker`` whose label lookup finds a running container.
-
-    The fake ``docker exec`` runs the real inner listing against ``host_dir``, with the
-    environment the outer script hands it. When ``is_exec_killed_after_first_agent`` is
-    set, it relays only the output up to the end of the first agent and then exits 137,
-    as ``docker exec`` does when the container is killed mid-listing (a workspace being
-    stopped). Returns the outer script's exit code, its parsed output, and the docker
-    subcommands it ran, in order.
-    """
-    inspections = dict(inspection_by_container_id or {_LABEL_CONTAINER_ID: _RUNNING_INSPECTION})
     exec_body = (
         f'bash > "$0.out"; awk \'{{print}} /{SEP_AGENT_END}/{{exit}}\' "$0.out"; exit 137'
         if is_exec_killed_after_first_agent
         else "exec bash"
     )
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    invocation_log = tmp_path / "docker-invocations.log"
-    inspection_cases = " ".join(
-        f"{shlex.quote(container_id)}) echo {shlex.quote(inspection)} ;;"
-        for container_id, inspection in inspections.items()
-    )
+    bin_dir.mkdir()
     write_executable_script(
         bin_dir / "docker",
         "#!/bin/bash\n"
-        f'echo "$1" >> {shlex.quote(str(invocation_log))}\n'
         'case "$1" in\n'
-        f"  ps) echo {_LABEL_CONTAINER_ID} ;;\n"
-        f'  inspect) case "${{@: -1}}" in {inspection_cases} *) exit 1 ;; esac ;;\n'
-        '  exec) shift; while [ "$1" != bash ]; do if [ "$1" = -e ]; then export "$2"; shift; fi; shift; done; '
-        f"{exec_body} ;;\n"
+        "  ps) echo fake-cid ;;\n"
+        '  inspect) case "$3" in *Status*) echo running ;; *) echo 0 ;; esac ;;\n'
+        f"  exec) {exec_body} ;;\n"
         "esac\n",
     )
-    script = build_outer_listing_collection_script(
-        "host-abc",
-        str(host_dir),
-        "mngr-",
-        window_name="agent",
-        known_container_id=known_container_id,
-        unchanged_fingerprint=unchanged_fingerprint,
-    )
+    script = build_outer_listing_collection_script("host-abc", str(host_dir), "mngr-", window_name="agent")
     finished = subprocess.run(
         ["bash", "-c", script],
         capture_output=True,
@@ -431,25 +396,15 @@ def _run_outer_listing_against_fake_docker(
         timeout=60,
         env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
     )
-    docker_subcommands = invocation_log.read_text().split()
-    invocation_log.unlink()
-    return finished.returncode, parse_listing_collection_output(finished.stdout), docker_subcommands
+    return finished.returncode, parse_listing_collection_output(finished.stdout)
 
 
 @pytest.mark.tmux
 def test_outer_listing_of_a_running_container_reports_every_agent(tmp_path: Path) -> None:
-    host_dir = _make_listing_host_dir(tmp_path)
-
-    returncode, result, docker_subcommands = _run_outer_listing_against_fake_docker(tmp_path, host_dir)
+    returncode, result = _run_outer_listing_against_fake_docker(tmp_path, is_exec_killed_after_first_agent=False)
 
     assert returncode == 0
-    assert [agent["data"]["id"] for agent in result["agents"]] == list(_LISTING_AGENT_IDS)
-    assert (result["container_id"], result["container_state"], result["container_exit_code"]) == (
-        _LABEL_CONTAINER_ID,
-        "running",
-        0,
-    )
-    assert docker_subcommands == ["ps", "inspect", "exec"]
+    assert [agent["data"]["id"] for agent in result["agents"]] == ["agent-a", "agent-b", "agent-c"]
 
 
 @pytest.mark.tmux
@@ -460,153 +415,10 @@ def test_outer_listing_fails_when_the_container_dies_mid_listing(tmp_path: Path)
     code is the only signal. A caller that took it as a successful listing would
     record the survivors as the host's complete agent set.
     """
-    host_dir = _make_listing_host_dir(tmp_path)
-
-    returncode, result, _docker_subcommands = _run_outer_listing_against_fake_docker(
-        tmp_path, host_dir, is_exec_killed_after_first_agent=True
-    )
+    returncode, result = _run_outer_listing_against_fake_docker(tmp_path, is_exec_killed_after_first_agent=True)
 
     assert [agent["data"]["id"] for agent in result["agents"]] == ["agent-a"]
     assert returncode != 0
-
-
-@pytest.mark.tmux
-def test_outer_listing_inspects_a_known_running_container_without_the_label_lookup(tmp_path: Path) -> None:
-    host_dir = _make_listing_host_dir(tmp_path)
-
-    returncode, result, docker_subcommands = _run_outer_listing_against_fake_docker(
-        tmp_path,
-        host_dir,
-        known_container_id="known-cid",
-        inspection_by_container_id={"known-cid": _RUNNING_INSPECTION, _LABEL_CONTAINER_ID: _RUNNING_INSPECTION},
-    )
-
-    assert returncode == 0
-    assert docker_subcommands == ["inspect", "exec"]
-    assert result["container_id"] == "known-cid"
-    assert [agent["data"]["id"] for agent in result["agents"]] == list(_LISTING_AGENT_IDS)
-
-
-@pytest.mark.tmux
-@pytest.mark.parametrize(
-    "known_container_inspection",
-    [None, "exited 137"],
-    ids=["known container gone", "known container not running"],
-)
-def test_outer_listing_falls_back_to_the_label_lookup_and_lists_in_full_when_the_known_container_is_not_running(
-    tmp_path: Path, known_container_inspection: str | None
-) -> None:
-    """A remembered container that is not the running one is not trusted, and neither is its fingerprint.
-
-    The container found by label may be a replacement whose records happen to
-    fingerprint the same (a restore), so the remembered fingerprint is only honored
-    for the container it was taken from.
-    """
-    host_dir = _make_listing_host_dir(tmp_path)
-    _returncode, first, _docker_subcommands = _run_outer_listing_against_fake_docker(tmp_path, host_dir)
-    inspections = {_LABEL_CONTAINER_ID: _RUNNING_INSPECTION}
-    if known_container_inspection is not None:
-        inspections["stale-cid"] = known_container_inspection
-
-    returncode, result, docker_subcommands = _run_outer_listing_against_fake_docker(
-        tmp_path,
-        host_dir,
-        known_container_id="stale-cid",
-        unchanged_fingerprint=first["listing_fingerprint"],
-        inspection_by_container_id=inspections,
-    )
-
-    assert returncode == 0
-    assert docker_subcommands == ["inspect", "ps", "inspect", "exec"]
-    assert result["container_id"] == _LABEL_CONTAINER_ID
-    assert "is_listing_unchanged" not in result
-    assert [agent["data"]["id"] for agent in result["agents"]] == list(_LISTING_AGENT_IDS)
-
-
-@pytest.mark.tmux
-def test_outer_listing_ends_early_when_the_records_fingerprint_the_same(tmp_path: Path) -> None:
-    host_dir = _make_listing_host_dir(tmp_path)
-    _returncode, first, _docker_subcommands = _run_outer_listing_against_fake_docker(tmp_path, host_dir)
-    fingerprint = first["listing_fingerprint"]
-    assert all(str(host_dir / "agents" / agent_id / "data.json") in fingerprint for agent_id in _LISTING_AGENT_IDS)
-
-    returncode, result, docker_subcommands = _run_outer_listing_against_fake_docker(
-        tmp_path, host_dir, known_container_id=_LABEL_CONTAINER_ID, unchanged_fingerprint=fingerprint
-    )
-
-    assert returncode == 0
-    assert docker_subcommands == ["inspect", "exec"]
-    assert result["is_listing_unchanged"] is True
-    assert result["agents"] == []
-    assert "certified_data" not in result
-    assert (result["container_id"], result["container_state"]) == (_LABEL_CONTAINER_ID, "running")
-
-
-def _rewrite_record(path: Path, content: str) -> None:
-    """Replace a record the way mngr writes one: a temp file renamed over it (a new inode)."""
-    temp_path = path.with_suffix(".tmp")
-    temp_path.write_text(content)
-    temp_path.rename(path)
-
-
-@pytest.mark.tmux
-@pytest.mark.parametrize(
-    "change_kind",
-    [
-        "agent record rewritten",
-        "agent record edited in place",
-        "agent added",
-        "agent removed",
-        "host record rewritten",
-    ],
-)
-def test_outer_listing_lists_in_full_when_a_record_changed(tmp_path: Path, change_kind: str) -> None:
-    host_dir = _make_listing_host_dir(tmp_path)
-    _returncode, first, _docker_subcommands = _run_outer_listing_against_fake_docker(tmp_path, host_dir)
-    agent_b_record = host_dir / "agents" / "agent-b" / "data.json"
-    if change_kind == "agent record rewritten":
-        _rewrite_record(agent_b_record, json.dumps({"id": "agent-b", "name": "agent-b-renamed"}))
-        expected_agent_ids = list(_LISTING_AGENT_IDS)
-    elif change_kind == "agent record edited in place":
-        with agent_b_record.open("r+") as record_file:
-            record_file.seek(0, os.SEEK_END)
-            record_file.write("\n")
-        expected_agent_ids = list(_LISTING_AGENT_IDS)
-    elif change_kind == "agent added":
-        (host_dir / "agents" / "agent-d").mkdir()
-        (host_dir / "agents" / "agent-d" / "data.json").write_text(json.dumps({"id": "agent-d", "name": "agent-d"}))
-        expected_agent_ids = [*_LISTING_AGENT_IDS, "agent-d"]
-    elif change_kind == "agent removed":
-        agent_b_record.unlink()
-        expected_agent_ids = ["agent-a", "agent-c"]
-    elif change_kind == "host record rewritten":
-        _rewrite_record(host_dir / "data.json", json.dumps({"host_id": "host-abc", "name": "renamed"}))
-        expected_agent_ids = list(_LISTING_AGENT_IDS)
-    else:
-        raise AssertionError(f"unknown change kind {change_kind}")
-
-    returncode, result, _docker_subcommands = _run_outer_listing_against_fake_docker(
-        tmp_path, host_dir, known_container_id=_LABEL_CONTAINER_ID, unchanged_fingerprint=first["listing_fingerprint"]
-    )
-
-    assert returncode == 0
-    assert "is_listing_unchanged" not in result
-    assert result["listing_fingerprint"] != first["listing_fingerprint"]
-    assert [agent["data"]["id"] for agent in result["agents"]] == expected_agent_ids
-
-
-def test_parse_listing_collection_output_reads_the_container_id_fingerprint_and_unchanged_marker() -> None:
-    unchanged = parse_listing_collection_output(
-        "CONTAINER_ID=abc123\nCONTAINER_STATE=running\nCONTAINER_EXIT_CODE=0\nHOST_DIR=/mngr\nLISTING_UNCHANGED=true\n"
-    )
-    listed = parse_listing_collection_output(
-        "CONTAINER_ID=\nCONTAINER_STATE=running\nLISTING_FINGERPRINT=42 1.5 10 /mngr/data.json;\n"
-    )
-
-    assert (unchanged["container_id"], unchanged["is_listing_unchanged"], unchanged["agents"]) == ("abc123", True, [])
-    assert "listing_fingerprint" not in unchanged
-    assert (listed["container_id"], listed["listing_fingerprint"]) == (None, "42 1.5 10 /mngr/data.json;")
-    assert "is_listing_unchanged" not in listed
 
 
 @pytest.mark.allow_warnings(match=r"missing or non-object 'data'")

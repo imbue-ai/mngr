@@ -1,0 +1,3 @@
+Added `ModalProxyConnectionError`, raised when the Modal control plane could not be reached at all (a dropped network or a Modal outage). It is translated from the SDK's `modal.exception.ConnectionError`, which previously fell through to the generic `ModalProxyError` and so was indistinguishable from a failure Modal actually answered with. Consumers can now tell "Modal was never reached, so its state is unknown" from "Modal said no" -- the distinction `mngr`'s modal provider uses to decide whether it is temporarily unavailable or genuinely broken.
+
+Added `UnreachableModalInterface` to the testing helpers: a `FakeModalInterface` whose network-crossing calls fail the way an unreachable Modal does, for testing consumers' offline behavior without a network.

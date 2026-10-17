@@ -1,0 +1,1 @@
+Modal discovery now reports each host's recorded size (`DiscoveredHost.size`: the sandbox's CPUs and memory, as `mngr list` reports `host.resource`) from the host records it already reads, so the `mngr observe` stream carries it; a running sandbox whose record has not propagated yet carries none.

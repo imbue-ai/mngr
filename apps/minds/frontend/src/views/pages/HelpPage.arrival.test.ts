@@ -5,7 +5,6 @@
 // param change, which only the real m.route does.
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import { createEmptyStores } from "../../models/boot";
 import {
   setPendingHelpLaunch,
@@ -36,7 +35,6 @@ afterEach(async () => {
     root.remove();
     root = null;
   }
-  clearAppContextForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -55,17 +53,7 @@ function shellWithTwoMachines(): ShellState {
       restorable_workspace_ids: [ALPHA, BETA],
     }),
   );
-  registerAppContext({ stores: shell.stores, shell });
   return shell;
-}
-
-/** Mount the router on a machine's own surface, the way a window sits before
- * an agent in it asks for a report. */
-function openOnMachine(agentId: string): void {
-  window.history.replaceState(null, "", `#!/workspace/${agentId}`);
-  root = document.createElement("div");
-  document.body.appendChild(root);
-  m.route(root, "/help", ROUTES);
 }
 
 /** Open Help with alpha's agent report on it, as its first arrival does. */
@@ -86,14 +74,6 @@ function openAlphaReport(description = "alpha's diagnosis"): void {
 async function landRoute(): Promise<void> {
   await settle();
   m.redraw.sync();
-}
-
-/** Wait for a dismissal to take the route off /help, then draw where it
- * landed. Polled rather than settled: jsdom traverses history.back() a few
- * ticks after a route.set would have landed. */
-async function landDismissal(): Promise<void> {
-  await vi.waitFor(() => expect(m.route.get()).not.toMatch(/^\/help/));
-  await landRoute();
 }
 
 /** An agent's report arriving while Help is up: staged, the redraw index.ts
@@ -290,45 +270,5 @@ describe("HelpPage when another report arrives while it is up", () => {
     expect(m.route.get()).toBe(`/help?workspace=${BETA}`);
     expect(formDescription()).toBe("beta's diagnosis");
     expect(takePendingHelpLaunch()).toBeNull();
-  });
-});
-
-describe("HelpPage closing", () => {
-  it("closes on the X when a second ask arrived before the first had landed", async () => {
-    // Both asks are made before either /help lands (m.route.get() trails
-    // route.set), so a history-walking close would land on the other /help.
-    const shell = shellWithTwoMachines();
-    openOnMachine(ALPHA);
-    await landRoute();
-
-    shell.openHelpForAgentAsk(ALPHA, "first diagnosis");
-    shell.openHelpForAgentAsk(ALPHA, "second diagnosis");
-    await landRoute();
-    expect(formDescription()).toBe("second diagnosis");
-
-    expect(shell.dismissAppOverlay()).toBe(true);
-    await landDismissal();
-
-    expect(m.route.get()).toBe(`/workspace/${ALPHA}`);
-    expect(document.getElementById("machine-surface")).not.toBeNull();
-    expect(formDescription()).toBeNull();
-  });
-
-  it("returns to the reporting machine on Done, not to whatever was on screen before", async () => {
-    // Whatever sits under the report in history (here another machine's
-    // surface) is not where Done goes.
-    const shell = shellWithTwoMachines();
-    openOnMachine(BETA);
-    await landRoute();
-    shell.openHelpForAgentAsk(ALPHA, "alpha's diagnosis");
-    await landRoute();
-
-    await sendAlphaReportThrough();
-    clickButton("Done");
-    await landDismissal();
-
-    expect(m.route.get()).toBe(`/workspace/${ALPHA}`);
-    expect(formDescription()).toBeNull();
-    expect(pageText()).not.toContain("Thanks!");
   });
 });

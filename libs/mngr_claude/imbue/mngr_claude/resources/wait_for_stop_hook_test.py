@@ -43,23 +43,6 @@ def _prompt(text: str) -> dict[str, Any]:
     return make_user_record(uuid4().hex, text=text)
 
 
-def _reply(text: str) -> dict[str, Any]:
-    return make_assistant_record(uuid4().hex, text=text)
-
-
-def _stop_hook_feedback() -> dict[str, Any]:
-    # The record Claude Code writes as soon as a stop hook exits 2, shaped as Claude Code 2.1.305 writes it
-    return {
-        "type": "user",
-        "message": {
-            "role": "user",
-            "content": "Stop hook feedback:\n[check_repo_root.sh]: Be sure to return to the repo root when you finish!\n",
-        },
-        "isMeta": True,
-        "uuid": uuid4().hex,
-    }
-
-
 def _api_error(timestamp: str) -> dict[str, Any]:
     record = make_assistant_record(uuid4().hex, text="API Error: 529 Overloaded.", timestamp=timestamp)
     return {**record, "isApiErrorMessage": True, "error": "server_error"}
@@ -198,44 +181,6 @@ def test_stop_hook_marks_agent_idle_when_no_prompt_is_queued(
     tmp_path: Path, transcript_records: list[dict[str, Any]] | None
 ) -> None:
     _assert_marked_idle(_run_stop_hook_at_turn_end(tmp_path, transcript_records))
-
-
-def test_stop_hook_leaves_agent_active_when_another_stop_hook_blocked_the_turn_end(tmp_path: Path) -> None:
-    transcript_records = [_prompt("hello"), _reply("done"), _stop_hook_feedback()]
-
-    _assert_left_active(_run_stop_hook_at_turn_end(tmp_path, transcript_records))
-
-
-@pytest.mark.parametrize(
-    "transcript_records",
-    [
-        pytest.param(
-            [
-                _prompt("hello"),
-                _reply("done"),
-                _stop_hook_feedback(),
-                _stop_hook_summary(),
-                _reply("back at the root"),
-            ],
-            id="block_answered_by_the_continuation_that_is_now_ending",
-        ),
-        pytest.param(
-            [_prompt("hello"), _stop_hook_feedback(), _stop_hook_summary(), _prompt("next"), _reply("ok")],
-            id="block_from_an_earlier_turn",
-        ),
-        pytest.param([_prompt("Stop hook feedback: is this a block?"), _reply("no")], id="prompt_quoting_the_prefix"),
-    ],
-)
-def test_stop_hook_marks_agent_idle_when_no_stop_hook_blocked_this_turn_end(
-    tmp_path: Path, transcript_records: list[dict[str, Any]]
-) -> None:
-    _assert_marked_idle(_run_stop_hook_at_turn_end(tmp_path, transcript_records))
-
-
-def test_stop_failure_hook_marks_agent_idle_even_after_a_block(tmp_path: Path) -> None:
-    transcript_records = [_prompt("hello"), _stop_hook_feedback(), _api_error(timestamp="2026-01-01T00:00:05.000Z")]
-
-    _assert_marked_idle(_run_stop_hook_at_turn_end(tmp_path, transcript_records, hook_event_name="StopFailure"))
 
 
 def test_stop_failure_hook_leaves_agent_active_when_the_queued_prompt_already_started(tmp_path: Path) -> None:

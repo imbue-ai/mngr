@@ -1,0 +1,5 @@
+`run_local_command_modern_version` now accepts the clock its `timeout` is measured against, as `monotonic_fn`. It defaults to the real monotonic clock, so nothing about running a command changes.
+
+The reason is that a command's deadline starts at the moment the process is spawned, and nothing synchronises the child's startup against it. A test that needs the deadline to arrive at a particular point in the child's life -- once it has installed a signal handler, say -- had no way to ask for that, so it had to guess a deadline generous enough for the child to get there first. Under load the guess lost: the test that covers a timed-out command's last words killed a child that had not finished starting, and failed on an empty stdout. Handing the test the clock removes the guess -- it expires the deadline itself, the moment the child's own output says it is ready -- so the test now holds for any deadline, from a millisecond upwards, instead of being a bet on how busy the machine is.
+
+The bound on draining a killed child's pipes is deliberately left on the real clock, so a posed deadline cannot leave that drain unbounded.

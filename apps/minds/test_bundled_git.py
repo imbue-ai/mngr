@@ -59,8 +59,7 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
-import certifi
-import httpx2
+import httpx
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
@@ -88,7 +87,7 @@ _TARGET_KEY_BY_PLATFORM_AND_MACHINE: Final[dict[tuple[str, str], str]] = {
     ("linux", "aarch64"): "linux-arm64",
 }
 
-# Stall timeout per download attempt (httpx2 applies it to each connect/read
+# Stall timeout per download attempt (httpx applies it to each connect/read
 # operation, not the whole body), and a hard timeout per git invocation.
 _DOWNLOAD_TIMEOUT_SECONDS: Final[float] = 180.0
 _GIT_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
@@ -116,14 +115,14 @@ class _StaticFileRequestHandler(http.server.SimpleHTTPRequestHandler):
 
 
 @retry(
-    retry=retry_if_exception_type(httpx2.HTTPError),
+    retry=retry_if_exception_type(httpx.HTTPError),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     reraise=True,
 )
 def _download_release_asset(asset_url: str) -> bytes:
     """Download a GitHub release asset (following the redirect to its CDN), retrying transport/HTTP errors."""
-    response = httpx2.get(asset_url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_SECONDS)
+    response = httpx.get(asset_url, follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.content
 
@@ -149,8 +148,12 @@ def _build_git_environment(git_root: Path, fake_home: Path) -> dict[str, str]:
         "GIT_COMMITTER_EMAIL": _TEST_IDENTITY_EMAIL,
         "GIT_TERMINAL_PROMPT": "0",
     }
-    # The contract points git at the app environment's certifi bundle on every platform.
-    return {**base_environment, "GIT_SSL_CAINFO": certifi.where()}
+    # The Linux payload does not use the system trust store, so the contract
+    # points at the bundled CA file (macOS links the system libcurl instead).
+    linux_only_environment = (
+        {"GIT_SSL_CAINFO": str(git_root / "ssl" / "cacert.pem")} if sys.platform == "linux" else {}
+    )
+    return {**base_environment, **linux_only_environment}
 
 
 def _run_git(

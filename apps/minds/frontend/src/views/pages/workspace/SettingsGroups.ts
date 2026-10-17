@@ -8,12 +8,15 @@ import { getAppContext } from "../../../app-context";
 import { Button } from "../../components/Button";
 import { ColorSwatch } from "../../components/ColorSwatch";
 import { Icon16 } from "../../components/Icon";
+import { Collapsible } from "../../components/Collapsible";
 import type { IconName } from "../../components/icons";
+import { machineVerdict } from "../../components/MachineVerdict";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
 import { routeLinkAttrs } from "../../components/route-link";
 import { CopyField, SectionHeader } from "../../components/Layout";
-import { FormLabel, Select, TextInput } from "../../components/FormControls";
+import { TextInput } from "../../components/FormControls";
+import type { UiWorkspaceUpdate } from "../../../channel/messages";
 import type {
   SettingsGroup,
   WorkspaceMachineSizeData,
@@ -21,25 +24,28 @@ import type {
 } from "../../../models/workspaceOptions";
 import {
   formatPendingMachineSize,
-  isMachineSizePickedFromChoices,
-  minimumMachineDiskGb,
   normalizeWorkspaceColorHex,
 } from "../../../models/workspaceOptions";
-import type {
-  MachineSizeDimension,
-  MachineSizeDraft,
-} from "../../../models/machineSize";
-import {
-  formatMachineSizeNumbers,
-  machineSizeDraftFor,
-} from "../../../models/machineSize";
+import type { MachineSizeDimension, MachineSizeDraft } from "../../../models/machineSize";
+import { formatMachineSizeNumbers, machineSizeDraftFor } from "../../../models/machineSize";
 import { MachineSizeInput } from "../../components/MachineSizeInput";
-import { updateNavDotFor } from "../../../models/updateSurfaces";
-import { shownUpdatePill } from "../../shell/workspace-notices";
+import {
+  devOverridePrefill,
+  isRecreationRequired,
+  isUpdateDispatchable,
+  recordedDispatchFailure,
+  standingUpdateNotice,
+  updateActivityNotice,
+} from "../../../models/updates";
+import {
+  noBackupConfirmPrompt,
+  scheduledLine,
+  updateVersionRow,
+} from "../../components/UpdateModal";
 import { BackupGroup } from "./BackupGroup";
-import { UpdatesGroup } from "./UpdatesGroup";
 import { Spinner } from "../../components/Spinner";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
+import { workspacePageNoticeFor } from "../../shell/notice-band";
 
 const GROUPS: { id: SettingsGroup; icon: IconName; label: string }[] = [
   { id: "general", icon: "info", label: "General" },
@@ -59,11 +65,32 @@ interface SettingsGroupsLocalState {
   colorDraft: string | null;
   isDestroyDialogOpen: boolean;
   isUnlinkDialogOpen: boolean;
+  /** The specific-version field's text and the machine it was typed for; null
+   * until edited so the dev-build prefill shows through. */
+  overrideDraft: { agentId: string; value: string } | null;
+  isOverrideOpen: boolean;
+  /** The in-flight dispatch: its machine and target ref ("" for the plain
+   * "Update now"), which each button's spinner keys off. */
+  pendingDispatch: { agentId: string; targetRef: string } | null;
+  /** The in-flight schedule write, its machine, and its target ref ("" for the default). */
+  pendingSchedule: {
+    agentId: string;
+    action: "schedule" | "cancel";
+    targetRef: string;
+  } | null;
+  /** The press held for the go-ahead-without-backups confirmation, and its machine. */
+  noBackupConfirm: {
+    agentId: string;
+    action: "now" | "schedule";
+    targetRef: string;
+  } | null;
+  /** The last dispatch's refusal and the machine it was refused for, or null. */
+  updateError: { agentId: string; message: string; detail: string } | null;
   /** The resize fields as typed, and the machine they were typed for; null until edited. */
   sizeDraft: { agentId: string; draft: MachineSizeDraft } | null;
 }
 
-/** The piece of held state only when it belongs to the machine being drawn:
+/** The piece of update state only when it belongs to the machine being drawn:
  * a route change between machines preserves this component instance, so every
  * piece is machine-stamped. */
 function forMachine<T extends { agentId: string }>(
@@ -79,15 +106,36 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
     colorDraft: null,
     isDestroyDialogOpen: false,
     isUnlinkDialogOpen: false,
+    overrideDraft: null,
+    isOverrideOpen: false,
+    pendingDispatch: null,
+    pendingSchedule: null,
+    noBackupConfirm: null,
+    updateError: null,
     sizeDraft: null,
   };
+  // ?override=1 is the update modal's "Update to a different version…" deep
+  // link. Watched per render because route changes preserve this instance, and
+  // for the value CHANGING to "1" because the param stays in the URL across
+  // group switches and must not re-open a field the user closed.
+  let lastOverrideParam: string | null | undefined;
+  function consumeOverrideParam(): void {
+    const param = new URLSearchParams(
+      (m.route.get() ?? "").split("?")[1] ?? "",
+    ).get("override");
+    if (param === "1" && lastOverrideParam !== "1") local.isOverrideOpen = true;
+    lastOverrideParam = param;
+  }
+
   return {
     view(vnode) {
+      consumeOverrideParam();
       const { model, selectedGroup, onSelectGroup } = vnode.attrs;
       const data = model.data;
       if (data === null) return null;
 
       return [
+        outOfDateNotice(data.agent_id),
         splitPane({
           navLabel: "Settings groups",
           nav: m(
@@ -106,7 +154,6 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
                 [
                   m(Icon16, { name: group.icon, extra: "shrink-0" }),
                   m("span", { class: "truncate" }, group.label),
-                  group.id === "updates" ? updatesNavDot(data.agent_id) : null,
                 ],
               ),
             ),
@@ -122,7 +169,7 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
               ? m(BackupGroup, { agentId: data.agent_id })
               : null,
             selectedGroup === "updates"
-              ? m(UpdatesGroup, { agentId: data.agent_id })
+              ? renderUpdatesGroup(data.agent_id, local)
               : null,
           ],
           extra: "mt-8",
@@ -136,15 +183,321 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
   };
 }
 
-/** The Updates entry's dot, in the titlebar pill's colour, while the pill shows. */
-function updatesNavDot(agentId: string): m.Children {
-  const dot = updateNavDotFor(shownUpdatePill(getAppContext().shell, agentId));
-  if (dot === null) return null;
-  return m("span", {
-    id: "updates-nav-dot",
-    class: `ml-auto shrink-0 size-1.5 rounded-full ${dot === "success" ? "bg-success" : "bg-warning"}`,
-    "aria-hidden": "true",
-  });
+/** The machine's own out-of-date notice, reached through the band's decision
+ * so the two cannot disagree. */
+function outOfDateNotice(agentId: string): m.Children {
+  const { stores, shell } = getAppContext();
+  const payload = workspacePageNoticeFor(
+    standingUpdateNotice(
+      stores.updates.forAgent(agentId),
+      stores.updates.isUpdating(agentId),
+    ),
+  );
+  if (payload === null) return null;
+  return m(
+    Notice,
+    { variant: payload.variant, extra: "mb-4", id: "ws-settings-out-of-date" },
+    m("div", { class: "flex items-center justify-between gap-3" }, [
+      m("span", payload.message),
+      payload.action !== null
+        ? m(
+            Button,
+            {
+              variant: "secondary",
+              onclick: () => shell.openUpdateModal(agentId),
+            },
+            payload.action.label,
+          )
+        : null,
+    ]),
+  );
+}
+
+/** Why "Update now" is greyed out: a disabled button with nothing beside it
+ * reads as a bug. */
+function disabledUpdateReason(update: UiWorkspaceUpdate): m.Children {
+  const reason =
+    update.availability === "UP_TO_DATE"
+      ? "This workspace is up to date."
+      : update.availability === "APP_BEHIND"
+        ? "This workspace is newer than this copy of Imbue Studio. Update the app to catch up."
+        : isRecreationRequired(update)
+          ? "This workspace is too old to update in place. Create a new workspace and ask its agent to migrate your work across."
+          : "";
+  return reason
+    ? m("p", { class: "type-helper text-tertiary mt-2" }, reason)
+    : null;
+}
+
+/** The Updates group: versions, the update action, and the collapsed
+ * specific-version override. The override is a real feature (an up-to-date
+ * machine can be moved to a branch or a newer release) but collapsed because
+ * naming a ref is the rare path. */
+function renderUpdatesGroup(
+  agentId: string,
+  local: SettingsGroupsLocalState,
+): m.Children {
+  const { stores, shell } = getAppContext();
+  const updates = stores.updates;
+  const update = updates.forAgent(agentId);
+  const isUpdating = updates.isUpdating(agentId);
+  const pending = forMachine(local.pendingDispatch, agentId);
+  const pendingSchedule = forMachine(local.pendingSchedule, agentId);
+  const isBusy = pending !== null || pendingSchedule !== null;
+  const prefill = devOverridePrefill(update.supported_version ?? "");
+  const draft = forMachine(local.overrideDraft, agentId);
+  const overrideValue = draft?.value ?? prefill;
+
+  /** A press of either update-now button; asks the same no-backups question the modal asks. */
+  function requestDispatch(targetRef: string): void {
+    local.updateError = null;
+    if (updates.needsNoBackupConfirmation(agentId)) {
+      local.noBackupConfirm = { agentId, action: "now", targetRef };
+      return;
+    }
+    dispatch(targetRef);
+  }
+
+  /** A press of either schedule button; asks the same no-backups question the modal asks. */
+  function requestSchedule(targetRef: string): void {
+    local.updateError = null;
+    if (updates.needsNoBackupConfirmation(agentId)) {
+      local.noBackupConfirm = { agentId, action: "schedule", targetRef };
+      return;
+    }
+    writeSchedule("schedule", targetRef);
+  }
+
+  function writeSchedule(action: "schedule" | "cancel", targetRef = ""): void {
+    const inFlight = { agentId, action, targetRef };
+    local.pendingSchedule = inFlight;
+    local.updateError = null;
+    const call =
+      action === "schedule"
+        ? updates.scheduleUpdate(agentId, targetRef)
+        : updates.cancelSchedule(agentId);
+    void call.then((result) => {
+      if (local.pendingSchedule === inFlight) local.pendingSchedule = null;
+      if (!result.isOk)
+        local.updateError = {
+          agentId,
+          message: result.error,
+          detail: result.detail,
+        };
+      m.redraw();
+    });
+  }
+
+  function dispatch(targetRef: string): void {
+    const inFlight = { agentId, targetRef };
+    local.pendingDispatch = inFlight;
+    local.updateError = null;
+    void updates.updateNow(agentId, targetRef).then((result) => {
+      // Only if still the dispatch being waited on: a press on another machine
+      // meanwhile owns the slot.
+      if (local.pendingDispatch === inFlight) local.pendingDispatch = null;
+      // Into the machine, as the modal's Update now does: an attended update is a conversation.
+      if (result.isOk) shell.enterWorkspace(agentId);
+      else
+        local.updateError = {
+          agentId,
+          message: result.error,
+          detail: result.detail,
+        };
+      m.redraw();
+    });
+  }
+
+  const activity = updateActivityNotice(update, isUpdating);
+  const held = forMachine(local.noBackupConfirm, agentId);
+  const shownError =
+    forMachine(local.updateError, agentId) ??
+    recordedDispatchFailure(update, isUpdating);
+  const errorMessage = shownError.message;
+
+  return m("div", { class: "max-w-md" }, [
+    m(SectionHeader, "Version"),
+    m("div", { class: "flex flex-col gap-1 mb-8" }, [
+      updateVersionRow("This workspace", update.current_version ?? ""),
+      updateVersionRow(
+        "Supported by Imbue Studio",
+        update.supported_version ?? "",
+      ),
+    ]),
+    m(SectionHeader, "Update"),
+    m("div", { id: "ws-updates-group", class: "mb-3" }, [
+      activity.message
+        ? m(
+            Notice,
+            { variant: "info", extra: "mb-3" },
+            m("span", { class: "inline-flex items-center gap-2" }, [
+              activity.isWaiting ? m(Spinner, { size: "sm" }) : null,
+              m("span", activity.message),
+            ]),
+          )
+        : null,
+      m(
+        "p",
+        { class: "type-helper text-secondary mb-3" },
+        "Updating runs an agent inside this workspace, which uses credits. Its chat is the record of what was done.",
+      ),
+      held !== null
+        ? // The question replaces the controls so there is one way to answer it.
+          noBackupConfirmPrompt({
+            onConfirm: () => {
+              local.noBackupConfirm = null;
+              if (held.action === "schedule")
+                writeSchedule("schedule", held.targetRef);
+              else dispatch(held.targetRef);
+            },
+            onCancel: () => {
+              local.noBackupConfirm = null;
+            },
+          })
+        : [
+            update.is_scheduled
+              ? m(
+                  "p",
+                  { class: "type-helper text-secondary mb-3" },
+                  scheduledLine(update, updates.updateWindow),
+                )
+              : null,
+            // Schedule first, as in the modal: the update window is when nobody is in the machine.
+            m("div", { class: "flex items-center gap-2" }, [
+              update.is_scheduled
+                ? m(
+                    Button,
+                    {
+                      variant: "secondary",
+                      id: "ws-update-cancel-schedule-btn",
+                      disabled: isBusy,
+                      onclick: () => writeSchedule("cancel"),
+                    },
+                    pendingSchedule?.action === "cancel"
+                      ? m(Spinner, { size: "sm" })
+                      : "Cancel schedule",
+                  )
+                : m(
+                    Button,
+                    {
+                      variant: "primary",
+                      id: "ws-update-schedule-btn",
+                      disabled:
+                        isBusy || isUpdating || !isUpdateDispatchable(update),
+                      onclick: () => requestSchedule(""),
+                    },
+                    pendingSchedule?.action === "schedule" &&
+                      pendingSchedule.targetRef === ""
+                      ? m(Spinner, { size: "sm" })
+                      : "Schedule update",
+                  ),
+              m(
+                Button,
+                {
+                  variant: "secondary",
+                  id: "ws-update-now-btn",
+                  disabled:
+                    isBusy || isUpdating || !isUpdateDispatchable(update),
+                  onclick: () => requestDispatch(""),
+                },
+                pending?.targetRef === ""
+                  ? m(Spinner, { size: "sm" })
+                  : "Update now",
+              ),
+            ]),
+            disabledUpdateReason(update),
+            // A named version is applied by the same in-place run, so a machine
+            // too old for one is too old for the other.
+            isRecreationRequired(update)
+              ? null
+              : m(
+                  Collapsible,
+                  {
+                    id: "update-override",
+                    isOpen: local.isOverrideOpen,
+                    onToggle: () =>
+                      (local.isOverrideOpen = !local.isOverrideOpen),
+                    extra: "mt-4",
+                    triggerExtra:
+                      "inline-flex items-center gap-1 type-helper text-secondary hover:text-primary",
+                    panelExtra: "flex flex-col gap-2 mt-2",
+                    summary: m("span", "Update to a specific version"),
+                  },
+                  [
+                    m("div", { class: "flex items-center gap-2" }, [
+                      m(TextInput, {
+                        id: "update-override-input",
+                        name: "update_override_ref",
+                        value: overrideValue,
+                        placeholder: "minds-v0.4.2, main, or a git ref",
+                        spellcheck: "false",
+                        autocomplete: "off",
+                        "aria-label": "Version to update to",
+                        extra: "flex-1",
+                        oninput: (event: InputEvent) => {
+                          local.overrideDraft = {
+                            agentId,
+                            value: (event.target as HTMLInputElement).value,
+                          };
+                        },
+                      }),
+                      m(
+                        Button,
+                        {
+                          variant: "secondary",
+                          id: "update-override-btn",
+                          disabled:
+                            isBusy || isUpdating || overrideValue.trim() === "",
+                          onclick: () => requestDispatch(overrideValue.trim()),
+                        },
+                        pending !== null && pending.targetRef !== ""
+                          ? m(Spinner, { size: "sm" })
+                          : "Update to this version",
+                      ),
+                      // The same confirmation the press above is; scheduling only
+                      // changes when the run happens.
+                      m(
+                        Button,
+                        {
+                          variant: "secondary",
+                          id: "update-override-schedule-btn",
+                          disabled:
+                            isBusy || isUpdating || overrideValue.trim() === "",
+                          onclick: () => requestSchedule(overrideValue.trim()),
+                        },
+                        pendingSchedule?.action === "schedule" &&
+                          pendingSchedule.targetRef !== ""
+                          ? m(Spinner, { size: "sm" })
+                          : "Schedule",
+                      ),
+                    ]),
+                    prefill && draft === null
+                      ? m(
+                          "p",
+                          { class: "type-helper text-tertiary" },
+                          "Prefilled with the template ref this build of Imbue Studio runs from.",
+                        )
+                      : null,
+                    m(
+                      "p",
+                      { class: "type-helper text-tertiary" },
+                      "Works on an up-to-date workspace too. A version newer than this Imbue Studio app, a branch, or a bare " +
+                        "ref is allowed and applied without further confirmation: it may not be a tested release, " +
+                        "parts of this workspace may stop working until the app catches up, and the update agent " +
+                        'offers a rollback afterwards. On a branch, this workspace may afterwards read as "version unknown".',
+                    ),
+                  ],
+                ),
+          ],
+      errorMessage
+        ? m(
+            "div",
+            { class: "type-helper text-important mt-3", role: "alert" },
+            [errorMessage, machineVerdict(shownError.detail)],
+          )
+        : null,
+    ]),
+  ]);
 }
 
 function renderGeneralGroup(
@@ -343,179 +696,34 @@ function renderGeneralGroup(
   ]);
 }
 
-const SIZE_NOT_REPORTED = "This machine does not report its size.";
-const SIZE_NOT_READ = "The machine's size could not be read.";
-
-/** The machine's size: what its provider recorded, plus, for a resizable
- * machine, the fields and the action that change it (a local docker or lima
- * machine is restarted to apply the change; an Imbue Cloud machine's size is
- * saved for its next restart, which the status notice offers), or a passive
- * restart-to-apply note when a size is pending on a machine the page cannot
- * resize. Always drawn, so the page says where the size stands (being read,
- * not reported, or known) rather than leaving a gap. */
+/** The machine's size: what its provider recorded, plus, for a local docker or
+ * lima machine, the fields and the action that change it (the machine is
+ * restarted to apply the change), and for an Imbue Cloud machine a passive
+ * restart-to-apply note when a resize is pending. Hidden entirely (null)
+ * until the lazy size fetch succeeds. */
 function renderMachineSizeSection(
   model: WorkspaceOptionsModel,
   local: SettingsGroupsLocalState,
 ): m.Children {
+  const size = model.machineSize;
+  if (size === null || !size.is_available) return null;
+  const currentLabel = formatMachineSizeNumbers(size);
+  if (!currentLabel) return null;
+  const pendingLabel = formatPendingMachineSize(size);
   return [
     m(SectionHeader, "Machine size"),
-    m(
-      "div",
-      { id: "machine-size-section", class: "mb-8" },
-      renderMachineSizeBody(model, local),
-    ),
-  ];
-}
-
-function renderMachineSizeBody(
-  model: WorkspaceOptionsModel,
-  local: SettingsGroupsLocalState,
-): m.Children {
-  const size = model.machineSize;
-  if (size === null) {
-    switch (model.machineSizeState) {
-      case "loading":
-        return m(
-          "p",
-          {
-            id: "machine-size-loading",
-            class: "type-body text-secondary flex items-center gap-2",
-          },
-          [m(Spinner, { size: "sm" }), "Reading the machine's size…"],
-        );
-      case "load_failed":
-        return m(
-          "p",
-          { id: "machine-size-load-failed", class: "type-body text-secondary" },
-          SIZE_NOT_READ,
-        );
-      default:
-        return m(
-          "p",
-          { id: "machine-size-unavailable", class: "type-body text-secondary" },
-          SIZE_NOT_REPORTED,
-        );
-    }
-  }
-  return [
-    m(
-      "p",
-      { class: "type-body text-secondary" },
-      formatMachineSizeNumbers(size) || SIZE_NOT_REPORTED,
-    ),
-    renderMachineSizeStatus(model, size),
-    renderMachineSizeControls(model, local, size),
-  ];
-}
-
-/** The size controls, a loading state while whether they are offered is
- * still being read, or nothing for a machine this page cannot resize. */
-function renderMachineSizeControls(
-  model: WorkspaceOptionsModel,
-  local: SettingsGroupsLocalState,
-  size: WorkspaceMachineSizeData,
-): m.Children {
-  if (size.is_resize_offer_pending === true || model.isResizeOfferLoading) {
-    return m(
-      "p",
-      {
-        id: "machine-size-offer-loading",
-        class: "type-helper text-tertiary mt-2 flex items-center gap-2",
-      },
-      [
-        m(Spinner, { size: "sm" }),
-        "Checking whether this machine's size can be changed…",
-      ],
-    );
-  }
-  if (!size.is_resizable) return null;
-  return isMachineSizePickedFromChoices(size)
-    ? renderMachineResizeFromChoices(model, local, size)
-    : renderMachineResize(model, local);
-}
-
-/** The one notice about a size in flux, in order of what matters most: the
- * restart under way (and so not to be asked for again), the size waiting for a
- * restart (with the restart itself when this page can ask for it: a running
- * Imbue Cloud machine whose size the page changes), or what the last change
- * did when nothing else on the page says it. */
-function renderMachineSizeStatus(
-  model: WorkspaceOptionsModel,
-  size: WorkspaceMachineSizeData,
-): m.Children {
-  const pendingLabel = formatPendingMachineSize(size);
-  if (model.isRestartInProgress) {
-    return m(
-      Notice,
-      { variant: "info", id: "machine-size-restarting" },
-      m("div", { class: "flex items-center gap-3" }, [
-        m(Spinner, { size: "sm" }),
-        m("span", machineRestartingText(model, size, pendingLabel)),
-      ]),
-    );
-  }
-  if (!pendingLabel) {
-    return model.resizeNotice
-      ? m(
-          Notice,
-          { variant: "info", id: "machine-resize-notice" },
-          model.resizeNotice,
-        )
-      : null;
-  }
-  const isRestartOffered =
-    size.is_resizable &&
-    isMachineSizePickedFromChoices(size) &&
-    size.is_running === true;
-  if (!isRestartOffered) {
-    return m(
-      Notice,
-      { variant: "info" },
-      `A new size is pending (${pendingLabel}). Restart this workspace's machine to apply it.`,
-    );
-  }
-  return m(Notice, { variant: "info", id: "machine-size-pending" }, [
-    m("div", { class: "flex items-center justify-between gap-3 flex-wrap" }, [
-      m(
-        "span",
-        `A new size is pending (${pendingLabel}). Restarting the machine applies it: the restart backs up ` +
-          "the machine's disks first, so it can take a while.",
-      ),
-      m(
-        Button,
-        {
-          variant: "secondary",
-          id: "machine-size-restart-btn",
-          disabled: model.isRestartBusy || model.isResizeBusy,
-          onclick: () => {
-            void model.restartMachineToApplySize();
-          },
-        },
-        model.isRestartBusy ? m(Spinner, { size: "sm" }) : "Restart now",
-      ),
+    m("div", { id: "machine-size-section", class: "mb-8" }, [
+      m("p", { class: "type-body text-secondary" }, currentLabel),
+      pendingLabel
+        ? m(
+            Notice,
+            { variant: "info" },
+            `A new size is pending (${pendingLabel}). Restart this workspace's machine to apply it.`,
+          )
+        : null,
+      size.is_resizable ? renderMachineResize(model, local) : null,
     ]),
-  ]);
-}
-
-/** What the running restart is doing: applying a new size when this page asked
- * for the restart or a size is pending, else the plain start or restart the
- * app reports (a stopped machine's start, the recovery card's restart), which
- * the section only waits out. */
-function machineRestartingText(
-  model: WorkspaceOptionsModel,
-  size: WorkspaceMachineSizeData,
-  pendingLabel: string,
-): string {
-  if (!model.isRestartDispatched && !pendingLabel) {
-    return size.is_resizable
-      ? "The machine is starting or restarting; its size can be changed once that finishes."
-      : "The machine is starting or restarting.";
-  }
-  const applying = pendingLabel ? ` (${pendingLabel})` : "";
-  return isMachineSizePickedFromChoices(size)
-    ? `The machine is restarting to apply the new size${applying}. The restart backs up ` +
-        "the machine's disks first, so it can take a few minutes."
-    : `The machine is restarting to apply the new size${applying}.`;
+  ];
 }
 
 /** The resize fields as typed for this machine, or its current size until they are edited. */
@@ -524,10 +732,7 @@ function currentSizeDraft(
   local: SettingsGroupsLocalState,
   size: WorkspaceMachineSizeData,
 ): MachineSizeDraft {
-  return (
-    forMachine(local.sizeDraft, model.agentId)?.draft ??
-    machineSizeDraftFor(size)
-  );
+  return forMachine(local.sizeDraft, model.agentId)?.draft ?? machineSizeDraftFor(size);
 }
 
 /** One resize field, keyed to the machine it is typed for. */
@@ -537,24 +742,15 @@ function machineResizeField(
   size: WorkspaceMachineSizeData,
   dimension: MachineSizeDimension,
   label: string,
-  bounds: { min?: string; max?: string; disabled?: boolean } = {},
 ): m.Children {
   const draft = currentSizeDraft(model, local, size);
   return m(MachineSizeInput, {
     dimension,
     label,
     value: draft[dimension],
-    disabled:
-      model.isResizeBusy ||
-      model.isRestartInProgress ||
-      bounds.disabled === true,
-    min: bounds.min,
-    max: bounds.max,
+    disabled: model.isResizeBusy,
     oninput: (text: string) => {
-      local.sizeDraft = {
-        agentId: model.agentId,
-        draft: { ...draft, [dimension]: text },
-      };
+      local.sizeDraft = { agentId: model.agentId, draft: { ...draft, [dimension]: text } };
     },
   });
 }
@@ -577,15 +773,13 @@ function renderMachineResize(
     m("div", { class: "flex flex-wrap items-center gap-3" }, [
       machineResizeField(model, local, size, "cpu_count", "CPUs"),
       machineResizeField(model, local, size, "memory_gb", "GB RAM"),
-      size.is_disk_resizable
-        ? machineResizeField(model, local, size, "disk_gb", "GB disk")
-        : null,
+      size.is_disk_resizable ? machineResizeField(model, local, size, "disk_gb", "GB disk") : null,
       m(
         Button,
         {
           variant: "secondary",
           id: "machine-resize-btn",
-          disabled: model.isResizeBusy || model.isRestartInProgress,
+          disabled: model.isResizeBusy,
           // The draft is kept on success: it is the size that was recorded,
           // which discovery reports back only on its next pass.
           onclick: () => {
@@ -595,167 +789,17 @@ function renderMachineResize(
         model.isResizeBusy ? m(Spinner, { size: "sm" }) : "Apply and restart",
       ),
     ]),
-    renderMachineResizeError(model),
-  ]);
-}
-
-/** What the plan leaves for this machine: the RAM its other running machines
- * use against the plan's quota, and the same for disk. */
-function machineSizePlanLine(size: WorkspaceMachineSizeData): string {
-  const parts: string[] = [];
-  if (
-    size.plan_memory_limit_gb !== null &&
-    size.plan_memory_limit_gb !== undefined
-  ) {
-    const others = size.other_machines_memory_gb ?? 0;
-    parts.push(
-      `Your plan allows ${size.plan_memory_limit_gb} GB of RAM across running machines` +
-        (others > 0
-          ? `, of which other running machines use ${others} GB.`
-          : "."),
-    );
-  }
-  if (size.max_disk_gb !== null && size.max_disk_gb !== undefined) {
-    parts.push(
-      size.max_disk_gb > minimumMachineDiskGb(size)
-        ? `The disk can grow to ${size.max_disk_gb} GB.`
-        : "The plan leaves no room to grow the disk.",
-    );
-  }
-  return parts.join(" ");
-}
-
-/** The RAM field of a machine sized from choices: a select over the sizes
- * the plan allows, the largest marked when the plan (not the fleet) caps it,
- * keyed to the machine it is picked for. */
-function machineMemoryChoiceField(
-  model: WorkspaceOptionsModel,
-  local: SettingsGroupsLocalState,
-  size: WorkspaceMachineSizeData,
-  isDisabled: boolean,
-): m.Children {
-  const draft = currentSizeDraft(model, local, size);
-  const choices = size.memory_choices_gb ?? [];
-  const largestChoice = choices[choices.length - 1];
-  const memoryId = "machine-size-memory_gb";
-  return m("div", { class: "flex items-center gap-2" }, [
-    m(
-      FormLabel,
-      {
-        target: memoryId,
-        inline: true,
-        extra: "type-helper text-secondary",
-      },
-      "GB RAM",
-    ),
-    m(
-      Select,
-      {
-        id: memoryId,
-        name: "memory_gb",
-        width: "w-40",
-        value: draft.memory_gb,
-        disabled: isDisabled,
-        onchange: (event: Event) => {
-          local.sizeDraft = {
-            agentId: model.agentId,
-            draft: {
-              ...draft,
-              memory_gb: (event.target as HTMLSelectElement).value,
-            },
-          };
-        },
-      },
-      choices.map((gb) =>
-        m(
-          "option",
-          { value: String(gb), selected: String(gb) === draft.memory_gb },
-          gb === largestChoice && size.is_memory_capped_by_plan
-            ? `${gb} GB (plan limit)`
-            : `${gb} GB`,
-        ),
-      ),
-    ),
-  ]);
-}
-
-/** The Imbue Cloud resize: RAM picked from the sizes the plan allows, a
- * grow-only disk, and the save that records the size for the next restart. */
-function renderMachineResizeFromChoices(
-  model: WorkspaceOptionsModel,
-  local: SettingsGroupsLocalState,
-  size: WorkspaceMachineSizeData,
-): m.Children {
-  const isTransitioning = size.is_transitioning === true;
-  const isDisabled =
-    model.isResizeBusy ||
-    model.isRestartBusy ||
-    model.isRestartInProgress ||
-    isTransitioning;
-  return m("div", { id: "machine-resize", class: "mt-3" }, [
-    m(
-      "p",
-      { class: "type-helper text-tertiary mb-2" },
-      "Pick the RAM, and optionally grow the disk (it never shrinks), then save. CPUs scale with the RAM. " +
-        "The new size takes effect the next time the machine restarts.",
-    ),
-    isTransitioning
+    model.resizeErrorMessage
       ? m(
           "p",
-          {
-            id: "machine-resize-wait",
-            class: "type-helper text-secondary mb-2",
-          },
-          "The machine is starting or stopping; its size can be changed once that finishes.",
+          { id: "machine-resize-error", class: "type-helper text-important mt-2", role: "alert" },
+          model.resizeErrorMessage,
         )
       : null,
-    m("div", { class: "flex flex-wrap items-center gap-3" }, [
-      machineMemoryChoiceField(model, local, size, isDisabled),
-      size.is_disk_resizable
-        ? machineResizeField(model, local, size, "disk_gb", "GB disk", {
-            min: String(minimumMachineDiskGb(size)),
-            max:
-              size.max_disk_gb === null || size.max_disk_gb === undefined
-                ? undefined
-                : String(size.max_disk_gb),
-            disabled: isDisabled,
-          })
-        : null,
-      m(
-        Button,
-        {
-          variant: "secondary",
-          id: "machine-resize-btn",
-          disabled: isDisabled,
-          onclick: () => {
-            void model.resizeMachine(currentSizeDraft(model, local, size));
-          },
-        },
-        model.isResizeBusy ? m(Spinner, { size: "sm" }) : "Save size",
-      ),
-    ]),
-    m(
-      "p",
-      { id: "machine-size-plan-line", class: "type-helper text-tertiary mt-2" },
-      machineSizePlanLine(size),
-    ),
-    renderMachineResizeError(model),
+    model.resizeNotice
+      ? m(Notice, { variant: "info", extra: "mt-2", id: "machine-resize-notice" }, model.resizeNotice)
+      : null,
   ]);
-}
-
-/** The last resize's or restart's refusal, under either form. */
-function renderMachineResizeError(model: WorkspaceOptionsModel): m.Children {
-  return model.resizeErrorMessage
-    ? m(
-        "p",
-        {
-          id: "machine-resize-error",
-          class: "type-helper text-important mt-2",
-          role: "alert",
-        },
-        model.resizeErrorMessage,
-      )
-    : null;
 }
 
 function commitHexDraft(
@@ -784,28 +828,21 @@ function renderAccountGroup(
   return m("div", [
     m(SectionHeader, "Account"),
     m("div", { id: "account-section" }, [
-      data.is_account_owned_provider
-        ? [
-            data.current_account
-              ? m("p", { class: "type-body text-primary mb-3" }, [
-                  "Linked to ",
-                  m("strong", data.current_account.email),
-                  ".",
-                ])
-              : data.leased_owner_email
-                ? m("p", { class: "type-body text-primary mb-3" }, [
-                    "This workspace is owned by ",
+      data.is_leased_imbue_cloud
+        ? m(
+            "p",
+            { id: "leased-account-note", class: "type-body text-secondary" },
+            [
+              "Workspaces running in Imbue Cloud can't be moved to a different account.",
+              data.leased_owner_email
+                ? [
+                    " This workspace is owned by ",
                     m("strong", data.leased_owner_email),
                     ".",
-                  ])
+                  ]
                 : null,
-            m(
-              Notice,
-              { variant: "info" },
-              "This workspace runs on a provider owned by its account (Imbue Cloud, or one of the account's cloud " +
-                "connections), so its account link is fixed and cannot be changed.",
-            ),
-          ]
+            ],
+          )
         : data.current_account
           ? [
               m("p", { class: "type-body text-primary mb-3" }, [
@@ -848,15 +885,6 @@ function renderAccountGroup(
   ]);
 }
 
-/**
- * The workspace now belongs to another window's account (every window shows one
- * account), so once an association change lands this window leaves for its
- * own account's hub rather than keep showing a workspace that is no longer its.
- */
-function leaveForHubIfMoved(isMoved: boolean): void {
-  if (isMoved) getAppContext().shell.routeToHub();
-}
-
 function renderAssociatePrompt(
   model: WorkspaceOptionsModel,
   accounts: { user_id: string; email: string }[],
@@ -873,12 +901,7 @@ function renderAssociatePrompt(
         { class: "type-body text-secondary" },
         m(
           "a",
-          {
-            class: "text-primary underline",
-            ...routeLinkAttrs(
-              m.buildPathname("/accounts", getAppContext().shell.overlayQuery()),
-            ),
-          },
+          { class: "text-primary underline", ...routeLinkAttrs("/accounts") },
           "Sign in or create an account",
         ),
       ),
@@ -899,8 +922,7 @@ function renderAssociatePrompt(
           {
             variant: "secondary",
             disabled: model.isAccountBusy,
-            onclick: () =>
-              void model.setAccount(account.user_id).then(leaveForHubIfMoved),
+            onclick: () => void model.setAccount(account.user_id),
           },
           `Link to ${account.email}`,
         ),
@@ -1011,9 +1033,8 @@ function renderUnlinkDialog(
             id: "unlink-confirm-btn",
             disabled: model.isAccountBusy,
             onclick: () => {
-              void model.setAccount(null).then((isMoved) => {
+              void model.setAccount(null).then(() => {
                 local.isUnlinkDialogOpen = false;
-                leaveForHubIfMoved(isMoved);
               });
             },
           },

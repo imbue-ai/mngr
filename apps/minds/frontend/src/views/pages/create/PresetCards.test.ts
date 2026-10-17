@@ -6,15 +6,10 @@ import { PresetCard } from "../../components/PresetCard";
 import { PRESET_TITLES, PresetCards } from "./PresetCards";
 import type { PresetName } from "./form-model";
 
-function renderCards(
-  selectedPreset: PresetName | null,
-  onSelect: (name: PresetName) => void,
-  isRemoteOffered = true,
-): AnyVnode[] {
+function renderCards(selectedPreset: PresetName | null, onSelect: (name: PresetName) => void): AnyVnode[] {
   const component = PresetCards();
-  const vnode = { attrs: { selectedPreset, isRemoteOffered, onSelect } } as m.Vnode<{
+  const vnode = { attrs: { selectedPreset, onSelect } } as m.Vnode<{
     selectedPreset: PresetName | null;
-    isRemoteOffered: boolean;
     onSelect(name: PresetName): void;
   }>;
   return collectVnodes(component.view.call(component, vnode)).filter((node) => node.tag === PresetCard);
@@ -35,12 +30,5 @@ describe("PresetCards", () => {
 
     for (const card of cards) (attrsOf(card).onclick as () => void)();
     expect(onSelect.mock.calls).toEqual([["remote"], ["local"], ["own-cloud"]]);
-  });
-
-  it("offers no Imbue Cloud card when it is not offered, keeping the other two", () => {
-    const cards = renderCards("local", vi.fn(), false);
-
-    expect(cards.map((card) => attrsOf(card).preset)).toEqual(["local", "own-cloud"]);
-    expect(cards.map((card) => attrsOf(card).selected)).toEqual([true, false]);
   });
 });

@@ -55,6 +55,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.utils.file_watch import DirectoryWatchGroup
 from imbue.mngr.utils.file_watch import WATCHED_TAIL_FALLBACK_POLL_SECONDS
@@ -184,13 +185,6 @@ class DiscoveryError(FrozenModel):
     traceback_text: str | None = Field(
         default=None, description="Formatted traceback of the exception, when one was available"
     )
-    # A provider that cannot be reached for want of credentials knows the command that
-    # fixes it (``ProviderUnavailableError.short_remediation``); carrying it here lets a
-    # consumer show the fix without parsing the message. Optional so replayed snapshots
-    # written before this field existed still parse.
-    remediation: str | None = Field(
-        default=None, description="The concise next step the provider named for this error, when it named one"
-    )
 
 
 class FullDiscoverySnapshotEvent(EventEnvelope):
@@ -281,6 +275,10 @@ class HostSSHInfoEvent(EventEnvelope):
     type: Literal[DiscoveryEventType.HOST_SSH_INFO] = DiscoveryEventType.HOST_SSH_INFO
     host_id: HostId = Field(description="ID of the host")
     ssh: SSHInfo = Field(description="SSH connection info for the host")
+    published_endpoints: list[PublishedEndpoint] = Field(
+        default_factory=list,
+        description="Where each of the host's published ports is reachable from this client (additive; empty when none)",
+    )
 
 
 class DiscoveryErrorEvent(EventEnvelope):
@@ -577,8 +575,13 @@ def emit_host_destroyed(
     logger.trace("Emitted host_destroyed event for {}", host_id)
 
 
-def emit_host_ssh_info(config: MngrConfig, host_id: HostId, ssh: SSHInfo) -> None:
-    """Build and append a host SSH info event."""
+def emit_host_ssh_info(
+    config: MngrConfig,
+    host_id: HostId,
+    ssh: SSHInfo,
+    published_endpoints: Sequence[PublishedEndpoint] = (),
+) -> None:
+    """Build and append a host SSH info event, carrying the host's published endpoints beside its SSH info."""
     timestamp, event_id = _make_envelope_fields()
     event = HostSSHInfoEvent(
         timestamp=timestamp,
@@ -586,6 +589,7 @@ def emit_host_ssh_info(config: MngrConfig, host_id: HostId, ssh: SSHInfo) -> Non
         source=DISCOVERY_EVENT_SOURCE,
         host_id=host_id,
         ssh=ssh,
+        published_endpoints=list(published_endpoints),
     )
     append_discovery_event(config, event)
     logger.trace("Emitted host_ssh_info event for {}", host_id)

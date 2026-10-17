@@ -6,21 +6,18 @@ import { NoticeBand } from "./NoticeBand";
 import { Shell } from "./Shell";
 import { ToastLayer } from "./ToastLayer";
 import { UpdateApplyModal } from "../components/UpdateApplyModal";
+import { UpdateModal } from "../components/UpdateModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { WorkspaceFrame } from "./WorkspaceFrame";
-import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
-import { AutoUpdatePromptModel } from "../../models/autoUpdatePrompt";
+import { PopoutDropOverlay } from "./PopoutDropOverlay";
 import type { UiNotificationEntry } from "../../channel/messages";
 import type { AnyVnode } from "../../testing";
 import {
   allText,
   attrsOf,
   collectVnodes,
-  jsonResponse,
   notificationEntry,
   renderRoot,
-  settingsOverview,
-  settle,
 } from "../../testing";
 
 const WORKSPACE_ID = "agent-ab12";
@@ -79,18 +76,13 @@ function updatesStoreStub(
   availability: "UP_TO_DATE" | "OUT_OF_DATE",
   isUpdating = false,
   isApplying = false,
-  isAutoUpdateEnabled = false,
-  fields: Record<string, unknown> = {},
 ) {
-  const update = { availability, activity: isApplying ? "APPLYING" : "IDLE", ...fields };
+  const update = { availability, activity: isApplying ? "APPLYING" : "IDLE" };
   return {
     forAgent: () => update,
     publishedFor: () => update,
     isApplying: () => isApplying,
     isUpdating: () => isUpdating,
-    isAutoUpdateEnabled,
-    autoUpdateFor: () => ({ isEnabled: isAutoUpdateEnabled, window: "2:00 AM-5:00 AM", override: null }),
-    hasReceivedUpdates: true,
   };
 }
 
@@ -105,12 +97,9 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
     currentRouteSearch: () => `workspace=${WORKSPACE_ID}`,
     closeAppOverlay: () => true,
     displayedWorkspaceAgentId: () => WORKSPACE_ID,
-    accountId: "local",
     stores: {
       requests: { hasPendingForWorkspace: () => false },
-      accounts: { labelFor: () => "This device" },
       workspaces: {
-        workspaces: [],
         toAgentScopedId: (anyId: string) => anyId,
         entryByAnyId: () => null,
       },
@@ -127,8 +116,7 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
       updates: updatesStoreStub("UP_TO_DATE"),
     },
     isRecoveryModalOpenFor: () => false,
-    // Never loaded, so it never offers: suites not about it see no prompt.
-    autoUpdatePrompt: new AutoUpdatePromptModel(),
+    openUpdateModalAgentId: () => null,
     ...overrides,
   } as unknown as ShellState;
   return { state };
@@ -323,9 +311,9 @@ describe("Shell request popup layer", () => {
     ).toBe(false);
   });
 
-  it("draws all six titlebar icons, not just the one the popup is", () => {
+  it("draws all five titlebar icons, not just the one the popup is", () => {
     // The popup covers the titlebar's icons, so drawing only its own key took
-    // the others off screen for as long as it was open.
+    // the other four off screen for as long as it was open.
     const { state } = makeShell();
     stubTitlebar();
     const root = renderShell(state, "/inbox", m("div#request-popup"), {
@@ -446,12 +434,9 @@ describe("Shell notifications overlay", () => {
     return makeShell({
       isNotificationsOpen: true,
       closeNotifications: () => undefined,
-      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
-        accounts: { labelFor: () => "This device" },
         workspaces: {
-          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -773,8 +758,6 @@ describe("Shell app-overlay card chrome", () => {
       "/inbox",
       "/settings/ai-keys",
       "/create/template",
-      // The route the stepper is actually opened on: its account's hub.
-      "/account/local/create/template",
     ]) {
       expect(String(overlayAttrsAt(routePath).bodyClass), routePath).toContain(
         "overflow-y-auto",
@@ -790,12 +773,9 @@ describe("Shell notice band wiring", () => {
     // band's field, so a stuck machine on a blocked network is narrated as the
     // network rather than as its own failure.
     const { state } = makeShell({
-      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
-        accounts: { labelFor: () => "This device" },
         workspaces: {
-          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -822,34 +802,46 @@ describe("Shell notice band wiring", () => {
   });
 
   it.each([
-    ["out of date", false, false],
-    ["preparing its update", true, false],
-    ["landing its update", true, true],
-  ])("says nothing on the band about a machine %s: its update is the titlebar pill's", (_name, isUpdating, isApplying) => {
+    [
+      "reading it as out of date raises the version band",
+      false,
+      "This workspace is running an older version of Imbue Studio.",
+    ],
+    [
+      "a run in flight replaces that with what the run is doing",
+      true,
+      "Preparing an update for this workspace. Nothing changes until it's ready to land.",
+    ],
+  ])("%s", (_name, isUpdating, expectedMessage) => {
+    // A band still saying "out of date" while the update runs is the two
+    // surfaces disagreeing about one machine.
     const { state } = makeShell({
-      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
-        accounts: { labelFor: () => "This device" },
         workspaces: {
-          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
         health: {
-          // Mid-apply the machine reads unhealthy: the apply took its services down on purpose.
-          statusFor: () => (isApplying ? "stuck" : "healthy"),
+          statusFor: () => "healthy",
           discoveryHealth: "healthy",
           appEnvironmentCondition: () => "NONE",
           recoveryKindFor: () => null,
         },
-        updates: updatesStoreStub("OUT_OF_DATE", isUpdating, isApplying),
+        updates: updatesStoreStub("OUT_OF_DATE", isUpdating),
       },
     } as unknown as Partial<ShellState>);
 
-    const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#content"));
+    const root = renderShell(
+      state,
+      `/workspace/${WORKSPACE_ID}`,
+      m("div#content"),
+    );
 
-    expect(collectVnodes(root).some((vnode) => vnode.tag === NoticeBand)).toBe(false);
+    const band = collectVnodes(root).find((vnode) => vnode.tag === NoticeBand);
+    expect(attrsOf(band as AnyVnode).payload).toMatchObject({
+      message: expectedMessage,
+    });
   });
 
   it("covers a machine whose update is landing with a card nothing dismisses", () => {
@@ -857,12 +849,9 @@ describe("Shell notice band wiring", () => {
     // the machine breaking; the backdrop starts below the titlebar so the
     // switcher stays reachable.
     const { state } = makeShell({
-      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
-        accounts: { labelFor: () => "This device" },
         workspaces: {
-          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => ({ name: "oldie" }),
         },
@@ -897,12 +886,9 @@ describe("Shell notice band wiring", () => {
 
   it("does not cover a machine while its update is only preparing", () => {
     const { state } = makeShell({
-      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
-        accounts: { labelFor: () => "This device" },
         workspaces: {
-          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -927,18 +913,52 @@ describe("Shell notice band wiring", () => {
     ).toBe(false);
   });
 
+  it("draws an out-of-date machine without raising the update modal over it", () => {
+    // The band carries the version; a draw that opens the modal unasked is the
+    // auto-raise back.
+    let openedAgentId: string | null = null;
+    const { state } = makeShell({
+      stores: {
+        requests: { hasPendingForWorkspace: () => false },
+        workspaces: {
+          toAgentScopedId: (anyId: string) => anyId,
+          entryByAnyId: () => null,
+        },
+        health: {
+          statusFor: () => "healthy",
+          discoveryHealth: "healthy",
+          appEnvironmentCondition: () => "NONE",
+          recoveryKindFor: () => null,
+        },
+        updates: updatesStoreStub("OUT_OF_DATE"),
+      },
+      openUpdateModal: (agentId: string) => {
+        openedAgentId = agentId;
+      },
+      openUpdateModalAgentId: () => openedAgentId,
+    } as unknown as Partial<ShellState>);
+
+    const root = renderShell(
+      state,
+      `/workspace/${WORKSPACE_ID}`,
+      m("div#content"),
+    );
+
+    expect(openedAgentId).toBeNull();
+    expect(collectVnodes(root).some((vnode) => vnode.tag === UpdateModal)).toBe(
+      false,
+    );
+  });
+
   it("speaks the device's own condition over a machine nothing has convicted yet", () => {
     // The case the whole app-level reading exists for: the user lands straight
     // on a machine page with the wifi off, and no machine has failed a probe
     // long enough to be convicted -- yet the band must already say what is
     // wrong rather than nothing at all.
     const { state } = makeShell({
-      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
-        accounts: { labelFor: () => "This device" },
         workspaces: {
-          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => ({
             id: WORKSPACE_ID,
@@ -974,12 +994,9 @@ describe("Shell notice band wiring", () => {
     // field the Shell puts in it -- another boolean off the same row would
     // type-check, compile, and give every on-device machine a no-network band.
     const { state } = makeShell({
-      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
-        accounts: { labelFor: () => "This device" },
         workspaces: {
-          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => ({
             id: WORKSPACE_ID,
@@ -1025,12 +1042,9 @@ describe("Shell toast layer", () => {
           entries.map((entry) => ({ id: entry.id, entry })),
         dismissToast: (id: string) => dismissed.push(id),
       } as unknown as ShellState["notificationsUi"],
-      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
-        accounts: { labelFor: () => "This device" },
         workspaces: {
-          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -1073,12 +1087,9 @@ describe("Shell toast layer", () => {
         dismissToast: () => undefined,
       } as unknown as ShellState["notificationsUi"],
       isNotificationsOpen: true,
-      accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
-        accounts: { labelFor: () => "This device" },
         workspaces: {
-          workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
@@ -1121,16 +1132,15 @@ describe("Shell on the popout route", () => {
 
   function componentNames(root: AnyVnode): string[] {
     return collectVnodes(root)
-      .map((vnode) =>
-        typeof vnode.tag === "function"
-          ? ((vnode.tag as { name?: string }).name ?? "")
-          : "",
-      )
+      .map((vnode) => (typeof vnode.tag === "function" ? ((vnode.tag as { name?: string }).name ?? "") : ""))
       .filter((name) => name !== "");
   }
 
   it("mounts the workspace surface in solo mode under the popout bar, with no titlebar or sidebar", () => {
-    const { state } = makeShell({ currentRouteSearch: () => "" } as unknown as Partial<ShellState>);
+    const { state } = makeShell({
+      currentRouteSearch: () => "",
+      isPopoutDropTarget: false,
+    } as unknown as Partial<ShellState>);
     const root = renderShell(state, POPOUT_PATH, m("div#popout-page"));
     const names = componentNames(root);
     expect(names).toContain("PopoutChrome");
@@ -1146,199 +1156,30 @@ describe("Shell on the popout route", () => {
   });
 
   it("tells the workspace shell a popout the app reopened was reopened", () => {
-    const { state } = makeShell({ currentRouteSearch: () => "reopened=1" } as unknown as Partial<ShellState>);
+    const { state } = makeShell({
+      currentRouteSearch: () => "reopened=1",
+      isPopoutDropTarget: false,
+    } as unknown as Partial<ShellState>);
     const root = renderShell(state, POPOUT_PATH, m("div#popout-page"));
     const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
     expect(attrsOf(frame as AnyVnode).soloWindowId).toBe("win-0123");
     expect(attrsOf(frame as AnyVnode).isSoloReopened).toBe(true);
   });
 
-  it("mounts the ordinary surface with no solo window", () => {
-    const { state } = makeShell();
+  it("mounts the ordinary surface with no solo window, and offers a drop only there", () => {
+    const { state } = makeShell({ isPopoutDropTarget: true } as unknown as Partial<ShellState>);
     const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#surface"));
     const names = componentNames(root);
     expect(names).toContain("Titlebar");
+    expect(collectVnodes(root).some((vnode) => vnode.tag === PopoutDropOverlay)).toBe(true);
     const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
     expect(attrsOf(frame as AnyVnode).soloWindowId).toBeNull();
-  });
-});
-
-describe("Shell auto-update prompt", () => {
-  /** A prompt on the first launch into a new app version, with no answer
-   * recorded; `isBackendUp` says whether the settings read succeeds. */
-  function firstLaunchPrompt(isBackendUp: () => boolean = () => true): {
-    model: AutoUpdatePromptModel;
-    settingsReads: () => number;
-  } {
-    let reads = 0;
-    const fetchImpl = (() => {
-      reads += 1;
-      return Promise.resolve(
-        isBackendUp()
-          ? jsonResponse(
-              settingsOverview({ auto_update_prompt_decision: null }),
-            )
-          : jsonResponse({}, 503),
-      );
-    }) as typeof fetch;
-    const model = new AutoUpdatePromptModel(
-      fetchImpl,
-      () => Promise.resolve(true),
-      () => undefined,
-    );
-    return { model, settingsReads: () => reads };
-  }
-
-  function hasPrompt(root: AnyVnode): boolean {
-    return collectVnodes(root).some(
-      (vnode) => vnode.tag === AutoUpdatePromptModal,
-    );
-  }
-
-  it("offers it over the machine a launch restored straight into", async () => {
-    const { model } = firstLaunchPrompt();
-    await model.load();
-    const { state } = makeShell({
-      autoUpdatePrompt: model,
-    } as unknown as Partial<ShellState>);
-    const root = renderShell(
-      state,
-      `/workspace/${WORKSPACE_ID}`,
-      m("div#surface"),
-    );
-    expect(
-      collectVnodes(root).some((vnode) => vnode.tag === WorkspaceFrame),
-    ).toBe(true);
-    expect(hasPrompt(root)).toBe(true);
-  });
-
-  it("offers it over Home, but not over the other pages or a popout window", async () => {
-    const { model } = firstLaunchPrompt();
-    await model.load();
-    const { state } = makeShell({
-      autoUpdatePrompt: model,
+    // A popout dragged over a popout is not a drop target.
+    const popout = makeShell({
       currentRouteSearch: () => "",
+      isPopoutDropTarget: true,
     } as unknown as Partial<ShellState>);
-    expect(
-      hasPrompt(
-        renderShell(state, "/", m("div#home"), { workspaceParam: null }),
-      ),
-    ).toBe(true);
-    expect(
-      hasPrompt(
-        renderShell(state, "/create", m("div#create"), {
-          workspaceParam: null,
-        }),
-      ),
-    ).toBe(false);
-    expect(
-      hasPrompt(
-        renderShell(state, `/popout/${WORKSPACE_ID}/win-0123`, m("div#popout")),
-      ),
-    ).toBe(false);
-  });
-
-  it("waits out one of the Shell's own modals over the machine, then comes up", async () => {
-    const { model } = firstLaunchPrompt();
-    await model.load();
-    let isRecoveryOpen = true;
-    const { state } = makeShell({
-      autoUpdatePrompt: model,
-      isRecoveryModalOpenFor: () => isRecoveryOpen,
-      isRecoveryModalAutoRaised: () => false,
-    } as unknown as Partial<ShellState>);
-    const path = `/workspace/${WORKSPACE_ID}`;
-    expect(hasPrompt(renderShell(state, path, m("div#surface")))).toBe(false);
-    expect(hasPrompt(renderShell(state, "/settings", m("div#settings")))).toBe(
-      false,
-    );
-    isRecoveryOpen = false;
-    expect(hasPrompt(renderShell(state, path, m("div#surface")))).toBe(true);
-  });
-
-  it("reads its answer when the window opens, and again on the next navigation after a failed read", async () => {
-    let isBackendUp = false;
-    const { model, settingsReads } = firstLaunchPrompt(() => isBackendUp);
-    const { state } = makeShell({
-      autoUpdatePrompt: model,
-    } as unknown as Partial<ShellState>);
-    vi.stubGlobal("window", { location: { search: "" } });
-    const instance = Shell() as unknown as m.Component;
-    const lifecycle = (routePath: string): m.Vnode =>
-      ({
-        attrs: {
-          shell: state,
-          routePath,
-          workspaceParam: WORKSPACE_ID,
-          content: null,
-          homeContent: null,
-          behindContent: null,
-          optionsContent: null,
-        },
-      }) as unknown as m.Vnode;
-    const path = `/workspace/${WORKSPACE_ID}`;
-    const view = (routePath: string) =>
-      (instance.view as unknown as (v: m.Vnode) => AnyVnode).call(
-        instance,
-        lifecycle(routePath),
-      );
-
-    (instance.oncreate as unknown as (v: m.Vnode) => void).call(
-      instance,
-      lifecycle(path),
-    );
-    await settle();
-    expect(settingsReads()).toBe(1);
-    expect(hasPrompt(view(path))).toBe(false);
-
-    isBackendUp = true;
-    // A redraw on the same route does not read again.
-    (instance.onupdate as unknown as (v: m.Vnode) => void).call(
-      instance,
-      lifecycle(path),
-    );
-    await settle();
-    expect(settingsReads()).toBe(1);
-
-    (instance.onupdate as unknown as (v: m.Vnode) => void).call(
-      instance,
-      lifecycle("/"),
-    );
-    await settle();
-    expect(settingsReads()).toBe(2);
-    expect(hasPrompt(view("/"))).toBe(true);
-  });
-
-  it("offers it for an out-of-date workspace only while that workspace follows Studio settings", async () => {
-    const model = new AutoUpdatePromptModel(
-      (() =>
-        Promise.resolve(
-          jsonResponse(settingsOverview({ auto_update_prompt_decision: null })),
-        )) as typeof fetch,
-      () => Promise.resolve(false),
-      () => undefined,
-    );
-    await model.load();
-    let override: { mode: "manual" } | null = { mode: "manual" };
-    const { state } = makeShell({
-      autoUpdatePrompt: model,
-      currentRouteSearch: () => "",
-    } as unknown as Partial<ShellState>);
-    const stores = state.stores as unknown as Record<string, unknown>;
-    stores.workspaces = {
-      workspaces: [{ id: WORKSPACE_ID }],
-      toAgentScopedId: (anyId: string) => anyId,
-      entryByAnyId: () => null,
-    };
-    stores.updates = {
-      ...updatesStoreStub("OUT_OF_DATE"),
-      autoUpdateFor: () => ({ isEnabled: false, window: "2:00 AM-5:00 AM", override }),
-    };
-    const home = () =>
-      hasPrompt(renderShell(state, "/", m("div#home"), { workspaceParam: null }));
-
-    expect(home()).toBe(false);
-    override = null;
-    expect(home()).toBe(true);
+    const popoutRoot = renderShell(popout.state, POPOUT_PATH, m("div#popout-page"));
+    expect(collectVnodes(popoutRoot).some((vnode) => vnode.tag === PopoutDropOverlay)).toBe(false);
   });
 });

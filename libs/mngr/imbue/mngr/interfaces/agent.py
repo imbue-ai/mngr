@@ -8,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Callable
-from typing import ClassVar
 from typing import Generic
 from typing import Sequence
 from typing import TYPE_CHECKING
@@ -24,7 +23,6 @@ from imbue.mngr.errors import AgentNoLongerIdleError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import FileTransferSpec
-from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.live_output import LiveOutputReader
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -59,11 +57,6 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
     host_id: HostId = Field(description="ID of the host this agent runs on")
     mngr_ctx: MngrContext = Field(frozen=True, repr=False, description="Mngr context")
     agent_config: AgentConfigT = Field(frozen=True, repr=False, description="Agent type config")
-
-    # The process name an agent of this class always runs as, whatever its command line, or None
-    # when it is the command's first word. A class attribute so a listing that knows only an
-    # agent's type (not a loaded agent) can read it off the registered class.
-    fixed_process_name: ClassVar[str | None] = None
 
     @property
     def session_name(self) -> str:
@@ -118,9 +111,8 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
     def get_expected_process_name(self) -> str:
         """Get the expected process name for lifecycle state detection.
 
-        An agent class whose process name is not its command's first word (e.g. one launched
-        through a shell wrapper with exports) sets ``fixed_process_name`` rather than overriding
-        this, so a listing that knows only the agent's type expects the same name.
+        Subclasses can override this to return a hardcoded process name
+        when the command is complex (e.g., shell wrappers with exports).
         """
         ...
 
@@ -182,15 +174,6 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         is the local machine.
         """
         return LifecycleProbeResult(state=self.get_lifecycle_state())
-
-    def probe_lifecycle_from_snapshot(self, lifecycle_snapshot: HostLifecycleSnapshot | None) -> LifecycleProbeResult:
-        """Like ``probe_lifecycle``, but read from a host-wide snapshot shared with the host's other agents.
-
-        ``lifecycle_snapshot`` is None when the host's snapshot could not be read. The default
-        implementation ignores the snapshot and probes on its own; implementations that read tmux
-        and ps (e.g. BaseAgent) override this so a listing reads them once per host.
-        """
-        return self.probe_lifecycle()
 
     def is_blocked_on_dialog(self) -> bool:
         """Whether the agent is holding on a dialog only the user can answer.
@@ -721,21 +704,18 @@ class HasVersionManagementMixin(ABC):
     two faces of version control -- not pinning is itself a choice to track
     upstream). CLIs that simply assume whatever binary is on PATH do not have
     this capability. The agent calls ``reconcile_installed_version`` during
-    provisioning to enforce that intent: a pinning agent verifies the installed
-    version and acts on a mismatch per its ``version_mismatch`` policy; an
-    update-policy agent runs its (best-effort) update check.
+    provisioning (once the binary is present) to enforce that intent: a pinning
+    agent verifies the installed version and raises on mismatch; an update-policy
+    agent runs its (best-effort) update check.
     """
 
     @abstractmethod
     def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
-        """Enforce this agent's version intent against the installed binary.
+        """Enforce this agent's version intent against the already-present binary.
 
-        Called during provisioning after any install step, whether or not
-        ``check_installation`` ran, so the binary may be absent or unable to
-        report its version; implementations leave that case alone. Pinning
-        agents verify the installed version matches (raising or warning on a
-        mismatch, per their ``version_mismatch`` policy); update-policy agents
-        run their (best-effort) update check.
+        Called during provisioning after the binary is known to be installed.
+        Pinning agents verify the installed version matches (raising on
+        mismatch); update-policy agents run their (best-effort) update check.
         """
         ...
 

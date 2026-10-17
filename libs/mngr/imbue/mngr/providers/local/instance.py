@@ -24,6 +24,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import LocalHostNotDestroyableError
 from imbue.mngr.errors import LocalHostNotStoppableError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
@@ -43,6 +44,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
@@ -240,6 +242,7 @@ class LocalProviderInstance(BaseProviderInstance):
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         snapshot: SnapshotName | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> Host:
         """Create (or return) the local host.
 
@@ -248,6 +251,12 @@ class LocalProviderInstance(BaseProviderInstance):
         ``localhost`` alias. The image and known_hosts parameters are ignored
         since the local machine uses its own configuration.
         """
+        if published_ports:
+            raise PublishedPortUnsupportedError(
+                self.name,
+                str(published_ports[0]),
+                "this provider does not publish ports yet",
+            )
         TMUX.require()
         GIT.require()
         JQ.require()

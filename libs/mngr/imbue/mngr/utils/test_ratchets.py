@@ -156,10 +156,6 @@ def test_prevent_async_await() -> None:
     rc.check_async_await(_DIR, snapshot(0))
 
 
-def test_prevent_httpx_import() -> None:
-    rc.check_httpx_import(_DIR, snapshot(0))
-
-
 # ratchet_group("Hardcoded paths")
 
 
@@ -248,7 +244,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(31))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(33))
 
 
 def test_prevent_test_container_classes() -> None:

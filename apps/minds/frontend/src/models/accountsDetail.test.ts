@@ -21,7 +21,6 @@ const PLAN_VIEW: AccountPlanView = {
   usage_rows: [],
   is_over_storage_quota: false,
   is_at_bucket_quota: false,
-  is_sharing_workspaces: false,
 };
 
 afterEach(() => {
@@ -80,17 +79,26 @@ describe("AccountsDetailModel", () => {
     );
   });
 
-  it("reloads the plan of an account logged out and added back", async () => {
+  it("reloads the plan of an account signed back in, or logged out and added back", async () => {
+    // A plan loaded while signed out reads as unavailable; the sign-in that
+    // follows must replace it rather than leave the card saying so.
+    let planView: AccountPlanView | null = null;
     const urls: string[] = [];
     const model = new AccountsDetailModel(
       async (input) => {
         urls.push(String(input));
-        return jsonResponse({ plan_view: PLAN_VIEW, trim_status: null });
+        return jsonResponse({ plan_view: planView, trim_status: null });
       },
       () => {},
       (callback) => callback(),
     );
+    const signedOut = accountEntry({ is_enabled: false });
 
+    model.syncAccounts([signedOut]);
+    await settle();
+    expect(model.planStateFor("user-1").isUnavailable).toBe(true);
+
+    planView = PLAN_VIEW;
     model.syncAccounts([ACCOUNT]);
     await settle();
     expect(model.planStateFor("user-1").planView).toEqual(PLAN_VIEW);
@@ -100,6 +108,7 @@ describe("AccountsDetailModel", () => {
     await settle();
 
     expect(urls.filter((url) => url.endsWith("/plan"))).toEqual([
+      "/ui/api/accounts/user-1/plan",
       "/ui/api/accounts/user-1/plan",
       "/ui/api/accounts/user-1/plan",
     ]);
@@ -185,7 +194,7 @@ describe("AccountsDetailModel", () => {
     const model = new AccountsDetailModel(
       async (input, init) => {
         const url = String(input);
-        if (url === "/accounts/user-1/logout") {
+        if (url === "/accounts/set-default") {
           observedBody = String(init?.body);
           observedContentType = new Headers(init?.headers).get("Content-Type");
           return new Response("", { status: 200 });
@@ -196,9 +205,9 @@ describe("AccountsDetailModel", () => {
       (callback) => callback(),
     );
 
-    await model.logOut("user-1");
+    await model.setDefault("user-1");
 
-    expect(observedBody).toBe("");
+    expect(observedBody).toBe("user_id=user-1");
     expect(observedContentType).toBe("application/x-www-form-urlencoded");
   });
 });
@@ -276,6 +285,22 @@ describe("the cached plan", () => {
     expect(shown.isUnavailable).toBe(false);
     expect(shown.isRefreshing).toBe(false);
     expect(shown.isRefreshFailed).toBe(true);
+  });
+
+  it("does not show a signed-out account's earlier plan, which reads as unavailable", async () => {
+    await visitOnce(PLAN_VIEW);
+    const { model, answer } = modelWithHeldReads();
+
+    model.syncAccounts([{ ...ACCOUNT, is_enabled: false }]);
+    const shown = model.planStateFor(ACCOUNT.user_id);
+    expect(shown.isLoaded).toBe(false);
+    expect(shown.planView).toBeNull();
+
+    answer(null);
+    await settle();
+
+    expect(shown.isUnavailable).toBe(true);
+    expect(shown.isRefreshFailed).toBe(false);
   });
 
   it("drops a logged-out account's plan, so adding it back loads from scratch", async () => {

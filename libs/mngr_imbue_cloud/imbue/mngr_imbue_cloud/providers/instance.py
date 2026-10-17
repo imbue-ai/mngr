@@ -43,7 +43,7 @@ from typing import Any
 from typing import Final
 from typing import assert_never
 
-import httpx2
+import httpx
 import paramiko
 from loguru import logger
 from pydantic import ConfigDict
@@ -53,7 +53,6 @@ from pydantic import SecretStr
 from pydantic import SkipValidation
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
@@ -63,6 +62,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
@@ -96,22 +96,20 @@ from imbue.mngr.interfaces.provider_instance import discover_hosts_within_per_ho
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
-from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.primitives import read_checked_out_branch
 from imbue.mngr.providers.base_provider import BaseProviderInstance
-from imbue.mngr.providers.host_access_manifest import host_access_per_host_dir
 from imbue.mngr.providers.host_dir_layouts import host_dir_fallbacks
 from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
@@ -123,7 +121,6 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.file_utils import read_json_dict
 from imbue.mngr.utils.polling import poll_for_value
-from imbue.mngr.utils.progress import NestedProgressReporter
 from imbue.mngr.utils.ssh import build_ssh_connect_command
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
@@ -135,7 +132,6 @@ from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import parse_imbue_cloud_build_args
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
-from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
@@ -150,9 +146,6 @@ from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import FAST_PATH_ADOPTABLE_START_ARGS
 from imbue.mngr_imbue_cloud.primitives import FastMode
-from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_CLIENT_KEY_NAME
-from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_HOST_ACCESS_MANIFEST
-from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_KNOWN_HOSTS_NAME
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import POOL_HOST_SERVICES_AGENT_NAME
 from imbue.mngr_imbue_cloud.primitives import WORKSPACE_PRIMARY_AGENT_LABEL
@@ -518,17 +511,6 @@ def _advance_workspace_start(
             assert_never(unreachable)
 
 
-class _RememberedListing(FrozenModel):
-    """What a leased host's last successful outer listing found, for the next listing to build on."""
-
-    container_id: str | None = Field(description="The container the listing found, None when the box had none")
-    listing_fingerprint: str | None = Field(
-        description="The fingerprint of the records the listing was shaped from, None unless the container was running"
-    )
-    host_ref: DiscoveredHost = Field(description="The host as that listing shaped it")
-    agent_refs: tuple[DiscoveredAgent, ...] = Field(description="The agents as that listing shaped them")
-
-
 class _OuterListingSession(MutableModel):
     """One leased host's kept outer-SSH connection for discovery listings, run one listing at a time."""
 
@@ -551,10 +533,6 @@ class _OuterListingSession(MutableModel):
         """The outer, for one listing at a time: a full poll's read and a re-read of the same host serialize here."""
         with self._listing_lock:
             yield self.outer
-
-
-_LEASE_STEP: Final[ProgressStepId] = ProgressStepId("imbue_cloud.lease")
-_REBUILD_STEP: Final[ProgressStepId] = ProgressStepId("imbue_cloud.rebuild")
 
 
 class ImbueCloudProvider(BaseProviderInstance):
@@ -585,13 +563,6 @@ class ImbueCloudProvider(BaseProviderInstance):
     # when its listing fails, its lease ends or moves, or the provider closes.
     _outer_listing_session_by_host_id: dict[HostId, _OuterListingSession] = PrivateAttr(default_factory=dict)
     _outer_listing_sessions_lock: Lock = PrivateAttr(default_factory=Lock)
-    # Each leased host's last successful listing: the container the next listing inspects
-    # first instead of looking it up by label, and the record fingerprint plus shaped
-    # result a re-read answers with when the container reports nothing changed. Not a
-    # per-cycle cache: ``reset_caches`` leaves it alone; an entry goes with its lease.
-    _remembered_listing_by_host_id: dict[HostId, _RememberedListing] = PrivateAttr(default_factory=dict)
-    # Guards ``_remembered_listing_by_host_id``, which the per-host listing threads write.
-    _remembered_listings_lock: Lock = PrivateAttr(default_factory=Lock)
     # What this instance last wrote to each per-host state file, so a listing that reads
     # the same answer every few seconds (the between-poll re-read) does not rewrite and
     # fsync it every time. Not a per-cycle cache: a host id is never reused, so a stale
@@ -635,15 +606,15 @@ class ImbueCloudProvider(BaseProviderInstance):
         return get_provider_data_dir(self.mngr_ctx.profile_dir, str(self.name))
 
     def _host_state_dir(self, host_id: HostId) -> Path:
-        return host_access_per_host_dir(self._provider_data_dir(), IMBUE_CLOUD_HOST_ACCESS_MANIFEST, host_id)
+        return self._provider_data_dir() / "hosts" / str(host_id)
 
     def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
         host_dir = self._host_state_dir(host_id)
         host_dir.mkdir(parents=True, exist_ok=True)
-        return host_dir / IMBUE_CLOUD_CLIENT_KEY_NAME, host_dir / f"{IMBUE_CLOUD_CLIENT_KEY_NAME}.pub"
+        return host_dir / "ssh_key", host_dir / "ssh_key.pub"
 
     def _host_known_hosts_path(self, host_id: HostId) -> Path:
-        return self._host_state_dir(host_id) / IMBUE_CLOUD_KNOWN_HOSTS_NAME
+        return self._host_state_dir(host_id) / "known_hosts"
 
     def _last_known_agents_path(self, host_id: HostId) -> Path:
         return self._host_state_dir(host_id) / "last_known_agents.json"
@@ -825,7 +796,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         Returns the private key path and the public key contents (so the caller
         can send the public key in the lease request).
         """
-        return load_or_create_ssh_keypair(self._host_state_dir(host_id), IMBUE_CLOUD_CLIENT_KEY_NAME)
+        return load_or_create_ssh_keypair(self._host_state_dir(host_id), "ssh_key")
 
     # Discovery
 
@@ -846,7 +817,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         except WorkspacesEndpointUnavailableError:
             logger.debug("imbue_cloud[{}]: connector has no /workspaces; using leased-only listing", self.name)
             self._workspaces_cache = None
-        except (httpx2.HTTPError, ImbueCloudUnreachableError) as exc:
+        except (httpx.HTTPError, ImbueCloudUnreachableError) as exc:
             raise ProviderUnavailableError(
                 self.name,
                 f"could not reach Imbue Cloud: {exc}",
@@ -906,7 +877,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         # Narrow the propagated type by cause so consumers can tell "the
         # connector is unreachable" apart from "auth/account problem": a
         # transport-level failure (connection refused, DNS, timeout -- the
-        # flaky-wifi / connector-down case, whether raised raw by httpx2 or as
+        # flaky-wifi / connector-down case, whether raised raw by httpx or as
         # the client's typed unreachable error, which also covers the
         # connector's own auth-upstream-down 503) becomes
         # ProviderUnavailableError, which recovery UIs treat as "don't bother
@@ -919,7 +890,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         try:
             token = self._get_access_token(account)
             self._leased_hosts_cache = self.client.list_hosts(token)
-        except (httpx2.HTTPError, ImbueCloudUnreachableError) as exc:
+        except (httpx.HTTPError, ImbueCloudUnreachableError) as exc:
             raise ProviderUnavailableError(
                 self.name,
                 f"could not reach Imbue Cloud: {exc}",
@@ -991,7 +962,6 @@ class ImbueCloudProvider(BaseProviderInstance):
         """
         lease_by_host_id = {HostId(lease.host_id): lease for lease in self._list_leased_hosts_cached()}
         self._drop_outer_listing_sessions_except(lease_by_host_id)
-        self._forget_remembered_listings_except(lease_by_host_id)
         leased_result = discover_hosts_within_per_host_timeout(
             provider_name=self.name,
             cg=cg,
@@ -1046,37 +1016,18 @@ class ImbueCloudProvider(BaseProviderInstance):
         ``HostConnectionError`` instead of answering with the host's cached agents, so
         the re-read emits nothing rather than a stale listing. The listing bounds its
         own SSH command, so ``timeout_seconds`` is unused.
-
-        The listing is handed the fingerprint of the records the host's last listing was
-        shaped from, and a container whose records still fingerprint the same answers
-        without listing them; the re-read then repeats the remembered listing, which is
-        what a full listing would have shaped, and leaves the raw listing the detail
-        reads consume as the last full listing (a full poll's, or a changed re-read's)
-        left it.
         """
         del timeout_seconds
         host_id = host_ref.host_id
         lease = self._find_leased_in_fetched_list(host_id)
         if lease is None:
             raise HostNotFoundError(self.name, host_id)
-        remembered = self._remembered_listing_for(host_id)
-        raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(
-            lease,
-            known_container_id=remembered.container_id if remembered is not None else None,
-            unchanged_fingerprint=remembered.listing_fingerprint if remembered is not None else None,
-        )
+        raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(lease)
         if raw is None:
             if is_auth_failure:
                 raise HostAuthenticationError(f"outer listing of host {host_id} failed: {outer_error}")
             raise HostConnectionError(f"outer listing of host {host_id} failed: {outer_error}")
-        if raw.get("is_listing_unchanged"):
-            if remembered is None:
-                raise ImbueCloudError(
-                    f"outer listing of host {host_id} reported its records unchanged, but no listing was remembered"
-                )
-            listed_host_ref, agent_refs = remembered.host_ref, list(remembered.agent_refs)
-        else:
-            listed_host_ref, agent_refs = self._shape_leased_host_listing(lease, raw)
+        listed_host_ref, agent_refs = self._shape_leased_host_listing(lease, raw)
         return BoundedHostRead(
             host=listed_host_ref,
             agents=tuple(agent_refs),
@@ -1102,7 +1053,6 @@ class ImbueCloudProvider(BaseProviderInstance):
         """
         leased = self._list_leased_hosts_cached()
         self._drop_outer_listing_sessions_except(HostId(lease.host_id) for lease in leased)
-        self._forget_remembered_listings_except(HostId(lease.host_id) for lease in leased)
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
         # Each leased host needs its own outer-SSH round trip (connect + run the
         # listing script), so a sequential loop's wall time is the sum across every
@@ -1173,18 +1123,12 @@ class ImbueCloudProvider(BaseProviderInstance):
         """Run one leased host's outer-SSH listing and shape it into a discovery result.
 
         May run concurrently for several hosts: writes to the shared listing
-        cache take ``_listing_raw_cache_lock`` and those to the remembered listings
-        ``_remembered_listings_lock``, while the sticky-identity and
+        cache take ``_listing_raw_cache_lock``, while the sticky-identity and
         resolved-host-dir persistence calls need no lock since each writes a
         distinct per-host file. Every leased host is listed: a held lease is a
         live resource whatever its container is doing.
         """
-        remembered = self._remembered_listing_for(HostId(entry.host_id))
-        raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(
-            entry,
-            known_container_id=remembered.container_id if remembered is not None else None,
-            unchanged_fingerprint=None,
-        )
+        raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(entry)
         if raw is None:
             return self._shape_unreachable_leased_host(entry, outer_error, is_auth_failure)
         return self._shape_leased_host_listing(entry, raw)
@@ -1320,38 +1264,11 @@ class ImbueCloudProvider(BaseProviderInstance):
             )
             if is_cache_complete:
                 agent_refs = cached_agent_refs
-        remembered = _RememberedListing(
-            container_id=raw.get("container_id"),
-            listing_fingerprint=raw.get("listing_fingerprint"),
-            host_ref=host_ref,
-            agent_refs=tuple(agent_refs),
-        )
-        with self._remembered_listings_lock:
-            self._remembered_listing_by_host_id[host_id] = remembered
         return host_ref, agent_refs
-
-    def _remembered_listing_for(self, host_id: HostId) -> _RememberedListing | None:
-        with self._remembered_listings_lock:
-            return self._remembered_listing_by_host_id.get(host_id)
-
-    def _forget_remembered_listings_except(self, leased_host_ids: Iterable[HostId]) -> None:
-        """Forget the remembered listings of hosts that are no longer leased."""
-        kept_host_ids = set(leased_host_ids)
-        with self._remembered_listings_lock:
-            forgotten_host_ids = [
-                host_id for host_id in self._remembered_listing_by_host_id if host_id not in kept_host_ids
-            ]
-            for host_id in forgotten_host_ids:
-                del self._remembered_listing_by_host_id[host_id]
 
     def _collect_listing_raw_via_outer(
         self,
         lease: LeasedHostInfo,
-        # The container a previous listing found, inspected first in place of the label lookup
-        known_container_id: str | None,
-        # The record fingerprint a previous listing of that container reported; a container whose
-        # records still fingerprint the same answers ``is_listing_unchanged`` in place of a full listing
-        unchanged_fingerprint: str | None,
     ) -> tuple[dict[str, Any] | None, str | None, bool]:
         """Run the outer listing script over root SSH on the leased VPS.
 
@@ -1373,8 +1290,6 @@ class ImbueCloudProvider(BaseProviderInstance):
                     self.mngr_ctx.config.prefix,
                     window_name=self.mngr_ctx.config.tmux.primary_window_name,
                     fallback_host_dirs=self._fallback_host_dirs(),
-                    known_container_id=known_container_id,
-                    unchanged_fingerprint=unchanged_fingerprint,
                 )
                 result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
         except HostAuthenticationError as exc:
@@ -2020,6 +1935,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         snapshot: SnapshotName | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> Host:
         """Lease a pool host and return it, via the fast (adopt) or slow (rebuild) path.
 
@@ -2047,6 +1963,12 @@ class ImbueCloudProvider(BaseProviderInstance):
         releases the lease back to the pool before re-raising -- the client
         owns the machine the moment the connector marks it ``leased``.
         """
+        if published_ports:
+            raise PublishedPortUnsupportedError(
+                self.name,
+                str(published_ports[0]),
+                "this provider does not publish ports yet",
+            )
         if snapshot is not None:
             raise SnapshotsNotSupportedError(self.name)
         try:
@@ -2119,10 +2041,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         back to the slow path.
         """
         logger.info("imbue_cloud[{}] FAST PATH: leasing exact-attribute pool host for {!r}", self.name, str(name))
-        progress = self.mngr_ctx.progress_reporter
-        creating_host = CreatePhase.CREATING_HOST.step_id
         tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
-        progress.start_step(_LEASE_STEP, "Reserving a cloud machine", creating_host, None)
         try:
             lease_result = self.client.lease_host(
                 token,
@@ -2136,14 +2055,10 @@ class ImbueCloudProvider(BaseProviderInstance):
             raise FastPathUnavailableError(
                 f"No pool host exactly matches the requested attributes for the fast (adopt) path: {exc}"
             ) from exc
-        progress.complete_step(_LEASE_STEP)
         self.reset_caches()
 
         host_id = HostId(lease_result.host_id)
-        with (
-            self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "fast-path setup"),
-            progress.step(ProgressStepId("imbue_cloud.adopt"), "Connecting to the machine", creating_host),
-        ):
+        with self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "fast-path setup"):
             # Install the keypair inside the guard: the connector has already
             # marked the host leased, so a failure here (e.g. an OSError while
             # moving the key files) must still release the lease.
@@ -2229,10 +2144,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             relaxed_attributes.to_request_dict(),
             str(name),
         )
-        progress = self.mngr_ctx.progress_reporter
-        creating_host = CreatePhase.CREATING_HOST.step_id
         tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
-        progress.start_step(_LEASE_STEP, "Reserving a cloud machine", creating_host, None)
         try:
             # The region constraint is NOT relaxed: the hard requirement still
             # applies to the rebuilt host.
@@ -2248,14 +2160,10 @@ class ImbueCloudProvider(BaseProviderInstance):
             # there is nothing to release. Surface the pool-exhausted signal.
             self._discard_pending_keypair(tmp_private_key, tmp_public_key)
             raise
-        progress.complete_step(_LEASE_STEP)
         self.reset_caches()
 
         host_id = HostId(lease_result.host_id)
-        with (
-            self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "slow-path rebuild"),
-            progress.step(_REBUILD_STEP, "Rebuilding the machine", creating_host),
-        ):
+        with self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "slow-path rebuild"):
             # Install the keypair inside the guard: the connector has already
             # marked the host leased, so a failure here (e.g. an OSError while
             # moving the key files) must still release the lease.
@@ -2336,24 +2244,12 @@ class ImbueCloudProvider(BaseProviderInstance):
         # one. Detected by the lease's container port differing from the standard
         # publish port -- true only for slices (forwarded ports), never OVH VPSes.
         is_slice = lease_result.container_ssh_port != self.config.container_ssh_port
-        # The VPS machinery reports its steps under the create's ``creating_host``
-        # phase; here they are the rebuild's own, so they nest under the rebuild step.
-        delegated_ctx = self.mngr_ctx.model_copy_update(
-            to_update(
-                self.mngr_ctx.field_ref().progress_reporter,
-                NestedProgressReporter(
-                    inner=self.mngr_ctx.progress_reporter,
-                    outer_parent_id=CreatePhase.CREATING_HOST.step_id,
-                    nested_parent_id=_REBUILD_STEP,
-                ),
-            )
-        )
         delegated_provider: VpsProvider = (
             build_slice_rebuild_provider(
-                name=self.name, config=self.config, mngr_ctx=delegated_ctx, lease_result=lease_result
+                name=self.name, config=self.config, mngr_ctx=self.mngr_ctx, lease_result=lease_result
             )
             if is_slice
-            else build_delegated_vps_provider(name=self.name, config=self.config, mngr_ctx=delegated_ctx)
+            else build_delegated_vps_provider(name=self.name, config=self.config, mngr_ctx=self.mngr_ctx)
         )
         # The VPS root host key (port 22 for OVH; the box-forwarded VM-root port
         # for a slice) feeds the rebuilt host's record AND is pinned in the
@@ -2510,7 +2406,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         leases_dir.mkdir(parents=True, exist_ok=True)
         tmp_key_dir = leases_dir / f"pending-{int(time.time() * 1000)}"
         tmp_key_dir.mkdir(parents=True, exist_ok=True)
-        tmp_private_key, tmp_public_key = save_ssh_keypair(tmp_key_dir, IMBUE_CLOUD_CLIENT_KEY_NAME)
+        tmp_private_key, tmp_public_key = save_ssh_keypair(tmp_key_dir, "ssh_key")
         return tmp_private_key, tmp_public_key, tmp_public_key.read_text().strip()
 
     def _discard_pending_keypair(self, tmp_private_key: Path, tmp_public_key: Path) -> None:
@@ -2532,7 +2428,10 @@ class ImbueCloudProvider(BaseProviderInstance):
         tmp_public_key: Path,
     ) -> tuple[Path, Path]:
         """Move a pending keypair into the canonical ``hosts/<host_id>/`` location."""
-        final_private_key, final_public_key = self._host_keypair_paths(host_id)
+        host_state_dir = self._host_state_dir(host_id)
+        host_state_dir.mkdir(parents=True, exist_ok=True)
+        final_private_key = host_state_dir / "ssh_key"
+        final_public_key = host_state_dir / "ssh_key.pub"
         tmp_private_key.replace(final_private_key)
         tmp_public_key.replace(final_public_key)
         final_private_key.chmod(0o600)

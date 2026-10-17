@@ -5,7 +5,6 @@ import json
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
-from imbue.mngr.e2e.conftest import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.utils.polling import poll_until
 from imbue.skitwright.expect import expect
 
@@ -89,7 +88,7 @@ def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
             "mngr create etl-job --provider modal --type command --idle-mode run --idle-timeout 60"
             " --no-ensure-clean --no-connect -- sleep 100991",
             comment="run a long-running data pipeline",
-            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+            timeout=180.0,
         )
     ).to_succeed()
 
@@ -102,7 +101,7 @@ def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="verify the etl-job agent's command and idle configuration",
-        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+        timeout=120.0,
     )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
@@ -197,7 +196,7 @@ def test_command_agent_batch_job_modal(e2e: E2eSession) -> None:
         e2e.run(
             'mngr create batch-job --provider modal --type command --idle-mode run --idle-timeout 30 --no-connect --no-ensure-clean -- bash -c "echo train && echo evaluate"',
             comment="modal batch job with --idle-mode run",
-            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+            timeout=180.0,
         )
     ).to_succeed()
 
@@ -206,7 +205,7 @@ def test_command_agent_batch_job_modal(e2e: E2eSession) -> None:
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="verify the batch job is registered on the modal provider",
-        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+        timeout=120.0,
     )
     expect(list_result).to_succeed()
     matching = [a for a in json.loads(list_result.stdout)["agents"] if a["name"] == "batch-job"]
@@ -231,7 +230,6 @@ def test_command_agent_batch_job_modal(e2e: E2eSession) -> None:
         result = e2e.run(
             "mngr list --provider modal --format json",
             comment="check the batch job host state",
-            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
         )
         if result.exit_code != 0:
             return None

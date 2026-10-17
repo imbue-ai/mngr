@@ -1,0 +1,1 @@
+The litellm-via-workspace deployment test now filters the chat agent's transcript with `--role assistant --role agent`, so it still finds the echoed token on agents whose transcript is ATIF-shaped (which name that role `agent`).

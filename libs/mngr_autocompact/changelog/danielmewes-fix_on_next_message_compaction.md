@@ -1,0 +1,1 @@
+Fix `ContextCompactionMode` handling so `mngr autocompact check` and `mngr autocompact run` only consider agents stale if their mode is set to `PROACTIVE_TIMER`, require `expected_mode` in compaction staleness and execution APIs, and rename `compact_agent` to `compact_agent_if_stale`.

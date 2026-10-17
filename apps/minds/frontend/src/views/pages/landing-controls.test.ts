@@ -134,7 +134,6 @@ describe("keyStateChipFor", () => {
     expect(keyStateChipFor("locked")?.label).toBe("Enter your master password to open");
     expect(keyStateChipFor("syncing")?.label).toBe("Syncing access…");
     expect(keyStateChipFor("unavailable")?.label).toBe("No access from this device");
-    expect(keyStateChipFor("rejected")?.label).toBe("Access refused from this device");
     expect(keyStateChipFor("")).toBeNull();
   });
 });
@@ -239,55 +238,33 @@ describe("remoteLocationBadgeFor", () => {
 
 describe("remoteStateChipFor", () => {
   it("shows nothing for the plain state", () => {
-    expect(remoteStateChipFor({ state: "" })).toBeNull();
-    expect(remoteStateChipFor({ state: "", detail: null })).toBeNull();
+    expect(remoteStateChipFor("")).toBeNull();
+  });
+
+  it("points a signed-out provider at the Accounts page", () => {
+    expect(remoteStateChipFor("signed_out")).toEqual({
+      label: "Signed out",
+      isImportant: true,
+      isAccountsLink: true,
+    });
   });
 
   it("reports the access states with their tones", () => {
-    expect(remoteStateChipFor({ state: "connecting" })).toMatchObject({
+    expect(remoteStateChipFor("connecting")).toEqual({
       label: "connecting…",
       isImportant: false,
+      isAccountsLink: false,
     });
-    expect(remoteStateChipFor({ state: "unreachable" })).toMatchObject({
+    expect(remoteStateChipFor("unreachable")).toEqual({
       label: "unreachable",
       isImportant: true,
+      isAccountsLink: false,
     });
-    expect(remoteStateChipFor({ state: "error" })).toMatchObject({
+    expect(remoteStateChipFor("error")).toEqual({
       label: "sync error",
       isImportant: true,
+      isAccountsLink: false,
     });
-    expect(remoteStateChipFor({ state: "locked" })).toMatchObject({ label: "locked", isImportant: false });
-    expect(remoteStateChipFor({ state: "missing_connection" })).toMatchObject({
-      label: "connection removed",
-      isImportant: true,
-    });
-    expect(remoteStateChipFor({ state: "no_credentials" })).toMatchObject({
-      label: "no credentials",
-      isImportant: true,
-    });
-    expect(remoteStateChipFor({ state: "read_only" })).toMatchObject({
-      label: "needs a newer app",
-      isImportant: true,
-    });
-  });
-
-  it("puts the failure detail behind an error chip, and a generic line when the server sent none", () => {
-    expect(remoteStateChipFor({ state: "error", detail: "key dir missing: /keys/host-1" })?.title).toBe(
-      "key dir missing: /keys/host-1",
-    );
-    expect(remoteStateChipFor({ state: "error", detail: null })?.title).toContain("failed");
-    expect(remoteStateChipFor({ state: "error" })?.title).toContain("failed");
-  });
-
-  it("spells out the locked and removed-connection chips, and the rest in their long form", () => {
-    expect(remoteStateChipFor({ state: "locked" })?.title).toBe("Enter your master password to reach this machine");
-    expect(remoteStateChipFor({ state: "missing_connection" })?.title).toBe(
-      "The connection this machine runs on was removed; re-add it or remove this machine from the list",
-    );
-    for (const state of ["connecting", "unreachable", "no_credentials", "read_only"]) {
-      const chip = remoteStateChipFor({ state });
-      expect(chip?.title.length ?? 0).toBeGreaterThan(chip?.label.length ?? 0);
-    }
   });
 });
 

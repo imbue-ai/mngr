@@ -1,0 +1,1 @@
+The owner-exec VM installer's curl downloads now pass --retry-all-errors, so protocol-level failures (e.g. the intermittent HTTP/2 PROTOCOL_ERROR from GitHub's release CDN) are retried instead of failing the install outright. Integrity is still guarded by the sha256 check. The same fix is applied to the paired default-workspace-template's system/scripts/install_owner_exec.sh.

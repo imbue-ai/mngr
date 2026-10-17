@@ -2,7 +2,6 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -33,12 +32,12 @@ from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import HostRecordUnreadableError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -65,7 +64,6 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import DockerCpuCount
@@ -74,12 +72,11 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import LogLevel
-from imbue.mngr.primitives import ProgressStepId
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
-from imbue.mngr.providers.host_access_manifest import host_access_key_dir
 from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import remove_host_key_record
 from imbue.mngr.providers.ssh_host_setup import REQUIRED_HOST_PACKAGES
@@ -90,7 +87,6 @@ from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoint_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
-from imbue.mngr.providers.ssh_host_setup import log_client_key_configuration
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
@@ -101,17 +97,12 @@ from imbue.mngr.providers.ssh_utils import per_host_key_dir
 from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
 from imbue.mngr.providers.ssh_utils import resolve_per_host_host_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
-from imbue.mngr.utils.docker_build_progress import DockerBuildProgressParser
 from imbue.mngr_docker.config import DockerProviderConfig
 from imbue.mngr_docker.config import LOCAL_DOCKER_SSH_HOST
 from imbue.mngr_docker.config import format_docker_publish_address
 from imbue.mngr_docker.config import is_docker_daemon_local
 from imbue.mngr_docker.config import ssh_host_for_docker_daemon
 from imbue.mngr_docker.config import verify_ssh_bind_address_reachable
-from imbue.mngr_docker.constants import DOCKER_HOST_ACCESS_MANIFEST
-from imbue.mngr_docker.constants import DOCKER_HOST_KEY_NAME
-from imbue.mngr_docker.constants import DOCKER_KNOWN_HOSTS_NAME
-from imbue.mngr_docker.constants import DOCKER_SSH_KEY_NAME
 from imbue.mngr_docker.data_types import ContainerSize
 from imbue.mngr_docker.data_types import ContainerSizeRequest
 from imbue.mngr_docker.data_types import DockerDaemonTotals
@@ -405,23 +396,6 @@ def _recorded_host_dir_override(host_record: HostRecord) -> Path | None:
     return Path(host_record.config.host_dir)
 
 
-_DOCKER_BUILD_STEP: Final[ProgressStepId] = ProgressStepId("docker.build")
-
-
-class _LoggedBuildOutput(MutableModel):
-    """The docker subprocess output callback: logs each line, then hands it to the build watcher when one is set."""
-
-    log_line: Callable[[str, bool], None] = Field(frozen=True, description="Logs the line at BUILD level")
-    watch_line: Callable[[str], None] | None = Field(
-        default=None, frozen=True, description="Parses the line for stage progress, when a build is being watched"
-    )
-
-    def __call__(self, line: str, is_stdout: bool) -> None:
-        self.log_line(line, is_stdout)
-        if self.watch_line is not None:
-            self.watch_line(line)
-
-
 class DockerProviderInstance(BaseProviderInstance):
     """Provider instance for managing Docker containers as hosts.
 
@@ -578,13 +552,12 @@ class DockerProviderInstance(BaseProviderInstance):
     @property
     def _keys_dir(self) -> Path:
         """Get the directory for SSH keys (profile-specific)."""
-        instance_dir = self.mngr_ctx.profile_dir / "providers" / "docker" / str(self.name)
-        return host_access_key_dir(instance_dir, DOCKER_HOST_ACCESS_MANIFEST)
+        return self.mngr_ctx.profile_dir / "providers" / "docker" / str(self.name) / "keys"
 
     @property
     def _known_hosts_path(self) -> Path:
         """Get the path to the known_hosts file for this provider instance."""
-        return self._keys_dir / DOCKER_KNOWN_HOSTS_NAME
+        return self._keys_dir / "known_hosts"
 
     def _build_volume_mount_args(
         self,
@@ -693,7 +666,7 @@ class DockerProviderInstance(BaseProviderInstance):
         ``known_hosts`` symlink so key-sibling consumers (the forward SSH
         tunnel) keep finding the pinned host keys.
         """
-        return resolve_per_host_client_keypair(self._keys_dir, host_id, DOCKER_SSH_KEY_NAME, DOCKER_KNOWN_HOSTS_NAME)
+        return resolve_per_host_client_keypair(self._keys_dir, host_id, "docker_ssh_key", "known_hosts")
 
     def _get_host_keypair(self, host_id: HostId) -> tuple[Path, str]:
         """Resolve the sshd host keypair for this host's container: per-host first, legacy fallback.
@@ -702,7 +675,7 @@ class DockerProviderInstance(BaseProviderInstance):
         host keeps serving the shared key already pinned for it while new
         hosts serve their own per-host key.
         """
-        return resolve_per_host_host_keypair(self._keys_dir, host_id, DOCKER_HOST_KEY_NAME)
+        return resolve_per_host_host_keypair(self._keys_dir, host_id, "host_key")
 
     def _get_ssh_host(self) -> str:
         """Get the SSH-reachable hostname for containers."""
@@ -854,9 +827,6 @@ class DockerProviderInstance(BaseProviderInstance):
         host_volume_symlink_target = self._get_host_volume_symlink_target(
             host_id, is_isolated=config.is_isolated_host_volume
         )
-        log_client_key_configuration(
-            host_id, self.name, self.mngr_ctx.get_profile_user_id(), client_public_key, tuple(authorized_keys or ())
-        )
         self._start_sshd_in_container(
             container,
             client_public_key,
@@ -875,12 +845,7 @@ class DockerProviderInstance(BaseProviderInstance):
         with log_span("Adding host to known_hosts", ssh_host=ssh_host, ssh_port=ssh_port):
             add_host_to_known_hosts(self._known_hosts_path, ssh_host, ssh_port, host_public_key, host_id=host_id)
 
-        with (
-            self.mngr_ctx.progress_reporter.step(
-                ProgressStepId("docker.wait_ssh"), "Waiting for the container's SSH", CreatePhase.CREATING_HOST.step_id
-            ),
-            log_span("Waiting for sshd to be ready..."),
-        ):
+        with log_span("Waiting for sshd to be ready..."):
             self._wait_for_sshd(ssh_host, ssh_port)
 
         pyinfra_host = self._create_pyinfra_host(ssh_host, ssh_port, private_key_path)
@@ -1026,26 +991,20 @@ kill -TERM 1
         return env
 
     def _run_docker_creation_command(
-        self,
-        args: list[str],
-        timeout: float = 300,
-        executable: DockerBuilder = DockerBuilder.DOCKER,
-        on_build_line: Callable[[str], None] | None = None,
+        self, args: list[str], timeout: float = 300, executable: DockerBuilder = DockerBuilder.DOCKER
     ) -> FinishedProcess:
         """Run a docker-compatible CLI command and return the result.
 
         `executable` defaults to DOCKER; pass DEPOT to use the depot.dev remote
-        builder (only valid for build subcommands). ``on_build_line`` sees every
-        output line after it is logged, so a build can be watched for progress.
+        builder (only valid for build subcommands).
         """
-
         # Defer the success/timeout/non-zero distinction to FinishedProcess.check(), which
         # raises ProcessTimeoutError on timeout instead of a generic ProcessError.
         result = self.mngr_ctx.concurrency_group.run_process_to_completion(
             [executable.value.lower()] + args,
             timeout=timeout,
             env=self._docker_env(),
-            on_output=_LoggedBuildOutput(log_line=self._log_docker_creation_command_output, watch_line=on_build_line),
+            on_output=self._log_docker_creation_command_output,
             is_checked_after=False,
         )
         result.check()
@@ -1085,12 +1044,9 @@ kill -TERM 1
         extra_args = ["--load"] if builder is DockerBuilder.DEPOT else []
         args = ["build", *extra_args, "-t", tag, *build_args]
         timeout_seconds = self.config.build_timeout_seconds
-        stage_parser = DockerBuildProgressParser(reporter=self.mngr_ctx.progress_reporter, step_id=_DOCKER_BUILD_STEP)
         with log_span("Running {} build with {} args", builder.value.lower(), len(build_args)):
             try:
-                self._run_docker_creation_command(
-                    args, timeout=timeout_seconds, executable=builder, on_build_line=stage_parser.feed_line
-                )
+                self._run_docker_creation_command(args, timeout=timeout_seconds, executable=builder)
             except ProcessTimeoutError as e:
                 raise DockerBuildTimeoutError(provider_name=self.name, timeout_seconds=timeout_seconds) from e
         return tag
@@ -1378,15 +1334,7 @@ kill -TERM 1
             # mapping cannot be read right now (e.g. it stopped in the window
             # since the caller's status check) must not break paths that
             # previously worked, so keep the recorded port.
-            logger.warning(
-                "Could not read live SSH port for host {} (keeping recorded port {}; container status {}; "
-                "published container ports: {}): {}",
-                host_record.certified_host_data.host_id,
-                recorded_ssh_port,
-                container.status,
-                ", ".join(sorted(port for port, bindings in (container.ports or {}).items() if bindings)) or "none",
-                e,
-            )
+            logger.warning("Could not read live SSH port for host {}: {}", host_record.certified_host_data.host_id, e)
             return recorded_ssh_port
 
         if live_ssh_port == recorded_ssh_port:
@@ -1525,6 +1473,7 @@ kill -TERM 1
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         snapshot: SnapshotName | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> Host:
         """Create a new Docker container host.
 
@@ -1532,6 +1481,12 @@ kill -TERM 1
         Start args are passed through to 'docker run' for resource limits,
         volumes, ports, network, etc.
         """
+        if published_ports:
+            raise PublishedPortUnsupportedError(
+                self.name,
+                str(published_ports[0]),
+                "this provider does not publish ports yet",
+            )
         host_id = HostId.generate()
         logger.info("Creating host {} in {} ...", name, self.name)
 
@@ -1570,23 +1525,18 @@ kill -TERM 1
                 "your project's dependencies for faster startup.",
             )
 
-        progress = self.mngr_ctx.progress_reporter
-        creating_host = CreatePhase.CREATING_HOST.step_id
         try:
             if build_args:
                 # Build image from user-provided build args / Dockerfile
                 build_tag = self._build_image_tag(host_id)
-                with progress.step(_DOCKER_BUILD_STEP, "Building the image", creating_host):
-                    image_name = self._build_image(build_args, build_tag)
+                image_name = self._build_image(build_args, build_tag)
             elif is_using_default:
                 # Build from the mngr default Dockerfile so packages are pre-installed
                 build_tag = self._build_image_tag(host_id)
-                with progress.step(_DOCKER_BUILD_STEP, "Building the image", creating_host):
-                    image_name = self._build_default_image(build_tag)
+                image_name = self._build_default_image(build_tag)
             else:
                 # User specified an image (via --image or config default_image); pull it
-                with progress.step(ProgressStepId("docker.pull"), "Pulling the image", creating_host):
-                    image_name = self._pull_image(base_image)
+                image_name = self._pull_image(base_image)
 
             labels = build_container_labels(host_id, name, str(self.name), tags)
 
@@ -1603,10 +1553,7 @@ kill -TERM 1
             if self.config.is_host_volume_created:
                 self._ensure_host_volume_dir(host_id)
 
-            with (
-                progress.step(ProgressStepId("docker.start_container"), "Starting the container", creating_host),
-                log_span("Creating Docker container", container_name=container_name),
-            ):
+            with log_span("Creating Docker container", container_name=container_name):
                 container = self._run_container(
                     image=image_name,
                     container_name=container_name,
@@ -1673,8 +1620,8 @@ kill -TERM 1
         # Mint this host's own client + host keypairs up front so the setup
         # helper's per-host resolution uses them for the new container instead
         # of falling back to a legacy shared pair from older hosts.
-        load_or_create_per_host_client_keypair(self._keys_dir, host_id, DOCKER_SSH_KEY_NAME, DOCKER_KNOWN_HOSTS_NAME)
-        load_or_create_per_host_host_keypair(self._keys_dir, host_id, DOCKER_HOST_KEY_NAME)
+        load_or_create_per_host_client_keypair(self._keys_dir, host_id, "docker_ssh_key", "known_hosts")
+        load_or_create_per_host_host_keypair(self._keys_dir, host_id, "host_key")
 
         try:
             host, ssh_host, ssh_port, host_public_key = self._setup_container_ssh_and_create_host(

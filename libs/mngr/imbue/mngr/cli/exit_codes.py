@@ -14,9 +14,8 @@ EXIT_CODE_HOST_RESOURCE_REMAINS: Final[int] = 5
 EXIT_CODE_PROVIDER_INACCESSIBLE: Final[int] = 6
 # `mngr message` only: the message WAS delivered/accepted, but afterward a blocking
 # interactive dialog remained that could not be resolved (see MessageDeliveredButBlockedError).
-# Distinct from EXIT_CODE_ERROR (not delivered, or not confirmed delivered) so callers -- e.g. the
-# minds system_interface -- can tell "delivered but the agent is now stuck on a dialog" apart from
-# "message failed to send".
+# Distinct from EXIT_CODE_ERROR (not delivered) so callers -- e.g. the minds system_interface --
+# can tell "delivered but the agent is now stuck on a dialog" apart from "message failed to send".
 EXIT_CODE_MESSAGE_DELIVERED_BUT_BLOCKED: Final[int] = 7
 # "The named agent or host does not exist" is EXIT_CODE_TARGET_NOT_FOUND (8), defined in
 # errors.py beside the exception classes that carry it.

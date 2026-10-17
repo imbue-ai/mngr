@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # sigwinch_panes.sh -- keep an agent's tmux pane usable and repainted after a client attaches.
 #
-# Runs from per-session tmux `client-attached` and (fit mode only) `client-resized` hooks, via
-# `if-shell -b`, in one of two modes:
+# Runs from a per-session tmux `client-attached` hook (via `run-shell -b`) in one of two modes:
 #
 #   fit   -- the default sizing policy. The agent window is pinned to window-size=manual (so a
 #            degenerate client on the shared tmux server can never collapse it), and this script
@@ -22,7 +21,7 @@
 # pane shell and may not be the pane's foreground process-group leader, so tmux's signal does not
 # reach it reliably.
 #
-# `if-shell -b` backgrounds this relative to the attach, so the attach is never blocked while we
+# `run-shell -b` backgrounds this relative to the attach, so the attach is never blocked while we
 # wait out the delay below (it lets the window settle at the new client first). Invoked directly
 # (e.g. in tests) it runs synchronously; set the delay to 0 there.
 
@@ -120,6 +119,5 @@ _main() {
     _signal_panes
 }
 
-# One line: bash has parsed the exit before _main runs, so rewriting this file mid-run cannot change
-# what runs next.
-_main; exit 0
+_main
+exit 0

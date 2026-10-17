@@ -456,28 +456,14 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
         """Read a file from the host volume."""
         return self.host_volume.read_file(self._to_volume_path(path))
 
-    def read_file_tail_from_offset(
-        self, path: Path, start_byte: int, max_byte_count: int | None = None
-    ) -> FileTailRead:
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
         """Read a file's bytes from ``start_byte`` to EOF by reading the whole file.
 
         The volume API has no ranged read, and an offline host's files do not change,
-        so callers read them once rather than polling. A nonzero ``max_byte_count`` is
-        not honored: every call reads the whole file, so serving it a piece at a time
-        would read it once per piece. A zero one asks only for the size, which the
-        directory listing carries, so the file is not downloaded for it.
+        so callers read them once rather than polling.
         """
-        if max_byte_count == 0:
-            return FileTailRead(file_size=self._listed_file_size(path), content=b"")
         content = self.read_file(path)
         return FileTailRead(file_size=len(content), content=content[start_byte:])
-
-    def _listed_file_size(self, path: Path) -> int:
-        normalized_path = Path(os.path.normpath(path))
-        for entry in self.list_directory(normalized_path.parent):
-            if entry.file_type == FileType.FILE and Path(entry.path).name == normalized_path.name:
-                return entry.size
-        raise FileNotFoundError(f"File not found: {path}")
 
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         """Read a file from the host volume and decode it."""

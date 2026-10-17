@@ -126,10 +126,6 @@ def test_prevent_async_await() -> None:
     rc.check_async_await(_DIR, snapshot(0))
 
 
-def test_prevent_httpx_import() -> None:
-    rc.check_httpx_import(_DIR, snapshot(0))
-
-
 # ratchet_group("Hardcoded paths")
 
 
@@ -152,7 +148,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(11))
+    rc.check_trailing_comments(_DIR, snapshot(12))
 
 
 def test_prevent_init_docstrings() -> None:

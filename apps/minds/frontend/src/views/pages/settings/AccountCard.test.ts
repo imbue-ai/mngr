@@ -5,14 +5,9 @@
 
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  clearAppContextForTests,
-  registerAppContext,
-} from "../../../app-context";
 import type { UiAccountEntry } from "../../../channel/messages";
 import { AccountsDetailModel } from "../../../models/accountsDetail";
-import { createEmptyStores } from "../../../models/boot";
-import { ShellState } from "../../shell/shell-state";
+import { webLogin } from "../../../models/webLogin";
 import type { AnyVnode } from "../../../testing";
 import {
   accountEntry,
@@ -38,7 +33,6 @@ function modelOnPlan(planName: string): AccountsDetailModel {
     usage_rows: [],
     is_over_storage_quota: false,
     is_at_bucket_quota: false,
-    is_sharing_workspaces: false,
   };
   state.privacyPolicyUrl = PRIVACY_POLICY_URL;
   return model;
@@ -60,7 +54,6 @@ function mountCard(
 }
 
 afterEach(() => {
-  clearAppContextForTests();
   vi.restoreAllMocks();
 });
 
@@ -214,6 +207,26 @@ describe("the plan switcher's plan names", () => {
   });
 });
 
+describe("a signed-out account's card", () => {
+  it("signs back in to close on landing, with no confirmation over the list", () => {
+    const start = vi
+      .spyOn(webLogin, "start")
+      .mockImplementation(() => Promise.resolve());
+    const render = mountCard(
+      modelOnPlan("free"),
+      accountEntry({ email: "person@example.com", is_enabled: false }),
+    );
+
+    const signInAgain = collectVnodes(render()).find(
+      (node) => collectText(node).join("").trim() === "Sign in again",
+    );
+    expect(signInAgain).toBeDefined();
+    (attrsOf(signInAgain as AnyVnode).onclick as () => void)();
+
+    expect(start).toHaveBeenCalledWith("", { isClosedOnSignIn: true });
+  });
+});
+
 describe("the email notifications switch", () => {
   function modelWithChannels(
     channels: { email_enabled: boolean; in_app_enabled: boolean } | null,
@@ -319,30 +332,6 @@ describe("the email notifications switch", () => {
     expect(emailSwitch(root)).toBeUndefined();
     expect(collectText(root).join(" ")).toContain(
       "Loading notification settings",
-    );
-  });
-});
-
-describe("the shared-workspaces link", () => {
-  it("is offered only while the account holds a share", () => {
-    // The link is the window's account's hub page, read off the registered shell.
-    const stores = createEmptyStores();
-    registerAppContext({ stores, shell: new ShellState(stores) });
-    const model = modelOnPlan("free");
-    const state = model.planStateFor(ACCOUNT.user_id);
-    expect(
-      collectVnodes(mountCard(model)()).some(
-        (node) => attrsOf(node).id === "account-shared-workspaces-link",
-      ),
-    ).toBe(false);
-
-    state.planView = { ...state.planView!, is_sharing_workspaces: true };
-    const link = collectVnodes(mountCard(model)()).find(
-      (node) => attrsOf(node).id === "account-shared-workspaces-link",
-    );
-    expect(link).toBeDefined();
-    expect(attrsOf(link as AnyVnode).href).toBe(
-      "/account/local/workspaces/shared",
     );
   });
 });

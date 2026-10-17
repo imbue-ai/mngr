@@ -28,7 +28,7 @@ from datetime import timezone
 from typing import Final
 from uuid import uuid4
 
-import httpx2
+import httpx
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -71,12 +71,9 @@ _RETENTION_CACHE_TTL_SECONDS: Final[float] = 60.0 * 60.0
 # Events land under events/<source>/events.jsonl in the Imbue Studio data dir.
 _EVENT_SOURCE: Final[str] = "backup_reaper"
 
-# The plugin CLI writes the raising exception's class name into its stderr JSON
-# (``error_class``), and the class it raises for a bucket the connector no
-# longer has is its own ``ImbueCloudBucketNotFoundError``, never the connector's
-# ``R2BucketNotFoundError``. A missing bucket during a reap just means someone
-# else got there first.
-_BUCKET_NOT_FOUND_SIGNAL: Final[str] = "ImbueCloudBucketNotFoundError"
+# The CLI writes the raising exception's class name into its stderr JSON;
+# a missing bucket during a reap just means someone else got there first.
+_BUCKET_NOT_FOUND_SIGNAL: Final[str] = "R2BucketNotFoundError"
 
 
 class ReapCandidate(FrozenModel):
@@ -133,10 +130,10 @@ def fetch_retention_seconds(connector_url: str) -> float | None:
     """Fetch the retention window from the connector's policy endpoint, or None on any failure."""
     url = f"{connector_url.rstrip('/')}{_RETENTION_POLICY_PATH}"
     try:
-        response = httpx2.get(url, timeout=_RETENTION_FETCH_TIMEOUT_SECONDS)
+        response = httpx.get(url, timeout=_RETENTION_FETCH_TIMEOUT_SECONDS)
         response.raise_for_status()
         body = response.json()
-    except (httpx2.HTTPError, ValueError) as e:
+    except (httpx.HTTPError, ValueError) as e:
         logger.debug("Could not fetch the backup retention policy from {}: {}", url, e)
         return None
     raw_value = body.get("retention_seconds") if isinstance(body, dict) else None

@@ -1,0 +1,1 @@
+Added `imbue.mngr_latchkey.device_metadata.build_device_metadata_env`, which builds the `DETENT_CUSTOM_METADATA` environment that makes a latchkey gateway report a device id to its permission checks as `customMetadata.deviceId`. A host's permissions file is shared between the user's computers, so this lets a rule apply on one computer only. Nothing writes such a rule yet.

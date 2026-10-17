@@ -1,0 +1,1 @@
+Landed the latchkey 3.x multiple-accounts support (from `hynek/multiple-accounts`): per-account credential parsing in `services_info`, the new `auth_list` and `add_account` methods, an account-aware `auth_clear`, and the `LATCHKEY_MIN_VERSION` bump to 3.1.0. See the `hynek-multiple-accounts` entry for the full description.

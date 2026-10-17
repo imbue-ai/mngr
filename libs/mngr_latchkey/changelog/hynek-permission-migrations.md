@@ -1,0 +1,11 @@
+Added a per-host permissions migration mechanism (`imbue.mngr_latchkey.migrations`) for a host's `latchkey_permissions.json`.
+
+- Each host's directory now carries a `permissions-format-version` stamp, one integer naming the format its policy is written in; a directory without one is at version 0. A host with a machine of its own keeps the same stamp beside its policy in the machine's `~/.latchkey`, where it is the source of truth: `read-state` answers with it, `apply-state` installs it after the policy, every push of a policy carries the stamp of the copy it was taken from, and every read adopts the machine's stamp with the policy. It is distinct from upstream's `data-format-version`, which stamps the credential store.
+
+- A migration is a `PermissionsMigration` with a `version` (consecutive from 1) and an `apply(permissions)` that takes the parsed policy (`LatchkeyPermissionsConfig`) as the version below wrote it and returns it as its own version writes it; the runner reads, writes and stamps. The build's migrations are listed in `migrations/runner.py` (`PERMISSIONS_MIGRATIONS`, currently none); a policy this build creates is stamped with the version the last one ends in, so a fresh file is never migrated.
+
+- `migrate_permissions` applies the migrations a host's stamp says it has not had yet, in order, re-stamping after each. For a host with a machine of its own it runs right after the machine's policy is adopted, by `MachineCredentials.refresh` and by the provisioning pass, and the migrated policy is handed back to the machine in one command (`migrate_permissions_and_push`). For a host without one it runs in place when `mngr latchkey forward` starts, before the gateway reads the file.
+
+- A policy stamped newer than a build knows is refused rather than read: `MachineCredentials.refresh` raises `PermissionsFormatNewerError`, while the provisioning pass and the forward's startup sweep log a warning and leave the policy as it is.
+
+- `push_permissions_snapshot`, `push_permissions_and_desktop_egress_rules` and `push_credentials_with_permissions` take the format version the snapshot is written in; `FetchedMachineState` and `RemoteMachineState` report the machine's; `link_opaque_permissions_to_host` reports whether it created the host's file.

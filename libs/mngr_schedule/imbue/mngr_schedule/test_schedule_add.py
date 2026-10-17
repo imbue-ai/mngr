@@ -1,36 +1,23 @@
-"""Release tests for mngr schedule add with Modal deployment.
+"""Release test for mngr schedule add with Modal deployment.
 
-These tests require Modal credentials and network access.
+This test requires Modal credentials and network access. It is marked
+with @pytest.mark.release and @pytest.mark.timeout(600).
 """
 
 import json
 import subprocess
 from pathlib import Path
-from typing import Final
 
 import pytest
 
 from imbue.mngr_schedule.implementations.modal.deploy import get_modal_app_name
-from imbue.mngr_schedule.testing import MODAL_APP_CLEANUP_RESERVE_SECONDS
 from imbue.mngr_schedule.testing import build_subprocess_env
 from imbue.mngr_schedule.testing import cleanup_modal_app
 from imbue.mngr_schedule.testing import resolve_modal_environment
 
-# Each test here deploys to Modal and cleans the app up in its `finally`, all
-# inside one pytest-timeout budget. Every command's budget is what that cap
-# leaves once the rest of the test is paid for, so a stuck command reports
-# before pytest-timeout fires.
-_TEST_TIMEOUT_SECONDS: Final[int] = 720
-# Held back for the `finally` cleanup and the interpreter work around it: twice
-# what the cleanup itself can spend.
-_AFTER_DEPLOY_RESERVE_SECONDS: Final[int] = 2 * MODAL_APP_CLEANUP_RESERVE_SECONDS
-_DEPLOY_TIMEOUT_SECONDS: Final[int] = _TEST_TIMEOUT_SECONDS - _AFTER_DEPLOY_RESERVE_SECONDS
-_LIST_TIMEOUT_SECONDS: Final[int] = 60
-_DEPLOY_THEN_LIST_TIMEOUT_SECONDS: Final[int] = _DEPLOY_TIMEOUT_SECONDS - _LIST_TIMEOUT_SECONDS
-
 
 @pytest.mark.release
-@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+@pytest.mark.timeout(600)
 def test_schedule_add_deploys_to_modal(monorepo_root: Path) -> None:
     """Test that schedule add successfully deploys a cron function to Modal.
 
@@ -69,7 +56,7 @@ def test_schedule_add_deploys_to_modal(monorepo_root: Path) -> None:
             ],
             capture_output=True,
             text=True,
-            timeout=_DEPLOY_TIMEOUT_SECONDS,
+            timeout=600,
             env=env,
             cwd=monorepo_root,
         )
@@ -90,7 +77,7 @@ def test_schedule_add_deploys_to_modal(monorepo_root: Path) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+@pytest.mark.timeout(500)
 def test_schedule_add_with_verification(monorepo_root: Path) -> None:
     """Test that schedule add with quick verification deploys and verifies.
 
@@ -130,7 +117,7 @@ def test_schedule_add_with_verification(monorepo_root: Path) -> None:
             ],
             capture_output=True,
             text=True,
-            timeout=_DEPLOY_TIMEOUT_SECONDS,
+            timeout=500,
             env=env,
             cwd=monorepo_root,
         )
@@ -151,7 +138,7 @@ def test_schedule_add_with_verification(monorepo_root: Path) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+@pytest.mark.timeout(500)
 def test_schedule_add_with_full_verification(monorepo_root: Path) -> None:
     """Test that schedule add with full verification deploys and waits.
 
@@ -192,7 +179,7 @@ def test_schedule_add_with_full_verification(monorepo_root: Path) -> None:
             ],
             capture_output=True,
             text=True,
-            timeout=_DEPLOY_TIMEOUT_SECONDS,
+            timeout=500,
             env=env,
             cwd=monorepo_root,
         )
@@ -213,7 +200,7 @@ def test_schedule_add_with_full_verification(monorepo_root: Path) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
+@pytest.mark.timeout(600)
 def test_schedule_list_shows_deployed_schedule(monorepo_root: Path) -> None:
     """Test that schedule list shows a schedule after it has been deployed.
 
@@ -252,7 +239,7 @@ def test_schedule_list_shows_deployed_schedule(monorepo_root: Path) -> None:
             ],
             capture_output=True,
             text=True,
-            timeout=_DEPLOY_THEN_LIST_TIMEOUT_SECONDS,
+            timeout=600,
             env=env,
             cwd=monorepo_root,
         )
@@ -265,7 +252,7 @@ def test_schedule_list_shows_deployed_schedule(monorepo_root: Path) -> None:
             ["uv", "run", "mngr", "schedule", "list", "--provider", "modal", "--format=json"],
             capture_output=True,
             text=True,
-            timeout=_LIST_TIMEOUT_SECONDS,
+            timeout=60,
             env=env,
             cwd=monorepo_root,
         )

@@ -10,11 +10,11 @@ Runs as a tracked workspace operation (the ``workspace_operations`` registry,
 like restart) so the settings view can poll step-level progress:
 
 1. Gate + wait: poll the workspace's gate probe until no backup tick is in
-   flight. RUNNING chat agents, UNKNOWN ones (state unreadable), and idle ones
-   busy with a pending background task, block the *code* path -- the caller
-   passes ``is_stop_chats`` (the "Stop all chats and retry" flow) to have the
-   apply script stop them first. Waiting is unbounded and cancellable (the
-   cancel just stops polling; nothing has been mutated yet).
+   flight. RUNNING chat agents, and idle ones busy with a pending background
+   task, block the *code* path -- the caller passes ``is_stop_chats`` (the
+   "Stop all chats and retry" flow) to have the apply script stop them
+   first. Waiting is unbounded and cancellable (the cancel just stops
+   polling; nothing has been mutated yet).
 2. Apply: one exec runs the mutating script (stash / checkout tag / commit /
    ``uv sync --all-packages`` / restart / verify), which auto-rolls-back via
    ``git revert``
@@ -31,7 +31,6 @@ the ``BLOCKED_BY_RUNNING_CHATS:`` prefix so the UI can offer the
 
 from collections.abc import Callable
 from typing import Final
-from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -54,23 +53,21 @@ from imbue.minds.desktop_client.backup_provisioning import run_mngr_exec_on_agen
 from imbue.minds.desktop_client.backup_verification import BackupServiceCheckState
 from imbue.minds.desktop_client.backup_verification import BackupServiceProblem
 from imbue.minds.desktop_client.backup_verification import check_backup_service_for_workspace
+from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_APPLY_UPDATE_SCRIPT
+from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROBE_SCRIPT
+from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_RESTORE_SCRIPT
+from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
+from imbue.minds.desktop_client.backup_workspace_scripts import RESTORE_RESULT_MARKER
+from imbue.minds.desktop_client.backup_workspace_scripts import RESUME_SERVICES_COMMAND
+from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
+from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
+from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
-from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_command
-from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.desktop_client.workspace_update_state import OLDEST_IN_PLACE_UPDATABLE_VERSION
 from imbue.minds.desktop_client.workspace_update_state import is_below_in_place_update_floor
 from imbue.minds.errors import BackupProvisioningError
-from imbue.minds.workspace_programs import backup_apply_update
-from imbue.minds.workspace_programs import backup_gate_probe
-from imbue.minds.workspace_programs import backup_restore
-from imbue.minds.workspace_programs.backup_protocol import BackupProgramStatus
-from imbue.minds.workspace_programs.backup_protocol import GATE_RESULT_MARKER
-from imbue.minds.workspace_programs.backup_protocol import RESTORE_RESULT_MARKER
-from imbue.minds.workspace_programs.backup_protocol import UPDATE_RESULT_MARKER
-from imbue.minds.workspace_programs.backup_protocol import parse_backup_program_status
-from imbue.minds.workspace_programs.backup_restore import RESUME_SERVICES_COMMAND
 from imbue.mngr.primitives import AgentId
 
 # Machine-readable prefix on the operation error when running chats block the
@@ -97,7 +94,7 @@ _STASH_CONFLICT_GUIDANCE: Final[str] = (
     "they are preserved in the git stash (run `git stash pop` in the workspace)."
 )
 
-# Must exceed the gate probe script's own `uv run --no-sync mngr list` budget (180s)
+# Must exceed the gate probe script's own `uv run mngr list` budget (180s)
 # so a slow list surfaces as the script's structured "mngr list failed"
 # payload rather than an opaque exec timeout.
 _GATE_PROBE_TIMEOUT_SECONDS: Final[float] = 240.0
@@ -276,8 +273,8 @@ def _apply_update_and_verify(
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
     is_stop_chats: bool,
-    # The workspace's own template version, as the update detector resolved it.
-    # None when it has none.
+    # The workspace's own template version, as the update detector resolved it
+    # (its git tag, else the create-time label). None when nobody could read one.
     workspace_version_ref: str | None,
 ) -> str | None:
     """Run the mutating update script, re-inject the env, and verify convergence.
@@ -293,8 +290,8 @@ def _apply_update_and_verify(
 
     # The mutating apply script (stash/checkout/commit/sync/restart).
     registry.append_log(agent_id, "Applying the backup service update...")
-    apply_command = build_workspace_program_command(
-        backup_apply_update,
+    apply_command = build_workspace_script_command(
+        BACKUP_APPLY_UPDATE_SCRIPT,
         (
             "--minds-version",
             resolve_release_id(),
@@ -315,20 +312,16 @@ def _apply_update_and_verify(
     if payload is None:
         detail = (apply_result.stderr or apply_result.stdout).strip()[-800:]
         return f"The update script produced no result: {detail}"
-    match parse_backup_program_status(payload.get("status")):
-        case BackupProgramStatus.BLOCKED:
-            running_chats = payload.get("running_chats")
-            chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
-            return f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}"
-        case BackupProgramStatus.FAILED:
-            detail = str(payload.get("detail", "unknown failure"))
-            rolled_back_note = " (changes were rolled back)" if payload.get("rolled_back") else ""
-            stash_note = f" {_STASH_CONFLICT_GUIDANCE}" if payload.get("stash_conflict") else ""
-            return f"{detail}{rolled_back_note}{stash_note}"
-        case BackupProgramStatus.OK:
-            pass
-        case _ as unreachable:
-            assert_never(unreachable)
+    status = str(payload.get("status", "failed"))
+    if status == "blocked":
+        running_chats = payload.get("running_chats")
+        chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
+        return f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}"
+    if status != "ok":
+        detail = str(payload.get("detail", "unknown failure"))
+        rolled_back_note = " (changes were rolled back)" if payload.get("rolled_back") else ""
+        stash_note = f" {_STASH_CONFLICT_GUIDANCE}" if payload.get("stash_conflict") else ""
+        return f"{detail}{rolled_back_note}{stash_note}"
     if payload.get("committed"):
         registry.append_log(agent_id, f"Updated backup service code to {payload.get('tag', 'the target tag')}.")
     else:
@@ -370,7 +363,7 @@ def _wait_for_quiet_workspace(
     first). Cancellation between polls ends the operation as failed
     ("cancelled"); nothing has been mutated at this point.
     """
-    probe_command = build_workspace_program_command(backup_gate_probe, ("--agent-id", str(agent_id)))
+    probe_command = build_workspace_script_command(BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", str(agent_id)))
     is_waiting_logged = False
     is_gate_error_logged = False
     while not registry.is_cancel_requested(agent_id):
@@ -669,8 +662,8 @@ def _run_restore_phases(
     registry.append_log(
         agent_id, "Backing up the current state, then restoring the selected backup. This can take a while..."
     )
-    restore_command = build_workspace_program_command(
-        backup_restore,
+    restore_command = build_workspace_script_command(
+        BACKUP_RESTORE_SCRIPT,
         (
             "--agent-id",
             str(agent_id),
@@ -714,27 +707,23 @@ def _run_restore_phases(
             logger.warning("Post-failure service resume for {} failed: {}", agent_id, resume_detail)
         registry.fail(agent_id, f"The restore script produced no result: {detail}")
         return
-    match parse_backup_program_status(payload.get("status")):
-        case BackupProgramStatus.BLOCKED:
-            running_chats = payload.get("running_chats")
-            chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
-            registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}")
-            return
-        case BackupProgramStatus.FAILED:
-            detail = str(payload.get("detail", "unknown failure"))
-            safety_note = (
-                " A safety backup of the pre-restore state was taken first."
-                if payload.get("safety_snapshot_taken")
-                else ""
-            )
-            config_warning = _supervisord_config_warning(payload)
-            config_note = f" {config_warning}" if config_warning is not None else ""
-            registry.fail(agent_id, f"{detail}{safety_note}{config_note}")
-            return
-        case BackupProgramStatus.OK:
-            pass
-        case _ as unreachable:
-            assert_never(unreachable)
+    status = str(payload.get("status", "failed"))
+    if status == "blocked":
+        running_chats = payload.get("running_chats")
+        chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
+        registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}")
+        return
+    if status != "ok":
+        detail = str(payload.get("detail", "unknown failure"))
+        safety_note = (
+            " A safety backup of the pre-restore state was taken first."
+            if payload.get("safety_snapshot_taken")
+            else ""
+        )
+        config_warning = _supervisord_config_warning(payload)
+        config_note = f" {config_warning}" if config_warning is not None else ""
+        registry.fail(agent_id, f"{detail}{safety_note}{config_note}")
+        return
     registry.append_log(
         agent_id, "Restored the backup, reinstalled dependencies, and restarted the workspace services."
     )

@@ -42,8 +42,6 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.logging import LoggingConfig
-from imbue.mngr.utils.progress import NullProgressReporter
-from imbue.mngr.utils.progress import ProgressReporterInterface
 from imbue.mngr.utils.suspension_watchdog import SuspensionWatchdog
 from imbue.overlay.markers import ScalarTuple
 
@@ -405,10 +403,7 @@ class RetryConfig(FrozenModel):
 
     connect_retry_times: int = Field(
         default=3,
-        description=(
-            "Number of times to retry a failed SSH connection before giving up. A drop that spans a "
-            "suspension of this machine, or that reconnects to a restored host, does not use a retry"
-        ),
+        description="Number of times to retry a failed SSH connection before giving up",
     )
     connect_retry_delay: str = Field(
         default="5s",
@@ -692,13 +687,6 @@ class MngrContext(FrozenModel):
     project_root: Path | None = Field(
         default=None,
         description="Project root directory (git worktree root)",
-    )
-    progress_reporter: ProgressReporterInterface = Field(
-        default_factory=NullProgressReporter,
-        description=(
-            "Where long-running operations (create, provider prepare) report their steps; the CLI installs an "
-            "emitting reporter for --format jsonl and every other caller gets the no-op default"
-        ),
     )
 
     def get_plugin_config(self, name: str, config_type: type[PluginConfigT]) -> PluginConfigT:

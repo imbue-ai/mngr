@@ -34,9 +34,6 @@ import type {
   SharingGrantList,
   SharingGrantsDocument,
   SharingReadinessResponse,
-  VisitingAgentEntry,
-  VisitingAgentInviteResponse,
-  VisitingAgentsResponse,
 } from "./workspaceOptions";
 import {
   RESOLVE_USER_URL,
@@ -71,26 +68,7 @@ function publicationMutationKey(coordinate: string): MutationKey {
 }
 
 /** A sharing route that answered with a failure, in its own words. */
-export class SharingRequestError extends Error {
-  /** The in-app page that fixes a refusal with a structured code (the
-   * shared-workspaces page for a full share quota); "" otherwise. */
-  readonly remedyPath: string;
-
-  constructor(message: string, remedyPath = "") {
-    super(message);
-    this.remedyPath = remedyPath;
-  }
-}
-
-/** The page a publish refusal points at, read from its body: the connector's
- * quota_exceeded refusal names the shared-workspaces page, where a leaked
- * share holding the slot is removed. */
-export function remedyPathFromBody(body: unknown): string {
-  if (body === null || typeof body !== "object") return "";
-  const record = body as Record<string, unknown>;
-  const path = record["shared_workspaces_path"];
-  return record["code"] === "quota_exceeded" && typeof path === "string" ? path : "";
-}
+export class SharingRequestError extends Error {}
 
 /** One throw of the switch, as its mutation remembers it: the token by which
  * an answer is told to be the newest attempt's, and the place of the write
@@ -116,8 +94,7 @@ const GRANTS_SYNC_RETRY_MS = 15_000;
  * allowance and the cooldown are named only at the moment of refusal (spec
  * P5, O5); every other code is the desktop's or the connector's own. */
 const INVITE_REFUSAL_MESSAGES: Record<string, string> = {
-  over_allowance:
-    "Access granted, but you've reached your invitation email limit for now.",
+  over_allowance: "You have reached your invitation limit for now.",
   too_soon: "You invited this person too recently.",
   grants_out_of_date:
     "The permissions have not reached Imbue Cloud yet. Try again in a moment.",
@@ -145,33 +122,6 @@ export type MobileLinkState =
    * redraw that follows the send. */
   | { readonly state: "sent"; readonly recipientEmail: string }
   | { readonly state: "refused"; readonly message: string };
-/** What the visiting-agents section is doing about an invite: exactly one of
- * nothing, minting, holding a minted code, and refused is ever on screen. A
- * code carries the scope of the pane it was minted on (`target`), so only
- * that pane shows it; the other panes describe a different scope. */
-export type VisitingAgentInviteState =
-  | { readonly state: "idle" }
-  | { readonly state: "minting" }
-  | {
-      readonly state: "minted";
-      readonly target: string;
-      readonly invite: VisitingAgentInviteResponse;
-    }
-  | {
-      readonly state: "refused";
-      readonly target: string;
-      readonly message: string;
-    };
-
-/** How far the visiting-agent list has got. */
-export type VisitingAgentsLoadState = "idle" | "loading" | "ready" | "failed";
-
-const VISITING_AGENT_INVITE_FAILURE_MESSAGE = "Could not create the invitation";
-const VISITING_AGENT_REVOKE_FAILURE_MESSAGE =
-  "Could not revoke the agent's access";
-const VISITING_AGENTS_LOAD_FAILURE_MESSAGE =
-  "Could not read the visiting agents";
-
 /** What a grant can be typed as, in the order the add row offers them. */
 export const GRANT_ADD_KINDS = ["email", "email_domain"] as const;
 
@@ -212,7 +162,7 @@ export type PublishWrite =
   | { readonly state: "idle" }
   | { readonly state: "publishing" }
   | { readonly state: "unpublishing" }
-  | { readonly state: "failed"; readonly message: string; readonly remedyPath: string };
+  | { readonly state: "failed"; readonly message: string };
 
 /** The workspace gateway's own bring-up report while the link is not live. */
 const GATEWAY_STATES = ["up", "retrying", "halted"] as const;
@@ -260,14 +210,6 @@ export interface GrantOutcome {
   readonly lastVisitedAt: string | null;
 }
 
-/** Whether the person a row names has opened the workspace: what a granter
- * wants to know about someone they invited. */
-export type WorkspaceAccess =
-  | { readonly kind: "not_a_user" }
-  | { readonly kind: "never" }
-  /** `at` is the latest visit. */
-  | { readonly kind: "accessed"; readonly at: string | null };
-
 export type InviteState =
   | { readonly state: "idle" }
   | { readonly state: "inviting" }
@@ -282,22 +224,10 @@ export type InviteState =
 export type InvitationStatusIndicator =
   | { readonly kind: "none" }
   | { readonly kind: "inviting" }
-  | {
-      readonly kind: "invited";
-      readonly at: string | null;
-      readonly canReinvite: boolean;
-    }
+  | { readonly kind: "invited"; readonly at: string | null; readonly canReinvite: boolean }
   | { readonly kind: "could_not_invite"; readonly canReinvite: boolean }
-  | {
-      readonly kind: "refused";
-      readonly message: string;
-      readonly canReinvite: boolean;
-    }
-  | {
-      readonly kind: "joined";
-      readonly firstAt: string | null;
-      readonly lastAt: string | null;
-    };
+  | { readonly kind: "refused"; readonly message: string; readonly canReinvite: boolean }
+  | { readonly kind: "joined"; readonly firstAt: string | null; readonly lastAt: string | null };
 
 /** One entry the grants route refused, as the 400 body names it. */
 interface GrantRefusal {
@@ -418,22 +348,11 @@ export class SharePanelModel {
   private isDisposed = false;
   // Keyed by target and grantee, as the outcomes route lists them.
   private outcomeByKey = new Map<string, GrantOutcome>();
-  /** Whether the outcomes route has answered: until it has, no row's missing
-   * outcome means its person never visited. */
-  private isOutcomesKnown = false;
   private readonly inviteStateByKey = new Map<GrantKey, InviteState>();
   // What the mobile-link control is doing. One per panel rather than per
   // target: the message carries the whole workspace's link, whichever target
   // the pane is on.
   private mobileLink: MobileLinkState = { state: "idle" };
-  // The visiting agents (outside coding agents invited into the workspace),
-  // read on demand: listing them costs an exec into the workspace.
-  private visitingAgents: VisitingAgentEntry[] = [];
-  private visitingAgentsLoad: VisitingAgentsLoadState = "idle";
-  private visitingAgentsError: string | null = null;
-  private visitingAgentInvite: VisitingAgentInviteState = { state: "idle" };
-  private readonly revokingVisitingAgentIds = new Set<string>();
-  private visitingAgentRevokeError: string | null = null;
   // A person is auto-invited once, when their grant first settles and the document has reached
   // Imbue Cloud; a later re-invite is the granter's own doing.
   private readonly autoInvitedKeys = new Set<GrantKey>();
@@ -489,131 +408,6 @@ export class SharePanelModel {
       .subscribe((event) => this.onMutationEvent(event));
   }
 
-  // Visiting agents: outside coding agents invited into the target.
-
-  get visitingAgentList(): readonly VisitingAgentEntry[] {
-    return this.visitingAgents;
-  }
-
-  get visitingAgentsLoadState(): VisitingAgentsLoadState {
-    return this.visitingAgentsLoad;
-  }
-
-  get visitingAgentsLoadError(): string | null {
-    return this.visitingAgentsError;
-  }
-
-  get visitingAgentInviteState(): VisitingAgentInviteState {
-    return this.visitingAgentInvite;
-  }
-
-  get visitingAgentRevokeErrorMessage(): string | null {
-    return this.visitingAgentRevokeError;
-  }
-
-  isRevokingVisitingAgent(agentId: string): boolean {
-    return this.revokingVisitingAgentIds.has(agentId);
-  }
-
-  /** The scope an invite minted from `target` carries: the whole workspace, or that one app. */
-  visitingAgentScopeFor(target: string): string | string[] {
-    return target === this.options.wholeService ? "workspace" : [target];
-  }
-
-  /** Read the visiting agents once; later calls re-read only when asked to. */
-  async ensureVisitingAgentsLoaded(): Promise<void> {
-    if (this.visitingAgentsLoad !== "idle") return;
-    await this.reloadVisitingAgents();
-  }
-
-  async reloadVisitingAgents(): Promise<void> {
-    this.visitingAgentsLoad = "loading";
-    this.visitingAgentsError = null;
-    this.redraw();
-    const result = await this.fetchJson(`${this.shareApiBase()}/agents`);
-    if (this.isDisposed) return;
-    if (result.ok) {
-      this.visitingAgents = (result.body as VisitingAgentsResponse).agents;
-      this.visitingAgentsLoad = "ready";
-    } else {
-      this.visitingAgentsLoad = "failed";
-      this.visitingAgentsError = errorMessageFromBody(
-        result.body,
-        VISITING_AGENTS_LOAD_FAILURE_MESSAGE,
-      );
-    }
-    this.redraw();
-  }
-
-  /**
-   * Mint a one-time code for an agent to join with the scope `target` names.
-   * The route publishes the workspace first when it is not published; the
-   * answer carries the code and the instruction block to hand the agent.
-   */
-  async inviteVisitingAgent(target: string): Promise<void> {
-    if (this.visitingAgentInvite.state === "minting") return;
-    this.visitingAgentInvite = { state: "minting" };
-    this.redraw();
-    const result = await this.fetchJson(
-      `${this.shareApiBase()}/agents/invites`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope: this.visitingAgentScopeFor(target) }),
-      },
-    );
-    if (this.isDisposed) return;
-    if (result.ok) {
-      this.visitingAgentInvite = {
-        state: "minted",
-        target,
-        invite: result.body as VisitingAgentInviteResponse,
-      };
-      // Publishing may have happened on the way; the switch should say so.
-      void this.statusQuery.refetch();
-    } else {
-      this.visitingAgentInvite = {
-        state: "refused",
-        target,
-        message: errorMessageFromBody(
-          result.body,
-          VISITING_AGENT_INVITE_FAILURE_MESSAGE,
-        ),
-      };
-    }
-    this.redraw();
-  }
-
-  /** Put the minted code away and re-read the list: by now the agent has most likely joined. */
-  dismissVisitingAgentInvite(): void {
-    this.visitingAgentInvite = { state: "idle" };
-    void this.reloadVisitingAgents();
-  }
-
-  async revokeVisitingAgent(agentId: string): Promise<void> {
-    if (this.revokingVisitingAgentIds.has(agentId)) return;
-    this.revokingVisitingAgentIds.add(agentId);
-    this.visitingAgentRevokeError = null;
-    this.redraw();
-    const result = await this.fetchJson(
-      `${this.shareApiBase()}/agents/${encodeURIComponent(agentId)}`,
-      { method: "DELETE" },
-    );
-    if (this.isDisposed) return;
-    this.revokingVisitingAgentIds.delete(agentId);
-    if (result.ok) {
-      this.visitingAgents = this.visitingAgents.filter(
-        (agent) => agent.agent_id !== agentId,
-      );
-    } else {
-      this.visitingAgentRevokeError = errorMessageFromBody(
-        result.body,
-        VISITING_AGENT_REVOKE_FAILURE_MESSAGE,
-      );
-    }
-    this.redraw();
-  }
-
   /** Flipped the moment the switch is thrown, before the route answers. */
   get isPublished(): boolean {
     const pending = this.pendingPublication;
@@ -630,7 +424,6 @@ export class SharePanelModel {
       return {
         state: "failed",
         message: error?.message ?? "Could not change sharing",
-        remedyPath: error instanceof SharingRequestError ? error.remedyPath : "",
       };
     return { state: "idle" };
   }
@@ -754,24 +547,6 @@ export class SharePanelModel {
     return key === null ? null : (this.outcomeByKey.get(key) ?? null);
   }
 
-  /** Whether the row's person has opened the workspace, or null when the row
-   * can say nothing: a domain names no one, a row being saved has no settled
-   * person yet, and an account's visits are unknown until the outcomes route
-   * has answered. An address had no account when it was granted, and that
-   * grant-time lookup is all the panel ever learns about accounts (spec O3). */
-  workspaceAccessFor(target: string, grant: Grant): WorkspaceAccess | null {
-    if (grant.grantee.kind === "email_domain") return null;
-    if (grant.status.state !== "settled") return null;
-    const outcome = this.outcomeFor(target, grant);
-    if (outcome?.kind === "joined")
-      return {
-        kind: "accessed",
-        at: outcome.lastVisitedAt ?? outcome.joinedAt,
-      };
-    if (grant.grantee.kind === "email") return { kind: "not_a_user" };
-    return this.isOutcomesKnown ? { kind: "never" } : null;
-  }
-
   inviteStateFor(key: GrantKey): InviteState {
     return this.inviteStateByKey.get(key) ?? { state: "idle" };
   }
@@ -791,10 +566,7 @@ export class SharePanelModel {
    * in-flight request, the last refusal, and the granter-visible outcome, in that order, so the
    * view only ever renders one of them. A domain row, and a row with nothing known yet, show
    * nothing. */
-  invitationStatusIndicator(
-    target: string,
-    grant: Grant,
-  ): InvitationStatusIndicator {
+  invitationStatusIndicator(target: string, grant: Grant): InvitationStatusIndicator {
     if (grant.grantee.kind === "email_domain") return { kind: "none" };
     const invite = this.inviteStateFor(grant.key);
     if (invite.state === "inviting") return { kind: "inviting" };
@@ -804,11 +576,7 @@ export class SharePanelModel {
     const outcome = this.outcomeFor(target, grant);
     if (outcome === null) return { kind: "none" };
     if (outcome.kind === "joined")
-      return {
-        kind: "joined",
-        firstAt: outcome.joinedAt,
-        lastAt: outcome.lastVisitedAt,
-      };
+      return { kind: "joined", firstAt: outcome.joinedAt, lastAt: outcome.lastVisitedAt };
     if (outcome.kind === "invited")
       return { kind: "invited", at: outcome.invitedAt, canReinvite };
     return { kind: "could_not_invite", canReinvite };
@@ -1238,7 +1006,6 @@ export class SharePanelModel {
     this.adoptedOutcomesSequence = sequence;
     const entries = (result.body as InvitationOutcomesResponse).outcomes ?? [];
     this.outcomeByKey = outcomesByKey(entries);
-    this.isOutcomesKnown = true;
     this.redraw();
   }
 
@@ -1797,7 +1564,6 @@ export class SharePanelModel {
     if (!result.ok)
       throw new SharingRequestError(
         errorMessageFromBody(result.body, `HTTP ${result.status}`),
-        remedyPathFromBody(result.body),
       );
     return result.body as MachineSharingResponse;
   }

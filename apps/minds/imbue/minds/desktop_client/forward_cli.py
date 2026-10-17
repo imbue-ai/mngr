@@ -20,7 +20,7 @@ spawning code; this file replaces them with a thin consumer that:
   dead, so the discovery pipeline is down) to the discovery-health watchdog
   via registered ``on_unexpected_exit`` callbacks.
 
-Provider-set changes are picked up by bouncing the ``mngr latchkey
+Provider-set changes are picked up by bouncing the detached ``mngr latchkey
 forward`` supervisor (the single discovery observer); the tailer here then sees
 the fresh snapshot automatically, so this consumer no longer sends ``SIGHUP``.
 """
@@ -38,7 +38,6 @@ from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from typing import AbstractSet
 from typing import Any
 from typing import Final
 
@@ -65,19 +64,15 @@ from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 from imbue.minds.utils.secret_redaction import redact_url_credentials_in_text
 from imbue.mngr.api.discovery_aggregator import AggregatorDelta
 from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
-from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import DiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoverySchemaMismatchWarner
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
@@ -376,10 +371,6 @@ class _ForwardStderrCollapser(MutableModel):
     _tail_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _tail: deque[str] = PrivateAttr(default_factory=lambda: deque(maxlen=_STDERR_TAIL_LINE_COUNT))
 
-    def scrub(self, line: str) -> str:
-        """Scrub ``line`` the way the tail's lines are, for quoting other plugin output in the same report."""
-        return _scrub_stderr_line(line, self._home_dir)
-
     def get_tail(self) -> tuple[str, ...]:
         """The last relayed messages, oldest first, scrubbed for quoting in an error report."""
         with self._tail_lock:
@@ -461,7 +452,7 @@ class _ForwardStderrCollapser(MutableModel):
 
     def _relay(self, message: str) -> None:
         logger.debug("mngr forward stderr: {}", message)
-        scrubbed = self.scrub(message)
+        scrubbed = _scrub_stderr_line(message, self._home_dir)
         with self._tail_lock:
             self._tail.append(scrubbed)
 
@@ -493,28 +484,8 @@ class EnvelopeStreamConsumer(MutableModel):
             "the snapshot advances no freshness. None (tests, embedded factories) fences nothing."
         ),
     )
-    is_provider_polled_here: Callable[[str], bool] | None = Field(
-        default=None,
-        frozen=True,
-        description=(
-            "Whether discovery on this device still polls a provider instance: an enabled block, or a backend's "
-            "own default. Discovery for one it does not is dropped: the events-file replay keeps a removed "
-            "instance's (or a suppressed default's) last snapshot in its window forever, and a poll that raced a "
-            "block's removal can still report its hosts, either of which would resurrect machines this device can "
-            "no longer reach. None (tests, embedded factories) drops nothing."
-        ),
-    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    # Orders an observe event's vanished-instance check, aggregator apply and
-    # resolver provider update against ``forget_provider_instances`` (the
-    # materializer's thread). The aggregator orders incremental events against
-    # snapshot spans, not snapshots against each other, so a snapshot that passed
-    # the check just before its block was deleted would otherwise re-add the
-    # instance's hosts after the forget emptied them, and nothing would ever
-    # take them away again; its ``update_providers`` after the resolver's own
-    # forget would likewise leave a provider entry nothing ever removes.
-    _ingest_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # The shared span-aware, per-provider discovery reconciler. Every parsed
     # observe event is folded into it; its accumulated view is what we push into
     # the resolver and fan out as discovered/destroyed callbacks.
@@ -581,18 +552,6 @@ class EnvelopeStreamConsumer(MutableModel):
     # wrote just before it died.
     _stdout_drained_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _stderr_drained_event: threading.Event = PrivateAttr(default_factory=threading.Event)
-    # The structured `{"event": "error", ...}` line mngr's CLI writes to stdout
-    # (in `--format jsonl`) when an exception escapes the plugin command: the
-    # error class, and its message scrubbed for quoting in the exit report.
-    # Guarded by `_lock`.
-    _plugin_error_class: str | None = PrivateAttr(default=None)
-    _plugin_error_message: str | None = PrivateAttr(default=None)
-    # When this backend began its own shutdown (monotonic clock) and the signal
-    # that started it, so the exit report can tell a plugin that died alongside
-    # its parent (both signalled at once) from one that died on its own.
-    # Guarded by `_lock`.
-    _backend_shutdown_began_at_monotonic: float | None = PrivateAttr(default=None)
-    _backend_shutdown_signal_name: str | None = PrivateAttr(default=None)
 
     def add_on_agent_discovered_callback(self, callback: OnAgentDiscoveredCallback) -> None:
         """Register a callback fired for every observe-stream agent discovery."""
@@ -718,20 +677,6 @@ class EnvelopeStreamConsumer(MutableModel):
             )
         return port
 
-    def note_backend_shutdown_began(self, signal_name: str) -> None:
-        """Record that this backend received ``signal_name`` and is shutting down.
-
-        Called from the backend's signal handler, before the lifespan teardown
-        reaches :meth:`terminate`. A plugin that exits in between is still
-        reported as unexpected; this lets that report say the backend was
-        already on its way out, and for how long.
-        """
-        with self._lock:
-            if self._backend_shutdown_began_at_monotonic is not None:
-                return
-            self._backend_shutdown_began_at_monotonic = time.monotonic()
-            self._backend_shutdown_signal_name = signal_name
-
     def terminate(self) -> None:
         """Stop the plugin subprocess (SIGTERM, then SIGKILL on timeout).
 
@@ -780,7 +725,6 @@ class EnvelopeStreamConsumer(MutableModel):
         if process is None:
             return
         exit_code = process.wait()
-        exited_at_monotonic = time.monotonic()
         self._exit_code = exit_code
         # The pipes can still hold a `listening` envelope or the traceback
         # naming the failing step when `wait()` returns; let the readers finish.
@@ -798,7 +742,7 @@ class EnvelopeStreamConsumer(MutableModel):
             if self._has_reported_exit:
                 return
             self._has_reported_exit = True
-            self._log_unexpected_exit(exit_code, exited_at_monotonic, is_stdout_drained, is_stderr_drained)
+            self._log_unexpected_exit(exit_code, is_stdout_drained, is_stderr_drained)
         finally:
             self._listening_settled_event.set()
         with self._lock:
@@ -809,13 +753,7 @@ class EnvelopeStreamConsumer(MutableModel):
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_unexpected_exit callback failed: {}", e)
 
-    def _log_unexpected_exit(
-        self,
-        exit_code: int,
-        exited_at_monotonic: float,
-        is_stdout_drained: bool,
-        is_stderr_drained: bool,
-    ) -> None:
+    def _log_unexpected_exit(self, exit_code: int, is_stdout_drained: bool, is_stderr_drained: bool) -> None:
         """Report an unasked-for exit with enough context to tell a startup failure from a runtime crash.
 
         The classifying facts go in the message itself, which is all a Sentry
@@ -824,20 +762,9 @@ class EnvelopeStreamConsumer(MutableModel):
         the event's message.
         """
         attached_at = self._attached_at_monotonic
-        seconds_since_spawn = round(exited_at_monotonic - attached_at, 1) if attached_at is not None else None
+        seconds_since_spawn = round(time.monotonic() - attached_at, 1) if attached_at is not None else None
         with self._lock:
             had_reported_listening = self._listening_port is not None
-            plugin_error_class = self._plugin_error_class
-            plugin_error_message = self._plugin_error_message
-            backend_shutdown_began_at = self._backend_shutdown_began_at_monotonic
-            backend_shutdown_signal = self._backend_shutdown_signal_name
-        # Negative when the backend's signal arrived only after the plugin had
-        # exited (during the pipe-drain wait that precedes this report).
-        seconds_since_backend_shutdown_began = (
-            round(exited_at_monotonic - backend_shutdown_began_at, 1)
-            if backend_shutdown_began_at is not None
-            else None
-        )
         stderr_tail = self._stderr_collapser.get_tail()
         logger.bind(
             exit_code=exit_code,
@@ -847,19 +774,13 @@ class EnvelopeStreamConsumer(MutableModel):
             is_stdout_drained=is_stdout_drained,
             is_stderr_drained=is_stderr_drained,
             stderr_tail="\n".join(stderr_tail),
-            plugin_error_class=plugin_error_class,
-            plugin_error_message=plugin_error_message,
-            backend_shutdown_signal=backend_shutdown_signal,
-            seconds_since_backend_shutdown_began=seconds_since_backend_shutdown_began,
         ).error(
             "mngr forward exited unexpectedly with code {}; had_reported_listening={} seconds_since_spawn={} "
-            "stderr_tail_lines={} plugin_error_class={} backend_shutdown_signal={}",
+            "stderr_tail_lines={}",
             _describe_exit_code(exit_code),
             had_reported_listening,
             seconds_since_spawn,
             len(stderr_tail),
-            plugin_error_class,
-            backend_shutdown_signal,
         )
 
     def _handle_envelope_line(self, line: str) -> None:
@@ -872,9 +793,6 @@ class EnvelopeStreamConsumer(MutableModel):
             logger.warning("Could not parse envelope line {!r}: {}", stripped[:200], e)
             return
         if not isinstance(envelope, dict):
-            return
-        if envelope.get("event") == "error":
-            self._record_plugin_error(envelope)
             return
         stream = envelope.get("stream")
         agent_id_value = envelope.get("agent_id")
@@ -890,16 +808,6 @@ class EnvelopeStreamConsumer(MutableModel):
             self._handle_forward_payload(payload)
         else:
             logger.trace("Unknown envelope stream {!r}", stream)
-
-    def _record_plugin_error(self, error_line: dict[str, Any]) -> None:
-        """Keep the error mngr's CLI reported for the plugin command, for the exit report that follows it."""
-        error_class = error_line.get("error_class")
-        message = error_line.get("message")
-        scrubbed_message = self._stderr_collapser.scrub(message) if isinstance(message, str) else None
-        logger.debug("mngr forward reported error {}: {}", error_class, scrubbed_message)
-        with self._lock:
-            self._plugin_error_class = error_class if isinstance(error_class, str) else None
-            self._plugin_error_message = scrubbed_message
 
     def _did_poll_straddle_a_sleep(self, event: ProviderDiscoverySnapshotEvent) -> bool:
         """Whether this process stopped running somewhere inside the poll's own window."""
@@ -923,106 +831,96 @@ class EnvelopeStreamConsumer(MutableModel):
         if isinstance(event, FullDiscoverySnapshotEvent):
             logger.trace("Ignoring legacy full discovery snapshot; Imbue Studio consumes per-provider snapshots")
             return
-        with self._ingest_lock:
-            unpolled_provider_name = self._unpolled_provider_name(event)
-            if unpolled_provider_name is not None:
-                logger.info(
-                    "Dropping a {} discovery event for provider {}: this device does not poll it",
-                    event.type,
-                    unpolled_provider_name,
-                )
-                return
-            # SSH info carries no agent/host membership, so the aggregator does not
-            # model it; record it here before folding the event in so the agents view
-            # we push below joins the info onto the agents on this host.
-            if isinstance(event, HostSSHInfoEvent):
-                self._record_host_ssh_info(event)
-            delta = self._aggregator.apply_event(event)
-            if isinstance(event, ProviderDiscoverySnapshotEvent):
-                # A clean snapshot re-arms the provider's error-log suppression (and
-                # logs a recovery line if its error was previously logged).
-                self._error_log_suppressor.record_provider_snapshot(event)
-                # A pre-start snapshot is events-file replay, and its error describes
-                # the gap while Imbue Studio was closed, not the present: the
-                # discovery producer keeps polling after the quit flow stops the
-                # docker state container, so the backlog's last docker snapshot
-                # reliably carries "state container is stopped" -- already outdated,
-                # since Imbue Studio restarts that container before this consumer runs.
-                # Drop the stale error (a genuinely-broken provider re-asserts it on
-                # the first fresh cycle); the snapshot's topology still merges below.
-                # The backlog holds one snapshot per cycle of downtime, so the drops
-                # are tallied by a collapser rather than logged one line apiece. Only
-                # a post-start snapshot ends the replay and logs what it dropped: a
-                # clean pre-start one must not, or a provider whose backlog errors
-                # flap (as they do across a multi-day gap) logs afresh after every
-                # clean cycle in between.
-                error = event.error
-                # Dropping the error must also drop the snapshot's claim to freshness.
-                # ``last_snapshot_at`` is what tells a consumer "discovery has reported this
-                # provider", and the cloud-tile state reads a recorded time plus no error as
-                # proof the provider is healthy -- so recording it here would launder a
-                # provider that was broken for the whole gap into a healthy one reporting
-                # zero hosts, and every workspace on it would render "unreachable" (a
-                # positive claim that discovery looked and the host was gone) instead of
-                # "connecting" (we do not know yet). That is exactly what happened to a
-                # leased, perfectly healthy staging host whose provider had been failing for
-                # ~25h. Leave freshness unset until a genuine post-start snapshot lands.
-                is_snapshot_state_current = True
-                if event.discovery_finished_at < self.started_at:
-                    if error is not None:
-                        self._pre_start_drop_logger.record_dropped_error(
-                            provider_name=event.provider_name,
-                            error=error,
-                            snapshot_at=event.discovery_finished_at,
-                        )
-                        error = None
-                        is_snapshot_state_current = False
-                else:
-                    self._pre_start_drop_logger.flush_provider(event.provider_name)
-                    # A poll that straddled a sleep is the same case inside one
-                    # lifetime: its error describes a window in which this process
-                    # -- and the network in front of it -- was not there, not the
-                    # provider. The socket it timed out on was opened before the lid
-                    # closed and read after it opened, so what it reports is that
-                    # the laptop went away, and consuming that as the provider's
-                    # last word blames a backend that was never asked. Every reader
-                    # of provider freshness is fenced here, at the ingress, rather
-                    # than each remembering to ask the tracker. A clean poll that
-                    # spanned the same sleep completed after the wake and is kept.
-                    if error is not None and self._did_poll_straddle_a_sleep(event):
-                        logger.info(
-                            "Dropping provider error for {} from a discovery poll that straddled a sleep ({} to {}): {}",
-                            event.provider_name,
-                            event.discovery_started_at.isoformat(),
-                            event.discovery_finished_at.isoformat(),
-                            error.message,
-                        )
-                        error = None
-                        is_snapshot_state_current = False
-                # A per-provider snapshot is also a discovery event, so update_providers
-                # bumps last_event_at; merge just this provider's state + freshness.
-                # A clean snapshot additionally carries its full host-id set (with the
-                # unknown-state hosts, whose absence proves nothing) so the resolver
-                # can authoritatively prune this provider's vanished hosts from the
-                # last-good topology; an errored snapshot passes None -- its hosts
-                # are unreachable, not absent.
-                clean_snapshot_host_ids: tuple[str, ...] | None = None
-                if event.error is None:
-                    clean_snapshot_host_ids = tuple(
-                        {str(host.host_id) for host in event.hosts}
-                        | {str(host_id) for host_id in event.unknown_host_ids}
+        # SSH info carries no agent/host membership, so the aggregator does not
+        # model it; record it here before folding the event in so the agents view
+        # we push below joins the info onto the agents on this host.
+        if isinstance(event, HostSSHInfoEvent):
+            self._record_host_ssh_info(event)
+        delta = self._aggregator.apply_event(event)
+        if isinstance(event, ProviderDiscoverySnapshotEvent):
+            # A clean snapshot re-arms the provider's error-log suppression (and
+            # logs a recovery line if its error was previously logged).
+            self._error_log_suppressor.record_provider_snapshot(event)
+            # A pre-start snapshot is events-file replay, and its error describes
+            # the gap while Imbue Studio was closed, not the present: the detached
+            # discovery producer keeps polling after the quit flow stops the
+            # docker state container, so the backlog's last docker snapshot
+            # reliably carries "state container is stopped" -- already outdated,
+            # since Imbue Studio restarts that container before this consumer runs.
+            # Drop the stale error (a genuinely-broken provider re-asserts it on
+            # the first fresh cycle); the snapshot's topology still merges below.
+            # The backlog holds one snapshot per cycle of downtime, so the drops
+            # are tallied by a collapser rather than logged one line apiece. Only
+            # a post-start snapshot ends the replay and logs what it dropped: a
+            # clean pre-start one must not, or a provider whose backlog errors
+            # flap (as they do across a multi-day gap) logs afresh after every
+            # clean cycle in between.
+            error = event.error
+            # Dropping the error must also drop the snapshot's claim to freshness.
+            # ``last_snapshot_at`` is what tells a consumer "discovery has reported this
+            # provider", and the cloud-tile state reads a recorded time plus no error as
+            # proof the provider is healthy -- so recording it here would launder a
+            # provider that was broken for the whole gap into a healthy one reporting
+            # zero hosts, and every workspace on it would render "unreachable" (a
+            # positive claim that discovery looked and the host was gone) instead of
+            # "connecting" (we do not know yet). That is exactly what happened to a
+            # leased, perfectly healthy staging host whose provider had been failing for
+            # ~25h. Leave freshness unset until a genuine post-start snapshot lands.
+            is_snapshot_state_current = True
+            if event.discovery_finished_at < self.started_at:
+                if error is not None:
+                    self._pre_start_drop_logger.record_dropped_error(
+                        provider_name=event.provider_name,
+                        error=error,
+                        snapshot_at=event.discovery_finished_at,
                     )
-                self.resolver.update_providers(
-                    provider_name=event.provider_name,
-                    provider=event.provider,
-                    error=error,
-                    last_snapshot_at=event.discovery_finished_at,
-                    clean_snapshot_host_ids=clean_snapshot_host_ids,
-                    is_snapshot_state_current=is_snapshot_state_current,
-                    unread_host_ids=tuple(str(host_id) for host_id in event.unknown_host_ids),
-                )
+                    error = None
+                    is_snapshot_state_current = False
             else:
-                self._record_incremental_event(event)
+                self._pre_start_drop_logger.flush_provider(event.provider_name)
+                # A poll that straddled a sleep is the same case inside one
+                # lifetime: its error describes a window in which this process
+                # -- and the network in front of it -- was not there, not the
+                # provider. The socket it timed out on was opened before the lid
+                # closed and read after it opened, so what it reports is that
+                # the laptop went away, and consuming that as the provider's
+                # last word blames a backend that was never asked. Every reader
+                # of provider freshness is fenced here, at the ingress, rather
+                # than each remembering to ask the tracker. A clean poll that
+                # spanned the same sleep completed after the wake and is kept.
+                if error is not None and self._did_poll_straddle_a_sleep(event):
+                    logger.info(
+                        "Dropping provider error for {} from a discovery poll that straddled a sleep ({} to {}): {}",
+                        event.provider_name,
+                        event.discovery_started_at.isoformat(),
+                        event.discovery_finished_at.isoformat(),
+                        error.message,
+                    )
+                    error = None
+                    is_snapshot_state_current = False
+            # A per-provider snapshot is also a discovery event, so update_providers
+            # bumps last_event_at; merge just this provider's state + freshness.
+            # A clean snapshot additionally carries its full host-id set (with the
+            # unknown-state hosts, whose absence proves nothing) so the resolver
+            # can authoritatively prune this provider's vanished hosts from the
+            # last-good topology; an errored snapshot passes None -- its hosts
+            # are unreachable, not absent.
+            clean_snapshot_host_ids: tuple[str, ...] | None = None
+            if event.error is None:
+                clean_snapshot_host_ids = tuple(
+                    {str(host.host_id) for host in event.hosts} | {str(host_id) for host_id in event.unknown_host_ids}
+                )
+            self.resolver.update_providers(
+                provider_name=event.provider_name,
+                provider=event.provider,
+                error=error,
+                last_snapshot_at=event.discovery_finished_at,
+                clean_snapshot_host_ids=clean_snapshot_host_ids,
+                is_snapshot_state_current=is_snapshot_state_current,
+                unread_host_ids=tuple(str(host_id) for host_id in event.unknown_host_ids),
+            )
+        else:
+            self._record_incremental_event(event)
         self._push_agents_view()
         self._fire_membership_delta(delta)
         # A HostSSHInfoEvent changes no membership (empty delta), so the agents on
@@ -1030,61 +928,6 @@ class EnvelopeStreamConsumer(MutableModel):
         # that their host's SSH info is known.
         if isinstance(event, HostSSHInfoEvent):
             self._refire_discovered_for_host(str(event.host_id))
-
-    def forget_provider_instances(self, provider_names: AbstractSet[str]) -> None:
-        """Drop the aggregator's membership for provider instances that no longer exist on this device.
-
-        The resolver forgets them on its own, but the aggregator is the source of
-        the agents view pushed on every later event, so without this the next push
-        would hand the forgotten hosts straight back. An empty, error-free
-        snapshot is the aggregator's own authoritative "this provider has nothing".
-        """
-        if not provider_names:
-            return
-        now = datetime.now(timezone.utc)
-        # The block is already gone from the settings file when this runs, so once
-        # the applies below hold the ingest lock, any event for the instance that
-        # the reader thread has not yet folded in fails its vanished check.
-        with self._ingest_lock:
-            deltas = [
-                self._aggregator.apply_event(
-                    make_provider_discovery_snapshot_event(
-                        provider_name=ProviderInstanceName(name),
-                        agents=(),
-                        hosts=(),
-                        discovery_started_at=now,
-                        discovery_finished_at=now,
-                    )
-                )
-                for name in sorted(provider_names)
-            ]
-        delta_removed_agents: list[AgentInstanceKey] = []
-        for delta in deltas:
-            delta_removed_agents.extend(delta.removed_agent_instances)
-            self._fire_membership_delta(delta)
-        if delta_removed_agents:
-            logger.info(
-                "Forgot {} agent(s) of provider instances that no longer exist here", len(delta_removed_agents)
-            )
-        self._push_agents_view()
-
-    def _unpolled_provider_name(self, event: DiscoveryEvent) -> str | None:
-        """The event's provider when discovery on this device does not poll it, else None."""
-        if self.is_provider_polled_here is None:
-            return None
-        if isinstance(event, ProviderDiscoverySnapshotEvent):
-            provider_name = str(event.provider_name)
-        elif isinstance(event, AgentDiscoveryEvent):
-            provider_name = str(event.agent.provider_name)
-        elif isinstance(event, HostDiscoveryEvent):
-            provider_name = str(event.host.provider_name)
-        elif isinstance(event, DiscoveryErrorEvent) and event.provider_name is not None:
-            provider_name = event.provider_name
-        else:
-            return None
-        if self.is_provider_polled_here(provider_name):
-            return None
-        return provider_name
 
     def _record_incremental_event(self, event: DiscoveryEvent) -> None:
         """Log a discovery error (if any) and bump the resolver's last-event time for a non-snapshot event.
@@ -1327,7 +1170,6 @@ def start_mngr_forward(
     config: ForwardSubprocessConfig,
     resolver: MngrCliBackendResolver,
     sleep_tracker: SleepTracker | None = None,
-    is_provider_polled_here: Callable[[str], bool] | None = None,
 ) -> tuple[EnvelopeStreamConsumer, str, str]:
     """Spawn the ``mngr forward`` subprocess and attach an envelope consumer.
 
@@ -1361,12 +1203,11 @@ def start_mngr_forward(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        bufsize=0,
         env=env,
         cwd=str(Path.home()),
     )
-    consumer = EnvelopeStreamConsumer(
-        resolver=resolver, sleep_tracker=sleep_tracker, is_provider_polled_here=is_provider_polled_here
-    )
+    consumer = EnvelopeStreamConsumer(resolver=resolver, sleep_tracker=sleep_tracker)
     consumer.attach(process)
     return consumer, preauth_cookie, browser_bridge_token
 

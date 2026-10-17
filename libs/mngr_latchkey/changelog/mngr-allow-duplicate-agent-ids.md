@@ -1,0 +1,1 @@
+Latchkey's per-agent tracking is now instance-scoped (`<agent_id>@<host_id>`): reverse-tunnel tags, pending-setup coalescing, and the destroyed callback (which now carries the host id) all key on the (host, agent) pair, so destroying or stopping an agent on one host never tears down tunnels for a same-id agent on another host (agent ids are unique per host, not globally).

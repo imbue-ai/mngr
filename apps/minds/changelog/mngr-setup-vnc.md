@@ -1,0 +1,7 @@
+# Linux arm64 (Raspberry Pi 5) support for running the desktop client from source
+
+`scripts/download-binaries.js` now recognizes `linux/arm64` and provisions the pinned, SHA256-verified binaries for it: uv (`uv-aarch64-unknown-linux-gnu`), restic (`linux_arm64`), the latchkey Chrome-impersonating curl (`curl-aarch64-unknown-linux-musl`, which the datalib release already ships), plus the lima, desync, and dugite-native git payloads whose arm64 hashes were already pinned. Previously `pnpm start` on a 64-bit Raspberry Pi died in the `prestart` hook with `Unsupported platform/arch: linux/arm64`.
+
+Added `docs/raspberry-pi.md` and `scripts/setup-raspberry-pi.sh` (since folded into `scripts/install-linux.sh --raspberry-pi`; see `mngr-linux-dev-packaging.md`): an idempotent, run-over-ssh setup that turns a stock Raspberry Pi OS (bookworm, Pi 5) into an always-on host for the production-tier minds desktop client -- Docker CE with the pinned gVisor `runsc` runtime (which needs the 4K-page `kernel8.img` and `cgroup_enable=memory`), uv, the pinned Node/pnpm toolchain, the source checkout, a `minds-desktop` launcher plus desktop/autostart entries, and the Pi OS desktop + wayvnc for remote-desktop access.
+
+`electron/build-metadata.js` no longer forwards git's stderr when resolving the dev-mode git SHA. Node forwards even an empty stderr buffer to the process's stderr, and that zero-length write fails with `EFAULT` under Electron on linux/arm64, which crashed the main process at startup on the Pi.

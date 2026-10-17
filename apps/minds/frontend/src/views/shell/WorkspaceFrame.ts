@@ -2,7 +2,8 @@
 // cross-origin iframe + the white anti-flash mirror behind it, and the embed
 // contract endpoint.
 //
-// A machine's health is NOT drawn here: the shell owns that, so one band can
+// Faithful port of pages/Chrome.jinja + the frame parts of chrome.js. A
+// machine's health is NOT drawn here: the shell owns that, so one band can
 // speak for whichever condition is actually relevant (a dead discovery
 // consumer outranks the stuck machine it produces) and so the surface
 // shrinks under it instead of being obscured by it.
@@ -10,28 +11,21 @@
 import m from "mithril";
 import { electronBridge } from "../../electron-bridge";
 import { fetchJson } from "../../models/create";
-import {
-  armProviderRelay,
-  stopProviderRelay,
-} from "../../models/providerRelay";
-import { LOCAL_FILES_SECTION } from "../../models/workspacePermissions";
+import { armProviderRelay, stopProviderRelay } from "../../models/providerRelay";
 import type {
-  ChromeAnchor,
   DetachedWindowEntry,
+  FocusChatSender,
   OpenLinkSender,
   PermissionResolvedSender,
   ReattachWindowSender,
   ShellState,
   TearOutSender,
   WorkspaceFrameHandle,
-  WorkspaceMessageSender,
 } from "./shell-state";
-import { isAppOverlayPath } from "./classify";
 import type {
   PopoutOpenRequest,
   TearOutReport,
   WorkspaceLinkHandlingReport,
-  WorkspaceLinkPromises,
   WorkspaceWindowDragRequest,
 } from "../../electron-bridge";
 
@@ -60,9 +54,6 @@ interface EmbedContractModule {
   TEAR_OUT: string;
   OPEN_LINK: string;
   OPEN_EXTERNAL: string;
-  OPEN_LOCAL_FILES: string;
-  HIGHLIGHT_CHROME: string;
-  CHROME_ANCHORS: readonly string[];
   REQUEST_ID_PATTERN: RegExp;
   createEmbedderEndpoint(options: {
     getFrameWindow: () => Window | null;
@@ -86,13 +77,6 @@ export interface PermissionResolutionEntry {
 // for tests only.
 export const WORKSPACE_ORIGIN_FAMILY =
   /^(?:[a-z0-9_-]+\.)*(?:host|agent)-[a-f0-9]+\.(?:localhost|127\.0\.0\.1)$/i;
-
-// A feature missing here is refused to every page inside the workspace,
-// however far down it is framed, before the OS is ever asked. `microphone`
-// lets a workspace app listen to an audio input (the built-in mic, a headset
-// on the audio port, a USB interface); the OS still asks the user first.
-export const WORKSPACE_FRAME_ALLOW =
-  "clipboard-read *; clipboard-write *; fullscreen *; microphone *";
 
 async function loadEmbedContract(): Promise<EmbedContractModule> {
   // Runtime URL import (the module is served by Flask, not bundled); the
@@ -143,14 +127,11 @@ export interface EmbedHandlerDeps {
   workspaceAgentId: () => string;
   openRequestPopup: (requestId: string | null) => void;
   /** The mounted page announced that its endpoint is listening, and whether
-   * it opens the links main hands back (minds:open-link), custom-scheme ones
-   * included. */
-  onWorkspaceReady: (promises: WorkspaceLinkPromises) => void;
+   * it opens the links main hands back (minds:open-link). */
+  onWorkspaceReady: (opensLinks: boolean) => void;
   /** Open an external link the workspace handed over outside the app (minds:open-external); null in a chrome that
    * cannot, which then says so in its capabilities and the workspace opens the link itself. */
   openExternalLink: ((url: string) => void) | null;
-  /** Ring one of the chrome's own controls while the workspace's tour talks about it, or clear the ring (null). */
-  highlightChrome: (anchor: ChromeAnchor | null) => void;
   /** The workspace asked to pull one of its windows out (the pull-out-window
    * spec); null in a chrome that cannot, which then never answers with the
    * capability either. */
@@ -160,12 +141,7 @@ export interface EmbedHandlerDeps {
     beginDrag: (request: WorkspaceWindowDragRequest) => void;
     /** The shell's own drag gesture ended, having detached the window or not, and cancelled or released
      * (null from a shell that does not say). */
-    endDrag: (
-      workspaceId: string,
-      windowId: string,
-      isDetached: boolean,
-      isCancelled: boolean | null,
-    ) => void;
+    endDrag: (workspaceId: string, windowId: string, isDetached: boolean, isCancelled: boolean | null) => void;
     detachedWindows: (windows: readonly DetachedWindowEntry[]) => void;
   } | null;
 }
@@ -239,64 +215,35 @@ export function buildEmbedHandlers(
         : { tab: "share", target: serviceName },
     );
   };
-  handlers[contract.OPEN_LOCAL_FILES] = () => {
-    // Float the options panel's Permissions pane over this machine, at Local files.
-    navigate(`/workspace/${workspaceAgentId()}/options`, {
-      tab: "permissions",
-      section: LOCAL_FILES_SECTION,
-    });
-  };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
   handlers[contract.WORKSPACE_READY] = (message) => {
-    onWorkspaceReady({
-      opensLinks: message.opensLinks === true,
-      opensCustomSchemeLinks: message.opensCustomSchemeLinks === true,
-    });
+    onWorkspaceReady(message.opensLinks === true);
     // What this chrome can do, so the workspace's pull-out gesture turns on
     // only where a desktop window can be made, and it hands over the
     // external links it does not open itself only where main opens them.
-    // Every chrome that runs these handlers has the options panel, so each
-    // takes OPEN_LOCAL_FILES.
     sendAck(contract.EMBEDDER_CAPABILITIES, {
       canPopOut: deps.popout !== null,
       opensExternalLinks: deps.openExternalLink !== null,
-      opensCustomSchemeLinks: deps.openExternalLink !== null,
-      opensLocalFiles: true,
     });
   };
   const openExternalLink = deps.openExternalLink;
   if (openExternalLink !== null) {
-    handlers[contract.OPEN_EXTERNAL] = (message) =>
-      openExternalLink(String(message.url));
+    handlers[contract.OPEN_EXTERNAL] = (message) => openExternalLink(String(message.url));
   }
-  handlers[contract.HIGHLIGHT_CHROME] = (message) => {
-    // The contract's list is the one source of anchor names; anything else clears the ring.
-    const anchor = message.anchor;
-    const isKnown =
-      typeof anchor === "string" && contract.CHROME_ANCHORS.includes(anchor);
-    deps.highlightChrome(isKnown ? (anchor as ChromeAnchor) : null);
-  };
   const popout = deps.popout;
   if (popout !== null) {
     // The contract validated every field's shape; the fields are re-read
     // here so nothing else of a message rides into main.
-    const openRequestOf = (
-      message: Record<string, unknown>,
-    ): PopoutOpenRequest => ({
+    const openRequestOf = (message: Record<string, unknown>): PopoutOpenRequest => ({
       workspaceId: workspaceAgentId(),
       windowId: String(message.windowId),
       title: String(message.title),
       width: Number(message.width),
       height: Number(message.height),
     });
-    handlers[contract.POP_OUT_WINDOW] = (message) =>
-      popout.open(openRequestOf(message));
+    handlers[contract.POP_OUT_WINDOW] = (message) => popout.open(openRequestOf(message));
     handlers[contract.WINDOW_DRAG_STARTED] = (message) =>
-      popout.beginDrag({
-        ...openRequestOf(message),
-        grabX: Number(message.grabX),
-        grabY: Number(message.grabY),
-      });
+      popout.beginDrag({ ...openRequestOf(message), grabX: Number(message.grabX), grabY: Number(message.grabY) });
     handlers[contract.WINDOW_DRAG_ENDED] = (message) =>
       popout.endDrag(
         workspaceAgentId(),
@@ -311,10 +258,7 @@ export function buildEmbedHandlers(
         if (typeof raw !== "object" || raw === null) continue;
         const entry = raw as Record<string, unknown>;
         if (typeof entry.windowId !== "string") continue;
-        entries.push({
-          windowId: entry.windowId,
-          title: typeof entry.title === "string" ? entry.title : "",
-        });
+        entries.push({ windowId: entry.windowId, title: typeof entry.title === "string" ? entry.title : "" });
       }
       popout.detachedWindows(entries);
     };
@@ -362,21 +306,15 @@ export async function pushResolutionSnapshot(
   if (entries !== null && entries.length > 0) send(entries);
 }
 
-const NO_LINK_PROMISES: WorkspaceLinkPromises = {
-  opensLinks: false,
-  opensCustomSchemeLinks: false,
-};
-
 /** What main is told about the mounted frame's link handling, and the gate on
  * handing its page a link main caught. Only the page's own announcement sets
- * its promises, so sending the frame to a new page forgets them until that
- * page announces: a URL sent before a page listens is lost. Repeated reports
- * of the same state are not sent again. */
+ * `opensLinks`, so sending the frame to a new page forgets it until that page
+ * announces: a URL sent before a page listens is lost. Repeated reports of
+ * the same state are not sent again. */
 export class FrameLinkHandling {
   private workspaceId: string | null = null;
-  private promises: WorkspaceLinkPromises = NO_LINK_PROMISES;
-  private lastReport: WorkspaceLinkHandlingReport | null | undefined =
-    undefined;
+  private opensLinks = false;
+  private lastReport: WorkspaceLinkHandlingReport | null | undefined = undefined;
   private readonly report: (report: WorkspaceLinkHandlingReport | null) => void;
   private readonly sendOpenLink: (url: string) => void;
 
@@ -392,34 +330,29 @@ export class FrameLinkHandling {
    * when that sent the frame to a new page. */
   frameArmed(workspaceId: string, isNavigating: boolean): void {
     this.workspaceId = workspaceId;
-    if (isNavigating) this.promises = NO_LINK_PROMISES;
+    if (isNavigating) this.opensLinks = false;
     this.publish();
   }
 
   /** The frame's page announced that it is listening. */
-  pageReady(promises: WorkspaceLinkPromises): void {
-    this.promises = promises;
+  pageReady(opensLinks: boolean): void {
+    this.opensLinks = opensLinks;
     this.publish();
   }
 
   /** The frame is no longer mounted. */
   unmounted(): void {
     this.workspaceId = null;
-    this.promises = NO_LINK_PROMISES;
+    this.opensLinks = false;
     this.publish();
   }
 
   /** Main handed back a link (a popup's or a frame navigation's URL): it goes
    * to a page that announced it opens links, and nowhere otherwise. */
   openLink(url: string): void {
-    if (this.workspaceId === null || !this.promises.opensLinks) {
-      const why =
-        this.workspaceId === null
-          ? "no workspace is mounted"
-          : "its page has not announced opensLinks";
-      console.warn(
-        `[link-routing] dropped a link main handed back, since ${why}: ${url}`,
-      );
+    if (this.workspaceId === null || !this.opensLinks) {
+      const why = this.workspaceId === null ? "no workspace is mounted" : "its page has not announced opensLinks";
+      console.warn(`[link-routing] dropped a link main handed back, since ${why}: ${url}`);
       return;
     }
     this.sendOpenLink(url);
@@ -427,17 +360,13 @@ export class FrameLinkHandling {
 
   private publish(): void {
     const next =
-      this.workspaceId === null
-        ? null
-        : { workspaceId: this.workspaceId, ...this.promises };
+      this.workspaceId === null ? null : { workspaceId: this.workspaceId, opensLinks: this.opensLinks };
     const last = this.lastReport;
     const isUnchanged =
       last !== undefined &&
       (last === null || next === null
         ? last === next
-        : last.workspaceId === next.workspaceId &&
-          last.opensLinks === next.opensLinks &&
-          last.opensCustomSchemeLinks === next.opensCustomSchemeLinks);
+        : last.workspaceId === next.workspaceId && last.opensLinks === next.opensLinks);
     if (isUnchanged) return;
     this.lastReport = next;
     this.report(next);
@@ -476,7 +405,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   };
   let snapshotResendTimer: ReturnType<typeof setTimeout> | null = null;
   let permissionResolvedSender: PermissionResolvedSender | null = null;
-  let workspaceMessageSender: WorkspaceMessageSender | null = null;
+  let focusChatSender: FocusChatSender | null = null;
   let reattachWindowSender: ReattachWindowSender | null = null;
   let tearOutSender: TearOutSender | null = null;
   let openLinkSender: OpenLinkSender | null = null;
@@ -510,21 +439,13 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     armedWorkspaceAnyId = workspaceAnyId;
     armedSoloWindowId = soloWindowId;
     armedIsSoloReopened = isSoloReopened;
-    const expected = shell.stores.workspaces.workspaceFrameUrl(
-      workspaceAnyId,
-      soloWindowId,
-      isSoloReopened,
-    );
+    const expected = shell.stores.workspaces.workspaceFrameUrl(workspaceAnyId, soloWindowId, isSoloReopened);
     const isNavigating = frameElement.getAttribute("src") !== expected;
     if (isNavigating) {
       isMountedPageReady = false;
-      shell.highlightedChromeAnchor = null;
       frameElement.src = expected;
     }
-    linkHandling.frameArmed(
-      shell.stores.workspaces.toAgentScopedId(workspaceAnyId),
-      isNavigating,
-    );
+    linkHandling.frameArmed(shell.stores.workspaces.toAgentScopedId(workspaceAnyId), isNavigating);
   }
 
   // Re-navigate the frame even though the URL is unchanged: assigning src
@@ -535,22 +456,14 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   function reloadFrame(shell: ShellState): void {
     if (frameElement === null || armedWorkspaceAnyId === null) return;
     isMountedPageReady = false;
-    shell.highlightedChromeAnchor = null;
-    frameElement.src = shell.stores.workspaces.workspaceFrameUrl(
-      armedWorkspaceAnyId,
-      armedSoloWindowId,
-      armedIsSoloReopened,
-    );
-    linkHandling.frameArmed(
-      shell.stores.workspaces.toAgentScopedId(armedWorkspaceAnyId),
-      true,
-    );
+    frameElement.src =
+      shell.stores.workspaces.workspaceFrameUrl(armedWorkspaceAnyId, armedSoloWindowId, armedIsSoloReopened);
+    linkHandling.frameArmed(shell.stores.workspaces.toAgentScopedId(armedWorkspaceAnyId), true);
   }
 
   return {
     oncreate(vnode) {
-      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } =
-        vnode.attrs;
+      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } = vnode.attrs;
       frameElement = vnode.dom.querySelector("#content-frame");
       frameElement?.addEventListener("load", stampFrameLoad);
       armFrame(shell, workspaceAnyId, soloWindowId, isSoloReopened);
@@ -569,12 +482,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       // lands and the URL therefore changes to the workspace-id form.
       unsubscribeWorkspaces = shell.stores.workspaces.onChanged(() => {
         if (armedWorkspaceAnyId !== null) {
-          armFrame(
-            shell,
-            armedWorkspaceAnyId,
-            armedSoloWindowId,
-            armedIsSoloReopened,
-          );
+          armFrame(shell, armedWorkspaceAnyId, armedSoloWindowId, armedIsSoloReopened);
         }
       });
 
@@ -588,13 +496,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           armedWorkspaceAnyId ?? workspaceAnyId;
         const handlers = buildEmbedHandlers({
           contract: loaded,
-          // An overlay floated over the frame carries the window's account,
-          // so a reload keeps it; a workspace sub-page names the workspace.
-          navigate: (path, params) =>
-            m.route.set(
-              path,
-              isAppOverlayPath(path) ? shell.overlayQuery(params ?? {}) : params,
-            ),
+          navigate: (path, params) => m.route.set(path, params),
           sendAck: (type, payload) => endpoint?.send(type, payload),
           bringAppToFront: () => electronBridge.bringAppToFront(),
           armProviderRelay: (flowId, url) =>
@@ -614,32 +516,22 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
             shell.openInbox(requestId === null ? {} : { selected: requestId });
             m.redraw();
           },
-          onWorkspaceReady: (promises) => {
+          onWorkspaceReady: (opensLinks) => {
             isMountedPageReady = true;
-            linkHandling.pageReady(promises);
-            // A message held while the page was not listening -- a fresh
+            linkHandling.pageReady(opensLinks);
+            // A chat ask held while the page was not listening -- a fresh
             // mount, or a click from another workspace -- goes now.
-            shell.flushPendingWorkspaceMessage();
+            shell.flushPendingFocusChat();
           },
           openExternalLink: electronBridge.opensExternalLinks
             ? (url) => electronBridge.openExternalLink(url)
             : null,
-          highlightChrome: (anchor) => {
-            shell.highlightedChromeAnchor = anchor;
-            m.redraw();
-          },
           popout: electronBridge.canPopOut
             ? {
                 open: (request) => electronBridge.openPopoutWindow(request),
-                beginDrag: (request) =>
-                  electronBridge.beginWorkspaceWindowDrag(request),
+                beginDrag: (request) => electronBridge.beginWorkspaceWindowDrag(request),
                 endDrag: (workspaceId, windowId, isDetached, isCancelled) =>
-                  electronBridge.endWorkspaceWindowDrag(
-                    workspaceId,
-                    windowId,
-                    isDetached,
-                    isCancelled,
-                  ),
+                  electronBridge.endWorkspaceWindowDrag(workspaceId, windowId, isDetached, isCancelled),
                 detachedWindows: (windows) =>
                   shell.handleDetachedWindows(
                     windows,
@@ -680,41 +572,24 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           });
         };
         shell.registerPermissionResolvedSender(permissionResolvedSender);
-        workspaceMessageSender = (workspaceAgentId, message) => {
+        focusChatSender = (workspaceAgentId, chatAgentId) => {
           if (
             shell.stores.workspaces.toAgentScopedId(mountedAnyId()) !==
             workspaceAgentId
           )
             return false;
           if (!isMountedPageReady) return false;
-          switch (message.kind) {
-            case "focus-chat":
-              endpoint?.send(loaded.FOCUS_CHAT, {
-                chatId: message.chatAgentId,
-              });
-              return true;
-            case "app-message":
-              // The workspace shell routes the type to the app whose
-              // manifest registers it; the fields ride beside the type.
-              endpoint?.send(message.type, message.fields);
-              return true;
-          }
+          endpoint?.send(loaded.FOCUS_CHAT, { chatId: chatAgentId });
+          return true;
         };
-        shell.registerWorkspaceMessageSender(workspaceMessageSender);
-        reattachWindowSender = (windowId) => {
-          endpoint?.send(loaded.REATTACH_WINDOW, { windowId });
+        shell.registerFocusChatSender(focusChatSender);
+        reattachWindowSender = (windowId, frame) => {
+          endpoint?.send(loaded.REATTACH_WINDOW, frame === null ? { windowId } : { windowId, frame });
         };
         shell.registerReattachWindowSender(reattachWindowSender);
         tearOutSender = (report: TearOutReport) => {
-          if (
-            report.workspaceId !==
-            shell.stores.workspaces.toAgentScopedId(mountedAnyId())
-          )
-            return;
-          endpoint?.send(loaded.TEAR_OUT, {
-            windowId: report.windowId,
-            phase: report.phase,
-          });
+          if (report.workspaceId !== shell.stores.workspaces.toAgentScopedId(mountedAnyId())) return;
+          endpoint?.send(loaded.TEAR_OUT, { windowId: report.windowId, phase: report.phase });
         };
         shell.registerTearOutSender(tearOutSender);
         openLinkSender = (url) => linkHandling.openLink(url);
@@ -734,12 +609,6 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           );
         };
         onFrameLoad = () => {
-          // A page the workspace itself reloaded is a fresh page with no tour on it. The load listener is
-          // a DOM one, outside Mithril's redraw, so the ring is redrawn away here.
-          if (shell.highlightedChromeAnchor !== null) {
-            shell.highlightedChromeAnchor = null;
-            m.redraw();
-          }
           sendSnapshot();
           if (snapshotResendTimer !== null) clearTimeout(snapshotResendTimer);
           snapshotResendTimer = setTimeout(sendSnapshot, 2000);
@@ -751,8 +620,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       });
     },
     onupdate(vnode) {
-      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } =
-        vnode.attrs;
+      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } = vnode.attrs;
       armFrame(shell, workspaceAnyId, soloWindowId, isSoloReopened);
     },
     onremove(vnode) {
@@ -766,11 +634,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         );
         permissionResolvedSender = null;
       }
-      if (workspaceMessageSender !== null) {
-        vnode.attrs.shell.unregisterWorkspaceMessageSender(
-          workspaceMessageSender,
-        );
-        workspaceMessageSender = null;
+      if (focusChatSender !== null) {
+        vnode.attrs.shell.unregisterFocusChatSender(focusChatSender);
+        focusChatSender = null;
       }
       if (reattachWindowSender !== null) {
         vnode.attrs.shell.unregisterReattachWindowSender(reattachWindowSender);
@@ -789,7 +655,6 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       // frame is mounted when a successor already reported its own.
       if (vnode.attrs.shell.workspaceFrame === frameHandle) {
         vnode.attrs.shell.workspaceFrame = null;
-        vnode.attrs.shell.highlightedChromeAnchor = null;
         linkHandling.unmounted();
       }
       frameHandle = null;
@@ -820,7 +685,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         m("iframe#content-frame", {
           sandbox:
             "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals",
-          allow: WORKSPACE_FRAME_ALLOW,
+          allow: "clipboard-read *; clipboard-write *; fullscreen *",
           class: "workspace-surface border-0 bg-surface-primary",
           style: "box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;",
         }),

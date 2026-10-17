@@ -17,7 +17,6 @@ from typing import Final
 
 from loguru import logger
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.minds.errors import MngrCommandError
@@ -121,11 +120,9 @@ def run_mngr_capturing(
     launch the process raises ``MngrCommandError``; a timeout raises the more
     specific ``MngrCommandTimeoutError``.
 
-    The process runs directly on the caller's group -- no child group to rewrap
-    a launch failure. The group's own launch precondition still reports a
-    strand/ancestor failure or a shutdown as a ``ConcurrencyExceptionGroup``
-    (always wrapped, even when it is the only failure), which is no
-    ``ConcurrencyGroupError``, so the except below names it alongside.
+    The process runs directly on the caller's group -- no child group, whose
+    exit would rewrap a launch failure as a ``ConcurrencyExceptionGroup`` that
+    is no ``ConcurrencyGroupError`` and would sail past the except below.
     """
     try:
         finished = concurrency_group.run_process_to_completion(
@@ -134,7 +131,7 @@ def run_mngr_capturing(
             is_checked_after=False,
             env=env,
         )
-    except (OSError, ConcurrencyGroupError, ConcurrencyExceptionGroup) as exc:
+    except (OSError, ConcurrencyGroupError) as exc:
         # The command never ran (a fork/exec failure, or a concurrency-group
         # setup/strand/shutdown failure). Callers handle failure locally, so we
         # wrap it as the single MngrCommandError they already catch.

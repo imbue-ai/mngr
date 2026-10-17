@@ -1,0 +1,1 @@
+New rollout page `docs/deploy/history/rollouts/workspace-tmp-exec.md`: why existing gen-2 workspace containers keep a `noexec` `/tmp` across restarts, how `minds-admin repair-tmp-exec` repairs them, the survey/canary/sweep procedure for a tier, and the 2026-09-24 staging record.

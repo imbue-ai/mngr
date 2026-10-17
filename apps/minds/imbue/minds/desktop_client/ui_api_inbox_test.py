@@ -12,11 +12,11 @@ from flask.testing import FlaskClient
 from pydantic import Field
 
 from imbue.minds.config.data_types import InstallationPaths
-from imbue.minds.desktop_client.app import _derive_ui_requests_and_notifications_messages
+from imbue.minds.desktop_client.app import _derive_ui_notifications_message
+from imbue.minds.desktop_client.app import _derive_ui_requests_message
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
-from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import PermissionEffect
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
@@ -328,7 +328,7 @@ def test_build_agent_message_card_names_the_chat_and_resolves_its_workspace_by_n
         chat_agent_id=chat_agent_id,
     )
 
-    card = build_agent_message_card(chat_agent_id, None, "Done with the build.", resolver, destination=None)
+    card = build_agent_message_card(chat_agent_id, "Done with the build.", resolver)
 
     assert card.chat_agent_id == str(chat_agent_id)
     assert card.chat_name == "Migration chat"
@@ -336,79 +336,13 @@ def test_build_agent_message_card_names_the_chat_and_resolves_its_workspace_by_n
     assert card.workspace_agent_id == str(workspace_agent_id)
     assert card.workspace_name == "alpha"
     assert card.workspace_accent == "#123456"
-    assert card.destination is None
-
-
-def test_build_agent_message_card_for_the_workspace_primary_agent_carries_no_chat() -> None:
-    """The primary agent is the workspace itself, not a chat: a click raises the workspace, nothing else."""
-    workspace_agent_id = AgentId()
-    resolver = ChatInWorkspaceResolver(
-        url_by_agent_and_service={},
-        workspace_agent_id=workspace_agent_id,
-        chat_agent_id=AgentId(),
-    )
-
-    card = build_agent_message_card(workspace_agent_id, None, "The inbox digest ran.", resolver, destination=None)
-
-    assert card.chat_agent_id == ""
-    assert card.chat_name == "alpha"
-    assert card.body == "The inbox digest ran."
-    assert card.workspace_agent_id == str(workspace_agent_id)
-    assert card.workspace_name == "alpha"
-    assert card.workspace_accent == "#123456"
-
-
-def test_build_agent_message_card_heads_a_primary_agent_message_with_its_title() -> None:
-    """The primary agent's own name means nothing to the user: a titled message is headed by the title alone."""
-    workspace_agent_id = AgentId()
-    resolver = ChatInWorkspaceResolver(
-        url_by_agent_and_service={},
-        workspace_agent_id=workspace_agent_id,
-        chat_agent_id=AgentId(),
-    )
-
-    card = build_agent_message_card(workspace_agent_id, "Inbox digest", "3 new items", resolver, destination=None)
-
-    assert card.chat_name == "Inbox digest"
-    assert card.body == "3 new items"
-
-
-def test_build_agent_message_card_keeps_a_chat_message_headed_by_the_chat_with_the_title_as_a_prefix() -> None:
-    workspace_agent_id = AgentId()
-    chat_agent_id = AgentId()
-    resolver = ChatInWorkspaceResolver(
-        url_by_agent_and_service={},
-        workspace_agent_id=workspace_agent_id,
-        chat_agent_id=chat_agent_id,
-    )
-
-    card = build_agent_message_card(chat_agent_id, "Test run", "all green", resolver, destination=None)
-
-    assert card.chat_name == "Migration chat"
-    assert card.body == "Test run: all green"
-
-
-def test_build_agent_message_card_carries_the_destination_through() -> None:
-    workspace_agent_id = AgentId()
-    resolver = ChatInWorkspaceResolver(
-        url_by_agent_and_service={},
-        workspace_agent_id=workspace_agent_id,
-        chat_agent_id=AgentId(),
-    )
-    destination = NotificationDestination.model_validate({"type": "minds:show-routine", "routine_id": "inbox-digest"})
-
-    card = build_agent_message_card(
-        workspace_agent_id, None, "The inbox digest ran.", resolver, destination=destination
-    )
-
-    assert card.destination == destination
 
 
 def test_build_agent_message_card_for_an_unknown_chat_still_records_the_message() -> None:
     chat_agent_id = AgentId()
     resolver = StaticBackendResolver(url_by_agent_and_service={})
 
-    card = build_agent_message_card(chat_agent_id, None, "hello", resolver, destination=None)
+    card = build_agent_message_card(chat_agent_id, "hello", resolver)
 
     assert card.chat_name == str(chat_agent_id)
     assert card.workspace_agent_id == ""
@@ -524,54 +458,18 @@ def test_pending_workspace_badge_survives_notification_dismissal_until_request_i
         pending_requests=pending,
         request_event_handlers=(_StubDetailHandler(),),
     )
-    requests_message, notifications_message = _derive_ui_requests_and_notifications_messages(app, resolver)
-    (entry,) = notifications_message.entries
-    assert requests_message.workspace_agent_ids == (str(workspace_id),)
+    (entry,) = _derive_ui_notifications_message(app, resolver).entries
+    assert _derive_ui_requests_message(app, resolver).workspace_agent_ids == (str(workspace_id),)
 
     assert client.post(f"/ui/api/notifications/{entry.id}/clear").status_code == 200
 
-    after_dismissal, notifications_after_dismissal = _derive_ui_requests_and_notifications_messages(app, resolver)
-    assert notifications_after_dismissal.entries == ()
+    assert _derive_ui_notifications_message(app, resolver).entries == ()
+    after_dismissal = _derive_ui_requests_message(app, resolver)
     assert after_dismissal.request_ids == (request.request_id,)
     assert after_dismissal.workspace_agent_ids == (str(workspace_id),)
 
     pending.pending = ()
-    after_answer, _ = _derive_ui_requests_and_notifications_messages(app, resolver)
-    assert after_answer.workspace_agent_ids == ()
-
-
-class _ListCountingPendingRequests(StaticPendingRequests):
-    """Counts reads of the pending set, each of which is a gateway round-trip in production."""
-
-    list_pending_call_count: int = Field(default=0, description="How many times list_pending ran")
-
-    def list_pending(self) -> tuple[StreamedPermissionRequest, ...]:
-        self.list_pending_call_count += 1
-        return super().list_pending()
-
-
-def test_one_publish_pass_reads_the_pending_requests_once(tmp_path: Path) -> None:
-    """The inbox badge and the notification feed share one read of the pending set per pass."""
-    workspace_id, sibling_id = AgentId(), AgentId()
-    pending = _ListCountingPendingRequests(pending=(_make_stub_request(str(sibling_id)),))
-    resolver = _SiblingAgentResolver(
-        url_by_agent_and_service={}, workspace_agent_id=workspace_id, sibling_agent_id=sibling_id
-    )
-    _client, app, _auth_store = build_desktop_client_for_test(
-        tmp_path,
-        is_authenticated=True,
-        backend_resolver=resolver,
-        pending_requests=pending,
-        request_event_handlers=(_StubDetailHandler(),),
-    )
-    with app.app_context():
-        publisher = get_state().ui_publisher
-    assert publisher is not None
-    count_before_pass = pending.list_pending_call_count
-
-    publisher.publish_now()
-
-    assert pending.list_pending_call_count - count_before_pass == 1
+    assert _derive_ui_requests_message(app, resolver).workspace_agent_ids == ()
 
 
 def test_a_relaunch_neither_rebanners_pending_requests_nor_brings_back_cleared_ones(tmp_path: Path) -> None:
@@ -600,12 +498,12 @@ def test_a_relaunch_neither_rebanners_pending_requests_nor_brings_back_cleared_o
     cleared = _make_stub_request(str(sibling_id), created_at=datetime.now(timezone.utc))
     kept = _make_stub_request(str(sibling_id), created_at=datetime.now(timezone.utc))
     inbox.pending = (cleared, kept)
-    _derive_ui_requests_and_notifications_messages(app, resolver)
+    _derive_ui_notifications_message(app, resolver)
     assert len(dispatcher.dispatched) == 2
     assert client.post(f"/ui/api/notifications/{cleared.request_id}/clear").status_code == 200
 
     _client, relaunched_app, relaunched_dispatcher = launch()
-    _, message = _derive_ui_requests_and_notifications_messages(relaunched_app, resolver)
+    message = _derive_ui_notifications_message(relaunched_app, resolver)
 
     assert [entry.id for entry in message.entries] == [kept.request_id]
     assert relaunched_dispatcher.dispatched == []
@@ -652,6 +550,6 @@ def test_a_discovery_flap_does_not_destroy_an_unread_agent_message(tmp_path: Pat
     held = feed.append_agent_message(_agent_message_card(flapping_workspace_id))
     feed.append_agent_message(_agent_message_card(gone_workspace_id))
 
-    _, message = _derive_ui_requests_and_notifications_messages(app, resolver)
+    message = _derive_ui_notifications_message(app, resolver)
 
     assert [entry.id for entry in message.entries] == [held.id]

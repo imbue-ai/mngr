@@ -1,0 +1,3 @@
+Modal workspace creation now supports an optional overlay template via the `MINDS_MODAL_EXTRA_TEMPLATE` env var: when set, the create command stacks `--template <name>` on top of `--template modal` (mirroring how `docker_runsc` overlays `docker`). Unset (the default) is unchanged. The eval harness uses this to select a shorter-timeout `modal_eval` template without touching the shared `modal` template.
+
+The create command now honors `MINDS_EXTRA_PASS_HOST_ENV` (a space-separated list of env var names): each becomes a `--pass-host-env <name>` so a creating host can forward extra env vars from its own environment onto every workspace it creates. Unset (the default) is unchanged. The eval harness uses this to push feature flags into eval workspaces.

@@ -1,0 +1,1 @@
+This branch carries the slice-fleet gen2 phase 1-4 work by merging `mngr/slice-fleet-gen2-phase-4` as the base for the upcoming variable-workspace-sizing spec; the substantive changes are described by that branch's own `mngr-slice-fleet-gen2-phase-*` entries in this same PR. No additional changes to this project yet.

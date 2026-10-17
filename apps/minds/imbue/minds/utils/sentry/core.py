@@ -1,13 +1,10 @@
-import os
 from collections.abc import Callable
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
 
 from sentry_sdk.integrations.flask import FlaskIntegration
 
-from imbue.imbue_common.pure import pure
 from imbue.imbue_common.sentry.core import MANUALLY_SUBMITTED_TAG as MANUALLY_SUBMITTED_TAG
 from imbue.imbue_common.sentry.core import MAX_SENTRY_LIST_SIZE
 from imbue.imbue_common.sentry.core import flush_sentry_on_shutdown as flush_sentry_on_shutdown
@@ -199,7 +196,7 @@ def resolve_anonymous_user_id(data_dir: Path) -> str:
     The id is a random, opaque value (no PII) stored in ``<data_dir>/anonymous_user_id``. It is
     attached to every Sentry event so Sentry can count the distinct installs affected by each issue,
     letting us tell a rare bug hitting many users apart from a noisy one hitting a single user. The
-    same value is shared with the ``mngr latchkey forward`` child and the JS frontends so an
+    same value is shared with the detached ``mngr latchkey forward`` daemon and the JS frontends so an
     install is counted once regardless of which process reported the event. The read-or-create is
     atomic, so the Python backend and the Electron main process racing on first launch converge on one
     id (see ``get_or_create_anonymous_user_id``).
@@ -208,7 +205,7 @@ def resolve_anonymous_user_id(data_dir: Path) -> str:
 
 
 def latchkey_forward_sentry_consent_path(data_dir: Path) -> Path:
-    """Path of the JSON consent file Imbue Studio maintains for the ``mngr latchkey forward`` child.
+    """Path of the JSON consent file Imbue Studio maintains for the detached ``mngr latchkey forward`` daemon.
 
     The daemon reads this file live (per event) to gate what it sends, so Imbue Studio rewrites it whenever
     the user changes their error-reporting consent -- letting a grant/revoke reach the running daemon
@@ -223,7 +220,7 @@ def write_latchkey_forward_sentry_consent(
 ) -> None:
     """Atomically write the daemon's live consent file from Imbue Studio's current consent setting.
 
-    Called at startup and on every consent change so the child's live gate reflects the
+    Called at startup and on every consent change so the detached daemon's live gate reflects the
     user's ``report_unexpected_errors`` choice promptly.
     """
     consent = ForwardSentryConsent(
@@ -236,7 +233,7 @@ def write_latchkey_forward_sentry_consent(
 
 
 def resolve_latchkey_forward_sentry_env(consent_file_path: Path, anonymous_user_id: str) -> dict[str, str]:
-    """Env vars to publish into the ``mngr latchkey forward`` supervisor.
+    """Env vars to publish into the detached ``mngr latchkey forward`` supervisor.
 
     The daemon receives concrete Sentry *infrastructure* config (the DSN, environment name, and S3
     bucket) that Imbue Studio resolves from its own environment model, plus the path of the
@@ -266,7 +263,7 @@ def _external_log_attachment_groups(
 ) -> tuple[LogAttachmentGroup, ...]:
     """Attachment groups for logs that live outside ``~/.minds/logs``.
 
-    The ``mngr latchkey forward`` child (which runs discovery and the
+    The detached ``mngr latchkey forward`` daemon (which runs discovery and the
     reverse tunnels) logs into the latchkey plugin data dir, the shared
     discovery event stream persists under the mngr host dir, and every ``mngr``
     subprocess Imbue Studio spawns (recovery restarts included) file-logs its
@@ -342,23 +339,6 @@ def _external_log_attachment_groups(
     )
 
 
-# Every CI run of the desktop app starts from a fresh data directory, and so
-# reports under a fresh anonymous user id: without this tag a failure that fires
-# once per test run reads in Sentry as one affecting hundreds of installs.
-_IS_UNDER_PYTEST_TAG: Final[str] = "is_under_pytest"
-
-
-@pure
-def is_under_pytest(environ: Mapping[str, str]) -> bool:
-    """Whether this process runs under a pytest test, directly or as a descendant of one.
-
-    pytest sets ``PYTEST_CURRENT_TEST`` in its own environment for the duration
-    of each test, and the harnesses that launch the app (and the app's launcher
-    that starts this backend) pass their environment on, so it reaches here.
-    """
-    return "PYTEST_CURRENT_TEST" in environ
-
-
 def setup_sentry(
     environment: SentryDeployEnvironment,
     release_id: str,
@@ -388,5 +368,4 @@ def setup_sentry(
         # Imbue Studio backend brokers cross-workspace reverse tunnels through the same paramiko machinery,
         # so ignore those loggers to keep Sentry from flooding on already-handled failures.
         ignored_loggers=SENTRY_IGNORED_STDLIB_LOGGER_PATTERNS,
-        extra_tags={_IS_UNDER_PYTEST_TAG: str(is_under_pytest(os.environ)).lower()},
     )

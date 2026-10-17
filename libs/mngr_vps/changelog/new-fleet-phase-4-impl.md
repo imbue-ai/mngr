@@ -1,0 +1,1 @@
+`build_home_volume_symlink_command` is the pure builder of the in-container command `setup_container_ssh` runs to point the container home at the host volume's `home/` subdirectory, so other container-recreation paths (the gen-1 -> gen-2 slice-fleet cutover) can replay the same link; `HOST_VOLUME_HOME_PATH` names the link's in-container target (`/mngr-vol/home`).

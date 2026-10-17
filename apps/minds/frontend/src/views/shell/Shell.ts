@@ -19,21 +19,24 @@
 import m from "mithril";
 import type { ShellState } from "./shell-state";
 import {
-  hubPagePath,
   isAppOverlayPath,
   isWorkspaceOverlayPath,
   overlayBehindWorkspaceId,
   popoutFromPath,
 } from "./classify";
 import { PopoutChrome } from "./PopoutChrome";
-import { surfaceNoticeBand } from "./workspace-notices";
-import { isUpdateOffered } from "../../models/updates";
+import { PopoutDropOverlay } from "./PopoutDropOverlay";
+import { noticeBandFor } from "./notice-band";
+import {
+  standingUpdateNotice,
+  updateRunOutcome,
+  updateRunPhase,
+} from "../../models/updates";
 import { NoticeBand } from "./NoticeBand";
 import { NotificationsPage } from "../pages/NotificationsPage";
 import type { OverlayShellAttrs } from "./OverlayShell";
 import { ANCHORED_CARD_CLASS, OverlayShell } from "./OverlayShell";
 import { SidebarMenu } from "./SidebarMenu";
-import { AccountSwitcherMenu } from "./AccountSwitcher";
 import { Titlebar } from "./Titlebar";
 import { ToastLayer } from "./ToastLayer";
 import { NotificationChoiceCard } from "./NotificationChoiceCard";
@@ -52,8 +55,8 @@ import {
 } from "./update-ready";
 import { UpdateReadyCard } from "./UpdateReadyCard";
 import { RecoveryModal } from "../recovery/RecoveryModal";
-import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
 import { UpdateApplyModal } from "../components/UpdateApplyModal";
+import { UpdateModal } from "../components/UpdateModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { electronBridge } from "../../electron-bridge";
 
@@ -168,26 +171,12 @@ export interface ShellAttrs {
 }
 
 export function Shell(): m.Component<ShellAttrs> {
-  let promptLoadedForRoutePath: string | null = null;
-
-  /** Read the auto-update prompt's answer, again on each navigation: a read
-   * that failed is retried there rather than on every redraw. */
-  function loadAutoUpdatePrompt({ shell, routePath }: ShellAttrs): void {
-    if (routePath === promptLoadedForRoutePath) return;
-    promptLoadedForRoutePath = routePath;
-    void shell.autoUpdatePrompt.load();
-  }
-
   // Escape is handled by the app's single in-document listener (index.ts),
   // which routes through ShellState.handleEscape -- not here, so the Shell
   // never competes with it for the same keypress.
   return {
-    oncreate(vnode) {
+    oncreate() {
       watchUpdateStatus(() => m.redraw());
-      loadAutoUpdatePrompt(vnode.attrs);
-    },
-    onupdate(vnode) {
-      loadAutoUpdatePrompt(vnode.attrs);
     },
     view(vnode) {
       const {
@@ -216,7 +205,7 @@ export function Shell(): m.Component<ShellAttrs> {
       // The New workspace template stepper floats as a modal only when it is
       // over a machine (?workspace=); opened with none it redirects to the full
       // create form, so it is not an overlay then.
-      const isTemplateRoute = hubPagePath(routePath) === "/create/template";
+      const isTemplateRoute = routePath === "/create/template";
       // The workspace surface kept mounted underneath: the agent surface itself,
       // or the workspace a Get help / request popup / template modal was
       // opened over. Rendering it at a stable vtree position keeps its iframe
@@ -351,10 +340,11 @@ export function Shell(): m.Component<ShellAttrs> {
           ? null
           : m(OverlayShell, overlayAttrs, overlayContent);
 
-      // The band speaks for whichever machine is painted: the workspace
-      // route's own frame, and equally the machine an app-level modal was
-      // opened over. A hub page with no machine behind it reports these
-      // conditions in its own flow instead.
+      // The band speaks for whichever machine is painted, so it is keyed to the
+      // surface rather than the route: the workspace route's own frame, and
+      // equally the machine an app-level modal was opened over, which stays
+      // mounted behind the backdrop. A hub page with no machine behind it
+      // reports these conditions in its own flow instead.
       //
       // Not gated on capture mode, unlike the reconnecting indicator above:
       // that one reads live channel liveness, which no capture has, while
@@ -364,7 +354,72 @@ export function Shell(): m.Component<ShellAttrs> {
         surfaceWorkspaceId === null
           ? null
           : shell.stores.workspaces.toAgentScopedId(surfaceWorkspaceId);
-      const band = surfaceNoticeBand(shell, surfaceWorkspaceId);
+      const health =
+        agentScoped === null
+          ? "healthy"
+          : shell.stores.health.statusFor(agentScoped);
+      // A machine the recovery verdict reads as unreachable through its own
+      // backend is unreachable for a reason the band can state, which is why it
+      // reads unhealthy at all. The list frame already carries the verdict and
+      // the backend's name per row, so the band can name it without a poll of
+      // its own -- and says the same thing the card behind "Open recovery" will.
+      const entry =
+        agentScoped === null
+          ? null
+          : shell.stores.workspaces.entryByAnyId(agentScoped);
+      const unreachableProviderLabel = entry?.is_backend_unreachable
+        ? entry.provider_label || null
+        : null;
+      const standingNotice =
+        agentScoped === null
+          ? "none"
+          : standingUpdateNotice(
+              shell.stores.updates.forAgent(agentScoped),
+              shell.stores.updates.isUpdating(agentScoped),
+            );
+      // The band is where a run reports itself to the reader inside the
+      // machine, who cannot see the row badge.
+      const published =
+        agentScoped === null
+          ? null
+          : shell.stores.updates.publishedFor(agentScoped);
+      const updatePhase =
+        agentScoped === null
+          ? "none"
+          : updateRunPhase(
+              published,
+              shell.stores.updates.isUpdating(agentScoped),
+            );
+      const updateOutcome = updateRunOutcome(published);
+      const band = noticeBandFor(
+        health,
+        shell.stores.health.discoveryHealth,
+        surfaceWorkspaceId !== null,
+        {
+          isRestartAppAvailable: electronBridge.isDesktop,
+          unreachableProviderLabel,
+          deviceEnvironment: shell.stores.health.appEnvironmentCondition(),
+          // So the band can tell the user's own bounce, which narrates itself,
+          // from the app's unattended start, which must not hide the device.
+          recoveryKind:
+            agentScoped === null
+              ? null
+              : shell.stores.health.recoveryKindFor(agentScoped),
+          // Which scopes that app-global condition to the machines it can
+          // explain: one on an on-device backend answers over loopback with the
+          // wifi off. A row we have no entry for keeps the conservative default.
+          isWorkspaceNetworkDependent: entry?.is_network_dependent ?? true,
+          isDeviceCannotConnect: entry?.is_device_cannot_connect ?? false,
+          liveness: entry?.liveness ?? "",
+          stopKind: entry?.stop_kind ?? "",
+          updateRunPhase: updatePhase,
+          updateHoldDetail: published?.is_hold_recorded
+            ? (published.hold_detail ?? "")
+            : null,
+          updateRunOutcome: updateOutcome,
+          standingUpdateNotice: standingNotice,
+        },
+      );
       // The card is a modal of its own, so it is raised only where it can sit
       // on top: the machine's own route. It out-z-indexes the docked options
       // overlay there, but an app-level modal shares its z and is emitted after
@@ -375,51 +430,38 @@ export function Shell(): m.Component<ShellAttrs> {
         workspaceParam !== null &&
         agentScoped !== null &&
         shell.isRecoveryModalOpenFor(agentScoped);
+      // Not gated on a displayed machine: the machines list opens this for a
+      // row while Home is the surface.
+      const updateModalAgentId = shell.openUpdateModalAgentId();
       // Covers only the machine the apply is landing in; up exactly while the
       // run is applying.
       const isApplyCovering =
         workspaceParam !== null &&
         agentScoped !== null &&
         shell.stores.updates.isApplying(agentScoped);
-      // The one-time auto-update offer goes over Home or a machine in the main
-      // window -- a launch can restore straight into a machine -- and waits out
-      // any of the Shell's own modals rather than stacking on one.
-      const isAutoUpdatePromptPlaceable =
-        popout === null &&
-        (hubPagePath(routePath) === "/" ||
-          (workspaceParam !== null && !isWorkspaceOverlayPath(routePath))) &&
-        overlay === null &&
-        !isRecoveryOpen &&
-        !isApplyCovering;
-      const autoUpdatePromptTrigger = isAutoUpdatePromptPlaceable
-        ? shell.autoUpdatePrompt.triggerFor(
-            shell.stores.updates.hasReceivedUpdates
-              ? shell.stores.updates.isAutoUpdateEnabled
-              : null,
-            // Only a workspace that follows Studio settings: the offer turns on
-            // Studio's switch, which one with its own setting ignores.
-            shell.stores.workspaces.workspaces.some(
-              (workspace) =>
-                shell.stores.updates.autoUpdateFor(workspace.id).override === null &&
-                isUpdateOffered(shell.stores.updates.forAgent(workspace.id)),
-            ),
-          )
-        : null;
 
       return m("div", { style: "display: contents" }, [
         popout === null
           ? m(Titlebar, { shell, routePath })
           : m(PopoutChrome, { shell, workspaceAnyId: popout.workspaceAnyId, windowId: popout.windowId }),
         popout === null ? m(SidebarMenu, { shell }) : null,
-        popout === null ? m(AccountSwitcherMenu, { shell }) : null,
+        // A popout dragged over this window offers to return its window to the
+        // desktop here; the overlay names the drop.
+        shell.isPopoutDropTarget && surfaceWorkspaceId !== null && popout === null
+          ? m(PopoutDropOverlay)
+          : null,
         band !== null
           ? m(NoticeBand, {
               shell,
               payload: band,
-              onAction: (action) => {
-                if (action.kind === "restart-app") {
+              onAction: () => {
+                if (band.action?.kind === "restart-app") {
                   electronBridge.restartApp();
-                } else if (agentScoped !== null) {
+                } else if (agentScoped === null) {
+                  return;
+                } else if (band.action?.kind === "update-workspace") {
+                  shell.openUpdateModal(agentScoped);
+                } else {
                   shell.openRecoveryModal(agentScoped);
                 }
               },
@@ -439,8 +481,14 @@ export function Shell(): m.Component<ShellAttrs> {
                 "this workspace",
             })
           : null,
-        autoUpdatePromptTrigger !== null
-          ? m(AutoUpdatePromptModal, { model: shell.autoUpdatePrompt })
+        updateModalAgentId !== null
+          ? m(UpdateModal, {
+              agentId: updateModalAgentId,
+              workspaceName:
+                shell.stores.workspaces.entryByAnyId(updateModalAgentId)
+                  ?.name ?? "this workspace",
+              onClose: () => shell.closeUpdateModal(),
+            })
           : null,
         // The creation page's crossing into the workspace; it outlives that
         // page's route, so the shell owns it.

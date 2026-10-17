@@ -15,21 +15,9 @@ _DEFAULT_CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
 # Messages at or above this length use load-buffer/paste-buffer instead of send-keys
 # to avoid tmux "command too long" errors. Used by base_agent.py, for messages sent to an
 # already-running agent. The launch path does not use this: it faces a different limit
-# (a pty's canonical-mode input buffer, not tmux's argv limit) and sources a script instead.
+# (a pty's canonical-mode input buffer, not tmux's argv limit) and sources a script
+# unconditionally instead -- see _build_agent_launch_steps in host.py.
 LONG_MESSAGE_THRESHOLD: Final[int] = 1024
-
-
-@pure
-def quote_tmux_text_argument(text: str) -> str:
-    r"""Shell-quote ``text`` as one tmux argument that tmux delivers exactly as written.
-
-    tmux splits its own argv into commands at any argument ending in ``;`` and drops that ``;``,
-    so ``send-keys -l -- 'hello;'`` types ``hello``. An argument ending in ``\;`` is kept, with
-    its final ``\;`` read as ``;``. A backslash before a trailing ``;`` therefore round-trips
-    every text, including one that itself ends in ``\;`` (``find ... -exec ... \;``).
-    """
-    escaped = text[:-1] + "\\;" if text.endswith(";") else text
-    return shlex.quote(escaped)
 
 
 class TmuxSessionTarget(FrozenModel):
@@ -77,11 +65,6 @@ AGENT_PANE_ID_OPTION: Final[str] = "@mngr_agent_pane"
 # just before can find no session by it; the id never changes, and the option travels with the
 # session through `rename-session`.
 AGENT_ID_OPTION: Final[str] = "@mngr_agent_id"
-
-# What a tmux client prints when no server listens on its socket, so there are no sessions: "no
-# server running on <socket>" for a stale socket, "error connecting to <socket> (No such file or
-# directory)" for none.
-TMUX_NO_SERVER_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = ("no server running on ", "(No such file or directory)")
 
 # Shell expressions for the name and id of the tmux session a command's own pane belongs to. A
 # launch command is stored once at create and replayed on every start, so one that baked in the

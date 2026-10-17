@@ -1,9 +1,6 @@
 import os
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 
-import psutil
 from loguru import logger
 from pydantic import Field
 
@@ -196,7 +193,7 @@ def setup_forward_sentry(log_folder: Path) -> None:
 
     Sentry always initializes when configured; what it actually *sends* is gated live by the consent
     file the embedder maintains, exactly mirroring how the minds backend gates its own Sentry on the
-    live user setting. So a grant/revoke by the user reaches this process on the next event,
+    live user setting. So a grant/revoke by the user reaches this detached daemon on the next event,
     without respawning it. With no consent file (or an unreadable one), the gate defaults to off.
     """
     config = resolve_forward_sentry_config()
@@ -223,11 +220,4 @@ def setup_forward_sentry(log_folder: Path) -> None:
         # offline and the health check retries. Ignore those stdlib loggers so Sentry is not flooded
         # with already-handled connection-failure noise -- exactly the flood this daemon produced.
         ignored_loggers=SENTRY_IGNORED_STDLIB_LOGGER_PATTERNS,
-        # This daemon runs for days, so its uptime at the time of an event says
-        # whether a failure is a startup problem or something that changed under it.
-        extra_tags={"process_started_at": _process_started_at().isoformat()},
     )
-
-
-def _process_started_at() -> datetime:
-    return datetime.fromtimestamp(psutil.Process().create_time(), tz=timezone.utc)

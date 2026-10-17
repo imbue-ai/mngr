@@ -44,10 +44,6 @@ contextBridge.exposeInMainWorld('mindsNative', {
   },
   retry: () => ipcRenderer.send('retry'),
   openLogFile: () => ipcRenderer.send('open-log-file'),
-  // Quit the whole app (the backend and every window), through the same quit
-  // sequence the tray's Quit runs. The page offers it where a desktop has no
-  // tray to offer it from.
-  quitApp: () => ipcRenderer.send('quit-app'),
   // The app is up and the first route decided. The loading document's intro
   // holds on a settled mark until this arrives, and takes it as its cue to
   // leave -- so the lockup's travel to the titlebar always means the same
@@ -75,9 +71,6 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // Open the OS's own notification-settings pane (no app can force a
   // re-prompt once declined -- the reader has to flip it back on there).
   openNotificationSettings: () => ipcRenderer.invoke('open-notification-settings'),
-  // Open macOS's Full Disk Access list, which the browser-cookie import needs
-  // the app on (macOS 27 and later); resolves false where there is no such list.
-  openFullDiskAccessSettings: () => ipcRenderer.invoke('open-full-disk-access-settings'),
 
   // Bring the app back in front after an external-browser OAuth hop.
   bringAppToFront: () => ipcRenderer.send('bring-app-to-front'),
@@ -93,8 +86,8 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // here with the workspace's id. A popout window's own page uses its bar's
   // drag, its title, and the reattach ask main sends it when no desktop
   // window can take the window back; a main window hears when a popout's
-  // window is to return to its desktop (a popout's close), and reports once
-  // its desktop has it back.
+  // window is to return to its desktop (a drop onto it, a popout's close),
+  // and reports once its desktop has it back.
   openPopoutWindow: (request) => ipcRenderer.send('open-popout-window', request),
   beginWorkspaceWindowDrag: (request) => ipcRenderer.send('begin-workspace-window-drag', request),
   endWorkspaceWindowDrag: (workspaceId, windowId, isDetached, isCancelled) =>
@@ -115,6 +108,9 @@ contextBridge.exposeInMainWorld('mindsNative', {
   },
   popoutWindowReturned: (workspaceId, windowId) =>
     ipcRenderer.send('popout-window-returned', { workspaceId, windowId }),
+  onPopoutDropTarget: (callback) => {
+    ipcRenderer.on('popout-drop-target', (_event, isOver) => callback(Boolean(isOver)));
+  },
 
   // Link routing (electron/link-routing.js).
   reportWorkspaceLinkHandling: (report) => ipcRenderer.send('workspace-link-handling', report),
@@ -135,10 +131,6 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // a window, so the browser build leaves this to the browser's own zoom.
   getDisplayZoom: () => ipcRenderer.invoke('get-display-zoom'),
   setDisplayZoom: (percent) => ipcRenderer.invoke('set-display-zoom', percent),
-
-  // Whether this is the first launch into a new app version (the auto-update
-  // prompt's first trigger); recorded by main once at startup.
-  getLaunchVersionChange: () => ipcRenderer.invoke('get-launch-version-change'),
 
   // Release channels. Desktop-only: the web UI has no binary to update, so the
   // Settings section that uses these renders only when mindsNative is present.

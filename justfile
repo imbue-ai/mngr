@@ -18,7 +18,7 @@ _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # Default mark filter for local unit + integration recipes. Kept out of
 # pyproject addopts because it would collide with offload-modal-acceptance
 # (which runs the opposite filter). A later -m on CLI overrides this.
-_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume and not smoke'"
+_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 # Coverage report flags are passed explicitly here (not via root addopts) so
 # offload CI batches can suppress them -- see the NOTE in root addopts.
@@ -99,8 +99,8 @@ test-apt-mirror-worker:
 test-minds-js:
   # --ignore-scripts: the units load `semver`, read `electron-updater`'s
   # AppUpdater.js off disk, and are otherwise node builtins -- so the packages
-  # are needed but their postinstalls are not, and a plain install fetches
-  # Playwright's browsers, which they never run.
+  # are needed but their postinstalls are not, and a plain install fetches the
+  # Electron binary and Playwright's browsers to run neither.
   cd apps/minds && pnpm install --frozen-lockfile --ignore-scripts && pnpm test:unit
   # `generate` before `check`: src/generated/ is gitignored, so a fresh checkout
   # has no ui.ts and tsc would otherwise fail on the missing import rather than
@@ -197,17 +197,6 @@ export-image-requirements:
 sync-litellm-prices *args:
     uv run python -m scripts.sync_litellm_prices {{args}}
 
-# Restate the create and connection progress-bar seeds
-# (apps/minds/imbue/minds/desktop_client/create_progress_defaults.toml) from
-# recorded histories: the create_progress events.jsonl files a desktop data dir
-# holds, or the one the create-progress release test exports to
-# .test_output/create_progress/. A seed only moves when the measured median has
-# drifted past the threshold; `create-progress-defaults-sync.yml` runs this on a
-# schedule and opens a PR when one does. Pass `--check` to report drift without writing.
-[group("minds dev")]
-sync-create-progress-defaults *args:
-    uv run python -m scripts.sync_create_progress_defaults {{args}}
-
 # Diffs against the real base branch, so it must run on a real checkout
 # (locally or the GitHub Actions runner), NOT inside an offload sandbox -- the
 # sandbox has no base ref and the check would pass vacuously. Bare `python`
@@ -217,9 +206,6 @@ sync-create-progress-defaults *args:
 [group("mngr dev")]
 check-changelog:
     python -m scripts.check_changelog_entries
-
-# mngr-seer operator recipes.
-import 'apps/mngr_issue_generator/seer.just'
 
 # Ops recipes live in private.just, which is absent on the public mirror.
 import? 'private.just'

@@ -15,16 +15,13 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
-from uuid import uuid4
 
-import httpx2
+import httpx
 import pytest
 from pydantic import PrivateAttr
 
@@ -39,9 +36,7 @@ from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import ORPHANED_SCRATCH_CLONE_AGE_SECONDS
 from imbue.minds.desktop_client.agent_creator import SCRATCH_CLONE_DIR_PREFIX
-from imbue.minds.desktop_client.agent_creator import _BootstrapProgressTail
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
-from imbue.minds.desktop_client.agent_creator import _bootstrap_follow_command
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_github_https_url
@@ -58,7 +53,6 @@ from imbue.minds.desktop_client.agent_creator import is_default_workspace_templa
 from imbue.minds.desktop_client.agent_creator import latchkey_gateway_location_for_launch
 from imbue.minds.desktop_client.agent_creator import latest_release_tag_from_ls_remote_output
 from imbue.minds.desktop_client.agent_creator import make_scratch_clone_root
-from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
@@ -68,9 +62,7 @@ from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clon
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
-from imbue.minds.desktop_client.create_progress import OperationProgressTracker
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
-from imbue.minds.desktop_client.imbue_cloud_cli import QUOTA_EXCEEDED_ERROR_CLASS
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -82,19 +74,15 @@ from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_GIT_TOKEN_REMO
 from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_GIT_TOKEN_VAULT_KEY
 from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_MNGR_REPO_URL
 from imbue.minds.desktop_client.template_mngr_pin import PUBLIC_MNGR_REPO_URL
-from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
 from imbue.minds.desktop_client.testing import install_stub_on_path
-from imbue.minds.desktop_client.testing import mngr_create_stub_body
 from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
 from imbue.minds.desktop_client.testing import vault_kv_stub_body
-from imbue.minds.desktop_client.testing import write_forward_ca_for_test
 from imbue.minds.desktop_client.testing import write_template_pyproject_pinning_mngr
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
-from imbue.minds.errors import GitRefNotFoundError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import PendingCreateAttemptStoreError
 from imbue.minds.errors import WorkspaceNameInUseError
@@ -108,24 +96,9 @@ from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
-from imbue.mngr.utils.polling import poll_until
-from imbue.mngr.utils.polling import wait_for
-from imbue.mngr.utils.progress import ProgressEvent
-from imbue.mngr.utils.progress import ProgressEventKind
-from imbue.mngr.utils.progress import ProgressStep
-from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
-from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.store import permissions_path_for_host
-from imbue.mngr_latchkey.testing import make_full_fake_latchkey
-
-# A SuperTokens user id (UUID v4) and a connection instance name, as the create path carries them.
-_USER_ID = "3f2a9c1e-5b7d-4a8e-9c0f-1d2e3f4a5b6c"
-_AWS_CONNECTION = f"aws_{uuid4().hex}"
-_MODAL_CONNECTION = f"modal_{uuid4().hex}"
 
 
 def test_latest_release_tag_prefers_the_minds_scheme_over_newer_plain_semver_tags() -> None:
@@ -207,26 +180,6 @@ def test_create_event_capture_records_error_class_from_jsonl_error_event() -> No
     )
     assert capture.error_class == "FastPathUnavailableError"
     assert capture.canonical_agent_id is None
-
-
-def test_create_event_capture_consumes_progress_lines_and_forwards_everything_else() -> None:
-    """Progress reports feed the bar and stay out of the human log; ordinary lines and other events still reach it."""
-    forwarded: list[tuple[str, bool]] = []
-    progress: list[ProgressEvent] = []
-    capture = _CreateEventCapture(
-        inner_on_output=lambda line, is_stdout: forwarded.append((line, is_stdout)), on_progress=progress.append
-    )
-
-    capture('{"event": "progress", "kind": "started", "step": "creating_host", "label": "Creating the host"}', True)
-    capture("Building the image...", False)
-    capture('{"event": "created", "agent_id": "agent-b40593cc326a41cd832e3dc5c3d951de", "host_id": "host-xyz"}', True)
-
-    assert [(event.kind, str(event.step_id)) for event in progress] == [(ProgressEventKind.STARTED, "creating_host")]
-    assert forwarded == [
-        ("Building the image...", False),
-        ('{"event": "created", "agent_id": "agent-b40593cc326a41cd832e3dc5c3d951de", "host_id": "host-xyz"}', True),
-    ]
-    assert capture.canonical_agent_id == AgentId("agent-b40593cc326a41cd832e3dc5c3d951de")
 
 
 def test_create_event_capture_still_records_created_event() -> None:
@@ -350,15 +303,6 @@ def test_classify_create_attempt_error_flags_any_failed_github_clone() -> None:
         assert (
             classify_create_attempt_error(url, GitCloneError(message)) is CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED
         ), message
-
-
-def test_classify_create_attempt_error_flags_a_missing_ref_on_any_remote() -> None:
-    """A clone that reached the remote but found no such branch or tag is not an
-    access problem, so it classifies as GIT_REF_NOT_FOUND ahead of the
-    host-based auth kinds."""
-    error = GitRefNotFoundError("git fetch failed:\nfatal: couldn't find remote ref main")
-    for source in ("https://github.com/acme/repo", "https://gitlab.example.com/acme/repo.git"):
-        assert classify_create_attempt_error(source, error) is CreateAttemptErrorKind.GIT_REF_NOT_FOUND, source
 
 
 def test_classify_create_attempt_error_flags_non_github_remotes_generically() -> None:
@@ -529,6 +473,21 @@ def test_build_mngr_create_command_omits_prebaked_image_override_when_unset() ->
     assert "default_image_url" not in " ".join(command)
 
 
+def test_build_mngr_create_command_stacks_modal_overlay_template_from_env(monkeypatch) -> None:
+    """A MODAL create stacks the overlay template named in ``MINDS_MODAL_EXTRA_TEMPLATE`` on top of
+    ``modal`` (mirroring ``docker_runsc`` on ``docker``); the eval harness uses this for ``modal_eval``."""
+    monkeypatch.setenv("MINDS_MODAL_EXTRA_TEMPLATE", "modal_eval")
+    joined = " ".join(_build_mngr_create_command(launch_mode=LaunchMode.MODAL, host_name=HostName("hello")))
+    assert "--template main --template modal --template modal_eval" in joined
+
+
+def test_build_mngr_create_command_modal_has_no_overlay_when_env_unset(monkeypatch) -> None:
+    monkeypatch.delenv("MINDS_MODAL_EXTRA_TEMPLATE", raising=False)
+    joined = " ".join(_build_mngr_create_command(launch_mode=LaunchMode.MODAL, host_name=HostName("hello")))
+    assert "--template main --template modal" in joined
+    assert "modal_eval" not in joined
+
+
 def test_build_mngr_create_command_stamps_original_minds_version_label() -> None:
     """The resolved template ref is stamped as an immutable
     ``original_minds_version`` label so the version API can report what
@@ -587,12 +546,12 @@ def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
         (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.VULTR, None),
-        (LaunchMode.IMBUE_CLOUD, _USER_ID),
+        (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
     ):
         command = _build_mngr_create_command(
             launch_mode=mode,
             host_name=HostName("hello"),
-            imbue_cloud_user_id=account,
+            imbue_cloud_account=account,
         )
         joined = " ".join(command)
         assert "MINDS_API_KEY" not in joined, f"{mode}: command must not mention MINDS_API_KEY"
@@ -602,7 +561,7 @@ def test_build_mngr_create_command_forwards_fast_mode_for_imbue_cloud() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_user_id=_USER_ID,
+        imbue_cloud_account="alice@imbue.com",
         imbue_cloud_fast_mode="require",
     )
     # The fast_mode knob must reach mngr as a -b build arg.
@@ -614,7 +573,7 @@ def test_build_mngr_create_command_omits_fast_mode_when_unset() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_user_id=_USER_ID,
+        imbue_cloud_account="alice@imbue.com",
     )
     joined = " ".join(command)
     assert "fast_mode" not in joined
@@ -624,7 +583,7 @@ def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_user_id=_USER_ID,
+        imbue_cloud_account="alice@imbue.com",
         region="US-WEST-OR",
     )
     # The explicit region must reach mngr as a hard -b region= build arg.
@@ -632,15 +591,14 @@ def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
 
 
 def test_build_mngr_create_command_modal_targets_modal_provider() -> None:
-    """Modal addresses the connection instance the create names (Modal is a connection, not ambient)."""
-    modal_connection = f"modal_{uuid4().hex}"
+    """Modal addresses the ``modal`` provider instance (local-token mode)."""
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.MODAL,
         host_name=HostName("hello"),
-        cloud_account=modal_connection,
     )
-    assert f"system-services@hello.{modal_connection}" in command
-    assert "system-services@hello.modal" not in command
+    # Exact list-element match so it can't be confused with ``modal_proxied``.
+    assert "system-services@hello.modal" in command
+    assert "system-services@hello.modal_proxied" not in command
     # Same remote shape as vultr/aws: new host + main + modal templates.
     assert "--new-host" in command
     assert command.count("--template") == 2
@@ -648,24 +606,6 @@ def test_build_mngr_create_command_modal_targets_modal_provider() -> None:
     assert "main" in command
     # No --reuse (that is only for imbue_cloud pool adoption).
     assert "--reuse" not in command
-
-
-def test_build_mngr_create_command_passes_no_region_flag_for_an_unplaced_modal_create() -> None:
-    modal_connection = f"modal_{uuid4().hex}"
-    unplaced = _build_mngr_create_command(
-        launch_mode=LaunchMode.MODAL,
-        host_name=HostName("hello"),
-        cloud_account=modal_connection,
-        region="",
-    )
-    assert not any("--region=" in part for part in unplaced)
-    placed = _build_mngr_create_command(
-        launch_mode=LaunchMode.MODAL,
-        host_name=HostName("hello"),
-        cloud_account=modal_connection,
-        region="eu-west",
-    )
-    assert any("--region=eu-west" in part for part in placed)
 
 
 def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
@@ -679,14 +619,14 @@ def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
 
 
 def test_build_mngr_create_command_aws_address_encodes_cloud_account() -> None:
-    """AWS is connection-only: the address selects the connection instance."""
+    """AWS is bring-your-own-key-account: the address selects the account's block."""
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.AWS,
         host_name=HostName("hello"),
         region="us-west-2",
-        cloud_account=_AWS_CONNECTION,
+        cloud_account="byok-aws-mine",
     )
-    assert f"system-services@hello.{_AWS_CONNECTION}" in command
+    assert "system-services@hello.byok-aws-mine" in command
     assert "aws" in command
     assert "--template" in command
 
@@ -696,7 +636,7 @@ def test_build_mngr_create_command_forwards_region_for_aws() -> None:
         launch_mode=LaunchMode.AWS,
         host_name=HostName("hello"),
         region="eu-west-1",
-        cloud_account=_AWS_CONNECTION,
+        cloud_account="byok-aws-mine",
     )
     # AWS confirms the account's pinned placement with a matching build arg.
     assert "--aws-region=eu-west-1" in command
@@ -738,34 +678,29 @@ def test_latchkey_gateway_location_for_launch_uses_vps(launch_mode: LaunchMode) 
 
 
 def test_provider_instance_name_for_launch_aws_uses_cloud_account() -> None:
-    """AWS resolves only through a connection instance name."""
-    assert provider_instance_name_for_launch(LaunchMode.AWS, cloud_account=_AWS_CONNECTION) == _AWS_CONNECTION
+    """AWS resolves only through a bring-your-own-key account block name."""
+    assert (
+        provider_instance_name_for_launch(LaunchMode.AWS, region="us-west-2", cloud_account="byok-aws-mine")
+        == "byok-aws-mine"
+    )
 
 
 def test_provider_instance_name_for_launch_aws_requires_cloud_account() -> None:
     with pytest.raises(MngrCommandError, match="AWS mode requires a cloud account"):
-        provider_instance_name_for_launch(LaunchMode.AWS)
+        provider_instance_name_for_launch(LaunchMode.AWS, region="us-west-2")
 
 
 def test_provider_instance_name_for_launch_imbue_cloud_is_per_account() -> None:
-    """Imbue Cloud is per-account; the instance carries the full user id, never an email."""
+    """Imbue Cloud is per-account; the slug mirrors the registered provider block."""
     assert (
-        provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD, imbue_cloud_user_id=_USER_ID)
-        == f"imbue_cloud_{_USER_ID}"
+        provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD, imbue_cloud_account="Alice@Imbue.com")
+        == "imbue_cloud_alice-imbue-com"
     )
 
 
 def test_provider_instance_name_for_launch_imbue_cloud_requires_account() -> None:
-    with pytest.raises(MngrCommandError, match="IMBUE_CLOUD mode requires imbue_cloud_user_id"):
+    with pytest.raises(MngrCommandError, match="IMBUE_CLOUD mode requires imbue_cloud_account"):
         provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD)
-
-
-def test_provider_instance_name_for_launch_modal_requires_a_connection() -> None:
-    """Modal is a connection with credentials, not an ambient provider."""
-    with pytest.raises(MngrCommandError, match="MODAL mode requires a cloud account"):
-        provider_instance_name_for_launch(LaunchMode.MODAL)
-    modal_connection = f"modal_{uuid4().hex}"
-    assert provider_instance_name_for_launch(LaunchMode.MODAL, cloud_account=modal_connection) == modal_connection
 
 
 def test_provider_instance_name_matches_create_address() -> None:
@@ -775,11 +710,11 @@ def test_provider_instance_name_matches_create_address() -> None:
     so it has to be exactly the provider the create address selects -- otherwise
     the live check and the create-time conflict check would disagree.
     """
-    instance = provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD, imbue_cloud_user_id=_USER_ID)
+    instance = provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD, imbue_cloud_account="alice@imbue.com")
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_user_id=_USER_ID,
+        imbue_cloud_account="alice@imbue.com",
     )
     assert f"system-services@hello.{instance}" in command
 
@@ -787,16 +722,16 @@ def test_provider_instance_name_matches_create_address() -> None:
 def test_run_mngr_aws_prepare_requires_region() -> None:
     # prepare runs before the create-command builder in the AWS create flow, so
     # it must reject an empty region with the same message rather than shelling
-    # out to ``mngr aws prepare --provider aws_<hex> --region ''``.
+    # out to ``mngr aws prepare --provider aws- --region ''``.
     with pytest.raises(MngrCommandError, match="AWS mode requires a region"):
-        run_mngr_aws_prepare("", _AWS_CONNECTION)
+        run_mngr_aws_prepare("")
 
 
 def test_build_mngr_create_command_omits_region_when_unset() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_user_id=_USER_ID,
+        imbue_cloud_account="alice@imbue.com",
     )
     joined = " ".join(command)
     assert "region=" not in joined
@@ -863,33 +798,11 @@ def test_build_mngr_create_command_passes_the_machine_size_in_the_providers_own_
         launch_mode=launch_mode,
         host_name=HostName("hello"),
         machine_size=MachineSizeSelection(cpu_count=4, memory_gb=16, disk_gb=200),
-        # Modal is reachable only through a connection; the local modes ignore the account.
-        cloud_account="modal_" + "0" * 32 if launch_mode is LaunchMode.MODAL else None,
     )
     rendered = " ".join(command)
     assert " ".join(expected_args) in rendered
     # The size follows the templates, so it is what docker and lima keep as the last spelling of each flag.
     assert rendered.index("--template") < rendered.index(expected_args[1])
-
-
-def test_build_mngr_create_command_passes_the_modal_sandbox_timeout_as_a_build_arg() -> None:
-    connection = "modal_" + "0" * 32
-    command = _build_mngr_create_command(
-        launch_mode=LaunchMode.MODAL,
-        host_name=HostName("hello"),
-        cloud_account=connection,
-        modal_sandbox_timeout_seconds=10710,
-    )
-    timeout_index = command.index("--timeout=10710")
-    assert command[timeout_index - 1] == "-b"
-    # Never as a settings override: a connection instance name is not a backend
-    # the standalone -S parse knows, so mngr would refuse the create outright.
-    assert not any(arg.startswith("providers.") for arg in command)
-
-    without_override = _build_mngr_create_command(
-        launch_mode=LaunchMode.MODAL, host_name=HostName("hello"), cloud_account=connection
-    )
-    assert not any(arg.startswith("--timeout=") for arg in without_override)
 
 
 def test_build_mngr_create_command_passes_no_size_flags_when_none_was_chosen() -> None:
@@ -958,15 +871,15 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_user_id=_USER_ID,
+        imbue_cloud_account="alice@imbue.com",
         imbue_cloud_repo_url="https://github.com/imbue-ai/default-workspace-template",
         imbue_cloud_branch_or_tag="v1.2.3",
     )
     joined = " ".join(command)
-    # Address points at the imbue_cloud_<user id> provider so mngr routes
+    # Address points at the imbue_cloud_<slug> provider so mngr routes
     # create_host to ImbueCloudProvider. The agent name is now the constant
     # ``system-services``; the user's input drives the host name.
-    assert f"system-services@hello.imbue_cloud_{_USER_ID}" in joined
+    assert "system-services@hello.imbue_cloud_alice-imbue-com" in joined
     # IMBUE_CLOUD passes ``--reuse`` because the bake's services agent
     # is named ``system-services`` too, which mngr's pre-flight "agent
     # already exists on this host" check would otherwise reject. It
@@ -1008,12 +921,12 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
         (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.VULTR, None),
-        (LaunchMode.IMBUE_CLOUD, _USER_ID),
+        (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
     ):
         command = _build_mngr_create_command(
             launch_mode=mode,
             host_name=HostName("hello"),
-            imbue_cloud_user_id=account,
+            imbue_cloud_account=account,
         )
         joined = " ".join(command)
         assert "--pass-env" not in command, f"{mode} should not inline --pass-env"
@@ -1062,7 +975,7 @@ def _make_origin_repo_with_branch(origin: Path, branch: str) -> None:
 # contention on a loaded machine; passes in isolation. Retried rather than lengthened:
 # the timeout is the suite-wide budget, and this test is only slow when it is
 # competing, not when it is doing more work. Same shape as the group marked in
-# backup_workspace_programs_test.py.
+# backup_workspace_scripts_test.py.
 @pytest.mark.flaky
 def test_clone_then_checkout_branch_is_non_shallow_and_mirror_pushable(tmp_path: Path) -> None:
     """Cloning then checking out a branch keeps full ancestry (non-shallow) and remains mirror-pushable.
@@ -1223,40 +1136,13 @@ def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
 # load rather than anything about the branch it is checking. Passes alone.
 @pytest.mark.flaky
 def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
-    """Requesting a branch that does not exist on a reachable remote fails at
-    clone time with the ref-not-found error, not a generic clone failure."""
+    """Requesting a branch that does not exist fails at clone time (cleanly)."""
     origin = tmp_path / "origin"
     _make_origin_repo_with_branch(origin, "testing")
 
     dest = tmp_path / "clone"
-    with pytest.raises(GitRefNotFoundError):
+    with pytest.raises(GitCloneError):
         clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("nonexistent"))
-
-
-@pytest.mark.timeout(30)
-def test_clone_git_repo_raises_on_missing_branch_despite_a_ref_ending_in_its_name(tmp_path: Path) -> None:
-    """``ls-remote`` tail-matches patterns, so a bare ``main`` probe would match
-    ``refs/heads/release/main``; the probe is qualified so ``git fetch``'s
-    "couldn't find remote ref main" is still reported as a missing ref."""
-    origin = tmp_path / "origin"
-    _make_origin_repo_with_branch(origin, "release/main")
-    _git(origin, "branch", "-q", "-m", "main", "master")
-
-    with pytest.raises(GitRefNotFoundError):
-        clone_git_repo(GitUrl("file://{}".format(origin)), tmp_path / "clone", branch=GitBranch("main"))
-
-
-@pytest.mark.timeout(30)
-def test_clone_git_repo_does_not_call_a_missing_commit_sha_a_missing_ref(tmp_path: Path) -> None:
-    """A full SHA is never probed with ``ls-remote`` (which lists refs, not
-    commits), so an unknown SHA stays a plain clone failure."""
-    origin = tmp_path / "origin"
-    _make_origin_repo_with_branch(origin, "testing")
-
-    dest = tmp_path / "clone"
-    with pytest.raises(GitCloneError) as exc_info:
-        clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("0" * 40))
-    assert not isinstance(exc_info.value, GitRefNotFoundError)
 
 
 class _AlwaysUnauthorizedHandler(BaseHTTPRequestHandler):
@@ -1271,19 +1157,6 @@ class _AlwaysUnauthorizedHandler(BaseHTTPRequestHandler):
         del format, args
 
 
-@contextmanager
-def _serve_always_unauthorized_git_remote() -> Iterator[GitUrl]:
-    """Serve an ``_AlwaysUnauthorizedHandler`` remote on a daemon thread and yield its git URL."""
-    server = HTTPServer(("127.0.0.1", 0), _AlwaysUnauthorizedHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield GitUrl("http://127.0.0.1:{}/acme/private-repo.git".format(server.server_address[1]))
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-
-
 @pytest.mark.timeout(30)
 def test_clone_git_repo_fails_fast_with_auth_shaped_error_when_remote_requires_auth(tmp_path: Path) -> None:
     """A remote that answers with an auth challenge fails the clone quickly and
@@ -1295,22 +1168,19 @@ def test_clone_git_repo_fails_fast_with_auth_shaped_error_when_remote_requires_a
     supplies rejected credentials: "Authentication failed"), so the assertion
     accepts either shape.
     """
-    with _serve_always_unauthorized_git_remote() as url:
+    server = HTTPServer(("127.0.0.1", 0), _AlwaysUnauthorizedHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = GitUrl("http://127.0.0.1:{}/acme/private-repo.git".format(server.server_address[1]))
+        dest = tmp_path / "clone"
         with pytest.raises(GitCloneError) as exc_info:
-            clone_git_repo(url, tmp_path / "clone")
-    message = str(exc_info.value)
-    assert "terminal prompts disabled" in message or "Authentication failed" in message, message
-
-
-@pytest.mark.timeout(30)
-def test_clone_git_repo_with_a_branch_on_a_remote_that_requires_auth_is_not_a_missing_ref(tmp_path: Path) -> None:
-    """When the remote never answers with its refs, the ``ls-remote`` probe
-    fails too (exit 128, not 2), so the failure stays a plain clone error
-    and keeps the access guidance."""
-    with _serve_always_unauthorized_git_remote() as url:
-        with pytest.raises(GitCloneError) as exc_info:
-            clone_git_repo(url, tmp_path / "clone", branch=GitBranch("main"))
-    assert not isinstance(exc_info.value, GitRefNotFoundError)
+            clone_git_repo(url, dest)
+        message = str(exc_info.value)
+        assert "terminal prompts disabled" in message or "Authentication failed" in message, message
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
 
 
 def test_clone_then_checkout_branch_accepts_full_commit_sha(tmp_path: Path) -> None:
@@ -1370,67 +1240,11 @@ def test_clone_then_checkout_branch_accepts_annotated_tag(tmp_path: Path) -> Non
     assert (dest / "f").read_text() == "on branch\n"
 
 
-def _forward_ca_cert_path(tmp_path: Path) -> Path:
-    """Where a test's plugin stand-in writes its CA certificate and the creator under test pins it."""
-    return tmp_path / "forward-ca.pem"
-
-
-def _fail_a_create_on_a_missing_ref(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, is_default_template: bool
-) -> list[str]:
-    """Run a create naming a ref its origin lacks, check it failed as GIT_REF_NOT_FOUND, and return its ERROR records.
-
-    With ``is_default_template``, the origin is configured as the default workspace template repo.
-    """
-    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, "exit 0")
-    origin = tmp_path / "origin"
-    _make_origin_repo_with_branch(origin, "testing")
-    origin_url = "file://{}".format(origin)
-    if is_default_template:
-        monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
-        monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", origin_url)
-    creator = _make_test_creator(tmp_path)
-
-    with capture_error_logs() as error_records:
-        create_attempt_id = creator.start_create_attempt(
-            origin_url, host_name="missing-ref-2165", branch="nonexistent"
-        )
-        _wait_until_finished(creator, create_attempt_id)
-        creator.wait_for_all()
-
-    info = creator.get_create_attempt_info(create_attempt_id)
-    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
-    assert info.error_kind is CreateAttemptErrorKind.GIT_REF_NOT_FOUND
-    return error_records
-
-
-@pytest.mark.timeout(30)
-def test_a_create_naming_a_missing_branch_fails_as_ref_not_found_without_an_error_log(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A branch the repository does not have is a mistake in the create's input,
-    shown on the creating page: it classifies as GIT_REF_NOT_FOUND and files no
-    ERROR record (ERROR records become error-tracker events)."""
-    error_records = _fail_a_create_on_a_missing_ref(tmp_path, monkeypatch, is_default_template=False)
-    assert error_records == []
-
-
-@pytest.mark.timeout(30)
-def test_a_missing_ref_on_the_default_template_repo_still_logs_an_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The default template's ref is the release's pinned tag, not the person's
-    input, so a missing one is a broken release and must reach error reporting."""
-    error_records = _fail_a_create_on_a_missing_ref(tmp_path, monkeypatch, is_default_template=True)
-    assert any("Failed to create agent for create attempt" in record for record in error_records)
-
-
 def _make_test_creator(
     tmp_path,
     *,
     mngr_forward_port: int = 0,
     preauth_cookie: str = "",
-    is_forward_ca_configured: bool = True,
     timeout_seconds: float = 1.0,
     poll_interval_seconds: float = 0.05,
     probe_timeout_seconds: float = 0.5,
@@ -1441,8 +1255,6 @@ def _make_test_creator(
     pending_create_attempt_store: PendingCreateAttemptStore | None = None,
     mngr_binary: str | None = None,
     on_create_attempts_changed: Callable[[], None] | None = None,
-    on_create_attempt_done: Callable[[CreateAttemptId, AgentId], None] | None = None,
-    latchkey: Latchkey | None = None,
 ) -> AgentCreator:
     paths = InstallationPaths(data_dir=tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
@@ -1453,7 +1265,6 @@ def _make_test_creator(
         report_backup_setup_failure=report_backup_setup_failure,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
-        mngr_forward_ca_cert_path=_forward_ca_cert_path(tmp_path) if is_forward_ca_configured else None,
         workspace_ready_timeout_seconds=timeout_seconds,
         workspace_ready_poll_interval_seconds=poll_interval_seconds,
         workspace_ready_probe_timeout_seconds=probe_timeout_seconds,
@@ -1462,9 +1273,7 @@ def _make_test_creator(
         backup_setup_retry_wait_seconds=backup_setup_retry_wait_seconds,
         pending_create_attempt_store=pending_create_attempt_store,
         on_create_attempts_changed=on_create_attempts_changed,
-        on_create_attempt_done=on_create_attempt_done,
         mngr_binary=mngr_binary if mngr_binary is not None else MNGR_BINARY,
-        latchkey=latchkey,
     )
 
 
@@ -1516,20 +1325,9 @@ def test_wait_for_workspace_ready_short_circuits_when_no_preauth(tmp_path) -> No
     assert log_sink.appended_line_count == 0
 
 
-def test_wait_for_workspace_ready_short_circuits_without_a_ca_certificate(tmp_path) -> None:
-    """No CA certificate to verify the plugin against also disables the probe."""
-    creator = _make_test_creator(
-        tmp_path, mngr_forward_port=8421, preauth_cookie="anything", is_forward_ca_configured=False
-    )
-    log_sink = CreateAttemptLogSink()
-    aid = AgentId.generate()
-    creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
-    assert log_sink.appended_line_count == 0
-
-
 def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
     """The probe stops as soon as the (subdomain) endpoint returns 200."""
-    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=2) as port:
+    with scripted_workspace_probe_server(not_ready_count=2) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -1570,7 +1368,7 @@ def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) 
     # de-enrolls it so the background probe loop stops polling it.
     tracker.record_failure(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
-    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
+    with scripted_workspace_probe_server(not_ready_count=0) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -1596,16 +1394,20 @@ def test_probe_workspace_through_plugin_targets_root_path() -> None:
     answering on the inner port, with no assumption about which routes it
     implements.
     """
-    captured: list[httpx2.Request] = []
+    captured: list[httpx.Request] = []
 
-    def _capture(request: httpx2.Request) -> httpx2.Response:
+    def _capture(request: httpx.Request) -> httpx.Response:
         captured.append(request)
-        return httpx2.Response(200, text="ok")
+        return httpx.Response(200, text="ok")
 
     workspace_id = AgentId.generate()
-    with httpx2.Client(transport=httpx2.MockTransport(_capture)) as client:
+    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
         outcome = probe_workspace_through_plugin(
-            probe_client=client, mngr_forward_port=18999, workspace_id=str(workspace_id)
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            workspace_id=str(workspace_id),
+            probe_timeout_seconds=0.5,
+            client=client,
         )
 
     assert outcome.is_ready
@@ -1628,13 +1430,17 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
     records a probe failure, driving the agent toward STUCK.
     """
 
-    def _capture(request: httpx2.Request) -> httpx2.Response:
+    def _capture(request: httpx.Request) -> httpx.Response:
         del request
-        return httpx2.Response(503, text="Service Unavailable")
+        return httpx.Response(503, text="Service Unavailable")
 
-    with httpx2.Client(transport=httpx2.MockTransport(_capture)) as client:
+    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
         outcome = probe_workspace_through_plugin(
-            probe_client=client, mngr_forward_port=18999, workspace_id=str(AgentId.generate())
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            workspace_id=str(AgentId.generate()),
+            probe_timeout_seconds=0.5,
+            client=client,
         )
 
     assert not outcome.is_ready
@@ -1645,10 +1451,10 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
 @pytest.mark.parametrize(
     "raised, expected_summary",
     [
-        (httpx2.ConnectError("[Errno 61] Connection refused"), "ConnectError: [Errno 61] Connection refused"),
-        # httpx2 raises its timeouts and read errors with an empty message, so
+        (httpx.ConnectError("[Errno 61] Connection refused"), "ConnectError: [Errno 61] Connection refused"),
+        # httpx raises its timeouts and read errors with an empty message, so
         # the class name is the whole of what there is to report.
-        (httpx2.ReadTimeout(""), "ReadTimeout"),
+        (httpx.ReadTimeout(""), "ReadTimeout"),
     ],
     ids=("refused", "timed-out"),
 )
@@ -1661,38 +1467,21 @@ def test_probe_workspace_through_plugin_names_the_transport_failure(raised: Exce
     a different component.
     """
 
-    def _fail(request: httpx2.Request) -> httpx2.Response:
+    def _fail(request: httpx.Request) -> httpx.Response:
         raise raised
 
-    with httpx2.Client(transport=httpx2.MockTransport(_fail)) as client:
+    with httpx.Client(transport=httpx.MockTransport(_fail)) as client:
         outcome = probe_workspace_through_plugin(
-            probe_client=client, mngr_forward_port=18999, workspace_id=str(AgentId.generate())
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            workspace_id=str(AgentId.generate()),
+            probe_timeout_seconds=0.5,
+            client=client,
         )
 
     assert not outcome.is_ready
     assert outcome.status_code is None
     assert outcome.summary == expected_summary
-
-
-def test_probe_client_refuses_a_proxy_signed_by_another_ca(tmp_path: Path) -> None:
-    """The probe client trusts the CA at its path and nothing else, so an impostor on the port gets no cookie.
-
-    The preauth cookie the client carries is accepted by the plugin as the
-    owner, which is what makes verifying the proxy matter even on loopback.
-    """
-    other_ca_cert_path = tmp_path / "other-ca.pem"
-    write_forward_ca_for_test(other_ca_cert_path)
-    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
-        with make_workspace_probe_client(
-            preauth_cookie="any-preauth", probe_timeout_seconds=5.0, ca_cert_path=other_ca_cert_path
-        ) as client:
-            outcome = probe_workspace_through_plugin(
-                probe_client=client, mngr_forward_port=port, workspace_id=str(AgentId.generate())
-            )
-
-    assert not outcome.is_ready
-    assert outcome.status_code is None
-    assert "CERTIFICATE_VERIFY_FAILED" in outcome.summary, outcome.summary
 
 
 def test_probe_workspace_uses_https_scheme() -> None:
@@ -1702,15 +1491,19 @@ def test_probe_workspace_uses_https_scheme() -> None:
     make every readiness probe fail the TLS handshake (or hit a closed http
     port).
     """
-    captured: list[httpx2.Request] = []
+    captured: list[httpx.Request] = []
 
-    def _capture(request: httpx2.Request) -> httpx2.Response:
+    def _capture(request: httpx.Request) -> httpx.Response:
         captured.append(request)
-        return httpx2.Response(200, text="ok")
+        return httpx.Response(200, text="ok")
 
-    with httpx2.Client(transport=httpx2.MockTransport(_capture)) as client:
+    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
         probe_workspace_through_plugin(
-            probe_client=client, mngr_forward_port=18999, workspace_id=str(AgentId.generate())
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            workspace_id=str(AgentId.generate()),
+            probe_timeout_seconds=0.5,
+            client=client,
         )
 
     assert captured[0].url.scheme == "https"
@@ -1725,68 +1518,9 @@ def test_build_redirect_url_uses_https_scheme(tmp_path) -> None:
     assert url == f"https://localhost:8421/goto/{agent_id}/"
 
 
-def test_bootstrap_follow_command_names_the_agent_by_its_ids_when_the_create_reported_them() -> None:
-    aid, hid = AgentId.generate(), HostId.generate()
-
-    assert _bootstrap_follow_command("mngr", aid, hid, "docker") == (
-        "mngr",
-        "event",
-        f"{aid}@{hid}.docker",
-        "bootstrap",
-        "--follow",
-    )
-    # Without a host id or a provider the bare agent id is all there is to go on.
-    assert _bootstrap_follow_command("mngr", aid, None, "docker")[2] == str(aid)
-    assert _bootstrap_follow_command("mngr", aid, hid, "")[2] == str(aid)
-
-
-def test_wait_for_workspace_ready_follows_the_bootstrap_events_by_the_agents_ids(tmp_path: Path) -> None:
-    """The wait tails the boot's events with one follow that names the agent by its ids, so mngr skips discovery."""
-    calls_path = tmp_path / "mngr-calls.log"
-    calls_path.write_text("")
-    fake_mngr = tmp_path / "fake-mngr"
-    fake_mngr.write_text(
-        f'#!/bin/bash\necho "$@" >> "{calls_path}"\nif [ "$1" = "event" ]; then exec sleep 130006; fi\nexit 0\n'
-    )
-    fake_mngr.chmod(0o755)
-    tracker = OperationProgressTracker(expected_seconds_by_step_id={}, default_expected_seconds=10.0)
-    aid = AgentId.generate()
-
-    def _hold_until_the_follow_recorded_its_call() -> None:
-        # The follow starts before the first probe; holding that probe keeps the
-        # ready answer from stopping the follow before it ran.
-        poll_until(lambda: calls_path.read_text() != "", poll_interval=0.01)
-
-    with scripted_workspace_probe_server(
-        ca_cert_path=_forward_ca_cert_path(tmp_path),
-        not_ready_count=0,
-        on_first_request=_hold_until_the_follow_recorded_its_call,
-    ) as port:
-        creator = _make_test_creator(
-            tmp_path,
-            mngr_forward_port=port,
-            preauth_cookie="any-preauth",
-            timeout_seconds=5.0,
-            poll_interval_seconds=0.02,
-            probe_timeout_seconds=0.5,
-            mngr_binary=str(fake_mngr),
-        )
-        hid = HostId.generate()
-        creator._wait_for_workspace_ready(
-            aid,
-            CreateAttemptLogSink(),
-            creator.workspace_ready_timeout_seconds,
-            tracker,
-            host_id=hid,
-            provider_instance_name="docker",
-        )
-
-    assert calls_path.read_text().splitlines() == [f"event {aid}@{hid}.docker bootstrap --follow"]
-
-
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
     """If the probe times out, we still return so the caller can publish the redirect."""
-    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=10**6) as port:
+    with scripted_workspace_probe_server(not_ready_count=10**6) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -1946,22 +1680,14 @@ def test_build_mngr_create_command_forwards_extra_pass_host_env(monkeypatch) -> 
     """MINDS_EXTRA_PASS_HOST_ENV (space-separated var names) becomes one --pass-host-env per name, so a
     creating host (e.g. the eval box) can push env vars onto every machine it creates."""
     monkeypatch.setenv("MINDS_EXTRA_PASS_HOST_ENV", "FEATURE_X FEATURE_Y")
-    joined = " ".join(
-        _build_mngr_create_command(
-            launch_mode=LaunchMode.MODAL, host_name=HostName("hello"), cloud_account=_MODAL_CONNECTION
-        )
-    )
+    joined = " ".join(_build_mngr_create_command(launch_mode=LaunchMode.MODAL, host_name=HostName("hello")))
     assert "--pass-host-env FEATURE_X" in joined
     assert "--pass-host-env FEATURE_Y" in joined
 
 
 def test_build_mngr_create_command_no_extra_pass_host_env_when_unset(monkeypatch) -> None:
     monkeypatch.delenv("MINDS_EXTRA_PASS_HOST_ENV", raising=False)
-    joined = " ".join(
-        _build_mngr_create_command(
-            launch_mode=LaunchMode.MODAL, host_name=HostName("hello"), cloud_account=_MODAL_CONNECTION
-        )
-    )
+    joined = " ".join(_build_mngr_create_command(launch_mode=LaunchMode.MODAL, host_name=HostName("hello")))
     assert "FEATURE_X" not in joined
 
 
@@ -2545,10 +2271,26 @@ def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monke
     ``agent_id`` there shows the workspace row and the creating row side by side.
     """
     aid = AgentId.generate()
-    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, mngr_create_stub_body(aid, HostId.generate()))
+    hid = HostId.generate()
+    # The create command invokes the ``MNGR_BINARY`` constant ("mngr") via PATH,
+    # so the fake rides a PATH shim rather than the ``mngr_binary`` field (which
+    # only the implicit-discard commands use).
+    fake_bin_dir = tmp_path / "fake-bin"
+    fake_bin_dir.mkdir()
+    script_path = fake_bin_dir / "mngr"
+    script_path.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = "create" ]; then\n'
+        f'  echo \'{{"event": "created", "agent_id": "{aid}", "host_id": "{hid}"}}\'\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    script_path.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin_dir}{os.pathsep}{os.environ['PATH']}")
     # The readiness probe never answers 200, so the create attempt sits in
     # WAITING_FOR_READY for the whole (short) ready window.
-    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=10**6) as port:
+    with scripted_workspace_probe_server(not_ready_count=10**6) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -2575,122 +2317,6 @@ def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monke
         assert observed_waiting, "the create attempt never reached WAITING_FOR_READY"
         assert info is not None and info.status is AgentCreateAttemptStatus.DONE
         creator.wait_for_all()
-
-
-@pytest.mark.timeout(30)
-def test_create_attempts_change_after_canonical_ids_follows_the_host_permissions_link(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Every notification that publishes the canonical agent id comes after the host permissions file landed.
-
-    Latchkey auto-register defers an agent whose host permissions file is not
-    there yet and retries only on a resolver change; an unchanged agents view
-    is not one. This notification (wired to the resolver's ``notify_change``)
-    is the first change after the link, so firing it before the link would
-    leave a new workspace's own agent unregistered until the next discovery
-    poll.
-    """
-    aid = AgentId.generate()
-    hid = HostId.generate()
-    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, mngr_create_stub_body(aid, hid))
-    latchkey = make_full_fake_latchkey(tmp_path / "latchkey")
-    host_permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, hid)
-    create_attempt_ids: list[CreateAttemptId] = []
-    is_host_file_present_by_canonical_notification: list[bool] = []
-
-    def _on_changed() -> None:
-        if not create_attempt_ids:
-            return
-        info = creator.get_create_attempt_info(create_attempt_ids[0])
-        if info is not None and info.agent_id == aid:
-            is_host_file_present_by_canonical_notification.append(host_permissions_path.is_file())
-
-    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
-        creator = _make_test_creator(
-            tmp_path,
-            mngr_forward_port=port,
-            preauth_cookie="any-preauth",
-            timeout_seconds=5.0,
-            poll_interval_seconds=0.02,
-            probe_timeout_seconds=0.5,
-            on_create_attempts_changed=_on_changed,
-            latchkey=latchkey,
-        )
-        create_attempt_ids.append(
-            creator.start_create_attempt(str(_make_fake_repo(tmp_path)), host_name="link-order-name-71003")
-        )
-        _wait_until_finished(creator, create_attempt_ids[0])
-        info = creator.get_create_attempt_info(create_attempt_ids[0])
-        assert info is not None and info.status is AgentCreateAttemptStatus.DONE
-        creator.wait_for_all()
-
-    assert is_host_file_present_by_canonical_notification
-    assert all(is_host_file_present_by_canonical_notification), is_host_file_present_by_canonical_notification
-
-
-def test_a_finished_create_attempt_runs_the_done_hook_with_its_workspace(tmp_path: Path, monkeypatch) -> None:
-    """The welcome chat is seeded from this hook, so it must fire for every attempt that reaches DONE."""
-    aid = AgentId.generate()
-    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, mngr_create_stub_body(aid, HostId.generate()))
-    finished: list[tuple[CreateAttemptId, AgentId]] = []
-    is_finished = threading.Event()
-
-    def on_done(create_attempt_id: CreateAttemptId, agent_id: AgentId) -> None:
-        finished.append((create_attempt_id, agent_id))
-        is_finished.set()
-
-    with scripted_workspace_probe_server(ca_cert_path=_forward_ca_cert_path(tmp_path), not_ready_count=0) as port:
-        creator = _make_test_creator(
-            tmp_path, mngr_forward_port=port, preauth_cookie="any-preauth", on_create_attempt_done=on_done
-        )
-        create_attempt_id = creator.start_create_attempt(str(_make_fake_repo(tmp_path)), host_name="done-hook-71002")
-        assert is_finished.wait(timeout=30.0)
-        creator.wait_for_all()
-
-    assert finished == [(create_attempt_id, aid)]
-    info = creator.get_create_attempt_info(create_attempt_id)
-    assert info is not None and info.status is AgentCreateAttemptStatus.DONE
-
-
-@pytest.mark.timeout(30)
-def test_a_quota_refused_create_fails_the_attempt_without_an_error_log(tmp_path: Path, monkeypatch) -> None:
-    """A waitlisted account's refusal is a correct outcome shown on the creating page, not a fault to report.
-
-    ERROR records become error-tracker events, so logging this one there filed an
-    event for every waitlisted person who tried to create a workspace.
-    """
-    refusal = json.dumps(
-        {"event": "error", "error_class": QUOTA_EXCEEDED_ERROR_CLASS, "message": "This account is on the waitlist."}
-    )
-    install_stub_mngr_on_path(
-        tmp_path / "fake-bin", monkeypatch, f'if [ "$1" = "create" ]; then echo \'{refusal}\'; exit 1; fi\nexit 0'
-    )
-    creator = _make_test_creator(tmp_path)
-
-    with capture_error_logs() as error_records:
-        create_attempt_id = creator.start_create_attempt(str(_make_fake_repo(tmp_path)), host_name="waitlist-71003")
-        _wait_until_finished(creator, create_attempt_id)
-        creator.wait_for_all()
-
-    info = creator.get_create_attempt_info(create_attempt_id)
-    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
-    assert info.error == "This account is on the waitlist."
-    assert error_records == []
-
-
-@pytest.mark.timeout(30)
-def test_a_create_failing_for_any_other_reason_still_logs_an_error(tmp_path: Path, monkeypatch) -> None:
-    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, 'if [ "$1" = "create" ]; then exit 1; fi\nexit 0')
-    creator = _make_test_creator(tmp_path)
-
-    with capture_error_logs() as error_records:
-        create_attempt_id = creator.start_create_attempt(str(_make_fake_repo(tmp_path)), host_name="failing-71004")
-        _wait_until_finished(creator, create_attempt_id)
-        creator.wait_for_all()
-
-    info = creator.get_create_attempt_info(create_attempt_id)
-    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
-    assert any("Failed to create agent for create attempt" in record for record in error_records)
 
 
 def test_scratch_clone_roots_are_unique_per_create_attempt() -> None:
@@ -2741,7 +2367,7 @@ def test_build_mngr_create_command_keeps_a_repo_path_with_spaces_whole_through_m
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
-        imbue_cloud_user_id="11111111-1111-1111-1111-111111111111",
+        imbue_cloud_account="alice@imbue.com",
         imbue_cloud_repo_url=repo_path,
         imbue_cloud_branch_or_tag="it's-a-branch",
     )
@@ -2750,74 +2376,3 @@ def test_build_mngr_create_command_keeps_a_repo_path_with_spaces_whole_through_m
     tokens = [token for value in build_arg_values for token in shlex.split(value)]
     assert f"repo_url={repo_path}" in tokens
     assert "repo_branch_or_tag=it's-a-branch" in tokens
-
-
-@contextmanager
-def _bootstrap_tail(command: tuple[str, ...]) -> Iterator[_BootstrapProgressTail]:
-    """An unstarted tail of ``command`` under the ready step, with a fresh tracker, inside its own concurrency group."""
-    tracker = OperationProgressTracker(expected_seconds_by_step_id={}, default_expected_seconds=10.0)
-    with ConcurrencyGroup(name=f"bootstrap-tail-{uuid4().hex}") as cg:
-        yield _BootstrapProgressTail(
-            command=command, concurrency_group=cg, tracker=tracker, parent_step_id="wait_for_ready"
-        )
-
-
-def test_bootstrap_progress_tail_feeds_the_followed_events_into_the_tracker_until_stopped() -> None:
-    """The tail runs one follow command for the whole wait and nests what it prints under the ready step."""
-    line = (
-        '{"timestamp": "2026-10-18T01:30:00.000000000Z", "type": "bootstrap_step_started", "event_id": "boot-1", '
-        '"source": "bootstrap", "step": "sync_venv", "label": "Installing packages"}'
-    )
-    with _bootstrap_tail(("sh", "-c", f"echo '{line}'; sleep 130003")) as tail:
-        tail.tracker.announce_plan([ProgressStep(step_id=ProgressStepId("wait_for_ready"), label="Waiting")], None)
-        tail.tracker.start_step("wait_for_ready", "Waiting", None, None)
-        tail.start()
-        wait_for(
-            lambda: tail.tracker.snapshot().current_label == "Installing packages",
-            timeout=10.0,
-            error_message="the followed event never reached the tracker",
-        )
-        tail.stop()
-        assert tail.process is None
-
-
-def test_bootstrap_progress_tail_stop_outlives_a_follow_that_ignores_sigterm() -> None:
-    """Stopping the tail never raises out of the readiness wait: a follow deaf to SIGTERM is killed after its grace."""
-    with _bootstrap_tail(("sh", "-c", "trap '' TERM; echo started; sleep 130005")) as tail:
-        tail.start()
-        process = tail.process
-        assert process is not None
-        # The shell prints "started" only after installing the trap; a stop sent
-        # earlier would hit a shell that still dies on SIGTERM and skip the kill path.
-        wait_for(lambda: "started" in process.read_stdout(), timeout=10.0, error_message="the follow never started")
-
-        tail.stop()
-
-        assert tail.process is None
-        wait_for(process.is_finished, timeout=10.0, error_message="the follow outlived its stop")
-
-
-def test_bootstrap_progress_tail_reports_a_follow_that_exited_on_its_own() -> None:
-    """A follow that dies before the wait ends (mngr refused it) is said in the log, with its stderr, not lost."""
-    with (
-        capture_log_warnings() as warnings,
-        _bootstrap_tail(("sh", "-c", "echo 'no such agent 48217' >&2; exit 3")) as tail,
-    ):
-        tail.start()
-        process = tail.process
-        assert process is not None
-        wait_for(process.is_finished, timeout=10.0, error_message="the follow never exited")
-
-        tail.stop()
-
-    assert tail.process is None
-    assert len(warnings) == 1
-    assert "exited early with code 3" in warnings[0]
-    assert "no such agent 48217" in warnings[0]
-
-
-def test_bootstrap_progress_tail_tolerates_a_command_that_cannot_start() -> None:
-    with _bootstrap_tail((f"/nonexistent/mngr-{uuid4().hex}", "event")) as tail:
-        tail.start()
-        tail.stop()
-    assert tail.tracker.snapshot().current_label == ""

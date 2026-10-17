@@ -19,7 +19,8 @@ That is the one thing the read writes into the workspace.
 The hub reads them on demand by running ``git`` inside the (online) workspace
 via ``mngr exec``. This is best-effort: an offline workspace, a workspace that
 has neither marker nor tag, or any exec failure yields a ``None`` current
-version and an empty history.
+version and an empty history -- callers fall back to the
+``original_minds_version`` label, the one version fact knowable offline.
 """
 
 import json
@@ -33,10 +34,10 @@ from pydantic import Field
 
 from imbue.imbue_common.event_envelope import parse_iso_timestamp
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_NAME
+from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_URL
 from imbue.minds.desktop_client.minds_version import parse_minds_version
 from imbue.minds.utils.mngr_caller import MngrCaller
-from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_NAME
-from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_URL
 
 # Field separator used in the ``git log`` format string; a tab cannot appear in
 # a commit hash or ISO timestamp, and we only keep the subject's first line.
@@ -52,10 +53,6 @@ _GIT_EXEC_TIMEOUT_SECONDS: float = 30.0
 # sweep's 300s interval so a read can never overlap its own next pass, which
 # would have two fetches writing one workspace's refs.
 _GIT_VERSION_EXEC_TIMEOUT_SECONDS: float = 150.0
-
-# A failed read is logged every sweep, so only the end of mngr's stderr, where
-# its error lands, is kept.
-_MAX_LOGGED_STDERR_CHARACTERS: Final[int] = 2000
 
 # The subject ``update-self`` writes when a run lands, verbatim from the skill
 # (``.agents/skills/update-self/references/update-self-worker.md``). Matched in
@@ -123,10 +120,6 @@ _GIT_ENSURE_OFFICIAL_REMOTE_COMMAND: str = (
     f"{shlex.join(('git', 'remote', 'set-url', OFFICIAL_REMOTE_NAME, OFFICIAL_REMOTE_URL))} >/dev/null 2>&1 "
     f"|| {shlex.join(('git', 'remote', 'add', OFFICIAL_REMOTE_NAME, OFFICIAL_REMOTE_URL))} >/dev/null 2>&1"
 )
-_GIT_READ_MARKER_AND_TAG_COMMAND: str = (
-    f'marker="$({shlex.join(_GIT_UPDATE_SELF_ARGS)})"; {_GIT_DESCRIBE_INTO_TAG_COMMAND}'
-)
-_PRINT_MARKER_AND_TAG_COMMAND: str = 'printf \'%s\\n\' "$marker" "$tag"'
 # Both version reads in one exec: the marker line (empty when there is none)
 # and then the tag. Every git step is allowed to fail -- a tagless clone, a
 # workspace with no network -- so the command ends on the ``printf`` that
@@ -139,18 +132,14 @@ _PRINT_MARKER_AND_TAG_COMMAND: str = 'printf \'%s\\n\' "$marker" "$tag"'
 # only for one with neither -- which is why the condition is both being empty,
 # not the tag alone.
 _GIT_CURRENT_VERSION_COMMAND: str = (
-    f"{_GIT_READ_MARKER_AND_TAG_COMMAND}; "
+    f'marker="$({shlex.join(_GIT_UPDATE_SELF_ARGS)})"; '
+    f"{_GIT_DESCRIBE_INTO_TAG_COMMAND}; "
     f'if [ -z "$marker" ] && [ -z "$tag" ] && {_GIT_FETCH_IS_WORTH_TRYING_CONDITION}; then '
     f"{_GIT_ENSURE_OFFICIAL_REMOTE_COMMAND}; "
     f"{shlex.join(_TIME_BOUNDED_GIT_FETCH_TAGS_ARGS)} >/dev/null; "
     f"{_GIT_DESCRIBE_INTO_TAG_COMMAND}; "
     "fi; "
-    f"{_PRINT_MARKER_AND_TAG_COMMAND}"
-)
-# The same two lines, read from what the workspace already holds, for a probe that rides
-# along another exec.
-GIT_CURRENT_VERSION_WITHOUT_FETCH_COMMAND: Final[str] = (
-    f"{_GIT_READ_MARKER_AND_TAG_COMMAND}; {_PRINT_MARKER_AND_TAG_COMMAND}"
+    'printf \'%s\\n\' "$marker" "$tag"'
 )
 _GIT_MERGES_FORMAT: str = f"%H{_GIT_LOG_FIELD_SEPARATOR}%cI{_GIT_LOG_FIELD_SEPARATOR}%s"
 _GIT_MERGES_ARGS: tuple[str, ...] = ("git", "log", "--merges", "--first-parent", f"--format={_GIT_MERGES_FORMAT}")
@@ -314,12 +303,11 @@ def _exec_git_in_workspace(
     )
     if result.is_timed_out or result.returncode != 0:
         logger.debug(
-            "{} in machine {} failed (timed_out={}, rc={}): {}",
+            "{} in machine {} failed (timed_out={}, rc={})",
             git_command,
             agent_address,
             result.is_timed_out,
             result.returncode,
-            result.stderr.strip()[-_MAX_LOGGED_STDERR_CHARACTERS:],
         )
         return None
     try:

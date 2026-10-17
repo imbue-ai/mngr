@@ -18,7 +18,6 @@ import pytest
 from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
@@ -38,15 +37,12 @@ from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputStyleName
 from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr.utils.testing import capture_loguru
-from imbue.mngr.utils.testing import make_command_agent
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_pi_coding.plugin import PiCodingAgent
 from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
@@ -541,60 +537,6 @@ def test_provision_raises_when_remote_install_disabled(tmp_path: Path, pi_agent:
 
     with pytest.raises(AgentInstallationError, match="automatic remote installation is disabled"):
         pi_agent.provision(host, options, mngr_ctx)
-
-
-def test_provision_verifies_pinned_version_through_the_pi_binary_with_check_installation_off(
-    tmp_path: Path, make_pi_agent: Callable[..., PiCodingAgent]
-) -> None:
-    # A wrapper command (like a workspace's OOM launcher) may not resolve where provisioning
-    # runs; probing through it would fail and skip the check, so the pin must be verified via
-    # the binary -- and with check_installation off, which only governs install-if-missing.
-    host = _stub_host(
-        tmp_path,
-        command_results={
-            "launch_wrapper.py": CommandResult(stdout="", stderr="can't open file", success=False),
-            "pi --version": CommandResult(stdout="", stderr="0.9.0", success=True),
-        },
-    )
-    config = PiCodingAgentConfig(
-        check_installation=False,
-        version="1.2.3",
-        command=CommandString("python3 ./launch_wrapper.py pi"),
-        sync_auth=False,
-        sync_home_settings=False,
-    )
-    agent = make_pi_agent(agent_config=config, host=host)
-    mngr_ctx = _make_test_mngr_ctx(tmp_path, is_auto_approve=True)
-
-    with mngr_ctx.concurrency_group, pytest.raises(AgentInstallationError, match="pi version mismatch"):
-        agent.provision(host, _make_options(), mngr_ctx)
-
-
-def test_provision_warns_and_completes_on_version_mismatch_under_warn(
-    tmp_path: Path, make_pi_agent: Callable[..., PiCodingAgent]
-) -> None:
-    # pi writes --version to stderr.
-    host = _stub_host(
-        tmp_path,
-        command_results={"pi --version": CommandResult(stdout="", stderr="0.9.0", success=True)},
-    )
-    config = PiCodingAgentConfig(
-        check_installation=False,
-        version="1.2.3",
-        version_mismatch=VersionMismatchPolicy.WARN,
-        sync_auth=False,
-        sync_home_settings=False,
-    )
-    agent = make_pi_agent(agent_config=config, host=host)
-    mngr_ctx = _make_test_mngr_ctx(tmp_path, is_auto_approve=True)
-
-    with mngr_ctx.concurrency_group, capture_loguru() as log_output:
-        agent.provision(host, _make_options(), mngr_ctx)
-
-    warning = log_output.getvalue()
-    assert "pi version mismatch" in warning
-    assert "0.9.0" in warning
-    assert agent._get_lifecycle_extension_path().read_text() == _load_resource(_LIFECYCLE_EXTENSION_NAME)
 
 
 # Transcript mixin
@@ -1258,14 +1200,6 @@ def test_pi_waiting_reason_is_end_of_turn_when_idle(local_provider: LocalProvide
     agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
     agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
     assert _waiting_reason(agent, agent.host) == WaitingReason.END_OF_TURN
-
-
-def test_pi_waiting_reason_is_absent_for_an_agent_of_another_type(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    agent, host = make_command_agent(local_provider, tmp_path / "command-work")
-
-    assert _waiting_reason(agent, host) is None
 
 
 def test_pi_waiting_reason_is_none_when_active(local_provider: LocalProviderInstance, tmp_path: Path) -> None:

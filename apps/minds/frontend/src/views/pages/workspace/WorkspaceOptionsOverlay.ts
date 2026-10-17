@@ -83,7 +83,7 @@ export function WorkspaceOptionsOverlay(): m.Component<WorkspaceOptionsOverlayAt
           // on. The bell and the bug button are different surfaces, so those
           // leave through the strip's own transition.
           onSelectIcon: (id) =>
-            id === "notifications" || id === "help" || id === "account"
+            id === "notifications" || id === "help"
               ? openTitlebarPopup(shell, id)
               : onSelectTab(id),
         },

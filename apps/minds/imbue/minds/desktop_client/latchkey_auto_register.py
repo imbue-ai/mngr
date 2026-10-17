@@ -139,13 +139,12 @@ class LatchkeyAutoRegister(MutableModel):
         treating the absence as final would leave the workspace's own agent out
         of the host's ``minds-api-proxy`` allowlist for the rest of the app's
         lifetime -- every ``/api/v1/agents/<id>/...`` call from it rejected 403.
-        Retrying settles at the first resolver change after the file appears;
-        agent creation fires one right after linking it. Its cost is one
-        ``stat`` per *resolver change*: besides every provider snapshot and
-        every changed agents snapshot, ``_on_change`` fires on every service
-        change a workspace emits and on the many request paths that call
-        ``notify_change``. A host that genuinely is not managed by Imbue
-        Studio pays that stat forever, since we still refuse to conjure it
+        Retrying settles as soon as the file appears. Its cost is one ``stat``
+        per *resolver change* -- which is more often than per discovery tick:
+        besides the observe stream's agent and provider snapshots, ``_on_change``
+        fires on every service event a workspace emits and on the many request
+        paths that call ``notify_change``. A host that genuinely is not
+        managed by Imbue Studio pays that stat forever, since we still refuse to conjure it
         a file from a discovery event alone. Hence the one-shot deferral log: the
         stat is cheap, a log line per resolver change is not.
 

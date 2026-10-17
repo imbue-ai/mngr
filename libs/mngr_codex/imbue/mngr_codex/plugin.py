@@ -77,7 +77,6 @@ from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Callable
-from typing import ClassVar
 from typing import Final
 from uuid import uuid4
 
@@ -95,7 +94,6 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
-from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.output_styles import read_output_style_files
@@ -136,7 +134,6 @@ from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.agent import read_idle_since_for_compaction
 from imbue.mngr.interfaces.data_types import FileType
-from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
@@ -285,8 +282,8 @@ _THREAD_STATUS_ACTIVE: Final[str] = "active"
 
 # Lifecycle states in which the agent's process is present (its primary window is alive).
 # Only for these does the daemon's live status re-derive the RUNNING/WAITING split; the
-# other states (STOPPED/DONE/REPLACED, and UNKNOWN when tmux/ps could not be read) are
-# kept verbatim so ``mngr ls`` never misreports a dead, replaced or unreadable agent as running.
+# other states (STOPPED/DONE/REPLACED) are pure process-presence facts from tmux/ps and
+# are kept verbatim so ``mngr ls`` never misreports a dead or replaced agent as running.
 _PROCESS_PRESENT_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
     {AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING}
 )
@@ -503,15 +500,9 @@ class CodexAgentConfig(AgentTypeConfig):
     version: str | None = Field(
         default=None,
         description="Pin the codex CLI version to install (e.g., '0.139.0'). When set, installation runs "
-        "`npm i -g @openai/codex@<version>` and provisioning verifies the installed codex matches (see "
-        "`version_mismatch`), whether or not `check_installation` is set. When None (the default), installs "
-        "the latest version. A pin also suppresses the provision-time update check (`update_policy` is "
-        "ignored), since updating would defeat the pin.",
-    )
-    version_mismatch: VersionMismatchPolicy = Field(
-        default=VersionMismatchPolicy.ERROR,
-        description="What provisioning does when the installed codex does not report the pinned `version`. "
-        "`ERROR` (default): fail the create. `WARN`: log a warning and continue on the installed binary.",
+        "`npm i -g @openai/codex@<version>` and provisioning verifies the installed codex matches, erroring "
+        "on a mismatch. When None (the default), installs the latest version. A pin also suppresses the "
+        "provision-time update check (`update_policy` is ignored), since updating would defeat the pin.",
     )
     # emit_common_transcript gates the rollout -> common-schema converter. The
     # raw transcript is always captured (HasTranscriptMixin); only the common
@@ -575,17 +566,17 @@ class CodexAgent(
     ``BaseAgent`` and override their own transport.
     """
 
-    # The codex CLI is a single Rust binary; ps/tmux show the literal name.
-    fixed_process_name: ClassVar[str | None] = "codex"
+    def get_expected_process_name(self) -> str:
+        # The codex CLI is a single Rust binary; ps/tmux show the literal name.
+        return "codex"
 
     def get_lifecycle_state(self) -> AgentLifecycleState:
         """Get lifecycle state, sourcing RUNNING/WAITING from the daemon's live thread status.
 
         Process presence comes from the base tmux/ps probe: STOPPED / DONE / REPLACED are
         pure "is the window's process there?" facts and pass through unchanged (so a dead or
-        replaced agent is never misreported as running), as does UNKNOWN (the host's tmux and
-        ps could not be read). When the process IS present, the RUNNING-vs-WAITING split is
-        derived SOLELY from the daemon:
+        replaced agent is never misreported as running). When the process IS present, the
+        RUNNING-vs-WAITING split is derived SOLELY from the daemon:
 
         * a turn in flight -> RUNNING; promoted to WAITING when the turn is parked awaiting an
           approval/input the agent cannot self-clear (``thread/status`` ``active`` with
@@ -598,7 +589,7 @@ class CodexAgent(
         cannot be confirmed. The permission promotion stays in
         ``_resolve_lifecycle_state_for_permission`` so it is unit-testable without a live pane.
         """
-        base_probe = self._base_probe_lifecycle(self.host.read_lifecycle_snapshot())
+        base_probe = self._base_probe_lifecycle()
         if base_probe.state not in _PROCESS_PRESENT_STATES:
             return base_probe.state
         activity = self._resolve_live_activity()
@@ -607,15 +598,15 @@ class CodexAgent(
         live_state = AgentLifecycleState.RUNNING if activity.is_active else AgentLifecycleState.WAITING
         return _resolve_lifecycle_state_for_permission(live_state, activity.is_blocked)
 
-    def _base_probe_lifecycle(self, lifecycle_snapshot: HostLifecycleSnapshot | None) -> LifecycleProbeResult:
-        """The tmux/ps process-presence probe (STOPPED/DONE/REPLACED/UNKNOWN + pid), before live re-sourcing.
+    def _base_probe_lifecycle(self) -> LifecycleProbeResult:
+        """The tmux/ps process-presence probe (STOPPED/DONE/REPLACED + pid), before live re-sourcing.
 
-        A thin wrapper over ``BaseAgent.probe_lifecycle_from_snapshot`` so the process-presence half
-        can be driven in unit tests without a live tmux pane, independently of the daemon status seam.
+        A thin wrapper over ``BaseAgent.probe_lifecycle`` so the process-presence half can be
+        driven in unit tests without a live tmux pane, independently of the daemon status seam.
         """
-        return super().probe_lifecycle_from_snapshot(lifecycle_snapshot)
+        return super().probe_lifecycle()
 
-    def probe_lifecycle_from_snapshot(self, lifecycle_snapshot: HostLifecycleSnapshot | None) -> LifecycleProbeResult:
+    def probe_lifecycle(self) -> LifecycleProbeResult:
         """Probe lifecycle state + pid, sourcing the RUNNING/WAITING split from live status.
 
         The base probe supplies process presence and the pid; when the process is present its
@@ -626,7 +617,7 @@ class CodexAgent(
         is applied only by ``get_lifecycle_state`` (matching the base contract, where
         ``probe_lifecycle`` reports the raw split and the promotion layers on top).
         """
-        base_probe = self._base_probe_lifecycle(lifecycle_snapshot)
+        base_probe = self._base_probe_lifecycle()
         if base_probe.state not in _PROCESS_PRESENT_STATES:
             return base_probe
         activity = self._resolve_live_activity()
@@ -1264,7 +1255,7 @@ class CodexAgent(
         return get_agent_idle_since(self)
 
     def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
-        # With a pinned version, verify the installed codex matches (per version_mismatch) --
+        # With a pinned version, verify the installed codex matches and error on a mismatch --
         # and skip the update check entirely, since prompting to update would defeat the pin.
         if self.agent_config.version is not None:
             self._verify_pinned_codex_version(host)
@@ -1275,11 +1266,12 @@ class CodexAgent(
         self._maybe_check_for_codex_update(host, self._resolve_user_codex_home(host), mngr_ctx)
 
     def _verify_pinned_codex_version(self, host: OnlineHostInterface) -> None:
-        """Verify the installed codex matches ``config.version``, per ``config.version_mismatch``.
+        """Verify the installed codex matches ``config.version``, erroring on a mismatch.
 
         Called only when a version is pinned. A mismatch means the wrong codex is on
         PATH (e.g. a pre-existing global install that ``check_installation`` left in
-        place). Delegates to the shared verifier so codex matches the pin the same
+        place), which the user must resolve -- re-install the pinned version or update
+        the pin. Delegates to the shared verifier so codex matches the pin the same
         (scheme-agnostic) way as the other agents.
         """
         pinned_version = self.agent_config.version
@@ -1287,9 +1279,9 @@ class CodexAgent(
             return
         verify_pinned_cli_version(
             host,
+            command=str(self.agent_config.command),
             binary_name=self.get_install_binary_name(),
             pinned_version=pinned_version,
-            mismatch_policy=self.agent_config.version_mismatch,
         )
 
     def get_install_binary_name(self) -> str:
@@ -2265,8 +2257,9 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     idle -> END_OF_TURN) as the SOLE source. The shared ``classify_waiting_reason`` produces the
     verdict, so this field and the ``get_lifecycle_state`` RUNNING -> WAITING promotion cannot drift.
 
-    Field generators run for every listed agent whatever its type, so the isinstance guard is
-    what keeps this field off agents of other types.
+    Registered only for the codex type, so ``agent`` is always a :class:`CodexAgent`; the
+    isinstance guard narrows the type (a foreign agent, which the registration prevents, yields
+    ``None`` rather than a marker read off ``host``).
     """
     return agent.compute_waiting_reason() if isinstance(agent, CodexAgent) else None
 

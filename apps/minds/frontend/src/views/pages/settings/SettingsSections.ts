@@ -20,7 +20,6 @@ import {
 } from "../../../models/settings";
 import { formatRelativeAgo } from "../../../models/backups";
 import { BROWSER_IMPORT_SUCCESS_MESSAGE } from "../../../models/browserImport";
-import { browserImportFailureNotice } from "../../components/UnreadableChromeProfileNotice";
 import type { NotificationStyle } from "../../../models/notificationsUi";
 import { electronBridge } from "../../../electron-bridge";
 import { Button } from "../../components/Button";
@@ -30,7 +29,6 @@ import { Spinner } from "../../components/Spinner";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
 import { updateInstallingCopy, updateReadyCopy } from "../../shell/UpdateReadyCard";
 import { installTermsOf } from "../../shell/update-ready";
-import { workspaceUpdateSettings } from "./WorkspaceUpdateSettings";
 
 interface SectionsAttrs {
   model: SettingsModel;
@@ -361,7 +359,9 @@ function browserImportPanel(model: SettingsModel): m.Children {
             BROWSER_IMPORT_SUCCESS_MESSAGE,
           )
         : null,
-      browserImportFailureNotice(browserImport, "browser-import-result"),
+      outcome !== null && !outcome.is_success
+        ? m(Notice, { variant: "error", role: "alert", id: "browser-import-result" }, outcome.detail)
+        : null,
     ]),
     m(
       "p",
@@ -427,15 +427,84 @@ function errorReportingPanel(model: SettingsModel): m.Children {
   ]);
 }
 
-/** The workspace-updates half of the Updates panel: auto-update and the window
- * scheduled updates start in. Drawn whatever build this is -- the app-updates
- * half above it is for installed desktop builds, but workspaces update the
- * same way everywhere. */
+/** Whole hours only: the setting means "while I am asleep". */
+const HOUR_OPTIONS: number[] = Array.from(
+  { length: 24 },
+  (_unused, hour) => hour,
+);
+
+function formatHour(hour: number): string {
+  const suffix = hour < 12 ? "AM" : "PM";
+  return `${hour % 12 || 12}:00 ${suffix}`;
+}
+
+function hourSelect(
+  id: string,
+  value: number,
+  onchange: (hour: number) => void,
+): m.Children {
+  return m(
+    "select",
+    {
+      id,
+      class: "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
+      value: String(value),
+      onchange: (event: Event) =>
+        onchange(Number((event.target as HTMLSelectElement).value)),
+    },
+    HOUR_OPTIONS.map((hour) =>
+      m("option", { value: String(hour) }, formatHour(hour)),
+    ),
+  );
+}
+
+/** The machine-updates half of the Updates panel: the window scheduled machine
+ * updates run in. Drawn whatever build this is -- the app-updates half above it
+ * is for installed desktop builds, but machines update the same way everywhere. */
 function machineUpdatesSection(model: SettingsModel): m.Children {
-  if (model.overview === null) return null;
+  const overview = model.overview;
+  if (overview === null) return null;
+  const startHour = overview.update_window_start_hour;
+  const endHour = overview.update_window_end_hour;
   return m("div", { class: "mt-8" }, [
     m("h3", { class: "type-heading text-primary mb-2" }, "Workspace updates"),
-    workspaceUpdateSettings(model),
+    m(
+      "p",
+      { class: "type-body text-secondary mb-3" },
+      "When you schedule an update for a workspace, Imbue Studio runs it inside this window. A workspace that " +
+        "isn't reachable or has agents working in it when the window comes is skipped and tried again " +
+        "in the next one.",
+    ),
+    m("div", { class: "flex items-center gap-2 py-3 border-b border-subtle" }, [
+      m(
+        "label",
+        { class: "type-body text-primary", for: "update-window-start" },
+        "Between",
+      ),
+      hourSelect(
+        "update-window-start",
+        startHour,
+        (hour) => void model.setUpdateWindow(hour, endHour),
+      ),
+      m(
+        "label",
+        { class: "type-body text-primary", for: "update-window-end" },
+        "and",
+      ),
+      hourSelect(
+        "update-window-end",
+        endHour,
+        (hour) => void model.setUpdateWindow(startHour, hour),
+      ),
+      m("span", { class: "type-helper text-tertiary" }, "local time"),
+    ]),
+    model.updateWindowError
+      ? m(
+          "p",
+          { class: "type-helper text-important mt-3", role: "alert" },
+          model.updateWindowError,
+        )
+      : null,
   ]);
 }
 
@@ -885,35 +954,6 @@ function internalChannelDisclosure(
   );
 }
 
-// Closing the last window leaves the app running behind its tray icon, so quitting
-// is explicit. The tray and Cmd+Q / Ctrl+Q offer it; this row is for a desktop
-// that shows no tray (a Linux session without an appindicator), where the page
-// is the only place left to put it.
-function quitAppRow(): m.Children {
-  if (!electronBridge.canQuitApp) return null;
-  return m(
-    "div",
-    { class: "flex items-center justify-between gap-4 py-3 border-b border-subtle" },
-    [
-      m(
-        "p",
-        { class: "type-body text-secondary" },
-        "Closing a window leaves Imbue Studio running in the background, so your workspaces stay reachable.",
-      ),
-      m(
-        Button,
-        {
-          variant: "secondary",
-          size: "md",
-          id: "quit-app",
-          onclick: () => electronBridge.quitApp(),
-        },
-        "Quit Imbue Studio",
-      ),
-    ],
-  );
-}
-
 function updatesPanel(model: SettingsModel): m.Children {
   const state = model.updateState;
   if (!electronBridge.isDesktop) {
@@ -957,7 +997,6 @@ function updatesPanel(model: SettingsModel): m.Children {
       { class: "type-body text-secondary" },
       `You're on Imbue Studio ${state.currentVersion}.`,
     ),
-    quitAppRow(),
     updateStandingLine(model),
     updateStatusLine(model),
     ...listed.map((channel) => channelRow(model, state, channel)),

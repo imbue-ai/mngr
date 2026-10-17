@@ -1,0 +1,1 @@
+No change to `mngr` itself. This branch is stacked on the ownership-lock change, whose `mngr` entry covers the process-title quoting it carries; the diff against `main` shows it only because the base has not merged yet.

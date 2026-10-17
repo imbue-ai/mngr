@@ -5,7 +5,6 @@ import queue
 import re
 import shlex
 import time
-import tomllib
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -17,35 +16,25 @@ from typing import Final
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-import httpx2
+import httpx
 import pytest
 from flask import Flask
 from flask.testing import FlaskClient
 from pydantic import AnyUrl
-from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
-from werkzeug.test import TestResponse
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import InstallationPaths
-from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client import restic_cli
-from imbue.minds.desktop_client import workspace_ssh
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CreateAttemptErrorKind
-from imbue.minds.desktop_client.api_v1 import CONNECTION_GONE_DURING_UPDATE_MESSAGE
-from imbue.minds.desktop_client.api_v1 import CREATE_IN_FLIGHT_ON_CONNECTION_MESSAGE
-from imbue.minds.desktop_client.api_v1 import REGISTRATION_IN_FLIGHT_ON_CONNECTION_MESSAGE
-from imbue.minds.desktop_client.api_v1 import UPDATE_IN_FLIGHT_ON_CONNECTION_MESSAGE
-from imbue.minds.desktop_client.api_v1 import _SSH_GRANT_WRITE_ATTEMPTS
 from imbue.minds.desktop_client.api_v1 import _describe_mngr_exec_failure
 from imbue.minds.desktop_client.api_v1 import _drain_backup_summary_rows
 from imbue.minds.desktop_client.api_v1 import _stream_workspace_backup_summaries
@@ -54,7 +43,6 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
@@ -66,74 +54,42 @@ from imbue.minds.desktop_client.backup_verification_store import set_backup_veri
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import TEST_RELAY_ENDPOINTS
-from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
 from imbue.minds.desktop_client.conftest import make_agents_json
-from imbue.minds.desktop_client.conftest import make_connection_store_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
-from imbue.minds.desktop_client.conftest import make_provider_materializer_for_test
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.conftest import make_share_probe_result
-from imbue.minds.desktop_client.conftest import session_store_account_source
-from imbue.minds.desktop_client.conftest import unlock_account_with_master_password_for_test
-from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
-from imbue.minds.desktop_client.connections.data_types import ConnectionCredentials
-from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
-from imbue.minds.desktop_client.connections.primitives import ConnectionId
-from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
-from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
-from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
-from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
-from imbue.minds.desktop_client.folder_sync import FolderSyncManager
-from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
-from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
-from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudClientTooOldCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
-from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.minds_config import MindsConfig
-from imbue.minds.desktop_client.mock_agent_creator_test import InFlightCreateAttempt
-from imbue.minds.desktop_client.mock_agent_creator_test import make_in_flight_agent_creator
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import ChatInWorkspaceResolver
-from imbue.minds.desktop_client.testing import blocking_release_wait_body
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
-from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
 from imbue.minds.desktop_client.testing import restic_backup_a_file
-from imbue.minds.desktop_client.testing import wait_until_synced
-from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.minds.desktop_client.ui_models import UiNotificationEntry
-from imbue.minds.desktop_client.workspace_create import CreateOnCreatedCallback
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
-from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_TOO_NEW_MESSAGE
-from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_update_state import UpdateAvailability
 from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
 from imbue.minds.errors import WorkspaceNameInUseError
 from imbue.minds.primitives import CreateAttemptId
-from imbue.minds.primitives import DEFAULT_AWS_INSTANCE_TYPE
-from imbue.minds.primitives import DEFAULT_AZURE_VM_SIZE
-from imbue.minds.primitives import DEFAULT_GCP_MACHINE_TYPE
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
@@ -141,13 +97,9 @@ from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.utils.polling import poll_for_value
-from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _TEST_KEY = "test-minds-api-key"
@@ -203,14 +155,12 @@ class _RecordingAgentCreator(AgentCreator):
         cloud_account: str = "",
         instance_type: str = "",
         machine_size: MachineSizeSelection | None = None,
-        modal_sandbox_timeout_seconds: int | None = None,
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
-        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         self._last_call = {
             "repo_source": repo_source,
@@ -224,13 +174,10 @@ class _RecordingAgentCreator(AgentCreator):
             "cloud_account": cloud_account,
             "instance_type": instance_type,
             "machine_size": machine_size,
-            "modal_sandbox_timeout_seconds": modal_sandbox_timeout_seconds,
             "color": color,
             "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
             "account_id": account_id,
-            "is_onboarding_driven_by_agent": is_onboarding_driven_by_agent,
-            "on_created": on_created,
         }
         return CreateAttemptId()
 
@@ -257,7 +204,6 @@ def _client_with_agent_creator(
     agent_creator: AgentCreator | None = None,
     session_store: MultiAccountSessionStore | None = None,
     minds_config: MindsConfig | None = None,
-    connection_store: ConnectionStore | None = None,
 ) -> FlaskClient:
     """Build a test client whose ``/api/v1`` create route has an ``AgentCreator`` wired.
 
@@ -282,7 +228,6 @@ def _client_with_agent_creator(
         http_client=None,
         agent_creator=agent_creator,
         session_store=session_store,
-        connection_store=connection_store,
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
         minds_config=minds_config,
@@ -486,54 +431,6 @@ def test_reading_a_chat_resolves_messages_filed_by_its_earlier_agent(tmp_path: P
     assert entry.is_resolved is True
 
 
-def test_agent_notification_from_the_primary_agent_with_a_destination_opens_an_app_page(tmp_path: Path) -> None:
-    """The routines runner notifies from the workspace's primary agent, which is not a chat, and names a page to land on."""
-    workspace_agent_id = AgentId()
-    client, app = _client_with_chat(tmp_path, workspace_agent_id, AgentId())
-
-    response = client.post(
-        f"/api/v1/agents/{workspace_agent_id}/notifications",
-        json={
-            "message": "3 new items",
-            "title": "Inbox digest",
-            "destination": {"type": "minds:show-routine", "routine_id": "inbox-digest"},
-        },
-        headers=_auth_header(),
-    )
-
-    assert response.status_code == 200
-    (entry,) = _feed_entries(app)
-    assert entry.kind == "agent_message"
-    assert entry.chat_agent_id == ""
-    # Headed by the title, not the primary agent's own name; the message stands alone as the body.
-    assert entry.title == "Inbox digest"
-    assert entry.body == "3 new items"
-    assert entry.workspace_agent_id == str(workspace_agent_id)
-    assert entry.destination is not None
-    assert entry.destination.model_dump(mode="json") == {"type": "minds:show-routine", "routine_id": "inbox-digest"}
-    # Reading the sender's "chat" reads nothing: there is no chat to be read in.
-    read = client.post(f"/api/v1/agents/{workspace_agent_id}/notifications/read", json={}, headers=_auth_header())
-    assert read.status_code == 200
-    (still_unread,) = _feed_entries(app)
-    assert still_unread.is_resolved is False
-
-
-def test_agent_notification_with_a_malformed_destination_is_rejected(tmp_path: Path) -> None:
-    workspace_agent_id = AgentId()
-    chat_agent_id = AgentId()
-    client, app = _client_with_chat(tmp_path, workspace_agent_id, chat_agent_id)
-
-    response = client.post(
-        f"/api/v1/agents/{chat_agent_id}/notifications",
-        json={"message": "hi", "destination": {"type": "shell:open", "path": "/"}},
-        headers=_auth_header(),
-    )
-
-    assert response.status_code == 422
-    assert response.get_json()["errors"][0]["field"] == "destination"
-    assert _feed_entries(app) == ()
-
-
 def test_agent_notification_without_a_message_is_rejected(tmp_path: Path) -> None:
     workspace_agent_id = AgentId()
     chat_agent_id = AgentId()
@@ -559,17 +456,6 @@ def test_list_workspaces_returns_known_workspaces(tmp_path: Path) -> None:
     body = json.loads(response.data)
     ids = [w["agent_id"] for w in body["workspaces"]]
     assert str(agent_id) in ids
-
-
-def test_list_workspaces_reports_every_listed_workspace_as_the_users_own(tmp_path: Path) -> None:
-    client = _client_with_workspace(tmp_path, AgentId())
-
-    response = client.get("/api/v1/workspaces", headers=_auth_header())
-
-    assert response.status_code == 200
-    workspaces = json.loads(response.data)["workspaces"]
-    assert workspaces
-    assert all(workspace["is_owned"] is True for workspace in workspaces)
 
 
 def test_list_workspaces_requires_bearer(tmp_path: Path) -> None:
@@ -1122,117 +1008,6 @@ def test_create_workspace_imbue_cloud_with_account_unselected_returns_field_erro
     assert "redirect_url" not in body
 
 
-def test_create_workspace_on_a_connection_requires_the_connections_owner_to_be_selected(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-) -> None:
-    """The selected account picks the providers on offer: a connection is usable only under its owner, and the
-    create then carries that account (the association) and, for Modal, the region the form picked and the
-    sandbox lifetime the request named."""
-    owner_user_id = "11111111-1111-1111-1111-111111111111"
-    cli = _fake_sharing_cli()
-    cli.add_account(user_id=owner_user_id, email="owner@example.com")
-    data_dir = tmp_path / "sessions"
-    session_store = make_session_store_for_test(data_dir, cli=cli)
-    connection_store = make_connection_store_for_test(data_dir, cli)
-    paths = InstallationPaths(data_dir=data_dir)
-    unlock_account_with_master_password_for_test(paths, owner_user_id)
-    connection_id = add_modal_connection_for_test(connection_store, owner_user_id, "team modal")
-    instance_name = provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id)
-    creator = _make_recording_creator(tmp_path, root_concurrency_group)
-    client = _client_with_agent_creator(
-        tmp_path,
-        root_concurrency_group,
-        agent_creator=creator,
-        session_store=session_store,
-        connection_store=connection_store,
-    )
-
-    # No account selected: the local profile's providers are on offer, and this connection is not among them.
-    refused = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={"git_url": "https://example/repo", "launch_mode": "MODAL", "cloud_account": instance_name},
-    )
-    assert refused.status_code == 400
-    assert json.loads(refused.data)["field"] == "cloud_account"
-
-    accepted = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={
-            "git_url": "https://example/repo",
-            "launch_mode": "MODAL",
-            "cloud_account": instance_name,
-            "account_id": owner_user_id,
-            "region": "eu-west",
-            "modal_sandbox_timeout_seconds": 10710,
-        },
-    )
-    assert accepted.status_code == 202, accepted.data
-    assert creator._last_call is not None
-    assert creator._last_call["cloud_account"] == instance_name
-    assert creator._last_call["account_id"] == owner_user_id
-    # Modal places per create, so the form's region rides through rather than a pin.
-    assert creator._last_call["region"] == "eu-west"
-    assert creator._last_call["modal_sandbox_timeout_seconds"] == 10710
-    # The association seeds the record with the connection instance as its provider, not the account's
-    # Imbue Cloud instance, and as an account-synced row (no hosting device).
-    on_created = creator._last_call["on_created"]
-    assert isinstance(on_created, CreateOnCreatedCallback) and on_created.base_callback is not None
-    assert on_created.base_callback.provider_kind == instance_name
-    assert on_created.base_callback.is_cloud_row is True
-
-
-@pytest.mark.parametrize("selected_account_id", ["", "11111111-1111-1111-1111-111111111111"])
-def test_create_workspace_on_a_local_profile_connection_is_accepted_under_any_account(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, selected_account_id: str
-) -> None:
-    """A this-device-only connection is a device provider, like docker: offered under every account and under none,
-    and the selected account (if any) is still the workspace's association."""
-    account_user_id = "11111111-1111-1111-1111-111111111111"
-    cli = _fake_sharing_cli()
-    cli.add_account(user_id=account_user_id, email="owner@example.com")
-    data_dir = tmp_path / "sessions"
-    session_store = make_session_store_for_test(data_dir, cli=cli)
-    connection_store = make_connection_store_for_test(data_dir, cli)
-    connection_id = add_modal_connection_for_test(connection_store, LOCAL_PROFILE_USER_ID, "device modal")
-    instance_name = provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id)
-    creator = _make_recording_creator(tmp_path, root_concurrency_group)
-    client = _client_with_agent_creator(
-        tmp_path,
-        root_concurrency_group,
-        agent_creator=creator,
-        session_store=session_store,
-        connection_store=connection_store,
-    )
-
-    accepted = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={
-            "git_url": "https://example/repo",
-            "launch_mode": "MODAL",
-            "cloud_account": instance_name,
-            "account_id": selected_account_id,
-        },
-    )
-
-    assert accepted.status_code == 202, accepted.data
-    assert creator._last_call is not None
-    assert creator._last_call["cloud_account"] == instance_name
-    assert creator._last_call["account_id"] == selected_account_id
-    # A device provider's workspace is recorded as hosted here (not as an account-synced row).
-    on_created = creator._last_call["on_created"]
-    assert isinstance(on_created, CreateOnCreatedCallback)
-    if selected_account_id:
-        assert on_created.base_callback is not None
-        assert on_created.base_callback.provider_kind == instance_name
-        assert on_created.base_callback.is_cloud_row is False
-    else:
-        assert on_created.base_callback is None
-
-
 def test_create_workspace_empty_git_url_returns_field_error(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
@@ -1429,37 +1204,6 @@ def test_create_workspace_passes_no_machine_size_for_a_mode_sized_another_way(
     assert creator.last_call["machine_size"] is None
 
 
-def test_create_workspace_threads_the_modal_sandbox_timeout_only_for_a_modal_create(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-) -> None:
-    creator = _make_recording_creator(tmp_path, root_concurrency_group)
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
-
-    dropped = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={"git_url": "https://example/repo", "launch_mode": "DOCKER", "modal_sandbox_timeout_seconds": 10710},
-    )
-    assert dropped.status_code == 202
-    assert creator.last_call["modal_sandbox_timeout_seconds"] is None
-
-    below_one = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={"git_url": "https://example/repo", "launch_mode": "DOCKER", "modal_sandbox_timeout_seconds": 0},
-    )
-    assert below_one.status_code == 422
-
-    # Modal's 24h cap, less the provider's shutdown buffer: a longer sandbox would fail in the background create.
-    above_the_cap = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={"git_url": "https://example/repo", "launch_mode": "MODAL", "modal_sandbox_timeout_seconds": 86311},
-    )
-    assert above_the_cap.status_code == 422
-
-
 def test_create_workspace_rejects_a_machine_size_below_one(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
@@ -1506,8 +1250,7 @@ def test_create_workspace_ignores_stale_ai_provider_field(
     # The AI provider moved into the workspace's own sign-in modal. A stale
     # client still sending ai_provider (even a value that used to require an
     # API key) must be accepted -- the field is silently ignored.
-    creator = _make_recording_creator(tmp_path, root_concurrency_group)
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group)
 
     response = client.post(
         "/api/v1/workspaces",
@@ -1877,7 +1620,7 @@ def test_establish_ssh_missing_fields_returns_422_with_field_errors(tmp_path: Pa
     assert all(error["message"] for error in errors)
 
 
-def _write_recording_fake_mngr(directory: Path, record_path: Path, changed_write_count: int = 0) -> str:
+def _write_recording_fake_mngr(directory: Path, record_path: Path) -> str:
     """Fake ``mngr`` that records each invocation's argv, then exits 0.
 
     Args are NUL-delimited within an invocation and invocations are separated by
@@ -1890,36 +1633,13 @@ def _write_recording_fake_mngr(directory: Path, record_path: Path, changed_write
     appends a ``Command succeeded on agent ...`` status line to stdout that the
     route must not write back, so the route reads in JSON and extracts the inner
     body. Other invocations (the write, which discards stdout) emit nothing.
-
-    The first ``changed_write_count`` invocations that are not the read fail the
-    way the guarded write script does when the file no longer matches the read
-    it was composed from: exit 75 with ``AUTHORIZED_KEYS_CHANGED_SINCE_READ`` on
-    stderr, which the envelope carries with ``success: false``. Every later
-    write succeeds, so the route's re-read lands.
     """
     directory.mkdir(parents=True, exist_ok=True)
     script = directory / "mngr"
     rec = shlex.quote(str(record_path))
-    changed_writes_seen = shlex.quote(str(directory / "changed_writes_seen"))
     envelope = json.dumps(
         {
             "results": [{"agent": "t", "stdout": "", "stderr": "", "success": True}],
-            "failed_agents": [],
-            "total_executed": 1,
-            "total_failed": 0,
-        }
-    )
-    # A command that exits non-zero stays in ``results`` with its stderr; ``failed_agents`` is for an exec that never ran.
-    changed_envelope = json.dumps(
-        {
-            "results": [
-                {
-                    "agent": "t",
-                    "stdout": "",
-                    "stderr": f"{workspace_ssh.AUTHORIZED_KEYS_CHANGED_MARKER}\n",
-                    "success": False,
-                }
-            ],
             "failed_agents": [],
             "total_executed": 1,
             "total_failed": 0,
@@ -1929,17 +1649,6 @@ def _write_recording_fake_mngr(directory: Path, record_path: Path, changed_write
         "#!/bin/sh\n"
         f'for a in "$@"; do printf \'%s\\0\' "$a" >> {rec}; done\n'
         f"printf '\\036' >> {rec}\n"
-        'case "$3" in\n'
-        "  cat*) ;;\n"
-        "  *)\n"
-        f"    seen=$(cat {changed_writes_seen} 2>/dev/null || echo 0)\n"
-        f'    if [ "$seen" -lt {changed_write_count} ]; then\n'
-        f"      echo $((seen + 1)) > {changed_writes_seen}\n"
-        f"      printf '%s' {shlex.quote(changed_envelope)}\n"
-        "      exit 1\n"
-        "    fi\n"
-        "    ;;\n"
-        "esac\n"
         'for a in "$@"; do\n'
         '  if [ "$a" = "json" ]; then\n'
         f"    printf '%s' {shlex.quote(envelope)}\n"
@@ -2021,69 +1730,6 @@ def test_establish_ssh_passes_command_as_single_mngr_exec_arg(
     assert '"results"' not in write_script
 
 
-def test_establish_ssh_rereads_authorized_keys_when_the_guarded_write_finds_it_changed(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """The write holds the file's lock and only lands on the body it was composed from; otherwise read again."""
-    target = AgentId()
-    resolver = StaticBackendResolver(
-        url_by_agent_and_service={str(target): {}},
-        ssh_info_by_agent_id={
-            str(target): RemoteSSHInfo(user="root", host="ssh.example.com", port=2222, key_path=Path("/k"))
-        },
-    )
-    record_path = tmp_path / "mngr_argv.bin"
-    fake_mngr = _write_recording_fake_mngr(tmp_path / "bin", record_path, changed_write_count=1)
-    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group, mngr_binary=fake_mngr)
-
-    response = client.post(
-        f"/api/v1/workspaces/{target}/ssh",
-        headers=_auth_header(),
-        json={
-            "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5TESTKEYMATERIAL",
-            "requester_workspace_id": str(AgentId()),
-        },
-    )
-    assert response.status_code == 200, response.data
-
-    commands = [invocation[2] for invocation in _recorded_mngr_invocations(record_path)]
-    # read, write (refused: the file changed), read again, write (landed)
-    assert [command.startswith("cat ") for command in commands] == [True, False, True, False]
-    assert all(f"flock {workspace_ssh.AUTHORIZED_KEYS_LOCK_PATH} sh -c" in command for command in commands[1::2])
-
-
-def test_establish_ssh_gives_up_when_authorized_keys_keeps_changing(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """Every write finds the file changed: the route re-reads a bounded number of times, then answers 502."""
-    target = AgentId()
-    resolver = StaticBackendResolver(
-        url_by_agent_and_service={str(target): {}},
-        ssh_info_by_agent_id={
-            str(target): RemoteSSHInfo(user="root", host="ssh.example.com", port=2222, key_path=Path("/k"))
-        },
-    )
-    record_path = tmp_path / "mngr_argv.bin"
-    fake_mngr = _write_recording_fake_mngr(
-        tmp_path / "bin", record_path, changed_write_count=_SSH_GRANT_WRITE_ATTEMPTS + 1
-    )
-    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group, mngr_binary=fake_mngr)
-
-    response = client.post(
-        f"/api/v1/workspaces/{target}/ssh",
-        headers=_auth_header(),
-        json={
-            "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5TESTKEYMATERIAL",
-            "requester_workspace_id": str(AgentId()),
-        },
-    )
-    assert response.status_code == 502, response.data
-    assert "kept changing" in json.loads(response.data)["error"]
-
-    commands = [invocation[2] for invocation in _recorded_mngr_invocations(record_path)]
-    assert [command.startswith("cat ") for command in commands] == [True, False] * _SSH_GRANT_WRITE_ATTEMPTS
-
-
 def test_operation_logs_unknown_create_id_returns_404(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
     create_attempt_id = CreateAttemptId()
@@ -2119,14 +1765,10 @@ def _build_client(
     mngr_host_dir: Path | None = None,
     imbue_cloud_cli: ImbueCloudCli | None = None,
     session_store: MultiAccountSessionStore | None = None,
-    http_client: httpx2.Client | None = None,
+    http_client: httpx.Client | None = None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
     client_env_config: ClientEnvConfig | None = None,
-    connection_store: ConnectionStore | None = None,
-    provider_materializer: ProviderSettingsMaterializer | None = None,
-    minds_config: MindsConfig | None = None,
     mngr_caller: MngrCaller | None = None,
-    agent_creator: AgentCreator | None = None,
 ) -> FlaskClient:
     """Build a desktop-client test client with the /api/v1 surface and the given deps."""
     app = create_desktop_client(
@@ -2134,16 +1776,12 @@ def _build_client(
         backend_resolver=resolver,
         http_client=http_client,
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
-        minds_config=minds_config,
         minds_api_key=_TEST_KEY,
         root_concurrency_group=root_concurrency_group,
-        agent_creator=agent_creator,
         mngr_binary=mngr_binary,
         mngr_host_dir=mngr_host_dir,
         imbue_cloud_cli=imbue_cloud_cli,
         session_store=session_store,
-        connection_store=connection_store,
-        provider_materializer=provider_materializer,
         system_interface_health_tracker=system_interface_health_tracker,
         mngr_caller=mngr_caller if mngr_caller is not None else RecordingMngrCaller(),
         client_env_config=client_env_config,
@@ -2172,6 +1810,9 @@ class FakeSharingCli(FakeImbueCloudCli):
     created_shares: list[str] = Field(default_factory=list)
     deleted_shares: list[str] = Field(default_factory=list)
     share_status_call_count: int = Field(default=0, description="How many times get_share_status was consulted")
+    create_share_error: str | None = Field(
+        default=None, description="When set, create_share raises an ImbueCloudCliError with this message"
+    )
 
     def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
         self.share_status_call_count += 1
@@ -2199,7 +1840,8 @@ class FakeSharingCli(FakeImbueCloudCli):
         preferred_region: str | None = None,
         workspace_id: str | None = None,
     ) -> ShareCliInfo:
-        self._raise_create_share_error_if_configured()
+        if self.create_share_error is not None:
+            raise ImbueCloudCliError(self.create_share_error)
         self.created_shares.append(host_id)
         self.share = ShareCliInfo(
             host_id=host_id,
@@ -2364,7 +2006,7 @@ def test_patch_workspace_associate_account_by_email(tmp_path: Path) -> None:
 
 def test_patch_workspace_associate_unknown_account_returns_404(tmp_path: Path) -> None:
     # A value matching no signed-in account is rejected (404) instead of being
-    # silently accepted then garbage-collected.
+    # silently accepted then garbage-collected -- the previous false-success bug.
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     cli = _fake_sharing_cli()
@@ -2382,7 +2024,7 @@ def test_patch_workspace_associate_unknown_account_returns_404(tmp_path: Path) -
 
 def test_get_workspace_surfaces_associated_account(tmp_path: Path) -> None:
     # After association the detail readout exposes account_id + account_email so a
-    # caller can confirm it.
+    # caller can confirm it (previously there was no account field at all).
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     cli = _fake_sharing_cli()
@@ -2428,7 +2070,7 @@ def test_patch_workspace_associate_leased_host_returns_403(tmp_path: Path) -> No
     response = client.patch(f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"account_id": "user-123"})
 
     assert response.status_code == 403
-    assert "account-owned provider" in json.loads(response.data)["error"]
+    assert "leased from imbue_cloud" in json.loads(response.data)["error"]
 
 
 def test_patch_workspace_disassociate_leased_host_returns_403(tmp_path: Path) -> None:
@@ -2438,7 +2080,7 @@ def test_patch_workspace_disassociate_leased_host_returns_403(tmp_path: Path) ->
     response = client.patch(f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"account_id": None})
 
     assert response.status_code == 403
-    assert "account-owned provider" in json.loads(response.data)["error"]
+    assert "leased from imbue_cloud" in json.loads(response.data)["error"]
 
 
 def test_dismiss_destroy_operation_is_idempotent_noop(tmp_path: Path) -> None:
@@ -2458,7 +2100,63 @@ def test_dismiss_operation_requires_bearer(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-# Desktop running-workspaces / stop-hosts / state-container
+def test_patch_provider_enable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-tname")
+    resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client = _build_client(tmp_path, resolver)
+
+    response = client.patch("/api/v1/desktop/providers/docker", headers=_auth_header(), json={"enabled": True})
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body == {"provider_name": "docker", "enabled": True, "changed": True}
+    assert "is_enabled = true" in settings_path.read_text()
+
+
+def test_patch_provider_disable_with_active_workspaces_conflicts(tmp_path: Path) -> None:
+    # The single workspace is served by provider "local" and its host is not
+    # DESTROYED, so disabling "local" must be rejected with a 409 and no write.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver)
+
+    response = client.patch("/api/v1/desktop/providers/local", headers=_auth_header(), json={"enabled": False})
+
+    assert response.status_code == 409
+    assert "active workspace" in json.loads(response.data)["error"].lower()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # missing 'enabled' key -> enabled is None
+        {},
+        # wrong type (string)
+        {"enabled": "yes"},
+        # wrong type (int, must not be accepted via truthiness)
+        {"enabled": 1},
+        # non-object JSON body
+        [1, 2, 3],
+    ],
+)
+def test_patch_provider_rejects_invalid_body(tmp_path: Path, body: object) -> None:
+    client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}))
+
+    response = client.patch("/api/v1/desktop/providers/docker", headers=_auth_header(), json=body)
+
+    # Structural validation (required strict bool) is now enforced by spectree,
+    # so a missing/wrong-typed ``enabled`` yields the uniform 422 contract.
+    assert response.status_code == 422
+    assert "errors" in json.loads(response.data)
+
+
+def test_patch_provider_requires_bearer(tmp_path: Path) -> None:
+    client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}))
+
+    response = client.patch("/api/v1/desktop/providers/docker", json={"enabled": True})
+
+    assert response.status_code == 401
 
 
 def test_desktop_running_workspaces(tmp_path: Path) -> None:
@@ -2546,7 +2244,7 @@ def _sharing_client(
     email: str = "owner@example.com",
     service_logs: dict[str, str] | None = None,
     mngr_binary: str = "mngr",
-    http_client: httpx2.Client | None = None,
+    http_client: httpx.Client | None = None,
     agent_labels: dict[str, str] | None = None,
 ) -> FlaskClient:
     resolver = make_resolver_with_data(make_agents_json(agent_id, labels=agent_labels), service_logs=service_logs)
@@ -2713,7 +2411,7 @@ def test_machine_sharing_status_reports_a_failed_domain_move_as_an_error(tmp_pat
     cli = _fake_sharing_cli(
         share=stale_share,
         mngr_caller=_ShareProbeCaller(is_share_env_present=True),
-        create_share_error_to_raise=ImbueCloudCliError("connector refused"),
+        create_share_error="connector refused",
     )
     client = _sharing_client(tmp_path, agent_id, cli)
     # The readiness poll's cached lookup from before the move was attempted.
@@ -3336,10 +3034,7 @@ def test_workspace_sharing_delete_keeps_the_grants_in_its_document(tmp_path: Pat
 
 def test_machine_sharing_put_surfaces_connector_errors(tmp_path: Path) -> None:
     agent_id = AgentId()
-    cli = _fake_sharing_cli(
-        create_share_error_to_raise=ImbueCloudCliError("shares create failed (exit 1)"),
-        mngr_caller=_ShareProbeCaller(),
-    )
+    cli = _fake_sharing_cli(create_share_error="shares create failed (exit 1)", mngr_caller=_ShareProbeCaller())
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.put(
@@ -3350,25 +3045,6 @@ def test_machine_sharing_put_surfaces_connector_errors(tmp_path: Path) -> None:
 
     assert response.status_code == 502
     assert "Could not publish this workspace" in json.loads(response.data)["error"]
-
-
-def test_workspace_sharing_put_answers_a_full_share_quota_with_a_structured_code(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    cli = _fake_sharing_cli(
-        create_share_error_to_raise=ImbueCloudQuotaExceededCliError(
-            "shares create: Shared workspace limit reached (50 of 50)."
-        ),
-        mngr_caller=_ShareProbeCaller(),
-    )
-    client = _sharing_client(tmp_path, agent_id, cli)
-
-    response = client.put(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
-
-    assert response.status_code == 403, response.data
-    body = json.loads(response.data)
-    assert body["code"] == "quota_exceeded"
-    assert body["shared_workspaces_path"] == "/workspaces/shared"
-    assert "Shared workspace limit reached (50 of 50)" in body["error"]
 
 
 def test_machine_sharing_delete_disables(tmp_path: Path) -> None:
@@ -3410,11 +3086,11 @@ def test_machine_sharing_readiness_ready_when_shell_label_origin_answers(tmp_pat
     cli = _fake_sharing_cli(share=_active_share())
     probed_hosts: list[str] = []
 
-    def _handler(request: httpx2.Request) -> httpx2.Response:
+    def _handler(request: httpx.Request) -> httpx.Response:
         probed_hosts.append(request.url.host)
-        return httpx2.Response(302, headers={"location": "https://accounts.example/share/authorize"})
+        return httpx.Response(302, headers={"location": "https://accounts.example/share/authorize"})
 
-    http_client = httpx2.Client(transport=httpx2.MockTransport(_handler), follow_redirects=False)
+    http_client = httpx.Client(transport=httpx.MockTransport(_handler), follow_redirects=False)
     # The shell's label must be known for readiness -- the probe hits the shell's
     # label origin, not the bare machine domain (which does not route on a share).
     client = _sharing_client(
@@ -3450,10 +3126,10 @@ def test_machine_sharing_readiness_polls_reuse_the_cached_share_lookup(tmp_path:
     agent_id = AgentId()
     cli = _fake_sharing_cli(share=_active_share())
 
-    def _handler(request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(302, headers={"location": "https://accounts.example/share/authorize"})
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "https://accounts.example/share/authorize"})
 
-    http_client = httpx2.Client(transport=httpx2.MockTransport(_handler), follow_redirects=False)
+    http_client = httpx.Client(transport=httpx.MockTransport(_handler), follow_redirects=False)
     client = _sharing_client(
         tmp_path,
         agent_id,
@@ -3483,7 +3159,7 @@ def test_machine_sharing_readiness_not_ready_when_shell_label_unknown(tmp_path: 
         to_update(bare_share.field_ref().last_tunnel_login_at, "2026-08-13 12:00:00+00:00"),
     )
     cli = _fake_sharing_cli(share=share)
-    client = _sharing_client(tmp_path, agent_id, cli, http_client=httpx2.Client())
+    client = _sharing_client(tmp_path, agent_id, cli, http_client=httpx.Client())
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
@@ -3514,10 +3190,10 @@ def test_machine_sharing_readiness_reports_the_gateway_status_while_not_live(tmp
     caller = _GatewayStatusCaller(status_json=status_json)
     cli = _fake_sharing_cli(share=_active_share(), mngr_caller=caller)
 
-    def _handler(request: httpx2.Request) -> httpx2.Response:
-        raise httpx2.ConnectError("no route to host")
+    def _handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host")
 
-    http_client = httpx2.Client(transport=httpx2.MockTransport(_handler))
+    http_client = httpx.Client(transport=httpx.MockTransport(_handler))
     client = _sharing_client(
         tmp_path,
         agent_id,
@@ -3544,7 +3220,7 @@ def test_machine_sharing_readiness_reports_the_gateway_status_while_not_live(tmp
 
 def test_machine_sharing_readiness_not_ready_when_disabled(tmp_path: Path) -> None:
     agent_id = AgentId()
-    client = _sharing_client(tmp_path, agent_id, _fake_sharing_cli(), http_client=httpx2.Client())
+    client = _sharing_client(tmp_path, agent_id, _fake_sharing_cli(), http_client=httpx.Client())
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
@@ -3927,167 +3603,6 @@ def test_machine_size_change_refuses_a_workspace_without_a_host_coordinate(tmp_p
     assert caller.calls == []
 
 
-_IMBUE_CLOUD_OWNER_USER_ID = "33333333-3333-3333-3333-333333333333"
-
-
-def _imbue_cloud_resize_client(
-    tmp_path: Path, agent_id: AgentId, host_state: HostState
-) -> tuple[FlaskClient, FakeImbueCloudCli]:
-    """A client whose one workspace is a leased Imbue Cloud machine linked to a signed-in account."""
-    resolver = _resolver_for_machine_resize(
-        agent_id, AgentId(), imbue_cloud_provider_name_for_user(_IMBUE_CLOUD_OWNER_USER_ID), host_state
-    )
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id=_IMBUE_CLOUD_OWNER_USER_ID, email="owner@example.com")
-    cli.machines = [
-        MachineSizeCliInfo(
-            host_db_id="row-1",
-            host_id=_MACHINE_RESIZE_HOST_ID,
-            host_name="sunny",
-            status="running" if host_state is HostState.RUNNING else "stopped",
-            memory_units=8,
-            disk_gb=28,
-        )
-    ]
-    session_store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
-    session_store.associate_created_workspace(
-        user_id=_IMBUE_CLOUD_OWNER_USER_ID,
-        agent_id=str(agent_id),
-        host_id=_MACHINE_RESIZE_HOST_ID,
-        display_name="",
-        color=None,
-        is_cloud_row=False,
-    )
-    caller = RecordingMngrCaller()
-    client = _build_client(
-        tmp_path,
-        resolver,
-        imbue_cloud_cli=cli,
-        session_store=session_store,
-        system_interface_health_tracker=SystemInterfaceHealthTracker(),
-        mngr_caller=caller,
-    )
-    return client, cli
-
-
-@pytest.mark.witnesses(
-    "machine-size.imbue-cloud-size-is-recorded-for-the-next-restart",
-    partial="the page's rendering is covered by the frontend tests",
-)
-def test_machine_size_change_records_an_imbue_cloud_size_without_restarting(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.RUNNING)
-
-    response = client.post(
-        f"/api/v1/workspaces/{agent_id}/machine-size",
-        headers=_auth_header(),
-        json={"memory_gb": 16, "disk_gb": 56},
-    )
-
-    assert response.status_code == 200
-    # Never a restart: the one that applies the size backs the disks up first, so the user picks when.
-    assert json.loads(response.data) == {"is_restart_dispatched": False, "operation_id": None}
-    assert cli.resize_calls == [("owner@example.com", _MACHINE_RESIZE_HOST_ID, 16, 56)]
-    assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
-    assert cli.machines[0].target_memory_units == 16
-    assert cli.machines[0].target_disk_gb == 56
-
-
-def test_machine_size_change_records_an_imbue_cloud_size_on_a_stopped_machine_too(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.STOPPED)
-
-    response = client.post(
-        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"memory_gb": 16}
-    )
-
-    assert response.status_code == 200
-    assert cli.resize_calls == [("owner@example.com", _MACHINE_RESIZE_HOST_ID, 16, None)]
-
-
-@pytest.mark.witnesses(
-    "machine-size.imbue-cloud-quota-refusal-is-explained",
-    partial="the page's rendering is covered by the frontend tests",
-)
-def test_machine_size_change_explains_an_imbue_cloud_quota_refusal(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.RUNNING)
-    cli.resize_error_to_raise = ImbueCloudQuotaExceededCliError(
-        "machines resize: Quota exceeded: active machine units limit is 16 (currently 8)"
-    )
-
-    response = client.post(
-        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"memory_gb": 32}
-    )
-
-    assert response.status_code == 409
-    assert json.loads(response.data)["error"] == (
-        "Your plan cannot hold this size right now: Quota exceeded: active machine units limit is 16 (currently 8)"
-    )
-
-
-def test_machine_size_change_quotes_the_imbue_cloud_plugins_refusal(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.RUNNING)
-    # The wrapper's own phrasing of a non-quota plugin failure (see ImbueCloudCli._expect_success).
-    cli.resize_error_to_raise = ImbueCloudCliError(
-        "machines resize failed: Disk never shrinks: target_disk_gb=20 is below the machine's current 28GB"
-    )
-
-    response = client.post(f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"disk_gb": 20})
-
-    assert response.status_code == 502
-    assert json.loads(response.data)["error"] == (
-        "The machine's provider refused the new size: "
-        "Disk never shrinks: target_disk_gb=20 is below the machine's current 28GB"
-    )
-
-
-def test_machine_size_change_keeps_a_refusal_the_wrapper_did_not_prefix_whole(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.RUNNING)
-    # A too-old refusal carries the plugin's message verbatim, with no command prefix in front of it.
-    cli.resize_error_to_raise = ImbueCloudClientTooOldCliError("Client too old: update to 1.2 or newer")
-
-    response = client.post(
-        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"memory_gb": 16}
-    )
-
-    assert response.status_code == 502
-    assert json.loads(response.data)["error"] == (
-        "The machine's provider refused the new size: Client too old: update to 1.2 or newer"
-    )
-
-
-def test_machine_size_change_on_an_imbue_cloud_machine_takes_no_cpu_count(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.RUNNING)
-
-    response = client.post(
-        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"cpu_count": 4}
-    )
-
-    assert response.status_code == 400
-    assert json.loads(response.data)["error"] == "Nothing to resize: pass memory_gb or disk_gb."
-    assert cli.resize_calls == []
-
-
-def test_machine_size_change_refuses_an_imbue_cloud_machine_with_no_linked_account(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    resolver = _resolver_for_machine_resize(agent_id, AgentId(), "imbue_cloud_someone", HostState.RUNNING)
-    cli = make_fake_imbue_cloud_cli()
-    client = _build_client(
-        tmp_path, resolver, imbue_cloud_cli=cli, session_store=make_session_store_for_test(tmp_path / "s", cli=cli)
-    )
-
-    response = client.post(
-        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"memory_gb": 16}
-    )
-
-    assert response.status_code == 409
-    assert "not linked" in json.loads(response.data)["error"]
-
-
 def test_machine_size_change_requires_bearer(tmp_path: Path) -> None:
     agent_id = AgentId()
     resolver = _resolver_for_machine_resize(agent_id, AgentId(), "docker", HostState.RUNNING)
@@ -4410,7 +3925,7 @@ def test_backup_service_update_refuses_a_machine_below_the_in_place_floor(
         detection=UpdateDetection(availability=UpdateAvailability.NEEDS_RECREATION),
         current_version="minds-v0.3.9",
         supported_version="",
-        is_readable=True,
+        is_version_from_label=False,
     )
 
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
@@ -4851,1122 +4366,25 @@ def test_backup_routes_require_bearer(tmp_path: Path) -> None:
     )
 
 
-_CONNECTIONS_ROOT_NAME = "minds-dev-tname"
-_CONNECTION_OWNER_ID = "3f2a9c1e-5b7d-4a8e-9c0f-1d2e3f4a5b6c"
-_CONNECTION_OWNER_EMAIL = "owner@example.com"
-
-
-class _ConnectionClientParts(FrozenModel):
-    """A desktop client with connections wired up, plus the stores the tests assert on."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    client: FlaskClient
-    connection_store: ConnectionStore
-    session_store: MultiAccountSessionStore
-    cli: FakeImbueCloudCli
-    settings_path: Path
-    stub_argv_path: Path
-
-
-class _FinishedResponse(FrozenModel):
-    """A connection add or update driven to its end: the status and body the synchronous route used to answer with."""
-
-    status_code: int
-    data: bytes
-
-
-def _finish_connection_operation(client: FlaskClient, response: TestResponse) -> _FinishedResponse:
-    """Poll a 202 handle until the worker ends; anything else is returned as it was answered."""
-    if response.status_code != 202:
-        return _FinishedResponse(status_code=response.status_code, data=response.data)
-    operation_id = json.loads(response.data)["operation_id"]
-
-    def _terminal() -> dict[str, Any] | None:
-        polled = client.get(f"/api/v1/desktop/cloud-accounts/operations/{operation_id}", headers=_auth_header())
-        assert polled.status_code == 200, polled.data
-        info = json.loads(polled.data)
-        return info if info["status"] in ("DONE", "FAILED") else None
-
-    info, _poll_count, _elapsed = poll_for_value(_terminal, timeout=20.0, poll_interval=0.05)
-    assert info is not None, "the connection operation never ended"
-    if info["status"] == "DONE":
-        return _FinishedResponse(status_code=200, data=json.dumps(info["account"]).encode())
-    body: dict[str, Any] = {"error": info["error"]}
-    if info["code"] is not None:
-        body["code"] = info["code"]
-    return _FinishedResponse(status_code=info["status_code"], data=json.dumps(body).encode())
-
-
-def _post_connection(parts: _ConnectionClientParts, body: Mapping[str, object]) -> _FinishedResponse:
-    """Register a connection and wait for its worker, as the modal does."""
-    response = parts.client.post("/api/v1/desktop/cloud-accounts", headers=_auth_header(), json=body)
-    return _finish_connection_operation(parts.client, response)
-
-
-def _put_connection(
-    parts: _ConnectionClientParts, instance_name: str, body: Mapping[str, object]
-) -> _FinishedResponse:
-    """Update a connection's credentials and wait for its worker."""
-    response = parts.client.put(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header(), json=body)
-    return _finish_connection_operation(parts.client, response)
-
-
-def _connection_client(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    root_concurrency_group: ConcurrencyGroup,
-    resolver: BackendResolverInterface,
-    stub_exit_code: int,
-    minds_config: MindsConfig | None = None,
-    agent_creator: AgentCreator | None = None,
-) -> _ConnectionClientParts:
-    """The cloud-connection routes' whole environment: a stubbed ``mngr`` on PATH (recording its
-    argv, exiting with ``stub_exit_code``), a signed-in account, and the stores."""
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _CONNECTIONS_ROOT_NAME)
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _CONNECTIONS_ROOT_NAME)
-    stub_argv_path = tmp_path / "stub-argv.txt"
-    install_stub_mngr_on_path(tmp_path / "bin", monkeypatch, f'echo "$@" >> "{stub_argv_path}"\nexit {stub_exit_code}')
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id=_CONNECTION_OWNER_ID, email=_CONNECTION_OWNER_EMAIL)
-    data_dir = tmp_path / "minds"
-    session_store = make_session_store_for_test(data_dir, cli)
-    connection_store = make_connection_store_for_test(data_dir, cli)
-    materializer = make_provider_materializer_for_test(
-        _CONNECTIONS_ROOT_NAME, connection_store, session_store_account_source(session_store)
-    )
-    client = _build_client(
-        tmp_path,
-        resolver,
-        imbue_cloud_cli=cli,
-        session_store=session_store,
-        connection_store=connection_store,
-        provider_materializer=materializer,
-        minds_config=minds_config,
-        agent_creator=agent_creator,
-        root_concurrency_group=root_concurrency_group,
-    )
-    return _ConnectionClientParts(
-        client=client,
-        connection_store=connection_store,
-        session_store=session_store,
-        cli=cli,
-        settings_path=settings_path,
-        stub_argv_path=stub_argv_path,
-    )
-
-
-def _modal_connection_body(owner: str) -> dict[str, str]:
-    return {
-        "backend": "modal",
-        "alias": "eval modal",
-        "owner": owner,
-        "modal_token_id": "ak-token-id-1234",
-        "modal_token_secret": "as-token-secret",
-    }
-
-
-def test_create_local_modal_connection_writes_its_block_after_a_successful_listing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-
-    response = _post_connection(parts, _modal_connection_body("local"))
-
-    assert response.status_code == 200, response.data
-    body = json.loads(response.data)
-    assert body["backend"] == "modal" and body["alias"] == "eval modal" and body["region"] == ""
-    assert body["identifier"] == "ak-t…1234"
-    assert body["owner_user_id"] == "local" and body["is_region_pinned"] is False
-    instance_name = body["name"]
-    assert instance_name.startswith("modal_")
-    # The token was validated with one listing on the freshly-written instance.
-    assert f"list --provider {instance_name} --format json" in parts.stub_argv_path.read_text()
-    block = tomllib.loads(parts.settings_path.read_text())["providers"][instance_name]
-    assert block["token_secret"] == "as-token-secret"
-    assert block["user_id"] == instance_name.removeprefix("modal_")
-    # A local-profile connection is never pushed.
-    assert parts.cli.document_push_count == 0
-    (view,) = parts.connection_store.list_all_views()
-    assert view.owner_user_id == "local"
-
-
-def test_create_local_modal_connection_may_name_its_modal_namespace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """The evals harness names the trial's environment after its stamped user id; the block carries it."""
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-    body = {**_modal_connection_body("local"), "modal_user_id": "evals-ci-20261015-abcdef"}
-
-    response = _post_connection(parts, body)
-
-    assert response.status_code == 200, response.data
-    instance_name = json.loads(response.data)["name"]
-    block = tomllib.loads(parts.settings_path.read_text())["providers"][instance_name]
-    assert block["user_id"] == "evals-ci-20261015-abcdef"
-    (view,) = parts.connection_store.list_all_views()
-    assert view.placement == {"user_id": "evals-ci-20261015-abcdef"}
-
-
-def test_create_connection_refuses_a_modal_namespace_under_an_account_or_in_a_bad_shape(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-    unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
-
-    under_account = _post_connection(
-        parts, {**_modal_connection_body(_CONNECTION_OWNER_ID), "modal_user_id": "evals-ci-1"}
-    )
-    assert under_account.status_code == 400, under_account.data
-    assert json.loads(under_account.data) == {
-        "error": "modal_user_id is for this-device-only connections",
-        "field": "modal_user_id",
-    }
-    for bad_user_id in ("-leading-dash", "a" * 49, "has space", ""):
-        bad_shape = _post_connection(parts, {**_modal_connection_body("local"), "modal_user_id": bad_user_id})
-        if bad_user_id == "":
-            # Blank means "not named": the id-derived namespace, like an omitted field.
-            assert bad_shape.status_code == 200, bad_shape.data
-            continue
-        assert bad_shape.status_code == 400, bad_user_id
-        assert json.loads(bad_shape.data)["field"] == "modal_user_id"
-    assert len(parts.connection_store.list_all_views()) == 1
-
-
-def test_create_connection_answers_503_and_drops_the_row_when_the_account_listing_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """A failed listing writes no block, so the route must not blame the credentials for the missing instance."""
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-    parts.session_store.invalidate_identity_cache()
-    parts.cli.is_auth_list_failing = True
-
-    response = _post_connection(parts, _modal_connection_body("local"))
-
-    assert response.status_code == 503, response.data
-    assert json.loads(response.data)["code"] == "account_listing_failed"
-    assert "signed-in accounts" in json.loads(response.data)["error"]
-    assert parts.connection_store.list_all_views() == []
-    # No validation ran against the instance whose block was never written (the stub was never invoked).
-    assert not parts.stub_argv_path.exists()
-
-
-def test_create_connection_answers_503_when_the_account_listing_fails_for_an_account_owner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """A failed listing reads like no accounts; the route must not tell a signed-in owner they are signed out."""
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-    unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
-    parts.session_store.invalidate_identity_cache()
-    parts.cli.is_auth_list_failing = True
-
-    response = _post_connection(parts, _modal_connection_body(_CONNECTION_OWNER_ID))
-
-    assert response.status_code == 503, response.data
-    assert "signed-in accounts" in json.loads(response.data)["error"]
-    assert parts.connection_store.list_all_views() == []
-    assert not parts.stub_argv_path.exists()
-
-
-_GCP_SERVICE_ACCOUNT_KEY_JSON = json.dumps(
-    {"type": "service_account", "client_email": "svc@proj.iam.gserviceaccount.com"}
-)
-
-
-@pytest.mark.parametrize(
-    ("body", "expected_prepare", "expected_placement"),
-    [
-        (
-            {
-                "backend": "aws",
-                "region": "us-west-2",
-                "aws_access_key_id": "AKIA1234EXAMPLE9",
-                "aws_secret_access_key": "s",
-            },
-            "aws prepare --provider {instance} --region us-west-2",
-            {"default_region": "us-west-2", "default_instance_type": DEFAULT_AWS_INSTANCE_TYPE},
-        ),
-        (
-            {
-                "backend": "gcp",
-                "region": "us-central1-a",
-                "gcp_service_account_key_json": _GCP_SERVICE_ACCOUNT_KEY_JSON,
-            },
-            "gcp prepare --provider {instance}",
-            {"default_zone": "us-central1-a", "default_machine_type": DEFAULT_GCP_MACHINE_TYPE},
-        ),
-        (
-            {
-                "backend": "azure",
-                "region": "eastus",
-                "azure_subscription_id": "sub",
-                "azure_tenant_id": "ten",
-                "azure_client_id": "cli",
-                "azure_client_secret": "sec",
-            },
-            "azure prepare --provider {instance}",
-            {"default_region": "eastus", "default_vm_size": DEFAULT_AZURE_VM_SIZE},
-        ),
-    ],
-    ids=["aws", "gcp", "azure"],
-)
-def test_create_vps_connection_runs_prepare_on_its_instance_and_pins_the_placement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    root_concurrency_group: ConcurrencyGroup,
-    body: dict[str, str],
-    expected_prepare: str,
-    expected_placement: dict[str, str],
-) -> None:
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-
-    response = _post_connection(parts, {**body, "alias": "team cloud", "owner": "local"})
-
-    assert response.status_code == 200, response.data
-    summary = json.loads(response.data)
-    instance_name = summary["name"]
-    assert instance_name.startswith(f"{body['backend']}_")
-    assert summary["is_region_pinned"] is True and summary["owner_user_id"] == "local"
-    assert expected_prepare.format(instance=instance_name) in parts.stub_argv_path.read_text()
-    block = tomllib.loads(parts.settings_path.read_text())["providers"][instance_name]
-    assert {key: block[key] for key in expected_placement} == expected_placement
-    if body["backend"] == "azure":
-        assert block["resource_group"] == f"mngr-{instance_name.removeprefix('azure_')}-eastus"
-
-
-@pytest.mark.parametrize(
-    ("body", "expected_prepare", "expected_block_keys", "forbidden_block_keys", "expected_placement"),
-    [
-        (
-            {"backend": "aws", "region": "us-west-2", "credential_source": "local_profile", "aws_profile": "work"},
-            "aws prepare --provider {instance} --region us-west-2",
-            {"aws_profile": "work"},
-            ("aws_access_key_id", "aws_secret_access_key"),
-            {"default_region": "us-west-2", "default_instance_type": DEFAULT_AWS_INSTANCE_TYPE, "aws_profile": "work"},
-        ),
-        (
-            {
-                "backend": "azure",
-                "region": "eastus",
-                "credential_source": "local_profile",
-                "azure_subscription_id": "sub-0123456789",
-                "azure_tenant_id": "tenant-1",
-            },
-            "azure prepare --provider {instance}",
-            {"subscription_id": "sub-0123456789", "tenant_id": "tenant-1", "use_azure_cli_login": True},
-            ("client_id", "client_secret"),
-            {"default_region": "eastus", "default_vm_size": DEFAULT_AZURE_VM_SIZE, "tenant_id": "tenant-1"},
-        ),
-        (
-            {"backend": "modal", "credential_source": "local_profile", "modal_profile": "work"},
-            "list --provider {instance} --format json",
-            {"modal_profile": "work"},
-            ("token_id", "token_secret"),
-            {"modal_profile": "work"},
-        ),
-    ],
-    ids=["aws", "azure", "modal"],
-)
-def test_create_local_profile_connection_writes_a_block_naming_the_login_and_no_secret(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    root_concurrency_group: ConcurrencyGroup,
-    body: dict[str, str],
-    expected_prepare: str,
-    expected_block_keys: dict[str, object],
-    forbidden_block_keys: tuple[str, ...],
-    expected_placement: dict[str, str],
-) -> None:
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-    unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
-
-    response = _post_connection(parts, {**body, "alias": "work cloud", "owner": _CONNECTION_OWNER_ID})
-
-    assert response.status_code == 200, response.data
-    summary = json.loads(response.data)
-    instance_name = summary["name"]
-    assert summary["credential_source"] == "local_profile"
-    assert expected_prepare.format(instance=instance_name) in parts.stub_argv_path.read_text()
-    block = tomllib.loads(parts.settings_path.read_text())["providers"][instance_name]
-    assert {key: block[key] for key in expected_block_keys} == expected_block_keys
-    assert not any(key in block for key in forbidden_block_keys)
-    # The login rides the synced metadata in plaintext; the document carries no payload at all.
-    (stored,) = parts.cli.sync_documents_by_email[_CONNECTION_OWNER_EMAIL]["connection"].values()
-    assert stored["encrypted_payload"] is None
-    assert {key: stored["metadata"]["placement"][key] for key in expected_placement} == expected_placement
-    assert stored["metadata"]["credential_source"] == "local_profile"
-
-
-def test_create_local_profile_connection_rejects_gcp_a_blank_profile_and_an_unknown_source(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-
-    gcp = _post_connection(
-        parts,
-        {
-            "backend": "gcp",
-            "alias": "g",
-            "owner": "local",
-            "region": "us-central1-a",
-            "credential_source": "local_profile",
-        },
-    )
-    assert gcp.status_code == 400 and json.loads(gcp.data)["field"] == "credential_source"
-    blank_profile = _post_connection(
-        parts, {"backend": "modal", "alias": "m", "owner": "local", "credential_source": "local_profile"}
-    )
-    assert blank_profile.status_code == 400 and json.loads(blank_profile.data)["field"] == "modal_profile"
-    half_azure = _post_connection(
-        parts,
-        {
-            "backend": "azure",
-            "alias": "a",
-            "owner": "local",
-            "region": "eastus",
-            "credential_source": "local_profile",
-            "azure_subscription_id": "sub",
-        },
-    )
-    assert half_azure.status_code == 400 and json.loads(half_azure.data)["field"] == "azure_subscription_id"
-    unknown = _post_connection(
-        parts, {"backend": "modal", "alias": "m", "owner": "local", "credential_source": "vault", "modal_profile": "w"}
-    )
-    assert unknown.status_code == 400 and json.loads(unknown.data)["field"] == "credential_source"
-    assert parts.connection_store.list_all_views() == []
-    assert not parts.stub_argv_path.exists()
-
-
-def test_local_profiles_route_lists_this_machines_logins_per_backend(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-    (tmp_path / "aws-config").write_text("[profile work]\nregion = eu-west-1\n")
-    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "aws-config"))
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "aws-credentials"))
-
-    response = parts.client.get("/api/v1/desktop/cloud-accounts/local-profiles?backend=aws", headers=_auth_header())
-
-    assert response.status_code == 200, response.data
-    assert json.loads(response.data) == {
-        "backend": "aws",
-        "profiles": [
-            {
-                "name": "work",
-                "label": "work",
-                "region": "eu-west-1",
-                "tenant_id": None,
-                "subscription_id": None,
-                "unusable_reason": "",
-            }
-        ],
-    }
-    unknown = parts.client.get("/api/v1/desktop/cloud-accounts/local-profiles?backend=nope", headers=_auth_header())
-    assert unknown.status_code == 400
-
-
-def test_recheck_route_bounces_discovery_for_a_known_connection_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-    created = _post_connection(
-        parts,
-        {
-            "backend": "modal",
-            "alias": "m",
-            "owner": "local",
-            "credential_source": "local_profile",
-            "modal_profile": "w",
-        },
-    )
-    assert created.status_code == 200, created.data
-    instance_name = json.loads(created.data)["name"]
-
-    # No forward supervisor is wired in tests, so the bounce is a no-op; the route still answers.
-    response = parts.client.post(f"/api/v1/desktop/cloud-accounts/{instance_name}/recheck", headers=_auth_header())
-    assert response.status_code == 200, response.data
-    missing = parts.client.post(
-        "/api/v1/desktop/cloud-accounts/modal_" + "0" * 32 + "/recheck", headers=_auth_header()
-    )
-    assert missing.status_code == 404
-
-
-def test_create_connection_rolls_back_when_the_credentials_fail_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 6
-    )
-
-    response = _post_connection(parts, _modal_connection_body("local"))
-
-    assert response.status_code == 502
-    assert json.loads(response.data)["code"] == "credentials_rejected"
-    assert "Account setup failed" in json.loads(response.data)["error"]
-    assert parts.connection_store.list_all_views() == []
-    providers = tomllib.loads(parts.settings_path.read_text()).get("providers", {})
-    assert not any(name.startswith("modal_") for name in providers)
-
-
-def test_create_connection_rolls_back_when_the_validation_command_cannot_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """A failure that is not the provider's own refusal (here: no runnable mngr) must not leave the row or its block."""
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-    # No mngr anywhere on PATH (every other binary stays reachable), so the spawn itself
-    # fails before any exit code.
-    (tmp_path / "bin" / MNGR_BINARY).unlink()
-    monkeypatch.setenv(
-        "PATH",
-        os.pathsep.join(
-            entry for entry in os.environ["PATH"].split(os.pathsep) if not (Path(entry) / MNGR_BINARY).exists()
-        ),
-    )
-
-    response = _post_connection(parts, _modal_connection_body("local"))
-
-    assert response.status_code == 500, response.data
-    assert parts.connection_store.list_all_views() == []
-    providers = tomllib.loads(parts.settings_path.read_text()).get("providers", {})
-    assert not any(name.startswith("modal_") for name in providers)
-
-
-def test_create_synced_connection_requires_an_unlocked_account_with_a_master_password(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-
-    response = _post_connection(parts, _modal_connection_body(_CONNECTION_OWNER_ID))
-
-    assert response.status_code == 409
-    assert json.loads(response.data)["code"] == "master_password_required"
-    assert "local profile" in json.loads(response.data)["error"]
-    assert parts.connection_store.list_all_views() == []
-
-
-def test_create_synced_connection_pushes_the_document_to_the_account(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-    unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
-
-    response = _post_connection(parts, _modal_connection_body(_CONNECTION_OWNER_ID))
-
-    assert response.status_code == 200, response.data
-    instance_name = json.loads(response.data)["name"]
-    documents = parts.cli.sync_documents_by_email[_CONNECTION_OWNER_EMAIL]["connection"]
-    (stored,) = documents.values()
-    assert stored["metadata"]["alias"] == "eval modal" and stored["revision"] == 1
-    assert instance_name == f"modal_{ConnectionId(str(stored['doc_id'])).get_uuid().hex}"
-    assert instance_name in tomllib.loads(parts.settings_path.read_text())["providers"]
-
-
-def test_create_synced_connection_rolls_back_when_the_push_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """Adding a synced connection requires connectivity: a failed push leaves no row, block, or document."""
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-    unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
-    parts.cli.is_sync_offline = True
-
-    response = _post_connection(parts, _modal_connection_body(_CONNECTION_OWNER_ID))
-
-    assert response.status_code == 502, response.data
-    assert json.loads(response.data)["code"] == "sync_failed"
-    assert "Could not sync the connection" in json.loads(response.data)["error"]
-    assert parts.connection_store.list_all_views() == []
-    assert parts.cli.sync_documents_by_email.get(_CONNECTION_OWNER_EMAIL, {}).get("connection", {}) == {}
-    assert not any(
-        name.startswith("modal_") for name in tomllib.loads(parts.settings_path.read_text()).get("providers", {})
-    )
-
-
-def test_create_connection_without_an_owner_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """There is no install-wide default account: the window adding a connection names the owner itself."""
-    parts = _connection_client(
-        tmp_path,
-        monkeypatch,
-        root_concurrency_group,
-        StaticBackendResolver(url_by_agent_and_service={}),
-        0,
-    )
-    unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
-    body = {key: value for key, value in _modal_connection_body("").items() if key != "owner"}
-
-    response = _post_connection(parts, body)
-
-    assert response.status_code == 400, response.data
-    assert json.loads(response.data)["field"] == "owner"
-    assert parts.connection_store.list_all_views() == []
-
-
-def test_create_connection_rejects_an_unknown_owner_a_missing_token_a_blank_alias_and_a_blank_region(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-
-    unknown_owner = _post_connection(parts, _modal_connection_body(str(uuid4())))
-    assert unknown_owner.status_code == 400
-    assert json.loads(unknown_owner.data)["field"] == "owner"
-    missing_token = _post_connection(
-        parts, {"backend": "modal", "alias": "x", "owner": "local", "modal_token_id": "ak"}
-    )
-    assert missing_token.status_code == 400
-    assert json.loads(missing_token.data)["field"] == "modal_token_id"
-    # Spectree's min_length passes a whitespace-only alias; the route rejects it once stripped.
-    blank_alias = _post_connection(parts, {**_modal_connection_body("local"), "alias": "  "})
-    assert blank_alias.status_code == 400
-    assert json.loads(blank_alias.data)["field"] == "alias"
-    # Same for a placed backend's region, which Modal bodies do not carry at all.
-    blank_region = _post_connection(
-        parts,
-        {
+def test_cloud_account_routes_gated_off_by_default(tmp_path: Path) -> None:
+    # The bring-your-own-key cloud feature ships dark: with the flag unset
+    # (default), both account routes are refused (403) even with valid auth and a
+    # well-formed body -- the feature is unreachable by URL, not merely hidden.
+    client = _client_with_workspace(tmp_path, AgentId())
+    create = client.post(
+        "/api/v1/desktop/cloud-accounts",
+        headers=_auth_header(),
+        json={
             "backend": "aws",
-            "alias": "work aws",
-            "owner": "local",
-            "region": "  ",
-            "aws_access_key_id": "AKIA1234EXAMPLE9",
-            "aws_secret_access_key": "very-secret",
+            "alias": "mine",
+            "region": "us-east-1",
+            "aws_access_key_id": "AKIA",
+            "aws_secret_access_key": "s",
         },
     )
-    assert blank_region.status_code == 400
-    assert json.loads(blank_region.data)["field"] == "region"
-    assert parts.connection_store.list_all_views() == []
-
-
-def _resolver_with_workspace_on(provider_name: str, agent_id: AgentId) -> MngrCliBackendResolver:
-    resolver = MngrCliBackendResolver()
-    agent = DiscoveredAgent(
-        host_id=HostId.generate(),
-        agent_id=agent_id,
-        agent_name=AgentName("system-services"),
-        provider_name=ProviderInstanceName(provider_name),
-        certified_data={"labels": {"is_primary": "true"}},
-    )
-    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
-    return resolver
-
-
-def _rebuild_with_resolver(
-    tmp_path: Path, parts: _ConnectionClientParts, resolver: BackendResolverInterface
-) -> _ConnectionClientParts:
-    """The same stores behind a fresh client whose discovery view is ``resolver``."""
-    session_store = make_session_store_for_test(tmp_path / "minds", parts.cli)
-    return _ConnectionClientParts(
-        client=_build_client(
-            tmp_path,
-            resolver,
-            imbue_cloud_cli=parts.cli,
-            session_store=session_store,
-            connection_store=parts.connection_store,
-            provider_materializer=make_provider_materializer_for_test(
-                _CONNECTIONS_ROOT_NAME, parts.connection_store, session_store_account_source(session_store)
-            ),
-        ),
-        connection_store=parts.connection_store,
-        session_store=session_store,
-        cli=parts.cli,
-        settings_path=parts.settings_path,
-        stub_argv_path=parts.stub_argv_path,
-    )
-
-
-def test_delete_connection_refuses_while_a_workspace_uses_it_then_removes_its_block(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    resolver = MngrCliBackendResolver()
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, resolver, 0)
-    created = _post_connection(parts, _modal_connection_body("local"))
-    instance_name = json.loads(created.data)["name"]
-    busy_parts = _rebuild_with_resolver(tmp_path, parts, _resolver_with_workspace_on(instance_name, AgentId()))
-
-    refused = busy_parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
-    assert refused.status_code == 409
-    assert json.loads(refused.data)["code"] == "connection_in_use"
-    assert "1 active workspace" in json.loads(refused.data)["error"]
-    assert instance_name in tomllib.loads(parts.settings_path.read_text())["providers"]
-
-    removed = parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
-    assert removed.status_code == 200
-    assert instance_name not in tomllib.loads(parts.settings_path.read_text())["providers"]
-    assert parts.connection_store.list_all_views() == []
-    unknown = parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
-    assert unknown.status_code == 404
-
-
-def test_delete_account_connection_tombstones_its_document_and_removes_its_block(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
-    created = _post_connection(parts, _modal_connection_body(_CONNECTION_OWNER_ID))
-    assert created.status_code == 200, created.data
-    instance_name = json.loads(created.data)["name"]
-
-    removed = parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
-
-    assert removed.status_code == 200, removed.data
-    (stored,) = parts.cli.sync_documents_by_email[_CONNECTION_OWNER_EMAIL]["connection"].values()
-    assert stored["state"] == "deleted" and stored["encrypted_payload"] is None and stored["revision"] == 2
-    assert parts.connection_store.list_all_views() == []
-    assert instance_name not in tomllib.loads(parts.settings_path.read_text())["providers"]
-
-
-def test_delete_connection_refuses_a_connection_a_newer_app_wrote(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
-    connection_id = ConnectionId.generate()
-    parts.cli.seed_connection_document(
-        _CONNECTION_OWNER_EMAIL,
-        str(connection_id),
-        {"connection_format": 99, "backend": "modal", "alias": "from the future", "identifier": "", "placement": {}},
-    )
-    assert parts.connection_store.pull(_CONNECTION_OWNER_ID, _CONNECTION_OWNER_EMAIL).is_changed is True
-    instance_name = provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id)
-
-    refused = parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
-
-    assert refused.status_code == 409, refused.data
-    assert "newer" in json.loads(refused.data)["error"]
-    (view,) = parts.connection_store.list_all_views()
-    assert view.connection_id == str(connection_id)
-
-
-def test_delete_local_connection_refuses_while_an_accounts_records_hold_a_workspace_on_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """A workspace on a this-device-only connection may be recorded under an account, so every replica counts."""
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    created = _post_connection(parts, _modal_connection_body("local"))
-    instance_name = json.loads(created.data)["name"]
-    record_store = parts.session_store.record_store
-    assert record_store is not None
-    record_store.upsert_local_record(
-        _CONNECTION_OWNER_ID,
-        _CONNECTION_OWNER_EMAIL,
-        ReplicaRecord(
-            host_id=str(HostId.generate()),
-            agent_id=str(AgentId()),
-            display_name="on the device connection",
-            provider_kind=instance_name,
-            hosting_device_id="this-device",
-            device_label="here",
-            state=RECORD_STATE_ACTIVE,
-        ),
-    )
-
-    refused = parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
-
-    assert refused.status_code == 409, refused.data
-    assert "1 active workspace" in json.loads(refused.data)["error"]
-    assert instance_name in tomllib.loads(parts.settings_path.read_text())["providers"]
-
-
-def test_delete_connection_counts_a_workspace_in_both_discovery_and_the_owners_records_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """A workspace hosted here is in local discovery AND mirrored into the owner's records: one workspace, not two."""
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
-    created = _post_connection(parts, _modal_connection_body(_CONNECTION_OWNER_ID))
-    assert created.status_code == 200, created.data
-    instance_name = json.loads(created.data)["name"]
-    hosted_here = AgentId()
-    busy_parts = _rebuild_with_resolver(tmp_path, parts, _resolver_with_workspace_on(instance_name, hosted_here))
-    record_store = busy_parts.session_store.record_store
-    assert record_store is not None
-    for agent_id, device_id in ((hosted_here, "this-device"), (AgentId(), None)):
-        record_store.upsert_local_record(
-            _CONNECTION_OWNER_ID,
-            _CONNECTION_OWNER_EMAIL,
-            ReplicaRecord(
-                host_id=str(HostId.generate()),
-                agent_id=str(agent_id),
-                display_name="on the connection",
-                provider_kind=instance_name,
-                hosting_device_id=device_id,
-                device_label="somewhere",
-                state=RECORD_STATE_ACTIVE,
-            ),
-        )
-
-    refused = busy_parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
-
-    assert refused.status_code == 409
-    # The hosted-here workspace appears in both sources; the other only in the records.
-    assert "2 active workspace" in json.loads(refused.data)["error"]
-
-
-def _rotated_modal_body() -> dict[str, str]:
-    return {
-        "backend": "modal",
-        "alias": "rotated modal",
-        "modal_token_id": "ak-token-id-5678",
-        "modal_token_secret": "as-rotated-secret",
-    }
-
-
-def _created_synced_modal_connection(parts: _ConnectionClientParts) -> str:
-    unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
-    created = _post_connection(parts, _modal_connection_body(_CONNECTION_OWNER_ID))
-    assert created.status_code == 200, created.data
-    return json.loads(created.data)["name"]
-
-
-def test_update_connection_rotates_the_credentials_in_place_and_pushes_the_document(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    instance_name = _created_synced_modal_connection(parts)
-
-    response = _put_connection(parts, instance_name, _rotated_modal_body())
-
-    assert response.status_code == 200, response.data
-    summary = json.loads(response.data)
-    assert summary["name"] == instance_name and summary["alias"] == "rotated modal"
-    assert summary["identifier"] == "ak-t…5678" and summary["owner_user_id"] == _CONNECTION_OWNER_ID
-    block = tomllib.loads(parts.settings_path.read_text())["providers"][instance_name]
-    assert block["token_id"] == "ak-token-id-5678" and block["token_secret"] == "as-rotated-secret"
-    assert parts.stub_argv_path.read_text().count(f"list --provider {instance_name} --format json") == 2
-    (stored,) = parts.cli.sync_documents_by_email[_CONNECTION_OWNER_EMAIL]["connection"].values()
-    assert stored["metadata"]["alias"] == "rotated modal" and stored["revision"] == 2
-    (record,) = parts.connection_store.list_connections(_CONNECTION_OWNER_ID)
-    assert record.validation_rollback is None and record.is_dirty is False
-
-
-def test_update_connection_switches_a_pasted_connection_to_a_local_profile_and_drops_the_secret(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    instance_name = _created_synced_modal_connection(parts)
-
-    response = _put_connection(
-        parts, instance_name, {"backend": "modal", "credential_source": "local_profile", "modal_profile": "work"}
-    )
-
-    assert response.status_code == 200, response.data
-    summary = json.loads(response.data)
-    assert summary["name"] == instance_name and summary["credential_source"] == "local_profile"
-    assert summary["identifier"] == "profile work"
-    block = tomllib.loads(parts.settings_path.read_text())["providers"][instance_name]
-    assert block["modal_profile"] == "work"
-    assert "token_id" not in block and "token_secret" not in block
-    # The environment the connection's hosts live in is unchanged by the switch.
-    assert block["user_id"] == instance_name.removeprefix("modal_")
-    (stored,) = parts.cli.sync_documents_by_email[_CONNECTION_OWNER_EMAIL]["connection"].values()
-    assert stored["encrypted_payload"] is None and stored["metadata"]["credential_source"] == "local_profile"
-    assert stored["metadata"]["placement"]["modal_profile"] == "work"
-
-
-def test_update_connection_restores_the_previous_credentials_when_the_new_ones_fail_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    instance_name = _created_synced_modal_connection(parts)
-    failing_parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 6)
-
-    response = _put_connection(failing_parts, instance_name, _rotated_modal_body())
-
-    assert response.status_code == 502, response.data
-    assert "Account setup failed" in json.loads(response.data)["error"]
-    block = tomllib.loads(parts.settings_path.read_text())["providers"][instance_name]
-    assert block["token_id"] == "ak-token-id-1234"
-    (record,) = parts.connection_store.list_connections(_CONNECTION_OWNER_ID)
-    assert record.validation_rollback is None and record.metadata["alias"] == "eval modal"
-    (stored,) = parts.cli.sync_documents_by_email[_CONNECTION_OWNER_EMAIL]["connection"].values()
-    assert stored["revision"] == 1
-
-
-def test_update_connection_restores_the_previous_credentials_when_the_push_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    instance_name = _created_synced_modal_connection(parts)
-    parts.cli.is_sync_offline = True
-
-    response = _put_connection(parts, instance_name, _rotated_modal_body())
-
-    assert response.status_code == 502, response.data
-    assert "Could not sync the connection" in json.loads(response.data)["error"]
-    block = tomllib.loads(parts.settings_path.read_text())["providers"][instance_name]
-    assert block["token_id"] == "ak-token-id-1234"
-    (record,) = parts.connection_store.list_connections(_CONNECTION_OWNER_ID)
-    assert record.validation_rollback is None and record.metadata["alias"] == "eval modal"
-
-
-def test_update_connection_answers_409_when_the_connection_was_removed_on_another_device(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    instance_name = _created_synced_modal_connection(parts)
-    (doc_id,) = parts.cli.sync_documents_by_email[_CONNECTION_OWNER_EMAIL]["connection"]
-    parts.cli.tombstone_connection_document(_CONNECTION_OWNER_EMAIL, doc_id)
-
-    response = _put_connection(parts, instance_name, _rotated_modal_body())
-
-    assert response.status_code == 409, response.data
-    assert json.loads(response.data)["error"] == "This connection was removed on another device."
-    assert json.loads(response.data)["code"] == "connection_removed_elsewhere"
-    block = tomllib.loads(parts.settings_path.read_text())["providers"][instance_name]
-    assert block["token_id"] == "ak-token-id-1234"
-    # The restored row is clean, so the next pull retires it like any removal from elsewhere.
-    parts.connection_store.pull(_CONNECTION_OWNER_ID, _CONNECTION_OWNER_EMAIL)
-    assert parts.connection_store.list_connections(_CONNECTION_OWNER_ID) == []
-
-
-def test_update_connection_rejects_another_backend_and_a_missing_credential_field(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    created = _post_connection(parts, _modal_connection_body("local"))
-    instance_name = json.loads(created.data)["name"]
-
-    other_backend = _put_connection(
-        parts, instance_name, {"backend": "aws", "aws_access_key_id": "AKIA1234EXAMPLE9", "aws_secret_access_key": "s"}
-    )
-    assert other_backend.status_code == 400
-    assert json.loads(other_backend.data)["field"] == "backend"
-    missing_secret = _put_connection(parts, instance_name, {"backend": "modal", "modal_token_id": "ak-token-id-5678"})
-    assert missing_secret.status_code == 400
-    assert json.loads(missing_secret.data)["field"] == "modal_token_id"
-    unknown = parts.client.put(
-        "/api/v1/desktop/cloud-accounts/modal_" + "0" * 32, headers=_auth_header(), json=_rotated_modal_body()
-    )
-    assert unknown.status_code == 404
-    block = tomllib.loads(parts.settings_path.read_text())["providers"][instance_name]
-    assert block["token_id"] == "ak-token-id-1234"
-
-
-def test_update_connection_keeps_the_alias_when_the_body_leaves_it_out_or_null(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    created = _post_connection(parts, _modal_connection_body("local"))
-    instance_name = json.loads(created.data)["name"]
-
-    credentials_only = {key: value for key, value in _rotated_modal_body().items() if key != "alias"}
-    for body in (credentials_only, {**credentials_only, "alias": None}):
-        response = _put_connection(parts, instance_name, body)
-        assert response.status_code == 200, response.data
-        assert json.loads(response.data)["alias"] == "eval modal"
-
-
-def test_delete_and_update_refuse_a_connection_whose_credentials_are_still_being_validated(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """The update route settles the row when its validation ends; a removal meanwhile would be undone by that."""
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    created = _post_connection(parts, _modal_connection_body("local"))
-    instance_name = json.loads(created.data)["name"]
-    (view,) = parts.connection_store.list_all_views()
-    parts.connection_store.update_connection(
-        LOCAL_PROFILE_USER_ID,
-        view.connection_id,
-        alias="mid update",
-        identifier="ak-t…5678",
-        credentials=ConnectionCredentials(token_id="ak-token-id-5678", token_secret=SecretStr("as-rotated-secret")),
-    )
-
-    refused_delete = parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
-    refused_update = _put_connection(parts, instance_name, _rotated_modal_body())
-
-    for refused in (refused_delete, refused_update):
-        assert refused.status_code == 409, refused.data
-        assert json.loads(refused.data) == {
-            "error": UPDATE_IN_FLIGHT_ON_CONNECTION_MESSAGE,
-            "code": "connection_in_use",
-        }
-    (record,) = parts.connection_store.list_connections(LOCAL_PROFILE_USER_ID)
-    assert record.validation_rollback is not None and record.metadata["alias"] == "mid update"
-    assert instance_name in tomllib.loads(parts.settings_path.read_text())["providers"]
-
-
-def test_delete_and_update_refuse_a_connection_whose_registration_is_still_validating(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """The row exists once the add route answered 202; its worker still has to read it back or roll it back.
-
-    An update meanwhile must not touch the row either: its block is what the
-    registration's validation is running against.
-    """
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    release_path = tmp_path / "release-validation"
-    install_stub_mngr_on_path(tmp_path / "bin", monkeypatch, blocking_release_wait_body(release_path) + "\nexit 0")
-
-    accepted = parts.client.post(
-        "/api/v1/desktop/cloud-accounts", headers=_auth_header(), json=_modal_connection_body("local")
-    )
-    assert accepted.status_code == 202, accepted.data
-    instance_name = json.loads(accepted.data)["operation_id"]
-    try:
-        refused_delete = parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
-        refused_update = parts.client.put(
-            f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header(), json=_rotated_modal_body()
-        )
-        (record,) = parts.connection_store.list_connections(LOCAL_PROFILE_USER_ID)
-    finally:
-        release_path.touch()
-
-    for refused in (refused_delete, refused_update):
-        assert refused.status_code == 409, refused.data
-        assert json.loads(refused.data) == {
-            "error": REGISTRATION_IN_FLIGHT_ON_CONNECTION_MESSAGE,
-            "code": "connection_in_use",
-        }
-    # The refused update never replaced the row the registration is validating.
-    assert record.validation_rollback is None and record.metadata["alias"] == "eval modal"
-    registered = _finish_connection_operation(parts.client, accepted)
-    assert registered.status_code == 200, registered.data
-    removed = parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
-    assert removed.status_code == 200, removed.data
-    assert parts.connection_store.list_all_views() == []
-
-
-def test_connection_operation_routes_answer_404_for_an_unknown_id_and_replay_the_prepare_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """The dialog tails the logs route for the prepare's output; a Modal listing's stdout is JSON, not progress."""
-    parts = _connection_client(
-        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
-    )
-    install_stub_mngr_on_path(
-        tmp_path / "bin", monkeypatch, 'echo "stdout-listing-noise"\necho "checking the Modal token" >&2\nexit 0'
-    )
-    unknown_status = parts.client.get(
-        "/api/v1/desktop/cloud-accounts/operations/modal_unknown", headers=_auth_header()
-    )
-    unknown_logs = parts.client.get(
-        "/api/v1/desktop/cloud-accounts/operations/modal_unknown/logs", headers=_auth_header()
-    )
-    assert unknown_status.status_code == 404, unknown_status.data
-    assert unknown_logs.status_code == 404, unknown_logs.data
-
-    accepted = parts.client.post(
-        "/api/v1/desktop/cloud-accounts", headers=_auth_header(), json=_modal_connection_body("local")
-    )
-
-    assert accepted.status_code == 202, accepted.data
-    handle = json.loads(accepted.data)
-    assert handle["kind"] == "connection_add"
-    operation_id = handle["operation_id"]
-    registered = _finish_connection_operation(parts.client, accepted)
-    assert registered.status_code == 200, registered.data
-    status = json.loads(
-        parts.client.get(f"/api/v1/desktop/cloud-accounts/operations/{operation_id}", headers=_auth_header()).data
-    )
-    assert status["kind"] == "connection_add" and status["is_done"] is True
-    assert status["account"]["name"] == operation_id and status["error"] is None
-    logs = parts.client.get(f"/api/v1/desktop/cloud-accounts/operations/{operation_id}/logs", headers=_auth_header())
-    assert logs.status_code == 200
-    text = logs.get_data(as_text=True)
-    assert '"checking the Modal token"' in text
-    assert "stdout-listing-noise" not in text
-    assert '"done": true' in text
-
-
-def test_update_connection_answers_409_when_its_owner_signs_out_during_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """A signout drops the row mid-update; the settlement finds nothing to clear or restore, and the route says so."""
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    instance_name = _created_synced_modal_connection(parts)
-    release_path = tmp_path / "release-validation"
-    install_stub_mngr_on_path(tmp_path / "bin", monkeypatch, blocking_release_wait_body(release_path) + "\nexit 0")
-
-    accepted = parts.client.put(
-        f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header(), json=_rotated_modal_body()
-    )
-    assert accepted.status_code == 202, accepted.data
-    try:
-        wait_for(
-            lambda: any(
-                record.validation_rollback is not None
-                for record in parts.connection_store.list_connections(_CONNECTION_OWNER_ID)
-            ),
-            timeout=10.0,
-            poll_interval=0.05,
-            error_message="the update never reached its validation",
-        )
-        parts.connection_store.retain_unpushed_removals(_CONNECTION_OWNER_ID)
-    finally:
-        release_path.touch()
-    response = _finish_connection_operation(parts.client, accepted)
-
-    assert response.status_code == 409, response.data
-    assert json.loads(response.data) == {"error": CONNECTION_GONE_DURING_UPDATE_MESSAGE}
-    assert parts.connection_store.list_connections(_CONNECTION_OWNER_ID) == []
-    assert instance_name not in tomllib.loads(parts.settings_path.read_text())["providers"]
-
-
-@pytest.mark.parametrize("is_create_on_the_connection", [True, False])
-def test_delete_connection_waits_for_a_workspace_still_being_created_on_it(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    root_concurrency_group: ConcurrencyGroup,
-    is_create_on_the_connection: bool,
-) -> None:
-    """A create holds no record until `mngr create` returns, so the gate reads the creates in flight too."""
-    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
-    created = _post_connection(parts, _modal_connection_body("local"))
-    instance_name = json.loads(created.data)["name"]
-    in_flight_provider = instance_name if is_create_on_the_connection else "docker"
-    busy_parts = _connection_client(
-        tmp_path,
-        monkeypatch,
-        root_concurrency_group,
-        MngrCliBackendResolver(),
-        0,
-        agent_creator=make_in_flight_agent_creator(
-            tmp_path,
-            root_concurrency_group,
-            (InFlightCreateAttempt(provider_instance_name=in_flight_provider, host_name="still-creating"),),
-        ),
-    )
-
-    response = busy_parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
-
-    if is_create_on_the_connection:
-        assert response.status_code == 409, response.data
-        assert json.loads(response.data)["error"] == CREATE_IN_FLIGHT_ON_CONNECTION_MESSAGE
-        assert json.loads(response.data)["code"] == "connection_in_use"
-        assert instance_name in tomllib.loads(parts.settings_path.read_text())["providers"]
-    else:
-        assert response.status_code == 200, response.data
-        assert instance_name not in tomllib.loads(parts.settings_path.read_text())["providers"]
+    assert create.status_code == 403
+    delete = client.delete("/api/v1/desktop/cloud-accounts/byok-aws-mine", headers=_auth_header())
+    assert delete.status_code == 403
 
 
 class _NameConflictAgentCreator(_RecordingAgentCreator):
@@ -5985,14 +4403,12 @@ class _NameConflictAgentCreator(_RecordingAgentCreator):
         cloud_account: str = "",
         instance_type: str = "",
         machine_size: MachineSizeSelection | None = None,
-        modal_sandbox_timeout_seconds: int | None = None,
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
-        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         raise WorkspaceNameInUseError(
             "A machine named 'contended' is already being created. "
@@ -6083,32 +4499,6 @@ def test_create_workspace_threads_account_id_to_start_create_attempt(
 
     assert response.status_code == 202
     assert creator.last_call["account_id"] == "user-77120"
-
-
-def test_create_workspace_threads_the_onboarding_examples_flag_off_unless_the_body_turns_it_on(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-) -> None:
-    # The creation page reads the flag back from the attempt's record, so it must reach the creator;
-    # the form leaves it off, and the start flow's creates (and the form's switch) turn it on.
-    creator = _make_recording_creator(tmp_path, root_concurrency_group)
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
-
-    quiet = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={"git_url": "https://example/repo", "host_name": "quiet-create"},
-    )
-    assert quiet.status_code == 202
-    assert creator.last_call["is_onboarding_driven_by_agent"] is False
-
-    asked = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={"git_url": "https://example/repo", "host_name": "asked-create", "is_onboarding_driven_by_agent": True},
-    )
-    assert asked.status_code == 202
-    assert creator.last_call["is_onboarding_driven_by_agent"] is True
 
 
 def test_create_workspace_marks_onboarding_complete(
@@ -6534,394 +4924,3 @@ def test_workspace_sharing_mobile_access_link_leaves_an_unshared_workspace_to_im
     assert json.loads(response.data)["error"] == "not_published"
     (call,) = cli.mobile_access_link_calls
     assert call["link"] is None
-
-
-_FOLDER_SYNC_DEVICE_ID: Final[str] = "host-0f0e0d0c0b0a09080706050403020100"
-_FOLDER_SYNC_START_TIMEOUT_SECONDS: Final[float] = 20.0
-
-
-def _client_with_folder_syncs(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    workspace_agent_id: AgentId,
-    chat_agent_id: AgentId,
-) -> tuple[FlaskClient, FolderSyncManager]:
-    """A client whose folder syncs run against the stand-in ``mngr`` and a workspace with a chat in it."""
-    resolver = ChatInWorkspaceResolver(
-        url_by_agent_and_service={}, workspace_agent_id=workspace_agent_id, chat_agent_id=chat_agent_id
-    )
-    manager = FolderSyncManager(
-        concurrency_group=root_concurrency_group,
-        mngr_binary=str(write_fake_mngr_pair_script(tmp_path, tmp_path / "argv.json")),
-        mngr_host_dir=tmp_path / ".mngr",
-        home_dir=tmp_path,
-        device_id=_FOLDER_SYNC_DEVICE_ID,
-        backend_resolver=resolver,
-        store=FolderSyncStore(records_dir=tmp_path / "folder_syncs"),
-    )
-    app = create_desktop_client(
-        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
-        backend_resolver=resolver,
-        http_client=None,
-        paths=InstallationPaths(data_dir=tmp_path / "minds"),
-        minds_api_key=_TEST_KEY,
-        mngr_caller=RecordingMngrCaller(),
-        folder_sync_manager=manager,
-        device_id=_FOLDER_SYNC_DEVICE_ID,
-    )
-    return app.test_client(), manager
-
-
-def test_folder_syncs_answers_any_agent_of_the_workspace_with_the_workspaces_syncs(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """A chat asks under its own id, and is answered with what is filed under the primary's."""
-    workspace_agent_id, chat_agent_id = AgentId(), AgentId()
-    client, manager = _client_with_folder_syncs(tmp_path, root_concurrency_group, workspace_agent_id, chat_agent_id)
-    local_folder = tmp_path / "notes"
-    local_folder.mkdir()
-    manager.start(str(workspace_agent_id), str(local_folder), FolderSyncDirection.BOTH, FolderSyncConflict.NEWER)
-    try:
-        manager.wait_until_started(str(workspace_agent_id), str(local_folder), _FOLDER_SYNC_START_TIMEOUT_SECONDS)
-        wait_until_synced(manager, str(workspace_agent_id), str(local_folder), _FOLDER_SYNC_START_TIMEOUT_SECONDS)
-
-        response = client.get(f"/api/v1/agents/{chat_agent_id}/folder-syncs", headers=_auth_header())
-    finally:
-        manager.stop_all()
-
-    assert response.status_code == 200
-    body = json.loads(response.data)
-    assert body["device_id"] == _FOLDER_SYNC_DEVICE_ID
-    (sync,) = body["syncs"]
-    assert sync["local_path"] == str(local_folder)
-    assert sync["workspace_path"] == f"~/synced_folders/{_FOLDER_SYNC_DEVICE_ID}{local_folder}"
-    assert sync["activity"] == "ACTIVE"
-    assert sync["state"] == "SYNCED"
-    assert sync["message"] is None
-    assert sync["bytes_done"] is None and sync["bytes_total"] is None
-    assert sync["direction"] == "BOTH"
-    assert sync["conflict"] == "NEWER"
-
-
-def test_folder_syncs_reports_where_a_turned_off_syncs_copy_was_set_aside(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    workspace_agent_id, chat_agent_id = AgentId(), AgentId()
-    client, manager = _client_with_folder_syncs(tmp_path, root_concurrency_group, workspace_agent_id, chat_agent_id)
-    local_folder = tmp_path / "notes"
-    local_folder.mkdir()
-    manager.start(str(workspace_agent_id), str(local_folder), FolderSyncDirection.BOTH, FolderSyncConflict.NEWER)
-    manager.wait_until_started(str(workspace_agent_id), str(local_folder), _FOLDER_SYNC_START_TIMEOUT_SECONDS)
-    manager.stop(str(workspace_agent_id), str(local_folder))
-    assert manager.wait_until_settled(str(workspace_agent_id), str(local_folder), _FOLDER_SYNC_START_TIMEOUT_SECONDS)
-    manager.forget(str(workspace_agent_id), str(local_folder))
-
-    response = client.get(f"/api/v1/agents/{workspace_agent_id}/folder-syncs", headers=_auth_header())
-
-    (sync,) = json.loads(response.data)["syncs"]
-    assert sync["activity"] == "INACTIVE"
-    assert sync["state"] == "STOPPED"
-    assert sync["workspace_path"] == f"~/inactive_synced_folders/{_FOLDER_SYNC_DEVICE_ID}{local_folder}"
-
-
-def test_folder_syncs_refuses_an_agent_this_desktop_does_not_know(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    client, _manager = _client_with_folder_syncs(tmp_path, root_concurrency_group, AgentId(), AgentId())
-
-    response = client.get(f"/api/v1/agents/{AgentId()}/folder-syncs", headers=_auth_header())
-
-    assert response.status_code == 404
-
-
-def test_folder_syncs_answers_with_none_in_a_build_that_cannot_sync(tmp_path: Path) -> None:
-    workspace_agent_id, chat_agent_id = AgentId(), AgentId()
-    client, _app = _client_with_chat(tmp_path, workspace_agent_id, chat_agent_id)
-
-    response = client.get(f"/api/v1/agents/{chat_agent_id}/folder-syncs", headers=_auth_header())
-
-    assert response.status_code == 200
-    assert json.loads(response.data)["syncs"] == []
-
-
-# Visiting agents: the Share panel's routes onto the workspace's agent-access CLI.
-
-
-class _VisitingAgentsCaller(_ShareProbeCaller):
-    """The share probe caller, also answering every ``agent-access`` exec with ``agent_access_answer``."""
-
-    agent_access_answer: str = Field(default="{}", description="The JSON the CLI prints")
-    agent_access_returncode: int = Field(default=0, description="The CLI's exit code")
-    agent_access_stderr: str = Field(default="", description="What the CLI says on stderr when it refuses")
-
-    def call(
-        self,
-        argv: Sequence[str],
-        timeout: float | None = None,
-        env_overrides: Mapping[str, str] | None = None,
-        cwd: Path | None = None,
-    ) -> MngrCallResult:
-        if len(argv) > 2 and "agent-access" in argv[2]:
-            super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
-            envelope = {
-                "results": [
-                    {
-                        "agent": "system-services",
-                        "stdout": self.agent_access_answer,
-                        "stderr": self.agent_access_stderr,
-                        "success": self.agent_access_returncode == 0,
-                    }
-                ]
-            }
-            return MngrCallResult(
-                returncode=self.agent_access_returncode, stdout=json.dumps(envelope), stderr=self.agent_access_stderr
-            )
-        return super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
-
-
-def _visiting_agents_client(
-    tmp_path: Path, agent_id: AgentId, caller: _VisitingAgentsCaller, cli: FakeSharingCli | None = None
-) -> FlaskClient:
-    sharing_cli = cli if cli is not None else _fake_sharing_cli(mngr_caller=caller)
-    resolver = make_resolver_with_data(make_agents_json(agent_id))
-    store = _associated_session_store(
-        tmp_path, sharing_cli, agent_id, user_id="33333333-3333-3333-3333-333333333333", email="owner@example.com"
-    )
-    return _build_client(
-        tmp_path,
-        resolver,
-        imbue_cloud_cli=sharing_cli,
-        session_store=store,
-        client_env_config=_TEST_CLIENT_ENV_CONFIG,
-        mngr_caller=caller,
-    )
-
-
-def _agent_access_exec_commands(caller: _VisitingAgentsCaller) -> list[str]:
-    """The CLI invocation inside each agent-access exec, without the template-capability check around it."""
-    commands: list[str] = []
-    for call in caller.calls:
-        if len(call) > 2 and "agent-access" in call[2]:
-            assert call[2].startswith("if [ -f system/services/share_gateway/src/share_gateway/agent_cli.py ]; then ")
-            commands.append(call[2].split("; then ", 1)[1].split("; else ", 1)[0])
-    return commands
-
-
-def test_visiting_agents_list_runs_the_workspaces_cli_and_reports_its_agents(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    caller = _VisitingAgentsCaller(
-        is_share_env_present=True,
-        agent_access_answer=json.dumps(
-            {
-                "agents": [
-                    {
-                        "agent_id": "va-" + "1" * 32,
-                        "name": "Josh Claude",
-                        "fingerprint": "SHA256:abc",
-                        "scope": "workspace",
-                        "granter": "user:33333333-3333-3333-3333-333333333333",
-                        "created_at": "2026-10-15T18:00:00+00:00",
-                        "expires_at": None,
-                        "last_seen_at": None,
-                    }
-                ]
-            }
-        ),
-    )
-    client = _visiting_agents_client(tmp_path, agent_id, caller)
-
-    response = client.get(f"/api/v1/workspace-sharing/{agent_id}/agents", headers=_auth_header())
-
-    assert response.status_code == 200, response.data
-    assert json.loads(response.data) == {
-        "agents": [
-            {
-                "agent_id": "va-" + "1" * 32,
-                "name": "Josh Claude",
-                "fingerprint": "SHA256:abc",
-                "scope": "workspace",
-                "granter": "user:33333333-3333-3333-3333-333333333333",
-                "created_at": "2026-10-15T18:00:00+00:00",
-                "expires_at": None,
-                "last_seen_at": None,
-            }
-        ]
-    }
-    assert _agent_access_exec_commands(caller) == ["uv run --no-sync agent-access list --json"]
-
-
-def test_visiting_agents_invite_publishes_an_unpublished_workspace_then_mints_as_the_owner(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    caller = _VisitingAgentsCaller(
-        is_share_env_present=False,
-        agent_access_answer=json.dumps(
-            {
-                "code": "7K3M-QX9A-2PFH",
-                "expires_at": "2026-10-15T18:15:00+00:00",
-                "scope": "workspace",
-                "granter": "user:33333333-3333-3333-3333-333333333333",
-                "auth_origin": "https://auth-x.alpha.example.com",
-                "is_published": True,
-                "instructions": "Join at https://auth-x.alpha.example.com with 7K3M-QX9A-2PFH",
-            }
-        ),
-    )
-    cli = _fake_sharing_cli(mngr_caller=caller)
-    client = _visiting_agents_client(tmp_path, agent_id, caller, cli)
-
-    response = client.post(
-        f"/api/v1/workspace-sharing/{agent_id}/agents/invites",
-        headers=_auth_header(),
-        json={"scope": "workspace", "name_hint": "Josh Claude"},
-    )
-
-    assert response.status_code == 200, response.data
-    body = json.loads(response.data)
-    assert body["code"] == "7K3M-QX9A-2PFH" and body["auth_origin"] == "https://auth-x.alpha.example.com"
-    assert "7K3M-QX9A-2PFH" in body["instructions"] and body["scope"] == "workspace"
-    # The workspace was published first (the share was created and its materials written), then the CLI ran.
-    assert len(cli.created_shares) == 1
-    assert caller.is_share_env_present is True
-    assert _agent_access_exec_commands(caller) == [
-        "uv run --no-sync agent-access invite --granter user:33333333-3333-3333-3333-333333333333 "
-        "--scope workspace --name-hint 'Josh Claude' --json"
-    ]
-
-
-def test_visiting_agents_invite_does_not_republish_a_published_workspace_and_passes_an_app_scope(
-    tmp_path: Path,
-) -> None:
-    agent_id = AgentId()
-    caller = _VisitingAgentsCaller(
-        is_share_env_present=True,
-        agent_access_answer=json.dumps(
-            {
-                "code": "C",
-                "expires_at": "2026-10-15T18:15:00+00:00",
-                "scope": ["chat"],
-                "granter": "user:33333333-3333-3333-3333-333333333333",
-                "auth_origin": "https://auth-x.alpha.example.com",
-                "is_published": True,
-                "instructions": "x",
-            }
-        ),
-    )
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=caller)
-    client = _visiting_agents_client(tmp_path, agent_id, caller, cli)
-
-    response = client.post(
-        f"/api/v1/workspace-sharing/{agent_id}/agents/invites",
-        headers=_auth_header(),
-        json={"scope": ["chat"], "expires_in_days": 7},
-    )
-
-    assert response.status_code == 200, response.data
-    assert json.loads(response.data)["scope"] == ["chat"]
-    assert cli.created_shares == []
-    assert _agent_access_exec_commands(caller) == [
-        "uv run --no-sync agent-access invite --granter user:33333333-3333-3333-3333-333333333333 "
-        "--scope chat --expires-in-days 7.0 --json"
-    ]
-
-
-def test_visiting_agents_invite_refuses_when_the_share_never_reached_the_workspace(tmp_path: Path) -> None:
-    """The connector holds a share but the workspace has no materials: the CLI's placeholder origin is not handed out."""
-    agent_id = AgentId()
-    caller = _VisitingAgentsCaller(
-        is_share_env_present=False,
-        agent_access_answer=json.dumps(
-            {
-                "code": "C",
-                "expires_at": "2026-10-15T18:15:00+00:00",
-                "scope": "workspace",
-                "granter": "user:33333333-3333-3333-3333-333333333333",
-                "auth_origin": "",
-                "is_published": False,
-                "instructions": "Join at https://<the workspace's address once it is published>",
-            }
-        ),
-    )
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=caller)
-    client = _visiting_agents_client(tmp_path, agent_id, caller, cli)
-
-    response = client.post(
-        f"/api/v1/workspace-sharing/{agent_id}/agents/invites", headers=_auth_header(), json={"scope": "workspace"}
-    )
-
-    assert response.status_code == 502, response.data
-    assert "Turn sharing off and on again" in json.loads(response.data)["error"]
-    assert cli.created_shares == []
-
-
-def test_visiting_agents_invite_reports_a_cli_refusal_as_a_bad_request(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    caller = _VisitingAgentsCaller(
-        is_share_env_present=True,
-        agent_access_returncode=2,
-        agent_access_stderr=json.dumps({"error": "not a grantable app: owner-exec", "kind": "refused"}) + "\n",
-    )
-    client = _visiting_agents_client(tmp_path, agent_id, caller)
-
-    response = client.post(
-        f"/api/v1/workspace-sharing/{agent_id}/agents/invites", headers=_auth_header(), json={"scope": ["owner-exec"]}
-    )
-
-    assert response.status_code == 400
-    assert "not a grantable app" in json.loads(response.data)["error"]
-
-
-def test_visiting_agents_revoke_runs_the_cli_as_the_owner_and_maps_an_unknown_agent_to_404(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    caller = _VisitingAgentsCaller(
-        is_share_env_present=True, agent_access_answer=json.dumps({"revoked": "va-" + "1" * 32, "name": "x"})
-    )
-    client = _visiting_agents_client(tmp_path, agent_id, caller)
-
-    response = client.delete(f"/api/v1/workspace-sharing/{agent_id}/agents/va-{'1' * 32}", headers=_auth_header())
-
-    assert response.status_code == 200, response.data
-    assert json.loads(response.data) == {"revoked": "va-" + "1" * 32}
-    assert _agent_access_exec_commands(caller) == [
-        f"uv run --no-sync agent-access revoke va-{'1' * 32} --revoker user:33333333-3333-3333-3333-333333333333 "
-        "--owner --json"
-    ]
-
-    caller.agent_access_returncode = 2
-    caller.agent_access_stderr = json.dumps({"error": f"no agent va-{'f' * 32}", "kind": "refused"}) + "\n"
-    missing = client.delete(f"/api/v1/workspace-sharing/{agent_id}/agents/va-{'f' * 32}", headers=_auth_header())
-    assert missing.status_code == 404
-
-    # A value that is not an agent id is refused before anything runs in the workspace.
-    malformed = client.delete(f"/api/v1/workspace-sharing/{agent_id}/agents/--json", headers=_auth_header())
-    assert malformed.status_code == 400
-    assert len(_agent_access_exec_commands(caller)) == 2
-
-
-def test_visiting_agents_on_a_workspace_without_the_cli_answer_409_with_the_update_hint(tmp_path: Path) -> None:
-    """The exec's own capability check answers the CLI's refusal shape with kind ``unsupported``."""
-    agent_id = AgentId()
-    caller = _VisitingAgentsCaller(
-        is_share_env_present=True,
-        agent_access_returncode=3,
-        agent_access_stderr=json.dumps({"error": "predates visiting agents; update it", "kind": "unsupported"}),
-    )
-    client = _visiting_agents_client(tmp_path, agent_id, caller)
-
-    response = client.get(f"/api/v1/workspace-sharing/{agent_id}/agents", headers=_auth_header())
-
-    assert response.status_code == 409, response.data
-    assert "update it" in json.loads(response.data)["error"]
-
-
-def test_visiting_agents_routes_require_auth_and_a_known_workspace(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    caller = _VisitingAgentsCaller(is_share_env_present=True, agent_access_answer=json.dumps({"agents": []}))
-    client = _visiting_agents_client(tmp_path, agent_id, caller)
-    assert client.get(f"/api/v1/workspace-sharing/{agent_id}/agents").status_code == 401
-    assert client.get(f"/api/v1/workspace-sharing/{AgentId()}/agents", headers=_auth_header()).status_code == 404
-    # A legacy machine coordinate resolves to the machine's agent, as on every sharing route; an unknown one is 404.
-    assert client.get(f"/api/v1/workspace-sharing/{_TEST_HOST_ID}/agents", headers=_auth_header()).status_code == 200
-    unknown_host = client.get(f"/api/v1/workspace-sharing/host-{'f' * 32}/agents", headers=_auth_header())
-    assert unknown_host.status_code == 404, unknown_host.data
-    # Only the resolved coordinate reached the workspace's CLI.
-    assert len(_agent_access_exec_commands(caller)) == 1

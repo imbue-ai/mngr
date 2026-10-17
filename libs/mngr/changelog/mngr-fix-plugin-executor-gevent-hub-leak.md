@@ -1,0 +1,1 @@
+Adopted the new repo-wide `raw ConcurrencyGroupExecutor construction` ratchet (`test_prevent_raw_concurrency_group_executor`) at a count of 0. It points callers at `mngr_executor`, which now also covers the imbue_cloud, vps, modal, mapreduce and ovh plugins' fan-outs. That closes the gevent Hub leak that kept long-running `mngr observe` processes growing after the July fix.

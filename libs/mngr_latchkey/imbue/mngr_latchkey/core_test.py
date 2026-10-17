@@ -2,15 +2,12 @@ import base64
 import errno
 import hashlib
 import json
-import signal
 import socket
 import threading
 import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -21,15 +18,9 @@ from loguru import logger
 from paramiko.ssh_exception import NoValidConnectionsError
 from pydantic import Field
 from pydantic import PrivateAttr
-from pydantic import SecretStr
-from pyinfra.api.exceptions import ConnectError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.imbue_common.primitives import PositiveInt
-from imbue.imbue_common.suspension import ClockReading
-from imbue.imbue_common.suspension import read_clocks
 from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -53,8 +44,6 @@ from imbue.mngr_latchkey.additional_services import additional_service_registrat
 from imbue.mngr_latchkey.cli import _run_gateway_health_check_loop
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
-from imbue.mngr_latchkey.core import ChromeImportOutcome
-from imbue.mngr_latchkey.core import CodedLatchkeyFailure
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import HIDDEN_BUILTIN_SERVICES
 from imbue.mngr_latchkey.core import LATCHKEY_CREDENTIAL_TYPE_OAUTH
@@ -62,7 +51,6 @@ from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyBinaryNotFoundError
 from imbue.mngr_latchkey.core import LatchkeyError
-from imbue.mngr_latchkey.core import LatchkeyErrorCode
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
@@ -70,16 +58,8 @@ from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_ID
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_SECRET
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_SERVICES
 from imbue.mngr_latchkey.core import MINDS_OAUTH_REDIRECT_URI_BY_SERVICE
-from imbue.mngr_latchkey.core import _GATEWAY_OUTPUT_TAIL_MAX_LINES
-from imbue.mngr_latchkey.core import _GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS
-from imbue.mngr_latchkey.core import _GatewayOutputTail
-from imbue.mngr_latchkey.core import _REENCRYPT_TIMEOUT_SECONDS
-from imbue.mngr_latchkey.core import _allocate_free_port
-from imbue.mngr_latchkey.core import _describe_port_bindability
 from imbue.mngr_latchkey.core import _log_gateway_output_line
-from imbue.mngr_latchkey.core import _terminate_and_diagnose_unbound_gateway
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
-from imbue.mngr_latchkey.core import parse_coded_latchkey_failure
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.devices import DesktopDeviceIdentity
@@ -88,12 +68,7 @@ from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery import TRANSIENT_FAILURE_REPORT_THRESHOLD
 from imbue.mngr_latchkey.discovery import _ContainerEndpoint
 from imbue.mngr_latchkey.discovery import _GatewayRoute
-from imbue.mngr_latchkey.discovery import _ObservedHostState
 from imbue.mngr_latchkey.discovery import _RemoteWiringStep
-from imbue.mngr_latchkey.discovery import _TransientFailureStreak
-from imbue.mngr_latchkey.discovery import _TransientFailureStreakKey
-from imbue.mngr_latchkey.discovery import _describe_connect_errors
-from imbue.mngr_latchkey.discovery import _describe_provider
 from imbue.mngr_latchkey.discovery import is_transient_remote_wiring_error
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
@@ -133,69 +108,6 @@ def test_gateway_output_is_routed_through_loguru() -> None:
         _log_gateway_output_line("hello from the gateway\n", is_stdout=True)
 
     assert ("DEBUG", "[latchkey gateway] hello from the gateway") in captured
-
-
-def test_gateway_output_tail_keeps_routing_and_reports_the_last_lines_redacted() -> None:
-    """The tail still logs every line at DEBUG, keeps only the newest ones, and redacts and truncates on render."""
-    tail = _GatewayOutputTail()
-    secret = "listen-password-value"
-    with _captured_log_records() as captured:
-        for index in range(_GATEWAY_OUTPUT_TAIL_MAX_LINES + 5):
-            tail.on_output(f"line {index}\n", is_stdout=True)
-        tail.on_output(f"config: password={secret}\n", is_stdout=False)
-        tail.on_output("x" * (_GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS + 50) + "\n", is_stdout=False)
-
-    assert ("DEBUG", "[latchkey gateway] line 0") in captured
-    rendered_lines = tail.render((secret, "")).split("\n")
-    assert len(rendered_lines) == _GATEWAY_OUTPUT_TAIL_MAX_LINES
-    assert "line 0" not in rendered_lines
-    assert rendered_lines[-2] == "config: password=<redacted>"
-    assert rendered_lines[-1] == "x" * _GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS + "...<truncated>"
-    assert all(secret not in line for line in rendered_lines)
-
-
-def test_describe_port_bindability_names_the_errno_of_a_held_port() -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
-        holder.bind(("127.0.0.1", 0))
-        holder.listen(1)
-        held_port = holder.getsockname()[1]
-        assert _describe_port_bindability("127.0.0.1", held_port) == "EADDRINUSE"
-
-
-def test_describe_port_bindability_reports_a_released_port_as_free() -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        released_port = probe.getsockname()[1]
-    assert _describe_port_bindability("127.0.0.1", released_port) == "free"
-
-
-def test_diagnosing_a_silent_gateway_still_starting_on_a_fresh_port(tmp_path: Path) -> None:
-    """A gateway alive but unbound at the deadline is terminated and reported as still running on a fresh port."""
-    port = _allocate_free_port("127.0.0.1")
-    events_log_path = tmp_path / "events.jsonl"
-    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        process = cg.run_process_in_background(command=["sleep", "30"], is_checked_by_group=False)
-        tail = _GatewayOutputTail()
-        with _captured_log_records() as captured:
-            error = _terminate_and_diagnose_unbound_gateway(
-                process=process,
-                output_tail=tail,
-                host="127.0.0.1",
-                port=port,
-                is_reused_port=False,
-                redacted_values=("secret",),
-                events_log_path=events_log_path,
-            )
-        assert process.poll() is not None
-
-    assert (
-        f"(gateway still running at the deadline; port free after cleanup; fresh port); see {events_log_path}"
-        in str(error)
-    )
-    assert (
-        "WARNING",
-        f"Latchkey gateway output before it failed to bind 127.0.0.1:{port}:\n<no output>",
-    ) in captured
 
 
 # The previous on-disk gateway-record tests went away when the record
@@ -422,18 +334,13 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         "    open(out, 'w').write(_json.dumps(payload))\n"
         "    sys.exit(0)\n"
         # ``auth import-chrome`` succeeds with latchkey's own summary unless a
-        # marker sits in the latchkey directory: ``no-chrome`` makes it fail
-        # the way a computer without Chrome does, ``chrome-unreadable`` the
-        # way a Mac without Full Disk Access does (one coded JSON line).
+        # ``no-chrome`` marker sits in the latchkey directory, which makes it
+        # fail the way a computer without Chrome does.
         'if sys.argv[1:3] == ["auth", "import-chrome"]:\n'
-        "    import json as _json, os as _os\n"
+        "    import os as _os\n"
         "    directory = _os.environ['LATCHKEY_DIRECTORY']\n"
         "    if _os.path.exists(_os.path.join(directory, 'no-chrome')):\n"
         "        print('Error: Google Chrome is not installed in any of the standard locations.', file=sys.stderr)\n"
-        "        sys.exit(1)\n"
-        "    if _os.path.exists(_os.path.join(directory, 'chrome-unreadable')):\n"
-        "        print(_json.dumps({'errorCode': 'CHROME_PROFILE_NOT_READABLE', 'errorMessage': "
-        "'The Google Chrome profile at /Users/me/Chrome/Default could not be read: EPERM.'}), file=sys.stderr)\n"
         "        sys.exit(1)\n"
         "    print('Imported 12 cookie(s) and the localStorage of 2 origin(s) into ' + directory + '/browser_state.json.enc.')\n"
         "    print('  https://slack.com')\n"
@@ -920,19 +827,9 @@ def test_start_gateway_respawns_dead_gateway_on_same_port(tmp_path: Path) -> Non
         first_process.terminate()
         assert not manager.is_gateway_running
 
-        with _captured_log_records() as captured:
-            respawned_port = manager.start_gateway(cg)
+        respawned_port = manager.start_gateway(cg)
         assert respawned_port == original_port
         assert manager.is_gateway_running
-        assert (
-            "INFO",
-            f"Respawning shared Latchkey gateway on its previous port 127.0.0.1:{original_port} "
-            "(last running gateway exit code 0; 0 consecutive failed spawn(s) before this attempt)",
-        ) in captured
-        assert any(
-            level == "INFO" and message.startswith(f"Latchkey gateway bound 127.0.0.1:{original_port} ")
-            for level, message in captured
-        )
         running_after = manager._running_gateway
         assert running_after is not None
         assert running_after.process is not first_process
@@ -1087,47 +984,8 @@ def test_export_credentials_subset_raises_on_failure(tmp_path: Path) -> None:
     script.chmod(0o755)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
     manager.initialize()
-    with pytest.raises(LatchkeyError, match="re-encrypt") as exc_info:
+    with pytest.raises(LatchkeyError, match="re-encrypt"):
         manager.export_credentials_subset(tmp_path / "out.enc", {"slack"})
-    message = str(exc_info.value)
-    assert "exited 1 " in message
-    assert "timed_out=False, " in message
-    assert "services=1, has_destination_key=False, has_account=False" in message
-    assert message.endswith(": boom")
-
-
-def test_export_credentials_subset_failure_tells_an_outside_kill_from_a_timeout(tmp_path: Path) -> None:
-    """A child SIGTERMed by something other than our timeout reports ``timed_out=False`` and its short run time.
-
-    The exit code alone (-15) is the same for both, so the message must carry
-    what separates them -- and must never name the services or the account.
-    """
-    script = tmp_path / "latchkey"
-    script.write_text(
-        "#!/usr/bin/env python3\n"
-        "import os, signal, sys\n"
-        'if sys.argv[1] == "--version":\n'
-        f"    print('{LATCHKEY_MIN_VERSION}')\n"
-        "    sys.exit(0)\n"
-        "os.kill(os.getpid(), signal.SIGTERM)\n"
-    )
-    script.chmod(0o755)
-    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
-    manager.initialize()
-    with pytest.raises(LatchkeyError) as exc_info:
-        manager.export_credentials_subset(
-            tmp_path / "out.enc",
-            {"slack", "github"},
-            destination_key=SecretStr("synthetic-destination-key"),
-            account="user@example.com",
-        )
-    message = str(exc_info.value)
-    assert f"exited {-signal.SIGTERM} " in message
-    assert "timed_out=False, " in message
-    assert f"of {_REENCRYPT_TIMEOUT_SECONDS:.0f}s timeout" in message
-    assert "services=2, has_destination_key=True, has_account=True" in message
-    assert "slack" not in message
-    assert "user@example.com" not in message
 
 
 def test_create_permissions_override_jwt_returns_stripped_stdout(tmp_path: Path) -> None:
@@ -2492,26 +2350,10 @@ def _raised_from(error: BaseException, cause: BaseException) -> BaseException:
     return error
 
 
-def _raised_while_handling(error: BaseException, handled: BaseException) -> BaseException:
-    """Return ``error`` chained as if it had been ``raise``d inside the ``except`` block that caught ``handled``."""
-    error.__context__ = handled
-    return error
-
-
-def _outer_host_auth_error(paramiko_error: paramiko.AuthenticationException) -> BaseException:
-    """The shape the outer host raises for a paramiko auth failure: pyinfra wraps it implicitly, the host explicitly."""
-    message = f"Authentication error (username=root, key=/tmp/id_ed25519) ({paramiko_error})"
-    connect_error = _raised_while_handling(ConnectError(message), paramiko_error)
-    return _raised_from(
-        HostAuthenticationError(f"Authentication failed when connecting to host: {message}"), connect_error
-    )
-
-
 @pytest.mark.parametrize(
     ("error", "is_transient"),
     [
         pytest.param(ConnectionResetError(54, "Connection reset by peer"), True, id="connection-reset"),
-        pytest.param(OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"), True, id="local-address-lost"),
         pytest.param(paramiko.SSHException("No existing session"), True, id="no-existing-session"),
         pytest.param(paramiko.AuthenticationException("Authentication timeout."), True, id="auth-timeout"),
         pytest.param(EOFError(), True, id="eof"),
@@ -2545,33 +2387,7 @@ def _outer_host_auth_error(paramiko_error: paramiko.AuthenticationException) -> 
             True,
             id="wrapped-no-valid-connections",
         ),
-        pytest.param(
-            _outer_host_auth_error(paramiko.AuthenticationException("Authentication timeout.")),
-            True,
-            id="host-authentication-error-from-auth-timeout",
-        ),
         pytest.param(HostAuthenticationError("Authentication failed"), False, id="host-authentication-error"),
-        pytest.param(
-            _outer_host_auth_error(paramiko.AuthenticationException("Authentication failed.")),
-            False,
-            id="host-authentication-error-from-rejected-key",
-        ),
-        pytest.param(
-            _outer_host_auth_error(paramiko.BadAuthenticationType("Bad authentication type", ["password"])),
-            False,
-            id="host-authentication-error-from-bad-auth-type",
-        ),
-        pytest.param(
-            _raised_from(
-                HostAuthenticationError("Authentication failed"),
-                _raised_from(
-                    ConnectError("Authentication error (username=root) (Authentication timeout.)"),
-                    paramiko.AuthenticationException("Authentication timeout."),
-                ),
-            ),
-            True,
-            id="host-authentication-error-from-explicitly-chained-auth-timeout",
-        ),
         pytest.param(SSHTunnelError("No SSH key file", SSHTunnelPhase.LOCAL_SETUP), False, id="tunnel-local-setup"),
         pytest.param(RemoteGatewayError("Malformed permissions file"), False, id="remote-gateway-error-alone"),
         pytest.param(HostNotFoundError(ProviderInstanceName("p"), HostId()), False, id="host-not-found"),
@@ -2659,202 +2475,6 @@ def test_transient_tunnel_failures_report_an_error_only_once_the_streak_reaches_
     assert _error_messages_mentioning(captured, host_id) == errors_at_threshold
 
 
-def _desktop_tunnel_streak_logs(
-    tmp_path: Path,
-    temp_mngr_ctx: MngrContext,
-    error: BaseException,
-    observed_host_states: tuple[HostState, ...],
-    ssh_info_per_attempt: tuple[RemoteSSHInfo, ...],
-    seeded_streak_start: ClockReading | None = None,
-) -> tuple[str, list[tuple[str, str]]]:
-    """Fail a docker host's desktop gateway tunnel with ``error`` once per SSH info; return the agent id and logs.
-
-    ``seeded_streak_start``, when given, seeds a streak one attempt short of
-    the threshold that began at that reading, so the next attempt reports it.
-    """
-    fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
-    tunnel_manager = _ConfigurableFailureTunnelManager()
-    tunnel_manager._error_to_raise = error
-    agent_id = AgentId()
-    host_id = HostId()
-    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        handler = LatchkeyDiscoveryHandler(
-            latchkey=manager,
-            tunnel_manager=tunnel_manager,
-            concurrency_group=cg,
-            mngr_ctx=temp_mngr_ctx,
-            device=_DEVICE,
-        )
-        for host_state in observed_host_states:
-            handler._observe_host_state(host_id, host_state, "docker")
-        if seeded_streak_start is not None:
-            key = _TransientFailureStreakKey(host_id=host_id, step=_RemoteWiringStep.DESKTOP_GATEWAY_TUNNEL)
-            with handler._remote_hosts_lock:
-                handler._transient_failure_streak_by_key[key] = _TransientFailureStreak(
-                    length=PositiveInt(TRANSIENT_FAILURE_REPORT_THRESHOLD - 1),
-                    started_at=datetime.fromtimestamp(seeded_streak_start.wall_seconds, timezone.utc),
-                    started_clocks=seeded_streak_start,
-                    first_ssh_info=ssh_info_per_attempt[0],
-                    changed_ssh_info_fields=frozenset(),
-                )
-        with _captured_log_records() as captured:
-            for ssh_info in ssh_info_per_attempt:
-                handler._setup_desktop_gateway_reachability(agent_id, host_id, ssh_info, 41989)
-    return str(agent_id), captured
-
-
-def _desktop_tunnel_streak_report(
-    tmp_path: Path,
-    temp_mngr_ctx: MngrContext,
-    observed_host_states: tuple[HostState, ...],
-    ssh_info_per_attempt: tuple[RemoteSSHInfo, ...],
-) -> str:
-    """Fail the desktop gateway tunnel once per given SSH info, and return the error the streak is reported with."""
-    agent_id, captured = _desktop_tunnel_streak_logs(
-        tmp_path,
-        temp_mngr_ctx,
-        paramiko.AuthenticationException("Authentication timeout."),
-        observed_host_states,
-        ssh_info_per_attempt,
-    )
-    errors = [message for level, message in captured if level == "ERROR" and agent_id in message]
-    assert len(errors) == 1, captured
-    return errors[0]
-
-
-def test_a_reported_streak_names_the_ssh_info_fields_that_changed_and_the_host_state_change(
-    tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """A streak whose endpoint moved under it, on a host seen restarting, says both, by field name only."""
-    first_ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=2222, key_path=tmp_path / "k")
-    moved_ssh_info = first_ssh_info.model_copy_update(to_update(first_ssh_info.field_ref().port, 2223))
-
-    report = _desktop_tunnel_streak_report(
-        tmp_path,
-        temp_mngr_ctx,
-        (HostState.STOPPED, HostState.RUNNING),
-        (first_ssh_info,) + (moved_ssh_info,) * (TRANSIENT_FAILURE_REPORT_THRESHOLD - 1),
-    )
-
-    assert "Streak started at 20" in report
-    assert "SSH info changed during the streak: yes (port)" in report
-    assert "host state RUNNING since 20" in report
-    assert "(a change this process saw)" in report
-    assert "agent-host.example" not in report
-
-
-def test_a_reported_streak_on_unchanged_ssh_info_says_so(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
-    ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=2222, key_path=tmp_path / "k")
-
-    report = _desktop_tunnel_streak_report(
-        tmp_path, temp_mngr_ctx, (HostState.RUNNING,), (ssh_info,) * TRANSIENT_FAILURE_REPORT_THRESHOLD
-    )
-
-    assert "SSH info changed during the streak: no" in report
-    assert "(the first report this process saw)" in report
-
-
-# A loopback endpoint refused outright, beside an address the network cannot route to.
-_REFUSED_LOOPBACK_CONNECT_ERROR = NoValidConnectionsError(
-    {
-        ("127.0.0.1", 50161): ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"),
-        ("127.0.0.2", 50161): OSError(errno.EHOSTUNREACH, "No route to host"),
-    }
-)
-
-
-def _refused_loopback_ssh_info(tmp_path: Path) -> RemoteSSHInfo:
-    return RemoteSSHInfo(user="root", host="127.0.0.1", port=50161, key_path=tmp_path / "k")
-
-
-def test_a_reported_refused_connect_streak_names_the_provider_and_each_address_errno(
-    tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """The streak's first line and its report both say which provider owns the host and how each address failed.
-
-    ``NoValidConnectionsError`` prints as ``[Errno None]``; the per-address
-    errnos are what tell an absent listener from an unroutable address.
-    """
-    agent_id, captured = _desktop_tunnel_streak_logs(
-        tmp_path,
-        temp_mngr_ctx,
-        _REFUSED_LOOPBACK_CONNECT_ERROR,
-        (HostState.RUNNING,),
-        (_refused_loopback_ssh_info(tmp_path),) * TRANSIENT_FAILURE_REPORT_THRESHOLD,
-    )
-
-    infos = [message for level, message in captured if level == "INFO" and agent_id in message]
-    errors = [message for level, message in captured if level == "ERROR" and agent_id in message]
-    assert len(infos) == 1, captured
-    assert len(errors) == 1, captured
-    for message in (infos[0], errors[0]):
-        assert "provider docker (backend docker)" in message
-        assert "connect errors: 127.0.0.1:50161 ECONNREFUSED, 127.0.0.2:50161 EHOSTUNREACH" in message
-    assert "machine suspended during the streak: no" in errors[0]
-
-
-def test_a_reported_streak_says_when_the_machine_slept_during_it(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
-    now = read_clocks()
-    # The wall clock ran an hour further than the monotonic one since the streak began: a sleep.
-    started_before_a_sleep = ClockReading(
-        wall_seconds=now.wall_seconds - 3900.0, monotonic_seconds=now.monotonic_seconds - 300.0
-    )
-
-    agent_id, captured = _desktop_tunnel_streak_logs(
-        tmp_path,
-        temp_mngr_ctx,
-        _REFUSED_LOOPBACK_CONNECT_ERROR,
-        (HostState.RUNNING,),
-        (_refused_loopback_ssh_info(tmp_path),),
-        seeded_streak_start=started_before_a_sleep,
-    )
-
-    errors = [message for level, message in captured if level == "ERROR" and agent_id in message]
-    assert len(errors) == 1, captured
-    assert "machine suspended during the streak: yes" in errors[0]
-
-
-def test_describe_provider_names_the_configured_backend_of_a_provider_instance(temp_mngr_ctx: MngrContext) -> None:
-    observed = _ObservedHostState(
-        state=HostState.RUNNING,
-        since=datetime.now(timezone.utc),
-        is_after_change=False,
-        provider_name="my-docker",
-    )
-    config = temp_mngr_ctx.config.model_copy_update(
-        to_update(
-            temp_mngr_ctx.config.field_ref().providers,
-            {ProviderInstanceName("my-docker"): ProviderInstanceConfig(backend=ProviderBackendName("docker"))},
-        )
-    )
-    configured_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, config))
-    unconfigured_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(
-            temp_mngr_ctx.field_ref().config,
-            temp_mngr_ctx.config.model_copy_update(to_update(temp_mngr_ctx.config.field_ref().providers, {})),
-        )
-    )
-
-    assert _describe_provider(observed, configured_ctx) == "provider my-docker (backend docker)"
-    assert _describe_provider(observed, unconfigured_ctx) == "provider my-docker (backend my-docker)"
-    assert _describe_provider(None, configured_ctx) == "provider never reported to this process"
-
-
-def test_describe_connect_errors_finds_a_wrapped_refusal_and_says_when_there_is_none() -> None:
-    wrapped = _raised_from(
-        RemoteGatewayError("Failed to reach the gateway"),
-        NoValidConnectionsError({("127.0.0.3", 22002): ConnectionRefusedError(errno.ECONNREFUSED, "refused")}),
-    )
-    without_errno = NoValidConnectionsError({("127.0.0.3", 22002): ConnectionRefusedError()})
-
-    assert _describe_connect_errors(wrapped) == "127.0.0.3:22002 ECONNREFUSED"
-    assert _describe_connect_errors(without_errno) == "127.0.0.3:22002 ConnectionRefusedError"
-    assert _describe_connect_errors(paramiko.SSHException("No existing session")) == (
-        "n/a (not a refused or unreachable connect)"
-    )
-
-
 def test_an_unreachable_outer_host_is_reported_only_once_the_streak_reaches_the_threshold(
     tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -2867,7 +2487,7 @@ def test_an_unreachable_outer_host_is_reported_only_once_the_streak_reaches_the_
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     tunnel_manager = _ConfigurableFailureTunnelManager()
     tunnel_manager._error_to_raise = NoValidConnectionsError(
-        {("127.0.0.3", 22002): ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")}
+        {("203.0.113.9", 22002): ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")}
     )
     agent_id = AgentId()
     host_id = HostId()
@@ -3091,38 +2711,6 @@ def test_non_transient_provisioning_failure_still_escapes_the_worker(
     assert provisioning_hosts == set()
     assert pending == set()
     assert streaks == {}
-
-
-def test_provisioning_pass_logs_how_many_hosts_are_provisioning_concurrently(
-    tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """Each pass records how many hosts are provisioning at once, to tell concurrent failures from lone ones."""
-    fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
-    agent_id = AgentId()
-    host_id = HostId()
-    ssh_info = RemoteSSHInfo(user="root", host="vps.example.test", port=2222, key_path=tmp_path / "k")
-    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        handler = _ProvisionFailureHandler(
-            latchkey=manager,
-            tunnel_manager=_RecordingTunnelManager(),
-            concurrency_group=cg,
-            mngr_ctx=temp_mngr_ctx,
-            device=_DEVICE,
-        )
-        handler._error_to_raise = RemoteGatewayError("Malformed permissions file")
-        _mark_provisioning_in_flight(handler, AgentId(), HostId())
-        _mark_provisioning_in_flight(handler, agent_id, host_id)
-        with _captured_log_records() as captured:
-            with pytest.raises(RemoteGatewayError):
-                handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud", None)
-
-    entry_logs = [
-        message for level, message in captured if level == "DEBUG" and "Provisioning the VPS-resident" in message
-    ]
-    assert len(entry_logs) == 1, captured
-    assert str(host_id) in entry_logs[0]
-    assert "2 host(s) provisioning in this process" in entry_logs[0]
 
 
 def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, counter_path: Path) -> Path:
@@ -4166,7 +3754,7 @@ def test_import_chrome_browser_state_reports_a_clean_exit_as_success(tmp_path: P
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
 
-    assert manager.import_chrome_browser_state() == ChromeImportOutcome(is_success=True, detail="")
+    assert manager.import_chrome_browser_state() == (True, "")
 
 
 def test_import_chrome_browser_state_surfaces_latchkeys_reason_on_failure(tmp_path: Path) -> None:
@@ -4175,64 +3763,7 @@ def test_import_chrome_browser_state_surfaces_latchkeys_reason_on_failure(tmp_pa
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
 
-    outcome = manager.import_chrome_browser_state()
+    is_success, detail = manager.import_chrome_browser_state()
 
-    assert outcome.is_success is False
-    assert outcome.error_code is None
-    assert "Google Chrome is not installed" in outcome.detail
-
-
-def test_import_chrome_browser_state_carries_the_code_of_an_unreadable_profile(tmp_path: Path) -> None:
-    fake_binary = _make_fake_latchkey_binary(tmp_path)
-    (tmp_path / "chrome-unreadable").write_text("")
-    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
-    manager.initialize()
-
-    outcome = manager.import_chrome_browser_state()
-
-    assert outcome.is_success is False
-    assert outcome.error_code is LatchkeyErrorCode.CHROME_PROFILE_NOT_READABLE
-    # The sentence, not the JSON line it arrived in.
-    assert outcome.detail == "The Google Chrome profile at /Users/me/Chrome/Default could not be read: EPERM."
-
-
-def test_parse_coded_latchkey_failure_reads_the_json_line_among_other_output() -> None:
-    raw = (
-        "(node:123) Warning: something\n"
-        '{"errorCode":"CHROME_PROFILE_NOT_READABLE","errorMessage":"The profile could not be read."}\n'
-    )
-    failure = parse_coded_latchkey_failure(raw)
-    assert failure is not None
-    assert failure == CodedLatchkeyFailure(
-        code="CHROME_PROFILE_NOT_READABLE", message="The profile could not be read."
-    )
-    assert failure.known_code is LatchkeyErrorCode.CHROME_PROFILE_NOT_READABLE
-
-
-def test_parse_coded_latchkey_failure_does_not_depend_on_the_object_fitting_one_line() -> None:
-    raw = (
-        "(node:123) ExperimentalWarning: something\n"
-        "{\n"
-        '  "errorCode": "CHROME_PROFILE_NOT_READABLE",\n'
-        '  "errorMessage": "The profile could not be read: EPERM,\\n  operation not permitted."\n'
-        "}\n"
-        "trailing output\n"
-    )
-    assert parse_coded_latchkey_failure(raw) == CodedLatchkeyFailure(
-        code="CHROME_PROFILE_NOT_READABLE", message="The profile could not be read: EPERM,\n  operation not permitted."
-    )
-
-
-def test_parse_coded_latchkey_failure_ignores_output_that_is_not_a_coded_failure() -> None:
-    assert parse_coded_latchkey_failure("Error: Google Chrome is not installed.") is None
-    assert parse_coded_latchkey_failure("{ not json\n{}\n") is None
-    assert parse_coded_latchkey_failure('{"errorCode": 5, "errorMessage": "x"}') is None
-    # Names the key but is no JSON object: a crash dump quoting the source.
-    assert parse_coded_latchkey_failure('throw new CodedError({ "errorCode": code })') is None
-
-
-def test_parse_coded_latchkey_failure_keeps_a_code_this_package_does_not_know() -> None:
-    failure = parse_coded_latchkey_failure('{"errorCode":"SOMETHING_NEW","errorMessage":"A newer latchkey said so."}')
-    assert failure is not None
-    assert failure == CodedLatchkeyFailure(code="SOMETHING_NEW", message="A newer latchkey said so.")
-    assert failure.known_code is None
+    assert is_success is False
+    assert "Google Chrome is not installed" in detail

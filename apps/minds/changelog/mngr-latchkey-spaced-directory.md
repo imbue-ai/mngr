@@ -1,0 +1,3 @@
+The desktop client asks which process owns the latchkey directory, rather than reading a separate record, when it waits for the `mngr latchkey forward` supervisor's gateway port.
+
+The supervisor now publishes its pid and its gateway port into the ownership lock it holds for its whole life, so a supervisor that dies between spawn and port-bind is detected by the lock being released rather than by inspecting a pid recorded on disk. A slow supervisor is never mistaken for a dead one, and a dead one is never mistaken for slow. A supervisor caught in the instant between claiming the directory and publishing its record counts as slow, not dead, so the client waits for it instead of failing.

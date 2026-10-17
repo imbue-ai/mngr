@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CreateAttemptRequestSummary } from "./create";
-import {
-  SETUP_LINE,
-  SHOWCASE_APP,
-  readyTurnMarkdown,
-  showcaseMarkdown,
-} from "./creationTranscript";
+import { SETUP_LINE, SETUP_SECTIONS, readyTurnMarkdown } from "./creationTranscript";
 import {
   MANIFESTO_POINTS,
   MANIFESTO_QUESTION,
@@ -28,8 +23,6 @@ const REQUEST: CreateAttemptRequestSummary = {
   display_name: "workspace-1",
   launch_mode: "IMBUE_CLOUD",
   cloud_account: "",
-  cloud_account_alias: "",
-  cloud_account_backend_label: "",
   backup_provider: "IMBUE_CLOUD",
   region: "US-EAST-VA",
   instance_type: "",
@@ -38,7 +31,6 @@ const REQUEST: CreateAttemptRequestSummary = {
   disk_gb: null,
   repository: "https://github.com/imbue-ai/default-workspace-template.git",
   branch: "",
-  is_onboarding_driven_by_agent: false,
 };
 
 /** A cloud create by a returning user. */
@@ -52,8 +44,8 @@ const ENTRIES: TranscriptEntry[] = [
 ];
 
 describe("welcomeChatBody", () => {
-  it("opens with the manifesto, follows the flow, and closes with the settings, the setup line and the welcome", () => {
-    const body = welcomeChatBody(ENTRIES, REQUEST, false, false);
+  it("opens with the manifesto, follows the flow, and closes with the settings, the setup line and the ready list", () => {
+    const body = welcomeChatBody(ENTRIES, REQUEST, false);
 
     expect(body.title).toBe("Welcome");
     expect(body.turns.map((turn) => turn.role)).toEqual([
@@ -81,17 +73,11 @@ describe("welcomeChatBody", () => {
     expect(body.turns[6].text).toBe("Use Imbue Cloud");
     expect(body.turns[8].text).toContain("Name — workspace-1");
     expect(body.turns[8].text).toContain("Branch — latest");
-    expect(body.turns[9].text).toBe(SETUP_LINE);
+    expect(body.turns[9].text.startsWith(SETUP_LINE)).toBe(true);
+    for (const section of SETUP_SECTIONS) {
+      expect(body.turns[9].text).toContain(disclosureMarkdown(section));
+    }
     expect(body.turns[10].text).toBe(readyTurnMarkdown());
-  });
-
-  it("carries the recording between the setup line and the welcome for an onboarding create", () => {
-    const built = welcomeChatBody(ENTRIES, REQUEST, false, true);
-    expect(built.turns.slice(9).map((turn) => [turn.role, turn.text])).toEqual([
-      ["assistant", SETUP_LINE],
-      ["assistant", showcaseMarkdown(SHOWCASE_APP)],
-      ["assistant", readyTurnMarkdown()],
-    ]);
   });
 });
 
@@ -102,12 +88,12 @@ describe("flowTurns", () => {
     ]);
     expect(ask.role).toBe("assistant");
     expect(
-      ask.text.startsWith("Welcome back. Let's set up your workspace."),
+      ask.text.startsWith("Welcome back. Let's create your first workspace."),
     ).toBe(true);
     expect(ask.text).toContain(
       "**Imbue Cloud** (Recommended)\n- 30 second setup",
     );
-    expect(ask.text.endsWith("- Easy to share with others")).toBe(true);
+    expect(ask.text.endsWith("- Shareable with other people")).toBe(true);
     expect(
       flowTurns([{ kind: "step", id: "run", ack: "", answer: null, said: "" }]),
     ).toHaveLength(1);
@@ -183,24 +169,12 @@ describe("postWelcomeChat", () => {
     });
   });
 
-  it("answers an empty chat id while the attempt is still being built and the conversation is held", async () => {
-    const chatId = await postWelcomeChat(
-      "attempt-1",
-      { title: "Welcome", turns: [{ role: "user", text: "hi" }] },
-      () => Promise.resolve(jsonResponse({ chat_id: "" }, 202)),
-    );
-    expect(chatId).toBe("");
-  });
-
   it("fails on a refusal, carrying the body's message and the script's verdict, or on an answer without a chat id", async () => {
     await expect(
       postWelcomeChat("attempt-1", { title: "", turns: [] }, () =>
         Promise.resolve(
           jsonResponse(
-            {
-              error: "Couldn't open the welcome chat in the workspace.",
-              detail: "the chat app answered HTTP 400",
-            },
+            { error: "Couldn't open the welcome chat in the workspace.", detail: "the chat app answered HTTP 400" },
             502,
           ),
         ),

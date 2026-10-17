@@ -1,17 +1,14 @@
-import subprocess
 import sys
 import tomllib
-from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
-from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import MindsRoot
+from imbue.minds.mngr_settings.enablement import set_provider_is_enabled
 from imbue.minds.mngr_settings.errors import MindsSettingsError
-from imbue.minds.mngr_settings.reconcile import ensure_mngr_profile_and_settings_before_mngr_import
 from imbue.minds.mngr_settings.reconcile import ensure_mngr_settings
 from imbue.minds.mngr_settings.reconcile import ensure_mngr_settings_before_mngr_import
 from imbue.minds.testing import stub_mngr_host_dir
@@ -26,88 +23,27 @@ def _forget_imported_mngr_modules(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delitem(sys.modules, name)
 
 
-def test_importing_the_pre_import_reconcile_loads_no_mngr_module() -> None:
-    """``main.py`` imports the reconcile and then refuses to run if any ``imbue.mngr`` module is loaded.
-
-    The in-process tests below forget mngr modules first, so only a fresh interpreter can show that
-    the reconcile's own imports keep mngr out.
-    """
-    probe = (
-        "import sys\n"
-        "import imbue.minds.mngr_settings.reconcile\n"
-        "print(sorted(name for name in sys.modules if name == 'imbue.mngr' or name.startswith('imbue.mngr.')))\n"
-    )
-    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
-    assert result.stdout.strip() == "[]"
-
-
-_PRE_IMPORT_ENTRY_POINTS = pytest.mark.parametrize(
-    "ensure_before_mngr_import",
-    [ensure_mngr_profile_and_settings_before_mngr_import, ensure_mngr_settings_before_mngr_import],
-)
-
-
-@_PRE_IMPORT_ENTRY_POINTS
-def test_ensure_before_mngr_import_raises_when_mngr_already_loaded(
-    monkeypatch: pytest.MonkeyPatch, ensure_before_mngr_import: Callable[[], None]
-) -> None:
+def test_ensure_before_mngr_import_raises_when_mngr_already_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "imbue.mngr.config", ModuleType("imbue.mngr.config"))
     with pytest.raises(MindsSettingsError, match="before importing mngr"):
-        ensure_before_mngr_import()
+        ensure_mngr_settings_before_mngr_import()
 
 
-@_PRE_IMPORT_ENTRY_POINTS
-def test_ensure_before_mngr_import_noops_when_root_name_unset(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ensure_before_mngr_import: Callable[[], None]
-) -> None:
+def test_ensure_before_mngr_import_noops_when_root_name_unset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _forget_imported_mngr_modules(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv(MINDS_ROOT_NAME_ENV_VAR, raising=False)
-    ensure_before_mngr_import()
-    assert not MindsRoot(DEFAULT_MINDS_ROOT_NAME).state_dir.exists()
+    ensure_mngr_settings_before_mngr_import()
+    assert not (tmp_path / ".minds").exists()
 
 
-@_PRE_IMPORT_ENTRY_POINTS
-def test_ensure_before_mngr_import_reconciles_active_env(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ensure_before_mngr_import: Callable[[], None]
-) -> None:
+def test_ensure_before_mngr_import_reconciles_active_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _forget_imported_mngr_modules(monkeypatch)
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-tname")
-    ensure_before_mngr_import()
+    ensure_mngr_settings_before_mngr_import()
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["plugins"]["recursive"]["enabled"] is False
-
-
-def test_ensure_profile_and_settings_before_mngr_import_creates_the_profile_and_lands_the_overrides_in_a_fresh_host_dir(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _forget_imported_mngr_modules(monkeypatch)
-    root = MindsRoot("minds-dev-tname")
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, root.root_name)
-    assert not root.mngr_host_dir.exists()
-
-    ensure_mngr_profile_and_settings_before_mngr_import()
-
-    profile_id = tomllib.loads((root.mngr_host_dir / "config.toml").read_text())["profile"]
-    settings_path = root.mngr_host_dir / "profiles" / profile_id / "settings.toml"
-    providers = tomllib.loads(settings_path.read_text())["providers"]
-    assert providers["aws"]["is_enabled"] is False
-    assert providers["gcp"]["is_enabled"] is False
-    assert providers["azure"]["is_enabled"] is False
-
-
-def test_ensure_settings_before_mngr_import_leaves_a_missing_profile_uncreated(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A shell still activated against a destroyed env must not get the env's root back from the next command."""
-    _forget_imported_mngr_modules(monkeypatch)
-    root = MindsRoot("minds-dev-tname")
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, root.root_name)
-
-    ensure_mngr_settings_before_mngr_import()
-
-    assert not root.state_dir.exists()
 
 
 def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(
@@ -115,7 +51,7 @@ def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(
 ) -> None:
     """``ensure_mngr_settings`` must suppress the default ``[providers.imbue_cloud]``
     instance so ``get_all_provider_instances`` doesn't auto-create one alongside
-    the per-account ``imbue_cloud_<user id>`` entries.
+    the per-account ``imbue_cloud_<slug>`` entries.
     """
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     ensure_mngr_settings(MindsRoot("minds-dev-tname"))
@@ -129,7 +65,7 @@ def test_ensure_mngr_settings_keeps_default_aws_disabled(monkeypatch: pytest.Mon
 
     Otherwise ``get_all_provider_instances`` auto-creates it and its discovery
     fails every ``mngr list`` cycle ("credentials not configured"); the usable
-    AWS providers are the ``aws_<hex>`` connection instances.
+    AWS providers are the bring-your-own-key ``byok-aws-<slug>`` account blocks.
     """
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     ensure_mngr_settings(MindsRoot("minds-dev-tname"))
@@ -141,8 +77,8 @@ def test_ensure_mngr_settings_removes_legacy_ambient_aws_region_blocks(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Ambient ``aws-<region>`` blocks written by earlier builds are actively
-    deleted at boot (the machine-credential AWS path was removed from minds).
-    Other blocks survive this pre-import pass (the materializer owns them)."""
+    deleted at boot (the machine-credential AWS path was removed from Imbue Studio;
+    ``byok-aws-<slug>`` accounts are the only AWS path). BYOK blocks survive."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     settings_path.write_text(
         '[providers.aws-us-east-1]\nbackend = "aws"\ndefault_region = "us-east-1"\n\n'
@@ -164,96 +100,56 @@ def test_ensure_mngr_settings_returns_whether_file_was_modified(
     assert ensure_mngr_settings(MindsRoot("minds-dev-tname")) is False
 
 
-def test_ensure_mngr_settings_suppresses_the_default_modal_instance(
+def test_ensure_mngr_settings_leaves_panel_disabled_modal_alone(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Modal is a connection with its own credentials now, so the default instance is suppressed like the others."""
+    """A panel-toggled ``is_enabled = false`` on ``[providers.modal]`` is a valid desired
+    shape: it neither triggers a rewrite nor gets reset back to enabled."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     ensure_mngr_settings(MindsRoot("minds-dev-tname"))
+    set_provider_is_enabled("modal", False, root=MindsRoot("minds-dev-tname"))
+
+    assert ensure_mngr_settings(MindsRoot("minds-dev-tname")) is False
     parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["modal"] == {"backend": "modal", "is_enabled": False}
+    assert parsed["providers"]["modal"]["is_enabled"] is False
+    assert parsed["providers"]["modal"]["mode"] == "DIRECT"
+    assert parsed["providers"]["modal"]["is_persistent"] is True
 
 
-def test_ensure_mngr_settings_rewrites_a_legacy_ambient_modal_direct_block(
+def test_ensure_mngr_settings_preserves_modal_is_enabled_on_rewrite(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The ambient DIRECT block older builds wrote (with a panel-written enable) collapses to the suppression form."""
+    """When something else forces a rewrite, a panel-toggled modal Disable is carried
+    over while the fields Imbue Studio controls are re-pinned."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    settings_path.write_text(
-        '[providers.modal]\nbackend = "modal"\nmode = "DIRECT"\nis_enabled = true\nis_persistent = true\n'
-    )
+    ensure_mngr_settings(MindsRoot("minds-dev-tname"))
+    set_provider_is_enabled("modal", False, root=MindsRoot("minds-dev-tname"))
+
+    # Force the rewrite path: a stale extra aws-* block makes the desired-shape
+    # check fail, so every block Imbue Studio controls is re-pinned.
+    with settings_path.open("a") as f:
+        f.write('\n[providers.aws-eu-central-9]\nbackend = "aws"\n')
 
     assert ensure_mngr_settings(MindsRoot("minds-dev-tname")) is True
     parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["modal"] == {"backend": "modal", "is_enabled": False}
-    assert ensure_mngr_settings(MindsRoot("minds-dev-tname")) is False
+    modal_block = parsed["providers"]["modal"]
+    assert modal_block["is_enabled"] is False
+    assert modal_block["mode"] == "DIRECT"
+    assert modal_block["is_persistent"] is True
 
 
-_PANEL_DISABLED_SETTINGS = "\n".join(
-    [
-        "[providers.docker]",
-        "is_enabled = false",
-        "[providers.lima]",
-        'backend = "lima"',
-        "is_enabled = false",
-        "[providers.vultr]",
-        'backend = "vultr"',
-        "is_enabled = true",
-        "[providers.aws]",
-        'backend = "aws"',
-        "is_enabled = false",
-        "",
-    ]
-)
-
-
-def test_ensure_clears_the_disabled_flag_the_retired_panel_toggle_wrote_exactly_once(
+def test_ensure_mngr_settings_pins_modal_fields_around_legacy_panel_only_block(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A docker/lima/vultr block disabled by the old toggle is re-enabled once; a later hand edit is left alone."""
-    root_name = "minds-dev-tname"
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, root_name)
-    settings_path.write_text(_PANEL_DISABLED_SETTINGS)
-    root = MindsRoot(root_name)
+    """A legacy ``[providers.modal]`` holding only a panel-written ``is_enabled = false``
+    (from before the Modal-Direct block existed) gets the pinned fields added while the
+    user's Disable is preserved."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path.write_text("[providers.modal]\nis_enabled = false\n")
 
-    # The migration's write counts as a write, like the reconcile's own.
-    assert ensure_mngr_settings(root) is True
-
-    providers = tomllib.loads(settings_path.read_text())["providers"]
-    # A block left empty by the removal goes with it; a block with other keys keeps them.
-    assert "docker" not in providers
-    assert providers["lima"] == {"backend": "lima"}
-    assert providers["vultr"] == {"backend": "vultr", "is_enabled": True}
-    # The suppressed defaults are the reconcile's own and stay disabled.
-    assert providers["aws"] == {"backend": "aws", "is_enabled": False}
-    marker_path = root.state_dir / "migrations" / "panel_provider_disables_cleared"
-    assert marker_path.is_file()
-
-    # Done once: a deliberate disable written afterwards survives the next reconcile.
-    settings_path.write_text(settings_path.read_text() + "[providers.docker]\nis_enabled = false\n")
-    assert ensure_mngr_settings(root) is False
-    assert tomllib.loads(settings_path.read_text())["providers"]["docker"] == {"is_enabled": False}
-
-
-def test_the_one_shot_migration_retries_until_its_save_succeeds(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The marker is written only after a successful save, so a save that raised is tried again."""
-    root_name = "minds-dev-tname"
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, root_name)
-    settings_path.write_text(_PANEL_DISABLED_SETTINGS)
-    root = MindsRoot(root_name)
-    marker_path = root.state_dir / "migrations" / "panel_provider_disables_cleared"
-    # A directory where the store's temp file goes makes the save fail whoever runs the
-    # test (a permission bit would not stop root, which CI runs as).
-    blocking_dir = settings_path.with_suffix(".tmp")
-    blocking_dir.mkdir()
-    with pytest.raises(OSError):
-        ensure_mngr_settings(root)
-    blocking_dir.rmdir()
-    assert not marker_path.exists()
-
-    ensure_mngr_settings(root)
-
-    assert marker_path.is_file()
-    assert "docker" not in tomllib.loads(settings_path.read_text())["providers"]
+    assert ensure_mngr_settings(MindsRoot("minds-dev-tname")) is True
+    parsed = tomllib.loads(settings_path.read_text())
+    modal_block = parsed["providers"]["modal"]
+    assert modal_block["is_enabled"] is False
+    assert modal_block["mode"] == "DIRECT"
+    assert modal_block["is_persistent"] is True

@@ -20,19 +20,12 @@ One ``mngr pair`` subprocess per sync, supervised here:
   conflict. Those map onto ``--sync-direction`` and ``--conflict``;
 * its ``--format jsonl`` stream is read line by line to drive the state one
   sync is shown in: STARTING until ``pair_syncing`` says unison is watching
-  both replicas, then SYNCING until ``pair_transferring`` says its first pass
-  has left the two level, and from there SYNCED or SYNCING as bytes move.
+  both replicas, then SYNCING until the process exits.
 
 A sync runs only while Imbue Studio does, but the *choice* to keep a folder synced
 outlives it: :mod:`folder_sync_store` records it, and :meth:`restore_all`
 starts them again at launch. Quitting stops every sync; starting brings back
 every one the user had not turned off.
-
-A sync can only run while its workspace's machine does, and Imbue Studio
-already follows every machine's state (discovery, plus its own starts and
-stops). So a sync never waits on a timer: one whose machine is not running at
-launch waits for it, and :meth:`FolderSyncManager.on_backend_changed` starts it,
-and any that failed, once the machine is RUNNING again.
 
 Starting a sync checks only what the next step needs -- an absolute path to a
 directory that exists -- and deliberately not what a share path goes through:
@@ -53,6 +46,7 @@ import shlex
 import threading
 import time
 from collections.abc import Callable
+from enum import auto
 from pathlib import Path
 from typing import Final
 from typing import assert_never
@@ -64,6 +58,7 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.local_process import RunningProcess
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
@@ -73,7 +68,6 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
-from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncRecord
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.mngr_command import extract_exec_failure_detail
@@ -83,8 +77,6 @@ from imbue.minds.errors import FolderSyncError
 from imbue.minds.errors import FolderSyncStoreError
 from imbue.minds.errors import MngrCommandError
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.polling import poll_for_value
 
 # How long ``stop`` waits for ``mngr pair`` to tear its unison down before
@@ -145,7 +137,47 @@ _WORKSPACE_MKDIR_TIMEOUT_SECONDS: Final[float] = 60.0
 _RESTORE_HOST_WAIT_SECONDS: Final[float] = 120.0
 _RESTORE_HOST_POLL_SECONDS: Final[float] = 1.0
 
-_WORKSPACE_NOT_RUNNING_MESSAGE: Final[str] = "This workspace is not running. Syncing starts again when it is."
+
+class FolderSyncState(UpperCaseStrEnum):
+    """Where one folder actually is right now, as opposed to where the user asked it to be.
+
+    The user sets the destination -- see :class:`FolderSyncActivity`, which is
+    what a click writes -- and this is the app's progress towards it. Every
+    move between destinations crosses the network, so each has a state for
+    being under way, and a click never waits for one.
+
+    STARTING covers everything between spawning ``mngr pair`` and unison
+    reporting for duty: resolving the workspace, moving a set-aside copy back,
+    installing a usable unison on a remote host, the SSH handshake. RESTARTING
+    is the same work for a sync whose settings changed under it -- told apart
+    because the files are already on the machine, so the wait is a handshake
+    rather than a first copy, and a user who has just changed a dropdown is
+    owed the difference. After that a sync alternates between SYNCING (moving
+    bytes right now) and SYNCED (up and watching, with nothing to carry across)
+    -- which is where it spends nearly all its time. DEACTIVATING and
+    DISCARDING are the same idea in the other direction: the sync has stopped
+    and the machine is being told what to do with its copy.
+
+    Three states are terminal, and they are worth keeping apart because the
+    user is owed a different thing by each. STOPPED means it ended because it
+    was asked to -- the user unticked the box, or Imbue Studio quit -- and is where a
+    settled inactive folder rests, so the unticked checkbox says everything and
+    the row needs no badge. FAILED means it ended on its own, and carries the
+    reason. UNKNOWN is neither: the folder is one the user still wants synced,
+    nothing is running, and Imbue Studio cannot say why. That is not a resting place,
+    it is a disagreement between what the app says and what it is doing -- and
+    it used to be spelled STOPPED, which made it invisible.
+    """
+
+    STARTING = auto()
+    RESTARTING = auto()
+    SYNCING = auto()
+    SYNCED = auto()
+    DEACTIVATING = auto()
+    DISCARDING = auto()
+    STOPPED = auto()
+    UNKNOWN = auto()
+    FAILED = auto()
 
 
 class FolderSyncSpec(FrozenModel):
@@ -510,16 +542,12 @@ class _PairEventSink(MutableModel):
     def on_output(self, line: str, is_stdout: bool) -> None:
         """Fold one line of the subprocess's output into the sync's state.
 
-        ``pair_syncing`` says unison is up, which is not yet that the two sides
-        agree: its first pass is still comparing them, and may have a whole
-        folder to carry across, so the sync reads SYNCING until
-        ``pair_transferring`` reports that pass settled (which ``mngr pair``
-        always does for the first one, even when it moved nothing). From then
-        on that event moves it between SYNCED and SYNCING as bytes actually
-        move. mngr's ``error`` event is kept as the verdict a failure is
-        reported with.
-        Every line joins the tail regardless -- mngr's own logging, on stderr,
-        is what a death neither of those events explains is diagnosed from.
+        ``pair_syncing`` says unison is up, which settles the sync at SYNCED;
+        ``pair_transferring`` then moves it between SYNCED and SYNCING as bytes
+        actually move. mngr's ``error`` event is kept as the verdict a failure
+        is reported with. Every line joins the tail regardless -- mngr's own
+        logging, on stderr, is what a death neither of those events explains is
+        diagnosed from.
         """
         stripped = line.strip()
         logger.debug("mngr pair: {}", stripped)
@@ -532,7 +560,8 @@ class _PairEventSink(MutableModel):
             FolderSyncState.STARTING,
             FolderSyncState.RESTARTING,
         ):
-            self.state = FolderSyncState.SYNCING
+            # Up and watching, with nothing to carry across until told otherwise.
+            self.state = FolderSyncState.SYNCED
             self._left_starting.set()
         if event.get("event") == _PAIR_TRANSFERRING_EVENT and self.state in (
             FolderSyncState.SYNCED,
@@ -781,12 +810,6 @@ class FolderSyncManager(MutableModel):
     # so the checkbox is on, and with no run behind it the row would otherwise
     # report a bare STOPPED with no reason and no way to act on it.
     _restore_failures: dict[_SyncKey, str] = PrivateAttr(default_factory=dict)
-    # Set by stop_all. A converger may still be mid-step when the app shuts
-    # down, and this is what stops it spawning a ``mngr pair`` nobody will stop.
-    _is_stopped: bool = PrivateAttr(default=False)
-    # Whether each workspace with a sync was running when the resolver last
-    # changed, so its machine coming up again is seen as the edge it is.
-    _is_running_by_agent: dict[str, bool] = PrivateAttr(default_factory=dict)
 
     def start(
         self,
@@ -997,81 +1020,6 @@ class FolderSyncManager(MutableModel):
         self._set_desired(spec, FolderSyncActivity.ACTIVE)
         return FolderSyncStatus(spec=spec, state=FolderSyncState.STARTING, message="")
 
-    def on_backend_changed(self) -> None:
-        """Start the syncs of every workspace whose machine has just come up.
-
-        Registered on the backend resolver, which calls it on every change it
-        sees: discovery, and Imbue Studio's own starts and stops. Only the edge
-        into RUNNING acts, so a sync that fails on a running machine for a
-        reason of its own is not asked again on every unrelated change.
-        """
-        with self._lock:
-            agent_ids = {key.agent_id for key in self._desired_by_key} | {
-                key.agent_id for key in self._restore_failures
-            }
-        is_running_by_agent = {
-            agent_id: self._workspace_state(agent_id) == HostState.RUNNING for agent_id in agent_ids
-        }
-        with self._lock:
-            came_up = [
-                agent_id
-                for agent_id, is_running in is_running_by_agent.items()
-                if is_running and self._is_running_by_agent.get(agent_id) is not True
-            ]
-            self._is_running_by_agent.update(is_running_by_agent)
-        for agent_id in came_up:
-            self.on_workspace_recovered(AgentId(agent_id))
-
-    def on_workspace_recovered(self, agent_id: AgentId) -> None:
-        """Start again every sync with ``agent_id`` that is meant to run and is not running.
-
-        Called when the workspace's machine comes up (see
-        :meth:`on_backend_changed`) and when its shell answers again after it
-        did not. A sync that failed while the workspace was away failed because
-        it was away, and so did a launch-time restore that could not run; neither
-        would come back without a click otherwise. One retry per event, so a
-        sync that fails for a reason of its own stays failed.
-
-        Fast enough for the callers' callback threads: each retry only records
-        a destination and hands it to a worker.
-        """
-        with self._lock:
-            failed_paths = [
-                key.local_path
-                for key, run in self._runs_by_key.items()
-                if key.agent_id == agent_id
-                and run.sink.state == FolderSyncState.FAILED
-                and self._is_desired_active(key)
-            ]
-            unrestored_paths = [key.local_path for key in self._restore_failures if key.agent_id == agent_id]
-        for local_path in (*failed_paths, *unrestored_paths):
-            logger.info("The workspace for {} is back; starting its folder sync again", local_path)
-            try:
-                self.retry(str(agent_id), local_path)
-            except FolderSyncError as e:
-                logger.warning("Could not start the folder sync for {} again: {}", local_path, e)
-
-    def _is_desired_active(self, key: _SyncKey) -> bool:
-        """Whether ``key`` is meant to be syncing. Call with the lock held."""
-        desired = self._desired_by_key.get(key)
-        return desired is not None and desired.activity == FolderSyncActivity.ACTIVE
-
-    def _workspace_state(self, agent_id: str) -> HostState | None:
-        """The state of the machine ``agent_id`` runs on, or None while Imbue Studio cannot say."""
-        host_id = self._host_id_for(agent_id)
-        if host_id is None:
-            return None
-        try:
-            parsed = HostId(host_id)
-        except ValueError:
-            return None
-        return self.backend_resolver.get_host_state(parsed)
-
-    def _is_workspace_known_not_running(self, agent_id: str) -> bool:
-        """Whether the resolver says ``agent_id``'s machine is in a state other than RUNNING."""
-        state = self._workspace_state(agent_id)
-        return state is not None and state != HostState.RUNNING
-
     def discard_copy(self, agent_id: str, local_path: str) -> None:
         """Ask for the set-aside copy of a folder whose sync is off to be deleted.
 
@@ -1121,10 +1069,15 @@ class FolderSyncManager(MutableModel):
         )
 
     def _converge(self, key: _SyncKey) -> None:
-        """Thread body: move one sync towards its destination until it is there."""
+        """Thread body: move one sync towards its destination until it is there.
+
+        Retires only after checking, under the lock, that the destination has
+        not moved since the last step -- otherwise a click landing in that
+        window would find a worker still marked as running and nothing would
+        pick it up.
+        """
         last_desired: _DesiredSync | None = None
         steps_for_this_destination = 0
-        is_retired = False
         try:
             # Runs for as long as this sync has somewhere to be. There is no
             # step budget for the whole worker: a click is a new destination
@@ -1132,16 +1085,20 @@ class FolderSyncManager(MutableModel):
             # there have been. What is bounded is the moves against any *one*
             # destination, below.
             while (desired := self._desired_for(key)) is not None:
-                if desired is not last_desired:
-                    # A new click, so the count starts again -- even one asking
-                    # for the same destination, like a retry.
+                if desired != last_desired:
+                    # A new destination, so the count starts again.
                     last_desired = desired
                     steps_for_this_destination = 0
                 step = self._next_step(key, desired)
                 if step is None:
-                    if self._retire_if_still_bound_for(key, desired):
-                        is_retired = True
-                        return
+                    # Retiring and the last look at the destination happen under
+                    # one lock hold. Apart, a click landing between them would
+                    # find a worker still marked as running and be picked up by
+                    # nobody.
+                    with self._lock:
+                        if self._desired_by_key.get(key) is desired:
+                            self._converging.discard(key)
+                            return
                     continue
                 steps_for_this_destination += 1
                 if steps_for_this_destination > _MAX_STEPS_PER_DESTINATION:
@@ -1150,45 +1107,22 @@ class FolderSyncManager(MutableModel):
                     # of real moves does. Giving up is better than a thread
                     # spinning on the machine, and worse than either would be
                     # carrying on silently.
-                    if self._retire_if_still_bound_for(key, desired):
-                        is_retired = True
-                        logger.warning(
-                            "Gave up moving {} after {} moves towards one destination; it is left where it "
-                            "got to and the next click starts again",
-                            key.local_path,
-                            _MAX_STEPS_PER_DESTINATION,
-                        )
-                        return
-                    continue
+                    logger.warning(
+                        "Gave up moving {} after {} moves towards one destination; it is left where it "
+                        "got to and the next click starts again",
+                        key.local_path,
+                        _MAX_STEPS_PER_DESTINATION,
+                    )
+                    return
                 step(desired.spec)
         finally:
-            # A step that raised: the flag must not outlive the thread holding
-            # it, or the folder is stuck with no worker. Skipped after a normal
-            # retirement, when the key may already belong to the next click's
-            # worker.
-            if not is_retired:
-                with self._lock:
-                    self._retire_locked(key)
-
-    def _retire_if_still_bound_for(self, key: _SyncKey, desired: _DesiredSync) -> bool:
-        """Retire ``key``'s worker if ``desired`` is still its destination, and say whether it did.
-
-        The last look and the whole of retiring share one lock hold. Split, a
-        click between them is either picked up by nobody or starts a worker
-        whose settled event this one then pops and sets.
-        """
-        with self._lock:
-            if self._desired_by_key.get(key) is not desired:
-                return False
-            self._retire_locked(key)
-            return True
-
-    def _retire_locked(self, key: _SyncKey) -> None:
-        """Mark ``key`` as having no worker and wake anyone waiting on it. Caller holds ``self._lock``."""
-        self._converging.discard(key)
-        settled = self._settled_events.pop(key, None)
-        if settled is not None:
-            settled.set()
+            # Also covers a step that raised: the flag must not outlive the
+            # thread holding it, or the folder is stuck with no worker.
+            with self._lock:
+                self._converging.discard(key)
+                settled = self._settled_events.pop(key, None)
+            if settled is not None:
+                settled.set()
 
     def _desired_for(self, key: _SyncKey) -> _DesiredSync | None:
         """Where this sync should end up, or None once nothing wants it anywhere."""
@@ -1262,16 +1196,7 @@ class FolderSyncManager(MutableModel):
         Everything slow about starting a sync happens here, and anything that
         goes wrong settles the row as FAILED with the reason -- which is how the
         pane learns, since nobody is waiting on a return value.
-
-        Refuses once :meth:`stop_all` has run. That needs ``run`` registered
-        before this is called: :meth:`stop_all` then either stopped it or had
-        already set the flag.
         """
-        with self._lock:
-            is_stopped = self._is_stopped
-        if is_stopped:
-            run.sink.on_stopped()
-            return
         try:
             # Behind the same lock as setting a copy aside: turning sync off
             # and straight back on is two renames of one directory.
@@ -1629,8 +1554,7 @@ class FolderSyncManager(MutableModel):
         rather than when someone next opens the panel.
 
         Every failure is per-folder and lands on that folder's row: a machine
-        that is stopped (nothing here starts one; the sync starts when the
-        machine does, see :meth:`on_backend_changed`), a workspace Imbue Studio cannot
+        that is stopped (nothing here starts one), a workspace Imbue Studio cannot
         place yet, or a folder that is no longer on this computer -- an
         unmounted disk, or one the user deleted. None of them are reasons to
         abandon the other folders, and none of them forget the intent, which is
@@ -1657,16 +1581,6 @@ class FolderSyncManager(MutableModel):
                 with self._lock:
                     self._restore_failures[key] = message
                 continue
-            if self._is_workspace_known_not_running(record.agent_id):
-                # Quitting often stops the machine, and Imbue Studio starts it
-                # again moments after launch; asking it before then only fails.
-                # The resolver says when it is running, and on_backend_changed
-                # starts the sync then.
-                logger.info("Waiting for the workspace of {} to run before syncing it", record.local_path)
-                key = _SyncKey(agent_id=record.agent_id, local_path=record.local_path)
-                with self._lock:
-                    self._restore_failures[key] = _WORKSPACE_NOT_RUNNING_MESSAGE
-                continue
             try:
                 self.start(
                     agent_id=record.agent_id,
@@ -1681,13 +1595,8 @@ class FolderSyncManager(MutableModel):
                     self._restore_failures[key] = str(e)
 
     def stop_all(self) -> None:
-        """Stop every sync, so no unison outlives the app. Called on shutdown.
-
-        Final: no sync starts on this manager afterwards, including one a
-        converger was part-way to bringing up when this ran.
-        """
+        """Stop every sync, so no unison outlives the app. Called on shutdown."""
         with self._lock:
-            self._is_stopped = True
             runs = tuple(self._runs_by_key.values())
         for run in runs:
             run.terminate()

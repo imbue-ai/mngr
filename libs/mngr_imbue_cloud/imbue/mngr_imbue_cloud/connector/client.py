@@ -1,7 +1,7 @@
 """HTTP client for the remote_service_connector.
 
 One client wraps all the connector concerns (auth, hosts, keys, shares, ...)
-so the CLI commands and provider can share a single httpx2 instance per
+so the CLI commands and provider can share a single httpx instance per
 account.
 
 Authentication semantics:
@@ -20,7 +20,7 @@ from importlib import metadata
 from typing import Any
 from urllib.parse import quote
 
-import httpx2
+import httpx
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import ConfigDict
@@ -38,7 +38,6 @@ from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
-from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountDeletedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountSuspendedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
@@ -51,8 +50,6 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudClientTooOldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudDeviceCodeRefusedError
-from imbue.mngr_imbue_cloud.errors import ImbueCloudDocumentLimitError
-from imbue.mngr_imbue_cloud.errors import ImbueCloudDocumentNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
@@ -68,7 +65,6 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUserNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceRetiredError
-from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspacesPresentError
 from imbue.mngr_imbue_cloud.errors import WorkspaceHasNoStopError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStopKindRouteUnavailableError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
@@ -103,7 +99,6 @@ from imbue.mngr_imbue_cloud.wire_types import SignupCodeCreated
 from imbue.mngr_imbue_cloud.wire_types import SignupCodeInfo
 from imbue.mngr_imbue_cloud.wire_types import StorageCleanupGrant
 from imbue.mngr_imbue_cloud.wire_types import StorageRecheckResult
-from imbue.mngr_imbue_cloud.wire_types import SyncDocument
 from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.wire_types import SyncRecordsListing
 from imbue.mngr_imbue_cloud.wire_types import SyncWorkspaceRecord
@@ -148,7 +143,7 @@ _DEVICE_LOGIN_ATTEMPT_TIMEOUT_SECONDS = 5.0
 # never saw it, so retrying is safe even for a non-idempotent call. Used to gate
 # retries on the create/lease POSTs, where a blanket retry on a post-send error
 # (e.g. a read error after the server already acted) could double-allocate.
-_CONNECT_PHASE_TRANSPORT_ERRORS = (httpx2.ConnectError, httpx2.ConnectTimeout)
+_CONNECT_PHASE_TRANSPORT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
 
 # Canonical client-identification header. Every connector call carries it (the
 # Python client mirrors the same string into User-Agent), so the connector's
@@ -180,7 +175,7 @@ def _client_id_headers() -> dict[str, str]:
 
 def _is_retryable_transport_error(exc: BaseException, idempotent: bool) -> bool:
     """Whether ``_send`` may safely re-send the request after ``exc``."""
-    return isinstance(exc, httpx2.TransportError) and (idempotent or isinstance(exc, _CONNECT_PHASE_TRANSPORT_ERRORS))
+    return isinstance(exc, httpx.TransportError) and (idempotent or isinstance(exc, _CONNECT_PHASE_TRANSPORT_ERRORS))
 
 
 def _warn_before_retry_sleep(retry_state: RetryCallState, method: str, url: str) -> None:
@@ -203,11 +198,11 @@ class ImbueCloudConnectorClient(MutableModel):
 
     base_url: AnyUrl = Field(description="Base URL of the remote_service_connector")
     timeout_seconds: float = Field(default=DEFAULT_TIMEOUT_SECONDS, description="Default per-request timeout")
-    transport: httpx2.BaseTransport | None = Field(
+    transport: httpx.BaseTransport | None = Field(
         default=None,
         description=(
-            "Optional httpx2 transport override. Tests inject an httpx2.MockTransport here so "
-            "requests never leave the process; production leaves it None (module-level httpx2 calls)."
+            "Optional httpx transport override. Tests inject an httpx.MockTransport here so "
+            "requests never leave the process; production leaves it None (module-level httpx calls)."
         ),
     )
 
@@ -219,7 +214,7 @@ class ImbueCloudConnectorClient(MutableModel):
     def _bearer(self, access_token: SecretStr) -> dict[str, str]:
         return {**_client_id_headers(), "Authorization": f"Bearer {access_token.get_secret_value()}"}
 
-    def _raise_if_client_too_old(self, response: httpx2.Response) -> None:
+    def _raise_if_client_too_old(self, response: httpx.Response) -> None:
         """Raise the typed client-too-old error on the connector's structured HTTP 426 refusal."""
         if response.status_code != 426:
             return
@@ -234,7 +229,7 @@ class ImbueCloudConnectorClient(MutableModel):
             )
         raise ImbueCloudClientTooOldError(CLIENT_TOO_OLD_FALLBACK_MESSAGE, min_version=None, sunset_date=None)
 
-    def _raise_if_quota_exceeded(self, response: httpx2.Response) -> None:
+    def _raise_if_quota_exceeded(self, response: httpx.Response) -> None:
         """Raise the typed quota error when a 403 carries the connector's structured detail."""
         if response.status_code != 403:
             return
@@ -251,7 +246,7 @@ class ImbueCloudConnectorClient(MutableModel):
                 current=float(detail.get("current", 0)),
             )
 
-    def _raise_if_email_not_verified(self, response: httpx2.Response) -> None:
+    def _raise_if_email_not_verified(self, response: httpx.Response) -> None:
         """Raise the typed verification error when a 403 carries the connector's structured detail."""
         if response.status_code != 403:
             return
@@ -267,7 +262,7 @@ class ImbueCloudConnectorClient(MutableModel):
                 email=email if isinstance(email, str) else None,
             )
 
-    def _raise_if_account_suspended(self, response: httpx2.Response) -> None:
+    def _raise_if_account_suspended(self, response: httpx.Response) -> None:
         """Raise the typed suspension error when a 403 carries the connector's structured detail."""
         if response.status_code != 403:
             return
@@ -277,29 +272,7 @@ class ImbueCloudConnectorClient(MutableModel):
                 str(detail.get("message", "This account is suspended. Contact support@imbue.com."))
             )
 
-    def _raise_if_account_deleted(self, response: httpx2.Response) -> None:
-        """Raise the typed deletion error when a 403 carries the connector's structured detail."""
-        if response.status_code != 403:
-            return
-        detail = _detail_dict_from_response(response)
-        if detail is not None and detail.get("code") == "account_deleted":
-            raise ImbueCloudAccountDeletedError(
-                str(detail.get("message", "This account has been deleted. Contact support@imbue.com."))
-            )
-
-    def _raise_if_workspaces_present(self, response: httpx2.Response) -> None:
-        """Raise the typed refusal when a 403 carries the connector's ``workspaces_present`` detail."""
-        if response.status_code != 403:
-            return
-        detail = _detail_dict_from_response(response)
-        if detail is not None and detail.get("code") == "workspaces_present":
-            workspace_count = detail.get("workspace_count")
-            raise ImbueCloudWorkspacesPresentError(
-                str(detail.get("message", "The account still holds Imbue Cloud workspaces.")),
-                workspace_count=workspace_count if isinstance(workspace_count, int) else 0,
-            )
-
-    def _raise_if_auth_upstream_unavailable(self, response: httpx2.Response) -> None:
+    def _raise_if_auth_upstream_unavailable(self, response: httpx.Response) -> None:
         """Raise the transport-style unreachable error when a 503 carries the connector's ``auth_upstream_unavailable`` detail.
 
         The connector answers it when its SuperTokens core is down mid-session
@@ -315,7 +288,7 @@ class ImbueCloudConnectorClient(MutableModel):
                 str(detail.get("message", "The Imbue Cloud authentication service is temporarily unavailable."))
             )
 
-    def _raise_if_workspace_held(self, response: httpx2.Response) -> None:
+    def _raise_if_workspace_held(self, response: httpx.Response) -> None:
         """Raise the typed hold error when a 409 carries the connector's ``workspace_under_maintenance`` or ``workspace_retired`` detail.
 
         The owner start's mapping only: the admin start answers the same detail
@@ -330,7 +303,7 @@ class ImbueCloudConnectorClient(MutableModel):
         if detail is not None and detail.get("code") == "workspace_under_maintenance":
             raise ImbueCloudWorkspaceHeldError(str(detail.get("message", "")))
 
-    def _raise_if_grant_budget_exhausted(self, response: httpx2.Response) -> None:
+    def _raise_if_grant_budget_exhausted(self, response: httpx.Response) -> None:
         """Raise the typed grant-budget error when a 403 carries the connector's structured detail."""
         if response.status_code != 403:
             return
@@ -347,7 +320,7 @@ class ImbueCloudConnectorClient(MutableModel):
                 window_hours=int(detail.get("window_hours", 0)),
             )
 
-    def _check(self, response: httpx2.Response, exc_cls: type[Exception]) -> dict[str, Any]:
+    def _check(self, response: httpx.Response, exc_cls: type[Exception]) -> dict[str, Any]:
         """Raise ``exc_cls`` on non-2xx, otherwise return parsed JSON.
 
         The connector's structured refusals (the ``_raise_if_*`` helpers) are
@@ -359,7 +332,6 @@ class ImbueCloudConnectorClient(MutableModel):
         self._raise_if_grant_budget_exhausted(response)
         self._raise_if_email_not_verified(response)
         self._raise_if_account_suspended(response)
-        self._raise_if_account_deleted(response)
         self._raise_if_auth_upstream_unavailable(response)
         if response.status_code in (401, 403):
             raise ImbueCloudAuthError(f"Unauthenticated ({response.status_code}): {response.text[:300]}")
@@ -372,10 +344,10 @@ class ImbueCloudConnectorClient(MutableModel):
                 raise exc_cls(f"Connector returned non-JSON response: {response.text[:200]}") from exc
         raise exc_cls(f"Connector error {response.status_code}: {response.text[:300]}")
 
-    def _http_call(self, method: str, url: str, **kwargs: Any) -> httpx2.Response:
-        """Dispatch one HTTP call to the matching module-level ``httpx2`` function.
+    def _http_call(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Dispatch one HTTP call to the matching module-level ``httpx`` function.
 
-        Calls ``httpx2.get``/``post``/``put``/``delete`` by name at call time (not a
+        Calls ``httpx.get``/``post``/``put``/``delete`` by name at call time (not a
         cached reference) so tests that monkeypatch those functions still
         intercept the request. When an explicit ``transport`` is injected
         (the preferred test seam), the call goes through it instead.
@@ -387,16 +359,16 @@ class ImbueCloudConnectorClient(MutableModel):
         slow-but-successful operation reads as a failure.
         """
         if self.transport is not None:
-            with httpx2.Client(transport=self.transport) as injected_client:
+            with httpx.Client(transport=self.transport) as injected_client:
                 return injected_client.request(method, url, follow_redirects=True, **kwargs)
         if method == "GET":
-            return httpx2.get(url, follow_redirects=True, **kwargs)
+            return httpx.get(url, follow_redirects=True, **kwargs)
         if method == "POST":
-            return httpx2.post(url, follow_redirects=True, **kwargs)
+            return httpx.post(url, follow_redirects=True, **kwargs)
         if method == "PUT":
-            return httpx2.put(url, follow_redirects=True, **kwargs)
+            return httpx.put(url, follow_redirects=True, **kwargs)
         if method == "DELETE":
-            return httpx2.delete(url, follow_redirects=True, **kwargs)
+            return httpx.delete(url, follow_redirects=True, **kwargs)
         raise SwitchError(f"Unsupported HTTP method: {method}")
 
     def _send(
@@ -407,17 +379,17 @@ class ImbueCloudConnectorClient(MutableModel):
         exc_cls: type[Exception],
         idempotent: bool = True,
         **kwargs: Any,
-    ) -> httpx2.Response:
+    ) -> httpx.Response:
         """Make one connector request, retrying transient transport failures.
 
-        Returns the raw ``httpx2.Response`` (the caller still runs it through
+        Returns the raw ``httpx.Response`` (the caller still runs it through
         ``_check``/``_check_bucket`` for HTTP-status handling). On a transport
         error -- the connector was unreachable, reset, or timed out before a
         response -- this retries with bounded exponential backoff and, if it
         still fails, raises ``exc_cls`` with a concise message (never the raw
-        httpx2 traceback). ``idempotent`` (default ``True``) controls retry
+        httpx traceback). ``idempotent`` (default ``True``) controls retry
         breadth: idempotent calls (every GET/PUT/DELETE and the upsert-style
-        POSTs) retry on any ``httpx2.TransportError``; non-idempotent POSTs pass
+        POSTs) retry on any ``httpx.TransportError``; non-idempotent POSTs pass
         ``idempotent=False`` so only
         connect-phase errors -- where the request never reached the server --
         are retried, avoiding a double-allocation on a post-send blip.
@@ -435,7 +407,7 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         try:
             return retrying(self._http_call, method, url, **kwargs)
-        except httpx2.TransportError as exc:
+        except httpx.TransportError as exc:
             attempt_count = retrying.statistics["attempt_number"]
             raise exc_cls(
                 f"could not reach the imbue_cloud connector at {url} after {attempt_count} attempt(s): {exc}"
@@ -519,23 +491,17 @@ class ImbueCloudConnectorClient(MutableModel):
         an already-consumed one trips its token-theft detection, so only
         connect-phase transport errors (request never reached the server) are
         retried.
-
-        ``ImbueCloudAuthError`` is reserved for the connector refusing the
-        refresh (401/403): callers such as minds' expired-session detection
-        sign the account out on that class, so an unreachable connector raises
-        ``ImbueCloudUnreachableError`` and any other status
-        ``ImbueCloudConnectorError`` instead.
         """
         response = self._send(
             "POST",
             self._url("/auth/session/refresh"),
-            exc_cls=ImbueCloudUnreachableError,
+            exc_cls=ImbueCloudAuthError,
             idempotent=False,
             headers=_client_id_headers(),
             json={"refresh_token": refresh_token.get_secret_value()},
             timeout=self.timeout_seconds,
         )
-        return self._check(response, ImbueCloudConnectorError)
+        return self._check(response, ImbueCloudAuthError)
 
     def auth_revoke_session(self, access_token: SecretStr) -> None:
         """Revoke EVERY session for the caller's user (all devices + browser).
@@ -676,6 +642,16 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         self._check(response, ImbueCloudAuthError)
 
+    def auth_get_user(self, user_id: str) -> dict[str, Any]:
+        response = self._send(
+            "GET",
+            self._url(f"/auth/users/{user_id}"),
+            exc_cls=ImbueCloudAuthError,
+            headers=_client_id_headers(),
+            timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudAuthError)
+
     # Hosts (lease pool)
 
     def lease_host(
@@ -742,7 +718,7 @@ class ImbueCloudConnectorClient(MutableModel):
                 headers=self._bearer(access_token),
                 timeout=self.timeout_seconds,
             )
-        except httpx2.HTTPError as exc:
+        except httpx.HTTPError as exc:
             raise ImbueCloudConnectorError(
                 f"release request for host {host_db_id} could not reach the connector: {exc}"
             ) from exc
@@ -760,14 +736,14 @@ class ImbueCloudConnectorClient(MutableModel):
         since the connector owns the name.
         """
         try:
-            response = httpx2.post(
+            response = httpx.post(
                 self._url(f"/hosts/{host_db_id}/rename"),
                 headers=self._bearer(access_token),
                 json={"host_name": host_name},
                 timeout=self.timeout_seconds,
                 follow_redirects=True,
             )
-        except httpx2.HTTPError as exc:
+        except httpx.HTTPError as exc:
             raise ImbueCloudConnectorError(
                 f"rename request for host {host_db_id} could not reach the connector: {exc}"
             ) from exc
@@ -782,13 +758,13 @@ class ImbueCloudConnectorClient(MutableModel):
         returns the connector's ``{host_id, workspace_domain, region}`` body.
         """
         try:
-            response = httpx2.post(
+            response = httpx.post(
                 self._url(f"/hosts/{host_db_id}/enable-sharing"),
                 headers=self._bearer(access_token),
                 timeout=self.timeout_seconds,
                 follow_redirects=True,
             )
-        except httpx2.HTTPError as exc:
+        except httpx.HTTPError as exc:
             raise ImbueCloudConnectorError(
                 f"enable-sharing request for host {host_db_id} could not reach the connector: {exc}"
             ) from exc
@@ -809,7 +785,7 @@ class ImbueCloudConnectorClient(MutableModel):
 
     # Workspaces (full-lifecycle listing + stop/start)
 
-    def _check_workspaces_supported(self, response: httpx2.Response) -> None:
+    def _check_workspaces_supported(self, response: httpx.Response) -> None:
         # An old connector has no /workspaces routes. Surface that as its own
         # type so callers can fall back to the deprecated leased-only /hosts
         # listing.
@@ -974,33 +950,33 @@ class ImbueCloudConnectorClient(MutableModel):
         if metadata is not None:
             body["metadata"] = metadata
         try:
-            response = httpx2.post(
+            response = httpx.post(
                 self._url("/keys/create"),
                 headers=self._bearer(access_token),
                 json=body,
                 timeout=KEY_OP_TIMEOUT_SECONDS,
                 follow_redirects=True,
             )
-        except httpx2.HTTPError as exc:
+        except httpx.HTTPError as exc:
             raise ImbueCloudKeyError(f"Key creation HTTP request failed: {exc}") from exc
         body_json = self._check(response, ImbueCloudKeyError)
         return validate_wire(LiteLLMKeyMaterial, body_json)
 
     def list_litellm_keys(self, access_token: SecretStr) -> list[LiteLLMKeyInfo]:
         try:
-            response = httpx2.get(
+            response = httpx.get(
                 self._url("/keys"),
                 headers=self._bearer(access_token),
                 timeout=KEY_OP_TIMEOUT_SECONDS,
                 follow_redirects=True,
             )
-        except httpx2.HTTPError as exc:
+        except httpx.HTTPError as exc:
             raise ImbueCloudKeyError(f"Key list HTTP request failed: {exc}") from exc
         body = self._check(response, ImbueCloudKeyError)
         return parse_wire_entries(LiteLLMKeyInfo, body, "GET /keys", ImbueCloudKeyError)
 
     def get_litellm_key_info(self, access_token: SecretStr, key_id: str) -> LiteLLMKeyInfo:
-        response = httpx2.get(
+        response = httpx.get(
             self._url(f"/keys/{key_id}"),
             headers=self._bearer(access_token),
             timeout=KEY_OP_TIMEOUT_SECONDS,
@@ -1019,7 +995,7 @@ class ImbueCloudConnectorClient(MutableModel):
         body: dict[str, Any] = {"max_budget": max_budget}
         if budget_duration is not None:
             body["budget_duration"] = budget_duration
-        response = httpx2.put(
+        response = httpx.put(
             self._url(f"/keys/{key_id}/budget"),
             headers=self._bearer(access_token),
             json=body,
@@ -1029,7 +1005,7 @@ class ImbueCloudConnectorClient(MutableModel):
         self._check(response, ImbueCloudKeyError)
 
     def delete_litellm_key(self, access_token: SecretStr, key_id: str) -> None:
-        response = httpx2.delete(
+        response = httpx.delete(
             self._url(f"/keys/{key_id}"),
             headers=self._bearer(access_token),
             timeout=KEY_OP_TIMEOUT_SECONDS,
@@ -1154,7 +1130,7 @@ class ImbueCloudConnectorClient(MutableModel):
         count = body.get("count")
         return int(count) if isinstance(count, int) else len(grantee_user_ids)
 
-    def _raise_if_share_refused(self, response: httpx2.Response) -> None:
+    def _raise_if_share_refused(self, response: httpx.Response) -> None:
         """Map the connector's structured 409 refusals of the grants push and invitation routes."""
         if response.status_code != 409:
             return
@@ -1287,7 +1263,7 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         return validate_wire(NotificationPreferencesInfo, self._check(response, ImbueCloudAccountError))
 
-    def _check_bucket(self, response: httpx2.Response) -> Any:
+    def _check_bucket(self, response: httpx.Response) -> Any:
         """Validate a bucket-route response, mapping status codes to typed errors."""
         self._raise_if_client_too_old(response)
         self._raise_if_quota_exceeded(response)
@@ -1316,7 +1292,7 @@ class ImbueCloudConnectorClient(MutableModel):
         raise ImbueCloudBucketError(f"Connector error {response.status_code}: {detail}")
 
     def create_bucket(self, access_token: SecretStr, name: str, access: str) -> R2BucketCreateResult:
-        response = httpx2.post(
+        response = httpx.post(
             self._url("/buckets"),
             headers=self._bearer(access_token),
             json={"name": name, "access": access},
@@ -1326,7 +1302,7 @@ class ImbueCloudConnectorClient(MutableModel):
         return validate_wire(R2BucketCreateResult, self._check_bucket(response))
 
     def list_buckets(self, access_token: SecretStr) -> list[R2BucketInfo]:
-        response = httpx2.get(
+        response = httpx.get(
             self._url("/buckets"),
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
@@ -1336,7 +1312,7 @@ class ImbueCloudConnectorClient(MutableModel):
         return parse_wire_entries(R2BucketInfo, body, "GET /buckets", ImbueCloudBucketError)
 
     def get_bucket_info(self, access_token: SecretStr, name: str) -> R2BucketInfo:
-        response = httpx2.get(
+        response = httpx.get(
             self._url(f"/buckets/{name}"),
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
@@ -1345,7 +1321,7 @@ class ImbueCloudConnectorClient(MutableModel):
         return validate_wire(R2BucketInfo, self._check_bucket(response))
 
     def destroy_bucket(self, access_token: SecretStr, name: str) -> None:
-        response = httpx2.delete(
+        response = httpx.delete(
             self._url(f"/buckets/{name}"),
             headers=self._bearer(access_token),
             timeout=KEY_OP_TIMEOUT_SECONDS,
@@ -1355,7 +1331,7 @@ class ImbueCloudConnectorClient(MutableModel):
 
     def roll_bucket_key(self, access_token: SecretStr, name: str) -> R2KeyMaterial:
         """Return fresh credentials for a bucket's single key (same Access Key ID, new secret)."""
-        response = httpx2.post(
+        response = httpx.post(
             self._url(f"/buckets/{name}/roll-key"),
             headers=self._bearer(access_token),
             timeout=KEY_OP_TIMEOUT_SECONDS,
@@ -1366,7 +1342,7 @@ class ImbueCloudConnectorClient(MutableModel):
     def list_bucket_keys(self, access_token: SecretStr, name: str | None) -> list[R2KeyInfo]:
         """List keys for one bucket (``name`` set) or across all the caller's buckets (``name`` None)."""
         path = "/bucket-keys" if name is None else f"/buckets/{name}/keys"
-        response = httpx2.get(
+        response = httpx.get(
             self._url(path),
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
@@ -1608,27 +1584,6 @@ class ImbueCloudConnectorClient(MutableModel):
         """
         return f"/admin/accounts/{quote(email, safe='@')}"
 
-    def _check_admin_account(self, response: httpx2.Response, email: str) -> dict[str, Any]:
-        """``_check`` for the email-addressed account routes, with their own answers typed first.
-
-        A 404 is the connector finding no account for the email (a finalized
-        account has no identity left, so it answers this too) and maps to
-        ``ImbueCloudUserNotFoundError``; a 403 ``workspaces_present`` maps to
-        ``ImbueCloudWorkspacesPresentError`` before ``_check`` would read the
-        403 as an authentication failure. FastAPI's bare 404 for a route this
-        connector does not serve stays a connector error, so an old connector
-        never reads as "no such account".
-        """
-        if _is_route_not_served(response):
-            raise ImbueCloudConnectorError(
-                "This connector does not serve this account route yet; redeploy it "
-                "(Imbue-internal: `minds-admin env deploy`)."
-            )
-        if response.status_code == 404:
-            raise ImbueCloudUserNotFoundError(f"No account found for {email}")
-        self._raise_if_workspaces_present(response)
-        return self._check(response, ImbueCloudAccountError)
-
     def admin_get_account(self, admin_api_key: SecretStr, email: str) -> AdminAccountInfo:
         response = self._send(
             "GET",
@@ -1637,7 +1592,7 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(admin_api_key),
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
-        return validate_wire(AdminAccountInfo, self._check_admin_account(response, email))
+        return validate_wire(AdminAccountInfo, self._check(response, ImbueCloudAccountError))
 
     def admin_set_account_plan(self, admin_api_key: SecretStr, email: str, plan: str) -> dict[str, Any]:
         # Always resets to the plan's defaults, so a retried request lands in
@@ -1752,28 +1707,6 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         return self._check(response, ImbueCloudAccountError)
 
-    def admin_delete_account(self, admin_api_key: SecretStr, email: str) -> dict[str, Any]:
-        """The delete step for the addressed account (idempotent); the reaper finalizes it after the grace period."""
-        response = self._send(
-            "POST",
-            self._url(f"{self._admin_account_path(email)}/delete"),
-            exc_cls=ImbueCloudAccountError,
-            headers=self._bearer(admin_api_key),
-            timeout=KEY_OP_TIMEOUT_SECONDS,
-        )
-        return self._check_admin_account(response, email)
-
-    def admin_finalize_account(self, admin_api_key: SecretStr, email: str) -> dict[str, Any]:
-        """The finalize step, now, for an account already deleted (a 409 ``not_deleted`` otherwise)."""
-        response = self._send(
-            "POST",
-            self._url(f"{self._admin_account_path(email)}/finalize"),
-            exc_cls=ImbueCloudAccountError,
-            headers=self._bearer(admin_api_key),
-            timeout=KEY_OP_TIMEOUT_SECONDS,
-        )
-        return self._check_admin_account(response, email)
-
     def admin_start_workspace(self, admin_api_key: SecretStr, host_db_id: str) -> dict[str, Any]:
         """Operator start of one stopped workspace (idempotent, like the owner start; no quota check)."""
         response = self._send(
@@ -1847,22 +1780,6 @@ class ImbueCloudConnectorClient(MutableModel):
             params=params,
             # A full pass fans out to Cloudflare per over-quota account.
             timeout=KEY_OP_TIMEOUT_SECONDS,
-        )
-        return self._check(response, ImbueCloudAccountError)
-
-    def admin_run_share_retirement_sweep(self, admin_api_key: SecretStr, dry_run: bool) -> dict[str, Any]:
-        """Run one share retirement sweep pass on demand (operator tool + deployment tests).
-
-        ``dry_run`` lists every active share with the verdict it would get
-        (``live``, ``retired``, ``unmatched``) and retires nothing.
-        """
-        response = self._send(
-            "POST",
-            self._url("/admin/sweep/share-retirement"),
-            exc_cls=ImbueCloudAccountError,
-            headers=self._bearer(admin_api_key),
-            params={"dry_run": "1"} if dry_run else None,
-            timeout=ADMIN_SWEEP_TIMEOUT_SECONDS,
         )
         return self._check(response, ImbueCloudAccountError)
 
@@ -1947,11 +1864,18 @@ class ImbueCloudConnectorClient(MutableModel):
                 timeout=self.timeout_seconds,
             )
         if response.status_code == 409:
-            code, message, detail = _structured_conflict_detail(response)
-            if code == "record_format_too_new":
-                raise ImbueCloudRecordFormatTooNewError(message)
+            detail_message = _detail_from_response(response)
+            detail = _detail_dict_from_response(response)
+            if detail is not None and detail.get("code") == "record_format_too_new":
+                # Prefer the structured human message over detail_message,
+                # which for a dict detail is the repr of the whole payload
+                # (embedded stored row included).
+                format_message = detail.get("message")
+                raise ImbueCloudRecordFormatTooNewError(
+                    format_message if isinstance(format_message, str) else detail_message
+                )
             stored = detail.get("stored") if detail is not None else None
-            raise ImbueCloudSyncConflictError(message, stored if isinstance(stored, dict) else None)
+            raise ImbueCloudSyncConflictError(detail_message, stored if isinstance(stored, dict) else None)
         body = self._check(response, ImbueCloudSyncError)
         return validate_wire(SyncWorkspaceRecord, body)
 
@@ -1998,12 +1922,7 @@ class ImbueCloudConnectorClient(MutableModel):
         self._check(response, ImbueCloudSyncError)
 
     def scrub_sync_secrets(self, access_token: SecretStr) -> int:
-        """Strip every client-encrypted blob of the account server-side; returns how many records were scrubbed.
-
-        The connector clears the records' ``encrypted_secrets`` and the
-        account documents' ``encrypted_payload`` in one call; the count covers
-        the records only.
-        """
+        """Strip encrypted_secrets from all the account's records; returns how many were scrubbed."""
         response = self._send(
             "POST",
             self._url("/sync/scrub-secrets"),
@@ -2049,79 +1968,6 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         self._check(response, ImbueCloudSyncError)
 
-    # Account documents (per-account synced documents, e.g. connections)
-
-    def list_sync_documents(self, access_token: SecretStr, kind: str) -> list[SyncDocument]:
-        """Every document of one kind for the account, tombstones included."""
-        response = self._send(
-            "GET",
-            self._url(f"/sync/documents/{quote(kind, safe='')}"),
-            exc_cls=ImbueCloudSyncError,
-            headers=self._bearer(access_token),
-            timeout=self.timeout_seconds,
-        )
-        body = self._check(response, ImbueCloudSyncError)
-        return parse_wire_entries(
-            SyncDocument, body.get("documents", []), f"GET /sync/documents/{kind}", ImbueCloudSyncError
-        )
-
-    def put_sync_document(self, access_token: SecretStr, document: SyncDocument) -> SyncDocument:
-        """Push one document (insert at revision 1, else CAS on revision); returns the stored row.
-
-        Only the fields explicitly set on ``document`` ride the request, so an
-        ``encrypted_payload`` that was never set gets the server's
-        preserve-on-absent behavior while an explicit ``None`` clears it. A
-        409 raises one of three typed errors: ``document_format_too_new``
-        raises :class:`ImbueCloudRecordFormatTooNewError` (terminal until the
-        client updates), ``document_limit_exceeded`` raises
-        :class:`ImbueCloudDocumentLimitError`, and a revision conflict raises
-        :class:`ImbueCloudSyncConflictError` carrying the server's current row
-        (``None`` when the push tried to insert at a revision other than 1).
-        """
-        response = self._send(
-            "PUT",
-            self._url(f"/sync/documents/{quote(document.kind, safe='')}/{quote(document.doc_id, safe='')}"),
-            exc_cls=ImbueCloudSyncError,
-            headers=self._bearer(access_token),
-            json=document.model_dump(mode="json", exclude_unset=True),
-            timeout=self.timeout_seconds,
-        )
-        if response.status_code == 409:
-            code, message, detail = _structured_conflict_detail(response)
-            if code == "document_format_too_new":
-                raise ImbueCloudRecordFormatTooNewError(message)
-            if code == "document_limit_exceeded":
-                limit = detail.get("limit") if detail is not None else None
-                raise ImbueCloudDocumentLimitError(message, limit=limit if isinstance(limit, int) else None)
-            stored = detail.get("stored") if detail is not None else None
-            raise ImbueCloudSyncConflictError(message, stored if isinstance(stored, dict) else None)
-        body = self._check(response, ImbueCloudSyncError)
-        return validate_wire(SyncDocument, body)
-
-    def delete_sync_document(self, access_token: SecretStr, kind: str, doc_id: str) -> SyncDocument:
-        """Tombstone one document (idempotent) and return the stored tombstone.
-
-        Raises :class:`ImbueCloudDocumentNotFoundError` when the account holds
-        no such document (a structured 404); a bare 404 means a connector too
-        old for the documents routes and raises :class:`ImbueCloudSyncError`.
-        """
-        response = self._send(
-            "DELETE",
-            self._url(f"/sync/documents/{quote(kind, safe='')}/{quote(doc_id, safe='')}"),
-            exc_cls=ImbueCloudSyncError,
-            headers=self._bearer(access_token),
-            timeout=self.timeout_seconds,
-        )
-        if response.status_code == 404:
-            detail = _detail_dict_from_response(response)
-            if detail is not None and detail.get("code") == "document_not_found":
-                structured_message = detail.get("message")
-                raise ImbueCloudDocumentNotFoundError(
-                    structured_message if isinstance(structured_message, str) else f"no document {kind}/{doc_id}"
-                )
-        body = self._check(response, ImbueCloudSyncError)
-        return validate_wire(SyncDocument, body)
-
     # Paid lists (admin-key authenticated)
     #
     # These take the fixed admin API key (NOT a SuperTokens
@@ -2131,7 +1977,7 @@ class ImbueCloudConnectorClient(MutableModel):
     def _list_paid_entries(
         self, admin_api_key: SecretStr, path: str, value_key: str, paid_only: bool
     ) -> list[PaidListEntry]:
-        response = httpx2.get(
+        response = httpx.get(
             self._url(path),
             headers=self._bearer(admin_api_key),
             params={"paid_only": "true" if paid_only else "false"},
@@ -2150,7 +1996,7 @@ class ImbueCloudConnectorClient(MutableModel):
         return entries
 
     def _post_paid_entry(self, admin_api_key: SecretStr, path: str, value: str) -> dict[str, Any]:
-        response = httpx2.post(
+        response = httpx.post(
             self._url(path),
             headers=self._bearer(admin_api_key),
             json={"value": value},
@@ -2227,7 +2073,7 @@ def create_litellm_key_rotating_on_exists(
     )
 
 
-def _is_route_not_served(response: httpx2.Response) -> bool:
+def _is_route_not_served(response: httpx.Response) -> bool:
     """Whether ``response`` is FastAPI's fixed answer for a route this connector does not have.
 
     An older connector answers an unknown path with 404 "Not Found" (or 405
@@ -2247,7 +2093,7 @@ def _is_route_not_served(response: httpx2.Response) -> bool:
     return detail is None or detail in ("Not Found", "Method Not Allowed")
 
 
-def _detail_from_response(response: httpx2.Response) -> str:
+def _detail_from_response(response: httpx.Response) -> str:
     """Extract the connector's ``detail`` error message, falling back to the raw body."""
     try:
         body = response.json()
@@ -2262,7 +2108,7 @@ def _detail_from_response(response: httpx2.Response) -> str:
     return response.text[:300]
 
 
-def _detail_dict_from_response(response: httpx2.Response) -> dict[str, Any] | None:
+def _detail_dict_from_response(response: httpx.Response) -> dict[str, Any] | None:
     """Extract the connector's structured ``detail`` dict, or None when the body has no such shape."""
     try:
         payload = response.json()
@@ -2271,23 +2117,6 @@ def _detail_dict_from_response(response: httpx2.Response) -> dict[str, Any] | No
         return None
     detail = payload.get("detail") if isinstance(payload, dict) else None
     return detail if isinstance(detail, dict) else None
-
-
-def _structured_conflict_detail(response: httpx2.Response) -> tuple[str | None, str, dict[str, Any] | None]:
-    """The ``(code, message, detail)`` of a sync push's 409.
-
-    ``message`` prefers the detail's structured ``message`` over the raw
-    detail text, which for a dict detail is the repr of the whole payload
-    (embedded stored row included). ``code`` is None for a 409 that carries
-    no structured code; ``detail`` is the whole dict for callers that need
-    more of it (``stored``, ``limit``).
-    """
-    detail_message = _detail_from_response(response)
-    detail = _detail_dict_from_response(response)
-    code = detail.get("code") if detail is not None else None
-    structured_message = detail.get("message") if detail is not None else None
-    message = structured_message if isinstance(structured_message, str) else detail_message
-    return (code if isinstance(code, str) else None), message, detail
 
 
 def _parse_paid_list_entry(raw: dict[str, Any], value_key: str) -> PaidListEntry:
@@ -2333,11 +2162,6 @@ def _parse_share_info(body: dict[str, Any], state: str) -> ShareInfo:
         relays=relay_logins,
         relay_token=SecretStr(relay_token) if relay_token else None,
         last_tunnel_login_at=body.get("last_tunnel_login_at"),
-        last_seen_at=body.get("last_seen_at"),
-        created_at=body.get("created_at"),
-        updated_at=body.get("updated_at"),
-        entry_label=body.get("entry_label"),
-        share_label=body.get("share_label"),
         cert_not_after=body.get("cert_not_after"),
         chrome_origin=str(raw_chrome_origin) if raw_chrome_origin else None,
         needs_reshare=body.get("needs_reshare") is True,

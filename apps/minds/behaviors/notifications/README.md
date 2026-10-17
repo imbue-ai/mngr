@@ -2,7 +2,7 @@
 
 Understanding this behavior corpus calls for the behaviors skill; consult it when reading this file.
 
-A *notification* is an entry in the app's notification feed: a workspace's permission request, a workspace agent's message to the user (a chat's, which opening lands in; or the workspace's own, which may name a page of one of its apps to open instead), or an event the app reports on the user's behalf.
+A *notification* is an entry in the app's notification feed: a workspace's permission request, a chat agent's message to the user, or an event the app reports on the user's behalf.
 The feed backs the bell and its count, the dock count, the *toast* (an in-app card that flashes in a window and then retires), and the *banner* (the operating system's own notification).
 
 A *main window* is a desktop window that shows the app's pages; a *pulled-out window* shows one window of a workspace on its own.

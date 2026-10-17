@@ -1,0 +1,3 @@
+Machine settings now show the machine's SSH command under General > "Connect over SSH", the same copyable command the recovery card's Troubleshooting block offers. It is available whenever discovery reports an SSH endpoint for the machine, so a healthy machine can be reached for debugging without first landing on the recovery screen. A machine with no SSH endpoint shows no section.
+
+The copied command (in both places) now matches the one mngr prints: when mngr reports a pinned known_hosts file for the machine, the command verifies the host against it (`-o UserKnownHostsFile=... -o StrictHostKeyChecking=yes`) instead of falling back to `~/.ssh/known_hosts`, and shell-quotes paths so a key path containing a space pastes correctly.

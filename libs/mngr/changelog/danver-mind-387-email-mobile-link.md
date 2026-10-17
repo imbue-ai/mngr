@@ -1,0 +1,1 @@
+- The generated command docs now cover `mngr imbue_cloud shares mobile-access-link`, which has Imbue Cloud email you the link to one of your own published workspaces.

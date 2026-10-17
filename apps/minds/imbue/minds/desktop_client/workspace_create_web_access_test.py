@@ -16,17 +16,12 @@ from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.conftest import make_share_probe_result
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
-from imbue.minds.desktop_client.minds_config import NotificationStyle
-from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
-from imbue.minds.desktop_client.notification_feed import NotificationFeed
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import enable_web_access_for_workspace
 from imbue.minds.desktop_client.testing import read_injected_share_env_text
-from imbue.minds.desktop_client.ui_models import NotificationKind
 from imbue.minds.desktop_client.workspace_create import WebAccessEnabler
 from imbue.minds.primitives import ServiceName
 from imbue.minds.utils.testing import RecordingMngrCaller
@@ -77,7 +72,7 @@ class _RecordingCreateShareCli(FakeImbueCloudCli):
         workspace_id: str | None = None,
     ) -> ShareCliInfo:
         self.create_share_calls.append((account, host_id, entry_label))
-        raise ImbueCloudCliError("recorded; stopping the bring-up here.")
+        raise ImbueCloudCliError("recorded; stopping the bring-up here")
 
 
 def _store_with_associated_workspace(
@@ -217,29 +212,18 @@ def test_enable_web_access_local_row_resolves_urls_without_an_app_context(tmp_pa
     assert base64.b64encode(empty_toml.encode()).decode("ascii") in write_command
 
 
-def test_web_access_enabler_swallows_sharing_failures_and_tells_the_user(tmp_path: Path) -> None:
+def test_web_access_enabler_swallows_sharing_failures(tmp_path: Path) -> None:
     # A share bring-up hiccup must never flip an already-successful create:
     # the agent creator marks the whole create FAILED on any raised exception.
-    # The creating page has moved on by then, so the failure lands in the
-    # notification feed instead, naming the workspace and the way back.
     recording_cli = _RecordingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
     store, cli = _store_with_associated_workspace(tmp_path, cli=recording_cli, is_cloud_row=True)
     assert isinstance(cli, _RecordingCreateShareCli)
-    feed = NotificationFeed(
-        notification_dispatcher=None,
-        get_dispatch_preferences=lambda: NotificationDispatchPreferences(
-            is_enabled=True, style=NotificationStyle.BOTH
-        ),
-        is_main_window_focused=lambda: False,
-        is_screen_locked=lambda: False,
-    )
     enabler = WebAccessEnabler(
         cli=cli,
         session_store=store,
         is_cloud_row=True,
         backend_resolver=_empty_resolver(),
         client_env_config=_client_env_config(),
-        notification_feed=feed,
         active_share_cache=ActiveShareCache(),
     )
 
@@ -249,57 +233,6 @@ def test_web_access_enabler_swallows_sharing_failures_and_tells_the_user(tmp_pat
     # failure escaping the enabler.
     assert cli.create_share_calls == [("owner@example.com", _HOST_ID, None)]
     assert cli.shares_by_account == {}
-    events = [
-        (entry.title, entry.body, entry.workspace_agent_id)
-        for entry in feed.reconcile((), {}).entries
-        if entry.kind == NotificationKind.SYSTEM_EVENT
-    ]
-    assert len(events) == 1
-    title, body, workspace_agent_id = events[0]
-    assert title == "Sharing was not enabled"
-    # The provider's message keeps its own full stop; the card does not add a second one.
-    assert body == (
-        "Could not publish this workspace: recorded; stopping the bring-up here. "
-        "Turn sharing on from the workspace's Share panel to try again."
-    )
-    assert workspace_agent_id == str(_AGENT_ID)
-
-
-def test_web_access_enabler_points_a_quota_refusal_at_the_shared_workspaces_page(tmp_path: Path) -> None:
-    # A full share quota is fixed on the shared-workspaces page (a leaked share
-    # holds the slot), so that card's gesture lands there, not on the backups page.
-    quota_refusing_cli = FakeImbueCloudCli(
-        connector_url=FAKE_CONNECTOR_URL,
-        create_share_error_to_raise=ImbueCloudQuotaExceededCliError(
-            "shares create: Shared workspace limit reached (50 of 50)."
-        ),
-    )
-    store, cli = _store_with_associated_workspace(tmp_path, cli=quota_refusing_cli, is_cloud_row=True)
-    feed = NotificationFeed(
-        notification_dispatcher=None,
-        get_dispatch_preferences=lambda: NotificationDispatchPreferences(
-            is_enabled=True, style=NotificationStyle.BOTH
-        ),
-        is_main_window_focused=lambda: False,
-        is_screen_locked=lambda: False,
-    )
-    enabler = WebAccessEnabler(
-        cli=cli,
-        session_store=store,
-        is_cloud_row=True,
-        backend_resolver=_empty_resolver(),
-        client_env_config=_client_env_config(),
-        notification_feed=feed,
-        active_share_cache=ActiveShareCache(),
-    )
-
-    enabler(_AGENT_ID, HostId(_HOST_ID))
-
-    (entry,) = [e for e in feed.reconcile((), {}).entries if e.kind == NotificationKind.SYSTEM_EVENT]
-    assert entry.title == "Sharing was not enabled"
-    assert entry.link_path == "/workspaces/shared"
-    assert "Review your shared workspaces to free a slot" in entry.body
-    assert "Shared workspace limit reached (50 of 50)" in entry.body
 
 
 def test_web_access_enabler_enables_sharing_for_cloud_rows(tmp_path: Path) -> None:

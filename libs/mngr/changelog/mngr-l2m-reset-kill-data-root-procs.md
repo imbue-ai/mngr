@@ -1,0 +1,1 @@
+The default Dockerfile (`imbue/mngr/resources/Dockerfile`, also the offload test image) now installs `lsof`, which the minds runner-reset helper `kill-processes-under.sh` and its tests use to find processes by the files they hold.

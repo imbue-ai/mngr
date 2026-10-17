@@ -1,0 +1,3 @@
+Promoted minds 0.5.2 to the alpha channel (build `260909wnd3gb4z1`, `minds-v0.5.2`), at 100% of the channel, replacing 0.5.1. Beta and stable stay on 0.5.0 build `260902shwco3ynx`.
+
+The production pool is baked at `minds-v0.5.2` ahead of this -- 13 slices in US-WEST-OR and 7 in US-EAST-VA, all 20 verified container-side -- so alpha clients get the fast path rather than a slow rebuild. The production services were also deployed first (`deploy_id 20260909T225715Z`), which moved the web-create pin from `minds-v0.4.3` to `minds-v0.5.2`, so browser and desktop creates now target the same tag for the first time since 0.4.3.

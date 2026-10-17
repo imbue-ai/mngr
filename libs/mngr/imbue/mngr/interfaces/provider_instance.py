@@ -37,7 +37,6 @@ from imbue.mngr.interfaces.data_types import BoundedHostRead
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
-from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -58,6 +57,7 @@ from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -223,7 +223,6 @@ def _build_agent_details_from_online_agent(
     host: OnlineHostInterface,
     ssh_activity: datetime | None,
     field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]],
-    lifecycle_snapshot: HostLifecycleSnapshot | None,
 ) -> AgentDetails:
     """Build AgentDetails from a live agent on an online host."""
     # Get activity config from host
@@ -247,7 +246,7 @@ def _build_agent_details_from_online_agent(
     # Compute plugin-specific fields from field generators
     plugin_data = _compute_plugin_fields(field_generators, agent, host)
 
-    lifecycle = agent.probe_lifecycle_from_snapshot(lifecycle_snapshot)
+    lifecycle = agent.probe_lifecycle()
 
     return AgentDetails(
         id=agent.id,
@@ -730,11 +729,18 @@ class ProviderInstanceInterface(MutableModel, ABC):
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         snapshot: SnapshotName | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> OnlineHostInterface:
         """Create and start a new host with the given name and configuration.
 
         If snapshot is provided, the host is created from the snapshot image
         instead of building a new one.
+
+        ``published_ports`` are the guest ports the host's workload listens on; the
+        provider publishes each the way it can and records the resulting host-side
+        endpoints on the host (``get_published_endpoints``), or raises
+        ``PublishedPortUnsupportedError`` before any resource exists when it cannot
+        (``specs/published-ports/spec.md``).
         """
         ...
 
@@ -1124,12 +1130,10 @@ class ProviderInstanceInterface(MutableModel, ABC):
             # this is inside the try block so that, if the host appears to be online but transitions to offline, we properly fall back to offline data
             host_details, ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
 
-            # Get all agents on this host, and the tmux panes and processes their states are read from
+            # Get all agents on this host
             agents: list[AgentInterface] | None = None
-            lifecycle_snapshot: HostLifecycleSnapshot | None = None
             if isinstance(host, OnlineHostInterface):
                 agents = host.get_agents()
-                lifecycle_snapshot = host.read_lifecycle_snapshot() if agents else None
 
             # Build AgentDetails for each agent on this host
             resolved_field_generators = field_generators or {}
@@ -1142,7 +1146,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
                         agent = next((a for a in agents if a.id == agent_ref.agent_id), None)
                         if agent is not None:
                             agent_details = _build_agent_details_from_online_agent(
-                                agent, host_details, host, ssh_activity, resolved_field_generators, lifecycle_snapshot
+                                agent, host_details, host, ssh_activity, resolved_field_generators
                             )
                         else:
                             # Agent was discovered but is no longer on the host

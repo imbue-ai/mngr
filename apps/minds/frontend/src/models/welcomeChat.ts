@@ -1,16 +1,15 @@
 // The onboarding conversation as the workspace's first chat. Once a create attempt is
 // done, the creation page hands everything said so far (the manifesto exchange, the
-// questions and their answers, the settings, the setup line, the recording an onboarding
-// create shows, the welcome) to the desktop client, which seeds a chat inside the new
-// workspace with it, so the conversation simply continues there. This module turns the page's transcript into that chat's turns, as
+// questions and their answers, the settings, the setup and ready lines) to the desktop
+// client, which seeds a chat inside the new workspace with it, so the conversation simply
+// continues there. This module turns the page's transcript into that chat's turns, as
 // markdown the chat app renders; the toggles become <details> blocks, which it allows.
 
 import type { CreateAttemptRequestSummary } from "./create";
 import {
   SETUP_LINE,
-  SHOWCASE_APP,
+  SETUP_SECTIONS,
   readyTurnMarkdown,
-  showcaseMarkdown,
   summaryLines,
 } from "./creationTranscript";
 import type {
@@ -120,19 +119,15 @@ export function flowTurns(entries: TranscriptEntry[]): WelcomeChatTurn[] {
   return turns;
 }
 
-/**
- * The creation page's own turns: the settings, the setup line, the recording when the page showed one
- * (``isShowcaseShown``, the attempt's ``is_onboarding_driven_by_agent``), and the welcome.
- */
+/** The creation page's own turns: the settings, the setup line with its reading material, and the ready line with its list. */
 export function creationTurns(
   request: CreateAttemptRequestSummary,
   isCloudPreset: boolean,
-  isShowcaseShown: boolean,
 ): WelcomeChatTurn[] {
+  const guide = SETUP_SECTIONS.map((section) => disclosureMarkdown(section));
   return [
     user(summaryLines(request, isCloudPreset).join("\n")),
-    assistant(SETUP_LINE),
-    ...(isShowcaseShown ? [assistant(showcaseMarkdown(SHOWCASE_APP))] : []),
+    assistant([SETUP_LINE, "", ...guide].join("\n")),
     assistant(readyTurnMarkdown()),
   ];
 }
@@ -143,14 +138,13 @@ export function welcomeChatBody(
   request: CreateAttemptRequestSummary,
   // Whether the create was the start flow's Imbue Cloud answer, which the settings turn restates as that one choice.
   isCloudPreset: boolean,
-  isShowcaseShown: boolean,
 ): WelcomeChatBody {
   return {
     title: WELCOME_CHAT_TITLE,
     turns: [
       ...manifestoTurns(),
       ...flowTurns(entries),
-      ...creationTurns(request, isCloudPreset, isShowcaseShown),
+      ...creationTurns(request, isCloudPreset),
     ],
   };
 }
@@ -170,11 +164,7 @@ async function refusalReason(response: Response): Promise<string> {
   return parts.length === 0 ? "" : `: ${parts.join(" -- ")}`;
 }
 
-/**
- * Hand the conversation to the attempt's workspace. Resolves with the seeded chat's id once
- * the attempt is done, or with "" while it is still being built: the desktop client holds the
- * conversation and seeds it when the attempt finishes.
- */
+/** Hand the conversation to the finished attempt's workspace; resolves with the seeded chat's id. */
 export async function postWelcomeChat(
   createAttemptId: string,
   body: WelcomeChatBody,

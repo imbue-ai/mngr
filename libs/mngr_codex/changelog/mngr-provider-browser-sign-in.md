@@ -1,0 +1,1 @@
+- The codex app-server client can sign in to ChatGPT: `start_chatgpt_login()` (browser login, returns the authorize URL), `start_device_login()` (device code), and `wait_login_completed()`, which waits for the `account/login/completed` notification of that login.

@@ -1,0 +1,1 @@
+Lima discovery now reports each host's recorded size (`DiscoveredHost.size`: the VM's CPUs and memory, and the data disk that backs the host's data) from the host records it already reads, so the `mngr observe` stream carries it.

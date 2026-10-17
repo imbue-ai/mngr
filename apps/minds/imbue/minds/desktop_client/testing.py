@@ -6,7 +6,6 @@ import json
 import os
 import queue
 import re
-import shlex
 import stat
 import subprocess
 import threading
@@ -26,9 +25,6 @@ from typing import Any
 from typing import Final
 
 import pytest
-from cheroot import wsgi
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
 from flask import Flask
 from loguru import logger as loguru_logger
 from pydantic import Field
@@ -49,7 +45,6 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.chat_app import EXIT_SENTINEL
 from imbue.minds.desktop_client.chat_app import FALLBACK_BEGIN_SENTINEL
 from imbue.minds.desktop_client.chat_app import FALLBACK_EXIT_SENTINEL
-from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
@@ -57,9 +52,6 @@ from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.environment_signals import NetworkProber
 from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.desktop_client.environment_signals import SshEndpoint
-from imbue.minds.desktop_client.folder_sync import FolderSyncManager
-from imbue.minds.desktop_client.folder_sync import FolderSyncStatus
-from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceLogin
@@ -92,7 +84,6 @@ from imbue.minds.desktop_client.state import set_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
-from imbue.minds.desktop_client.ui_models import UiClientStateMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
@@ -101,7 +92,6 @@ from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
-from imbue.minds.desktop_client.ui_publisher import DEFAULT_MIN_SECONDS_BETWEEN_UI_PASSES
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_apply_window import AGENTS_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import AGENTS_END_SENTINEL
@@ -110,28 +100,17 @@ from imbue.minds.desktop_client.update_apply_window import BUSY_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import BUSY_END_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_END_SENTINEL
-from imbue.minds.desktop_client.update_apply_window import WATCHDOG_INSTALLED_SENTINEL
 from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
-from imbue.minds.desktop_client.update_program_stubs_testing import STUB_MNGR_SOURCE
-from imbue.minds.desktop_client.update_program_stubs_testing import STUB_TOOL_SOURCE
+from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
-from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_archive
-from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.primitives import DeviceId
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
-from imbue.minds.workspace_programs import update_workspace
-from imbue.minds.workspace_programs.background_task_markers import MARKER_ROOT
-from imbue.minds.workspace_programs.update_dispatcher import AGENT_PIDS_DIR
-from imbue.minds.workspace_programs.update_dispatcher import AgentEnvironment
-from imbue.minds.workspace_programs.update_dispatcher import ProgramContext
-from imbue.minds.workspace_programs.update_protocol import UPDATE_COMMAND_RESULT_MARKER
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import PersistedProviderInstanceConfig
-from imbue.mngr.api.exec import COMMAND_EXECUTION_FAILURE_PREFIX
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -139,11 +118,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.utils.polling import poll_for_value
-from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.testing import make_in_memory_test_ca
-from imbue.mngr_forward.tls import LocalCertificateAuthority
 from imbue.mngr_forward.tls import build_server_ssl_context
 from imbue.mngr_forward.tls import generate_server_credentials
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -413,26 +389,6 @@ def tamper_session_cookie_signed_content(cookie_value: str) -> str:
     return flipped_head + separator + signature
 
 
-_WSGI_SERVER_STOP_TIMEOUT_SECONDS: Final[float] = 5.0
-
-
-@contextmanager
-def serve_wsgi_server_in_thread(server: wsgi.Server, thread_name: str) -> Iterator[None]:
-    """Bind a cheroot server and serve it on a daemon thread for the duration of the block.
-
-    The server is prepared (bound and listening) before the block runs, so a
-    client can connect at once, and stopped and joined on the way out.
-    """
-    server.prepare()
-    thread = threading.Thread(target=server.serve, name=thread_name, daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        server.stop()
-        thread.join(timeout=_WSGI_SERVER_STOP_TIMEOUT_SECONDS)
-
-
 @contextmanager
 def capture_error_logs() -> Iterator[list[str]]:
     """Capture loguru ERROR-level records (a loguru sink; caplog can't hook loguru).
@@ -502,17 +458,14 @@ def _empty_workspaces_message() -> UiWorkspacesMessage:
 def build_ui_state_publisher_for_test(
     derive_workspaces: Callable[[], UiWorkspacesMessage] = _empty_workspaces_message,
     derive_health_states: Callable[[], tuple[UiHealthMessage, ...]] = tuple,
-    min_seconds_between_passes: float = DEFAULT_MIN_SECONDS_BETWEEN_UI_PASSES,
-    resolve_workspace_account_id: Callable[[str], str] = lambda _agent_id: LOCAL_PROFILE_USER_ID,
 ) -> tuple[UiStatePublisher, "queue.Queue[str | None]"]:
     """A publisher over a fresh broadcaster, plus the queue one registered window reads.
 
     Every derive answers an empty frame, because the tests that build one of
     these are about what the publisher *does* with the frames rather than what is
-    in them. The exceptions are the ones a test can want to say something about:
-    the workspace list a caller mutates between passes, the health states a
-    snapshot replays, and which account a health edge is routed to (the device's
-    by default).
+    in them. The two exceptions are the two a test can want to say something
+    about: the workspace list a caller mutates between passes, and the health
+    states a snapshot replays.
 
     Shared rather than rebuilt per file: the derive list is the publisher's
     constructor signature, so every frame added to the wire would otherwise have
@@ -523,28 +476,18 @@ def build_ui_state_publisher_for_test(
     publisher = UiStatePublisher(
         broadcaster=broadcaster,
         derive_workspaces=derive_workspaces,
-        derive_accounts=lambda: UiAccountsMessage(account_id=LOCAL_PROFILE_USER_ID, has_accounts=False, accounts=()),
-        derive_providers=lambda: UiProvidersMessage(
-            accounts=(), device_providers=(), last_event_at=None, last_full_snapshot_at=None
+        derive_accounts=lambda: UiAccountsMessage(
+            has_accounts=False, account_email="", extra_account_count=0, accounts=()
         ),
-        derive_requests_and_notifications=lambda: (
-            UiRequestsMessage(count=0, request_ids=()),
-            UiNotificationsMessage(entries=(), unresolved_count=0),
-        ),
+        derive_providers=lambda: UiProvidersMessage(providers=(), last_event_at=None, last_full_snapshot_at=None),
+        derive_requests=lambda: UiRequestsMessage(count=0, request_ids=()),
+        derive_notifications=lambda: UiNotificationsMessage(entries=(), unresolved_count=0),
         derive_discovery_health=lambda: UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
         derive_environment=lambda: UiEnvironmentMessage(state=EnvironmentCondition.NONE),
         derive_health_states=derive_health_states,
         derive_workspace_updates=lambda: UiWorkspaceUpdatesMessage(updates={}, update_window="2:00 AM-5:00 AM"),
-        resolve_workspace_account_id=resolve_workspace_account_id,
-        min_seconds_between_passes=min_seconds_between_passes,
     )
-    client_queue = broadcaster.register()
-    # The window shows the device account, as a fresh install's first window does,
-    # so the account-scoped frames reach it.
-    broadcaster.set_client_state(
-        client_queue, UiClientStateMessage(client_id="test-window", route="/", account_id=LOCAL_PROFILE_USER_ID)
-    )
-    return publisher, client_queue
+    return publisher, broadcaster.register()
 
 
 _DEFAULT_WORKSPACE_AGENT_NAME: Final[AgentName] = AgentName("my-claude-agent")
@@ -946,22 +889,9 @@ class _ScriptedWorkspaceProbeHandler(BaseHTTPRequestHandler):
         del format, args
 
 
-def write_forward_ca_for_test(ca_cert_path: Path) -> LocalCertificateAuthority:
-    """Mint a fresh in-memory CA and write its certificate to ``ca_cert_path``, as the proxy does before it listens.
-
-    The probe clients pin the certificate at that path, so a stand-in for the
-    proxy serves a leaf signed by the CA this returns, and a test of a probe
-    that never reaches a server still needs the file to build its client.
-    """
-    ca = make_in_memory_test_ca()
-    ca_cert_path.parent.mkdir(parents=True, exist_ok=True)
-    ca_cert_path.write_bytes(ca.cert_pem)
-    return ca
-
-
 @contextmanager
 def scripted_workspace_probe_server(
-    not_ready_count: int, ca_cert_path: Path, on_first_request: Callable[[], None] | None = None
+    not_ready_count: int, on_first_request: Callable[[], None] | None = None
 ) -> Iterator[int]:
     """Serve a plugin stand-in on loopback, yielding its port.
 
@@ -973,8 +903,7 @@ def scripted_workspace_probe_server(
 
     Speaks TLS with the proxy's own CA-backed cert helpers: Imbue Studio always runs
     ``mngr forward`` with HTTP/2, so a readiness probe dials https and would fail
-    the handshake against a plain-HTTP socket. The CA's certificate is written to
-    ``ca_cert_path``, where the probe under test pins it.
+    the handshake against a plain-HTTP socket.
     """
     handler_cls = type(
         "_ScopedWorkspaceProbeHandler",
@@ -989,7 +918,7 @@ def scripted_workspace_probe_server(
         },
     )
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
-    ca = write_forward_ca_for_test(ca_cert_path)
+    ca = make_in_memory_test_ca()
     chain_pem, key_pem = generate_server_credentials(ca)
     server.socket = build_server_ssl_context(chain_pem, key_pem, ca).wrap_socket(server.socket, server_side=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -1038,13 +967,12 @@ class _ScriptedChatCallbackHandler(BaseHTTPRequestHandler):
 
 @contextmanager
 def scripted_chat_callback_server(
-    answer_status: int, answer_body: bytes, ca_cert_path: Path
+    answer_status: int, answer_body: bytes
 ) -> Iterator[tuple[int, list[RecordedCallbackRequest]]]:
     """Serve a TLS stand-in for the forward plugin fronting a chat app's callback route.
 
     Every POST is recorded and answered with ``answer_status`` and ``answer_body``. Yields the
-    port and the live list of recorded requests. The CA's certificate is written to
-    ``ca_cert_path``, where the forwarder under test pins it.
+    port and the live list of recorded requests.
     """
     recorded: list[RecordedCallbackRequest] = []
     handler_cls = type(
@@ -1053,7 +981,7 @@ def scripted_chat_callback_server(
         {"answer_status": answer_status, "answer_body": answer_body, "recorded": recorded},
     )
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
-    ca = write_forward_ca_for_test(ca_cert_path)
+    ca = make_in_memory_test_ca()
     chain_pem, key_pem = generate_server_credentials(ca)
     server.socket = build_server_ssl_context(chain_pem, key_pem, ca).wrap_socket(server.socket, server_side=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -1078,11 +1006,12 @@ def exec_json_envelope(
 def make_update_state_store(
     tmp_path: Path, *, dismissal_store: UpdateDismissalStore | None = None
 ) -> WorkspaceUpdateStateStore:
-    """An update state store over the dismissal store under ``tmp_path``.
+    """An update state store over the schedule and dismissal stores under ``tmp_path``.
 
     A second call on the same ``tmp_path`` reads what the first one wrote, as a relaunched app would.
     """
     return WorkspaceUpdateStateStore(
+        schedule_store=UpdateScheduleStore(records_dir=tmp_path / "update_schedules"),
         dismissal_store=dismissal_store
         if dismissal_store is not None
         else UpdateDismissalStore(records_dir=tmp_path / "update_dismissals"),
@@ -1239,9 +1168,7 @@ def ready_machine_launch_stdout(
     return skill_chat_launch_stdout(skill_name, script_exit_code=2, fallback_stdout="")
 
 
-def update_run_probe_stdout(
-    *, run: str = "", agents: str | None = "", busy: str | None = "", is_watchdog_installed: bool = False
-) -> str:
+def update_run_probe_stdout(*, run: str = "", agents: str | None = "", busy: str | None = "") -> str:
     """One workspace's answer to the update run probe, in the wire format.
 
     Section bodies pass through verbatim (no newline added); ``agents=None``
@@ -1250,12 +1177,10 @@ def update_run_probe_stdout(
     """
     agent_section = f"{AGENTS_FAILED_SENTINEL}\n" if agents is None else agents
     busy_section = "" if busy is None else f"{BUSY_BEGIN_SENTINEL}\n{busy}{BUSY_END_SENTINEL}\n"
-    watchdog_line = f"{WATCHDOG_INSTALLED_SENTINEL}\n" if is_watchdog_installed else ""
     return (
         f"{RUN_BEGIN_SENTINEL}\n{run}{RUN_END_SENTINEL}\n"
         f"{AGENTS_BEGIN_SENTINEL}\n{agent_section}{AGENTS_END_SENTINEL}\n"
         f"{busy_section}"
-        f"{watchdog_line}"
     )
 
 
@@ -1328,151 +1253,37 @@ def record_sleep_of(sleep_tracker: SleepTracker, clock: CatchUpClock, seconds: f
     sleep_tracker.record_heartbeat()
 
 
-def mngr_create_stub_body(agent_id: AgentId, host_id: HostId) -> str:
-    """Shell lines for a ``mngr`` stub whose ``create`` reports ``agent_id`` on ``host_id``; every other command exits 0.
-
-    The agent creator runs ``mngr create`` through the ``MNGR_BINARY`` constant, so a test installs this with
-    ``install_stub_mngr_on_path`` rather than through the creator's ``mngr_binary`` field (which only the
-    implicit-discard commands use).
-    """
-    created = json.dumps({"event": "created", "agent_id": str(agent_id), "host_id": str(host_id)})
-    return f'if [ "$1" = "create" ]; then echo \'{created}\'; fi\nexit 0'
-
-
 FAKE_WORKSPACE_HOME: Final[str] = "/home/agent"
-_FAKE_MNGR_EXEC_HELD_NAME: Final[str] = "fake-mngr-exec-held"
-_FAKE_MNGR_EXEC_RELEASE_NAME: Final[str] = "fake-mngr-exec-release"
-_FAKE_MNGR_PAIR_ATTEMPTS_NAME: Final[str] = "fake-mngr-pair-attempts"
 
 
-class OneMachineBackendResolver(StaticBackendResolver):
-    """A static resolver that places every known agent on one machine, whose state the test sets."""
-
-    host_id: HostId = Field(frozen=True, description="The machine every known agent runs on")
-    _host_state: HostState | None = PrivateAttr(default=None)
-
-    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
-        if agent_id not in self.list_known_agent_ids():
-            return None
-        return AgentDisplayInfo(agent_name=str(agent_id), host_id=str(self.host_id))
-
-    def get_host_state(self, host_id: HostId) -> HostState | None:
-        return self._host_state if host_id == self.host_id else None
-
-    def set_host_state(self, state: HostState | None) -> None:
-        self._host_state = state
-
-
-def write_fake_mngr_pair_script(
-    directory: Path,
-    argv_record_path: Path,
-    unanswered_exec_count_path: Path | None = None,
-    held_exec_containing: str = "",
-    failing_pair_attempts: int = 0,
-) -> Path:
+def write_fake_mngr_pair_script(directory: Path, argv_record_path: Path) -> Path:
     """A stand-in ``mngr`` for folder-sync tests: records its argv, then waits.
 
     It answers the two commands a folder sync runs. ``mngr exec`` (which makes
     the workspace side exist and reports the agent's home directory) prints the
     success envelope carrying :data:`FAKE_WORKSPACE_HOME` and exits. ``mngr pair`` writes the arguments it was handed to
     ``argv_record_path``, emits the ``pair_syncing`` event a real pairing emits
-    once unison is watching both replicas and the ``pair_transferring`` settle
-    it emits once unison's first pass has left them level, and then blocks on
-    ``signal.pause`` until it is signalled -- which is how a real ``mngr pair``
-    spends the sync. ``FolderSyncManager.wait_until_started`` returns once
-    ``pair_syncing`` arrives, so a pairing that got that far has its argv file
-    on disk by then.
-
-    An ``mngr exec`` whose script contains ``held_exec_containing`` (when it
-    is not empty) does not answer until :func:`release_held_fake_mngr_exec`,
-    which holds a converger part-way through that step; see
-    :func:`wait_for_held_fake_mngr_exec`. The first ``failing_pair_attempts``
-    runs of ``mngr pair`` exit 1 at once, the way a pairing that dies on its
-    own does.
-
-    With ``unanswered_exec_count_path``, that file holds how many more
-    ``mngr exec`` calls fail as they do against a workspace that does not
-    answer -- exit 1 and nothing said -- and each one counts it down.
+    once unison is watching both replicas, and then blocks on ``signal.pause``
+    until it is signalled -- which is how a real ``mngr pair`` spends the sync.
+    Because ``FolderSyncManager.start`` waits for that event, the argv file is
+    always on disk by the time ``start`` returns.
     """
-    exec_hold = ""
-    if held_exec_containing:
-        os.mkfifo(directory / _FAKE_MNGR_EXEC_RELEASE_NAME)
-        # Released by a byte, not by the writer closing: on macOS under load a
-        # read-only reader waiting for EOF can miss it and hang. Opened
-        # read-write, the open never blocks and the read ends on the byte.
-        exec_hold = (
-            f"    if {held_exec_containing!r} in sys.argv[3]:\n"
-            f"        open({str(directory / _FAKE_MNGR_EXEC_HELD_NAME)!r}, 'w').close()\n"
-            f"        os.read(os.open({str(directory / _FAKE_MNGR_EXEC_RELEASE_NAME)!r}, os.O_RDWR), 1)\n"
-        )
-    # Only when asked for: the count is a read-modify-write of a shared file,
-    # which two pairings started together from one script would race on.
-    pair_failure = ""
-    if failing_pair_attempts > 0:
-        pair_failure = (
-            f"attempts_path = {str(directory / _FAKE_MNGR_PAIR_ATTEMPTS_NAME)!r}\n"
-            "attempts = int(open(attempts_path).read()) if os.path.exists(attempts_path) else 0\n"
-            "open(attempts_path, 'w').write(str(attempts + 1))\n"
-            f"if attempts < {failing_pair_attempts}:\n"
-            "    sys.stderr.write('Error: the fake pairing failed\\n')\n"
-            "    sys.exit(1)\n"
-        )
     script = directory / "fake-mngr"
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import json\n"
-        "import os\n"
-        "import pathlib\n"
         "import signal\n"
         "import sys\n"
-        f"unanswered_path = {None if unanswered_exec_count_path is None else str(unanswered_exec_count_path)!r}\n"
         "if sys.argv[1] == 'exec':\n"
-        "    if unanswered_path is not None:\n"
-        "        unanswered = int(pathlib.Path(unanswered_path).read_text())\n"
-        "        if unanswered > 0:\n"
-        "            pathlib.Path(unanswered_path).write_text(str(unanswered - 1))\n"
-        "            sys.exit(1)\n"
-        f"{exec_hold}"
         f"    print(json.dumps({{'results': [{{'stdout': {FAKE_WORKSPACE_HOME!r}, 'stderr': '', 'success': True}}]}}))\n"
         "    sys.exit(0)\n"
-        f"{pair_failure}"
         f"open({str(argv_record_path)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
         "sys.stdout.write(json.dumps({'event': 'pair_syncing'}) + '\\n')\n"
-        "sys.stdout.write(json.dumps({'event': 'pair_transferring', 'is_transferring': False}) + '\\n')\n"
         "sys.stdout.flush()\n"
         "signal.pause()\n"
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return script
-
-
-def wait_for_held_fake_mngr_exec(directory: Path, timeout: float) -> bool:
-    """Whether the ``mngr exec`` held by :func:`write_fake_mngr_pair_script` got that far within ``timeout``."""
-    return poll_until(lambda: (directory / _FAKE_MNGR_EXEC_HELD_NAME).exists(), timeout=timeout)
-
-
-def release_held_fake_mngr_exec(directory: Path) -> None:
-    """Let the held ``mngr exec`` answer. Call only once it is known to be held."""
-    with open(directory / _FAKE_MNGR_EXEC_RELEASE_NAME, "wb") as release:
-        release.write(b"\n")
-
-
-def wait_until_synced(manager: FolderSyncManager, agent_id: str, local_path: str, timeout: float) -> FolderSyncStatus:
-    """Block until a sync's first pass has left the two sides level, and return its status.
-
-    ``wait_until_started`` returns once unison is up, a step before that: the
-    fake reports the settle on the next line, which the sink may not have read.
-    """
-    status, _polls, _elapsed = poll_for_value(
-        lambda: _synced_status_or_none(manager, agent_id, local_path), timeout=timeout, poll_interval=0.05
-    )
-    assert status is not None, f"The sync of {local_path} never reached SYNCED"
-    return status
-
-
-def _synced_status_or_none(manager: FolderSyncManager, agent_id: str, local_path: str) -> FolderSyncStatus | None:
-    status = manager.status_for_path(agent_id, local_path)
-    return status if status is not None and status.state == FolderSyncState.SYNCED else None
 
 
 def _streamed_request(
@@ -1697,16 +1508,6 @@ def write_template_pyproject_pinning_mngr(
     (template_dir / "pyproject.toml").write_text(template_pyproject_pinning_mngr(repo_url, rev=rev))
 
 
-def generate_test_ssh_private_key() -> str:
-    """An OpenSSH-format Ed25519 key, the exact flavor mngr's ``generate_ssh_keypair`` produces."""
-    private_key = ed25519.Ed25519PrivateKey.generate()
-    return private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.OpenSSH,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode("utf-8")
-
-
 class HandshakeDrainingWebSocketClient(SimpleWebsocketClient):
     """A ``simple_websocket`` client that also delivers frames read together with the handshake response.
 
@@ -1719,311 +1520,3 @@ class HandshakeDrainingWebSocketClient(SimpleWebsocketClient):
     def handshake(self) -> None:
         super().handshake()
         self.connected = self._handle_events()
-
-
-class ScriptedToolAnswer(FrozenModel):
-    """One answer a stubbed in-workspace tool gives, in order."""
-
-    exit_code: int = Field(default=0, description="The tool's exit status")
-    stdout: str = Field(default="", description="What it prints on stdout")
-    stderr: str = Field(default="", description="What it prints on stderr")
-
-
-_SERVICES_AGENT: Final[dict[str, str]] = {
-    "id": "agent-" + "0" * 32,
-    "name": "system-services",
-    "state": "RUNNING",
-    "is_primary": "true",
-}
-
-
-class StagedUpdateWorkspace(FrozenModel):
-    """A workspace root on disk, laid out as far as the update program reads it, with stubbed tools on PATH."""
-
-    root: Path = Field(description="The workspace root; the program's cwd")
-    bin_dir: Path = Field(description="Holds the stub mngr, tk and cron")
-    calls_log: Path = Field(description="One JSON argv per line, for every stub mngr and tk call")
-    agents_file: Path = Field(description="What the stub ``mngr list`` answers")
-    live_cron_dir: Path = Field(description="Stands in for /etc/cron.d")
-    proc_root: Path = Field(description="Stands in for /proc")
-    agent_pids_dir: Path = Field(description="The template's agent-pid registry, at its place in the workspace")
-    program_archive: Path = Field(description="The update program's zip application, as the app ships it")
-
-    def set_agents(self, agents: Sequence[Mapping[str, str]], *, is_services_agent_listed: bool = True) -> None:
-        """What the stub ``mngr list`` answers: ``agents`` (``id``, ``name``, ``state``, optionally ``chat_id``),
-        beside the workspace's services agent unless told not to."""
-        listed = ([_SERVICES_AGENT] if is_services_agent_listed else []) + [dict(agent) for agent in agents]
-        self.agents_file.write_text(json.dumps(listed))
-
-    def script_tool(self, relative_path: str, answers: Sequence[ScriptedToolAnswer]) -> None:
-        """Put a stand-in for the template script at ``relative_path`` that answers ``answers`` in order."""
-        path = self.root / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _write_scripted_tool(path, answers)
-
-    def script_program_on_path(self, name: str, answers: Sequence[ScriptedToolAnswer]) -> None:
-        """Put a stand-in for the program ``name`` on the stub PATH that answers ``answers`` in order."""
-        _write_scripted_tool(self.bin_dir / name, answers)
-
-    def tool_calls(self, script_name: str) -> list[list[str]]:
-        """The recorded argv of every call to the stubbed template script named ``script_name``."""
-        return [call[1:] for call in self.recorded_calls() if call[:1] == [script_name]]
-
-    def chat_creates(self) -> list[list[str]]:
-        """Every chat the stubbed messenger was asked to create; the message text is the last item of each."""
-        return [call for call in self.tool_calls("message_chat.py") if call[:1] == ["--create"]]
-
-    def recorded_calls(self) -> list[list[str]]:
-        if not self.calls_log.exists():
-            return []
-        return [json.loads(line) for line in self.calls_log.read_text().splitlines() if line.strip()]
-
-    def write_state(self, name: str, content: Mapping[str, Any]) -> None:
-        path = self.root / "data" / ".state" / "update-apply" / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(dict(content)))
-
-    def read_state(self, name: str) -> dict[str, Any] | None:
-        path = self.root / "data" / ".state" / "update-apply" / name
-        return json.loads(path.read_text()) if path.exists() else None
-
-    def register_agent_process(
-        self,
-        pid: int,
-        agent_name: str,
-        *,
-        is_worker: bool,
-        agent_id: str | None,
-        oom_score_adj: int,
-        environ_agent_name: str | None = None,
-        tgid: int | None = None,
-    ) -> None:
-        """A live agent main process as the template's launch wrapper leaves it: its registry entry (with no
-        ``agent_id`` key when ``agent_id`` is None) and its ``/proc`` files, whose agent name and thread group
-        default to the entry's own."""
-        self.agent_pids_dir.mkdir(parents=True, exist_ok=True)
-        entry: dict[str, object] = {"agent_name": agent_name, "is_worker": is_worker}
-        if agent_id is not None:
-            entry["agent_id"] = agent_id
-        (self.agent_pids_dir / f"{pid}.json").write_text(json.dumps(entry))
-        process_dir = self.proc_root / str(pid)
-        process_dir.mkdir(parents=True, exist_ok=True)
-        (process_dir / "status").write_text(f"Name:\tclaude\nTgid:\t{pid if tgid is None else tgid}\nPid:\t{pid}\n")
-        environ = f"HOME=/home/user\0MNGR_AGENT_NAME={environ_agent_name or agent_name}\0"
-        (process_dir / "environ").write_bytes(environ.encode())
-        (process_dir / "oom_score_adj").write_text(f"{oom_score_adj}\n")
-
-    def registry_entry(self, pid: int) -> dict[str, Any]:
-        return json.loads((self.agent_pids_dir / f"{pid}.json").read_text())
-
-    def oom_score_adj(self, pid: int) -> int:
-        return int((self.proc_root / str(pid) / "oom_score_adj").read_text())
-
-
-def _write_executable(path: Path, text: str) -> None:
-    path.write_text(text)
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-
-def _write_scripted_tool(path: Path, answers: Sequence[ScriptedToolAnswer]) -> None:
-    _write_executable(path, STUB_TOOL_SOURCE)
-    path.with_name(path.name + ".answers.json").write_text(json.dumps([answer.model_dump() for answer in answers]))
-
-
-STAGED_CREATED_CHAT: Final[dict[str, str]] = {
-    "chat_id": "agent-" + "a" * 32,
-    "name": "Update-to-v090",
-    "display_name": "Update to v0.9.0",
-}
-
-
-def stage_update_workspace(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    has_skill: bool = True,
-    is_signed_in: bool = True,
-    has_cron: bool = True,
-    has_message_chat: bool = True,
-) -> StagedUpdateWorkspace:
-    """Lay out a workspace under ``tmp_path``, cd into it, and put stub tools first on PATH.
-
-    The environment reads as ``mngr exec``'s (``MNGR_HOST_DIR`` set), so the program uses it as is.
-    The template's chat messenger (unless ``has_message_chat`` is False) creates every chat it is
-    asked for, and its update-self recorder records every verdict, until a test scripts otherwise.
-    """
-    root = tmp_path / "workspace"
-    (root / ".mngr").mkdir(parents=True)
-    (root / "system" / "scripts").mkdir(parents=True)
-    (root / "system" / "scripts" / "require_create_account.py").write_text("")
-    if has_skill:
-        (root / ".agents" / "skills" / "update-self").mkdir(parents=True)
-        (root / ".agents" / "skills" / "update-self" / "SKILL.md").write_text("# update-self\n")
-    if is_signed_in:
-        (root / ".mngr" / "settings.local.toml").write_text('[commands.create]\ntype = "claude"\n')
-    bin_dir = tmp_path / "stub-bin"
-    bin_dir.mkdir()
-    _write_executable(bin_dir / "mngr", STUB_MNGR_SOURCE)
-    _write_executable(bin_dir / "tk", STUB_MNGR_SOURCE)
-    if has_cron:
-        _write_executable(bin_dir / "cron", "#!/bin/sh\nexit 0\n")
-    live_cron_dir = tmp_path / "etc-cron.d"
-    # A workspace with no cron has no drop-in directory for one either.
-    if has_cron:
-        live_cron_dir.mkdir()
-    program_archive = tmp_path / "update-program.pyz"
-    program_archive.write_bytes(build_workspace_program_archive(update_workspace))
-    staged = StagedUpdateWorkspace(
-        root=root,
-        bin_dir=bin_dir,
-        calls_log=tmp_path / "stub-calls.jsonl",
-        agents_file=tmp_path / "stub-agents.json",
-        live_cron_dir=live_cron_dir,
-        proc_root=tmp_path / "proc",
-        agent_pids_dir=root / AGENT_PIDS_DIR,
-        program_archive=program_archive,
-    )
-    staged.set_agents([])
-    if has_message_chat:
-        staged.script_tool(
-            "system/scripts/message_chat.py",
-            [ScriptedToolAnswer(stdout=json.dumps(STAGED_CREATED_CHAT) + "\n")],
-        )
-    if has_skill:
-        staged.script_tool(".agents/skills/update-self/scripts/update_self.py", [ScriptedToolAnswer()])
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "host-dir"))
-    monkeypatch.setenv("TICKETS_DIR", str(root / "data" / ".tickets"))
-    monkeypatch.setenv("STUB_CALLS_LOG", str(staged.calls_log))
-    monkeypatch.setenv("STUB_AGENTS_FILE", str(staged.agents_file))
-    monkeypatch.chdir(root)
-    return staged
-
-
-def update_program_context(staged: StagedUpdateWorkspace, argv: Sequence[str], now: float) -> ProgramContext:
-    """The context the update program's ``main`` hands a mode, for a run against ``staged`` at ``now``."""
-    return {
-        "argv": list(argv),
-        "program_path": str(staged.program_archive),
-        "live_cron_dir": str(staged.live_cron_dir),
-        "proc_root": str(staged.proc_root),
-        "agent_pids_dir": str(staged.agent_pids_dir),
-        "now": now,
-        "agent_environment": AgentEnvironment(),
-    }
-
-
-def read_update_program_answer(captured_stdout: str) -> dict[str, Any]:
-    """The program's one marker-wrapped JSON answer from what it printed."""
-    payload = extract_marker_json(captured_stdout, UPDATE_COMMAND_RESULT_MARKER)
-    assert payload is not None, captured_stdout
-    return dict(payload)
-
-
-# CLEANUP: drop with ``background_task_markers`` and its tests, once ``OLDEST_IN_PLACE_UPDATABLE_VERSION``
-# reaches minds-v0.8.7.
-def write_background_task_marker(workspace_root: Path, chat_id: str, pid: int) -> None:
-    """Record a background command pending for ``chat_id`` the way the template's ``run_in_background.py`` does,
-    run by the process ``pid``."""
-    chat_dir = workspace_root / MARKER_ROOT / chat_id
-    chat_dir.mkdir(parents=True, exist_ok=True)
-    marker = {
-        "source": "run_in_background",
-        "id": f"20261027T174227Z-16f569-{pid}",
-        "description": "Watch the update's background worker",
-        "command": "sleep 3600",
-        "started_at": "2026-10-27T17:42:27+00:00",
-        "pid": pid,
-        "pid_start": "",
-    }
-    (chat_dir / f"run_in_background-{marker['id']}.json").write_text(json.dumps(marker))
-
-
-# CLEANUP: drop with ``write_background_task_marker``.
-def exited_process_pid() -> int:
-    """The pid of a process that has already exited."""
-    process = subprocess.Popen(["true"])
-    process.wait()
-    return process.pid
-
-
-def update_command_exec_result(payload: Mapping[str, Any]) -> MngrCallResult:
-    """What ``mngr exec --format jsonl`` answers when the workspace's update program printed ``payload``."""
-    inner_stdout = f"{UPDATE_COMMAND_RESULT_MARKER}{json.dumps({**payload, 'schema': 1})}\n"
-    event = {"event": "exec_result", "agent": "workspace", "stdout": inner_stdout, "stderr": "", "success": True}
-    return MngrCallResult(returncode=0, stdout=json.dumps(event) + "\n", stderr="", is_mngr_output=True)
-
-
-def update_command_answer(outcome: str, detail: str = "", **extra: Any) -> MngrCallResult:
-    """The workspace update program answering ``outcome`` through ``mngr exec``."""
-    return update_command_exec_result({"outcome": outcome, "detail": detail, **extra})
-
-
-UPDATE_CHAT_NAME: Final[str] = "Update-to-v090"
-UPDATE_CHAT_ID: Final[str] = "agent-" + "d" * 32
-CREATED_UPDATE_COMMAND_RESULT: Final[MngrCallResult] = update_command_answer(
-    "CREATED", chat_agent_name=UPDATE_CHAT_NAME, chat_id=UPDATE_CHAT_ID
-)
-NEEDS_SIGN_IN_UPDATE_COMMAND_RESULT: Final[MngrCallResult] = update_command_answer(
-    "NEEDS_SIGN_IN", "No AI account is signed in to this workspace."
-)
-CANCELLED_UPDATE_COMMAND_RESULT: Final[MngrCallResult] = update_command_exec_result(
-    {"mode": "cancel", "is_cancelled": True}
-)
-# An exec that reached the workspace and was cut off there, so the program may have run.
-EXEC_CUT_OFF_REASON: Final[str] = f"{COMMAND_EXECUTION_FAILURE_PREFIX} workspace: Connection reset by peer"
-CUT_OFF_ON_REACHED_HOST_EXEC_RESULT: Final[MngrCallResult] = MngrCallResult(
-    returncode=1, stdout=exec_error_stdout(EXEC_CUT_OFF_REASON), is_mngr_output=True
-)
-
-
-def begin_dispatched_update_run(
-    store: WorkspaceUpdateStateStore, agent_id: AgentId, chat_agent_name: str, *, chat_agent_id: str = ""
-) -> None:
-    """Put ``agent_id``'s row where a dispatch whose chat the workspace created leaves it.
-
-    ``chat_agent_id`` is the id the create answered with, '' for a create that named none.
-    """
-    assert store.try_begin_run(agent_id, target_override="")
-    assert store.adopt_dispatched_chat(agent_id, chat_agent_name=chat_agent_name, chat_agent_id=chat_agent_id)
-
-
-def update_program_invocation(argv: Sequence[str]) -> tuple[str, dict[str, str]]:
-    """The mode and ``--flag value`` arguments one recorded ``mngr exec`` ran the workspace update program with.
-
-    Read back out of the shell string ``build_update_workspace_command`` ships: the
-    arguments follow the program's scratch path and end where its exit status is kept.
-    """
-    command = argv[3]
-    invocation = command.split("; minds_program_exit=$?", 1)[0].rsplit('"$minds_program" ', 1)[1]
-    mode, *arguments = shlex.split(invocation)
-    assert len(arguments) % 2 == 0, arguments
-    return mode, dict(zip(arguments[::2], arguments[1::2], strict=True))
-
-
-def armed_update_schedule_file(
-    *,
-    ceiling_ref: str,
-    override_ref: str = "",
-    window_start_minute_utc: int = 9 * 60,
-    window_length_minutes: int = 3 * 60,
-    is_auto_armed: bool = False,
-) -> dict[str, Any]:
-    """A ``schedule.json`` as the update program's arm writes it, and as its ARMED answer carries it."""
-    return {
-        "schema": 1,
-        "armed_at": datetime.now(timezone.utc).timestamp(),
-        "ceiling": ceiling_ref,
-        "window_start_minute_utc": window_start_minute_utc,
-        "window_length_minutes": window_length_minutes,
-        "override_ref": override_ref,
-        "is_auto_armed": is_auto_armed,
-        "is_backup_configured": False,
-        "marked_chat": "",
-        "marked_at": None,
-        "window_seen_open_at": None,
-        "pending_skip_reason": "",
-        "next_attempt_at": None,
-        "last_skip_reason": "",
-        "last_skip_at": None,
-    }

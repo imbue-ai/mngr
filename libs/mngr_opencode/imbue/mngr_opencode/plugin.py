@@ -66,7 +66,6 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import describe_failed_send_command
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
-from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.output_styles import read_output_style_files
@@ -290,23 +289,15 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     version: str | None = Field(
         default=None,
         description="Pin the opencode version to install (e.g., '0.4.10'). When set, installation runs the "
-        "opencode installer with VERSION=<version> and provisioning verifies the installed opencode matches "
-        "(see `version_mismatch`), whether or not `check_installation` is set. When None (the default), "
-        "installs the latest version.",
-    )
-    version_mismatch: VersionMismatchPolicy = Field(
-        default=VersionMismatchPolicy.ERROR,
-        description="What provisioning does when the installed opencode does not report the pinned `version`. "
-        "`ERROR` (default): fail the create. `WARN`: log a warning and continue on the installed binary.",
+        "opencode installer with VERSION=<version> and provisioning verifies the installed opencode matches, "
+        "erroring on a mismatch. When None (the default), installs the latest version.",
     )
     update_policy: AgentUpdatePolicy | None = Field(
         default=None,
-        description='How to handle opencode\'s update check. NEVER sets `"autoupdate": false` in the per-agent '
-        "opencode.json. On opencode 1.19.0 and later, which never installs updates on its own, that only turns "
-        "off the update check and its notice; on earlier versions it also stops opencode updating itself on "
-        "launch. AUTO does not write `autoupdate`, so the user's own opencode config (or opencode's "
-        "default) decides. ASK has no interactive flow for opencode and behaves like AUTO. When unset (the "
-        "default), resolves to NEVER -- set AUTO to leave it to the user's opencode config. An explicit "
+        description='How to handle opencode\'s startup auto-update. NEVER sets `"autoupdate": false` in the '
+        "per-agent opencode.json so opencode does not update itself on launch; AUTO leaves auto-update enabled. "
+        "ASK has no interactive flow for opencode and behaves like AUTO. When unset (the default), resolves to "
+        "NEVER (auto-update disabled) -- set AUTO to leave opencode's auto-update enabled. An explicit "
         "`autoupdate` key in `config_overrides` always wins.",
     )
     # emit_common_transcript gates the raw -> common-schema converter that writes
@@ -337,16 +328,18 @@ class OpenCodeAgent(
 ):
     """Agent implementation for OpenCode (driven via its server, not TUI keystrokes)."""
 
-    # Both `opencode serve` and `opencode attach` report `opencode`; the attach client is the pane's
-    # foreground process (lifecycle detection also matches it among pane descendants).
-    fixed_process_name: ClassVar[str | None] = "opencode"
-
     # How long send_message waits for the launch script to have written the
     # server port / root-session files (written at launch, before readiness, so
     # this only ever waits on the first send racing a just-started agent).
     # ClassVars so a test subclass can shrink them.
     _SEND_FILE_WAIT_SECONDS: ClassVar[float] = 30.0
     _SEND_FILE_POLL_INTERVAL_SECONDS: ClassVar[float] = 0.5
+
+    def get_expected_process_name(self) -> str:
+        # Both `opencode serve` and `opencode attach` report `opencode`; the
+        # attach client is the pane's foreground process (lifecycle detection
+        # also matches it among pane descendants).
+        return "opencode"
 
     def is_blocked_on_dialog(self) -> bool:
         """Whether opencode is holding on a tool-approval prompt.
@@ -527,13 +520,13 @@ class OpenCodeAgent(
         """
         if self.agent_config.check_installation:
             ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
-        if self.agent_config.version is not None:
-            verify_pinned_cli_version(
-                host,
-                binary_name=self.get_install_binary_name(),
-                pinned_version=self.agent_config.version,
-                mismatch_policy=self.agent_config.version_mismatch,
-            )
+            if self.agent_config.version is not None:
+                verify_pinned_cli_version(
+                    host,
+                    command=str(self.agent_config.command),
+                    binary_name=self.get_install_binary_name(),
+                    pinned_version=self.agent_config.version,
+                )
         host_home = self._resolve_host_home(host)
         self._provision_opencode_config(host, host_home)
         self._provision_agent_instructions(host)
@@ -947,12 +940,7 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     emits ``permission.replied`` and a cancelled turn emits ``session.idle``, both of
     which clear the marker promptly (verified live), so ``permissions_waiting`` does
     not strand alongside ``active``.
-
-    Field generators run for every listed agent whatever its type, so an agent of
-    another type gets no field rather than a verdict read off markers it never writes.
     """
-    if not isinstance(agent, OpenCodeAgent):
-        return None
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
     is_active = host.path_exists(agent_dir / ACTIVE_MARKER_FILENAME)
     return classify_waiting_reason(is_active, is_active and agent.is_blocked_on_dialog())

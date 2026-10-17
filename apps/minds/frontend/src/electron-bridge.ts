@@ -102,18 +102,11 @@ interface MindsNativeSurface {
   /** Bounce the backend and re-prepare every window. Named `retry` on the
    * preload, where it started as the error takeover's button. */
   retry(): void;
-  /** Optional: a preload from before the tray lacks it. Quits the whole app
-   * through the same sequence the tray's Quit runs. */
-  quitApp?(): void;
   showFilePicker(options: FilePickerOptions): Promise<string | null>;
   /** Open the OS's own notification-settings pane -- no app can force a
    * re-prompt once permission is declined, so this is the escape hatch.
    * Resolves to whether it actually opened. */
   openNotificationSettings(): Promise<boolean>;
-  /** Open macOS's Full Disk Access list, which the browser-cookie import
-   * needs the app on. Optional: a preload from before the import lacks it.
-   * Resolves to whether it actually opened (false off macOS). */
-  openFullDiskAccessSettings?(): Promise<boolean>;
   bringAppToFront(): void;
   openWorkspaceInNewWindow(agentId: string): void;
   claimWorkspaceWindow?(
@@ -144,9 +137,6 @@ interface MindsNativeSurface {
   // setting shipped lacks them, and the browser build scales with the browser.
   getDisplayZoom?(): Promise<number>;
   setDisplayZoom?(percent: number): Promise<number>;
-  // Which app version the previous launch ran. Optional: a preload from before
-  // it lacks it, and the browser build has no app version of its own.
-  getLaunchVersionChange?(): Promise<LaunchVersionChange>;
   // Release channels. Optional: a preload from before channels shipped lacks
   // them, and the browser build has no binary to update at all.
   getUpdateState?(): Promise<UpdateState>;
@@ -177,25 +167,16 @@ interface MindsNativeSurface {
   setPopoutTitle?(title: string): void;
   onPopoutReattachRequest?(callback: () => void): void;
   // A main window is asked to return a popout's window to the desktop it
-  // shows: the popout is closing.
+  // shows: the popout was dropped onto it, or is closing.
   onReattachPopoutWindow?(callback: (ask: PopoutReattachAsk) => void): void;
   // This main window's desktop has the asked-for window back; main closes its popout.
   popoutWindowReturned?(workspaceId: string, windowId: string): void;
+  onPopoutDropTarget?(callback: (isOver: boolean) => void): void;
   // Link routing (electron/link-routing.js). Optional: a preload from before
   // it lacks them, and the browser build opens popups itself.
   reportWorkspaceLinkHandling?(report: WorkspaceLinkHandlingReport | null): void;
   onOpenLink?(callback: (url: string) => void): void;
   openExternalLink?(url: string): void;
-}
-
-/** This launch's app version against the previous launch's, as main recorded
- * it at startup (electron/launch-version.js). */
-export interface LaunchVersionChange {
-  /** The version the previous launch ran; null on an install's first launch,
-   * and on the first launch of a build that started recording it. */
-  previousVersion: string | null;
-  /** This is the first launch into a new app version. */
-  isFirstLaunchAfterUpdate: boolean;
 }
 
 /** Why the main process could not install the staged update, or null when it is quitting into it. */
@@ -236,25 +217,29 @@ export interface PopoutGrab {
   grabY: number;
 }
 
+/** A frame in fractions of the workspace backdrop, as a drop back onto the
+ * desktop names it. */
+export interface PopoutFrame {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 /** Main's ask of a main window to return a pulled-out window of the workspace
- * it shows to the desktop, at the window's kept frame (the popout is closing). */
+ * it shows to the desktop: at `frame` when the popout was dropped there, else
+ * at the window's kept frame (the popout is closing). */
 export interface PopoutReattachAsk {
   workspaceId: string;
   windowId: string;
+  frame: PopoutFrame | null;
 }
 
-/** What a workspace's page promised when it announced readiness: that it
- * opens the links main hands back (minds:open-link), and custom-scheme ones
- * among them. */
-export interface WorkspaceLinkPromises {
-  opensLinks: boolean;
-  opensCustomSchemeLinks: boolean;
-}
-
-/** The workspace a window's frame shows, as main routes that window's popups,
- * with what its page promised. */
-export interface WorkspaceLinkHandlingReport extends WorkspaceLinkPromises {
+/** The workspace a window's frame shows, as main routes that window's popups:
+ * whether the workspace announced it opens links (minds:open-link). */
+export interface WorkspaceLinkHandlingReport {
   workspaceId: string;
+  opensLinks: boolean;
 }
 
 declare global {
@@ -297,14 +282,6 @@ export const electronBridge = {
   restartApp(): void {
     native()?.retry();
   },
-  /** Whether the page can quit the whole app: the desktop app, on a preload
-   * that knows how. The one way to quit on a Linux desktop with no tray. */
-  get canQuitApp(): boolean {
-    return native()?.quitApp !== undefined;
-  },
-  quitApp(): void {
-    native()?.quitApp?.();
-  },
   async showFilePicker(options: FilePickerOptions): Promise<string | null> {
     const surface = native();
     if (surface === null) return null;
@@ -314,15 +291,6 @@ export const electronBridge = {
     const surface = native();
     if (surface === null) return false;
     return surface.openNotificationSettings();
-  },
-  /** Whether this chrome can open macOS's Full Disk Access list: the desktop
-   * app on a Mac, on a preload that knows how. */
-  get canOpenFullDiskAccessSettings(): boolean {
-    return this.isMacPlatform && native()?.openFullDiskAccessSettings !== undefined;
-  },
-  /** Resolves to whether the list actually opened. */
-  async openFullDiskAccessSettings(): Promise<boolean> {
-    return (await native()?.openFullDiskAccessSettings?.()) ?? false;
   },
   bringAppToFront(): void {
     native()?.bringAppToFront();
@@ -382,12 +350,6 @@ export const electronBridge = {
    * null where the shell cannot scale windows. */
   async setDisplayZoom(percent: number): Promise<number | null> {
     return (await native()?.setDisplayZoom?.(percent)) ?? null;
-  },
-
-  /** Whether this is the first launch into a new app version. False in the
-   * browser, which has no app version of its own to have updated. */
-  async isFirstLaunchAfterAppUpdate(): Promise<boolean> {
-    return (await native()?.getLaunchVersionChange?.())?.isFirstLaunchAfterUpdate ?? false;
   },
 
   /** Null in the browser, and on a desktop build older than release channels. */
@@ -458,6 +420,9 @@ export const electronBridge = {
   popoutWindowReturned(workspaceId: string, windowId: string): void {
     native()?.popoutWindowReturned?.(workspaceId, windowId);
   },
+  onPopoutDropTarget(callback: (isOver: boolean) => void): void {
+    native()?.onPopoutDropTarget?.(callback);
+  },
 
   /** Tell main which workspace this window's frame shows and whether it opens
    * links, or null when no frame is mounted. */
@@ -473,8 +438,8 @@ export const electronBridge = {
   get opensExternalLinks(): boolean {
     return native()?.openExternalLink !== undefined;
   },
-  /** Open an external link the mounted workspace handed over outside the app (minds:open-external); a mailto:,
-   * tel: or custom-scheme link asks the user first. */
+  /** Open an external link the mounted workspace handed over outside the app (minds:open-external); a mailto: or
+   * tel: link asks the user first. */
   openExternalLink(url: string): void {
     native()?.openExternalLink?.(url);
   },

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { AnyVnode } from "../../../testing";
 import { attrsOf, classesOf, collectText, collectVnodes } from "../../../testing";
 import type { ScrollTarget } from "./transcript";
-import { TranscriptScroller, agentTurn, answerRow, choiceTable, userTurn } from "./transcript";
+import { TranscriptScroller, agentTurn, choiceTable } from "./transcript";
 
 function anchor(scrolls: string[], label: string): ScrollTarget {
   return { scrollIntoView: () => scrolls.push(label) };
@@ -133,84 +133,5 @@ describe("agentTurn", () => {
 
     expect(emOf(turn)).toBeUndefined();
     expect(textOf(turn)).toBe(OPENER);
-  });
-
-  it("takes a space of its own over it in place of the turn gap", () => {
-    const usual = agentTurn({ key: "ready", text: "Ready.", startAtMs: 0 });
-    const spaced = agentTurn({ key: "ready", text: "Ready.", startAtMs: 0, marginClass: "mt-20" });
-
-    expect(classesOf(usual as AnyVnode)).toContain("mt-10");
-    expect(classesOf(spaced as AnyVnode)).toContain("mt-20");
-    expect(classesOf(spaced as AnyVnode)).not.toContain("mt-10");
-  });
-});
-
-describe("userTurn", () => {
-  it("folds its details under the text behind a closed toggle, and shows them once opened", () => {
-    let isOpen = false;
-    const turnWith = (): unknown =>
-      userTurn({
-        key: "settings",
-        delayMs: 0,
-        isInstant: true,
-        text: "Create a workspace with these settings:",
-        details: {
-          id: "settings-details",
-          label: "Details",
-          lines: ["Name — workspace-1", "Branch — latest"],
-          isOpen,
-          onToggle: () => {
-            isOpen = !isOpen;
-          },
-        },
-      });
-
-    const closed = turnWith();
-    expect(collectText(closed).join("")).toContain("Create a workspace with these settings:");
-    const toggleOf = (turn: unknown): AnyVnode =>
-      collectVnodes(turn).find((vnode) => attrsOf(vnode).id === "settings-details") as AnyVnode;
-    expect(attrsOf(toggleOf(closed)).summary).toBe("Details");
-    expect(attrsOf(toggleOf(closed)).isOpen).toBe(false);
-    expect(collectText(toggleOf(closed)).join("")).toBe("Name — workspace-1\nBranch — latest");
-    (attrsOf(toggleOf(closed)).onToggle as () => void)();
-
-    expect(attrsOf(toggleOf(turnWith())).isOpen).toBe(true);
-  });
-
-  it("holds nothing but the text when it has no details", () => {
-    const turn = userTurn({ key: "said", delayMs: 0, isInstant: true, text: "Yes" });
-    expect(collectVnodes(turn).some((vnode) => attrsOf(vnode)["data-turn-details"] !== undefined)).toBe(false);
-    expect(collectText(turn).join("")).toBe("Yes");
-  });
-});
-
-describe("answerRow", () => {
-  function buttonOf(row: unknown, id: string): AnyVnode | undefined {
-    return collectVnodes(row).find((vnode) => attrsOf(vnode)["data-answer"] === id);
-  }
-
-  it("holds a disabled answer with its reason as the tooltip, leaving the other answer open", () => {
-    const row = answerRow({
-      key: "recovery",
-      delayMs: 0,
-      buttons: [
-        { id: "discard", label: "Discard", isEmphasized: false, onPress: () => undefined },
-        {
-          id: "retry",
-          label: "Retry",
-          isEmphasized: true,
-          isDisabled: true,
-          title: "The connection this attempt used was removed, so it cannot be retried.",
-          onPress: () => undefined,
-        },
-      ],
-    });
-
-    expect(attrsOf(buttonOf(row, "retry") as AnyVnode)).toMatchObject({
-      disabled: true,
-      title: "The connection this attempt used was removed, so it cannot be retried.",
-    });
-    expect(attrsOf(buttonOf(row, "discard") as AnyVnode)).toMatchObject({ disabled: false });
-    expect(attrsOf(buttonOf(row, "discard") as AnyVnode).title).toBeUndefined();
   });
 });

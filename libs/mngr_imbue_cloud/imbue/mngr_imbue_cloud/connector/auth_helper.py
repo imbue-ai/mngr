@@ -149,10 +149,7 @@ def get_active_token(
 ) -> SecretStr:
     """Return a fresh access token for ``account``, refreshing if needed.
 
-    Raises ``ImbueCloudAuthError`` if no session exists or the connector
-    refuses the refresh; a connector that cannot be reached raises
-    ``ImbueCloudUnreachableError`` and any other refresh failure
-    ``ImbueCloudConnectorError`` (see ``auth_refresh_session``).
+    Raises ``ImbueCloudAuthError`` if no session exists or refresh fails.
     """
     session = store.load_by_account(account)
     if session is None:

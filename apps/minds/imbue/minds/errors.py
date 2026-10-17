@@ -1,7 +1,5 @@
 import click
 
-from imbue.minds.mngr_settings.errors import MindsSettingsError
-
 
 class MindError(click.ClickException):
     """Base exception for all Imbue Studio errors.
@@ -22,12 +20,6 @@ class SigningKeyError(MindError):
 
 class GitCloneError(MindError):
     """Raised when git clone fails."""
-
-    ...
-
-
-class GitRefNotFoundError(GitCloneError):
-    """Raised when a clone's remote answered but has no branch or tag with the requested name."""
 
     ...
 
@@ -99,15 +91,6 @@ class MindsConfigError(MindError):
     ...
 
 
-class WorkspaceAutoUpdateSettingError(MindsConfigError, ValueError):
-    """Raised when a workspace's own auto-update setting has a window its mode cannot have.
-
-    A ``ValueError`` so pydantic reports it as a validation error of the setting.
-    """
-
-    ...
-
-
 class NaiveTimestampError(MindError, ValueError):
     """Raised when a timezone-aware datetime is required but a naive one was passed."""
 
@@ -127,6 +110,12 @@ class WorkspaceNameInUseError(MindError, ValueError):
 
 class PendingCreateAttemptStoreError(MindError):
     """Raised when a pending-create-attempt record cannot be written or deleted."""
+
+    ...
+
+
+class UpdateScheduleStoreError(MindError):
+    """Raised when a scheduled-update intent cannot be written."""
 
     ...
 
@@ -247,59 +236,6 @@ class WorkspaceRecordTooNewError(WorkspaceSyncError):
     ...
 
 
-class ConnectionRequiresMasterPasswordError(WorkspaceSyncError):
-    """Raised when a connection would be added to an account that cannot encrypt it here.
-
-    Synced connections ride the account's DEK, so the account must be unlocked
-    on this device and have a non-empty master password; the local profile is
-    the alternative for an account that has neither.
-    """
-
-    ...
-
-
-class ConnectionNotFoundError(WorkspaceSyncError):
-    """Raised when a connection id or instance name matches no active connection."""
-
-    ...
-
-
-class ConnectionTooNewError(WorkspaceSyncError):
-    """Raised when a state-changing operation targets a connection written by a newer app version."""
-
-    ...
-
-
-class ConnectionRemovedElsewhereError(WorkspaceSyncError):
-    """Raised when a push would rebase an active connection onto a tombstone another device wrote.
-
-    The removal wins: resurrecting the document would bring the connection
-    back on every device after one of them deliberately removed it.
-    """
-
-    ...
-
-
-class ConnectionUpdateInProgressError(WorkspaceSyncError):
-    """Raised when a removal or another update targets a connection whose new credentials are still being validated.
-
-    The update route settles such a row (clears or restores its rollback)
-    when the validation ends; a writer that changed it meanwhile would
-    either be undone by that settlement or carry the rollback into a row
-    that must never have one (a tombstone).
-    """
-
-    ...
-
-
-class ConnectionOperationInProgressError(WorkspaceSyncError):
-    """Raised when a registration or credential update is started on a connection that already has one running."""
-
-    def __init__(self, operation_id: str) -> None:
-        self.operation_id = operation_id
-        super().__init__(f"A registration or update of connection {operation_id!r} is still running")
-
-
 class LimaImageError(MindError):
     """Base exception for the pre-baked Lima image cache."""
 
@@ -350,30 +286,7 @@ class FolderSyncStoreError(MindError):
     ...
 
 
-class AccountsIndexUnreadableError(MindsSettingsError):
-    """Raised when the plugin's ``accounts.json`` index exists but cannot be read as a signed-in account list.
-
-    Distinct from an absent index (no account was ever signed in): a caller
-    deriving the provider set must not treat an unreadable listing as an
-    empty one, since writing it would delete every account and connection block.
-    """
-
-
 class SnapshotContainerStatesError(MindError):
     """Raised when the container states a snapshot sandbox was resumed into cannot be read."""
-
-    ...
-
-
-class ProgressSeedError(MindError, ValueError):
-    """Raised when the shipped create-progress seed table is malformed."""
-
-
-class WorkspaceMessageTypeError(MindError, ValueError):
-    """Raised when a workspace message type is not a lowercase ``prefix:kebab-name``, or claims the shell's ``shell:``.
-
-    Subclasses ``ValueError`` so pydantic treats it as a validation failure
-    when raised while validating the field.
-    """
 
     ...

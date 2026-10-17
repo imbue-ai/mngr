@@ -19,19 +19,10 @@ from typing import Literal
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import RootModel
+from pydantic import StrictBool
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.desktop_client.connections.data_types import DEFAULT_CREDENTIAL_SOURCE_NAME
-from imbue.minds.desktop_client.connections.primitives import MODAL_SANDBOX_TIMEOUT_SECONDS_MAX
-from imbue.minds.desktop_client.create_progress import OperationProgressSnapshot
-from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.data_types import ShareGatewayState
-from imbue.minds.desktop_client.data_types import ShareRemovalOutcome
-from imbue.minds.desktop_client.data_types import SharedWorkspaceRecordState
-from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
-from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
-from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
-from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
@@ -74,19 +65,11 @@ class ApiValidationErrorResponse(FrozenModel):
 
 
 class OperationHandleResponse(FrozenModel):
-    """A handle to poll for a long-running operation: a workspace create, destroy, or recovery, or a connection add or update."""
+    """A handle for a long-running create/destroy/recovery operation, to poll."""
 
-    operation_id: str = Field(
-        description=(
-            "Poll at /api/v1/workspaces/operations/<kind>/<operation_id> for a workspace operation, or at "
-            "/api/v1/desktop/cloud-accounts/operations/<operation_id> for a connection one"
-        )
-    )
+    operation_id: str = Field(description="Poll at /api/v1/workspaces/operations/<kind>/<operation_id>")
     kind: str = Field(
-        description=(
-            "Operation kind: create, destroy, or restart (the host recovery, whichever kind it runs), or "
-            "connection_add / connection_update"
-        )
+        description="Operation kind: create, destroy, or restart (the host recovery, whichever kind it runs)"
     )
 
 
@@ -107,10 +90,6 @@ class CreateOperationStatusResponse(FrozenModel):
             "Machine-readable failure classification (e.g. GITHUB_AUTH_REQUIRED), set when the "
             "failure is recognized; the creating page gates extra static guidance on it"
         ),
-    )
-    progress: OperationProgressSnapshot | None = Field(
-        default=None,
-        description="The attempt's progress (percent, rate, remaining time, step list), once it is tracked",
     )
 
 
@@ -198,8 +177,8 @@ class BackupServiceUpdateRequest(ApiRequestModel):
     stop_chats: bool = Field(
         default=False,
         description=(
-            "Stop RUNNING chat agents, UNKNOWN ones (state unreadable), and idle ones busy with a pending "
-            "background task, first, ending those tasks (the 'Stop all chats and retry' flow)"
+            "Stop RUNNING chat agents, and idle ones busy with a pending background task, first, ending those "
+            "tasks (the 'Stop all chats and retry' flow)"
         ),
     )
 
@@ -210,8 +189,8 @@ class BackupRestoreRequest(ApiRequestModel):
     stop_chats: bool = Field(
         default=False,
         description=(
-            "Stop RUNNING chat agents, UNKNOWN ones (state unreadable), and idle ones busy with a pending "
-            "background task, first, ending those tasks (the 'Stop chats and try again' flow)"
+            "Stop RUNNING chat agents, and idle ones busy with a pending background task, first, ending those "
+            "tasks (the 'Stop chats and try again' flow)"
         ),
     )
     update_after: bool = Field(
@@ -266,31 +245,15 @@ class TimezoneResponse(FrozenModel):
 
 
 class AgentNotificationRequest(ApiRequestModel):
-    """Body for notifying the user from a workspace agent (lands in the app's notification feed)."""
+    """Body for notifying the user from a chat agent (lands in the app's notification feed)."""
 
     message: str = Field(description="Free-text notification body")
-    title: str | None = Field(
-        default=None,
-        description=(
-            "Optional title. From a chat agent it is shown as a prefix on the body; from the workspace's primary "
-            "agent, which is not a chat, it heads the entry in place of the agent's name"
-        ),
-    )
+    title: str | None = Field(default=None, description="Optional title, shown as a prefix on the body")
     watched_by: tuple[str, ...] = Field(
         default=(),
         description=(
             "Ids of the chat page instances showing this chat to a focused reader; non-empty means the "
             "notification is recorded as read and not shown. Absent when the workspace does not know."
-        ),
-    )
-    destination: NotificationDestination | None = Field(
-        default=None,
-        description=(
-            'Where opening the notification lands: a workspace message, ``{"type": "<prefix:kebab-name>", '
-            '...string fields}`` (for example ``{"type": "minds:show-routine", "routine_id": "inbox-digest"}``), '
-            "posted into the workspace frame for the app whose manifest registers the type to show its page. "
-            "The type is lowercase ``prefix:kebab-name`` and never ``shell:``. Absent, the click lands in the "
-            "sending agent's chat (or just raises the workspace when the sender is its primary agent, not a chat)."
         ),
     )
 
@@ -354,21 +317,12 @@ class CreateWorkspaceRequest(ApiRequestModel):
         ge=1,
         description="Data disk in whole GB for the LIMA mode (the btrfs disk the workspace's data lives on); ignored elsewhere",
     )
-    modal_sandbox_timeout_seconds: int | None = Field(
-        default=None,
-        ge=1,
-        le=MODAL_SANDBOX_TIMEOUT_SECONDS_MAX,
-        description=(
-            "Sandbox lifetime in seconds for the MODAL mode, overriding the connection block's default "
-            "(about a day, the most Modal allows and this field's cap) for this one create; ignored by the other modes"
-        ),
-    )
     cloud_account: str | None = Field(
         default=None,
         description=(
-            "Cloud connection to create on: the ``<backend>_<hex>`` connection instance name "
-            "(the ``name`` from /desktop/cloud-accounts). When set, launch_mode must match the "
-            "connection's backend and the create targets that provider instance."
+            "Bring-your-own-key cloud account to create on: the ``byok-<backend>-<slug>`` provider "
+            "block name from /desktop/cloud-accounts. When set, launch_mode must match the "
+            "account's backend and the create targets that provider instance."
         ),
     )
     backup_provider: BackupProvider | None = Field(
@@ -384,30 +338,17 @@ class CreateWorkspaceRequest(ApiRequestModel):
             "grants nobody."
         ),
     )
-    is_onboarding_driven_by_agent: bool | None = Field(
-        default=None,
-        description=(
-            "Show the onboarding examples on the creation page while the workspace is built "
-            "(default off; the first-run start flow turns it on for its creates)"
-        ),
-    )
 
 
 class MachineSizeChangeRequest(ApiRequestModel):
     """Body for resizing a workspace's machine; a dimension left out keeps its current value."""
 
-    cpu_count: int | None = Field(
-        default=None,
-        ge=1,
-        description=(
-            "Whole CPUs to give the machine (docker and lima only; an Imbue Cloud machine's CPUs scale with its RAM)"
-        ),
-    )
+    cpu_count: int | None = Field(default=None, ge=1, description="Whole CPUs to give the machine")
     memory_gb: int | None = Field(default=None, ge=1, description="Memory in whole GB to give the machine")
     disk_gb: int | None = Field(
         default=None,
         ge=1,
-        description="Data disk in whole GB to grow the machine's disk to (lima and Imbue Cloud only; never shrinks)",
+        description="Data disk in whole GB to grow the machine's disk to (lima only; never shrinks)",
     )
 
 
@@ -416,9 +357,8 @@ class MachineSizeChangeResponse(FrozenModel):
 
     is_restart_dispatched: bool = Field(
         description=(
-            "True when a local machine was running and its restart was dispatched to apply the size; False when it "
-            "was stopped (the recorded size applies on its next start) or is an Imbue Cloud machine (the size is "
-            "only recorded; the restart that applies it is asked for separately)"
+            "True when the machine was running and its restart was dispatched to apply the size; False when it "
+            "was stopped, so the recorded size applies on its next start"
         )
     )
     operation_id: str | None = Field(
@@ -556,53 +496,6 @@ class MobileAccessLinkResponse(FrozenModel):
     sent_at: str | None = Field(default=None, description="When the message went out, for a sent outcome")
 
 
-class VisitingAgentInviteRequest(ApiRequestModel):
-    """Body for minting a visiting agent's one-time code: the scope the grant will have, and optional expiry and name."""
-
-    scope: str | list[str] = Field(
-        default="workspace", description="'workspace' (every origin, exec authority) or the app names to admit"
-    )
-    expires_in_days: float | None = Field(
-        default=None, description="Expire the grant after this many days; never when absent"
-    )
-    name_hint: str = Field(default="", description="A suggested name for the agent, shown in the instructions")
-
-
-class VisitingAgentInviteResponse(FrozenModel):
-    """The minted code and the instruction block the inviter hands the agent."""
-
-    code: str = Field(description="The one-time code (valid fifteen minutes, consumed by one join)")
-    expires_at: str = Field(description="When the code expires (ISO 8601)")
-    scope: str | list[str] = Field(description="'workspace', or the app names the grant will admit")
-    auth_origin: str = Field(description="The workspace's auth origin the agent joins at")
-    instructions: str = Field(description="The instruction block to copy to the agent")
-
-
-class VisitingAgentEntryResponse(FrozenModel):
-    """One visiting agent's grant as the workspace reports it."""
-
-    agent_id: str = Field(description="The grant's id (va-<hex>)")
-    name: str = Field(description="The name the agent gave itself")
-    fingerprint: str = Field(description="The SHA256 fingerprint of the agent's key")
-    scope: str | list[str] = Field(description="'workspace', or the app names the grant admits")
-    granter: str = Field(description="Who invited it: user:<id> or agent:<id>")
-    created_at: str = Field(description="When the grant was made (ISO 8601)")
-    expires_at: str | None = Field(default=None, description="When the grant expires, if ever")
-    last_seen_at: str | None = Field(default=None, description="When the agent last made a request, if ever")
-
-
-class VisitingAgentsResponse(FrozenModel):
-    """The workspace's visiting agents."""
-
-    agents: tuple[VisitingAgentEntryResponse, ...] = Field(description="Every unexpired grant")
-
-
-class VisitingAgentRevokeResponse(FrozenModel):
-    """Which visiting agent was revoked."""
-
-    revoked: str = Field(description="The revoked grant's id")
-
-
 class BugReportRequest(ApiRequestModel):
     """Body for submitting a bug report on behalf of an in-workspace agent.
 
@@ -615,48 +508,25 @@ class BugReportRequest(ApiRequestModel):
 
 
 class _CloudAccountCreateBase(ApiRequestModel):
-    """Fields shared by every backend's cloud-connection registration."""
+    """Fields shared by every backend's bring-your-own-key account registration."""
 
-    alias: str = Field(min_length=1, description="Display name for the connection")
-    credential_source: str | None = Field(
-        default=None,
-        description=(
-            "'pasted' (the default: the backend's keys are in the body) or 'local_profile' (no keys; the body names "
-            "a login installed on this machine: aws_profile, the Azure tenant and subscription of an `az login`, "
-            "or modal_profile). GCP has no local-profile form."
-        ),
-    )
-    owner: str | None = Field(
-        default=None,
-        description=(
-            "Who owns the connection: an imbue cloud account's user id (the connection syncs to every device "
-            "that unlocks the account) or 'local' (this device only). Omitted: the default account."
-        ),
-    )
-
-
-class _PlacedCloudAccountCreateBase(_CloudAccountCreateBase):
-    """The VPS clouds pin a placement per connection."""
-
+    alias: str = Field(min_length=1, description="Display name for the account (also seeds the block-name slug)")
     region: str = Field(
         min_length=1,
-        description="Default placement for machines created on this connection (an AWS/Azure region, or a GCE zone)",
+        description="Default placement for machines created on this account (an AWS/Azure region, or a GCE zone)",
     )
 
 
-class _AwsCredentialFields(ApiRequestModel):
-    """A pasted AWS access-key pair."""
+class AwsCloudAccountCreateRequest(_CloudAccountCreateBase):
+    """Register an AWS account from a pasted access-key pair."""
 
     backend: Literal["aws"] = Field(description="Cloud backend discriminator")
     aws_access_key_id: str | None = Field(default=None, description="AWS access key id")
     aws_secret_access_key: str | None = Field(default=None, description="AWS secret access key")
-    aws_profile: str | None = Field(
-        default=None, description="The ~/.aws/config profile to authenticate with (credential_source local_profile)"
-    )
 
 
-class _GcpCredentialFields(ApiRequestModel):
-    """A pasted GCP service-account key."""
+class GcpCloudAccountCreateRequest(_CloudAccountCreateBase):
+    """Register a GCP account from a pasted service-account key."""
 
     backend: Literal["gcp"] = Field(description="Cloud backend discriminator")
     gcp_service_account_key_json: str | None = Field(
@@ -664,8 +534,8 @@ class _GcpCredentialFields(ApiRequestModel):
     )
 
 
-class _AzureCredentialFields(ApiRequestModel):
-    """An Azure service-principal, or (credential_source local_profile) the tenant and subscription of an `az login`."""
+class AzureCloudAccountCreateRequest(_CloudAccountCreateBase):
+    """Register an Azure account from a service-principal."""
 
     backend: Literal["azure"] = Field(description="Cloud backend discriminator")
     azure_subscription_id: str | None = Field(default=None, description="Azure subscription id")
@@ -674,54 +544,15 @@ class _AzureCredentialFields(ApiRequestModel):
     azure_client_secret: str | None = Field(default=None, description="Service-principal client secret")
 
 
-class _ModalCredentialFields(ApiRequestModel):
-    """A Modal token pair."""
-
-    backend: Literal["modal"] = Field(description="Cloud backend discriminator")
-    modal_token_id: str | None = Field(default=None, description="Modal token id")
-    modal_token_secret: str | None = Field(default=None, description="Modal token secret")
-    modal_profile: str | None = Field(
-        default=None, description="The ~/.modal.toml profile to authenticate with (credential_source local_profile)"
-    )
-
-
-class AwsCloudAccountCreateRequest(_PlacedCloudAccountCreateBase, _AwsCredentialFields):
-    """Register an AWS connection from a pasted access-key pair."""
-
-
-class GcpCloudAccountCreateRequest(_PlacedCloudAccountCreateBase, _GcpCredentialFields):
-    """Register a GCP connection from a pasted service-account key."""
-
-
-class AzureCloudAccountCreateRequest(_PlacedCloudAccountCreateBase, _AzureCredentialFields):
-    """Register an Azure connection from a service-principal."""
-
-
-class ModalCloudAccountCreateRequest(_CloudAccountCreateBase, _ModalCredentialFields):
-    """Register a Modal connection from a token pair (no placement)."""
-
-    modal_user_id: str | None = Field(
-        default=None,
-        description=(
-            "Names the connection's Modal namespace (the environment is <prefix><modal_user_id>) instead of "
-            "deriving it from the connection id; this-device-only connections only, matching "
-            "[A-Za-z0-9][A-Za-z0-9_-]{0,47}"
-        ),
-    )
-
-
 class CloudAccountCreateRequest(
     RootModel[
         Annotated[
-            AwsCloudAccountCreateRequest
-            | GcpCloudAccountCreateRequest
-            | AzureCloudAccountCreateRequest
-            | ModalCloudAccountCreateRequest,
+            AwsCloudAccountCreateRequest | GcpCloudAccountCreateRequest | AzureCloudAccountCreateRequest,
             Field(discriminator="backend"),
         ]
     ]
 ):
-    """Body for registering a cloud connection (pasted credentials).
+    """Body for registering a bring-your-own-key cloud account (pasted credentials).
 
     A discriminated union on ``backend``: each cloud's credential fields live on
     its own variant instead of being splatted flat across one model. The wire
@@ -732,110 +563,22 @@ class CloudAccountCreateRequest(
     """
 
 
-class _CloudAccountUpdateBase(ApiRequestModel):
-    """Fields shared by every backend's in-place credential update: no owner, no region, no backend change."""
-
-    alias: str | None = Field(default=None, description="New display name; omitted keeps the current one")
-    credential_source: str | None = Field(
-        default=None,
-        description="'pasted' (default) or 'local_profile'; an update may switch the connection between the two",
-    )
-
-
-class AwsCloudAccountUpdateRequest(_CloudAccountUpdateBase, _AwsCredentialFields):
-    """Replace an AWS connection's access-key pair."""
-
-
-class GcpCloudAccountUpdateRequest(_CloudAccountUpdateBase, _GcpCredentialFields):
-    """Replace a GCP connection's service-account key."""
-
-
-class AzureCloudAccountUpdateRequest(_CloudAccountUpdateBase, _AzureCredentialFields):
-    """Replace an Azure connection's service-principal."""
-
-
-class ModalCloudAccountUpdateRequest(_CloudAccountUpdateBase, _ModalCredentialFields):
-    """Replace a Modal connection's token pair."""
-
-
-class CloudAccountUpdateRequest(
-    RootModel[
-        Annotated[
-            AwsCloudAccountUpdateRequest
-            | GcpCloudAccountUpdateRequest
-            | AzureCloudAccountUpdateRequest
-            | ModalCloudAccountUpdateRequest,
-            Field(discriminator="backend"),
-        ]
-    ]
-):
-    """Body for updating a cloud connection's credentials in place (``PUT .../cloud-accounts/<instance>``).
-
-    The ``backend`` discriminator must name the connection's own backend; the
-    connection keeps its id, instance name, owner, and placement. Every
-    credential field of the backend is required, as on registration.
-    """
-
-
 class CloudAccountSummary(FrozenModel):
-    """One cloud connection whose credentials are available on this device."""
+    """One registered bring-your-own-key cloud account."""
 
-    name: str = Field(description="Connection instance name (<backend>_<hex>) -- the stable id")
+    name: str = Field(description="Provider block name (byok-<backend>-<slug>) -- the stable id")
     alias: str = Field(description="Display alias")
     backend: str = Field(description="Cloud backend (e.g. 'aws')")
-    region: str = Field(description="The connection's pinned placement (empty for modal)")
+    region: str = Field(description="The account's current default region")
     identifier: str = Field(description="Masked credential hint (e.g. 'AKIA…F5X2'); never the secret")
-    owner_user_id: str = Field(description="The owning account's user id, or 'local' for this device's profile")
-    is_region_pinned: bool = Field(
-        description="Whether the backend fixes the region on the connection (aws, gcp, azure)"
-    )
-    credential_source: str = Field(
-        default=DEFAULT_CREDENTIAL_SOURCE_NAME,
-        description="'pasted' or 'local_profile': whether the connection names a local login",
-    )
 
 
-class LocalCredentialProfileResponse(FrozenModel):
-    """One login on this machine a local-profile connection can name."""
+class SetProviderEnabledRequest(ApiRequestModel):
+    """Body for toggling a provider's enabled flag."""
 
-    name: str = Field(description="What the connection names: the AWS or Modal profile, or the Azure subscription id")
-    label: str = Field(description="Display label")
-    region: str | None = Field(default=None, description="The AWS profile's own region, when it sets one")
-    tenant_id: str | None = Field(default=None, description="The Azure subscription's tenant")
-    subscription_id: str | None = Field(default=None, description="The Azure subscription id")
-    unusable_reason: str = Field(default="", description="Why a connection cannot use this login; empty when it can")
-
-
-class LocalCredentialProfilesResponse(FrozenModel):
-    """The logins on this machine a connection of one backend can name (``GET .../cloud-accounts/local-profiles``)."""
-
-    backend: str = Field(description="The backend the profiles were listed for")
-    profiles: tuple[LocalCredentialProfileResponse, ...] = Field(description="The usable and unusable logins found")
-
-
-class CloudAccountOperationStatusResponse(FrozenModel):
-    """Status of a connection registration or credential update (polled at /desktop/cloud-accounts/operations/<id>)."""
-
-    operation_id: str = Field(description="The connection's instance name, as the 202 handle carried it")
-    kind: str = Field(description="connection_add or connection_update")
-    status: str = Field(description="RUNNING, DONE, or FAILED")
-    is_done: bool = Field(description="Whether the operation finished successfully")
-    account: CloudAccountSummary | None = Field(default=None, description="The connection, once the operation is done")
-    error: str | None = Field(default=None, description="The failure message, once the operation failed")
-    code: str | None = Field(
-        default=None,
-        description=(
-            "The failure code a client branches on (credentials_rejected, sync_failed, connection_removed_elsewhere, "
-            "...), when one applies"
-        ),
-    )
-    status_code: int | None = Field(
-        default=None,
-        description="The HTTP status the registration would have answered with before it ran in the background",
-    )
-    progress: OperationProgressSnapshot | None = Field(
-        default=None, description="The operation's progress (percent, rate, remaining time, step list)"
-    )
+    # StrictBool (not bool) so a non-boolean like ``1`` or ``"yes"`` is rejected
+    # rather than truthiness-coerced, matching the route's prior isinstance check.
+    enabled: StrictBool = Field(description="Desired enabled state for the provider")
 
 
 class WorkspaceSummary(FrozenModel):
@@ -863,13 +606,6 @@ class WorkspaceSummary(FrozenModel):
         default=None, description="Immutable create-time Imbue Studio version label"
     )
     color: str | None = Field(default=None, description="Workspace tile color")
-    is_owned: bool = Field(
-        description=(
-            "Whether the workspace is the signed-in user's own. The listing holds only the user's own "
-            "workspaces today, so this is always true; a workspace shared with the user by someone else "
-            "will report false once such workspaces are listed, and an agent must treat it as untrusted"
-        )
-    )
 
 
 class WorkspaceListResponse(FrozenModel):
@@ -892,42 +628,6 @@ class AccountsResponse(FrozenModel):
     accounts: tuple[AccountSummary, ...] = Field(description="All signed-in accounts")
 
 
-class SharedWorkspaceRow(FrozenModel):
-    """One share of an account as the shared-workspaces page shows it."""
-
-    host_id: str = Field(description="The share's host coordinate, the key every share operation takes")
-    workspace_id: str | None = Field(description="The workspace the share is keyed by; None on a legacy row")
-    account_email: str = Field(description="The owning account")
-    display_name: str = Field(description="The workspace's name from its record, else the share's domain")
-    workspace_domain: str = Field(description="The share's domain")
-    device_label: str = Field(description="Where the workspace runs: its record's device, or 'This device'")
-    share_state: str = Field(description="The connector's share state: active, or suspended")
-    record_state: SharedWorkspaceRecordState = Field(description="What the account's records say about the workspace")
-    created_display: str = Field(description="When the share was created (YYYY-MM-DD), '' when unknown")
-    last_seen_display: str = Field(description="When the workspace's tunnel was last alive, in words")
-    is_likely_leaked: bool = Field(
-        description="The workspace is destroyed or unknown: the share holds a slot for nothing"
-    )
-    is_hosted_here: bool = Field(description="This device runs the workspace, so removing is an unpublish")
-
-
-class AccountSharesResponse(FrozenModel):
-    """The shares one signed-in account holds, each joined to the account's workspace records."""
-
-    account_id: str = Field(description="The account the rows belong to")
-    email: str = Field(description="The account's email")
-    rows: tuple[SharedWorkspaceRow, ...] = Field(description="Every slot-holding share, in share-creation order")
-
-
-class AccountShareRemovedResponse(FrozenModel):
-    """What removing one share from the shared-workspaces page did."""
-
-    host_id: str = Field(description="The share's host coordinate")
-    outcome: ShareRemovalOutcome = Field(
-        description="stopped_sharing when the workspace runs here and was unpublished; removed when only the share went"
-    )
-
-
 class AppVersionResponse(FrozenModel):
     """The version identity of the Imbue Studio desktop app a workspace is attached to."""
 
@@ -945,46 +645,6 @@ class OkResponse(FrozenModel):
     """A minimal ``{"ok": true}`` acknowledgement."""
 
     ok: bool = Field(description="Whether the operation succeeded")
-
-
-class AgentFolderSync(FrozenModel):
-    """One folder of this desktop that the workspace has a copy of, or had."""
-
-    local_path: str = Field(description="The folder on this desktop, as an absolute path; identifies the sync")
-    workspace_path: str | None = Field(
-        description=(
-            "Where the workspace's copy is, from the workspace's home directory (``~/...``): under "
-            "``~/synced_folders/<device id>/`` while the "
-            "sync is on, ``~/inactive_synced_folders/<device id>/`` once it is off and the copy set aside, "
-            "and null once that copy was deleted"
-        )
-    )
-    activity: FolderSyncActivity = Field(
-        description="ACTIVE (kept in sync), INACTIVE (sync off, copy set aside), or DISCARDED (sync off, copy deleted)"
-    )
-    state: FolderSyncState = Field(
-        description=(
-            "How far along it is. SYNCING until the first pass has compared both sides and left them level, "
-            "and again while a later change is moving; SYNCED only once they are level"
-        )
-    )
-    message: str | None = Field(description="Why it failed, when it did; null otherwise")
-    bytes_done: int | None = Field(description="Bytes moved so far in the transfer under way; null when none is")
-    bytes_total: int | None = Field(description="Bytes that transfer set out to move; null when none is under way")
-    direction: FolderSyncDirection = Field(description="BOTH, or TO_WORKSPACE (changes only travel from the desktop)")
-    conflict: FolderSyncConflict = Field(description="Which side wins a clash; meaningful only when direction is BOTH")
-
-
-class AgentFolderSyncsResponse(FrozenModel):
-    """``GET /api/v1/agents/<agent_id>/folder-syncs``: this desktop's folder syncs with the agent's workspace."""
-
-    device_id: str = Field(
-        description=(
-            "This desktop's device id: the one its file-sharing grants name "
-            "(``minds-file-server-<access>-<device id>:<path>``) and its copies are filed under"
-        )
-    )
-    syncs: tuple[AgentFolderSync, ...] = Field(description="One entry per folder that has ever been synced")
 
 
 class WorkspaceLifecycleResponse(FrozenModel):
@@ -1175,6 +835,14 @@ class MachineSharingResponse(FrozenModel):
             "not live until the workspace's share stack restarts."
         ),
     )
+
+
+class ProviderToggleResponse(FrozenModel):
+    """Result of toggling a provider's enabled flag."""
+
+    provider_name: str = Field(description="The provider that was toggled")
+    enabled: bool = Field(description="The provider's new enabled state")
+    changed: bool = Field(description="Whether the state actually changed")
 
 
 class StopStateContainerResponse(FrozenModel):

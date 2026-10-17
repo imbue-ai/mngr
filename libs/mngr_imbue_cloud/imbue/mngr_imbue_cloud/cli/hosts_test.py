@@ -1,11 +1,10 @@
 from pathlib import Path
 
-import httpx2
+import httpx
 import pytest
 from click.testing import CliRunner
 from pydantic import AnyUrl
 
-from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.cli.hosts import _find_host_state_dirs
 from imbue.mngr_imbue_cloud.cli.hosts import _find_lease_by_ref
 from imbue.mngr_imbue_cloud.cli.hosts import _release_lease
@@ -82,7 +81,7 @@ def test_find_host_state_dirs_scans_provider_instances(tmp_path: Path, monkeypat
     (with_private_key_only / "ssh_key").write_text("fake-private-key")
     monkeypatch.setenv("MNGR_HOST_DIR", str(host_dir))
 
-    found = _find_host_state_dirs(HostId(_HOST_ID))
+    found = _find_host_state_dirs(_HOST_ID)
 
     assert found == [with_key]
 
@@ -107,15 +106,15 @@ def _signed_in_store(tmp_path: Path) -> tuple[ImbueCloudSessionStore, ImbueCloud
 
 
 def _connector(release_status_code: int, released_paths: list[str]) -> ImbueCloudConnectorClient:
-    def handler(request: httpx2.Request) -> httpx2.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/auth/session/refresh":
-            return httpx2.Response(
+            return httpx.Response(
                 200, json={"status": "OK", "tokens": {"access_token": "at", "refresh_token": "rt-2"}}
             )
         released_paths.append(request.url.path)
-        return httpx2.Response(release_status_code, json={"status": "released"})
+        return httpx.Response(release_status_code, json={"status": "released"})
 
-    return ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
+    return ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
 
 
 def test_a_release_the_connector_accepts_is_reported_as_released(tmp_path: Path) -> None:

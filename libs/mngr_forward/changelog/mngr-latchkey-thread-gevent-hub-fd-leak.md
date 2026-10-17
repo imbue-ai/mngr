@@ -1,0 +1,3 @@
+The SSH tunnel relay now multiplexes with `poll()` instead of `select()`. `select()` rejects any descriptor numbered 1024 or above, so a forward process holding that many descriptors (from a leak, or from many concurrent tunneled connections) failed every relay with `ValueError: filedescriptor out of range in select()`, which clients saw as a hung-up socket (Sentry MINDS-PRODUCTION-13). This supersedes PR #161. The relay tests, adapted from that PR, now drive a real in-process paramiko channel instead of socket-backed stubs.
+
+The SIGHUP watcher and discovery-tail threads now start through `start_mngr_thread`, so they release their gevent Hub when they finish.

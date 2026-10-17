@@ -1,0 +1,5 @@
+Deflaked the remaining real-agent (`@pytest.mark.tmux`) CLI and API tests that were tripping the default 10s pytest-timeout under offload's parallel load. These tests run a full real tmux-agent lifecycle in-process, whose honest wall-time (~5s unloaded) is genuine and essentially irreducible, so the fix aligns them with their already-provisioned siblings: each now carries `@pytest.mark.timeout(30)` for headroom and `@pytest.mark.flaky` so offload auto-retries a single unlucky run instead of failing the whole job.
+
+Affected tests: `test_cleanup_stop_action_with_real_agent` (MIND-185; gains the timeout to match its siblings), `test_create_agent_work_dir_is_created`, `test_list_command_with_agent`, `test_list_command_with_exclude_filter`, and `test_list_command_with_host_name_filter`.
+
+The other real-agent members of this cluster (`test_destroy_single_agent_via_session`, `test_destroy_remove_created_branch_deletes_branch`, and `test_send_message_one_agent_failure_does_not_prevent_other_agents`) were already given the same treatment on main, so they are unchanged here.

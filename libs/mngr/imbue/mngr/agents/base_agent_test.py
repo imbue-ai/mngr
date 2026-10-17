@@ -23,7 +23,6 @@ from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.agents.base_agent import build_stderr_tee_redirect
 from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.agents.mock_host_test import HangingTmuxHost
-from imbue.mngr.agents.mock_host_test import is_send_preflight_command
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
@@ -31,15 +30,10 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MessageLockTimeoutError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.common import PROCESS_TABLE_SNAPSHOT_COMMAND
-from imbue.mngr.hosts.common import TMUX_PANES_SNAPSHOT_COMMAND
 from imbue.mngr.hosts.common import get_agent_state_dir_path
-from imbue.mngr.hosts.common import parse_tmux_pane_listings
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
-from imbue.mngr.hosts.tmux import capture_tmux_pane_content
 from imbue.mngr.interfaces.data_types import CommandResult
-from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -48,7 +42,6 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import InvalidName
-from imbue.mngr.primitives import LifecycleProbeResult
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
@@ -519,58 +512,6 @@ def test_send_tmux_literal_keys_short_message_with_leading_dash(
         cleanup_tmux_session(session_name)
 
 
-def _start_echoing_pane(agent: SendKeysAgent) -> TmuxWindowTarget:
-    """Start the agent's session with `cat` in its primary window, so whatever is typed shows on screen."""
-    session_name = f"{agent.mngr_ctx.config.prefix}{agent.name}"
-    window_name = agent.mngr_ctx.config.tmux.primary_window_name
-    agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' -n '{window_name}' -x 200 -y 24 'cat'",
-        timeout_seconds=5.0,
-    )
-    return agent.tmux_target
-
-
-def _wait_for_pane_line(agent: SendKeysAgent, expected_line: str) -> None:
-    """Wait until the pane's last non-blank line is exactly ``expected_line``."""
-
-    def _last_line() -> str:
-        content = agent.capture_pane_content() or ""
-        lines = [line for line in content.splitlines() if line.strip()]
-        return lines[-1] if lines else ""
-
-    wait_for(
-        lambda: _last_line() == expected_line, error_message=f"Expected the pane to show exactly {expected_line!r}"
-    )
-
-
-@pytest.mark.tmux
-@pytest.mark.parametrize("message", ["hello;", "a;b;", ";", "find . -exec echo {} \\;"])
-def test_send_tmux_literal_keys_keeps_trailing_semicolon(test_agent: BaseAgent, message: str) -> None:
-    """A short message ending in `;` must reach the pane with its `;`, not read by tmux as a command separator."""
-    assert isinstance(test_agent, SendKeysAgent)
-    send_keys_agent: SendKeysAgent = test_agent
-    tmux_target = _start_echoing_pane(send_keys_agent)
-    try:
-        send_keys_agent._send_tmux_literal_keys(tmux_target, message)
-        _wait_for_pane_line(send_keys_agent, message)
-    finally:
-        cleanup_tmux_session(tmux_target.session_name)
-
-
-@pytest.mark.tmux
-def test_press_key_chord_presses_semicolon_key(test_agent: BaseAgent) -> None:
-    """Pressing the `;` key must type `;`, not hand tmux an empty command separator."""
-    assert isinstance(test_agent, SendKeysAgent)
-    send_keys_agent: SendKeysAgent = test_agent
-    tmux_target = _start_echoing_pane(send_keys_agent)
-    try:
-        send_keys_agent.press_key_chord("x")
-        send_keys_agent.press_key_chord(";")
-        _wait_for_pane_line(send_keys_agent, "x;")
-    finally:
-        cleanup_tmux_session(tmux_target.session_name)
-
-
 @pytest.mark.tmux
 def test_send_tmux_literal_keys_long_message_arrives_as_one_bracketed_paste(
     test_agent: BaseAgent,
@@ -617,40 +558,6 @@ def test_send_tmux_literal_keys_long_message_arrives_as_one_bracketed_paste(
         assert received.startswith(PASTE_START_MARKER)
         assert received.endswith(PASTE_END_MARKER)
         assert message.encode() in received
-    finally:
-        cleanup_tmux_session(session_name)
-
-
-@pytest.mark.tmux
-def test_send_tmux_literal_keys_leaves_copy_mode_before_typing(
-    test_agent: BaseAgent,
-) -> None:
-    """A pane left in copy-mode is taken out of it by the same invocation that types the message."""
-    assert isinstance(test_agent, SendKeysAgent)
-    send_keys_agent: SendKeysAgent = test_agent
-    session_name = f"{send_keys_agent.mngr_ctx.config.prefix}{send_keys_agent.name}"
-    tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
-    target_arg = tmux_target.as_shell_arg()
-    message = "typed past copy-mode 58213"
-    send_keys_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' -x 200 -y 24 cat && tmux copy-mode -t {target_arg}",
-        timeout_seconds=5.0,
-    )
-
-    def _pane_state() -> str:
-        return send_keys_agent.host.execute_idempotent_command(
-            f"tmux display-message -p -t {target_arg} '#{{pane_in_mode}}'", timeout_seconds=5.0
-        ).stdout.strip()
-
-    try:
-        assert _pane_state() == "1"
-        send_keys_agent._send_tmux_literal_keys(tmux_target, message)
-
-        assert _pane_state() == "0"
-        wait_for(
-            lambda: message in (capture_tmux_pane_content(send_keys_agent.host, target_arg) or ""),
-            error_message="Expected the message typed into the pane once copy-mode was left",
-        )
     finally:
         cleanup_tmux_session(session_name)
 
@@ -1266,6 +1173,11 @@ class _StubHost:
         self.host_dir = Path("/tmp/stub-host")
         self.is_local = is_local
 
+    # Send preflight, not the command under test: resolving the agent's pane and leaving copy-mode
+    # run before every send, and a test scripting results is scripting the SEND. Serving these from
+    # the default keeps the scripted queue lined up with the command each test actually means.
+    _PREFLIGHT_COMMAND_PREFIXES = ("tmux show-options", "tmux copy-mode")
+
     def _execute_command(self, command: str, **kwargs: object) -> CommandResult:
         self.executed_commands.append(command)
         self.executed_command_timeouts.append(kwargs.get("timeout_seconds"))
@@ -1273,7 +1185,7 @@ class _StubHost:
             if self.pane_id is None:
                 return CommandResult(success=False, stdout="", stderr="invalid option: @mngr_agent_pane")
             return CommandResult(success=True, stdout=f"{self.pane_id}\n", stderr="")
-        if is_send_preflight_command(command):
+        if command.startswith(self._PREFLIGHT_COMMAND_PREFIXES):
             return self._default_result
         if self._command_results:
             return self._command_results.pop(0)
@@ -1286,23 +1198,13 @@ class _StubHost:
         Assertions about "what this send did" mean the send, not the pane resolution and
         mode-clearing that precede every one of them.
         """
-        return [c for c in self.executed_commands if not is_send_preflight_command(c)]
+        return [c for c in self.executed_commands if not c.startswith(self._PREFLIGHT_COMMAND_PREFIXES)]
 
     def execute_idempotent_command(self, command: str, **kwargs: object) -> CommandResult:
         return self._execute_command(command, **kwargs)
 
     def execute_stateful_command(self, command: str, **kwargs: object) -> CommandResult:
         return self._execute_command(command, **kwargs)
-
-    def read_lifecycle_snapshot(self) -> HostLifecycleSnapshot | None:
-        panes_result = self._execute_command(TMUX_PANES_SNAPSHOT_COMMAND)
-        if not panes_result.success:
-            return None
-        ps_result = self._execute_command(PROCESS_TABLE_SNAPSHOT_COMMAND)
-        return HostLifecycleSnapshot(
-            panes=parse_tmux_pane_listings(panes_result.stdout),
-            ps_output=ps_result.stdout if ps_result.success else None,
-        )
 
     def write_text_file(self, path: Path, content: str, **kwargs: object) -> None:
         self.written_files.append((path, content))
@@ -1365,20 +1267,6 @@ def test_send_tmux_literal_keys_short_message_uses_send_keys(
     assert len(stub.written_files) == 0
 
 
-def test_send_tmux_literal_keys_leaves_pane_modes_in_the_same_tmux_invocation(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """Leaving copy-mode rides along with the typing rather than costing a process spawn of its own."""
-    stub = _StubHost(pane_id="%7")
-    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
-
-    agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
-
-    assert stub.executed_commands[1:] == [
-        "tmux if-shell -F -t %7 '#{pane_in_mode}' 'copy-mode -q -t %7' \\; send-keys -t %7 -l -- hello"
-    ]
-
-
 def test_send_tmux_literal_keys_long_message_uses_load_buffer(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -1393,30 +1281,47 @@ def test_send_tmux_literal_keys_long_message_uses_load_buffer(
     assert len(stub.written_files) == 1
     assert stub.written_files[0][1] == long_message
 
-    # Then load, leave any mode and paste in one tmux invocation, and clean up
-    assert len(stub.sent_commands) == 2
-    load_and_paste = stub.sent_commands[0]
-    assert load_and_paste.index("load-buffer -b") < load_and_paste.index("copy-mode -q")
-    assert load_and_paste.index("copy-mode -q") < load_and_paste.index("paste-buffer -p -b")
-    assert "delete-buffer" in stub.sent_commands[1]
-    assert "rm -f" in stub.sent_commands[1]
+    # Then execute load-buffer, paste-buffer, and cleanup
+    assert len(stub.sent_commands) == 3
+    assert "load-buffer" in stub.sent_commands[0]
+    assert "-b" in stub.sent_commands[0]
+    assert "paste-buffer" in stub.sent_commands[1]
+    assert "-b" in stub.sent_commands[1]
+    assert "-p" in stub.sent_commands[1]
+    assert "delete-buffer" in stub.sent_commands[2]
+    assert "rm -f" in stub.sent_commands[2]
+
+
+def test_send_tmux_literal_keys_long_message_raises_on_load_buffer_failure(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """load-buffer failure should raise SendMessageError."""
+    stub = _StubHost(
+        command_results=[
+            CommandResult(success=False, stdout="", stderr="load failed"),
+        ]
+    )
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    with pytest.raises(SendMessageError, match="load-buffer failed"):
+        agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "x" * 1024)
 
 
 @pytest.mark.flaky
-def test_send_tmux_literal_keys_long_message_raises_on_load_or_paste_failure(
+def test_send_tmux_literal_keys_long_message_raises_on_paste_buffer_failure(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """A failed load-buffer/paste-buffer invocation raises SendMessageError and still cleans up."""
+    """paste-buffer failure should raise SendMessageError."""
     stub = _StubHost(
         command_results=[
+            CommandResult(success=True, stdout="", stderr=""),
             CommandResult(success=False, stdout="", stderr="paste failed"),
         ]
     )
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
-    with pytest.raises(SendMessageError, match="load-buffer/paste-buffer failed: paste failed"):
+    with pytest.raises(SendMessageError, match="paste-buffer failed"):
         agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "x" * 1024)
-    assert "delete-buffer" in stub.sent_commands[-1]
 
 
 def test_send_tmux_literal_keys_short_message_raises_on_send_keys_failure(
@@ -1460,64 +1365,47 @@ def test_migrate_unnamed_primary_window_renames_lowest_index_window(
     assert temp_mngr_ctx.config.tmux.primary_window_name in command
 
 
-def _lifecycle_snapshot_results(session_name: str, window_name: str) -> list[CommandResult]:
-    """The host's pane and process reads for one session whose window runs the stub agent's ``bash`` as pid 12345."""
-    return [
-        CommandResult(
-            success=True, stdout=f"{session_name}::MNGR::::MNGR::{window_name}::MNGR::0|bash|12345\n", stderr=""
-        ),
-        CommandResult(success=True, stdout="12345 1 bash\n", stderr=""),
-    ]
-
-
-def test_probe_lifecycle_migrates_an_unnamed_primary_window_then_rereads(
+def test_get_lifecycle_state_migrates_on_name_miss_then_reprobes(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """A session whose primary window lacks the configured name gets it renamed, then is read again."""
-    primary_window_name = temp_mngr_ctx.config.tmux.primary_window_name
-    agent_session_name = temp_mngr_ctx.config.agent_session_name(AgentName("stub-agent"))
+    """A by-name probe miss on an existing session triggers a rename and a successful re-probe."""
     stub = _StubHost(
         command_results=[
-            # The pre-upgrade primary window was auto-named after its command.
-            *_lifecycle_snapshot_results(agent_session_name, "bash"),
+            # Initial by-name probe misses (unnamed pre-upgrade primary window).
+            CommandResult(success=True, stdout="", stderr=""),
             # The one-shot migration rename succeeds.
             CommandResult(success=True, stdout="", stderr=""),
-            *_lifecycle_snapshot_results(agent_session_name, primary_window_name),
+            # The re-probe now resolves the renamed primary window.
+            CommandResult(success=True, stdout="0|node|12345", stderr=""),
+            # ps output for descendant detection.
+            CommandResult(success=True, stdout="12345 1 node\n", stderr=""),
         ]
     )
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
-    probe = agent.probe_lifecycle()
+    agent.get_lifecycle_state()
 
-    assert probe == LifecycleProbeResult(state=AgentLifecycleState.WAITING, pid=12345)
-    assert "list-panes -a" in stub.sent_commands[0]
-    assert "rename-window" in stub.sent_commands[2]
-    assert "list-panes -a" in stub.sent_commands[3]
+    # First probe, then rename, then re-probe (a correctly-named session would skip the latter two).
+    assert "list-panes" in stub.sent_commands[0]
+    assert "rename-window" in stub.sent_commands[1]
+    assert "list-panes" in stub.sent_commands[2]
 
 
-def test_probe_lifecycle_skips_migration_when_the_primary_window_is_named(
+def test_get_lifecycle_state_skips_migration_when_name_probe_hits(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """A correctly-named session resolves from the first read and never issues a rename."""
-    primary_window_name = temp_mngr_ctx.config.tmux.primary_window_name
-    agent_session_name = temp_mngr_ctx.config.agent_session_name(AgentName("stub-agent"))
-    stub = _StubHost(command_results=_lifecycle_snapshot_results(agent_session_name, primary_window_name))
+    """A correctly-named session resolves on the first probe and never issues a rename."""
+    stub = _StubHost(
+        command_results=[
+            CommandResult(success=True, stdout="0|node|12345", stderr=""),
+            CommandResult(success=True, stdout="12345 1 node\n", stderr=""),
+        ]
+    )
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
-    probe = agent.probe_lifecycle()
+    agent.get_lifecycle_state()
 
-    assert probe == LifecycleProbeResult(state=AgentLifecycleState.WAITING, pid=12345)
     assert not any("rename-window" in command for command in stub.sent_commands)
-
-
-def test_probe_lifecycle_is_unknown_when_the_lifecycle_snapshot_cannot_be_read(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """A host whose tmux panes could not be listed says nothing about the agent, so it is neither STOPPED nor DONE."""
-    stub = _StubHost(command_results=[CommandResult(success=False, stdout="", stderr="")])
-    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
-
-    assert agent.probe_lifecycle() == LifecycleProbeResult(state=AgentLifecycleState.UNKNOWN)
 
 
 def test_agent_name_rejects_slash() -> None:
@@ -1579,7 +1467,7 @@ def test_send_targets_the_recorded_pane_and_leaves_copy_mode(
 
     commands = stub.executed_commands
     assert any("show-options" in c and "@mngr_agent_pane" in c for c in commands)
-    assert any(c.startswith("tmux if-shell -F") and "copy-mode -q" in c for c in commands)
+    assert any(c.startswith("tmux copy-mode -q") for c in commands)
     # The send goes to the pane ID, not to session:window.
     send_command = next(c for c in commands if "send-keys" in c)
     assert "%7" in send_command
@@ -1644,6 +1532,49 @@ def test_press_key_chord_holds_message_lock(
     assert lock_path.exists()
     assert len(stub.sent_commands) == 1
     assert "send-keys" in stub.sent_commands[0]
+
+
+# _get_command_basename tests
+
+
+def test_get_command_basename_full_path(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """_get_command_basename should extract basename from a full path."""
+    stub = _StubHost()
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    assert agent._get_command_basename(CommandString("/usr/bin/python3 script.py")) == "python3"
+
+
+def test_get_command_basename_simple_command(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """_get_command_basename should handle a simple command name."""
+    stub = _StubHost()
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    assert agent._get_command_basename(CommandString("sleep 1000")) == "sleep"
+
+
+def test_get_command_basename_single_word(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """_get_command_basename should return the command itself for a single word."""
+    stub = _StubHost()
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    assert agent._get_command_basename(CommandString("python3")) == "python3"
+
+
+def test_get_command_basename_strips_leading_subshell_syntax(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """_get_command_basename should strip leading '(' from subshell-wrapped commands."""
+    stub = _StubHost()
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    assert agent._get_command_basename(CommandString("( /usr/bin/script.sh session ) &")) == "script.sh"
 
 
 # get_reported_activity_record tests

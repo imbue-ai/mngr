@@ -1,0 +1,3 @@
+Price Claude Opus 5.5. The Claude Code pin moving to 2.1.280 repoints the `opus` alias at `claude-opus-5-5`, which had no entry in `MODEL_PRICING` and no place in `FAST_MODE_MODELS`, so a token-only usage record on it would have logged "Missing pricing" and shown unpriced. Claude Code reports its own cost, so this table is its fallback rather than its main path; both now carry the model.
+
+Opus 5.5 gets its own `PerTokenPrices` rather than sharing the Opus 5 generation's: it is cheaper ($4/$20 per MTok against $5/$25) and cuts the cache read to 0.05x the input rate where the rest of the family charges 0.1x. The numbers are litellm's, as `litellm_pricing_test` requires.

@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any
 from typing import cast
 
-import click
 import pytest
 from loguru import logger
 
@@ -47,13 +46,11 @@ from imbue.minds.desktop_client.testing import record_sleep_of
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import DiscoveryError
-from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
-from imbue.mngr.cli.output_helpers import emit_error_event
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -62,10 +59,8 @@ from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
-from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
-from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
@@ -99,17 +94,6 @@ def _make_agent(agent_id: AgentId, host_id: HostId = _HOST_ID_1) -> DiscoveredAg
     )
 
 
-def _make_primary_agent(agent_id: AgentId, host_id: HostId, provider_name: str) -> DiscoveredAgent:
-    """An Imbue Studio primary machine agent (the labelled system-services agent) on the named provider instance."""
-    return DiscoveredAgent(
-        host_id=host_id,
-        agent_id=agent_id,
-        agent_name=AgentName("system-services"),
-        provider_name=ProviderInstanceName(provider_name),
-        certified_data={"labels": {"is_primary": "true"}},
-    )
-
-
 def _make_host(host_id: HostId, state: HostState) -> DiscoveredHost:
     return DiscoveredHost(
         host_id=host_id,
@@ -136,19 +120,6 @@ def _provider_snapshot(
         discovery_finished_at=discovery_finished_at,
         error=error,
         unknown_host_ids=unknown_host_ids,
-    )
-
-
-def _provider_error_event(provider_name: str, message: str) -> DiscoveryErrorEvent:
-    """A whole-provider discovery error (the provider itself is the source), as an errored poll emits."""
-    return DiscoveryErrorEvent(
-        timestamp=_TIMESTAMP,
-        event_id=EventId(f"evt-error-{provider_name}"),
-        source=_EVENT_SOURCE,
-        error_type="ProviderError",
-        error_message=message,
-        source_name=provider_name,
-        provider_name=provider_name,
     )
 
 
@@ -468,69 +439,6 @@ def test_snapshot_retains_agent_whose_provider_errored_then_drops_on_clean(
     assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1}
     # A clean snapshot clears the prior error for that provider.
     assert ProviderInstanceName("local") not in consumer.resolver.get_provider_errors()
-
-
-def test_forget_provider_instances_drops_the_aggregated_agents_so_a_later_push_cannot_restore_them() -> None:
-    """Forgetting an instance empties the aggregator too; the next event's push must not hand its hosts back."""
-    instance = "modal_" + "2" * 32
-    consumer = EnvelopeStreamConsumer(resolver=MngrCliBackendResolver())
-    agent = _make_primary_agent(_AGENT_ID_1, _HOST_ID_1, instance)
-    _dispatch(consumer, _observe_envelope(_provider_snapshot((agent,), provider_name=instance)))
-    assert _AGENT_ID_1 in set(consumer.resolver.list_known_agent_ids())
-
-    consumer.forget_provider_instances({instance})
-    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_2),))))
-
-    assert _AGENT_ID_1 not in set(consumer.resolver.list_known_agent_ids())
-    assert _AGENT_ID_2 in set(consumer.resolver.list_known_agent_ids())
-
-
-def test_discovery_for_a_provider_this_device_does_not_poll_is_dropped() -> None:
-    """A removed connection's snapshot (replayed from the events file, or a poll that raced the removal) is ignored,
-    and so is a suppressed default's (the bare ``modal`` block pinned ``is_enabled = false``).
-
-    The replay window keeps an unpolled provider's last snapshot forever, so
-    without this its machines come back on every start as running, local rows.
-    A managed instance that still has a block, and every backend default this
-    device polls (``local``, the slice backend), pass through unchanged.
-    """
-    gone_instance = "aws_" + "0" * 32
-    kept_instance = "modal_" + "1" * 32
-    polled = {kept_instance, "local", "imbue_cloud_slice"}
-    consumer = EnvelopeStreamConsumer(
-        resolver=MngrCliBackendResolver(),
-        started_at=_DISCOVERY_FINISHED_AT + timedelta(hours=1),
-        is_provider_polled_here=lambda name: name in polled,
-    )
-    gone_agent = _make_primary_agent(_AGENT_ID_1, _HOST_ID_1, gone_instance)
-    kept_agent = _make_primary_agent(_AGENT_ID_2, _HOST_ID_2, kept_instance)
-    suppressed_default_agent = _make_primary_agent(AgentId.generate(), HostId.generate(), "modal")
-
-    _dispatch(consumer, _observe_envelope(_provider_snapshot((gone_agent,), provider_name=gone_instance)))
-    _dispatch(consumer, _observe_envelope(_provider_snapshot((kept_agent,), provider_name=kept_instance)))
-    _dispatch(consumer, _observe_envelope(_provider_snapshot((suppressed_default_agent,), provider_name="modal")))
-    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(AgentId.generate()),))))
-    # A backend's own default instance shares the account prefix but is mngr's, not the materializer's.
-    slice_agent = _make_primary_agent(AgentId.generate(), HostId.generate(), "imbue_cloud_slice")
-    _dispatch(consumer, _observe_envelope(_provider_snapshot((slice_agent,), provider_name="imbue_cloud_slice")))
-    # The removed connection's errored polls are in the replay window too; only the kept instance's error is news.
-    with capture_loguru(level="WARNING") as log_output:
-        for instance in (gone_instance, kept_instance):
-            _dispatch(consumer, _observe_envelope(_provider_error_event(instance, "credentials were revoked")))
-
-    known = set(consumer.resolver.list_known_agent_ids())
-    assert _AGENT_ID_1 not in known
-    assert suppressed_default_agent.agent_id not in known
-    assert _AGENT_ID_2 in known
-    assert slice_agent.agent_id in known
-    assert len(known) == 3
-    provider_names = {p.provider_name for p in consumer.resolver.list_providers()}
-    assert ProviderInstanceName(gone_instance) not in provider_names
-    assert ProviderInstanceName("modal") not in provider_names
-    error_lines = [line for line in log_output.getvalue().splitlines() if "Discovery error from" in line]
-    assert len(error_lines) == 1
-    assert kept_instance in error_lines[0]
-    assert gone_instance not in log_output.getvalue()
 
 
 def test_pre_start_snapshot_error_is_dropped_but_topology_merges() -> None:
@@ -1599,7 +1507,7 @@ def test_unexpected_exit_report_carries_startup_context_and_stderr_tail() -> Non
     assert record["message"].startswith(
         "mngr forward exited unexpectedly with code 1; had_reported_listening=False seconds_since_spawn="
     )
-    assert record["message"].endswith("stderr_tail_lines=2 plugin_error_class=None backend_shutdown_signal=None")
+    assert record["message"].endswith("stderr_tail_lines=2")
     extra = record["extra"]
     assert extra["exit_code"] == 1
     assert extra["signal"] is None
@@ -1610,72 +1518,6 @@ def test_unexpected_exit_report_carries_startup_context_and_stderr_tail() -> Non
     assert extra["stderr_tail"] == (
         "Starting mngr forward\nTraceback (most recent call last): [2 lines folded, ending: OSError: bind]"
     )
-    assert extra["plugin_error_class"] is None
-    assert extra["plugin_error_message"] is None
-    assert extra["backend_shutdown_signal"] is None
-    assert extra["seconds_since_backend_shutdown_began"] is None
-
-
-def test_unexpected_exit_report_carries_the_error_the_plugin_command_reported(
-    consumer: EnvelopeStreamConsumer, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The structured error line mngr's CLI writes to stdout for the failed command is quoted, scrubbed, in the report."""
-    emit_error_event(click.ClickException("cannot reach user@example.com"), OutputFormat.JSONL)
-    error_line = capsys.readouterr().out
-    fake = _FakeProcess()
-    fake.returncode = 1
-    _attach_fake(consumer, fake)
-    _dispatch(consumer, error_line)
-
-    records = _unexpected_exit_records(consumer)
-
-    assert len(records) == 1
-    assert "plugin_error_class=ClickException" in records[0]["message"]
-    assert records[0]["extra"]["plugin_error_class"] == "ClickException"
-    assert records[0]["extra"]["plugin_error_message"] == "cannot reach <email>"
-
-
-def test_unexpected_exit_report_says_the_backend_was_already_shutting_down(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    """A plugin that exits after the backend's own signal, but before teardown terminates it, is reported as such."""
-    fake = _FakeProcess()
-    fake.returncode = 1
-    _attach_fake(consumer, fake)
-    consumer.note_backend_shutdown_began("SIGTERM")
-    # Only the first signal is the start of the shutdown.
-    consumer.note_backend_shutdown_began("SIGINT")
-
-    records = _unexpected_exit_records(consumer)
-
-    assert len(records) == 1
-    assert records[0]["message"].endswith("backend_shutdown_signal=SIGTERM")
-    assert records[0]["extra"]["backend_shutdown_signal"] == "SIGTERM"
-    assert records[0]["extra"]["seconds_since_backend_shutdown_began"] >= 0.0
-
-
-def test_unexpected_exit_report_measures_the_backend_signal_against_the_plugin_exit(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    """A backend signal landing in the pipe-drain wait, after the plugin had already exited, does not read as earlier.
-
-    stdout is never read, so the report waits out the full drain timeout after
-    the exit; the signal arrives inside that wait.
-    """
-    fake = _FakeProcess()
-    fake.returncode = 1
-    fake.stdout = io.BytesIO(b"")
-    _attach_fake(consumer, fake)
-    with _captured_error_records() as records:
-        watcher = threading.Thread(target=consumer._wait_and_report_exit)
-        watcher.start()
-        wait_for(lambda: consumer._exit_code is not None, timeout=10.0, poll_interval=0.01)
-        consumer.note_backend_shutdown_began("SIGTERM")
-        watcher.join(timeout=10.0)
-
-    assert len(records) == 1
-    assert records[0]["extra"]["is_stdout_drained"] is False
-    assert records[0]["extra"]["seconds_since_backend_shutdown_began"] <= 0.0
 
 
 def test_unexpected_exit_report_names_the_signal_and_a_prior_listening_report(

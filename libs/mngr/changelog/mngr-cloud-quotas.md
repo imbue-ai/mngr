@@ -1,0 +1,1 @@
+Regenerate the `mngr imbue_cloud` CLI docs for the new account plan/quota commands (`account show` / `set-plan`, `admin account ...`, `bucket roll-key`) and the removal of `bucket keys create` / `destroy`.

@@ -1,9 +1,7 @@
 """Unit tests for InteractiveTuiAgent's contract."""
 
 import contextlib
-import inspect
 import re
-import shlex
 from typing import Final
 from typing import Generator
 from typing import Sequence
@@ -11,25 +9,14 @@ from typing import cast
 
 import pytest
 
-from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.mock_host_test import ScriptedHost
-from imbue.mngr.agents.mock_host_test import run_bash_against_stand_in_pane
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
-from imbue.mngr.agents.tui_utils import EnterRetryGate
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
-from imbue.mngr.agents.tui_utils import UnconfirmedSubmissionReading
-from imbue.mngr.agents.tui_utils import _PANE_SHOWS_MESSAGE_FUNCTION
-from imbue.mngr.agents.tui_utils import _PASTE_NOT_VISIBLE_MARKER
 from imbue.mngr.agents.tui_utils import build_changed_token_probe
-from imbue.mngr.agents.tui_utils import build_normalized_message_probe
-from imbue.mngr.agents.tui_utils import build_unsubmitted_message_retry_gate
 from imbue.mngr.agents.tui_utils import wait_for_tui_ready
 from imbue.mngr.config.data_types import AgentTypeConfig
-from imbue.mngr.errors import InvalidPastePlaceholderPrefixesError
-from imbue.mngr.errors import PastedMessageNotShownError
-from imbue.mngr.errors import SendFailureKind
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -39,12 +26,6 @@ from imbue.mngr.primitives import AgentName
 
 class _ProbeTuiAgent(InteractiveTuiAgent[AgentTypeConfig]):
     TUI_READY_INDICATOR = "probe-banner"
-    PASTE_PLACEHOLDER_PREFIXES = ("[Pasted text ",)
-
-    def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
-        return build_unsubmitted_message_retry_gate(
-            message=message, paste_placeholder_prefixes=self.PASTE_PLACEHOLDER_PREFIXES
-        )
 
     def _build_submission_evidence_probes(
         self, message: str, policy: SubmissionConfirmationPolicy
@@ -62,12 +43,9 @@ class _RecordingTuiAgent(_ProbeTuiAgent):
     """
 
     pane_content: str = ""
-    # What preflight reports it saw; None models a preflight that does not read the pane.
-    preflight_pane_content: str | None = None
     steps: list[str] = []
     built_policies: list[SubmissionConfirmationPolicy] = []
     probes_to_return: list[SubmissionEvidenceProbe] = []
-    capture_count: int = 0
 
     @property
     def tmux_target(self) -> TmuxWindowTarget:
@@ -80,16 +58,14 @@ class _RecordingTuiAgent(_ProbeTuiAgent):
     def _capture_pane_content(
         self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False, include_styles: bool = False
     ) -> str | None:
-        self.capture_count += 1
         return self.pane_content
 
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget | str) -> str | None:
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
         self.steps.append("preflight")
-        return self.preflight_pane_content
 
-    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget | str, message: str) -> str:
+    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> str:
         self.steps.append("paste")
-        return self._send_target_arg(tmux_target)
+        return tmux_target.as_shell_arg()
 
     def _build_submission_evidence_probes(
         self, message: str, policy: SubmissionConfirmationPolicy
@@ -106,15 +82,12 @@ def _make_recording_agent(
     *scripted_results: CommandResult,
     probes: Sequence[SubmissionEvidenceProbe] = (),
     agent_class: type[_RecordingTuiAgent] = _RecordingTuiAgent,
-    preflight_pane_content: str | None = None,
-    pane_id: str | None = None,
 ) -> _RecordingTuiAgent:
-    host = ScriptedHost(scripted_results=list(scripted_results), pane_id=pane_id)
+    host = ScriptedHost(scripted_results=list(scripted_results))
     return agent_class.model_construct(
         id=AgentId.generate(),
         name=AgentName("probe"),
         pane_content=pane_content,
-        preflight_pane_content=preflight_pane_content,
         steps=[],
         built_policies=[],
         probes_to_return=list(probes),
@@ -146,60 +119,20 @@ def test_build_submission_evidence_probes_is_abstract_on_interactive_tui_agent()
     assert "_build_submission_evidence_probes" not in _ProbeTuiAgent.__abstractmethods__
 
 
-def test_build_enter_retry_gate_is_abstract_on_interactive_tui_agent() -> None:
-    """Every subclass must say when a swallowed Enter may be re-sent."""
-    assert "_build_enter_retry_gate" in InteractiveTuiAgent.__abstractmethods__
-    assert "_build_enter_retry_gate" not in _ProbeTuiAgent.__abstractmethods__
-
-
 def test_send_message_waits_for_ready_indicator_before_pasting() -> None:
     """send_message must confirm the TUI ready indicator before any keystrokes.
 
     The readiness wait happens inside send_message (not only on the create
     path), so it covers resume too: pasting before the indicator is visible
     would drop keystrokes into a still-replaying transcript. With no evidence
-    probes the send degrades to one best-effort Enter, sent by the host script
-    once the typed message shows.
+    probes the send degrades to a single best-effort Enter on the host.
     """
     pane = f"probe-banner {_RESUME_MESSAGE}"
     agent = _make_recording_agent(pane)
     agent.send_message(_RESUME_MESSAGE)
     assert agent.steps == ["preflight", "paste"]
     host_commands = cast(ScriptedHost, agent.host).sent_commands
-    assert len(host_commands) == 1
-    assert "tmux send-keys -t =s:0 Enter" in host_commands[0]
-    assert "while :" not in host_commands[0]
-
-
-def test_send_message_resolves_the_agent_pane_once_and_addresses_every_step_to_it() -> None:
-    """One pane lookup serves the whole send; each lookup is a process spawn."""
-    agent = _make_recording_agent(
-        f"probe-banner {_RESUME_MESSAGE}",
-        CommandResult(stdout="MNGR_CONFIRMED never\n", stderr="", success=True),
-        probes=[_never_confirming_probe()],
-        pane_id="%7",
-    )
-    agent.send_message(_RESUME_MESSAGE)
-    host = cast(ScriptedHost, agent.host)
-    assert [c for c in host.captured if c.startswith("tmux show-options")] == [host.captured[0]]
-    submit_command = host.sent_commands[-1]
-    assert "tmux send-keys -t %7 Enter" in submit_command
-    assert "=s:0" not in submit_command
-
-
-def test_send_message_reuses_the_pane_preflight_saw_when_it_shows_the_tui_ready() -> None:
-    """A preflight reading that already shows the ready indicator spares the readiness and leftover-text captures."""
-    pane = f"probe-banner {_RESUME_MESSAGE}"
-    agent = _make_recording_agent(pane, preflight_pane_content=pane)
-    agent.send_message(_RESUME_MESSAGE)
-    assert agent.capture_count == 0
-
-
-def test_send_message_waits_for_readiness_when_preflight_saw_no_ready_pane() -> None:
-    """A preflight reading without the indicator is not trusted: the send polls and captures afresh."""
-    agent = _make_recording_agent(f"probe-banner {_RESUME_MESSAGE}", preflight_pane_content="still painting")
-    agent.send_message(_RESUME_MESSAGE)
-    assert agent.capture_count == 2
+    assert host_commands == ["tmux send-keys -t =s:0 Enter"]
 
 
 def test_send_message_selects_strict_policy_for_normal_messages() -> None:
@@ -214,106 +147,16 @@ def test_send_message_selects_relaxed_policy_for_slash_commands() -> None:
     assert agent.built_policies == [SubmissionConfirmationPolicy.RELAXED]
 
 
-@pytest.mark.parametrize("blank_message", ["", "  \n\t "])
-def test_send_message_refuses_blank_message_without_touching_the_pane(blank_message: str) -> None:
-    """A blank message leaves no input to submit, so no evidence could ever confirm it.
-
-    It must fail at once rather than paste nothing, press Enter on an empty input
-    box, and poll out the whole confirmation window.
-    """
-    agent = _make_recording_agent("probe-banner", probes=[_never_confirming_probe()])
-    with pytest.raises(SendMessageError, match="the message is empty"):
-        agent.send_message(blank_message)
-    assert agent.steps == []
-    assert agent.built_policies == []
-    assert cast(ScriptedHost, agent.host).sent_commands == []
-
-
-_UNCONFIRMED_WINDOW: Final[CommandResult] = CommandResult(
-    stdout="MNGR_UNCONFIRMED\nMNGR_PROBE never base=[] final=[]\n", stderr="", success=False
-)
-
-
 @pytest.mark.allow_warnings
 def test_send_message_raises_when_strict_confirmation_times_out() -> None:
     """A normal message with probes that never confirm must fail loudly."""
     agent = _make_recording_agent(
-        f"probe-banner {_RESUME_MESSAGE}", _UNCONFIRMED_WINDOW, probes=[_never_confirming_probe()]
+        f"probe-banner {_RESUME_MESSAGE}",
+        CommandResult(stdout="MNGR_UNCONFIRMED\nMNGR_PROBE never base=[] final=[]\n", stderr="", success=False),
+        probes=[_never_confirming_probe()],
     )
     with pytest.raises(SendMessageError, match="Timeout waiting for message submission evidence"):
         agent.send_message(_RESUME_MESSAGE)
-
-
-class _ScreenTakenTuiAgent(_RecordingTuiAgent):
-    def _read_unconfirmed_submission(
-        self, tmux_target: TmuxWindowTarget | str, message: str, pre_send_pane_content: str | None
-    ) -> UnconfirmedSubmissionReading:
-        return UnconfirmedSubmissionReading.TAKEN
-
-
-class _ScreenNotTakenTuiAgent(_RecordingTuiAgent):
-    def _read_unconfirmed_submission(
-        self, tmux_target: TmuxWindowTarget | str, message: str, pre_send_pane_content: str | None
-    ) -> UnconfirmedSubmissionReading:
-        return UnconfirmedSubmissionReading.NOT_TAKEN
-
-
-@pytest.mark.allow_warnings
-def test_a_send_the_screen_shows_taken_succeeds_though_nothing_recorded_it() -> None:
-    agent = _make_recording_agent(
-        f"probe-banner {_RESUME_MESSAGE}",
-        _UNCONFIRMED_WINDOW,
-        probes=[_never_confirming_probe()],
-        agent_class=_ScreenTakenTuiAgent,
-    )
-    agent.send_message(_RESUME_MESSAGE)
-    event_commands = [command for command in cast(ScriptedHost, agent.host).captured if "events/messages" in command]
-    assert len(event_commands) == 1
-    assert "submission_confirmed_by_screen" in event_commands[0]
-
-
-_PASTE_NEVER_SHOWN: Final[CommandResult] = CommandResult(
-    stdout=f"{_PASTE_NOT_VISIBLE_MARKER}\n", stderr="", success=False
-)
-
-
-@pytest.mark.parametrize(
-    "confirmation_result",
-    [
-        pytest.param(_UNCONFIRMED_WINDOW, id="unconfirmed-window"),
-        pytest.param(_PASTE_NEVER_SHOWN, id="paste-never-shown"),
-    ],
-)
-def test_a_message_the_screen_shows_never_taken_fails_as_not_submitted(confirmation_result: CommandResult) -> None:
-    agent = _make_recording_agent(
-        f"probe-banner {_RESUME_MESSAGE}",
-        confirmation_result,
-        probes=[_never_confirming_probe()],
-        agent_class=_ScreenNotTakenTuiAgent,
-    )
-    with pytest.raises(SendMessageError) as raised:
-        agent.send_message(_RESUME_MESSAGE)
-    assert raised.value.kind is SendFailureKind.NOT_SUBMITTED
-
-
-def test_a_paste_that_never_showed_keeps_its_own_failure_when_the_screen_settles_nothing() -> None:
-    agent = _make_recording_agent(
-        f"probe-banner {_RESUME_MESSAGE}", _PASTE_NEVER_SHOWN, probes=[_never_confirming_probe()]
-    )
-    with pytest.raises(PastedMessageNotShownError):
-        agent.send_message(_RESUME_MESSAGE)
-
-
-def test_a_paste_that_never_showed_is_not_reported_delivered_when_the_screen_reads_taken() -> None:
-    agent = _make_recording_agent(
-        f"probe-banner {_RESUME_MESSAGE}",
-        _PASTE_NEVER_SHOWN,
-        probes=[_never_confirming_probe()],
-        agent_class=_ScreenTakenTuiAgent,
-    )
-    with pytest.raises(PastedMessageNotShownError):
-        agent.send_message(_RESUME_MESSAGE)
-    assert not any("events/messages" in command for command in cast(ScriptedHost, agent.host).captured)
 
 
 @pytest.mark.allow_warnings
@@ -360,7 +203,7 @@ def test_send_message_warns_and_records_event_for_preexisting_input_text() -> No
     assert len(event_commands) == 1
     assert "preexisting_input_text" in event_commands[0]
     # The send still went through (best-effort Enter recorded after the event).
-    assert any("send-keys -t =s:0 Enter" in command for command in host.captured)
+    assert any(command.endswith("Enter") for command in host.captured)
 
 
 def test_send_message_records_cleared_event_instead_of_warning_when_restored_command_is_cleared() -> None:
@@ -371,7 +214,7 @@ def test_send_message_records_cleared_event_instead_of_warning_when_restored_com
             return "/restored-command-71935"
 
         def _clear_preexisting_input_text_if_restored_command(
-            self, tmux_target: TmuxWindowTarget | str, leftover_text: str
+            self, tmux_target: TmuxWindowTarget, leftover_text: str
         ) -> bool:
             self.steps.append(f"clear {leftover_text}")
             return True
@@ -384,106 +227,7 @@ def test_send_message_records_cleared_event_instead_of_warning_when_restored_com
     assert len(event_commands) == 1
     assert "cleared_restored_input_text" in event_commands[0]
     assert "/restored-command-71935" in event_commands[0]
-    assert any("send-keys -t =s:0 Enter" in command for command in host.captured)
-
-
-class _ChipPastingTuiAgent(_RecordingTuiAgent):
-    PASTE_PLACEHOLDER_PREFIXES = ("[Pasted: ",)
-
-
-@pytest.mark.parametrize(
-    ("agent_class", "pane_content"),
-    [
-        pytest.param(_RecordingTuiAgent, "probe-banner > [Pasted text #1 +20 lines]", id="pasted_text_placeholder"),
-        pytest.param(_ChipPastingTuiAgent, "probe-banner > [Pasted: 3 lines]", id="declared_placeholder"),
-    ],
-)
-def test_send_message_counts_a_paste_placeholder_as_the_visible_paste(
-    agent_class: type[_RecordingTuiAgent], pane_content: str
-) -> None:
-    """The input box shows only the TUI's paste placeholder, never the message text, and the send still proceeds."""
-    agent = _make_recording_agent(pane_content, agent_class=agent_class)
-    agent.send_message(_RESUME_MESSAGE)
-    assert agent.steps == ["preflight", "paste"]
-    (submit_command,) = cast(ScriptedHost, agent.host).sent_commands
-    _, _, submit_script = shlex.split(submit_command)
-    result = run_bash_against_stand_in_pane(submit_script, pane_content)
-    assert result.stdout.splitlines() == ["tmux send-keys -t =s:0 Enter"]
-
-
-@pytest.mark.parametrize(
-    "declared_prefixes",
-    [
-        pytest.param("[Pasted: ", id="bare_string_missing_tuple_comma"),
-        pytest.param(("[Pasted: ", ""), id="empty_prefix"),
-        pytest.param(["[Pasted: "], id="list"),
-        pytest.param((b"[Pasted: ",), id="non_string_prefix"),
-    ],
-)
-def test_declaring_malformed_paste_placeholders_fails_when_the_class_is_defined(declared_prefixes: object) -> None:
-    with pytest.raises(InvalidPastePlaceholderPrefixesError):
-        type(
-            "_MalformedPlaceholderTuiAgent",
-            (_ProbeTuiAgent,),
-            {"PASTE_PLACEHOLDER_PREFIXES": declared_prefixes, "__module__": __name__},
-        )
-
-
-def test_a_concrete_tui_agent_that_leaves_out_paste_placeholders_fails_when_the_class_is_defined() -> None:
-    with pytest.raises(InvalidPastePlaceholderPrefixesError, match="must declare PASTE_PLACEHOLDER_PREFIXES"):
-
-        class _UndeclaredPlaceholderTuiAgent(InteractiveTuiAgent[AgentTypeConfig]):
-            TUI_READY_INDICATOR = "probe-banner"
-
-            def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
-                return None
-
-            def _build_submission_evidence_probes(
-                self, message: str, policy: SubmissionConfirmationPolicy
-            ) -> Sequence[SubmissionEvidenceProbe]:
-                return []
-
-
-def test_an_abstract_tui_agent_base_may_leave_the_paste_placeholders_to_its_subclasses() -> None:
-    class _AbstractTuiAgentBase(InteractiveTuiAgent[AgentTypeConfig]):
-        TUI_READY_INDICATOR = "probe-banner"
-
-    class _ConcreteTuiAgent(_AbstractTuiAgentBase):
-        PASTE_PLACEHOLDER_PREFIXES = ()
-
-        def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
-            return None
-
-        def _build_submission_evidence_probes(
-            self, message: str, policy: SubmissionConfirmationPolicy
-        ) -> Sequence[SubmissionEvidenceProbe]:
-            return []
-
-    assert inspect.isabstract(_AbstractTuiAgentBase)
-    assert not hasattr(_AbstractTuiAgentBase, "PASTE_PLACEHOLDER_PREFIXES")
-    assert not inspect.isabstract(_ConcreteTuiAgent)
-
-
-def test_send_message_confirms_through_the_agents_own_enter_retry_gate() -> None:
-    """The subclass's own gate, not ``build_unsubmitted_message_retry_gate``'s, is what the confirmation script runs before a retry."""
-
-    class _FooterGatedTuiAgent(_RecordingTuiAgent):
-        def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
-            return EnterRetryGate(condition_command=NonEmptyStr("test -e /tmp/footer-gate-marker-28417"))
-
-    agent = _make_recording_agent(
-        f"probe-banner {_RESUME_MESSAGE}",
-        CommandResult(stdout="MNGR_CONFIRMED never\n", stderr="", success=True),
-        probes=[_never_confirming_probe()],
-        agent_class=_FooterGatedTuiAgent,
-    )
-    agent.send_message(_RESUME_MESSAGE)
-    confirmation_commands = [c for c in cast(ScriptedHost, agent.host).sent_commands if "MNGR_CONFIRMED" in c]
-    assert len(confirmation_commands) == 1
-    retry_loop = confirmation_commands[0][confirmation_commands[0].index("while :") :]
-    assert "test -e /tmp/footer-gate-marker-28417" in retry_loop
-    assert shlex.quote(build_normalized_message_probe(_RESUME_MESSAGE)) not in retry_loop
-    assert _PANE_SHOWS_MESSAGE_FUNCTION not in retry_loop
+    assert any(command.endswith("Enter") for command in host.captured)
 
 
 @pytest.mark.allow_warnings
@@ -532,7 +276,7 @@ def test_send_message_runs_preflight_before_readiness_wait() -> None:
     """
 
     class _PreflightRaisingAgent(_RecordingTuiAgent):
-        def _preflight_send_message(self, tmux_target: TmuxWindowTarget | str) -> str | None:
+        def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
             self.steps.append("preflight")
             raise SendMessageError(str(self.name), "blocking dialog")
 

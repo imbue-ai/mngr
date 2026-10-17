@@ -1,0 +1,7 @@
+A default workspace template branch may now pin mngr from the private mngr-internal repo while a paired change is being iterated on, so it builds against an unmerged mngr commit; before merging, the pin moves to a public export of the mngr branch (`just dwt-mngr-pin-export`), and template `main` never pins the private repo (`specs/internal-mngr-pin/spec.md`).
+
+The desktop create path reads the template's pin and, for a private pin, delivers a credential to the workspace build: `MNGR_INTERNAL_GIT_TOKEN` in the `mngr create` environment (else the shared read-only token in Vault at `secrets/minds/dev/mngr-internal-git`, read with your own `vault login`, when launched with the local-worktree opt-in), plus an uploaded token file for the Lima and Modal templates. A private pin with no credential fails before the build starts, naming the remedy. A public pin needs no credential and no `docker buildx`.
+
+The CI snapshot bake and the launch-to-msg run hand their job token to the workspace build the same way, and the launch-to-msg pin bump leaves a template `main` alone while its pin was exported from an mngr commit that has not merged, instead of rewriting it to a mirror commit that lacks the change.
+
+`apps/minds/docs/dwt-mngr-pin.md` documents the iteration flow (`just dwt-mngr-pin-internal`), the export before merging (`just dwt-mngr-pin-export`), and the rewrite to the mirror of `main` afterwards.

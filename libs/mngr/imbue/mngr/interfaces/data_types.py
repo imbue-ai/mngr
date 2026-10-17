@@ -40,6 +40,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -196,24 +197,6 @@ class CommandResult(FrozenModel):
     exit_code: int | None = Field(
         default=None,
         description="The command's exit code when the executor observed one (None when not surfaced)",
-    )
-
-
-class TmuxPaneListing(FrozenModel):
-    """One pane from a host-wide ``tmux list-panes -a`` listing."""
-
-    session_name: str = Field(description="Name of the session holding the pane")
-    session_agent_id: str = Field(description="Agent id stamped on the session, or empty for an unstamped session")
-    window_name: str = Field(description="Name of the window holding the pane")
-    pane_info: str = Field(description="The pane's lifecycle fields as 'pane_dead|pane_current_command|pane_pid'")
-
-
-class HostLifecycleSnapshot(FrozenModel):
-    """One read of a host's tmux panes and process table, from which every agent's lifecycle on it is determined."""
-
-    panes: tuple[TmuxPaneListing, ...] = Field(description="Every pane on the host's tmux server")
-    ps_output: str | None = Field(
-        description="Output of 'ps -e -o pid=,ppid=,comm=' on the host, or None when it could not be read"
     )
 
 
@@ -610,6 +593,10 @@ class HostDetails(FrozenModel):
     uptime_seconds: float | None = Field(default=None, description="How long the host has been running")
     resource: HostResources | None = Field(default=None, description="Resource limits for the host")
     ssh: SSHInfo | None = Field(default=None, description="SSH access details (remote hosts only)")
+    published_endpoints: list[PublishedEndpoint] = Field(
+        default_factory=list,
+        description="Where each port the host was created with --publish is reachable from this client",
+    )
     snapshots: list[SnapshotInfo] = Field(default_factory=list, description="List of available snapshots")
     is_locked: bool | None = Field(
         default=None,

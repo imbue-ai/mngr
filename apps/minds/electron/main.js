@@ -1,19 +1,17 @@
-const { BrowserWindow, Menu, Notification, Tray, clipboard, crashReporter, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
-const os = require('os');
+const { BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn, execFile } = require('child_process');
 const paths = require('./paths');
 const { initElectronLogging, closeElectronLogging } = require('./logger');
 const { initConsoleCapture, recordConsoleMessage, closeConsoleCapture } = require('./console-capture');
-const { initSentry, captureManualReport, isNativeCrashReportingEnabled } = require('./sentry');
-const { createCrashAnnotator } = require('./crash-annotations');
+const { initSentry, captureManualReport } = require('./sentry');
 const { ensureLegacyLatchkeyLink, migrateLegacyDataDir, recordMigrationFailure } = require('./migrate-data-dir');
 const { runEnvSetup } = require('./env-setup');
 const { isSecretStartupLogLine } = require('./startup-log');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
-const { declaredUrlSchemes, deeplinkTargetPath, extractDeeplinkUrlFromArgv, protocolClientRegistrations } = require('./deeplink');
+const { DEEPLINK_SCHEMES, deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink');
 const {
   SCHEME_MIME_TYPES,
   DESKTOP_ENTRY_FILENAME,
@@ -28,7 +26,6 @@ const {
   isSandboxRelaunched,
 } = require('./linux-sandbox');
 const { startRelaunchAfterExit } = require('./linux-relaunch');
-const { createCertificateVerifyProc, loadForwardProxyCa } = require('./forward-proxy-trust');
 // Workspace-URL classification lives in ./surface-routing so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const {
@@ -37,12 +34,6 @@ const {
   parsePopoutRoute,
   popoutRoutePath,
 } = require('./surface-routing');
-const {
-  DEVICE_ACCOUNT_ID,
-  accountHomePath,
-  accountIdAfterNavigation,
-} = require('./account-routing');
-const { findWorkspaceRow, withAccountRows, workspaceRowFromFrameEntry } = require('./workspace-lists');
 // Pulled-out workspace windows (the pull-out-window spec): the pure decisions
 // live in ./popout-policy so they can be unit-tested under plain node.
 const {
@@ -50,6 +41,8 @@ const {
   popoutOpenBounds,
   surfaceBounds,
   isTornOut,
+  dropTargetFor,
+  redockFrame,
   isReattachHandshakeNeeded,
   isNavigationTarget,
   TITLEBAR_HEIGHT,
@@ -77,31 +70,21 @@ const {
 } = require('./session-persistence');
 const updater = require('./updater');
 const displayZoom = require('./display-zoom');
-const launchVersion = require('./launch-version');
 const { resolveWindowControls, windowControlsSwitch } = require('./window-controls');
 const { removeLegacyNameDirs } = require('./legacy-name-cleanup');
 const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 // Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const {
+  shouldQuitOnWindowAllClosed,
+  shouldInterceptLastWindowClose,
   shouldOpenWindowOnActivate,
   decideNewWindowTarget,
-  isBackgroundLaunch,
-  decideSecondInstanceAction,
-  shouldShowDockIcon,
 } = require('./lifecycle-policy');
 // Right-click (context) menu logic lives in ./context-menu so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const { registerContextMenuFor } = require('./context-menu');
-const { formatGpuProcessGone } = require('./gpu-diagnostics');
-const {
-  formatActivateStart,
-  formatActivateEnd,
-  formatFocusRelayStart,
-  formatFocusRelayEnd,
-} = require('./activation-diagnostics');
-const { createExternalOpener, createLinkRouter, isCustomSchemeUrl, isExternalUrl } = require('./link-routing');
-const { createExternalLinkPermissions } = require('./external-link-permissions');
+const { createExternalOpener, createLinkRouter, isExternalUrl } = require('./link-routing');
 
 // After the single-web-context collapse each window is ONE BrowserWindow whose
 // page is the Imbue Studio SPA (titlebar + hub pages + the sandboxed workspace
@@ -151,9 +134,6 @@ try {
 // A Linux launch with a --no-sandbox the sandbox did not need (see
 // linux-sandbox.js) is corrected here, before anything else starts.
 const launchArgs = process.argv.slice(1);
-// An agent starting the app for its API: the backend and the tray come up, no
-// window does (specs/imbue-studio-agent-access/spec.md).
-const isBackgroundStart = isBackgroundLaunch(launchArgs);
 const sandboxRelaunch = decideSandboxRelaunch({
   platform: process.platform,
   isPackaged: app.isPackaged,
@@ -197,13 +177,6 @@ initConsoleCapture(paths.getLogDir());
 // Initialize Sentry as early as possible. The SDK only sends when the user has
 // enabled error reporting (read live per event) -- see electron/sentry.js.
 initSentry({ getRendererName: rendererNameForWebContents });
-// Crashpad annotations recording what the main process was doing, copied into
-// a native-crash minidump (see electron/crash-annotations.js). Only valid once
-// initSentry has started Crashpad.
-const crashAnnotations = createCrashAnnotator(isNativeCrashReportingEnabled() ? crashReporter : null);
-// How often the memory annotation is refreshed: often enough that the dump's
-// reading is at most a minute old, rare enough to cost nothing.
-const MEMORY_ANNOTATION_INTERVAL_MS = 60 * 1000;
 
 // Expose Chromium's DevTools protocol (CDP) when MINDS_REMOTE_DEBUGGING_PORT is
 // set, for driving the real client with Playwright/CDP during development.
@@ -240,8 +213,9 @@ const windowControls = resolveWindowControls(process.platform, process.env);
 // A popout follows the cursor on a timer (Electron cannot hand a live drag
 // to a new native window): once per frame is smooth enough and cheap.
 const POPOUT_FOLLOW_INTERVAL_MS = 16;
-// How long a popout whose window is returning to the desktop (an OS close)
-// waits for the desktop to take the window back before it goes anyway.
+// How long a popout whose window is returning to the desktop (an OS close, a
+// drop onto a main window) waits for the desktop to take the window back
+// before it goes anyway.
 const POPOUT_REATTACH_TIMEOUT_MS = 2000;
 // Window ids as the workspace shell mints them; mirrors the embed contract's
 // WINDOW_ID_PATTERN (never trust the renderer).
@@ -265,11 +239,7 @@ let appMenuInstalled = false;
 
 let backendBaseUrl = null;
 let mngrForwardBaseUrl = null;
-// Each account's rows, as the last ``workspaces`` shell event about that
-// account said: account id -> [{id, name, account, accountUserId}]. Every
-// window's frame is scoped to its own account, so one frame replaces one
-// account's rows, never the install's (see ./workspace-lists).
-let workspaceRowsByAccount = new Map();
+let workspaceList = []; // [{id, name, account}]
 // Agent ids ever seen in a relayed ``workspaces`` shell event's
 // ``destroying_agent_ids`` payload: a workspace disappearing from the list is
 // only treated as destroyed (windows detached) when it was seen destroying
@@ -339,19 +309,6 @@ function updateWorkspaceAliasMaps(workspaces) {
       workspaceAgentIdByHostId.set(String(w.host_id), String(w.id));
     }
   }
-}
-
-// The account a workspace belongs to, as the relayed ``workspaces`` shell event
-// last said; null for one associated with none, or one the list does not know.
-function workspaceAccountIdOf(workspaceId) {
-  const entry = findWorkspaceRow(workspaceRowsByAccount, workspaceId, sameWorkspaceId);
-  return entry && entry.accountUserId ? entry.accountUserId : null;
-}
-
-// The home page a new window opens on: the focused window's account's home.
-function newWindowHomePath() {
-  const focused = getMostRecentWindow();
-  return accountHomePath(focused ? focused.accountId : null);
 }
 
 // The SPA URL that opens a window displaying ``workspaceId``. The host-scoped
@@ -503,6 +460,14 @@ function getMostRecentWindow({ includePopouts = false } = {}) {
   return null;
 }
 
+function isLastLiveWindow(bundle) {
+  let liveCount = 0;
+  for (const b of bundles) {
+    if (!b.window.isDestroyed()) liveCount += 1;
+  }
+  return liveCount <= 1 && !bundle.window.isDestroyed();
+}
+
 function focusBundle(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (bundle.window.isMinimized()) bundle.window.restore();
@@ -532,7 +497,7 @@ function focusBundleFromNotificationClick(bundle) {
 function computeTitleFor(bundle) {
   const agentId = bundle.currentWorkspaceId;
   if (agentId) {
-    const ws = findWorkspaceRow(workspaceRowsByAccount, agentId, sameWorkspaceId);
+    const ws = workspaceList.find((w) => sameWorkspaceId(w.id, agentId));
     const name = ws ? (ws.name || ws.id) : null;
     if (isPopoutBundle(bundle)) {
       const windowTitle = bundle.popout.title;
@@ -693,9 +658,6 @@ function buildBundleWindowOptions(kind, bounds) {
 // workspace surface) or 'popout' (one pulled-out workspace window, see the
 // pull-out-window spec); a popout names its workspace and window up front.
 function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
-  // The dock icon comes back before the window, so the window opens into a
-  // regular, activatable app rather than an agent-style one with no dock entry.
-  syncDockIcon({ isWindowAboutToOpen: true });
   const win = new BrowserWindow(buildBundleWindowOptions(kind, bounds));
 
   const bundle = {
@@ -703,8 +665,8 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
     kind,
     // For a popout: the workspace and window it shows, the follow loop while
     // the cursor drags it, whether its page has settled the window (so an OS
-    // close needs no reattach handshake), and the window's title for the OS
-    // title.
+    // close needs no reattach handshake), the main window a re-dock drag is
+    // over, and the window's title for the OS title.
     popout:
       popout === null
         ? null
@@ -714,6 +676,8 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
             title: (popout.title || '').slice(0, POPOUT_TITLE_MAX_LENGTH),
             followTimer: null,
             followGrab: null,
+            isRedockDrag: false,
+            dropTarget: null,
             isReattachSettled: false,
             reattachTimer: null,
           },
@@ -725,10 +689,6 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
     currentContentUrl: null,
     currentWorkspaceId: null,
     overlayOverWorkspaceId: null,
-    // The account this window shows (a user id, or 'local' for the device),
-    // read off each committed URL: a hub window is saved under it, and a new
-    // window opens on the focused window's. Null until the first navigation.
-    accountId: null,
     // The window's place in its history at its last committed navigation,
     // which tells a step back from a step forward.
     historyIndex: null,
@@ -802,29 +762,13 @@ function wireBundleWindowEvents(bundle) {
     if (win.isDestroyed() || win.webContents.isDestroyed()) return;
     try { win.webContents.send('window-focus-changed', isFocused); } catch { /* noop */ }
   };
-  // Read up front, so the focus lines never read the id off a destroyed window.
-  const windowId = win.id;
   win.on('focus', () => {
     const idx = mruWindows.indexOf(bundle);
     if (idx >= 0) mruWindows.splice(idx, 1);
     mruWindows.unshift(bundle);
-    // See activation-diagnostics.js for why the relay is bracketed.
-    const isWindowDestroyed = win.isDestroyed();
-    console.log(formatFocusRelayStart({
-      windowId,
-      isWindowDestroyed,
-      isContentsDestroyed: isWindowDestroyed || win.webContents.isDestroyed(),
-      isPopout: isPopoutBundle(bundle),
-    }));
     relayFocus(true);
-    console.log(formatFocusRelayEnd({ windowId }));
-    crashAnnotations.recordMainEvent('window-focus');
   });
-  win.on('blur', () => {
-    relayFocus(false);
-    crashAnnotations.recordMainEvent('window-blur');
-  });
-  win.on('show', () => crashAnnotations.recordMainEvent('window-show'));
+  win.on('blur', () => relayFocus(false));
 
   win.on('maximize', () => { bundle._maximizedByUs = true; });
   win.on('unmaximize', () => { bundle._maximizedByUs = false; });
@@ -832,9 +776,24 @@ function wireBundleWindowEvents(bundle) {
   win.on('move', () => scheduleSessionSave());
 
   win.on('close', (event) => {
-    // Closing a window, the last one included, is only ever a window close:
-    // the app keeps running behind its tray icon on every platform, so the
-    // running-workspaces prompt fires only on an explicit Quit.
+    // Off macOS, closing the LAST window quits the app; route that close
+    // through the quit sequence so the workspace shutdown prompt appears
+    // BEFORE the window disappears. If the user cancels, the window stays open.
+    // On macOS the app keeps running with no windows, so the last close is an
+    // ordinary window close and the prompt fires only on an explicit Quit.
+    if (
+      shouldInterceptLastWindowClose({
+        isMac,
+        isShuttingDown,
+        isQuitSequenceRunning,
+        hasBackend: !!getBackendProcess(),
+        isLastLiveWindow: isLastLiveWindow(bundle),
+      })
+    ) {
+      event.preventDefault();
+      runQuitSequence();
+      return;
+    }
     // A popout's OS close returns its window to the desktop first: the page
     // is asked to reattach and the close is retried once it answers (or
     // after a short wait). Not during a quit, when the popout is restored
@@ -875,8 +834,6 @@ function wireBundleWindowEvents(bundle) {
     const mruIdx = mruWindows.indexOf(bundle);
     if (mruIdx >= 0) mruWindows.splice(mruIdx, 1);
     if (initialBundle === bundle) initialBundle = null;
-    // With the last window gone the tray is the app's only presence.
-    syncDockIcon();
     // A window closed mid-intro can never report the film over; the startup
     // route waiting on it must not wait forever.
     bundle.resolveIntroFinished();
@@ -890,30 +847,6 @@ function wireBundleWindowEvents(bundle) {
 
 function wireBundleNavigationEvents(bundle) {
   const wc = bundle.window.webContents;
-
-  // Navigation milestones of every frame, as crashpad annotations: a native
-  // browser-process crash mid-navigation then names the phase it died in and
-  // the class of the target (see electron/crash-annotations.js). Registered
-  // before the handlers below so each milestone precedes the work it triggers.
-  const windowId = bundle.window.id;
-  const annotateNavigation = (phase, url, isMainFrame, isSameDocument) => {
-    crashAnnotations.recordNavigation({ windowId, isMainFrame, phase, url, isSameDocument });
-  };
-  wc.on('did-start-navigation', (event) => {
-    annotateNavigation('start', event.url, event.isMainFrame, event.isSameDocument);
-  });
-  wc.on('did-redirect-navigation', (event) => {
-    annotateNavigation('redirect', event.url, event.isMainFrame, event.isSameDocument);
-  });
-  wc.on('did-frame-navigate', (_e, url, _code, _status, isMainFrame) => {
-    annotateNavigation('commit', url, isMainFrame, false);
-  });
-  wc.on('did-navigate-in-page', (_e, url, isMainFrame) => {
-    annotateNavigation('commit', url, isMainFrame, true);
-  });
-  wc.on('did-fail-load', (_e, _code, _description, validatedURL, isMainFrame) => {
-    annotateNavigation('fail', validatedURL, isMainFrame, false);
-  });
 
   // Top-level navigation: the SPA's routes (hub pages and /workspace/<id>).
   // The SPA owns the UI; main records what it needs for session persistence,
@@ -968,12 +901,6 @@ function wireBundleNavigationEvents(bundle) {
       bundle.currentWorkspaceId = null;
       bundle.currentContentUrl = parsed.pathname + parsed.search;
     }
-    bundle.accountId = accountIdAfterNavigation({
-      url,
-      workspaceAccountId: workspaceAccountIdOf(bundle.currentWorkspaceId),
-      isWorkspaceUrl: bundle.currentWorkspaceId !== null,
-      previousAccountId: bundle.accountId,
-    });
     bundle.preErrorUrl = bundle.currentContentUrl;
     scheduleSessionSave();
     updateOsTitle(bundle);
@@ -1157,29 +1084,15 @@ function registerShortcutsFor(bundle, wc) {
   });
 }
 
-// A mailto:, tel: or custom-scheme link asks first, in a dialog owned by the
-// window the link came from; see externalOpenPrompt.
-const externalLinkPermissions = createExternalLinkPermissions(paths.getStateDir(), (message) => console.warn(message));
+// A mailto: or tel: link asks first, in a dialog owned by the window the link
+// came from; see externalOpenPrompt.
 const openExternal = createExternalOpener({
-  confirm: async ({ message, detail, rememberLabel }, wc) => {
+  confirm: async (prompt, wc) => {
     const win = wc && !wc.isDestroyed() ? BrowserWindow.fromWebContents(wc) : null;
-    const options = {
-      type: 'question',
-      buttons: ['Open', 'Cancel'],
-      defaultId: 0,
-      cancelId: 1,
-      message,
-      detail,
-      ...(rememberLabel !== null ? { checkboxLabel: rememberLabel } : {}),
-    };
-    const { response, checkboxChecked } = win
-      ? await dialog.showMessageBox(win, options)
-      : await dialog.showMessageBox(options);
-    return { accepted: response === 0, remember: checkboxChecked };
+    const options = { type: 'question', buttons: ['Open', 'Cancel'], defaultId: 0, cancelId: 1, ...prompt };
+    const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
+    return response === 0;
   },
-  // Linux names the handler by its desktop entry (`paseo.desktop`).
-  appNameFor: (url) => app.getApplicationNameForProtocol(url).replace(/\.desktop$/, ''),
-  permissions: externalLinkPermissions,
   open: (url, wc) => {
     shell.openExternal(url).catch((err) => {
       console.warn('[external-link] failed to open', url, err);
@@ -1191,9 +1104,9 @@ const openExternal = createExternalOpener({
 // See ./link-routing for the rule. Each window's page reports the workspace it
 // mounted over 'workspace-link-handling'.
 const linkRouter = createLinkRouter({
-  openExternal: (url, wc, workspaceId) => {
+  openExternal: (url, wc) => {
     setImmediate(() => {
-      openExternal(url, wc, workspaceId).catch((err) => console.warn('[external-link] failed to open', url, err));
+      openExternal(url, wc).catch((err) => console.warn('[external-link] failed to open', url, err));
     });
   },
   forward: (wc, url) => {
@@ -1219,15 +1132,9 @@ const linkRouter = createLinkRouter({
 // The address is copied either way; the explanation is an in-app toast in
 // the window the click happened in (never a system notification: nothing
 // left the app, and the reader is right there).
-async function notifyOpenFailed(url, wc) {
+function notifyOpenFailed(url, wc) {
   const fallback = linkFallbackFor(url);
-  try {
-    await clipboard.writeText(fallback.clipboardText);
-  } catch (err) {
-    // The toast says the address was copied, so it is not shown when it wasn't.
-    console.warn('[external-link] could not copy the address to the clipboard:', err && err.message);
-    return;
-  }
+  clipboard.writeText(fallback.clipboardText);
   if (!wc || wc.isDestroyed()) return;
   try {
     wc.send('show-toast', { title: fallback.title, body: fallback.body });
@@ -1350,7 +1257,7 @@ function openOrFocusWindow({ isReopen = false } = {}) {
     focusBundle(existing);
     return existing;
   }
-  if (target === 'home') return openNewWindow(backendBaseUrl + newWindowHomePath());
+  if (target === 'home') return openNewWindow(backendBaseUrl + '/');
   if (target === 'startup-route') return openStartupRoutedWindow();
   return openTakeoverWindow();
 }
@@ -1475,9 +1382,7 @@ function readLastLogLines(lineCount) {
 // On-disk shape is ``{ windows: [{ url, x, y, width, height, displayId },
 // ...] }``. A workspace window persists as the port-independent
 // ``/goto/<host-id>/`` path and is restored through the SPA's
-// /workspace/<id> route; every other screen persists as its account's hub
-// (``/account/<account-id>/``), or as home ("/") when the window's account was
-// never learned, which the SPA sends to the most recently used account.
+// /workspace/<id> route; every other screen persists as home ("/").
 
 function loadSessionState() {
   try {
@@ -1524,7 +1429,7 @@ function parseRecoveryPageAgentId(url) {
   }
 }
 
-function toPersistedContentUrl(url, accountId = null) {
+function toPersistedContentUrl(url) {
   if (!url) return null;
   const absolute = toAbsoluteUrl(url);
   const popoutRoute = parsePopoutRoute(absolute);
@@ -1534,7 +1439,7 @@ function toPersistedContentUrl(url, accountId = null) {
   }
   const workspaceId = parseWorkspaceId(absolute) || parseRecoveryPageAgentId(absolute);
   if (workspaceId) return `/goto/${encodeURIComponent(toHostScopedWorkspaceId(workspaceId))}/`;
-  return toRelativeBackendUrl(absolute) ? accountHomePath(accountId) : null;
+  return toRelativeBackendUrl(absolute) ? '/' : null;
 }
 
 // The workspace a persisted entry belongs to, whichever shape it took: a
@@ -1588,7 +1493,7 @@ function saveSessionState() {
     for (const b of mruWindows) {
       if (b.window.isDestroyed() || isLeavingSession(b)) continue;
       const url = b.preErrorUrl || b.currentContentUrl;
-      const persisted = toPersistedContentUrl(url, b.accountId);
+      const persisted = toPersistedContentUrl(url);
       if (!persisted) continue;
       const bounds = b.window.getBounds();
       const display = screen.getDisplayMatching(bounds);
@@ -1710,9 +1615,8 @@ function restoreWindowBounds(bundle, entry) {
 }
 
 // Each window's SPA owns its own /ui/ws channel and relays the events main
-// still acts on. Every window on an account relays that account's frames and
-// every window relays the install-wide ones, so handlers must be idempotent;
-// genuinely once-only reactions dedupe via recentShellEventKeys.
+// still acts on. Every window relays the same broadcasts, so handlers must be
+// idempotent; genuinely once-only reactions dedupe via recentShellEventKeys.
 
 function isDuplicateShellEvent(key) {
   const now = Date.now();
@@ -1727,18 +1631,14 @@ function isDuplicateShellEvent(key) {
 function handleShellEvent(evt, senderBundle) {
   if (!evt || typeof evt.type !== 'string') return;
   if (evt.type === 'workspaces' && Array.isArray(evt.workspaces)) {
-    const accountId = evt.account_id ? String(evt.account_id) : DEVICE_ACCOUNT_ID;
-    const { rowsByAccount, vanishedIds } = withAccountRows(
-      workspaceRowsByAccount,
-      accountId,
-      evt.workspaces.map(workspaceRowFromFrameEntry),
-    );
-    workspaceRowsByAccount = rowsByAccount;
-    // The frame is the projection for the sender's own account, so it names
-    // the account outright where the committed URL could not (a workspace
-    // window restored before any list had arrived).
-    senderBundle.accountId = accountId;
+    const oldIds = new Set(workspaceList.map((w) => w.id));
+    workspaceList = evt.workspaces.map((w) => ({
+      id: String(w.id),
+      name: w.name ? String(w.name) : '',
+      account: w.account ? String(w.account) : '',
+    }));
     updateWorkspaceAliasMaps(evt.workspaces);
+    const newIds = new Set(workspaceList.map((w) => w.id));
     if (Array.isArray(evt.destroying_agent_ids)) {
       for (const aid of evt.destroying_agent_ids) {
         everSeenDestroying.add(String(aid));
@@ -1747,7 +1647,8 @@ function handleShellEvent(evt, senderBundle) {
     // Detach windows whose workspace was genuinely destroyed (seen destroying
     // at a prior tick); transient discovery hiccups are left to the page's
     // recovery flow.
-    for (const oldId of vanishedIds) {
+    for (const oldId of oldIds) {
+      if (newIds.has(oldId)) continue;
       if (!everSeenDestroying.has(oldId)) continue;
       detachWindowsForWorkspace(oldId);
     }
@@ -1836,9 +1737,8 @@ ipcMain.on('shell-event', (event, evt) => {
 });
 
 // The window's page mounted a workspace frame (or unmounted it), and whether
-// that workspace announced it opens links and custom-scheme links:
-// `{ workspaceId, opensLinks, opensCustomSchemeLinks }`, or null for none.
-// Only the trusted SPA page may say so.
+// that workspace announced it opens links: `{ workspaceId, opensLinks }`, or
+// null for none. Only the trusted SPA page may say so.
 ipcMain.on('workspace-link-handling', (event, report) => {
   if (!trustedShellEventSenderBundle(event)) {
     console.warn('[link-routing] dropped a mount report from an untrusted sender frame');
@@ -1851,19 +1751,17 @@ ipcMain.on('workspace-link-handling', (event, report) => {
 
 // A workspace asked for an external link no app of its own takes to open
 // outside the app (minds:open-external, relayed by the window's page). Only
-// the trusted SPA page may ask, and only for an external or custom-scheme URL.
+// the trusted SPA page may ask, and only for an external URL.
 ipcMain.on('open-external-link', (event, url) => {
   if (!trustedShellEventSenderBundle(event)) {
     console.warn('[link-routing] dropped an external link from an untrusted sender frame');
     return;
   }
-  if (typeof url !== 'string' || !(isExternalUrl(url) || isCustomSchemeUrl(url))) {
+  if (typeof url !== 'string' || !isExternalUrl(url)) {
     console.warn('[link-routing] dropped an external link that is not one:', url);
     return;
   }
-  openExternal(url, event.sender, linkRouter.workspaceOf(event.sender)).catch((err) =>
-    console.warn('[external-link] failed to open', url, err),
-  );
+  openExternal(url, event.sender).catch((err) => console.warn('[external-link] failed to open', url, err));
 });
 
 const WORKSPACE_HTTP_TIMEOUT_MS = 10000;
@@ -2062,23 +1960,21 @@ async function promptWorkspaceShutdown() {
   console.log('[workspace-shutdown] prompt: running workspaces =', JSON.stringify(running));
   if (running.length === 0) return { proceed: true, stop: false, running: [] };
   const names = running.map((workspace) => workspace.name).join(', ');
-  // No "leave running" choice: the app's latchkey forward (the gateway the
-  // workspaces' agents reach their credentials through) stops with the app,
-  // so a workspace left running would keep using the computer's resources
-  // while its agents can no longer work.
   const { response } = await showQuitPrompt({
-    type: 'warning',
-    buttons: ['Cancel', 'Quit and stop workspaces'],
-    defaultId: 1,
+    type: 'question',
+    buttons: ['Cancel', 'Leave running', 'Shut down all'],
+    defaultId: 2,
     cancelId: 0,
     message: running.length === 1
-      ? 'Quitting will stop the workspace running on this computer'
-      : `Quitting will stop the ${running.length} workspaces running on this computer`,
-    detail: `${names}\n\nStopping them pauses their agents and makes their services inaccessible `
-      + 'until you open Imbue Studio and start them again (your data is preserved).',
+      ? '1 workspace is still running on this computer'
+      : `${running.length} workspaces are still running on this computer`,
+    detail: `${names}\n\nLeaving them running keeps using your computer's resources. `
+      + 'Shutting them down stops their agents and makes their services inaccessible '
+      + '(your data is preserved and you can start them again).',
   });
-  console.log(`[workspace-shutdown] prompt: user chose ${['Cancel', 'Quit and stop workspaces'][response]} (response=${response})`);
+  console.log(`[workspace-shutdown] prompt: user chose ${['Cancel', 'Leave running', 'Shut down all'][response]} (response=${response})`);
   if (response === 0) return { proceed: false, stop: false, running: [] };
+  if (response === 1) return { proceed: true, stop: false, running: [] };
   return { proceed: true, stop: true, running };
 }
 
@@ -2149,27 +2045,14 @@ function fetchAppStatus(timeoutMs = 25000) {
   });
 }
 
-// The schemes the running bundle's own Info.plist declares: what a macOS dev
-// run may register (see protocolClientRegistrations).
-function runningBundleUrlSchemes() {
-  if (process.platform !== 'darwin' || !process.defaultApp) return new Set();
-  const infoPlistPath = path.join(path.dirname(process.execPath), '..', 'Info.plist');
-  try {
-    return declaredUrlSchemes(fs.readFileSync(infoPlistPath, 'utf-8'));
-  } catch (err) {
-    console.warn(`[deeplink] could not read ${infoPlistPath}, so registering no url schemes: ${err.message}`);
-    return new Set();
+for (const scheme of DEEPLINK_SCHEMES) {
+  if (process.defaultApp) {
+    if (process.argv.length >= 2) {
+      app.setAsDefaultProtocolClient(scheme, process.execPath, [path.resolve(process.argv[1])]);
+    }
+  } else {
+    app.setAsDefaultProtocolClient(scheme);
   }
-}
-
-for (const registration of protocolClientRegistrations({
-  isDefaultApp: Boolean(process.defaultApp),
-  platform: process.platform,
-  execPath: process.execPath,
-  appPath: process.argv.length >= 2 ? path.resolve(process.argv[1]) : null,
-  bundleSchemes: runningBundleUrlSchemes(),
-})) {
-  app.setAsDefaultProtocolClient(...registration);
 }
 
 app.on('open-url', (event, url) => {
@@ -2183,19 +2066,8 @@ if (!gotLock) {
 } else {
   app.on('second-instance', (_event, argv) => {
     const url = extractDeeplinkUrlFromArgv(argv || []);
-    const action = decideSecondInstanceAction({
-      hasDeeplinkUrl: url !== null,
-      isBackgroundLaunch: isBackgroundLaunch(argv || []),
-    });
-    if (action === 'deeplink') {
+    if (url) {
       handleDeeplink(url);
-      return;
-    }
-    if (action === 'ignore') {
-      // An agent ran the recorded background launch while the app was already
-      // up: it wanted the API, which it has, and must not get a window popped
-      // over the user's work.
-      console.log('[lifecycle] second launch with --background while running; nothing to do');
       return;
     }
     // Launching the app again brings the app forward, so focus the window it
@@ -2258,70 +2130,28 @@ function registerAppImageDesktopEntry() {
   }
 }
 
-// This launch's version against the previous one's, recorded once at ready
-// (before this session writes any state of its own, which `hasRunBefore` reads).
-let launchVersionChange = { previousVersion: null, isFirstLaunchAfterUpdate: false };
-
 async function onReady() {
-  launchVersionChange = launchVersion.recordLaunchVersion(paths.getStateDir(), app.getVersion(), {
-    hasRunBefore: fs.existsSync(getSessionStatePath()),
-  });
   // Route the links every WebContents the app ever creates opens, by the rule
   // in ./link-routing.
   app.on('web-contents-created', (_event, contents) => {
     linkRouter.install(contents);
   });
-  // Every permission is granted, as with no handler, but openExternal: a page
-  // launching another app goes through the link router's ask-first opener.
-  session.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => {
-    if (permission !== 'openExternal') {
-      callback(true);
-      return;
-    }
-    callback(false);
-    linkRouter.openExternalRequested(wc, details);
-  });
   registerAppImageDesktopEntry();
   installApplicationMenu();
   installDockMenu();
   installDevDockIcon();
-  installTray();
-  if (isBackgroundStart) {
-    console.log('[lifecycle] background start: running the backend and the tray with no window');
-    // Hidden before any window could exist, so an agent-started app never
-    // flashes a dock icon the user did not ask for.
-    syncDockIcon();
-  }
-  powerMonitor.on('suspend', () => crashAnnotations.recordMainEvent('power-suspend'));
-  powerMonitor.on('resume', () => {
-    crashAnnotations.recordMainEvent('power-resume');
-    repaintAllWindowsAfterWake('resume');
-  });
+  powerMonitor.on('resume', () => repaintAllWindowsAfterWake('resume'));
   powerMonitor.on('unlock-screen', () => {
-    crashAnnotations.recordMainEvent('power-unlock-screen');
     repaintAllWindowsAfterWake('unlock-screen');
     relayScreenLockToAllWindows(false);
   });
   // Relayed so each window's client_state carries it: the backend's banner
   // gate stops trusting focus, and watched chats, while the screen is locked.
-  powerMonitor.on('lock-screen', () => {
-    crashAnnotations.recordMainEvent('power-lock-screen');
-    relayScreenLockToAllWindows(true);
-  });
+  powerMonitor.on('lock-screen', () => relayScreenLockToAllWindows(true));
 
-  // A background start opens no window: the startup sequence runs without
-  // one, the one-time code is still consumed, and the first-window route is
-  // held for whichever window is asked for first (see startBackendWithRetry).
-  initialBundle = isBackgroundStart ? null : createBundle();
-  if (initialBundle !== null) sizeFromSavedSession(initialBundle);
-  updater.init({
-    onStatus: (status) => {
-      crashAnnotations.recordMainEvent(`updater-${status.type}`);
-      broadcastUpdateStatus(status);
-    },
-  });
-  annotateMemory();
-  setInterval(annotateMemory, MEMORY_ANNOTATION_INTERVAL_MS);
+  initialBundle = createBundle();
+  sizeFromSavedSession(initialBundle);
+  updater.init({ onStatus: broadcastUpdateStatus });
   // CLEANUP: remove alongside electron/legacy-name-cleanup.js once the Imbue
   // Studio build has been on stable long enough for installs to have launched
   // once (specs/imbue-studio-rename/05_cleanup.md).
@@ -2331,18 +2161,6 @@ async function onReady() {
     setImmediate(removeLegacyNameDirs);
   }
   await runStartupSequence(initialBundle);
-}
-
-// Refresh the crashpad memory annotation (see electron/crash-annotations.js).
-// macOS's memory-pressure level is not exposed to Electron apps, so the
-// system's free memory stands in for it. Runs on a timer, so it must never
-// throw: a failure is logged and the previous reading stays in place.
-function annotateMemory() {
-  try {
-    crashAnnotations.recordMemory(app.getAppMetrics(), process.getSystemMemoryInfo());
-  } catch (err) {
-    console.warn(`[crash-annotations] could not read memory metrics: ${err.message || err}`);
-  }
 }
 
 function broadcastUpdateStatus(status) {
@@ -2458,127 +2276,25 @@ function installDevDockIcon() {
   if (!devIcon.isEmpty()) app.dock.setIcon(devIcon);
 }
 
-// Whether this tier shows as the product or as a development variant: every
-// tier but production gets the dev icon and its name in the tray, so a
-// production app and a dev app side by side read as two things.
-function isProductionTier() {
-  try {
-    return paths.getTier() === 'production';
-  } catch (err) {
-    console.warn('[tray] could not resolve the tier:', err.message);
-    return true;
-  }
-}
-
-// The macOS dock icon follows the windows (see shouldShowDockIcon): shown when
-// a window is about to open or is open, hidden once none is. Hiding leaves the
-// app running behind the tray; showing again before a window opens is what
-// makes that window a regular, focusable one. Re-applied after each show, since
-// a dock icon set on a hidden dock entry does not survive the round trip.
-function syncDockIcon({ isWindowAboutToOpen = false } = {}) {
-  if (!isMac || !app.dock) return;
-  const hasLiveWindow = isWindowAboutToOpen || getMostRecentWindow({ includePopouts: true }) != null;
-  const shouldShow = shouldShowDockIcon({ isMac, hasLiveWindow });
-  if (shouldShow === app.dock.isVisible()) return;
-  if (shouldShow) {
-    app.dock.show().then(() => installDevDockIcon()).catch((err) => {
-      console.warn('[lifecycle] could not show the dock icon:', err.message);
-    });
-  } else {
-    app.dock.hide();
-  }
-}
-
-// Held for the app's lifetime: a Tray with no reference is collected, and its
-// icon disappears.
-let tray = null;
-
-// The tray icon the platform draws legibly, the product icon on production
-// and a development variant on every other tier. On macOS a single-color
-// template image, which the menu bar tints to match its appearance like every
-// other menu bar item (its @2x sibling loads alongside it, so it is not
-// resized). Elsewhere a small bitmap of the color icon, since a Linux panel has
-// no template tinting.
-function trayIconImage() {
-  const isProduction = isProductionTier();
-  const fileName = isMac
-    ? (isProduction ? 'trayTemplate.png' : 'trayDevTemplate.png')
-    : (isProduction ? 'icon-linux.png' : 'icon-dev.png');
-  const image = nativeImage.createFromPath(path.join(__dirname, 'assets', fileName));
-  if (image.isEmpty()) throw new Error(`could not read the tray icon at ${fileName}`);
-  if (isMac) {
-    image.setTemplateImage(true);
-    return image;
-  }
-  // The launcher icons are 1024px; a panel wants about 22.
-  return image.resize({ width: 22, height: 22 });
-}
-
-function trayTooltip() {
-  return isProductionTier() ? PRODUCT_DISPLAY_NAME : `${PRODUCT_DISPLAY_NAME} (${paths.getTier()})`;
-}
-
-// The tray is the app's one persistent presence on every platform: it is where
-// a user with no window open reopens one and where Quit lives. Best effort: a
-// Linux desktop without an appindicator cannot show it, and the app runs on
-// behind the single-instance lock (a relaunch of the shortcut activates it)
-// with Ctrl+Q and the settings page's Quit still available from any window.
-function installTray() {
-  try {
-    tray = new Tray(trayIconImage());
-  } catch (err) {
-    console.warn(`[tray] could not create the tray icon; the app runs without one: ${err.message}`);
-    tray = null;
-    return;
-  }
-  const versionLabel = isProductionTier()
-    ? `${PRODUCT_DISPLAY_NAME} ${app.getVersion()}`
-    : `${PRODUCT_DISPLAY_NAME} ${app.getVersion()} (${paths.getTier()})`;
-  tray.setToolTip(trayTooltip());
-  tray.setContextMenu(Menu.buildFromTemplate([
-    {
-      label: `Open ${PRODUCT_DISPLAY_NAME}`,
-      click: () => openOrFocusWindow({ isReopen: true }),
-    },
-    { label: versionLabel, enabled: false },
-    { type: 'separator' },
-    {
-      label: 'Quit',
-      click: () => runQuitSequence(),
-    },
-  ]));
-  // Off macOS a click opens the app where the desktop delivers it as an
-  // activation (KDE on a single click, GNOME's AppIndicator extension only on
-  // a double click, a single one opening the menu); macOS opens the menu on
-  // any click.
-  if (!isMac) {
-    tray.on('click', () => openOrFocusWindow({ isReopen: true }));
-  }
-}
-
-// ``bundle`` is null on a background start, which has no window to show the
-// loading document in; everything after the document is window-independent.
 async function runStartupSequence(bundle) {
-  if (bundle !== null) {
-    console.log('[startup] Loading shell.html...');
-    bundle.isLoadingState = true;
-    // Every launch plays it: the app has to start either way, and the film is
-    // what the wait looks like. What a later launch skips is the lockup's travel
-    // to the titlebar, which only means anything when the start flow is about to
-    // hold the mark there -- see the park flag on startup-ready.
-    bundle.introFinished = new Promise((resolve) => {
-      bundle.resolveIntroFinished = resolve;
-    });
-    const loaded = bundle.window.webContents.loadFile(path.join(__dirname, 'shell.html'), { hash: 'intro' });
-    bundle.loadingDocumentLoaded = loaded.catch(() => {});
-    try {
-      await loaded;
-      console.log('[startup] shell.html loaded');
-    } catch (err) {
-      // Closing the window mid-load rejects the load. This sequence owns the
-      // backend start and the one-time code, so it runs on without a window.
-      console.warn('[startup] shell.html load did not finish:', err.message);
-    }
+  console.log('[startup] Loading shell.html...');
+  bundle.isLoadingState = true;
+  // Every launch plays it: the app has to start either way, and the film is
+  // what the wait looks like. What a later launch skips is the lockup's travel
+  // to the titlebar, which only means anything when the start flow is about to
+  // hold the mark there -- see the park flag on startup-ready.
+  bundle.introFinished = new Promise((resolve) => {
+    bundle.resolveIntroFinished = resolve;
+  });
+  const loaded = bundle.window.webContents.loadFile(path.join(__dirname, 'shell.html'), { hash: 'intro' });
+  bundle.loadingDocumentLoaded = loaded.catch(() => {});
+  try {
+    await loaded;
+    console.log('[startup] shell.html loaded');
+  } catch (err) {
+    // Closing the window mid-load rejects the load. This sequence owns the
+    // backend start and the one-time code, so it runs on without a window.
+    console.warn('[startup] shell.html load did not finish:', err.message);
   }
 
   const envSetupStartedAt = Date.now();
@@ -2987,7 +2703,6 @@ function handleNotification(event) {
   // exposes no permission-check API to app code, so this is the closest
   // thing to a confirmation we get).
   notification.on('show', () => {
-    crashAnnotations.recordMainEvent('notification-show');
     console.log(`[notification] shown by the OS: ${JSON.stringify(title)}`);
   });
   // A definitive OS-reported failure -- distinct from getting neither 'show'
@@ -2996,22 +2711,26 @@ function handleNotification(event) {
   notification.on('failed', () => {
     console.warn(`[notification] failed to display (OS-reported): ${JSON.stringify(title)}`);
   });
-  notification.on('click', () => {
-    crashAnnotations.recordMainEvent('notification-click');
-    openNotificationDestination(event.url, null, event.entry);
-  });
+  notification.on('click', () => openNotificationDestination(event.url, null, event.entry));
   liveBanners.remember(event.entry && event.entry.chat_agent_id, notification);
   notification.show();
   console.log(`[notification] .show() called for ${JSON.stringify(title)} -- if no banner appeared, check System Settings > Notifications for this app`);
 }
 
 
-// Open an OS settings URL, resolving to whether the OS took it.
+// Open the OS's own notification-settings pane so the reader can flip the
+// permission back on themselves after declining it -- no app can force a
+// re-prompt once the OS has decided.
+// Deliberately opens the general pane rather than deep-linking to this app's
+// own row: on macOS, every locally-run unpackaged dev build shares one
+// "com.github.Electron" identity in the OS's eyes (Electron.app's own
+// Info.plist, regardless of which project's checkout is running), and a
+// packaged build's real bundle id isn't available to look up here anyway.
 function openExternalBestEffort(url) {
   return shell.openExternal(url).then(
     () => true,
     (err) => {
-      console.warn('[os-settings] failed to open', url, err && err.message);
+      console.warn('[notification] failed to open OS notification settings:', err && err.message);
       return false;
     },
   );
@@ -3059,54 +2778,41 @@ async function openLinuxNotificationSettings() {
   return false;
 }
 
-// Open the OS's own notification-settings pane so the reader can flip the
-// permission back on themselves after declining it -- no app can force a
-// re-prompt once the OS has decided.
-// Deliberately opens the general pane rather than deep-linking to this app's
-// own row: on macOS, every locally-run unpackaged dev build shares one
-// "com.github.Electron" identity in the OS's eyes (Electron.app's own
-// Info.plist, regardless of which project's checkout is running), and a
-// packaged build's real bundle id isn't available to look up here anyway.
 ipcMain.handle('open-notification-settings', () => {
   if (isMac) return openExternalBestEffort('x-apple.systempreferences:com.apple.preference.notifications');
   if (process.platform === 'linux') return openLinuxNotificationSettings();
   return openExternalBestEffort('ms-settings:notifications');
 });
 
-// Open macOS's Full Disk Access list, where the user grants the app a look at
-// Google Chrome's profile data for the browser-cookie import. No API or
-// entitlement can ask for that permission: the user flips it by hand, and the
-// grant takes effect once the app is relaunched.
-ipcMain.handle('open-full-disk-access-settings', () => {
-  if (!isMac) return false;
-  return openExternalBestEffort('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
-});
+// Trust the forward proxy's CA-signed leaf certs for its loopback origins.
+// The CA is local to this machine (under the plugin state dir) and only
+// Imbue Studio's own loopback origins use it; every real https origin still gets
+// Chromium's default verification (cb(-3)).
+function isLoopbackHostname(hostname) {
+  return hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '127.0.0.1';
+}
 
-// Trust the forward proxy's leaf certs for its loopback origins by the local
-// CA that signed them (see forward-proxy-trust.js); every other origin keeps
-// Chromium's default verification.
-function trustForwardProxyCerts(caCertPath) {
-  session.defaultSession.setCertificateVerifyProc(createCertificateVerifyProc(loadForwardProxyCa(caCertPath)));
-  console.log('[startup] Trusting the forward proxy\'s local CA for its loopback origins (HTTP/2 on)');
+function trustLoopbackCerts() {
+  session.defaultSession.setCertificateVerifyProc((request, callback) => {
+    if (isLoopbackHostname(request.hostname)) {
+      callback(0); // trust
+    } else {
+      callback(-3); // defer to Chromium's default verification
+    }
+  });
+  console.log('[startup] Trusting forward-proxy loopback certs (HTTP/2 on)');
 }
 
 async function handleMngrForwardStarted(event) {
   const port = event.mngr_forward_port;
   const preauth = event.preauth_cookie;
-  const caCertPath = event.ca_cert_path;
-  if (!port || !preauth || !caCertPath) {
-    console.warn('[startup] mngr_forward_started missing port, preauth_cookie or ca_cert_path:', event);
+  if (!port || !preauth) {
+    console.warn('[startup] mngr_forward_started missing port or preauth_cookie:', event);
     return;
   }
   const url = `https://localhost:${port}`;
   mngrForwardBaseUrl = url;
-  try {
-    trustForwardProxyCerts(caCertPath);
-  } catch (err) {
-    // Without the CA every workspace origin fails TLS, which the first
-    // navigation reports; nothing here can stand in for it.
-    console.warn('[startup] Failed to read the forward proxy CA at', caCertPath, err);
-  }
+  trustLoopbackCerts();
   // The workspace iframe is cross-site to the chrome page, so the pre-set
   // cookie must be SameSite=None (Electron: 'no_restriction') + Secure to be
   // sent from inside it -- matching the attributes the plugin itself sets.
@@ -3160,8 +2866,6 @@ ipcMain.handle('set-display-zoom', (_event, percent) => {
   applyDisplayZoomToAllWindows();
   return normalized;
 });
-
-ipcMain.handle('get-launch-version-change', () => launchVersionChange);
 
 ipcMain.handle('get-update-state', () => updater.describe());
 
@@ -3250,18 +2954,20 @@ function closePopoutWindow(bundle, reason) {
 }
 
 // Ask a main window showing the popout's workspace to return the popout's
-// window to the desktop at its kept frame. That window's shell is the desktop's one writer of
+// window to the desktop, at ``frame`` (fractions of that window's surface)
+// when a drop named one. That window's shell is the desktop's one writer of
 // the layout, so the return goes through it rather than the popout's own
 // page whenever one is open. The popout closes once the window is reported
 // back or after the wait, not only when its own page sees it back: that page
 // may not have loaded yet.
-function sendReattachAsk(target, bundle) {
+function sendReattachAsk(target, bundle, frame) {
   try {
     // Agent-scoped like the SPA's own ids: a restored popout carries the
     // host-scoped coordinate its persisted route was written with.
     target.window.webContents.send('reattach-popout-window', {
       workspaceId: toAgentScopedWorkspaceId(bundle.popout.workspaceId),
       windowId: bundle.popout.windowId,
+      frame,
     });
   } catch (err) {
     console.warn('[popout] could not ask the desktop window to take the window back:', err && err.message);
@@ -3284,7 +2990,7 @@ function requestPopoutReattach(bundle) {
   }
   const target = mostRecentBundleForWorkspace(bundle.popout.workspaceId);
   if (target) {
-    sendReattachAsk(target, bundle);
+    sendReattachAsk(target, bundle, null);
   } else {
     try {
       wc.send('popout-reattach-request');
@@ -3306,12 +3012,35 @@ function armReattachTimeout(bundle) {
   }, POPOUT_REATTACH_TIMEOUT_MS);
 }
 
+// The main windows a re-dock drag could drop onto, most recently focused
+// first, as the drop-target rule reads them.
+function redockCandidatesFor(bundle) {
+  const candidates = [];
+  for (const b of mruWindows) {
+    if (b.window.isDestroyed() || isPopoutBundle(b)) continue;
+    candidates.push({
+      id: b,
+      contentBounds: b.window.getContentBounds(),
+      isSameWorkspace: sameWorkspaceId(b.currentWorkspaceId, bundle.popout.workspaceId),
+    });
+  }
+  return candidates;
+}
+
+function sendDropTarget(target, isOver) {
+  if (!target || target.window.isDestroyed() || target.window.webContents.isDestroyed()) return;
+  try {
+    target.window.webContents.send('popout-drop-target', isOver);
+  } catch { /* noop */ }
+}
+
 // Follow the cursor with the popout until told to stop: the tear-out drag
 // (the workspace shell still holds the pointer) and the popout's own bar
-// drag.
-function startFollowingCursor(bundle, grab) {
+// drag (which may end over a main window as a re-dock).
+function startFollowingCursor(bundle, grab, { isRedockDrag }) {
   stopFollowingCursor(bundle);
   bundle.popout.followGrab = grab;
+  bundle.popout.isRedockDrag = isRedockDrag;
   bundle.popout.followTimer = setInterval(() => {
     if (bundle.window.isDestroyed()) {
       stopFollowingCursor(bundle);
@@ -3320,6 +3049,12 @@ function startFollowingCursor(bundle, grab) {
     const cursor = screen.getCursorScreenPoint();
     const position = followPosition(cursor, bundle.popout.followGrab);
     bundle.window.setPosition(position.x, position.y);
+    if (!bundle.popout.isRedockDrag) return;
+    const target = dropTargetFor(cursor, redockCandidatesFor(bundle));
+    if (target === bundle.popout.dropTarget) return;
+    sendDropTarget(bundle.popout.dropTarget, false);
+    sendDropTarget(target, true);
+    bundle.popout.dropTarget = target;
   }, POPOUT_FOLLOW_INTERVAL_MS);
 }
 
@@ -3329,6 +3064,11 @@ function stopFollowingCursor(bundle) {
     bundle.popout.followTimer = null;
   }
   bundle.popout.followGrab = null;
+  const target = bundle.popout.dropTarget;
+  bundle.popout.dropTarget = null;
+  bundle.popout.isRedockDrag = false;
+  sendDropTarget(target, false);
+  return target;
 }
 
 // The renderer's popout asks all come from the SPA page of a window main
@@ -3377,7 +3117,7 @@ function openPopout(source, request, mode) {
     // surfacing the popout inactive keeps it that way, and the release ends
     // the follow and focuses the popout.
     bundle.showInactiveOnFirstShow = true;
-    startFollowingCursor(bundle, { grabX: request.grabX, grabY: request.grabY });
+    startFollowingCursor(bundle, { grabX: request.grabX, grabY: request.grabY }, { isRedockDrag: false });
     // Shown at once rather than at ready-to-show: the window is under the
     // cursor now, and a blank card that follows the hand beats one that
     // appears a beat later wherever the hand has got to.
@@ -3540,14 +3280,21 @@ ipcMain.on('begin-popout-drag', (event, grab) => {
   const grabX = Number(grab.grabX);
   const grabY = Number(grab.grabY);
   if (!Number.isFinite(grabX) || !Number.isFinite(grabY)) return;
-  startFollowingCursor(bundle, { grabX, grabY });
+  startFollowingCursor(bundle, { grabX, grabY }, { isRedockDrag: true });
 });
 
 ipcMain.on('end-popout-bar-drag', (event) => {
   const bundle = popoutSenderBundle(event);
   if (!bundle || !isPopoutBundle(bundle)) return;
-  stopFollowingCursor(bundle);
+  const target = stopFollowingCursor(bundle);
   scheduleSessionSave();
+  if (!target || target.window.isDestroyed()) return;
+  // Released over a main window showing this workspace: that window's shell
+  // returns the window to the desktop where it was dropped.
+  const frame = redockFrame(bundle.window.getContentBounds(), target.window.getContentBounds());
+  sendReattachAsk(target, bundle, frame);
+  armReattachTimeout(bundle);
+  focusBundle(target);
 });
 
 ipcMain.on('close-popout', (event) => {
@@ -3558,8 +3305,8 @@ ipcMain.on('close-popout', (event) => {
   closePopoutWindow(bundle, 'its page no longer shows the window as out');
 });
 
-// A main window's shell took back the window main asked it to (a popout's
-// close): the popout waiting on that return goes now.
+// A main window's shell took back the window main asked it to (a drop onto
+// it, a popout's close): the popout waiting on that return goes now.
 ipcMain.on('popout-window-returned', (event, payload) => {
   const source = popoutSenderBundle(event);
   if (!source || isPopoutBundle(source) || !isValidWorkspaceWindowIds(payload)) return;
@@ -3678,10 +3425,6 @@ ipcMain.on('open-log-file', () => {
   shell.openPath(logPath);
 });
 
-// Electron opens a dialog given no defaultPath in Downloads rather than where
-// the OS last left it, so the picker carries the last location itself.
-let lastFilePickerDir = null;
-
 ipcMain.handle('show-file-picker', async (event, options) => {
   const bundle = getBundleFromEvent(event);
   const opts = options || {};
@@ -3689,8 +3432,6 @@ ipcMain.handle('show-file-picker', async (event, options) => {
   const dialogOptions = { properties: [property] };
   if (typeof opts.defaultPath === 'string' && opts.defaultPath.length > 0) {
     dialogOptions.defaultPath = opts.defaultPath;
-  } else if (lastFilePickerDir) {
-    dialogOptions.defaultPath = lastFilePickerDir;
   }
   const result = bundle && bundle.window && !bundle.window.isDestroyed()
     ? await dialog.showOpenDialog(bundle.window, dialogOptions)
@@ -3698,7 +3439,6 @@ ipcMain.handle('show-file-picker', async (event, options) => {
   if (result.canceled || !Array.isArray(result.filePaths) || result.filePaths.length === 0) {
     return null;
   }
-  lastFilePickerDir = path.dirname(result.filePaths[0]);
   return result.filePaths[0];
 });
 
@@ -3729,24 +3469,12 @@ ipcMain.on('window-close', (event) => {
   if (bundle && !bundle.window.isDestroyed()) bundle.window.close();
 });
 
-// The page's own Quit (the settings page): the same explicit quit the tray and
-// Cmd+Q / Ctrl+Q run, prompt included, for a desktop with no tray to offer it.
-ipcMain.on('quit-app', () => {
-  runQuitSequence();
-});
-
 function initiateFullQuit() {
   app.quit();
 }
 
 let isQuitSequenceRunning = false;
 let isHeadlessQuit = false;
-// The first SIGTERM/SIGINT this run received (null until one arrives), so a
-// later GPU-process death can be ordered against it.
-let firstTerminationSignal = null;
-// GPU-process deaths seen this run; Chromium aborts the browser once enough of
-// them exhaust its fallback modes.
-let gpuProcessDeathCount = 0;
 // Callers waiting to hear that a quit sequence ended with the app staying up.
 let quitCancelledWaiters = [];
 
@@ -3819,56 +3547,26 @@ async function runQuitSequence() {
 app.whenReady().then(() => {
   for (const signal of ['SIGTERM', 'SIGINT']) {
     process.on(signal, () => {
-      if (firstTerminationSignal === null) firstTerminationSignal = signal;
       // The electron CLI shim forwards each signal it receives, so a process-group
       // signal arrives twice; a second app.quit() would cut the running quit short.
       if (isShuttingDown || isQuitSequenceRunning) {
-        console.log(`[lifecycle] ${signal} received, quit already in progress (uptime=${process.uptime().toFixed(1)}s)`);
+        console.log(`[lifecycle] ${signal} received, quit already in progress`);
         return;
       }
-      console.log(`[lifecycle] ${signal} received, requesting quit (uptime=${process.uptime().toFixed(1)}s)`);
+      console.log(`[lifecycle] ${signal} received, requesting quit`);
       isHeadlessQuit = true;
       app.quit();
     });
   }
 });
 
-// See gpu-diagnostics.js for why every GPU-process death is logged.
-app.on('child-process-gone', (_event, details) => {
-  if (details.type !== 'GPU') return;
-  gpuProcessDeathCount += 1;
-  let featureStatus = null;
-  try {
-    featureStatus = app.getGPUFeatureStatus();
-  } catch (err) {
-    console.error(`[gpu] could not read the GPU feature status: ${err.message || err}`);
-  }
-  // Every app process's working set (main, renderers, GPU, utilities), in KB.
-  let appMemoryKb = null;
-  try {
-    appMemoryKb = app.getAppMetrics().reduce((total, metric) => total + metric.memory.workingSetSize, 0);
-  } catch (err) {
-    console.error(`[gpu] could not read the app's process metrics: ${err.message || err}`);
-  }
-  console.error(formatGpuProcessGone({
-    reason: details.reason,
-    exitCode: details.exitCode,
-    gpuDeathCount: gpuProcessDeathCount,
-    isShuttingDown,
-    terminationSignal: firstTerminationSignal,
-    uptimeSeconds: process.uptime(),
-    featureStatus,
-    freeMemoryBytes: os.freemem(),
-    appMemoryBytes: appMemoryKb === null ? null : appMemoryKb * 1024,
-  }));
-});
-
 app.on('window-all-closed', () => {
   console.log('[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);
-  // The app stays alive with no windows on every platform, behind its tray
-  // icon; the user re-opens a window from the tray, the dock (see 'activate'
-  // below) or a relaunch, and quits explicitly. The listener itself is what
-  // keeps it alive: with none registered, Electron quits here.
+  // On macOS the app stays alive with no windows (the dock icon remains); the
+  // user re-opens a window from the dock (see 'activate' below) and quits with
+  // Cmd+Q. Other platforms quit when the last window closes.
+  if (!shouldQuitOnWindowAllClosed({ isMac, isShuttingDown, isQuitSequenceRunning })) return;
+  runQuitSequence();
 });
 
 // macOS: activating the app (clicking the dock icon) with no open windows
@@ -3878,20 +3576,17 @@ app.on('window-all-closed', () => {
 // when none remain. A popout is such a window: the OS raises it too, and a
 // main window is a Cmd+N away.
 app.on('activate', () => {
-  const hasLiveWindow = getMostRecentWindow({ includePopouts: true }) != null;
-  const opensWindow = shouldOpenWindowOnActivate({
+  if (!shouldOpenWindowOnActivate({
     isShuttingDown,
     isQuitSequenceRunning,
-    hasLiveWindow,
-  });
-  // See activation-diagnostics.js for why the handler is bracketed.
-  console.log(formatActivateStart({ hasLiveWindow, isShuttingDown, isQuitSequenceRunning, opensWindow }));
-  if (opensWindow) openOrFocusWindow({ isReopen: true });
-  console.log(formatActivateEnd({ openedWindow: opensWindow }));
+    hasLiveWindow: getMostRecentWindow({ includePopouts: true }) != null,
+  })) {
+    return;
+  }
+  openOrFocusWindow({ isReopen: true });
 });
 
 app.on('before-quit', (event) => {
-  crashAnnotations.recordMainEvent('app-before-quit');
   console.log('[lifecycle] before-quit fired, isShuttingDown=' + isShuttingDown + ', hasBackend=' + !!getBackendProcess());
   if (isShuttingDown) return;
   event.preventDefault();

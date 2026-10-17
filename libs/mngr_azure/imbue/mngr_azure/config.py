@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
-from azure.identity import AzureCliCredential
 from azure.identity import ClientSecretCredential
 from azure.identity import DefaultAzureCredential
 from loguru import logger
@@ -15,7 +14,6 @@ from pydantic import model_validator
 
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.utils.polling import poll_for_value
-from imbue.mngr_azure.errors import AzureCredentialConfigError
 from imbue.mngr_azure.errors import AzureSubscriptionError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
 from imbue.mngr_vps.config import PublicIpVpsProviderConfig
@@ -57,13 +55,7 @@ _AZ_PROFILE_READ_TIMEOUT_SECONDS: Final[float] = 0.2
 _AZ_PROFILE_READ_RETRY_SECONDS: Final[float] = 0.1
 
 
-def az_cli_profile_path() -> Path:
-    """Where the Azure CLI records its logins: ``$AZURE_CONFIG_DIR/azureProfile.json``, default ``~/.azure``."""
-    config_dir = os.environ.get("AZURE_CONFIG_DIR") or str(Path.home() / ".azure")
-    return Path(config_dir) / "azureProfile.json"
-
-
-def read_az_profile_subscriptions(profile_path: Path) -> list[Any] | None:
+def _read_az_profile_subscriptions(profile_path: Path) -> list[Any] | None:
     """Parse the az profile's ``subscriptions`` list; None on a transient torn read.
 
     Returning None tells the poll loop to retry (the az CLI rewrites the file
@@ -102,10 +94,11 @@ def read_az_cli_default_subscription() -> str | None:
     surfaces upstream as ``ProviderUnavailableError``, which would drop azure
     agents from ``mngr list`` if a momentary mid-write read were taken as final.
     """
-    profile_path = az_cli_profile_path()
+    config_dir = os.environ.get("AZURE_CONFIG_DIR") or str(Path.home() / ".azure")
+    profile_path = Path(config_dir) / "azureProfile.json"
     try:
         subscriptions, _, _ = poll_for_value(
-            lambda: read_az_profile_subscriptions(profile_path),
+            lambda: _read_az_profile_subscriptions(profile_path),
             timeout=_AZ_PROFILE_READ_TIMEOUT_SECONDS,
             poll_interval=_AZ_PROFILE_READ_RETRY_SECONDS,
         )
@@ -130,23 +123,22 @@ def read_az_cli_default_subscription() -> str | None:
 class AzureProviderConfig(PublicIpVpsProviderConfig):
     """Configuration for the Azure Virtual Machines VPS Docker provider.
 
-    Credentials resolve in three ways. By default this config stores none and
-    Azure's ``DefaultAzureCredential`` is used: it transparently resolves the
-    developer's ``az login`` session locally and a service principal
+    Credentials are deliberately not stored in this config. Azure's
+    ``DefaultAzureCredential`` is used exclusively: it transparently resolves
+    the developer's ``az login`` session locally and a service principal
     (``AZURE_CLIENT_ID`` / ``AZURE_TENANT_ID`` / ``AZURE_CLIENT_SECRET`` env
     vars) in CI. This matches the Modal / AWS / GCP provider convention and the
     broader project preference: do not handle credentials in mngr configs when
-    an SDK can do it for us. When ``client_id`` + ``tenant_id`` +
-    ``client_secret`` are set (the Imbue Studio bring-your-own-account paste
-    flow), a service-principal ``ClientSecretCredential`` is built from them
-    instead, mirroring the OVH/Vultr providers holding ``SecretStr`` key
-    material. When ``use_azure_cli_login`` is set, the credential is this
-    machine's Azure CLI login pinned to the block's ``tenant_id`` and
-    ``subscription_id``, so the block carries no secret at all; it is mutually
-    exclusive with ``client_secret``.
+    an SDK can do it for us.
 
     ``subscription_id`` is a plain, non-secret identifier -- not credential
     material -- and is the only required field.
+
+    Exception: when ``client_id`` + ``tenant_id`` + ``client_secret`` are set
+    (the Imbue Studio bring-your-own-account paste flow), a service-principal
+    ``ClientSecretCredential`` is built from them and used instead of
+    ``DefaultAzureCredential``. Mirrors the OVH/Vultr providers holding
+    ``SecretStr`` key material.
     """
 
     backend: ProviderBackendName = Field(
@@ -241,25 +233,6 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
         default=None,
         description="Service-principal client secret. Only used when client_id + tenant_id are also set.",
     )
-    use_azure_cli_login: bool = Field(
-        default=False,
-        description=(
-            "Authenticate through this machine's Azure CLI login (`az login`) for the block's tenant_id and "
-            "subscription_id, so the block carries no secret; both ids are required with it. Mutually "
-            "exclusive with client_secret. Needs the `az` CLI on PATH; a machine without the login reports the "
-            "provider as awaiting its credential source until `az login` has run."
-        ),
-    )
-    use_managed_identity: bool = Field(
-        default=False,
-        description=(
-            "Whether DefaultAzureCredential may try a managed identity, which probes the Azure instance "
-            "metadata service (169.254.169.254). Off by default: off Azure the probe can only fail, and "
-            "on macOS a connection to that link-local address raises the 'find devices on your local "
-            "network' prompt for the app running mngr. Set True only when running mngr on an Azure VM or "
-            "Container App that should authenticate via its managed identity."
-        ),
-    )
 
     @model_validator(mode="before")
     @classmethod
@@ -269,17 +242,13 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
     def get_credential(self) -> Any:
         """Return a ``DefaultAzureCredential`` for the management clients.
 
-        The managed-identity credential is excluded from the chain unless
-        ``use_managed_identity`` is set, so it never probes the instance
-        metadata service.
-
         Typed ``Any`` because ``azure.core.credentials.TokenCredential`` is a
         Protocol (not an isinstance-able concrete class), which pydantic's
         ``arbitrary_types_allowed`` validation cannot accept as a field type.
         The returned credential is consumed transparently by the SDK; mngr never
         inspects or stores the secret material.
 
-        Construction never authenticates (``DefaultAzureCredential`` authenticates
+        Construction never raises (``DefaultAzureCredential`` authenticates
         lazily on first token request), so unlike AWS/GCP there is no cheap
         no-credentials check here -- the gating is on ``subscription_id``
         presence (see ``get_subscription_id``), and an unauthenticated
@@ -288,33 +257,14 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
         When ``client_id`` + ``tenant_id`` + ``client_secret`` are all set (the
         paste flow), a service-principal ``ClientSecretCredential`` is returned
         instead, so no ambient ``az login`` / env service principal is needed.
-
-        When ``use_azure_cli_login`` is set, an ``AzureCliCredential`` pinned to
-        the block's tenant and subscription is returned: never
-        ``DefaultAzureCredential``, which would prefer ``AZURE_CLIENT_*``
-        environment variables. Raises
-        ``AzureCredentialConfigError`` when the switch is combined with a
-        service-principal secret or lacks the two ids.
         """
-        if self.use_azure_cli_login:
-            if self.client_secret is not None:
-                raise AzureCredentialConfigError(
-                    "use_azure_cli_login and client_secret are mutually exclusive: a block authenticates either "
-                    "through this machine's az login or through the service principal, never both."
-                )
-            if not self.tenant_id or not self.subscription_id:
-                raise AzureCredentialConfigError(
-                    "use_azure_cli_login needs tenant_id and subscription_id on the block: the az login can hold "
-                    "several tenants and subscriptions, and the block must name which one it means."
-                )
-            return AzureCliCredential(tenant_id=self.tenant_id, subscription=self.subscription_id)
         if self.client_id and self.tenant_id and self.client_secret:
             return ClientSecretCredential(
                 tenant_id=self.tenant_id,
                 client_id=self.client_id,
                 client_secret=self.client_secret.get_secret_value(),
             )
-        return DefaultAzureCredential(exclude_managed_identity_credential=not self.use_managed_identity)
+        return DefaultAzureCredential()
 
     def get_subscription_id(self) -> str:
         """Return the subscription ID, raising ``AzureSubscriptionError`` if unresolvable.

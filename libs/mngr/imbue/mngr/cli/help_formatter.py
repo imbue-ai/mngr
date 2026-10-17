@@ -16,7 +16,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mngr.cli.common_opts import find_option_group
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.utils.interactive_subprocess import popen_interactive_shell_command
+from imbue.mngr.utils.interactive_subprocess import popen_interactive_subprocess
 
 
 class CommandHelpMetadata(FrozenModel):
@@ -226,8 +226,9 @@ def _run_pager_with_subprocess(text: str, config: MngrConfig | None) -> None:
         env["LESS"] = env.get("LESS", "") + " -RFX"
 
     try:
-        process = popen_interactive_shell_command(
+        process = popen_interactive_subprocess(
             pager_cmd,
+            shell=True,
             stdin=subprocess.PIPE,
             env=env,
         )

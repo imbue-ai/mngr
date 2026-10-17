@@ -16,16 +16,6 @@ commit into `system/vendor/mngr-assets/`. So the pin *is* the mngr that runs ins
 every agent, wherever the workspace is built: a release, a pool bake, the dev
 desktop app, or a CI harness. Moving the pin is the only way to change it.
 
-One file travels with the pin rather than being fetched at build time: the published
-`imbue-studio` skill (`apps/minds/skills_plugin/skills/imbue-studio/SKILL.md` here),
-which the template commits verbatim at `.agents/skills/imbue-studio/SKILL.md` so that
-every harness reading its skills tree has it. The template's
-`system/scripts/vendor_mngr_skill.py` is that file's one writer and checker: every pin
-move below runs its `--write` with the commit the pin was resolved from and stages the
-copy with the pin, and the template's `pin-is-public` CI job runs its `--check` against
-the pinned commit, so the skill a workspace carries always describes the mngr it runs
-and nobody has to re-vendor it by hand after a release.
-
 The pin names one of two repos:
 
 - the **public mirror**, https://github.com/imbue-ai/mngr, which template `main` and
@@ -103,9 +93,6 @@ the recipe whenever the mngr branch changes before it merges.
    resolves mngr `HEAD` to its mirror commit, rewrites every pin in
    DEFAULT_WORKSPACE_TEMPLATE (an internal or export pin included), runs `uv lock`
    there, and commits. Position the mngr checkout at the exact commit you want first.
-   The relock runs the uv the template pins (`UV_VERSION` in its
-   `system/scripts/setup_system.sh`) through `uvx`, whatever uv you have, so the
-   lock matches what workspaces and the template's CI write.
 4. Open the DEFAULT_WORKSPACE_TEMPLATE PR; its CI builds against the new pin.
 
 Internal commits are not on the mirror; each mirrored commit carries a
@@ -143,7 +130,7 @@ internal pin nor an export can be tagged) -- is in `apps/minds/docs/deploy/ops/a
 
 `materialize_paired_default_workspace_template_worktree`
 (`apps/minds/imbue/minds/desktop_client/default_workspace_template_worktree.py`) gives
-the snapshot bake and `just minds-test-electron` a throwaway
+the snapshot bake, the full-flow e2e and `just minds-test-electron*` a throwaway
 clone of the DEFAULT_WORKSPACE_TEMPLATE branch named like the current mngr branch
 (else `main`). The workspace it builds runs the mngr that clone pins. With the paired
 branch pinned to this branch's commit on mngr-internal, or to its public export, that

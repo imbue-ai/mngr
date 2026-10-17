@@ -1,0 +1,1 @@
+`VpsProvider._compute_extra_start_args` now receives the VM's MemTotal (in KiB), the value the create already reads to size the container's /tmp tmpfs. That lets a provider derive `docker run` args from the VM's RAM without a second read; the imbue_cloud slice provider derives its container memory cap from it.

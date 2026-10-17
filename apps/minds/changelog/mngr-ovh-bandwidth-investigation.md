@@ -1,0 +1,3 @@
+Updated the workspace stop/start doc's "Known constraint" note with the resolved root cause of the slow artifact uploads (issue #385): the in-DC IPv6 path from OVH dedicated servers to the Object Storage VIP intermittently blackholes TCP flows (OVH ticket #723301). Box prep now pins the S3 endpoints to IPv4 (see the minds_admin changelog), restoring the full 1 Gbps uplink, so a ~13 GB stop artifact uploads in about 2 minutes.
+
+Added a rollout page (`docs/deploy/history/rollouts/s3-ipv4-pin.md`) recording the root-cause evidence and the 2026-09-12 rollout of the pin to the staging (3 boxes) and production (23 boxes) fleets.

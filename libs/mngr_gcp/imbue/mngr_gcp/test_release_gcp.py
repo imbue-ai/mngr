@@ -3,8 +3,7 @@
 These tests provision and destroy real GCE instances. They cost real money --
 typically a few cents per run for a ~5-minute e2-small -- and are double-gated:
 
-- Google ADC must resolve from ``GOOGLE_APPLICATION_CREDENTIALS`` or the
-  ``gcloud auth application-default login`` file. See
+- Google ADC must be resolvable (``google.auth.default()``). See
   ``testing.gcp_credentials_available`` -- the same probe used by the
   session-end cleanup hook.
 - ``MNGR_GCP_RELEASE_TESTS=1`` must be set explicitly.
@@ -24,8 +23,7 @@ this package for the full picture):
    the VM self-deletes even if pytest itself is killed. The production
    GcpProvider refuses to create instances under pytest without this set.
 
-Run manually (no per-PR CI path runs these; the ``mngr Release Tests`` workflow runs them
-on manual dispatch with ``run_gcp=true``):
+Run manually (release tests do not run in CI):
 
     MNGR_GCP_RELEASE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=1800 \\
         uv run pytest --no-cov -n 0 -m release \\
@@ -46,6 +44,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 
+import google.auth
 import pytest
 
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
@@ -55,7 +54,6 @@ from imbue.mngr.providers.provider_release_testing import run_provider_release_t
 from imbue.mngr_gcp.client import GCP_PYTEST_LAUNCHED_LABEL
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
-from imbue.mngr_gcp.config import get_gcloud_adc_file_path
 from imbue.mngr_gcp.testing import GCP_DEFAULT_REGION
 from imbue.mngr_gcp.testing import GCP_DEFAULT_ZONE
 from imbue.mngr_gcp.testing import GCP_RELEASE_TESTS_OPT_IN
@@ -180,7 +178,7 @@ def _gcp_release_test_firewall_prepared(
     env["MNGR_HOST_DIR"] = str(tmp_path_factory.mktemp("gcp_prepare_mngr_home"))
     env["HOME"] = str(tmp_path_factory.mktemp("gcp_prepare_home"))
     if "GOOGLE_APPLICATION_CREDENTIALS" not in env:
-        env["CLOUDSDK_CONFIG"] = str(get_gcloud_adc_file_path().parent)
+        env["CLOUDSDK_CONFIG"] = env.get("CLOUDSDK_CONFIG") or str(Path.home() / ".config" / "gcloud")
     cmd = [
         "uv",
         "run",
@@ -355,7 +353,7 @@ def test_provider_release_trip4(
 @pytest.fixture()
 def gcp_release_client(gcp_release_test_project: str) -> GcpVpsClient:
     """Real GCP API client for release-test read-only calls."""
-    credentials, _project = GcpProviderConfig().get_credentials_and_resolved_project()
+    credentials, _project = google.auth.default()
     return GcpVpsClient(
         credentials=credentials,
         project_id=gcp_release_test_project,

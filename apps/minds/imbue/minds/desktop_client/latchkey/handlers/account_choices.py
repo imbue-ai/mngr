@@ -49,8 +49,5 @@ class PermissionAccountChoice(FrozenModel):
         description="Whether picking this account has to establish credentials before the grant can apply.",
     )
     is_account_name_needed: bool = Field(
-        description=(
-            "Whether picking this account also requires the user to name it when its credentials are typed "
-            "into the dialog rather than learned from a browser sign-in."
-        ),
+        description="Whether picking this account also requires the user to name it (manual-credentials services).",
     )

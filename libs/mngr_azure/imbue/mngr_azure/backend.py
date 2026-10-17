@@ -9,7 +9,6 @@ from typing import Any
 from typing import Final
 
 from azure.core.exceptions import AzureError
-from azure.identity import CredentialUnavailableError
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -18,7 +17,6 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderCredentialSourceMissingError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
@@ -161,8 +159,7 @@ def _azure_not_authorized_error(
         "  - subscription: set AZURE_SUBSCRIPTION_ID, set `subscription_id` in [providers.azure], "
         "or run `az account set --subscription <id>`;\n"
         "  - credentials: run `az login` (or set AZURE_CLIENT_ID / AZURE_TENANT_ID / "
-        "AZURE_CLIENT_SECRET for a service principal, or, on an Azure VM or Container App, set "
-        "`use_managed_identity = true` in [providers.azure] to use its managed identity);\n"
+        "AZURE_CLIENT_SECRET for a service principal);\n"
         "  - one-time setup: run `mngr azure prepare` if you have not yet.\n"
         f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
     )
@@ -425,7 +422,7 @@ class AzureProvider(OfflineCapableVpsProvider):
             spot=spot,
         )
 
-    # The shared ``OfflineCapableVpsProvider._list_provider_vps_entries``
+    # The shared ``OfflineCapableVpsProvider._list_provider_vps_hostnames``
     # (cached listing -> non-empty main_ip) covers Azure: a *deallocated* VM keeps
     # its Static IP, so it is still listed and then fails fast over the bounded SSH
     # connect timeout before being reconstructed offline -- see that base method.
@@ -622,25 +619,7 @@ class AzureProviderBackend(ProviderBackendInterface):
         # discovery call), matching how AWS/GCP resolve credentials at construction.
         try:
             credential = _resolve_and_validate_azure_credential(config)
-        except ValueError as e:
-            # The block's own credential settings contradict each other; no retry fixes that,
-            # but the state is still unknown rather than empty.
-            raise _azure_not_authorized_error(name, str(e), "fix the provider block's credential settings") from e
         except AzureError as e:
-            if isinstance(e, CredentialUnavailableError) and config.use_azure_cli_login:
-                # The block names this machine's az login and there is none (or no `az`):
-                # the one auth failure that resolves outside mngr, so discovery keeps
-                # re-checking it rather than ending the provider's poller.
-                raise ProviderCredentialSourceMissingError(
-                    name,
-                    reason=f"this machine has no Azure CLI login for the block's tenant ({e})",
-                    short_remediation=f"run `az login --tenant {config.tenant_id}` (with the `az` CLI installed)",
-                    short_reason="Azure CLI login is not set up on this machine",
-                    user_help_text=(
-                        f"Azure CLI login is not set up on this machine: {e}\nInstall the Azure CLI and run "
-                        f"`az login --tenant {config.tenant_id}`, or edit the connection to use another credential."
-                    ),
-                ) from e
             # A credential we couldn't obtain/validate leaves Azure's state unknown, so
             # this is unauthorized (surfaced), not empty (silently skipped).
             raise _azure_not_authorized_error(

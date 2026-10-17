@@ -1,18 +1,11 @@
 """Frozen domain objects for the desktop client."""
 
 from enum import auto
-from typing import Final
-from typing import Self
 
-from pydantic import ConfigDict
 from pydantic import Field
-from pydantic import RootModel
-from pydantic import model_validator
 
 from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.errors import WorkspaceMessageTypeError
-from imbue.minds.primitives import WorkspaceMessageType
 
 
 class RemoteWorkspaceKind(LowerCaseStrEnum):
@@ -58,9 +51,6 @@ class CloudRowKeyState(LowerCaseStrEnum):
     SYNCING = auto()
     # No key bundle exists anywhere, so no key will ever reach this device.
     UNAVAILABLE = auto()
-    # The host refused this device's credential (or its host key could not be
-    # verified): discovery reports it UNAUTHENTICATED, and no restart helps.
-    REJECTED = auto()
 
 
 class ShareGatewayState(LowerCaseStrEnum):
@@ -78,26 +68,6 @@ class ShareGatewayState(LowerCaseStrEnum):
     HALTED = auto()
 
 
-class SharedWorkspaceRecordState(LowerCaseStrEnum):
-    """What the account's workspace records say about a share's workspace (lowercase wire values)."""
-
-    # The workspace's record is active: the share is of a workspace that exists.
-    ACTIVE = auto()
-    # The workspace was destroyed; its share should have been retired with it.
-    DESTROYED = auto()
-    # No record names the share's workspace or host: nothing can retire it but its owner.
-    MISSING = auto()
-
-
-class ShareRemovalOutcome(LowerCaseStrEnum):
-    """How a share was removed from the shared-workspaces page (lowercase wire values)."""
-
-    # The workspace runs on this device, so it was unpublished: materials cleared, then the share deleted.
-    STOPPED_SHARING = auto()
-    # The share alone was deleted at the connector (the workspace is elsewhere, or gone).
-    REMOVED = auto()
-
-
 class RemoteWorkspaceTile(FrozenModel):
     """A workspace known only from a synced record (not in local discovery), for the landing list."""
 
@@ -112,9 +82,7 @@ class RemoteWorkspaceTile(FrozenModel):
     state: str = Field(
         default="",
         description=(
-            "Derived access state for cloud rows: '' (plain), 'locked' (the account's key is not on this device), "
-            "'missing_connection' (the row's connection is not held here), 'no_credentials' (its credentials are "
-            "unusable here), 'read_only' (a newer app wrote it), 'connecting', 'unreachable', or 'error'"
+            "Derived access state for cloud rows: '' (plain), 'signed_out', 'connecting', 'unreachable', or 'error'"
         ),
     )
     state_detail: str | None = Field(default=None, description="Failure detail for the 'error' state (chip tooltip)")
@@ -157,35 +125,3 @@ class MachineSizeSelection(FrozenModel):
     @property
     def is_empty(self) -> bool:
         return self.cpu_count is None and self.memory_gb is None and self.disk_gb is None
-
-
-# The key a workspace message's type travels under, beside its other fields.
-WORKSPACE_MESSAGE_TYPE_KEY: Final[str] = "type"
-
-
-class NotificationDestination(RootModel[dict[str, str]]):
-    """The workspace message a notification's click delivers into the workspace frame, as the frame receives it.
-
-    Flat on the wire: ``type`` (a message type an app's manifest registers, which the workspace shell routes to
-    that app's page) beside the message's other fields, every one a string. Replaces landing in a chat.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    @model_validator(mode="after")
-    def _check_message_type(self) -> Self:
-        if WORKSPACE_MESSAGE_TYPE_KEY not in self.root:
-            raise WorkspaceMessageTypeError(
-                f"a notification destination names its message type under {WORKSPACE_MESSAGE_TYPE_KEY!r}"
-            )
-        WorkspaceMessageType(self.root[WORKSPACE_MESSAGE_TYPE_KEY])
-        return self
-
-    @property
-    def message_type(self) -> WorkspaceMessageType:
-        return WorkspaceMessageType(self.root[WORKSPACE_MESSAGE_TYPE_KEY])
-
-    @property
-    def fields(self) -> dict[str, str]:
-        """The message's fields other than its type."""
-        return {key: value for key, value in self.root.items() if key != WORKSPACE_MESSAGE_TYPE_KEY}

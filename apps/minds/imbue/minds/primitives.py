@@ -10,14 +10,20 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.errors import ContentDomainError
-from imbue.minds.errors import WorkspaceMessageTypeError
 
-# The AWS regions offered when registering an AWS connection (a connection is
-# pinned to its region for life). Deliberately only the US datacenters by
-# default. ``mngr_aws`` resolves the newest Debian AMI in whichever region a
-# connection is configured for at create time, so this set can be widened
-# without any ``mngr_aws`` change. Lives in ``primitives`` (which never
-# imports ``mngr``).
+# Canonical set of AWS regions the Imbue Studio app offers for ``LaunchMode.AWS``.
+# This is the single source of truth used both to write one
+# ``[providers.aws-<region>]`` block per region into the mngr profile settings
+# at startup (``imbue.minds.bootstrap``) and to populate the create form's AWS
+# region dropdown (``imbue.minds.desktop_client.region_preference``). Imbue Studio
+# deliberately exposes only the US datacenters by default: every configured
+# region adds a provider that ``mngr list`` fans out to on each discovery
+# cycle, and the non-US regions roughly doubled listing latency for little
+# benefit to the current user base. ``mngr_aws`` resolves the newest Debian
+# AMI in whichever region a provider is configured for at create time, so this
+# set can be widened without any ``mngr_aws`` change. Lives in ``primitives``
+# (which never imports ``mngr``) so the early ``bootstrap`` module can read it
+# without violating its no-mngr-on-import contract.
 CONFIGURED_AWS_REGIONS: Final[tuple[str, ...]] = (
     "us-east-1",
     "us-east-2",
@@ -35,11 +41,10 @@ CONFIGURED_AWS_REGIONS: Final[tuple[str, ...]] = (
 DEFAULT_AWS_REGION: Final[str] = "us-east-1"
 
 # EC2 instance types the create form offers, (value, label) pairs. Floor is
-# 4 GB: the default-workspace-template build (uv sync + npm ci/build) OOMs or
-# thrashes on the 2 GB of mngr_aws's own t3.small default, so nothing smaller
-# is offered. t3.large (8 GB) is the known-good default
-# (``DEFAULT_AWS_INSTANCE_TYPE`` below). Values feed the
-# ``--aws-instance-type=`` build arg.
+# 4 GB: the forever-claude-template build (uv sync + npm ci/build) is
+# documented to OOM/thrash on 2 GB (see ``_AWS_DEFAULT_INSTANCE_TYPE`` in
+# ``bootstrap``), so nothing smaller is offered. t3.large (8 GB) is the
+# known-good default. Values feed the ``--aws-instance-type=`` build arg.
 CONFIGURED_AWS_INSTANCE_TYPES: Final[tuple[tuple[str, str], ...]] = (
     ("t3.medium", "t3.medium — 2 vCPU / 4 GB (cheapest; heavy builds may be slow)"),
     ("t3.large", "t3.large — 2 vCPU / 8 GB (recommended)"),
@@ -84,9 +89,9 @@ CONFIGURED_AZURE_VM_SIZES: Final[tuple[tuple[str, str], ...]] = (
 )
 DEFAULT_AZURE_VM_SIZE: Final[str] = "Standard_D2s_v6"
 
-# Curated placement choices for GCP / Azure connections (GCE is
+# Curated placement choices for bring-your-own-key GCP / Azure accounts (GCE is
 # zonal, so GCP offers zones; Azure offers regions). Small US-centric lists,
-# mirroring CONFIGURED_AWS_REGIONS; the connection's pinned default comes first
+# mirroring CONFIGURED_AWS_REGIONS; the account's pinned default comes first
 # in the create form via the option's data-default-region.
 CONFIGURED_GCP_ZONES: Final[tuple[str, ...]] = (
     "us-west1-a",
@@ -175,15 +180,15 @@ class LaunchMode(UpperCaseStrEnum):
     LIMA = auto()
     IMBUE_CLOUD = auto()
     AWS = auto()
-    # Runs the agent in a Modal sandbox on a Modal *connection* (a ``modal_<hex>``
-    # provider instance carrying the connection's own token). Modal sandboxes are
-    # ephemeral (~1 day max, or the shorter ``modal_sandbox_timeout_seconds`` a
-    # create names), which the create form says under the compute select.
+    # Runs the agent in a Modal sandbox using the local machine's own Modal token
+    # (``modal token new``) -- resolves the ``modal`` provider instance. Modal
+    # sandboxes are ephemeral (~1 day max), so it is surfaced as "Modal (1-day
+    # ephemeral)" and is testing-only.
     MODAL = auto()
-    # GCP / Azure (like AWS and Modal) are reachable ONLY through a connection
-    # (``gcp_<hex>`` / ``azure_<hex>`` provider blocks the settings materializer
-    # writes); the create form does not render them as ambient options, so no
-    # ambient region tables / provider blocks exist for them.
+    # GCP / Azure are reachable ONLY through a bring-your-own-key cloud account
+    # (``byok-gcp-<slug>`` / ``byok-azure-<slug>`` provider blocks written by the
+    # accounts modal); the create form does not render them as ambient options,
+    # so no ambient region tables / provider blocks exist for them.
     GCP = auto()
     AZURE = auto()
 
@@ -309,31 +314,5 @@ class ContentDomain(NonEmptyStr):
             raise ContentDomainError(
                 f"content_domain must be dot-joined lowercase DNS labels (letters, digits, interior hyphens; "
                 f"at most 63 characters each), got {value!r}"
-            )
-        return super().__new__(cls, value)
-
-
-# A workspace message type as an app's manifest registers it: a lowercase
-# prefix, ``:``, and a lowercase kebab-case name (default-workspace-template's
-# ``app_manifest.primitives.MessageType`` applies the same shape).
-_WORKSPACE_MESSAGE_TYPE_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9]*:[a-z0-9]+(?:-[a-z0-9]+)*$")
-MAX_WORKSPACE_MESSAGE_TYPE_LENGTH: Final[int] = 64
-# The prefix of the workspace shell's own app-contract messages, which no app registers.
-WORKSPACE_SHELL_MESSAGE_PREFIX: Final[str] = "shell:"
-
-
-class WorkspaceMessageType(NonEmptyStr):
-    """The type of a message posted into a workspace's frame (``minds:show-routine``): lowercase ``prefix:kebab-name``."""
-
-    def __new__(cls, value: str) -> Self:
-        if _WORKSPACE_MESSAGE_TYPE_RE.fullmatch(value) is None or len(value) > MAX_WORKSPACE_MESSAGE_TYPE_LENGTH:
-            raise WorkspaceMessageTypeError(
-                f"a workspace message type is a lowercase prefix, ':', and a lowercase kebab-case name, "
-                f"at most {MAX_WORKSPACE_MESSAGE_TYPE_LENGTH} characters, got {value!r}"
-            )
-        if value.startswith(WORKSPACE_SHELL_MESSAGE_PREFIX):
-            raise WorkspaceMessageTypeError(
-                f"a workspace message type may not use the workspace shell's own prefix "
-                f"{WORKSPACE_SHELL_MESSAGE_PREFIX!r}, got {value!r}"
             )
         return super().__new__(cls, value)

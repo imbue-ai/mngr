@@ -33,24 +33,18 @@ server inside it.
 """
 
 import signal
-import ssl
 import threading
 from collections.abc import Iterator
-from collections.abc import Sequence
 from contextlib import contextmanager
-from pathlib import Path
 from types import FrameType
 from typing import Final
 
-import httpx2
-from cheroot import wsgi
+import httpx
 from flask import Flask
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.desktop_client.api_socket import create_local_socket_server
-from imbue.minds.desktop_client.api_socket import restrict_socket_file
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.region_preference import start_geo_detection
 from imbue.minds.desktop_client.state import DesktopClientState
@@ -62,26 +56,6 @@ from imbue.minds.utils.sentry.core import flush_sentry_on_shutdown
 # (mirrors the old FastAPI lifespan's httpx client timeout).
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
-
-def _share_probe_ssl_context() -> ssl.SSLContext:
-    """TLS for the share-URL readiness probe: the chain is verified against the system roots, the hostname is not.
-
-    Workspaces built before service labels became strict hostname labels
-    still serve their shell at ``system_interface-<rand>.<domain>``, and
-    Python's ssl refuses to match any certificate against a label containing
-    an underscore, so a hostname check would report those shares as never
-    ready on links every browser accepts. The probe sends nothing and reads
-    only the response status, so a trusted certificate for the wrong name
-    can at most fake "ready"; the user's browser still fully verifies the
-    real link.
-    """
-    # CLEANUP: drop this context (httpx2's default verifies the hostname) once no supported workspace
-    # predates the default-workspace-template release that mints hyphenated service labels.
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    return context
-
-
 # Worker-thread pool size for the cheroot server. This is a HARD cap, not a
 # floor: cheroot's ThreadPool.grow() runs exactly once at startup with this
 # value and nothing in plain cheroot ever grows the pool afterwards (``max``
@@ -91,17 +65,6 @@ def _share_probe_ssl_context() -> ssl.SSLContext:
 # exceed windows x (1 WebSocket + a few keep-alive HTTP connections) plus the
 # transient operation-log streams.
 _SERVER_THREAD_POOL_SIZE: Final[int] = 50
-
-# The same-machine socket serves agents' scripted calls, not browser windows: a
-# handful of concurrent requests, each short-lived.
-_LOCAL_SOCKET_THREAD_POOL_SIZE: Final[int] = 8
-_LOCAL_SOCKET_STOP_TIMEOUT_SECONDS: Final[float] = 5.0
-
-# How long the teardown waits for the latchkey forward to exit after everything
-# else is down. The Electron shell SIGKILLs the backend 5s after its SIGTERM,
-# so this must stay well inside that; a forward still winding down past it is
-# finished off by its own ``--parent-pid`` watch and the next start's restart.
-_LATCHKEY_FORWARD_STOP_JOIN_TIMEOUT_SECONDS: Final[float] = 2.0
 
 
 def _wake_sse_handlers(state: DesktopClientState) -> None:
@@ -127,9 +90,16 @@ def desktop_client_runtime(state: DesktopClientState, is_externally_managed_clie
     which case the runtime neither creates nor closes it.
     """
     if not is_externally_managed_client:
-        state.http_client = httpx2.Client(
-            follow_redirects=False, timeout=_PROXY_TIMEOUT_SECONDS, verify=_share_probe_ssl_context()
-        )
+        # TLS verification is deliberately OFF: this client's only consumer is
+        # the share-URL readiness probe, and Python's ssl refuses to match a
+        # wildcard certificate against a hostname label containing an
+        # underscore (e.g. ``system_interface--...``), which browsers accept.
+        # A verifying probe therefore reports "certificate verify failed"
+        # forever on share links that work fine in every browser. The probe
+        # reads only the redirect status/location (the Access-app "live"
+        # signal) and transfers nothing sensitive; the user's browser still
+        # fully verifies the real link.
+        state.http_client = httpx.Client(follow_redirects=False, timeout=_PROXY_TIMEOUT_SECONDS, verify=False)
     # Kick off the one-shot IP-geolocation lookup in the background so the create
     # form can default each provider's region to the user's nearest datacenter.
     if state.root_concurrency_group is not None:
@@ -172,17 +142,6 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
     # threads exit their for-line loops.
     if state.envelope_stream_consumer is not None:
         state.envelope_stream_consumer.terminate()
-    # Stop the latchkey forward supervisor (and with it the gateway, its
-    # observe child, and every reverse tunnel): nothing this process started
-    # outlives it. Its stop waits out the forward's own teardown, which can run
-    # longer than the shell's SIGKILL grace, so it runs alongside the rest of
-    # this sequence and is only joined at the end.
-    forward_stop_thread: threading.Thread | None = None
-    if state.latchkey_forward_supervisor is not None:
-        forward_stop_thread = threading.Thread(
-            target=state.latchkey_forward_supervisor.stop, name="minds-latchkey-forward-stop", daemon=True
-        )
-        forward_stop_thread.start()
     # Sets the consumer's stop event and closes the in-flight follow-stream so
     # its reader thread unblocks from its iter_lines read.
     if state.permission_requests_consumer is not None:
@@ -208,6 +167,8 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
         update_service.detector.stop()
         update_service.stop_run_polling()
         update_service.apply_window.stop()
+    if state.update_scheduler is not None:
+        state.update_scheduler.stop()
     # Terminate the idle pre-warmed mngr process so it doesn't wait out the
     # full shutdown timeout blocked reading its socket for the next request.
     get_default_mngr_caller().stop()
@@ -231,44 +192,20 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
             # Strands reported failures or timed out during shutdown; log but
             # don't propagate so other cleanup can run.
             logger.warning("Root concurrency group exit reported errors: {}", exc)
-    if forward_stop_thread is not None:
-        forward_stop_thread.join(timeout=_LATCHKEY_FORWARD_STOP_JOIN_TIMEOUT_SECONDS)
-        if forward_stop_thread.is_alive():
-            logger.warning(
-                "mngr latchkey forward is still winding down after {}s; its --parent-pid watch finishes the job",
-                _LATCHKEY_FORWARD_STOP_JOIN_TIMEOUT_SECONDS,
-            )
     # Last: flush Sentry and any pending S3 attachment uploads so errors captured
     # during the session (including any logged above during teardown) are sent
     # before the process exits. No-op when Sentry was never initialized.
     flush_sentry_on_shutdown()
 
 
-def _stop_servers(servers: Sequence[wsgi.Server]) -> None:
-    for candidate in servers:
-        candidate.stop()
-
-
-def serve_desktop_client(
-    app: Flask,
-    state: DesktopClientState,
-    host: str,
-    port: int,
-    # The same-machine API socket to serve ``app`` on as well; None serves TCP only.
-    api_socket_path: Path | None = None,
-) -> None:
-    """Serve ``app`` on ``host:port`` (and on ``api_socket_path``) until SIGINT/SIGTERM, then return.
+def serve_desktop_client(app: Flask, state: DesktopClientState, host: str, port: int) -> None:
+    """Serve ``app`` on ``host:port`` until SIGINT/SIGTERM, then return.
 
     Installs SIGINT/SIGTERM handlers that flip ``shutdown_event`` and wake the
     SSE handlers before stopping the threaded WSGI server. Must be called from
     the main thread (signal handlers can only be installed there). The teardown
     sequence runs in :func:`desktop_client_runtime`'s ``finally`` after this
     returns.
-
-    The socket listener is bound only after the TCP server is listening, so a
-    caller whose connection to the socket succeeds finds the app ready. The
-    caller has already cleared the path (``api_socket.prepare_socket_path``); the
-    socket file is removed again here once serving stops.
     """
     # cheroot speaks HTTP/1.1 with keep-alive and streams responses without a
     # Content-Length chunk-by-chunk (our SSE generators), matching the wire
@@ -277,22 +214,9 @@ def serve_desktop_client(
     # WebSocket-aware subclass additionally lets simple_websocket serve
     # /ui/ws sessions on cheroot's sockets (see ws_gateway.py).
     server = create_websocket_aware_wsgi_server((host, port), app, numthreads=_SERVER_THREAD_POOL_SIZE)
-    local_socket_server = (
-        create_local_socket_server(api_socket_path, app, numthreads=_LOCAL_SOCKET_THREAD_POOL_SIZE)
-        if api_socket_path is not None
-        else None
-    )
-    servers: tuple[wsgi.Server, ...] = tuple(
-        candidate for candidate in (server, local_socket_server) if candidate is not None
-    )
 
     def _handle_exit(signal_number: int, _frame: FrameType | None) -> None:
         logger.info("Received signal {}; beginning graceful shutdown", signal_number)
-        # Before anything else: the `mngr forward` child shares this process's
-        # group, so a group-wide signal can stop it before the teardown below
-        # marks its exit intentional, and its exit report should say so.
-        if state.envelope_stream_consumer is not None:
-            state.envelope_stream_consumer.note_backend_shutdown_began(signal.Signals(signal_number).name)
         # Flip the flag and wake the SSE loops BEFORE stopping the server so
         # their generators return cleanly instead of being cut off mid-stream.
         state.shutdown_event.set()
@@ -303,35 +227,20 @@ def serve_desktop_client(
         state.ui_channel_broadcaster.shutdown()
         # ``stop()`` blocks until the serve loop winds down and must run on a
         # different thread than the one calling ``serve()``.
-        threading.Thread(target=_stop_servers, args=(servers,), name="minds-server-shutdown", daemon=True).start()
+        threading.Thread(target=server.stop, name="minds-server-shutdown", daemon=True).start()
 
     previous_handler_by_signal = {
         signal_number: signal.signal(signal_number, _handle_exit) for signal_number in (signal.SIGINT, signal.SIGTERM)
     }
     server.prepare()
-    local_socket_thread: threading.Thread | None = None
     try:
-        # Inside the try so a socket that fails to bind still releases the TCP
-        # listener bound above and restores the signal handlers.
-        if local_socket_server is not None and api_socket_path is not None:
-            local_socket_server.prepare()
-            restrict_socket_file(api_socket_path)
-            local_socket_thread = threading.Thread(
-                target=local_socket_server.serve, name="minds-local-socket-server", daemon=True
-            )
-            local_socket_thread.start()
-            logger.info("Serving the same-machine API on {}", api_socket_path)
         server.serve()
     finally:
-        # Always close the listening sockets and tear down the worker pools, even
+        # Always close the listening socket and tear down the worker pool, even
         # if ``serve()`` exits by some path other than the signal-driven
         # ``stop()`` (e.g. cheroot re-raising an internal worker interrupt).
         # ``stop()`` is idempotent (it returns early once ``ready`` is False),
         # so this is a no-op on the normal signal-driven shutdown.
-        _stop_servers(servers)
-        if local_socket_thread is not None:
-            local_socket_thread.join(timeout=_LOCAL_SOCKET_STOP_TIMEOUT_SECONDS)
-        if api_socket_path is not None:
-            api_socket_path.unlink(missing_ok=True)
+        server.stop()
         for signal_number, previous_handler in previous_handler_by_signal.items():
             signal.signal(signal_number, previous_handler)

@@ -431,12 +431,6 @@ body:has(#notice-band) .workspace-surface {
   -webkit-app-region: no-drag;
 }
 
-/* The image lightbox paints over the titlebar the same way a modal does, so
-   its backdrop subtracts the drag region for the same reason. */
-.image-lightbox-overlay {
-  -webkit-app-region: no-drag;
-}
-
 .accent-spine::before {
   content: "";
   position: absolute;
@@ -565,8 +559,7 @@ body:has(#notice-band) .workspace-surface {
  * max-width + whitespace/pointer-events keep it a compact, non-interactive
  * label. The max-width is generous enough that short button labels (e.g.
  * "Open in new window") stay on one line; ``text-center`` centers the lines
- * when a longer label does wrap, and ``wrap-anywhere`` lets a label with no
- * spaces in it (a file path) break at the max-width instead of running past it.
+ * when a longer label does wrap.
  *
  * The opacity/transform transition is the enter/leave motion the SPA
  * controller (views/shell/tooltips.ts) drives by toggling the from/to states;
@@ -575,7 +568,7 @@ body:has(#notice-band) .workspace-surface {
  * prefers-reduced-motion collapses it to none, making those toggles instant.
  */
 .minds-tooltip {
-  @apply bg-surface-inverse text-inverse-primary type-helper shadow-overlay pointer-events-none inline-flex max-w-[400px] items-center gap-1.5 rounded-md px-2 py-1 text-center whitespace-normal wrap-anywhere;
+  @apply bg-surface-inverse text-inverse-primary type-helper shadow-overlay pointer-events-none inline-flex max-w-[400px] items-center gap-1.5 rounded-md px-2 py-1 text-center whitespace-normal;
   transition:
     opacity 80ms ease,
     transform 80ms ease;
@@ -746,24 +739,6 @@ body:has(#notice-band) .workspace-surface {
     -8px 0 0 0 var(--c-fill-subtle),
     8px 0 0 0 var(--c-fill-subtle);
   border-radius: 8px;
-}
-
-/*
- * A workspace's Updates tab status block, arrived at from another surface: one
- * ring in the status's tone (--flash), so the eye lands on what sent it here.
- */
-@keyframes update-status-arrive {
-  0%,
-  25% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--flash) 45%, transparent); }
-  100% { box-shadow: 0 0 0 3px transparent; }
-}
-.update-status-arrive {
-  animation: update-status-arrive 1.4s ease-out;
-}
-@media (prefers-reduced-motion: reduce) {
-  .update-status-arrive {
-    animation: none;
-  }
 }
 
 /*

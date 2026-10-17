@@ -210,9 +210,8 @@ class ClaudeCodePlugin(FrozenModel):
     )
 
 
-# The Claude Code plugins mngr knows how to install. Code-guardian lives in
-# its own GitHub repo; the two skills plugins share the imbue-skills
-# marketplace, which is exported from this monorepo's skills_plugin directories.
+# The Claude Code plugins mngr knows how to install. Each lives in its own
+# GitHub repo, published as a Claude Code plugin marketplace.
 _CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
     ClaudeCodePlugin(
         name="imbue-code-guardian",
@@ -223,14 +222,8 @@ _CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
     ClaudeCodePlugin(
         name="imbue-mngr-skills",
         description="Skills that teach Claude how to use mngr, e.g. to coordinate with other agents",
-        marketplace_repo="imbue-ai/imbue-skills",
-        install_ref="imbue-mngr-skills@imbue-skills",
-    ),
-    ClaudeCodePlugin(
-        name="imbue-studio-skills",
-        description="Skills that teach Claude how to drive Imbue Studio and its API",
-        marketplace_repo="imbue-ai/imbue-skills",
-        install_ref="imbue-studio-skills@imbue-skills",
+        marketplace_repo="imbue-ai/mngr-claude-skills",
+        install_ref="imbue-mngr-skills@imbue-mngr",
     ),
 )
 
@@ -726,10 +719,9 @@ CommandHelpMetadata(
     key="extras.claude-plugin",
     one_line_description="Install Claude Code plugins (code review and/or agent skills)",
     synopsis="mngr extras claude-plugin [-y]",
-    description="""Install mngr's Claude Code plugins (imbue-code-guardian,
-imbue-mngr-skills, and imbue-studio-skills). With an interactive terminal you
-pick which to install; -y auto-installs any that are missing. Requires Claude
-Code.""",
+    description="""Install mngr's Claude Code plugins (imbue-code-guardian and
+imbue-mngr-skills). With an interactive terminal you pick which to install;
+-y auto-installs any that are missing. Requires Claude Code.""",
     examples=(
         ("Choose which plugins to install", "mngr extras claude-plugin"),
         ("Auto-install all Claude Code plugins", "mngr extras claude-plugin -y"),

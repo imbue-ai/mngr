@@ -19,6 +19,7 @@ from tenacity import wait_exponential
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -29,6 +30,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
@@ -422,6 +424,7 @@ class SliceVpsDockerProvider(VpsProvider):
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         snapshot: SnapshotName | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> Host:
         """Provision a slice VM and bake the shared vps_docker container onto it.
 
@@ -429,6 +432,12 @@ class SliceVpsDockerProvider(VpsProvider):
         and uploading an SSH key, carves a slice VM on the box (no slice client
         supports cloud ordering) and reaches it via box-forwarded ports.
         """
+        if published_ports:
+            raise PublishedPortUnsupportedError(
+                self.name,
+                str(published_ports[0]),
+                "this provider does not publish ports yet",
+            )
         host_id = (
             HostId(self.slice_config.slice_host_id)
             if self.slice_config.slice_host_id is not None
@@ -516,7 +525,7 @@ class SliceVpsDockerProvider(VpsProvider):
             )
             wait_for_sshd(hostname=box, port=vm_ssh_port, timeout_seconds=self.config.ssh_connect_timeout)
 
-            with self._make_outer_for_vps_ip(box, host_id) as outer:
+            with self._make_outer_for_vps_ip(box) as outer:
                 # The guest's sshd answers while its one-time first boot is
                 # still running; wait it out before any outer provisioning
                 # (which would otherwise race cloud-init's apt for the dpkg
@@ -787,10 +796,7 @@ class SliceVpsDockerProvider(VpsProvider):
         return Path(self.slice_config.pool_private_key_path)
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
-        # Slices are reached with the tier's SSH CA certificate regardless of host,
-        # so the host id selects nothing here.
-        del host_id
+    def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
         port = self._current_outer_port if self._current_outer_port is not None else 22
         pyinfra_host = create_pyinfra_host(
             hostname=vps_ip,

@@ -19,9 +19,6 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 
 MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
 DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds"
-# The inert ``ci-snapshot`` tier (apps/minds/imbue/minds/config/envs/ci-snapshot/) the e2e harnesses
-# run under when no env is activated, and the root the minds-snapshot image's workspace was baked under.
-CI_SNAPSHOT_MINDS_ROOT_NAME: Final[str] = "minds-ci-snapshot"
 _MINDS_PREFIX: Final[str] = "minds"
 # Legal env-name suffixes after ``minds-``.
 # Mirrors the rules in :mod:`imbue.minds.envs.primitives` and the reserved tier names the operator env CLI accepts:
@@ -398,7 +395,7 @@ def apply_bootstrap() -> None:
 
     When ``MINDS_ROOT_NAME`` is set to an invalid value, raises ``BootstrapError`` (via :func:`resolve_minds_root_name`); ``main.py`` turns that into a clean one-line error.
 
-    The companion settings reconciliation (which must also precede any mngr import) lives in :mod:`imbue.minds.mngr_settings.reconcile`.
+    The companion settings reconciliation (which must also precede any mngr import) lives in :func:`imbue.minds.mngr_settings.reconcile.ensure_mngr_settings_before_mngr_import`.
     """
     raw_value = os.environ.get(MINDS_ROOT_NAME_ENV_VAR)
     if raw_value is None:

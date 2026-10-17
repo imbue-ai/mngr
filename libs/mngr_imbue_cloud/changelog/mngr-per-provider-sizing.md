@@ -1,0 +1,1 @@
+The gen-2 layout's note on the `.host-meminfo` file now says that a workspace under runc writes the same file for itself from its own cgroup (default-workspace-template's `publish_cgroup_meminfo` program), so the VM-side publisher is no longer its only writer.

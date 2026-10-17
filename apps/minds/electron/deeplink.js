@@ -96,49 +96,10 @@ function extractDeeplinkUrlFromArgv(argv) {
   return null;
 }
 
-/**
- * The url schemes an XML Info.plist declares (every ``CFBundleURLSchemes``
- * entry). Anything that is not an XML plist declares none.
- */
-function declaredUrlSchemes(infoPlistXml) {
-  const schemes = new Set();
-  if (typeof infoPlistXml !== 'string') return schemes;
-  const arrays = infoPlistXml.matchAll(/<key>CFBundleURLSchemes<\/key>\s*<array>([\s\S]*?)<\/array>/g);
-  for (const [, body] of arrays) {
-    for (const [, scheme] of body.matchAll(/<string>\s*([^<]*?)\s*<\/string>/g)) schemes.add(scheme);
-  }
-  return schemes;
-}
-
-/**
- * The ``app.setAsDefaultProtocolClient`` calls this run should make, as
- * argument lists.
- *
- * A packaged app registers itself. A dev run (``process.defaultApp``) is the
- * bare electron binary, which has to be told which app to load, and only
- * Windows takes the executable and arguments that say so. macOS ignores them
- * and registers the running bundle: the stock Electron.app declares no schemes
- * and would open every link in an empty window, taking them from an installed
- * app, so a dev run there registers only the schemes its own bundle declares
- * (``bundleSchemes``, from a bundle patched for deeplink testing). Linux
- * honors a protocol only for a packaged app, so a dev run there registers
- * nothing.
- */
-function protocolClientRegistrations({ isDefaultApp, platform, execPath, appPath, bundleSchemes }) {
-  if (!isDefaultApp) return DEEPLINK_SCHEMES.map((scheme) => [scheme]);
-  if (platform === 'darwin') {
-    return DEEPLINK_SCHEMES.filter((scheme) => bundleSchemes.has(scheme)).map((scheme) => [scheme]);
-  }
-  if (platform === 'win32' && appPath) return DEEPLINK_SCHEMES.map((scheme) => [scheme, execPath, [appPath]]);
-  return [];
-}
-
 module.exports = {
   parseDeeplink,
   deeplinkTargetPath,
   extractDeeplinkUrlFromArgv,
-  protocolClientRegistrations,
-  declaredUrlSchemes,
   DEEPLINK_SCHEMES,
   MAX_DEEPLINK_LENGTH,
 };

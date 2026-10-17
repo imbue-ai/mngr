@@ -1,0 +1,3 @@
+`imbue_common.event_envelope` now exports `parse_iso_timestamp`, which reads an `IsoTimestamp` (nanosecond-precision ISO 8601 with a `Z` suffix, offsets also accepted) into an aware UTC `datetime`, or `None` when it will not parse. The minds hub's restic and git readers use it instead of each carrying their own sub-microsecond trimming.
+
+The `if/elif without else` ratchet no longer flags an `else:` block whose body happens to begin with an `if`. Such a block is a real else clause, not a continuation of the chain -- an `elif` parses into an `orelse` holding the `if` and nothing else -- so the ratchet now only follows the chain when the `orelse` holds a single `If`.

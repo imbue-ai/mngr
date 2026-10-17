@@ -22,7 +22,6 @@ from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
-from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -41,8 +40,6 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
-from imbue.mngr.utils.testing import make_command_agent
-from imbue.mngr.utils.testing import put_fake_cli_reporting_version_on_path
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_opencode.opencode_config import AGENT_OPENCODE_DB_RELPATH
 from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
@@ -183,29 +180,6 @@ def test_provision_runs_install_check_when_enabled(local_provider: LocalProvider
         mngr_ctx=agent.mngr_ctx,
     )
     assert any(command.startswith("command -v opencode") for command in stub_host.executed_commands)
-
-
-def test_provision_verifies_pinned_version_through_the_binary_with_check_installation_off(
-    local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The launch wrapper does not resolve where provisioning runs, so a probe through
-    # ``command`` would fail and skip the check; the pin must be verified via the binary.
-    put_fake_cli_reporting_version_on_path(tmp_path, monkeypatch, "opencode", "1.0.0")
-    agent = _make_opencode_agent(
-        local_provider,
-        tmp_path,
-        OpenCodeAgentConfig(
-            check_installation=False,
-            version="1.18.19",
-            command=CommandString("python3 ./launch_wrapper.py opencode"),
-        ),
-    )
-    with pytest.raises(AgentInstallationError, match="opencode version mismatch"):
-        agent.provision(
-            host=agent.host,
-            options=CreateAgentOptions(agent_type=AgentTypeName("opencode")),
-            mngr_ctx=agent.mngr_ctx,
-        )
 
 
 def test_is_common_transcript_enabled_reflects_config() -> None:
@@ -894,14 +868,6 @@ def test_agent_field_generators_exposes_opencode_waiting_reason() -> None:
     assert callable(generators["waiting_reason"])
 
 
-def test_waiting_reason_is_absent_for_an_agent_of_another_type(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    agent, host = make_command_agent(local_provider, tmp_path / "command-work")
-
-    assert _waiting_reason(agent, host) is None
-
-
 def test_waiting_reason_returns_permissions_when_active_and_blocked(opencode_agent: OpenCodeAgent) -> None:
     """A real open prompt: the active marker (set when the session went busy) is
     present *and* permissions_waiting is present, so the agent is blocked on an
@@ -937,7 +903,7 @@ def test_waiting_reason_returns_none_when_active(opencode_agent: OpenCodeAgent) 
     assert _waiting_reason(opencode_agent, opencode_agent.host) is None
 
 
-# output_style / append_system_prompt -> AGENTS.md
+# --- output_style / append_system_prompt -> AGENTS.md ---------------------------
 
 
 def _write_output_style(work_dir: Path, name: str, body: str) -> None:

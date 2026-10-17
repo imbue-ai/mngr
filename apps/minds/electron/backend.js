@@ -3,33 +3,32 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
-const { BUNDLED_UV_ENV } = require('./bundled-uv-env');
 const { getBuildMetadata } = require('./build-metadata');
 const { createRotatingLogStream } = require('./log-rotation');
 const { formatTimestampedLine, createLineSplitter } = require('./log-timestamp');
 const { PRODUCT_DISPLAY_NAME } = require('./product-name');
-const { backgroundLaunchEnv } = require('./background-launch');
-const { bundledGitEnv } = require('./git-env');
-const { dropStdioWriteErrors } = require('./stdio-write-errors');
-const {
-  createStderrTail,
-  describeLaunch,
-  formatEarlyExitDetails,
-  formatSpawnFailureDetails,
-} = require('./backend-exit-diagnostics');
 
-// A failed write to the main process's own stdout/stderr -- EPIPE from a dev
-// launch piped through `head`, ENOSPC from stderr redirected to a file on a
-// full disk -- arrives as an async 'error' event that would otherwise crash
-// the main process.
-dropStdioWriteErrors({ stdout: process.stdout, stderr: process.stderr });
+// Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
+// launches go through a pipe (e.g. `just minds-start | head -30`), the
+// reader can exit while the backend is still alive, leaving subsequent
+// writes from the dev-mode forwarder (below) to raise EPIPE asynchronously
+// as an 'error' event. Without this handler the unhandled error surfaces
+// as a JS alert in the Electron window. We log nothing because the
+// downstream consumer is gone -- the log file is the durable record.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (err) => {
+    if (!err || err.code !== 'EPIPE') {
+      throw err;
+    }
+  });
+}
 
 let backendProcess = null;
 
 /**
  * Env var that points the latchkey gateway at the bundled curl router.
  * Set on the Imbue Studio backend process so it flows -- via ``dict(os.environ)``
- * inheritance -- to that process's own latchkey calls, the
+ * inheritance -- to that process's own latchkey calls, the detached
  * ``mngr latchkey forward`` supervisor, and the gateway subprocess it
  * spawns.
  *
@@ -57,35 +56,6 @@ function latchkeyCurlEnv() {
     return {};
   }
   return { LATCHKEY_CURL: router };
-}
-
-/**
- * On macOS, the CA bundle both of latchkey's curls verify against: the system
- * ``/usr/bin/curl`` that unmarked requests run, whose own default is the static
- * ``/etc/ssl/cert.pem``, and the bundled curl-impersonate, which with a file
- * named trusts only that file instead of Apple's SecTrust (so keychain-only
- * CAs stop working for marked requests). Apple's curl still falls back to
- * SecTrust when a chain fails the file, so it rejects a chain only when
- * SecTrust does too. Linux needs nothing: both curls read the host store.
- */
-function latchkeyCaBundleEnv(caBundlePath) {
-  return process.platform === 'darwin' ? { CURL_CA_BUNDLE: caBundlePath } : {};
-}
-
-/**
- * On macOS, the CA bundle the backend's Python HTTP clients verify against.
- * httpx2 verifies against the OS trust store unless ``SSL_CERT_FILE`` names a
- * file, and macOS's store trusts the compromised emSign chain until Apple's
- * 2026-10-19 update is installed, so the backend stays on the bundle the app
- * pins, like git and latchkey's curls. The variable reaches the backend's
- * whole process tree (uv, mngr and other Python children, and curl, which
- * reads it as its --cacert) and replaces any value the app was launched with.
- * Not set on Linux: curl would read it there too, moving latchkey's curls off
- * the host store they deliberately use.
- * CLEANUP: drop once every macOS version the app supports ships Apple's fix.
- */
-function pythonCaBundleEnv(caBundlePath) {
-  return process.platform === 'darwin' ? { SSL_CERT_FILE: caBundlePath } : {};
 }
 
 /**
@@ -124,12 +94,6 @@ const SECRET_STDOUT_EVENT_FIELDS = {
 };
 
 const REDACTED_PLACEHOLDER = '***';
-
-// How long a backend that died before its login URL may take to finish
-// draining its pipes before startup is failed with whatever stderr has arrived.
-// A dead process's pipes drain in milliseconds, so this only bites when a
-// grandchild inherited them.
-const STDIO_DRAIN_GRACE_MS = 500;
 
 /**
  * Return a copy of a backend stdout line safe to persist to minds.log.
@@ -295,9 +259,6 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         // Port is still occupied -- pick a different one.
         port = await findAvailablePort();
       }
-      // Resolved before the log stream opens: it throws when the venv has no
-      // certifi bundle, and nothing would end the stream on that path.
-      const caBundlePath = paths.getCertifiBundlePath();
       const logDir = paths.getLogDir();
 
       // Ensure log directory exists
@@ -329,10 +290,23 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const bundledClientConfig = paths.getBundledClientConfigPath();
       const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
-      // Dev and packaged modes both run the bundled git, so both need its
-      // environment (see git-env.js for why each variable is required).
+      // The bundled dugite-native git is built with an empty prefix, so
+      // prepending its bin dir to PATH is not enough: git --exec-path would
+      // resolve to //libexec/git-core and `git clone https://...` would fail
+      // with "'remote-https' is not a git command". Export the payload's real
+      // locations so helper dispatch, templates, and TLS work in both dev and
+      // packaged modes. See specs/minds-managed-git/concise.md.
       const gitRoot = paths.getGitRootDir();
-      const gitEnv = bundledGitEnv({ gitRoot, caBundlePath });
+      const gitEnv = {
+        GIT_EXEC_PATH: path.join(gitRoot, 'libexec', 'git-core'),
+        GIT_TEMPLATE_DIR: path.join(gitRoot, 'share', 'git-core', 'templates'),
+        GIT_CONFIG_SYSTEM: path.join(gitRoot, 'etc', 'gitconfig'),
+      };
+      // The Linux payload does not use the system trust store; macOS links the
+      // system libcurl and must NOT get this override.
+      if (process.platform === 'linux') {
+        gitEnv.GIT_SSL_CAINFO = path.join(gitRoot, 'ssl', 'cacert.pem');
+      }
       logBundledGitVersion(gitRoot);
 
       // desync is not staged on win32, and naming a missing file here would make the
@@ -390,8 +364,6 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
           ...latchkeyCurlEnv(),
-          ...latchkeyCaBundleEnv(caBundlePath),
-          ...pythonCaBundleEnv(caBundlePath),
         };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
@@ -450,7 +422,6 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           ...process.env,
           ...gitEnv,
           PATH: `${bundledBinDirs.join(':')}:${augmentedSystemPath}`,
-          ...BUNDLED_UV_ENV,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',
@@ -471,30 +442,9 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
           ...latchkeyCurlEnv(),
-          ...latchkeyCaBundleEnv(caBundlePath),
-          ...pythonCaBundleEnv(caBundlePath),
-          // How an agent brings this install up in the background when it
-          // finds it stopped; the backend records it in the tier's app.json.
-          ...backgroundLaunchEnv({
-            platform: process.platform,
-            isPackaged: true,
-            execPath: process.execPath,
-            appImagePath: process.env.APPIMAGE,
-          }),
         };
       }
 
-      // Logged (and so a Sentry breadcrumb) before the spawn, and repeated in a
-      // startup error: which launch path and config source a failing backend ran
-      // under.
-      const launch = describeLaunch({
-        isDev: paths.isDev(),
-        hasConfigFileArg: configFileArgs.length > 0,
-        hasInheritedClientConfigEnv: Boolean(process.env.MINDS_CLIENT_CONFIG_PATH),
-      });
-      console.log(`[backend] spawning backend (${launch})`);
-
-      const spawnedAt = Date.now();
       const child = spawn(uvBin, args, {
         env,
         cwd,
@@ -508,17 +458,6 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       // because every line logged below is stamped individually.
       const stdoutSplitter = createLineSplitter();
       const stderrSplitter = createLineSplitter();
-
-      // The backend's latest stderr lines and how many JSONL events it got out,
-      // for the error raised if it dies before the login URL. Fed only until
-      // startup settles, so a long-running backend pays nothing for them.
-      const stderrTail = createStderrTail();
-      let stdoutEventCount = 0;
-      // Set when the backend exits before the login URL; the rejection waits for
-      // its stderr to drain (see rejectEarlyExit).
-      let earlyExit = null;
-      let isEarlyExitReported = false;
-      const isCollectingStartupDiagnostics = () => !isResolved || (earlyExit !== null && !isEarlyExitReported);
 
       // Flush any buffered (newline-less) trailing stdout to the log so a final
       // fragment emitted right before exit is never dropped. Redacted like every
@@ -537,7 +476,6 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const remainder = stderrSplitter.flush();
         if (remainder !== null) {
           logStream.write(formatTimestampedLine(remainder));
-          if (isCollectingStartupDiagnostics()) stderrTail.push(remainder);
         }
       };
 
@@ -555,7 +493,6 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
-            if (isCollectingStartupDiagnostics()) stdoutEventCount += 1;
             if (event.event === 'login_url' && event.login_url) {
               if (!isResolved) {
                 isResolved = true;
@@ -580,10 +517,11 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       });
 
       // Stderr is human-readable logging -- capture to log file and console.
-      // The dev-mode forward to process.stderr does not throw when the write
-      // fails (a parent pipe gone, a full disk): the failure arrives as an
-      // 'error' event, dropped by dropStdioWriteErrors above, and the log file
-      // stays the durable record.
+      // The dev-mode forward to process.stderr can throw EPIPE if the parent
+      // (e.g. a `just` recipe whose stdout was piped through `head`) goes
+      // away while the backend is still emitting log lines. We swallow the
+      // error: the log file is the durable record, and a broken parent pipe
+      // should never bring down the Electron main process.
       child.stderr.on('data', (data) => {
         const text = data.toString();
         // Split into complete lines before logging so each one carries its own
@@ -592,12 +530,17 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         // still writes the raw text, keeping the interactive console untouched.
         for (const line of stderrSplitter.push(text)) {
           logStream.write(formatTimestampedLine(line));
-          if (isCollectingStartupDiagnostics()) stderrTail.push(line);
           // The loading document's log, so a cold launch does not look frozen.
           if (!isResolved && line.trim()) onLogLine(line.trim());
         }
         if (paths.isDev()) {
-          process.stderr.write(text);
+          try {
+            process.stderr.write(text);
+          } catch (err) {
+            if (err && err.code !== 'EPIPE') {
+              throw err;
+            }
+          }
         }
       });
 
@@ -620,41 +563,19 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         finalizeLog();
         if (!isResolved) {
           isResolved = true;
-          reject(new Error(formatSpawnFailureDetails({ errorMessage: err.message, launch })));
+          reject(new Error(`Failed to start backend: ${err.message}`));
         }
       });
 
-      // 'exit' can fire before the dead backend's last stderr has been read, and
-      // that last output (the traceback, uv's `error:` line) is the point of the
-      // tail. So the rejection waits for 'close', when both pipes have drained,
-      // but no longer than STDIO_DRAIN_GRACE_MS: a grandchild that inherited the
-      // pipes would hold 'close' off for as long as it lives.
-      let drainTimer = null;
-      const rejectEarlyExit = () => {
-        if (earlyExit === null || isEarlyExitReported) return;
-        isEarlyExitReported = true;
-        clearTimeout(drainTimer);
-        reject(new Error(formatEarlyExitDetails({
-          ...earlyExit,
-          stdoutEventCount,
-          launch,
-          stderrLines: stderrTail.lines(),
-        })));
-      };
+      child.on('close', finalizeLog);
 
-      child.on('close', () => {
-        finalizeLog();
-        rejectEarlyExit();
-      });
-
-      child.on('exit', (code, signal) => {
+      child.on('exit', (code) => {
         backendProcess = null;
         if (!isResolved) {
-          // Settled now, so a login URL still buffered in the pipe cannot
-          // resolve startup against a backend that is already gone.
           isResolved = true;
-          earlyExit = { code, signal, elapsedMs: Date.now() - spawnedAt };
-          drainTimer = setTimeout(rejectEarlyExit, STDIO_DRAIN_GRACE_MS);
+          reject(new Error(
+            `Backend exited with code ${code} before emitting login URL`
+          ));
         }
       });
     }).catch(reject);

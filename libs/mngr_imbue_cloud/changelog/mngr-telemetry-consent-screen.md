@@ -1,0 +1,1 @@
+Documentation: the account-plans section now describes the new "free" plan (1 remote workspace, no in-workspace analytics collection), the signup-time plan choice between free and explorer, and that accounts with no recorded choice default to free.

@@ -1,5 +1,4 @@
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -12,7 +11,6 @@ from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.latchkey.testing import build_permission_grant_handler
-from imbue.minds.desktop_client.minds_config import AutoUpdatePromptDecision
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
@@ -22,11 +20,8 @@ from imbue.minds.desktop_client.testing import RecordingNotificationDispatcher
 from imbue.minds.desktop_client.testing import WriteCountingMindsConfig
 from imbue.minds.desktop_client.ui_api_settings import compute_error_reporting_version
 from imbue.minds.desktop_client.ui_api_settings import compute_notification_prefs_version
-from imbue.minds.desktop_client.ui_api_settings import is_full_disk_access_needed
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
-from imbue.mngr_latchkey.core import ChromeImportOutcome
-from imbue.mngr_latchkey.core import LatchkeyErrorCode
 from imbue.mngr_latchkey.testing import FakeLatchkey
 
 
@@ -74,96 +69,6 @@ def test_update_window_write_round_trips_onto_the_overview(tmp_path: Path) -> No
     assert minds_config.get_update_window() == (23, 3)
     reread = json.loads(client.get("/ui/api/settings").data)
     assert (reread["update_window_start_hour"], reread["update_window_end_hour"]) == (23, 3)
-
-
-def test_auto_update_is_off_until_chosen_and_the_toggle_round_trips(tmp_path: Path) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config
-    )
-    overview = json.loads(client.get("/ui/api/settings").data)
-    assert (overview["is_auto_update_enabled"], overview["auto_update_prompt_decision"]) == (False, None)
-
-    turned_on = client.post("/ui/api/settings/auto-update", json={"is_enabled": True})
-    after_on = json.loads(client.get("/ui/api/settings").data)
-    turned_off = client.post("/ui/api/settings/auto-update", json={"is_enabled": False})
-
-    assert (turned_on.status_code, turned_off.status_code) == (200, 200)
-    assert after_on["is_auto_update_enabled"] is True
-    assert minds_config.get_auto_update_workspaces() is False
-    # The toggle is not the offer's answer: the offer can still be made.
-    assert minds_config.get_auto_update_prompt_decision() is None
-
-
-@pytest.mark.parametrize(
-    ("decision", "is_enabled_after"),
-    [(AutoUpdatePromptDecision.ACCEPTED, True), (AutoUpdatePromptDecision.DECLINED, False)],
-)
-def test_answering_the_auto_update_offer_is_remembered_and_accepting_turns_it_on(
-    tmp_path: Path, decision: AutoUpdatePromptDecision, is_enabled_after: bool
-) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config
-    )
-
-    response = client.post("/ui/api/settings/auto-update-prompt", json={"decision": str(decision)})
-
-    assert response.status_code == 200
-    relaunched = MindsConfig(data_dir=tmp_path / "config")
-    assert relaunched.get_auto_update_prompt_decision() is decision
-    assert relaunched.get_auto_update_workspaces() is is_enabled_after
-    assert json.loads(client.get("/ui/api/settings").data)["auto_update_prompt_decision"] == str(decision)
-
-
-def test_accepting_the_auto_update_offer_saves_the_window_picked_in_it(tmp_path: Path) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config
-    )
-
-    response = client.post(
-        "/ui/api/settings/auto-update-prompt",
-        json={"decision": "accepted", "window": {"start_hour": 23, "end_hour": 3}},
-    )
-
-    assert response.status_code == 200
-    relaunched = MindsConfig(data_dir=tmp_path / "config")
-    assert relaunched.get_update_window() == (23, 3)
-    assert relaunched.get_auto_update_workspaces() is True
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        pytest.param({"decision": "declined", "window": {"start_hour": 23, "end_hour": 3}}, id="declined-with-window"),
-        pytest.param({"decision": "accepted", "window": {"start_hour": 4, "end_hour": 4}}, id="empty-window"),
-    ],
-)
-def test_an_auto_update_answer_with_an_unusable_window_stores_nothing(tmp_path: Path, body: dict[str, object]) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config
-    )
-
-    response = client.post("/ui/api/settings/auto-update-prompt", json=body)
-
-    assert response.status_code == 400
-    assert minds_config.get_auto_update_prompt_decision() is None
-    assert minds_config.get_auto_update_workspaces() is False
-    assert minds_config.get_update_window() == DEFAULT_UPDATE_WINDOW
-
-
-def test_an_unknown_auto_update_answer_is_rejected_without_being_stored(tmp_path: Path) -> None:
-    minds_config = MindsConfig(data_dir=tmp_path / "config")
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=minds_config
-    )
-
-    response = client.post("/ui/api/settings/auto-update-prompt", json={"decision": "maybe"})
-
-    assert response.status_code == 400
-    assert minds_config.get_auto_update_prompt_decision() is None
 
 
 _FIREFOX = InstalledBrowser(
@@ -670,12 +575,7 @@ def test_browser_import_runs_latchkeys_import_once_and_counts_as_the_offer(tmp_p
     response = client.post("/ui/api/settings/browser-import")
 
     assert response.status_code == 200
-    assert json.loads(response.data) == {
-        "is_success": True,
-        "detail": "",
-        "error_code": None,
-        "is_full_disk_access_needed": False,
-    }
+    assert json.loads(response.data) == {"is_success": True, "detail": ""}
     assert latchkey.import_chrome_call_count == 1
     assert minds_config.get_is_browser_import_offered() is True
 
@@ -683,9 +583,7 @@ def test_browser_import_runs_latchkeys_import_once_and_counts_as_the_offer(tmp_p
 def test_a_failed_browser_import_answers_with_latchkeys_reason(tmp_path: Path) -> None:
     latchkey = FakeLatchkey(latchkey_directory=tmp_path)
     latchkey.configure(
-        import_chrome_result=ChromeImportOutcome(
-            is_success=False, detail="Google Chrome is not installed in any of the standard locations."
-        )
+        import_chrome_result=(False, "Google Chrome is not installed in any of the standard locations.")
     )
     client = _build_client_with_latchkey(tmp_path, latchkey, MindsConfig(data_dir=tmp_path / "config"))
 
@@ -695,35 +593,7 @@ def test_a_failed_browser_import_answers_with_latchkeys_reason(tmp_path: Path) -
     assert json.loads(response.data) == {
         "is_success": False,
         "detail": "Google Chrome is not installed in any of the standard locations.",
-        "error_code": None,
-        "is_full_disk_access_needed": False,
     }
-
-
-def test_a_browser_import_denied_by_macos_answers_with_the_code_the_client_acts_on(tmp_path: Path) -> None:
-    latchkey = FakeLatchkey(latchkey_directory=tmp_path)
-    latchkey.configure(
-        import_chrome_result=ChromeImportOutcome(
-            is_success=False,
-            detail="The Google Chrome profile at /Users/me/Chrome/Default could not be read: EPERM.",
-            error_code=LatchkeyErrorCode.CHROME_PROFILE_NOT_READABLE,
-        )
-    )
-    client = _build_client_with_latchkey(tmp_path, latchkey, MindsConfig(data_dir=tmp_path / "config"))
-
-    response = client.post("/ui/api/settings/browser-import")
-
-    assert response.status_code == 200
-    body = json.loads(response.data)
-    assert body["error_code"] == "CHROME_PROFILE_NOT_READABLE"
-    # The fix is macOS's Full Disk Access list only where the import ran on a Mac.
-    assert body["is_full_disk_access_needed"] is (sys.platform == "darwin")
-
-
-def test_full_disk_access_is_the_fix_only_for_an_unreadable_profile_on_a_mac() -> None:
-    assert is_full_disk_access_needed(LatchkeyErrorCode.CHROME_PROFILE_NOT_READABLE, "darwin") is True
-    assert is_full_disk_access_needed(LatchkeyErrorCode.CHROME_PROFILE_NOT_READABLE, "linux") is False
-    assert is_full_disk_access_needed(None, "darwin") is False
 
 
 def _preferences_client(tmp_path: Path, cli: FakeImbueCloudCli) -> FlaskClient:

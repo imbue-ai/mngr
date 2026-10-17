@@ -29,7 +29,6 @@ from enum import StrEnum
 from enum import auto
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
-from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import assert_never
@@ -37,7 +36,7 @@ from urllib.parse import SplitResult
 from urllib.parse import parse_qs
 from urllib.parse import urlsplit
 
-import httpx2
+import httpx
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -78,9 +77,6 @@ _WORKSPACE_FORWARD_TIMEOUT_SECONDS: Final[float] = 60.0
 CHAT_SERVICE_NAME: Final[str] = "chat"
 _MAX_DETAIL_CHARS: Final[int] = 300
 _PAGE_CONTENT_SECURITY_POLICY: Final[str] = "default-src 'none'; style-src 'unsafe-inline'"
-# A body the relay reads before answering, so its close is not a reset: a callback a provider sends as a form
-# POST is small; anything larger is left unread.
-_MAX_DRAINED_BODY_BYTES: Final[int] = 64 * 1024
 
 
 class InvalidSignInUrlError(MindError, ValueError):
@@ -338,10 +334,6 @@ class _RelayRequestHandler(BaseHTTPRequestHandler):
         return
 
     def _handle(self) -> None:
-        raw_length = self.headers.get("Content-Length", "")
-        length = int(raw_length) if raw_length.isdecimal() else 0
-        if 0 < length <= _MAX_DRAINED_BODY_BYTES:
-            self.rfile.read(length)
         page = self.relay.answer(self.command, self.path)
         body = render_relay_page(page)
         self.send_response(page.status)
@@ -567,9 +559,6 @@ class WorkspaceChatSignInForwarder(SignInCallbackForwarderInterface):
 
     mngr_forward_port: int = Field(frozen=True, description="Port the local mngr forward plugin listens on")
     preauth_cookie: str = Field(frozen=True, description="The plugin's preauth session cookie")
-    ca_cert_path: Path = Field(
-        frozen=True, description="The plugin's local CA certificate, which its TLS is verified against"
-    )
     workspace_id: AgentId = Field(frozen=True, description="The workspace whose chat app runs the flow")
     chat_service_label: str = Field(frozen=True, description="The chat app's origin label in that workspace")
     flow_id: str = Field(frozen=True, description="The chat app's sign-in flow the callback belongs to")
@@ -578,13 +567,11 @@ class WorkspaceChatSignInForwarder(SignInCallbackForwarderInterface):
         url = f"https://127.0.0.1:{self.mngr_forward_port}/api/accounts/flow/{self.flow_id}/callback"
         host = f"{self.chat_service_label}.{self.workspace_id}.localhost"
         with make_workspace_probe_client(
-            preauth_cookie=self.preauth_cookie,
-            probe_timeout_seconds=_WORKSPACE_FORWARD_TIMEOUT_SECONDS,
-            ca_cert_path=self.ca_cert_path,
+            preauth_cookie=self.preauth_cookie, probe_timeout_seconds=_WORKSPACE_FORWARD_TIMEOUT_SECONDS
         ) as client:
             try:
                 response = client.post(url, headers={"Host": host}, json={"path_and_query": path_and_query})
-            except httpx2.HTTPError as e:
+            except httpx.HTTPError as e:
                 raise SignInForwardError(f"the workspace could not be reached ({type(e).__name__})") from e
         if response.status_code == 409:
             raise SignInCallbackRefusedError(f"the workspace answered 409: {response.text[:_MAX_DETAIL_CHARS]}")

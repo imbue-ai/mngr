@@ -13,7 +13,6 @@ import json
 import os
 import re
 import shutil
-import ssl
 import tempfile
 import threading
 import time
@@ -24,14 +23,12 @@ from datetime import datetime
 from datetime import timezone
 from enum import auto
 from pathlib import Path
-from subprocess import TimeoutExpired
-from typing import Any
 from typing import Final
 from typing import assert_never
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
 
-import httpx2
+import httpx
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -45,8 +42,6 @@ from tenacity import stop_after_delay
 from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ConcurrencyGroupError
-from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
@@ -57,14 +52,6 @@ from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
-from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
-from imbue.minds.desktop_client.create_progress import OperationProgressSnapshot
-from imbue.minds.desktop_client.create_progress import OperationProgressTracker
-from imbue.minds.desktop_client.create_progress import TrackerEventSink
-from imbue.minds.desktop_client.create_progress import apply_bootstrap_event_lines
-from imbue.minds.desktop_client.create_progress_history import ProgressHistoryStore
-from imbue.minds.desktop_client.create_progress_history import create_scope
-from imbue.minds.desktop_client.create_progress_history import make_progress_history_store
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.data_types import WorkspaceProbeOutcome
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -100,7 +87,6 @@ from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_def
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
-from imbue.minds.errors import GitRefNotFoundError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import PendingCreateAttemptStoreError
 from imbue.minds.errors import WorkspaceNameInUseError
@@ -118,13 +104,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
-from imbue.mngr.utils.progress import ProgressEvent
-from imbue.mngr.utils.progress import ProgressStep
-from imbue.mngr.utils.progress import parse_progress_event
-from imbue.mngr.utils.thread_cleanup import start_mngr_thread
-from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
@@ -133,6 +113,13 @@ from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+
+# Inlined to avoid pulling the ``imbue-mngr-forward`` package into Imbue Studio's
+# import graph -- Imbue Studio spawns the plugin as a subprocess and otherwise has
+# no Python-level dependency on it. The constant is a stable wire-format
+# contract; if the plugin ever renames its session cookie, both sides update
+# together.
+_MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
 # Path the workspace-readiness / health probes hit through the plugin. We probe
 # ``/`` and treat any 200 as "ready" -- deliberately *not* coupled to any
@@ -147,66 +134,86 @@ _WORKSPACE_PROBE_PATH: Final[str] = "/"
 _MNGR_FORWARD_SCHEME: Final[str] = "https"
 
 
-def make_workspace_probe_client(
-    preauth_cookie: str, probe_timeout_seconds: float, ca_cert_path: Path
-) -> httpx2.Client:
-    """Construct a reusable httpx2.Client preconfigured for workspace probes.
+def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
+    """Construct a reusable httpx.Client preconfigured for workspace probes.
 
     Callers that probe in a tight poll loop should construct one of these and
-    pass it to ``probe_workspace_through_plugin`` on each iteration.
+    pass it to ``probe_workspace_through_plugin`` on each iteration, instead
+    of letting the helper construct a one-shot client per call.
 
-    The proxy serves TLS (HTTP/2) under a leaf signed by its persistent local
-    CA, whose certificate is at ``ca_cert_path`` (see
-    ``imbue.mngr_forward.tls.local_ca_cert_path``). The client trusts that CA
-    and nothing else, so the preauth cookie, which the plugin accepts as the
-    owner, only ever reaches the proxy that minted the CA. The probes dial
-    ``127.0.0.1``, which the leaf names among its SANs, so hostname
-    verification stays on; the workspace vhost rides the ``Host`` header.
+    The proxy serves TLS (HTTP/2), so cert verification is disabled: these
+    probes dial ``127.0.0.1`` with a ``Host: agent-<hex>.localhost`` header, so
+    hostname verification could never pass, and the cert is a self-signed
+    ephemeral one the probe is not positioned to validate anyway. Loopback-only.
     """
-    return httpx2.Client(
+    return httpx.Client(
         timeout=probe_timeout_seconds,
         follow_redirects=False,
-        cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
-        verify=ssl.create_default_context(cafile=str(ca_cert_path)),
+        cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
+        verify=False,
     )
 
 
-def probe_workspace_through_plugin(
-    probe_client: httpx2.Client, mngr_forward_port: int, workspace_id: str
-) -> WorkspaceProbeOutcome:
-    """Issue a single probe through the plugin to the workspace's inner web server.
+def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) -> WorkspaceProbeOutcome:
+    """Issue a single GET through ``probe_client`` and report what came back.
 
-    Probes ``/`` (see ``_WORKSPACE_PROBE_PATH``) with a client from
-    ``make_workspace_probe_client``. Reports the HTTP status observed (a 200
-    means some web server is up and answering on the inner port), or the
-    transport failure that produced no response (connect error, mid-stream
-    EOF, read timeout). This is the one definition of "ready" Imbue Studio
-    has, which is what makes every readiness check in it agree on the answer.
+    ``probe_url`` targets loopback directly; ``host_header`` carries the
+    ``agent-<hex>.localhost`` vhost the plugin routes on. Sending the subdomain
+    as an explicit ``Host`` header rather than in the URL keeps the probe from
+    depending on ``*.localhost`` name resolution, which is not available on a
+    bare Linux host (only loopback ``localhost`` itself reliably resolves).
 
-    ``workspace_id`` is the workspace's id (``agent-<hex>``, its services
-    agent's id) -- the canonical vhost the plugin routes workspace origins on.
-    Legacy ``host-<hex>`` vhosts must not be probed: the plugin only ever
-    redirects or refuses those, so they can never answer 200. The vhost rides
-    an explicit ``Host`` header while the URL targets loopback directly, which
-    keeps the probe from depending on ``*.localhost`` name resolution (not
-    available on a bare Linux host, where only ``localhost`` itself reliably
-    resolves).
-
-    A failure at the transport layer is reported by name rather than
-    swallowed: it is the only record of *why* a probe never saw a 200, and a
-    probe that fails while the renderer is connected through the same plugin
-    cannot be diagnosed without it.
+    A failure at the transport layer (connect error, mid-stream EOF, read
+    timeout) is reported by name rather than swallowed: it is the only record
+    of *why* a probe never saw a 200, and a probe that fails while the
+    renderer is connected through the same plugin cannot be diagnosed without
+    it. Module-private helper used by ``probe_workspace_through_plugin``;
+    hoisted out to satisfy the Imbue Studio project's no-inner-functions ratchet.
     """
-    probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
     try:
-        response = probe_client.get(probe_url, headers={"Host": f"{workspace_id}.localhost"})
-    except (httpx2.ConnectError, httpx2.RemoteProtocolError, httpx2.ReadError, httpx2.TimeoutException) as e:
-        # httpx2 leaves ReadError and every TimeoutException without a message,
+        response = probe_client.get(probe_url, headers={"Host": host_header})
+    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
+        # httpx leaves ReadError and every TimeoutException without a message,
         # so the class name is all there is to report for those.
         message = str(e)
         failure = f"{type(e).__name__}: {message}" if message else type(e).__name__
         return WorkspaceProbeOutcome(status_code=None, failure=failure)
     return WorkspaceProbeOutcome(status_code=response.status_code)
+
+
+def probe_workspace_through_plugin(
+    mngr_forward_port: int,
+    preauth_cookie: str,
+    workspace_id: str,
+    probe_timeout_seconds: float,
+    client: httpx.Client | None = None,
+) -> WorkspaceProbeOutcome:
+    """Issue a single probe through the plugin to the workspace's inner web server.
+
+    Probes ``/`` (see ``_WORKSPACE_PROBE_PATH``). Reports the HTTP status
+    observed (a 200 means some web server is up and answering on the inner
+    port), or the transport failure that produced no response (connect error,
+    mid-stream EOF, read timeout). This is the one definition of "ready" Imbue Studio
+    has, which is what makes every readiness check in it agree on the answer.
+
+    ``workspace_id`` is the workspace's id (``agent-<hex>``, its services
+    agent's id) -- the canonical vhost the plugin routes workspace origins on.
+    Legacy ``host-<hex>`` vhosts must not be probed: the plugin only ever
+    redirects or refuses those, so they can never answer 200.
+
+    Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
+    to reuse the connection pool across a tight poll loop. When omitted, a
+    one-shot client is constructed for this single probe -- fine for
+    one-off / sporadic callers but wasteful in a loop.
+    """
+    probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
+    host_header = f"{workspace_id}.localhost"
+    if client is not None:
+        return _probe_once(client, probe_url, host_header)
+    with make_workspace_probe_client(
+        preauth_cookie=preauth_cookie, probe_timeout_seconds=probe_timeout_seconds
+    ) as one_shot:
+        return _probe_once(one_shot, probe_url, host_header)
 
 
 def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
@@ -374,12 +381,6 @@ class CreateAttemptErrorKind(UpperCaseStrEnum):
     # git-credentials guidance for this kind.
     GIT_AUTH_REQUIRED = auto()
 
-    # The clone reached the remote, but it has no branch or tag with the name
-    # the create asked for (e.g. ``main`` on a repo whose default branch is
-    # ``master``). Not an access problem, so the creating page points at the
-    # Branch field instead of at credentials.
-    GIT_REF_NOT_FOUND = auto()
-
 
 class AgentCreateAttemptInfo(FrozenModel):
     """Snapshot of agent create attempt state, returned to callers for status polling.
@@ -431,9 +432,6 @@ class AgentCreateAttemptInfo(FrozenModel):
             "Machine-readable classification of the failure, set alongside ``error`` when the "
             "failure is recognized (see ``classify_create_attempt_error``); ``None`` otherwise"
         ),
-    )
-    progress: OperationProgressSnapshot | None = Field(
-        default=None, description="The attempt's progress as of this snapshot, once the attempt is tracked"
     )
 
 
@@ -549,18 +547,15 @@ def _is_remote_git_source(repo_source: str) -> bool:
 def classify_create_attempt_error(repo_source: str, error: Exception) -> CreateAttemptErrorKind | None:
     """Classify a create attempt failure into a ``CreateAttemptErrorKind``, when recognizable.
 
-    Recognizes cases for a failed clone (``GitCloneError``). Deliberately no
-    matching of git's error text (git has no structured error output, and
-    substring matching is brittle across git versions and locales). The one
-    case told apart is a missing ref, which :func:`clone_git_repo` establishes
-    from ``git ls-remote``'s exit code and raises as ``GitRefNotFoundError``,
-    whatever the source. Any other failed clone of a REMOTE source is
-    overwhelmingly an access problem (private/nonexistent, no usable
-    credentials on this machine), and the creating page's guidance covers it
-    while the raw git error stays visible right above for anything rarer.
+    Recognizes two cases, both for a failed clone (``GitCloneError``) of a
+    REMOTE git source -- the likely cause is the same (private/nonexistent,
+    no usable credentials on this machine). Deliberately no matching of git's
+    error text (git has no structured error output, and substring matching is
+    brittle across git versions and locales): a remote clone that failed at
+    all is overwhelmingly an access problem, and the creating page's guidance
+    covers it while the raw git error stays visible right above for anything
+    rarer.
 
-    - ``GitRefNotFoundError`` -> ``GIT_REF_NOT_FOUND`` (the remote answered
-      but has no such branch or tag; guidance points at the Branch field).
     - ``https://github.com/...`` -> ``GITHUB_AUTH_REQUIRED`` (guidance names
       the GitHub CLI, which only fits github.com https).
     - any other remote git source (a URL on another host, or an ssh remote)
@@ -570,8 +565,6 @@ def classify_create_attempt_error(repo_source: str, error: Exception) -> CreateA
     """
     if not isinstance(error, GitCloneError):
         return None
-    if isinstance(error, GitRefNotFoundError):
-        return CreateAttemptErrorKind.GIT_REF_NOT_FOUND
     if _is_github_https_url(repo_source):
         return CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED
     if _is_remote_git_source(repo_source):
@@ -688,10 +681,8 @@ def clone_git_repo(
     bare repo, and git rejects pushes from a shallow source with "shallow
     update not allowed" (the pushed tip's parent is missing from the pack).
 
-    Raises GitCloneError if any step fails. When the explicit-ref fetch fails
-    for a ``branch`` that is not a full commit SHA, a ``git ls-remote`` probe
-    (on the failure path only) tells a missing ref apart from every other
-    failure, and raises the ``GitRefNotFoundError`` subclass for it.
+    Raises GitCloneError if any step fails (including when ``branch`` does
+    not exist on the remote and is not a reachable commit).
     """
     logger.debug("Cloning {} to {}", _redact_url_credentials(str(git_url)), clone_dir)
     clone_dir.mkdir(parents=True, exist_ok=False)
@@ -739,43 +730,7 @@ def clone_git_repo(
                 break
     if failed is not None:
         step_name, output = failed
-        message = "git {} failed:\n{}".format(step_name, redact_url_credentials_in_text(output))
-        if (
-            step_name == "fetch"
-            and branch is not None
-            and not _FULL_SHA_RE.match(str(branch))
-            and _is_ref_missing_on_remote(clone_dir, branch, git_env, parent_cg)
-        ):
-            raise GitRefNotFoundError(message)
-        raise GitCloneError(message)
-
-
-def _is_ref_missing_on_remote(
-    clone_dir: Path, branch: GitBranch, git_env: dict[str, str], parent_cg: ConcurrencyGroup | None
-) -> bool:
-    """Whether the ``origin`` remote of ``clone_dir`` answers but has no ref named ``branch``.
-
-    ``git ls-remote --exit-code`` exits 2 exactly when it talked to the
-    remote and no ref matched; an unreachable, private or nonexistent remote
-    exits 128 instead. Full commit SHAs must not be probed: ``ls-remote``
-    lists refs, never commits, so a valid SHA would read as missing.
-
-    ``ls-remote`` matches a pattern against the trailing path components of
-    each ref, so a bare ``main`` would also match ``refs/heads/release/main``.
-    A short name is therefore probed as the branch and tag that ``git fetch``
-    would resolve it to; an already-qualified ``refs/...`` name as itself.
-    """
-    ref = str(branch)
-    patterns = [ref] if ref.startswith("refs/") else [f"refs/heads/{ref}", f"refs/tags/{ref}"]
-    cg = _make_child_cg("git-ls-remote", parent_cg)
-    with cg:
-        result = cg.run_process_to_completion(
-            command=["git", "ls-remote", "--exit-code", "origin", *patterns],
-            cwd=clone_dir,
-            is_checked_after=False,
-            env=git_env,
-        )
-    return result.returncode == 2
+        raise GitCloneError("git {} failed:\n{}".format(step_name, redact_url_credentials_in_text(output)))
 
 
 _FULL_SHA_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")
@@ -964,101 +919,6 @@ _DEAD_CREATE_ATTEMPT_HOST_LIST_TIMEOUT_SECONDS: Final[float] = 120.0
 _DEAD_CREATE_ATTEMPT_HOST_DESTROY_TIMEOUT_SECONDS: Final[float] = 300.0
 
 
-# The desktop's own steps around the ``mngr create`` call, as the progress bar plans them.
-_CLONE_STEP: Final[ProgressStepId] = ProgressStepId("clone_repo")
-_CHECKOUT_STEP: Final[ProgressStepId] = ProgressStepId("checkout_branch")
-_MNGR_CREATE_STEP: Final[ProgressStepId] = ProgressStepId("mngr_create")
-_READY_STEP: Final[ProgressStepId] = ProgressStepId("wait_for_ready")
-_DESKTOP_STEP_LABELS: Final[dict[ProgressStepId, str]] = {
-    _CLONE_STEP: "Getting things ready",
-    _CHECKOUT_STEP: "Building your workspace",
-    _MNGR_CREATE_STEP: "Installing your tools",
-    _READY_STEP: "Almost there",
-}
-# How long the bootstrap tail gets to exit on SIGTERM before it is killed, and the
-# bound on stopping it once the readiness wait ends; the stop must outlast the
-# grace, or terminating the tail raises while the kill is still pending.
-_BOOTSTRAP_TAIL_SIGTERM_GRACE_SECONDS: Final[float] = 1.0
-_BOOTSTRAP_TAIL_STOP_SECONDS: Final[float] = 5.0
-
-
-@pure
-def _bootstrap_follow_command(
-    mngr_binary: str, agent_id: AgentId, host_id: HostId | None, provider_instance_name: str
-) -> tuple[str, ...]:
-    """The ``mngr event`` command that follows the booting workspace's bootstrap events.
-
-    The agent is named by its ids and its provider when the create reported
-    them: that address needs no discovery, which on a machine with many
-    containers and providers takes longer than a Docker boot. The whole file
-    is followed; the reader drops the events of earlier boots by their
-    timestamps (see :func:`apply_bootstrap_event_lines`).
-    """
-    target = f"{agent_id}@{host_id}.{provider_instance_name}" if host_id and provider_instance_name else str(agent_id)
-    return (mngr_binary, "event", target, "bootstrap", "--follow")
-
-
-class _BootstrapProgressTail(MutableModel):
-    """Follows a booting workspace's bootstrap events into the ready step's progress for as long as the wait runs.
-
-    One ``mngr event`` follow subprocess (see :func:`_bootstrap_follow_command`)
-    for the whole wait, the way the desktop's other agent-side streams are
-    consumed, so a remote workspace is read over one connection rather than one
-    per poll. The template's bootstrap writes one event per step it runs; a
-    template that writes none leaves the ready step a single timed step. Nothing
-    here can fail the create: a tail that cannot start, or that ends before the
-    wait does, is logged, and the wait goes on without it.
-    """
-
-    model_config = {"arbitrary_types_allowed": True}
-
-    command: tuple[str, ...] = Field(frozen=True, description="The follow command, the mngr binary first")
-    concurrency_group: ConcurrencyGroup = Field(frozen=True, description="The group the subprocess runs under")
-    tracker: OperationProgressTracker = Field(frozen=True, description="Where the bootstrap steps land")
-    parent_step_id: str = Field(frozen=True, description="The step the bootstrap steps nest under")
-    not_before: datetime | None = Field(
-        default=None, frozen=True, description="Events stamped before this (less clock skew) belong to an earlier boot"
-    )
-    process: RunningProcess | None = Field(default=None, description="The follow subprocess while it runs")
-
-    def start(self) -> None:
-        try:
-            self.process = self.concurrency_group.run_process_in_background(
-                list(self.command),
-                is_checked_by_group=False,
-                on_output=self._on_output,
-                shutdown_timeout_sec=_BOOTSTRAP_TAIL_SIGTERM_GRACE_SECONDS,
-            )
-        except ConcurrencyGroupError as exc:
-            logger.warning("Could not follow the bootstrap events ({}); the boot wait shows no finer steps", exc)
-
-    def stop(self) -> None:
-        process = self.process
-        if process is None:
-            return
-        self.process = None
-        if process.is_finished():
-            # The follow is meant to outlive the wait; one that ended on its own
-            # failed (the agent could not be resolved, mngr refused), and would
-            # otherwise leave no trace beyond a bar with no bootstrap steps.
-            logger.warning(
-                "The bootstrap event tail exited early with code {}; the boot wait showed no finer steps. stderr: {}",
-                process.returncode,
-                process.read_stderr().strip(),
-            )
-            return
-        try:
-            process.terminate(force_kill_seconds=_BOOTSTRAP_TAIL_STOP_SECONDS)
-        except (TimeoutExpired, OSError, ConcurrencyGroupError) as exc:
-            logger.warning("Could not stop the bootstrap event tail ({}); it is left to the process group", exc)
-
-    def _on_output(self, line: str, is_stdout: bool) -> None:
-        if is_stdout:
-            apply_bootstrap_event_lines(self.tracker, [line], self.parent_step_id, self.not_before)
-        else:
-            logger.debug("bootstrap event tail: {}", line.rstrip())
-
-
 class _PrebakedImageProgressReporter(MutableModel):
     """Reports how much of the pre-baked image has downloaded into the create log.
 
@@ -1089,7 +949,8 @@ class _PrebakedImageFallbackReporter(MutableModel):
 
 def provider_instance_name_for_launch(
     launch_mode: LaunchMode,
-    imbue_cloud_user_id: str | None = None,
+    imbue_cloud_account: str | None = None,
+    region: str | None = None,
     cloud_account: str | None = None,
 ) -> str:
     """Return the mngr provider-instance name a ``mngr create`` on ``launch_mode`` targets.
@@ -1097,18 +958,18 @@ def provider_instance_name_for_launch(
     This is the scope within which host names must be unique: the create address
     is ``system-services@<host_name>.<provider-instance>`` and the provider's
     ``create_host`` raises ``HostNameConflictError`` only against existing hosts on
-    this same instance. Imbue Cloud is per-account (``imbue_cloud_<user id>``);
-    the other remote clouds are reachable only through a connection instance.
+    this same instance. Imbue Cloud is per-account (``imbue_cloud_<slug>``) and AWS
+    is per-region (``aws-<region>``); the other backends are single instances.
 
     Kept as the single source of truth for that mapping so the create command and
     the create form's availability check (which must agree on what "taken" means)
-    never drift apart. ``imbue_cloud_user_id`` is the account's full SuperTokens
-    user id (the account instance minds materializes for it).
+    never drift apart. ``imbue_cloud_account`` is the account *email* (slugified to
+    match the provider block Imbue Studio registers); ``region`` is required for AWS.
 
-    ``cloud_account`` is a connection's provider instance name
-    (``<backend>_<hex>``, written by the settings materializer). When set it IS
-    the provider instance name, so it short-circuits the per-mode mapping (the
-    block already pins backend + credentials + placement).
+    ``cloud_account`` is a bring-your-own-key account's provider block name
+    (``byok-<backend>-<slug>``, written by ``bootstrap.set_cloud_account_provider``).
+    When set it IS the provider instance name, so it short-circuits the
+    per-mode mapping (the block already pins backend + credentials + region).
     """
     if cloud_account:
         return cloud_account
@@ -1119,13 +980,22 @@ def provider_instance_name_for_launch(
             return "lima"
         case LaunchMode.VULTR:
             return "vultr"
+        case LaunchMode.AWS:
+            # BYOK-only (like GCP/AZURE): the ambient per-region ``aws-<region>``
+            # path was removed from Imbue Studio; the ``cloud_account`` short-circuit
+            # above is the only way to resolve an AWS provider instance.
+            raise MngrCommandError("AWS mode requires a cloud account")
         case LaunchMode.IMBUE_CLOUD:
-            if not imbue_cloud_user_id:
-                raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_user_id")
-            return imbue_cloud_provider_name_for_user(imbue_cloud_user_id)
-        case LaunchMode.AWS | LaunchMode.GCP | LaunchMode.AZURE | LaunchMode.MODAL:
-            # The remote clouds have no ambient provider instances in minds --
-            # they are reachable only through a connection instance, which the
+            if not imbue_cloud_account:
+                raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
+            return f"imbue_cloud_{_slugify_account(imbue_cloud_account)}"
+        case LaunchMode.MODAL:
+            # Single instance: the ``modal`` provider talks to Modal with the local
+            # token (``modal token new``).
+            return "modal"
+        case LaunchMode.GCP | LaunchMode.AZURE:
+            # GCP / Azure have no ambient provider instances in Imbue Studio -- they are
+            # reachable only through a bring-your-own-key account block, which the
             # ``cloud_account`` short-circuit above already returned.
             raise MngrCommandError(f"{launch_mode.value} mode requires a cloud account")
         case _ as unreachable:
@@ -1152,7 +1022,7 @@ def _build_mngr_create_command(
     launch_mode: LaunchMode,
     host_name: HostName,
     display_name: str = "",
-    imbue_cloud_user_id: str | None = None,
+    imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
     imbue_cloud_fast_mode: str | None = None,
@@ -1160,7 +1030,6 @@ def _build_mngr_create_command(
     cloud_account: str | None = None,
     instance_type: str | None = None,
     machine_size: MachineSizeSelection | None = None,
-    modal_sandbox_timeout_seconds: int | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
     docker_runtime: DockerRuntime = DockerRuntime.RUNC,
@@ -1184,11 +1053,10 @@ def _build_mngr_create_command(
         docker template's default, so it adds no extra template.
     LIMA mode: --template main --template lima (runs in Lima VM)
     VULTR mode: --template main --template vultr (runs in Docker on a Vultr VPS)
-    AWS mode: --new-host on the ``aws_<hex>`` connection instance named by
-        ``cloud_account``, --template main --template aws (runs in a runsc
-        Docker container on an EC2 instance; the connection block is written
-        by the settings materializer and pins the region)
-    IMBUE_CLOUD mode: --new-host on the imbue_cloud_<user id> provider (the
+    AWS mode: --new-host on the aws-<region> provider, --template main
+        --template aws (runs in a runsc Docker container on an EC2 instance;
+        the region-specific provider block is written by Imbue Studio at startup)
+    IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
         plugin's create_host adopts the pool's pre-baked agent under
         the lease's baked name); ``imbue_cloud_*`` arguments encode the
         lease attributes (--build-arg).
@@ -1202,10 +1070,12 @@ def _build_mngr_create_command(
     intent and pass neither ``--reuse`` nor ``--update`` because
     mngr's ``--reuse`` matches on agent name without host scope.
 
-    No Claude credentials ride the create: the workspace signs in to a provider
-    account from its own UI (an Imbue key comes from ``ai_keys``), so nothing here
-    or in DEFAULT_WORKSPACE_TEMPLATE forwards ``ANTHROPIC_API_KEY`` or
-    ``ANTHROPIC_BASE_URL``.
+    Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
+    the default workspace template's own ``pass_(host_)env`` declarations, not by inline
+    flags here -- ``run_mngr_create`` populates them in the subprocess env
+    when needed and the template-declared forwards pick them up. Keeping the
+    forwarding declaration in DEFAULT_WORKSPACE_TEMPLATE means the same template works for ``mngr
+    create`` invocations from outside Imbue Studio too.
 
     ``create_attempt_id_label`` is the opaque pending-create-attempt id stamped on the
     new HOST as a ``create-attempt-id`` host label (LIMA and DOCKER only -- the
@@ -1228,7 +1098,7 @@ def _build_mngr_create_command(
     # uniqueness check runs in) is derived once here so the create address and the
     # form's availability check share a single mapping.
     provider_instance = provider_instance_name_for_launch(
-        launch_mode, imbue_cloud_user_id=imbue_cloud_user_id, cloud_account=cloud_account
+        launch_mode, imbue_cloud_account=imbue_cloud_account, region=region, cloud_account=cloud_account
     )
     address = f"{_DEFAULT_AGENT_NAME}@{host_name}.{provider_instance}"
 
@@ -1387,8 +1257,8 @@ def _build_mngr_create_command(
         case LaunchMode.AWS:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "aws"])
             mngr_command.extend(_remote_host_env_flags())
-            # The create address already selects the ``aws_<hex>`` connection
-            # instance (whose block is pinned to this region). Pass the matching
+            # The create address already selects the ``aws-<region>`` provider
+            # (whose block is pinned to this region). Pass the matching
             # ``--aws-region`` build arg too so intent is explicit and the
             # provider's cross-region guard confirms the placement.
             if region:
@@ -1400,7 +1270,7 @@ def _build_mngr_create_command(
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
-            # + ``pass_host_env`` for ``MNGR_PREFIX``, and the runtime-only
+            # + ``pass_host_env`` for the LiteLLM creds, and the runtime-only
             # lease-attribute ``-b`` flags stay inline because they vary per
             # invocation.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "imbue_cloud"])
@@ -1426,24 +1296,18 @@ def _build_mngr_create_command(
             # Same remote shape as vultr/aws: the ``main`` + ``modal`` templates
             # run the provisioning chain over SSH on the freshly-created sandbox.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "modal"])
+            # Optional overlay template stacked on ``modal`` (like ``docker_runsc`` on
+            # ``docker``): any create host may name one via ``MINDS_MODAL_EXTRA_TEMPLATE``.
+            # The eval harness sets it to ``modal_eval`` (shorter sandbox timeout); a
+            # normal create leaves it unset and gets plain ``modal``.
+            extra_modal_template = os.environ.get("MINDS_MODAL_EXTRA_TEMPLATE")
+            if extra_modal_template:
+                mngr_command.extend(["--template", extra_modal_template])
             mngr_command.extend(_remote_host_env_flags())
-            # Modal places each sandbox per create (one of its broad region
-            # names); the connection block carries no placement, and an empty
-            # region passes no flag, so Modal places the sandbox anywhere.
-            if region:
-                mngr_command.extend(_build_arg_flag(f"--region={region}"))
             mngr_command.extend(size_args)
-            # The connection block carries the day-long default; a create that
-            # wants a shorter sandbox says so as the provider's own build arg
-            # (``--timeout`` defaults to the block's ``default_sandbox_timeout``).
-            # A ``-S providers.<instance>...`` override cannot do this: the
-            # setting is parsed on its own, where a connection instance name
-            # is not a known backend.
-            if modal_sandbox_timeout_seconds is not None:
-                mngr_command.extend(_build_arg_flag(f"--timeout={modal_sandbox_timeout_seconds}"))
         case LaunchMode.GCP:
-            # Same shape as aws; the address already selects the ``gcp_<hex>``
-            # connection instance. GCE is zonal, so the placement flag is ``--gcp-zone``
+            # Same shape as aws; the address already selects the ``byok-gcp-<slug>``
+            # account block. GCE is zonal, so the placement flag is ``--gcp-zone``
             # (the form's "region" value for GCP is a zone).
             mngr_command.extend(["--new-host", "--template", "main", "--template", "gcp"])
             mngr_command.extend(_remote_host_env_flags())
@@ -1452,8 +1316,8 @@ def _build_mngr_create_command(
             if instance_type:
                 mngr_command.extend(_build_arg_flag(f"--gcp-machine-type={instance_type}"))
         case LaunchMode.AZURE:
-            # Same shape as aws; the address already selects the ``azure_<hex>``
-            # connection instance.
+            # Same shape as aws; the address already selects the
+            # ``byok-azure-<slug>`` account block.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "azure"])
             mngr_command.extend(_remote_host_env_flags())
             if region:
@@ -1464,6 +1328,20 @@ def _build_mngr_create_command(
             assert_never(unreachable)
 
     return mngr_command
+
+
+def _slugify_account(account: str) -> str:
+    """Mirror ``slugify_account`` from the plugin so the provider instance name lines up.
+
+    Inlined (rather than imported from ``imbue.mngr_imbue_cloud``) because Imbue Studio
+    invokes ``mngr`` as a subprocess and is not allowed to depend on the
+    plugin Python API.
+    """
+    lowered = account.strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
+    if not slug:
+        raise MngrCommandError(f"Cannot slugify imbue_cloud account email: {account!r}")
+    return slug
 
 
 def _remote_host_env_flags() -> list[str]:
@@ -1570,36 +1448,17 @@ def resolve_template_version(
     return latest
 
 
-@pure
-def _parse_jsonl_event(line: str) -> dict[str, Any] | None:
-    """The JSON object a stdout line carries when it is one of mngr's JSONL event records, else None."""
-    stripped = line.strip()
-    if not stripped or not stripped.startswith("{"):
-        return None
-    try:
-        event = json.loads(stripped)
-    except json.JSONDecodeError:
-        return None
-    return event if isinstance(event, dict) else None
-
-
 class _CreateEventCapture(MutableModel):
-    """Forwards each child-process line to ``on_output`` while sniffing for mngr's JSONL events.
+    """Forwards each child-process line to ``on_output`` while sniffing for ``mngr create``'s JSONL events.
 
-    Fronts the stdout of ``mngr create --format jsonl`` and of the provider
-    ``prepare`` commands a connection setup runs the same way. Both write
-    structured event records to stdout, with ``{"event": "progress", ...}``
-    step reports ahead of the terminal record: ``{"event": "created",
-    "agent_id": "...", "host_id": "..."}`` for a create that succeeded, or
-    ``{"event": "error", "error_class": "...", "message": "..."}`` for either
-    command's failure. The progress lines are consumed here (parsed and handed
-    to ``on_progress``) and kept out of the caller's ``on_output``: they are
-    the machine protocol behind the progress bar, not log. Every other line
-    still goes through to ``on_output`` so log streaming behaviour is
-    unchanged; this wrapper just records the canonical agent id when it sees
-    the ``created`` event (so the create can return it without a follow-up
-    ``mngr list`` lookup) and the failure's class and message when it sees the
-    ``error`` event.
+    ``mngr create --format jsonl`` writes structured event records to stdout
+    -- the final one being ``{"event": "created", "agent_id": "...", "host_id": "..."}``
+    on success, or ``{"event": "error", "error_class": "...", "message": "..."}``
+    on failure. Each line still goes through to the caller's ``on_output`` so
+    log streaming behaviour is unchanged; this wrapper just records the
+    canonical agent id when it sees the ``created`` event (so the caller can
+    return it without a follow-up ``mngr list`` lookup) and the failure's
+    class and message when it sees the ``error`` event.
     """
 
     inner_on_output: OutputCallback | None = Field(
@@ -1629,21 +1488,20 @@ class _CreateEventCapture(MutableModel):
             "of the failure. The two are always taken from one event, so they describe the same error."
         ),
     )
-    on_progress: Callable[[ProgressEvent], None] | None = Field(
-        default=None,
-        description="Receives each ``progress`` event mngr streams (its plan and step reports), parsed",
-    )
 
     def __call__(self, line: str, is_stdout: bool) -> None:
-        event = _parse_jsonl_event(line) if is_stdout else None
-        if event is not None and event.get("event") == "progress":
-            progress_event = parse_progress_event(event)
-            if progress_event is not None and self.on_progress is not None:
-                self.on_progress(progress_event)
-            return
         if self.inner_on_output is not None:
             self.inner_on_output(line, is_stdout)
-        if event is None:
+        if not is_stdout:
+            return
+        stripped = line.strip()
+        if not stripped or not stripped.startswith("{"):
+            return
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(event, dict):
             return
         event_type = event.get("event")
         if event_type == "error":
@@ -1672,7 +1530,7 @@ def run_mngr_create(
     host_name: HostName,
     display_name: str = "",
     on_output: OutputCallback | None = None,
-    imbue_cloud_user_id: str | None = None,
+    imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
     imbue_cloud_fast_mode: str | None = None,
@@ -1680,7 +1538,6 @@ def run_mngr_create(
     cloud_account: str | None = None,
     instance_type: str | None = None,
     machine_size: MachineSizeSelection | None = None,
-    modal_sandbox_timeout_seconds: int | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
     docker_runtime: DockerRuntime = DockerRuntime.RUNC,
@@ -1690,7 +1547,6 @@ def run_mngr_create(
     create_attempt_id_label: str | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
-    on_progress: Callable[[ProgressEvent], None] | None = None,
 ) -> tuple[AgentId, HostId]:
     """Create an mngr agent via ``mngr create --format jsonl``.
 
@@ -1724,7 +1580,7 @@ def run_mngr_create(
         launch_mode,
         host_name,
         display_name,
-        imbue_cloud_user_id=imbue_cloud_user_id,
+        imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
         imbue_cloud_fast_mode=imbue_cloud_fast_mode,
@@ -1732,7 +1588,6 @@ def run_mngr_create(
         cloud_account=cloud_account,
         instance_type=instance_type,
         machine_size=machine_size,
-        modal_sandbox_timeout_seconds=modal_sandbox_timeout_seconds,
         latchkey_env=latchkey_env,
         color=color,
         docker_runtime=docker_runtime,
@@ -1742,7 +1597,7 @@ def run_mngr_create(
         create_attempt_id_label=create_attempt_id_label,
     )
 
-    capture = _CreateEventCapture(inner_on_output=on_output, on_progress=on_progress)
+    capture = _CreateEventCapture(inner_on_output=on_output)
     cg = _make_child_cg("mngr-create", parent_cg)
     # The Vault fallback for the private-pin credential is an operator convenience:
     # the same opt-in that routes the create form at a local template worktree.
@@ -1826,17 +1681,14 @@ def _mngr_create_failure(
 
 def run_mngr_aws_prepare(
     region: str,
-    provider_name: str,
     on_output: OutputCallback | None = None,
     *,
+    provider_name: str | None = None,
     parent_cg: ConcurrencyGroup | None = None,
-    on_progress: Callable[[ProgressEvent], None] | None = None,
 ) -> None:
     """Ensure the AWS security group for ``region`` exists before an AWS create.
 
-    Runs ``mngr aws prepare --provider <provider_name> --region <region>`` on the
-    AWS connection instance (``aws_<hex>``) whose block carries the pasted
-    credentials prepare should authenticate with. The command is
+    Runs ``mngr aws prepare --provider aws-<region> --region <region>``, which is
     read-only-first: when the ``mngr-aws`` security group already exists with the
     required SSH ingress it issues no write call, so this succeeds even with an
     AWS key that only has ``ec2:DescribeSecurityGroups``. It only attempts the
@@ -1849,18 +1701,22 @@ def run_mngr_aws_prepare(
     clear message on the creating page rather than a deferred opaque create
     failure.
     """
-    # AWS is region-locked per provider instance, so prepare needs the region
-    # the connection instance is pinned to. Fail fast with the same message
+    # AWS is region-locked per provider instance, so a region is required to
+    # name the ``aws-<region>`` provider. Fail fast with the same message
     # ``_build_mngr_create_command`` raises so the empty-region case is rejected
     # consistently regardless of which step trips first.
     if not region:
         raise MngrCommandError("AWS mode requires a region")
+    # ``provider_name`` overrides the ambient per-region block for
+    # bring-your-own-key accounts (``byok-aws-<slug>``), whose block carries the
+    # pasted credentials prepare should authenticate with.
+    if provider_name is None:
+        provider_name = f"aws-{region}"
     _run_mngr_prepare_command(
-        [MNGR_BINARY, "aws", "prepare", "--provider", provider_name, "--region", region, "--format", "jsonl"],
+        [MNGR_BINARY, "aws", "prepare", "--provider", provider_name, "--region", region],
         f"aws prepare for region {region}",
         on_output,
         parent_cg,
-        on_progress,
     )
 
 
@@ -1870,43 +1726,20 @@ def run_mngr_provider_prepare(
     on_output: OutputCallback | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
-    on_progress: Callable[[ProgressEvent], None] | None = None,
 ) -> None:
     """Run ``mngr <backend> prepare --provider <provider_name>`` (gcp / azure).
 
-    Unlike the AWS path there is no ``--region`` flag: the connection
-    block named by ``provider_name`` already pins the placement
+    Unlike the AWS path there is no ``--region`` flag: the bring-your-own-key
+    account block named by ``provider_name`` already pins the placement
     (``default_zone`` / ``default_region``), the credentials, and the project /
     subscription, and prepare reads all of them from the resolved provider
     config. Idempotent like the AWS prepare; failures raise ``MngrCommandError``.
     """
     _run_mngr_prepare_command(
-        [MNGR_BINARY, backend, "prepare", "--provider", provider_name, "--format", "jsonl"],
+        [MNGR_BINARY, backend, "prepare", "--provider", provider_name],
         f"{backend} prepare for provider {provider_name}",
         on_output,
         parent_cg,
-        on_progress,
-    )
-
-
-def run_mngr_modal_connection_check(
-    provider_name: str,
-    on_output: OutputCallback | None = None,
-    *,
-    parent_cg: ConcurrencyGroup | None = None,
-) -> None:
-    """Run ``mngr list --provider <provider_name>`` to prove a Modal connection's token works.
-
-    Modal has no ``prepare``; a listing on the instance is the first
-    privileged call against the pasted token, and a bad token fails it as
-    not authorized. Failures raise ``MngrCommandError`` like the prepares.
-    """
-    _run_mngr_prepare_command(
-        [MNGR_BINARY, "list", "--provider", provider_name, "--format", "json"],
-        f"modal connection check for provider {provider_name}",
-        on_output,
-        parent_cg,
-        None,
     )
 
 
@@ -1915,7 +1748,6 @@ def _run_mngr_prepare_command(
     description: str,
     on_output: OutputCallback | None,
     parent_cg: ConcurrencyGroup | None,
-    on_progress: Callable[[ProgressEvent], None] | None,
 ) -> None:
     """Shared runner for the per-provider ``mngr <backend> prepare`` subprocess."""
     logger.info("Running: {}", " ".join(command))
@@ -1924,7 +1756,7 @@ def _run_mngr_prepare_command(
         result = cg.run_process_to_completion(
             command=command,
             is_checked_after=False,
-            on_output=_CreateEventCapture(inner_on_output=on_output, on_progress=on_progress),
+            on_output=on_output,
         )
     if result.returncode != 0:
         raise MngrCommandError(
@@ -1949,23 +1781,18 @@ class _MngrCreateAttemptParams(FrozenModel):
     host_name: HostName
     display_name: str
     on_output: OutputCallback
-    # Receives mngr's parsed progress events, nested by the caller under its own create step.
-    on_progress: Callable[[ProgressEvent], None]
     latchkey_env: Mapping[str, str] | None
-    # The owning account's user id (names the imbue_cloud account instance), or None for a private workspace.
-    account_id: str | None
+    account_email: str | None
     repo_source: str | None
     branch_or_tag: str | None
     region: str | None
-    # Connection instance name (``<backend>_<hex>``), or
+    # Bring-your-own-key account provider block name (``byok-<backend>-<slug>``), or
     # None for the ambient per-mode providers.
     cloud_account: str | None
     # Per-create EC2 machine size (AWS modes only), or None for the block default.
     instance_type: str | None
     # Per-create size for the modes sized by numbers (DOCKER / LIMA / MODAL), or None for the template default.
     machine_size: MachineSizeSelection | None
-    # Per-create sandbox lifetime (MODAL only), or None for the connection block's default.
-    modal_sandbox_timeout_seconds: int | None
     parent_cg: ConcurrencyGroup | None
     color: str | None
     docker_runtime: DockerRuntime
@@ -1993,7 +1820,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         display_name=params.display_name,
         on_output=params.on_output,
         latchkey_env=params.latchkey_env,
-        imbue_cloud_user_id=params.account_id if is_imbue_cloud else None,
+        imbue_cloud_account=params.account_email if is_imbue_cloud else None,
         # Pass the form's repository through verbatim (a remote URL in
         # production, a local clone path in dev). The provider canonicalizes it
         # -- resolving a local path to its ``origin`` remote -- so the fast path
@@ -2004,14 +1831,12 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
         imbue_cloud_fast_mode=fast_mode,
         # ``region`` is honored by IMBUE_CLOUD (-b region=), VULTR
-        # (-b --vultr-region=), MODAL (-b --region=), and the pinned clouds
-        # (-b --aws-region= and friends); the command builder ignores it for
-        # DOCKER/LIMA.
+        # (-b --vultr-region=), and AWS (-b --aws-region=); the command builder
+        # ignores it for DOCKER/LIMA.
         region=(params.region or None),
         cloud_account=params.cloud_account,
         instance_type=params.instance_type,
         machine_size=params.machine_size,
-        modal_sandbox_timeout_seconds=params.modal_sandbox_timeout_seconds,
         color=params.color,
         docker_runtime=params.docker_runtime,
         original_minds_version=params.original_minds_version,
@@ -2019,7 +1844,6 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         prebaked_lima_image_raw_path=params.prebaked_lima_image_raw_path,
         create_attempt_id_label=params.create_attempt_id_label,
         parent_cg=params.parent_cg,
-        on_progress=params.on_progress,
     )
 
 
@@ -2153,15 +1977,6 @@ class AgentCreator(MutableModel):
             "readiness probing alongside ``mngr_forward_port=0``."
         ),
     )
-    mngr_forward_ca_cert_path: Path | None = Field(
-        default=None,
-        frozen=True,
-        description=(
-            "The ``mngr forward`` plugin's local CA certificate, which readiness probes verify the "
-            "plugin's TLS against (see ``imbue.mngr_forward.tls.local_ca_cert_path``). None disables "
-            "readiness probing alongside ``mngr_forward_port=0``."
-        ),
-    )
     system_interface_health_tracker: SystemInterfaceHealthTracker = Field(
         frozen=True,
         description=(
@@ -2218,15 +2033,6 @@ class AgentCreator(MutableModel):
             "chrome SSE rebuilds the workspace-list payload without waiting for a discovery tick."
         ),
     )
-    on_create_attempt_done: Callable[[CreateAttemptId, AgentId], None] | None = Field(
-        default=None,
-        frozen=True,
-        description=(
-            "Run on a thread of its own once a create attempt is DONE, with its workspace's agent id. Wired to "
-            "the welcome-chat seeder, which seeds the conversation the creation page handed over even when "
-            "that page has since been left."
-        ),
-    )
     mngr_binary: str = Field(
         default=MNGR_BINARY,
         frozen=True,
@@ -2253,17 +2059,9 @@ class AgentCreator(MutableModel):
     # per-provider conflict semantics. Empty string when the instance could
     # not be resolved (the create will fail downstream with its own error).
     _provider_instance_names: dict[str, str] = PrivateAttr(default_factory=dict)
-    # The owning account's user id per create attempt (empty for a private
-    # workspace), so a signout can wait for a create that will associate with it.
-    _account_ids: dict[str, str] = PrivateAttr(default_factory=dict)
     _log_sinks: dict[str, CreateAttemptLogSink] = PrivateAttr(default_factory=dict)
-    _progress_trackers: dict[str, OperationProgressTracker] = PrivateAttr(default_factory=dict)
-    _progress_history: ProgressHistoryStore = PrivateAttr()
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-
-    def model_post_init(self, __context: object) -> None:
-        self._progress_history = make_progress_history_store(self.paths.data_dir)
 
     def start_create_attempt(
         self,
@@ -2278,14 +2076,12 @@ class AgentCreator(MutableModel):
         cloud_account: str = "",
         instance_type: str = "",
         machine_size: MachineSizeSelection | None = None,
-        modal_sandbox_timeout_seconds: int | None = None,
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
-        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -2304,16 +2100,15 @@ class AgentCreator(MutableModel):
         workspace boots unauthenticated and its in-UI sign-in modal is the
         sole auth surface (subscription setup-token, Imbue LiteLLM key, or
         raw API key -- all written into the shared Claude settings env).
-        ``account_email`` is recorded only into the pending-create-attempt
-        record (the attempt's account, as the create-attempt rows show it);
-        the imbue_cloud account instance is named from ``account_id``.
+        ``account_email`` still selects the imbue_cloud account for compute
+        leasing and backups.
 
         ``docker_runtime`` selects the container runtime for
         ``LaunchMode.DOCKER`` (runc vs gVisor's runsc); it is ignored by every
         other launch mode, which pin their own runtime.
 
         For ``LaunchMode.IMBUE_CLOUD``, the agent runs on a leased pool host
-        via the ``imbue_cloud_<user id>`` provider; the plugin's
+        via the ``imbue_cloud_<account-slug>`` provider; the plugin's
         ``ImbueCloudProvider.create_host`` runs the lease + SSH bootstrap
         and the rest of mngr's create pipeline adopts the pool host's
         pre-baked agent under the requested name. The plugin owns the
@@ -2360,7 +2155,8 @@ class AgentCreator(MutableModel):
         try:
             provider_instance_name = provider_instance_name_for_launch(
                 launch_mode,
-                imbue_cloud_user_id=account_id or None,
+                imbue_cloud_account=account_email or None,
+                region=region or None,
                 cloud_account=cloud_account or None,
             )
         except MngrCommandError as e:
@@ -2371,7 +2167,6 @@ class AgentCreator(MutableModel):
             logger.debug("Could not resolve a provider instance for create attempt {}: {}", create_attempt_id, e)
             provider_instance_name = ""
 
-        progress_tracker = self._new_create_progress_tracker(launch_mode, is_branch_checked_out=bool(effective_branch))
         with self._lock:
             # Check-and-register under one lock hold so two concurrent
             # same-name creates cannot both pass the guard.
@@ -2386,9 +2181,7 @@ class AgentCreator(MutableModel):
             self._launch_modes[str(create_attempt_id)] = launch_mode
             self._host_names[str(create_attempt_id)] = effective_name
             self._provider_instance_names[str(create_attempt_id)] = provider_instance_name
-            self._account_ids[str(create_attempt_id)] = account_id
             self._log_sinks[str(create_attempt_id)] = log_sink
-            self._progress_trackers[str(create_attempt_id)] = progress_tracker
 
         # Persist the pending-create-attempt record BEFORE spawning anything: from
         # here on, a crash or quit can no longer orphan the create silently.
@@ -2411,7 +2204,6 @@ class AgentCreator(MutableModel):
             docker_runtime=docker_runtime,
             original_minds_version=original_minds_version,
             backup_request=backup_request,
-            is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
         )
 
         thread = threading.Thread(
@@ -2424,18 +2216,17 @@ class AgentCreator(MutableModel):
                 effective_branch,
                 log_sink,
                 launch_mode,
+                account_email,
                 branch_or_tag,
                 region,
                 cloud_account,
                 instance_type,
                 machine_size,
-                modal_sandbox_timeout_seconds,
                 on_created,
                 backup_request,
                 color,
                 docker_runtime,
                 original_minds_version,
-                account_id,
             ),
             daemon=True,
             name="agent-creator-{}".format(create_attempt_id),
@@ -2486,35 +2277,6 @@ class AgentCreator(MutableModel):
         with self._lock:
             return self._live_in_flight_names_locked(provider_instance_name)
 
-    def live_in_flight_provider_instance_names(self) -> set[str]:
-        """Provider instance names that a live (non-terminal) create attempt targets.
-
-        A connection or an account whose provider is in this set must keep its
-        block: the create's later ``mngr`` calls fail on an unknown provider,
-        leaving the VM in the user's cloud with no record and no block.
-        """
-        with self._lock:
-            return self._live_in_flight_values_locked(self._provider_instance_names)
-
-    def live_in_flight_account_ids(self) -> set[str]:
-        """User ids of the accounts that live (non-terminal) create attempts will associate their workspace with.
-
-        A create on a device provider (docker, lima, a this-device-only
-        connection) keeps its block through a signout, but the association it
-        performs at the end needs the account still signed in.
-        """
-        with self._lock:
-            return self._live_in_flight_values_locked(self._account_ids)
-
-    def _live_in_flight_values_locked(self, value_by_create_attempt_id: dict[str, str]) -> set[str]:
-        """The non-empty values the dict holds for live (non-terminal) create attempts. Must hold ``self._lock``."""
-        return {
-            value_by_create_attempt_id[cid_str]
-            for cid_str, status in self._statuses.items()
-            if status not in (AgentCreateAttemptStatus.DONE, AgentCreateAttemptStatus.FAILED)
-            and value_by_create_attempt_id.get(cid_str)
-        }
-
     def live_in_flight_create_attempt_ids(self) -> set[str]:
         """CreateAttempt ids (as strings) of live (non-terminal) create attempts.
 
@@ -2548,7 +2310,6 @@ class AgentCreator(MutableModel):
         docker_runtime: DockerRuntime,
         original_minds_version: str,
         backup_request: BackupSetupRequest | None,
-        is_onboarding_driven_by_agent: bool,
     ) -> None:
         """Write the IN_FLIGHT pending-create-attempt record, downgrading store errors to warnings.
 
@@ -2587,7 +2348,6 @@ class AgentCreator(MutableModel):
                     backup_request.backup_provider if backup_request is not None else BackupProvider.CONFIGURE_LATER
                 ),
                 backup_api_key_env=(backup_request.api_key_env_text if backup_request is not None else ""),
-                is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
             ),
         )
         try:
@@ -2660,7 +2420,6 @@ class AgentCreator(MutableModel):
             redirect_url=self._redirect_urls.get(cid_str),
             error=self._errors.get(cid_str),
             error_kind=self._error_kinds.get(cid_str),
-            progress=tracker.snapshot() if (tracker := self._progress_trackers.get(cid_str)) is not None else None,
         )
 
     def list_create_attempt_infos(self) -> list[AgentCreateAttemptInfo]:
@@ -2690,9 +2449,7 @@ class AgentCreator(MutableModel):
                 self._launch_modes,
                 self._host_names,
                 self._provider_instance_names,
-                self._account_ids,
                 self._log_sinks,
-                self._progress_trackers,
             ):
                 tracked.pop(cid_str, None)
         self._notify_create_attempts_changed()
@@ -2701,22 +2458,6 @@ class AgentCreator(MutableModel):
     def _notify_create_attempts_changed(self) -> None:
         if self.on_create_attempts_changed is not None:
             self.on_create_attempts_changed()
-
-    def _new_create_progress_tracker(
-        self, launch_mode: LaunchMode, *, is_branch_checked_out: bool
-    ) -> OperationProgressTracker:
-        """A tracker weighted by what creates on ``launch_mode`` have taken here, with the desktop's own steps planned."""
-        tracker = self._progress_history.expected_durations(create_scope(launch_mode)).new_tracker()
-        planned = [_CLONE_STEP, *([_CHECKOUT_STEP] if is_branch_checked_out else []), _MNGR_CREATE_STEP, _READY_STEP]
-        tracker.announce_plan(
-            [ProgressStep(step_id=step_id, label=_DESKTOP_STEP_LABELS[step_id]) for step_id in planned], None
-        )
-        return tracker
-
-    def _record_progress_durations(self, launch_mode: LaunchMode, tracker: OperationProgressTracker) -> None:
-        self._progress_history.record(
-            create_scope(launch_mode), tracker.drain_durations(), tracker.drain_skipped_step_ids()
-        )
 
     def get_log_sink(self, create_attempt_id: CreateAttemptId) -> CreateAttemptLogSink | None:
         """Get the replayable log sink for a tracked create attempt, or None if not tracked."""
@@ -2732,18 +2473,17 @@ class AgentCreator(MutableModel):
         branch: str,
         log_sink: CreateAttemptLogSink,
         launch_mode: LaunchMode,
+        account_email: str = "",
         branch_or_tag: str = "",
         region: str = "",
         cloud_account: str = "",
         instance_type: str = "",
         machine_size: MachineSizeSelection | None = None,
-        modal_sandbox_timeout_seconds: int | None = None,
         on_created: Callable[[AgentId, HostId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
-        account_id: str = "",
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
 
@@ -2759,11 +2499,7 @@ class AgentCreator(MutableModel):
         entries).
         """
         cid_str = str(create_attempt_id)
-        # Bootstrap events stamped before this are an earlier boot's (see the ready wait's follow).
-        create_started_at = datetime.now(timezone.utc)
         emit_log = make_log_callback(log_sink)
-        with self._lock:
-            tracker = self._progress_trackers[cid_str]
         workspace_dir: Path | None = None
         # Bound the moment the scratch root is created, NOT alongside
         # workspace_dir: in the worktree branch the clone and the rsync over it
@@ -2795,7 +2531,6 @@ class AgentCreator(MutableModel):
                 # launch-mode-aware via ``_STATUS_TEXT_IMBUE_CLOUD``.
                 with self._lock:
                     self._statuses[cid_str] = AgentCreateAttemptStatus.CLONING_REPO
-                tracker.start_step(_CLONE_STEP, _DESKTOP_STEP_LABELS[_CLONE_STEP], None, None)
 
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
@@ -2876,7 +2611,6 @@ class AgentCreator(MutableModel):
                 if branch:
                     with self._lock:
                         self._statuses[cid_str] = AgentCreateAttemptStatus.CHECKING_OUT_BRANCH
-                    tracker.start_step(_CHECKOUT_STEP, _DESKTOP_STEP_LABELS[_CHECKOUT_STEP], None, None)
                     log_sink.put("[Imbue Studio] Checking out branch '{}'...".format(branch))
                     # Scratch clones were just fetched into, so FETCH_HEAD is the
                     # requested ref; a plain local directory has no such fetch, and
@@ -2898,7 +2632,6 @@ class AgentCreator(MutableModel):
 
                 with self._lock:
                     self._statuses[cid_str] = AgentCreateAttemptStatus.CREATING_WORKSPACE
-                tracker.start_step(_MNGR_CREATE_STEP, _DESKTOP_STEP_LABELS[_MNGR_CREATE_STEP], None, None)
 
                 # Pre-create the shared latchkey gateway password and a
                 # per-host permissions-override JWT before invoking
@@ -2926,10 +2659,10 @@ class AgentCreator(MutableModel):
                 # re-creating the agent.
                 latchkey_setup = self._prepare_latchkey_or_warn(log_sink, launch_mode)
 
-                # No prepare step here: a connection's cloud scaffolding (AWS
-                # security group + state bucket, GCP/Azure equivalents) is
-                # created once when the connection is *added*
-                # (``_handle_create_cloud_account``), against the connection's pinned
+                # No prepare step here: a bring-your-own-key account's cloud
+                # scaffolding (AWS security group + state bucket, GCP/Azure
+                # equivalents) is created once when the account is *added*
+                # (``_handle_create_cloud_account``), against the account's pinned
                 # placement -- the same region every workspace on it uses. The
                 # other modes (docker / lima / vultr / imbue_cloud / modal) need
                 # no pre-created scaffolding at all.
@@ -2988,16 +2721,14 @@ class AgentCreator(MutableModel):
                     host_name=parsed_host,
                     display_name=display_name or str(parsed_host),
                     on_output=emit_log,
-                    on_progress=TrackerEventSink(tracker=tracker, default_parent_id=str(_MNGR_CREATE_STEP)),
                     latchkey_env=latchkey_setup.env,
-                    account_id=account_id or None,
+                    account_email=account_email,
                     repo_source=repo_source,
                     branch_or_tag=branch_or_tag,
                     region=region,
                     cloud_account=cloud_account or None,
                     instance_type=instance_type or None,
                     machine_size=machine_size,
-                    modal_sandbox_timeout_seconds=modal_sandbox_timeout_seconds,
                     parent_cg=self.root_concurrency_group,
                     color=color,
                     docker_runtime=docker_runtime,
@@ -3032,6 +2763,7 @@ class AgentCreator(MutableModel):
                 # the workspace row and the "Creating..." row show side by side.
                 with self._lock:
                     self._canonical_agent_ids[cid_str] = canonical_id
+                self._notify_create_attempts_changed()
 
                 # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
@@ -3071,11 +2803,6 @@ class AgentCreator(MutableModel):
                             f"canonical path for host {canonical_host_id}; this will be repaired "
                             f"automatically the first time the agent requests a permission. Reason: {link_error}"
                         )
-                # Notified after the link, not before: the latchkey auto-register
-                # retries an agent it deferred for a missing host permissions
-                # file only on a resolver change, and this is the one that
-                # follows the file landing.
-                self._notify_create_attempts_changed()
 
                 log_sink.put("[Imbue Studio] Agent created successfully.")
 
@@ -3089,7 +2816,6 @@ class AgentCreator(MutableModel):
                 # page rather than spinning forever (PR 1471 part 1).
                 with self._lock:
                     self._statuses[cid_str] = AgentCreateAttemptStatus.WAITING_FOR_READY
-                tracker.start_step(_READY_STEP, _DESKTOP_STEP_LABELS[_READY_STEP], None, None)
                 # A Lima create with no pre-baked image builds the workspace
                 # inside the VM, which routinely outlives the standard window;
                 # give it the build-in-VM window instead. While the wait runs,
@@ -3110,15 +2836,7 @@ class AgentCreator(MutableModel):
                     canonical_id, ProbeGracePurpose.CREATE_ATTEMPT, time.monotonic() + ready_timeout_seconds
                 )
                 try:
-                    self._wait_for_workspace_ready(
-                        canonical_id,
-                        log_sink,
-                        ready_timeout_seconds,
-                        tracker,
-                        host_id=canonical_host_id,
-                        provider_instance_name=provider_instance_name,
-                        create_started_at=create_started_at,
-                    )
+                    self._wait_for_workspace_ready(canonical_id, log_sink, ready_timeout_seconds)
                 finally:
                     self.system_interface_health_tracker.end_probe_grace(
                         canonical_id, ProbeGracePurpose.CREATE_ATTEMPT
@@ -3140,8 +2858,6 @@ class AgentCreator(MutableModel):
                 # publication so any downstream consumer (e.g.
                 # ``OnCreatedCallback``, which records the workspace<->account
                 # association) can rely on the canonical id.
-                tracker.complete_all()
-                self._record_progress_durations(launch_mode, tracker)
                 with self._lock:
                     self._statuses[cid_str] = AgentCreateAttemptStatus.DONE
                     self._redirect_urls[cid_str] = redirect_url
@@ -3149,17 +2865,6 @@ class AgentCreator(MutableModel):
 
                 if on_created is not None:
                     on_created(canonical_id, canonical_host_id)
-
-                if self.on_create_attempt_done is not None:
-                    start_mngr_thread(
-                        self.root_concurrency_group,
-                        target=self.on_create_attempt_done,
-                        args=(create_attempt_id, canonical_id),
-                        name=f"create-attempt-done-{create_attempt_id}",
-                        # Like the backup setup below: what it does is not the create, so a failure must not
-                        # poison the root CG.
-                        is_checked=False,
-                    )
 
                 # Configure restic backups asynchronously on a detached
                 # thread: bucket
@@ -3192,28 +2897,8 @@ class AgentCreator(MutableModel):
             ValueError,
             OSError,
         ) as e:
-            if isinstance(e, MngrCommandError) and e.error_class == QUOTA_EXCEEDED_ERROR_CLASS:
-                # The account's quota (e.g. the waitlist) refused the create: a
-                # correct, deterministic outcome whose sentence the creating page
-                # shows the person, not a fault for error reporting. The mngr
-                # transcript is still in the create log and the FAILED record.
-                logger.info("Create attempt {} was refused by the account's quota: {}", create_attempt_id, e)
-            elif isinstance(e, GitRefNotFoundError) and not is_default_workspace_template_url(repo_source):
-                # The requested branch or tag does not exist on a remote that
-                # answered: a mistake in the create's input, which the creating
-                # page explains, not a fault for error reporting. The default
-                # template repo is excluded: its ref is the release's pinned tag,
-                # so a missing one there is a broken release and stays an error.
-                logger.info(
-                    "Failed create attempt {}: it named a branch or tag the repository does not have: {}",
-                    create_attempt_id,
-                    e,
-                )
-            else:
-                logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
+            logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
             log_sink.put("[Imbue Studio] ERROR: {}".format(e))
-            # The steps that did finish measured something real; only they are kept.
-            self._record_progress_durations(launch_mode, tracker)
             error_kind = classify_create_attempt_error(repo_source, e)
             # Snapshot the failure (and the create attempt log's tail) into the
             # pending-create-attempt record BEFORE publishing the in-memory
@@ -3459,10 +3144,6 @@ class AgentCreator(MutableModel):
         # The readiness window for this create: ``workspace_ready_timeout_seconds``
         # normally, or the longer build-in-VM window for an imageless Lima create.
         timeout_seconds: float,
-        tracker: OperationProgressTracker | None = None,
-        host_id: HostId | None = None,
-        provider_instance_name: str = "",
-        create_started_at: datetime | None = None,
     ) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.
 
@@ -3473,61 +3154,32 @@ class AgentCreator(MutableModel):
         isn't yet listening, or 502 when SSH info hasn't propagated) are
         treated as not-yet-ready and re-polled until the timeout elapses.
 
-        Best-effort: if probing is unconfigured (``mngr_forward_port=0``, empty
-        preauth or no CA certificate, e.g. tests that bypass the plugin) we
-        return immediately.
+        Best-effort: if probing is unconfigured (``mngr_forward_port=0`` or
+        empty preauth, e.g. tests that bypass the plugin) we return immediately.
         On timeout we log + emit to the log queue and let the caller publish
         the redirect anyway -- the user lands on the plugin's auto-refresh
         retry page, which is better than spinning forever in the create attempt UI.
         """
-        ca_cert_path = self.mngr_forward_ca_cert_path
-        if self.mngr_forward_port == 0 or not self.mngr_forward_preauth_cookie or ca_cert_path is None:
-            logger.debug("Machine readiness probe disabled (port=0, empty preauth or no CA certificate); skipping")
+        if self.mngr_forward_port == 0 or not self.mngr_forward_preauth_cookie:
+            logger.debug("Machine readiness probe disabled (port=0 or empty preauth); skipping")
             return
 
         deadline = time.monotonic() + timeout_seconds
         log_sink.put("[Imbue Studio] Waiting for system interface to be ready...")
-        bootstrap_tail = (
-            _BootstrapProgressTail(
-                command=_bootstrap_follow_command(self.mngr_binary, agent_id, host_id, provider_instance_name),
-                concurrency_group=self.root_concurrency_group,
-                tracker=tracker,
-                parent_step_id=str(_READY_STEP),
-                not_before=create_started_at,
-            )
-            if tracker is not None
-            else None
-        )
-        if bootstrap_tail is not None:
-            bootstrap_tail.start()
-        try:
-            self._probe_until_ready(agent_id, log_sink, deadline, timeout_seconds, ca_cert_path)
-        finally:
-            if bootstrap_tail is not None:
-                bootstrap_tail.stop()
-
-    def _probe_until_ready(
-        self,
-        agent_id: AgentId,
-        log_sink: CreateAttemptLogSink,
-        deadline: float,
-        timeout_seconds: float,
-        ca_cert_path: Path,
-    ) -> None:
-        """The readiness loop proper: probe the system interface until it answers 200 or the deadline passes."""
         last_outcome: WorkspaceProbeOutcome | None = None
         attempt = 0
         with make_workspace_probe_client(
             preauth_cookie=self.mngr_forward_preauth_cookie,
             probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
-            ca_cert_path=ca_cert_path,
         ) as probe_client:
             while time.monotonic() < deadline:
                 attempt += 1
                 outcome = probe_workspace_through_plugin(
-                    probe_client=probe_client,
                     mngr_forward_port=self.mngr_forward_port,
+                    preauth_cookie=self.mngr_forward_preauth_cookie,
                     workspace_id=str(agent_id),
+                    probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
+                    client=probe_client,
                 )
                 last_outcome = outcome
                 if outcome.is_ready:

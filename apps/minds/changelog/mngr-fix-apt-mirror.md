@@ -1,0 +1,1 @@
+Release runbook step 0 (cutting the apt snapshot mirror timestamp) now uses the `apt-mirror` operator CLI (`uv run apt-mirror cut|warm|verify` with R2 credentials from Vault) instead of curling the connector's admin routes, and requires dwt's `.mngr/apt-snapshot-timestamp` to match the committed `apps/apt_mirror/current-timestamp` at T-bump time.

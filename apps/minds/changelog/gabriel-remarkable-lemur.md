@@ -1,0 +1,5 @@
+Added `GET /api/v1/app/version`, reporting the newest workspace-template ref the running desktop app supports.
+
+A workspace's `update-self` flow reads this as the ceiling on how far it may upgrade, so a workspace never ends up running a template newer than the app driving it. The route is reachable by every in-workspace agent without a permission grant (see the matching `mngr_latchkey` baseline change): update-self resolves its target from a background worker, with nobody watching to approve a dialog.
+
+The response carries the template ref alone rather than also the app's version number. A released binary ships the `minds-v*` tag it was verified against, so the two are the same fact; a dev build reports a branch instead, which the update flow reads as "no ceiling." Reporting the ref is what stays correct in both cases. The route is `/app/version` rather than `/app` for the same reason the payload is narrow: the baseline grant is pinned by `const` to this exact path, so any field or sibling route added under it would become readable by every agent with no grant and no dialog.

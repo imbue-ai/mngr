@@ -35,23 +35,17 @@ from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
-from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.installation import ensure_cli_installed
-from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.output_styles import read_output_style_files
 from imbue.mngr.agents.output_styles import resolve_output_style
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
-from imbue.mngr.agents.tui_utils import EnterRetryGate
-from imbue.mngr.agents.tui_utils import PANE_TARGET_SHELL_VARIABLE
 from imbue.mngr.agents.tui_utils import POST_SUBMIT_DIALOG_OBSERVE_SECONDS
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
 from imbue.mngr.agents.tui_utils import TUI_READY_TIMEOUT_SECONDS
-from imbue.mngr.agents.tui_utils import UnconfirmedSubmissionReading
 from imbue.mngr.agents.tui_utils import build_changed_token_probe
 from imbue.mngr.agents.tui_utils import build_file_mtime_token_command
 from imbue.mngr.agents.tui_utils import build_normalized_message_probe
-from imbue.mngr.agents.tui_utils import build_unsubmitted_message_retry_gate
 from imbue.mngr.agents.tui_utils import send_enter_keystroke
 from imbue.mngr.agents.tui_utils import send_key_keystroke
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
@@ -68,6 +62,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.external_settings import apply_settings_patch
 from imbue.mngr.config.field_markers import SettingsPatchField
+from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import NoCommandDefinedError
@@ -155,15 +150,12 @@ from imbue.mngr_claude.compaction import record_agent_compacted
 from imbue.mngr_claude.dialogs import COMPACT_COMMAND
 from imbue.mngr_claude.dialogs import DialogBlocked
 from imbue.mngr_claude.dialogs import INPUT_PROMPT_GLYPH
-from imbue.mngr_claude.dialogs import INPUT_REGION_LINES
 from imbue.mngr_claude.dialogs import Unrecognized
 from imbue.mngr_claude.dialogs import classify
-from imbue.mngr_claude.dialogs import count_message_turns_above_input_row
 from imbue.mngr_claude.dialogs import deal_with_dialogs
 from imbue.mngr_claude.dialogs import get_input_region
 from imbue.mngr_claude.dialogs import get_pane_text_without_input_row_hints
 from imbue.mngr_claude.dialogs import has_input_prompt_line
-from imbue.mngr_claude.dialogs import is_input_text_of_message
 from imbue.mngr_claude.dialogs import is_nonbenign_answer_allowed
 from imbue.mngr_claude.dialogs import is_restored_compact_command
 from imbue.mngr_claude.dialogs import is_shell_command_message
@@ -183,41 +175,8 @@ _MODEL_STATE_FILE_NAME: Final[str] = "model_state.json"
 _SHELL_MODE_EXIT_MAX_ATTEMPTS: Final[int] = 3
 _SHELL_MODE_EXIT_POLL_SECONDS: Final[float] = 2.0
 
-# How long to wait for the input row to empty after pressing ``_INPUT_LINE_CLEAR_KEYS``.
-_INPUT_LINE_CLEAR_POLL_SECONDS: Final[float] = 2.0
-
-# How much of a message the screen probe compares against what Claude shows of it: more than one
-# screen line of it ever holds.
-_SCREEN_PROBE_MESSAGE_CHARS: Final[int] = 1000
-
-# Reads Claude's screen (C locale, byte-wise) for a just-submitted message: prints how many past user
-# turns above the input row show it, then 1 when the input row still holds it (its words, or a paste
-# placeholder), else 0. Prints nothing when no input row is on screen (a dialog occupies it). The
-# input row is the lowest prompt-glyph line among the last ``region`` non-blank lines, as ``dialogs`` finds it.
-_SCREEN_SUBMISSION_AWK: Final[str] = r"""
-function norm(s) { s = tolower(s); gsub(/[^a-z0-9]/, "", s); return s }
-function is_placeholder(s,   at) { at = index(s, ph); return at > 0 && at <= 6 }
-{ line[NR] = $0 }
-END {
-  input = 0; seen = 0
-  for (i = NR; i >= 1 && seen < region; i--) {
-    if (line[i] ~ /[^ \t]/) { seen++; if (index(line[i], glyph) == 1) { input = i; break } }
-  }
-  if (input == 0) exit
-  count = 0
-  for (i = 1; i < input; i++) {
-    if (index(line[i], glyph) != 1) continue
-    shown = substr(line[i], length(glyph) + 1)
-    if (is_placeholder(shown)) { count++; continue }
-    words = norm(shown)
-    if (words != "" && index(msg, words) == 1) count++
-  }
-  held = substr(line[input], length(glyph) + 1)
-  held_words = norm(held)
-  in_box = is_placeholder(held) || (held_words != "" && index(msg, held_words) == 1)
-  print count, (in_box ? 1 : 0)
-}
-"""
+# How long to wait for the input row to empty after clearing a restored `/compact` draft.
+_RESTORED_COMMAND_CLEAR_POLL_SECONDS: Final[float] = 2.0
 # Claude Code's editing keys that empty a one-line input: end of line, then delete to line start.
 # Both are inert on an empty input (unlike Ctrl+C, whose second press exits).
 _INPUT_LINE_CLEAR_KEYS: Final[tuple[str, ...]] = ("C-e", "C-u")
@@ -408,15 +367,9 @@ class ClaudeAgentConfig(AgentTypeConfig):
     version: str | None = Field(
         default=None,
         description="Pin the Claude Code version to install (e.g., '2.1.50'). "
-        "When set, installation uses this specific version and provisioning verifies the installed version matches "
-        "(see `version_mismatch`), whether or not `check_installation` is set. "
+        "When set, installation uses this specific version and provisioning verifies the installed version matches. "
         'If None, uses the latest available version. Pin alongside `update_policy = "NEVER"` to keep the '
         "binary on the pinned version (claude's auto-updater would otherwise move it off the pin).",
-    )
-    version_mismatch: VersionMismatchPolicy = Field(
-        default=VersionMismatchPolicy.ERROR,
-        description="What provisioning does when the installed claude does not report the pinned `version`. "
-        "`ERROR` (default): fail the create. `WARN`: log a warning and continue on the installed binary.",
     )
     update_policy: AgentUpdatePolicy | None = Field(
         default=None,
@@ -973,6 +926,19 @@ def _parse_claude_version_output(output: str) -> str | None:
         return None
     parts = stripped.split()
     return parts[0] if parts else None
+
+
+def _get_claude_version(host: OnlineHostInterface) -> str | None:
+    """Get the installed claude version on the host.
+
+    Returns the version string (e.g., '2.1.50') or None if claude is not installed
+    or the version cannot be determined.
+    """
+    result = host.execute_idempotent_command("claude --version", timeout_seconds=10.0)
+    if not result.success:
+        logger.debug("Failed to get claude version on host: {}", result.stderr)
+        return None
+    return _parse_claude_version_output(result.stdout)
 
 
 def _get_local_claude_version(concurrency_group: ConcurrencyGroup) -> str | None:
@@ -1665,9 +1631,6 @@ class ClaudeCoreAgent(
     does not carry those interactive-only capabilities.
     """
 
-    # Launched through a shell chain of exports and resume fallbacks, but the process is always claude.
-    fixed_process_name: ClassVar[str | None] = "claude"
-
     @property
     def is_common_transcript_enabled(self) -> bool:
         return self.agent_config.emit_common_transcript
@@ -1810,6 +1773,14 @@ class ClaudeCoreAgent(
         slash-command picker such as ``/model``, or the cost threshold.
         """
         return self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME)
+
+    def get_expected_process_name(self) -> str:
+        """Return 'claude' as the expected process name.
+
+        This overrides the base implementation because ClaudeAgent uses a complex
+        shell command with exports and fallbacks, but the actual process is always 'claude'.
+        """
+        return "claude"
 
     def get_provision_file_transfers(
         self,
@@ -2162,11 +2133,10 @@ class ClaudeCoreAgent(
 
             # Ensure claude is installed via the shared helper (consent-gated locally,
             # config-gated remotely; claude's get_install_command pins the version),
-            # then reconcile the installed binary's version against any pin, whether or
-            # not the install check ran.
+            # then reconcile the present binary's version against any pin.
             if config.check_installation:
                 ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
-            self.reconcile_installed_version(host, mngr_ctx)
+                self.reconcile_installed_version(host, mngr_ctx)
 
             # no matter what, *always* dismiss the cost popup, it's pointless. In
             # shared mode this targets the user's global config (the file claude
@@ -2290,19 +2260,21 @@ class ClaudeCoreAgent(
         """Verify the installed claude matches the pinned version, if one is set.
 
         claude pins a specific version when ``config.version`` is set, otherwise it
-        follows its own auto-update (nothing to enforce). With a pin, a mismatch means
-        the wrong version is on PATH; ``config.version_mismatch`` decides whether that
-        fails provisioning or only warns.
+        follows its own auto-update (nothing to enforce). With a pin, the installed
+        binary must match -- a mismatch means the wrong version is on PATH, which the
+        user must resolve (re-install or update the pin).
         """
         pinned_version = self.agent_config.version
         if pinned_version is None:
             return
-        verify_pinned_cli_version(
-            host,
-            binary_name=self.get_install_binary_name(),
-            pinned_version=pinned_version,
-            mismatch_policy=self.agent_config.version_mismatch,
-        )
+        installed_version = _get_claude_version(host)
+        if installed_version != pinned_version:
+            raise AgentInstallationError(
+                f"Claude version mismatch: installed version is {installed_version!r}, "
+                f"but agent config pins version {pinned_version!r}. "
+                "Re-install claude with the correct version or update the pinned version in your agent config."
+            )
+        logger.debug("Claude version {} matches pinned version", installed_version)
 
     def get_install_binary_name(self) -> str:
         return "claude"
@@ -2382,6 +2354,7 @@ class _ClaudeDialogPane(FrozenModel):
     """
 
     agent: "ClaudeAgent"
+    tmux_target: TmuxWindowTarget
 
     # Resolved once for this pane object. The dialog loop captures repeatedly -- once per settle
     # poll, several times a pass -- and this object lives only for the length of one preflight,
@@ -2404,13 +2377,13 @@ class _ClaudeDialogPane(FrozenModel):
         )
 
     def press_enter(self) -> None:
-        self._press_and_settle(lambda: self.agent._press_enter(self.resolved_target))
+        self._press_and_settle(lambda: self.agent._press_enter(self.tmux_target))
 
     def press_down(self) -> None:
-        self._press_and_settle(lambda: send_key_keystroke(self.agent, self.resolved_target, "Down"))
+        self._press_and_settle(lambda: send_key_keystroke(self.agent, self.tmux_target, "Down"))
 
     def press_key(self, key: str) -> None:
-        self._press_and_settle(lambda: send_key_keystroke(self.agent, self.resolved_target, key))
+        self._press_and_settle(lambda: send_key_keystroke(self.agent, self.tmux_target, key))
 
     def accepts(self, nickname: str) -> bool:
         return is_nonbenign_answer_allowed(nickname, self.agent.agent_config.sensibly_deal_with_dialogs)
@@ -2437,9 +2410,6 @@ class ClaudeAgent(
     # which makes it a universal readiness signal. It is supplied as a predicate by
     # get_tui_ready_indicator below rather than as a pattern here, because the question is
     # positional -- see has_input_prompt_line.
-
-    # Claude Code shows a pasted message as e.g. ``[Pasted text #2 +20 lines]``.
-    PASTE_PLACEHOLDER_PREFIXES: ClassVar[tuple[str, ...]] = ("[Pasted text ",)
 
     # Path expression for mngr's always-provisioned raw mirror of Claude's
     # session JSONL, read by the submission-evidence probes. The embedded
@@ -2497,11 +2467,9 @@ class ClaudeAgent(
 
         An empty baseline makes the poll scan from offset 0, so a transcript
         that first appears mid-window is still searched from its beginning.
-        stderr is redirected before the input so a missing file's error goes
-        there too.
         """
         env_command_prefix = self.host.build_source_env_prefix(self)
-        return f"{env_command_prefix} wc -c 2>/dev/null < {file_path_expression} | tr -d '[:space:]'"
+        return f"{env_command_prefix} wc -c < {file_path_expression} 2>/dev/null | tr -d '[:space:]'"
 
     def _build_content_evidence_probe(
         self, name: str, file_path_expression: str, normalized_probe: str
@@ -2558,73 +2526,33 @@ class ClaudeAgent(
             is_rejection=True,
         )
 
-    def _build_screen_submission_probe(self, message: str) -> SubmissionEvidenceProbe | None:
-        """Probe confirming when Claude's screen shows the message taken: shown submitted above an input row that no longer holds it.
-
-        Claude takes a message off its input box at once but records it only when the turn starts,
-        which waits for its SessionStart hooks, so its screen is the first witness. None for a message
-        with no ASCII letters or digits to recognize it by.
-        """
-        message_words = "".join(char for char in message.lower() if char.isascii() and char.isalnum())
-        if message_words == "":
-            return None
-        read_screen = (
-            f"tmux capture-pane -p -t ${PANE_TARGET_SHELL_VARIABLE} 2>/dev/null | LC_ALL=C awk "
-            f"-v glyph={shlex.quote(INPUT_PROMPT_GLYPH)} -v ph={shlex.quote(self.PASTE_PLACEHOLDER_PREFIXES[0])} "
-            f"-v region={INPUT_REGION_LINES} "
-            f"-v msg={shlex.quote(message_words[:_SCREEN_PROBE_MESSAGE_CHARS])} {shlex.quote(_SCREEN_SUBMISSION_AWK)}"
-        )
-        return SubmissionEvidenceProbe(
-            name="screen-taken",
-            baseline_command=f"{read_screen} | cut -d' ' -f1",
-            poll_command=(
-                f'set -- $( {read_screen} ); [ -n "$base" ] && [ "${{2:-1}}" = 0 ] && [ "${{1:-0}}" -gt "$base" ] '
-                '&& echo "taken-$1"'
-            ),
-        )
-
-    def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
-        return build_unsubmitted_message_retry_gate(
-            message=message, paste_placeholder_prefixes=self.PASTE_PLACEHOLDER_PREFIXES
-        )
-
     def _build_submission_evidence_probes(
         self, message: str, policy: SubmissionConfirmationPolicy
     ) -> Sequence[SubmissionEvidenceProbe]:
-        """Build Claude's submission evidence.
+        """Build Claude's durable submission evidence.
 
         Content is verified against BOTH the native session JSONL and mngr's
         raw copy -- evidence in either confirms, so a dead transcript watcher
         or an unexpected config-dir layout cannot alone produce a false
-        delivery failure. For a normal message the native transcript is
-        checked first: Claude writes it as soon as it records the message, while
-        the raw copy lags behind it by the watcher's poll. A normal message is
-        also confirmed from Claude's screen (``screen-taken``), since Claude
-        takes a message off its input box before it records it, which waits for
-        its SessionStart hooks. Every artifact used
-        here (transcript logs, the ``claude_session_id`` and ``active``
-        markers) also exists on agents created by older mngr versions, so
-        probes work without reprovisioning.
+        delivery failure. Every artifact used here (transcript logs, the
+        ``claude_session_id`` and ``active`` markers) also exists on agents
+        created by older mngr versions, so probes work without reprovisioning.
         """
         raw_expression = self._RAW_TRANSCRIPT_PATH_EXPRESSION
         native_expression = self._build_native_transcript_path_expression()
         match policy:
             case SubmissionConfirmationPolicy.STRICT:
                 normalized_probe = build_normalized_message_probe(message)
-                screen_probe = self._build_screen_submission_probe(message)
-                screen_probes = [] if screen_probe is None else [screen_probe]
                 if len(normalized_probe) >= self._MIN_CONTENT_PROBE_LENGTH:
                     return [
+                        self._build_content_evidence_probe("content-raw-transcript", raw_expression, normalized_probe),
                         self._build_content_evidence_probe(
                             "content-native-transcript", native_expression, normalized_probe
                         ),
-                        self._build_content_evidence_probe("content-raw-transcript", raw_expression, normalized_probe),
-                        *screen_probes,
                     ]
                 return [
-                    self._build_any_accepted_record_probe("any-record-native-transcript", native_expression),
                     self._build_any_accepted_record_probe("any-record-raw-transcript", raw_expression),
-                    *screen_probes,
+                    self._build_any_accepted_record_probe("any-record-native-transcript", native_expression),
                 ]
             case SubmissionConfirmationPolicy.RELAXED:
                 # Slash commands are TUI-local: /clear and /compact surface as a
@@ -2676,7 +2604,7 @@ class ClaudeAgent(
         return None
 
     def _clear_preexisting_input_text_if_restored_command(
-        self, tmux_target: TmuxWindowTarget | str, leftover_text: str
+        self, tmux_target: TmuxWindowTarget, leftover_text: str
     ) -> bool:
         """Clear a ``/compact`` that Claude Code restored to the input box when its compaction was cancelled.
 
@@ -2686,20 +2614,16 @@ class ClaudeAgent(
         """
         if not is_restored_compact_command(leftover_text):
             return False
-        if self._clear_input_line(tmux_target):
+        for key in _INPUT_LINE_CLEAR_KEYS:
+            self._press_key(tmux_target, key)
+        if poll_until(lambda: self._is_input_row_empty(tmux_target), timeout=_RESTORED_COMMAND_CLEAR_POLL_SECONDS):
             return True
         logger.warning(
             "Agent {} still shows text in its input box after clearing a restored {!r}", self.name, leftover_text
         )
         return False
 
-    def _clear_input_line(self, tmux_target: TmuxWindowTarget | str) -> bool:
-        """Press the keys that empty a one-line input, then return whether the input row was seen empty."""
-        for key in _INPUT_LINE_CLEAR_KEYS:
-            self._press_key(tmux_target, key)
-        return poll_until(lambda: self._is_input_row_empty(tmux_target), timeout=_INPUT_LINE_CLEAR_POLL_SECONDS)
-
-    def _is_input_row_empty(self, tmux_target: TmuxWindowTarget | str) -> bool:
+    def _is_input_row_empty(self, tmux_target: TmuxWindowTarget) -> bool:
         """Whether the pane shows Claude Code's input row with nothing typed in it."""
         content = self._capture_input_box_pane_content(tmux_target)
         return (
@@ -2708,62 +2632,9 @@ class ClaudeAgent(
             and self._detect_preexisting_input_text(content) is None
         )
 
-    def _press_key(self, tmux_target: TmuxWindowTarget | str, key: str) -> None:
+    def _press_key(self, tmux_target: TmuxWindowTarget, key: str) -> None:
         """Send one named tmux key (e.g. ``C-u``) to the agent's pane."""
         send_key_keystroke(self, tmux_target, key)
-
-    def _read_unconfirmed_submission(
-        self, tmux_target: TmuxWindowTarget | str, message: str, pre_send_pane_content: str | None
-    ) -> UnconfirmedSubmissionReading:
-        """Read Claude Code's input box for a send its transcript never confirmed.
-
-        Claude takes a message off the input box at once, but records it only when it starts the turn,
-        which waits for its SessionStart hooks: an empty box with one more turn shown reading as the
-        message than before the send is a message Claude holds. The message still in the box was never
-        taken; it is cleared from there so that sending it again delivers it once. Anything else (a
-        dialog, someone's draft, no input box in a capture from before the send to tell a draft by, a
-        box that would not clear, no turn this send added) is left as it is.
-        """
-        content = self._capture_input_box_pane_content(tmux_target)
-        if content is None or not has_input_prompt_line(content):
-            return UnconfirmedSubmissionReading.UNKNOWN
-        leftover_text = self._detect_preexisting_input_text(content)
-        if leftover_text is None:
-            is_shown_submitted = self._is_message_shown_as_a_new_turn(content, pre_send_pane_content, message)
-            return UnconfirmedSubmissionReading.TAKEN if is_shown_submitted else UnconfirmedSubmissionReading.UNKNOWN
-        if (
-            pre_send_pane_content is None
-            or not has_input_prompt_line(pre_send_pane_content)
-            or not is_input_text_of_message(leftover_text, message, self.PASTE_PLACEHOLDER_PREFIXES)
-            or self._was_input_box_holding_a_draft(pre_send_pane_content)
-        ):
-            return UnconfirmedSubmissionReading.UNKNOWN
-        if self._clear_input_line(tmux_target):
-            return UnconfirmedSubmissionReading.NOT_TAKEN
-        logger.warning("Agent {} still shows its untaken message in the input box after clearing it", self.name)
-        return UnconfirmedSubmissionReading.UNKNOWN
-
-    def _was_input_box_holding_a_draft(self, pre_send_pane_content: str) -> bool:
-        """Whether the box held text before the send that the send did not clear, so the message was appended to it.
-
-        The box then holds that draft as well as the message, and a draft that is a paste
-        placeholder reads as the start of any message. A restored ``/compact`` is the one leftover
-        the send clears before typing.
-        """
-        pre_send_text = self._detect_preexisting_input_text(pre_send_pane_content)
-        return pre_send_text is not None and not is_restored_compact_command(pre_send_text)
-
-    def _is_message_shown_as_a_new_turn(
-        self, pane_content: str, pre_send_pane_content: str | None, message: str
-    ) -> bool:
-        """Whether the pane shows more past turns reading as ``message`` than the capture from before it was typed."""
-        if pre_send_pane_content is None:
-            return False
-        turns_before = count_message_turns_above_input_row(
-            pre_send_pane_content, message, self.PASTE_PLACEHOLDER_PREFIXES
-        )
-        turns_now = count_message_turns_above_input_row(pane_content, message, self.PASTE_PLACEHOLDER_PREFIXES)
-        return turns_before is not None and turns_now is not None and turns_now > turns_before
 
     def get_live_output_path(self) -> Path:
         """Return the path to this agent's response-streaming buffer file.
@@ -2779,7 +2650,7 @@ class ClaudeAgent(
         """Diff successive stream_buffer snapshots into incremental assistant-text deltas."""
         return SnapshotDeltaReader()
 
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget | str) -> str | None:
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
         """Check for (and optionally clear) blocking input states before sending a message.
 
         Everything that can hold the TUI's input goes through one loop: a dialog, and shell
@@ -2789,10 +2660,6 @@ class ClaudeAgent(
 
         The permission marker is checked first and separately: it is a hook-written file, not
         something visible in the pane, so no amount of pane reading would find it.
-
-        Returns the input-box capture on which nothing held the input, which shows the input
-        prompt the readiness check looks for, or None when the pane was only seen to be ready
-        through the unpainted-pane grace below.
         """
         if self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME):
             raise DialogDetectedError(
@@ -2800,16 +2667,18 @@ class ClaudeAgent(
                 "permission dialog",
                 "Claude is waiting for you to answer a permission request. Answer it in the agent's terminal.",
             )
-        return self._deal_with_blocking_input(tmux_target)
+        self._deal_with_blocking_input(tmux_target)
 
-    def _dialog_pane(self, tmux_target: TmuxWindowTarget | str) -> "_ClaudeDialogPane":
+    def _dialog_pane(self, tmux_target: TmuxWindowTarget) -> "_ClaudeDialogPane":
         """The pane surface ``mngr_claude.dialogs`` operates through, bound to this agent."""
-        return _ClaudeDialogPane(agent=self, resolved_target=self._send_target_arg(tmux_target))
+        return _ClaudeDialogPane(
+            agent=self, tmux_target=tmux_target, resolved_target=self._send_target_arg(tmux_target)
+        )
 
-    def _deal_with_blocking_input(self, tmux_target: TmuxWindowTarget | str) -> str | None:
-        """Clear whatever is holding the input, or raise the matching send error (see ``_preflight_send_message``)."""
+    def _deal_with_blocking_input(self, tmux_target: TmuxWindowTarget) -> None:
+        """Clear whatever is holding the input, or raise the matching send error."""
         try:
-            return deal_with_dialogs(self._dialog_pane(tmux_target))
+            deal_with_dialogs(self._dialog_pane(tmux_target))
         except DialogBlocked as e:
             if e.nickname == Unrecognized().get_nickname() and poll_until(
                 lambda: self._input_prompt_present(tmux_target),
@@ -2820,7 +2689,7 @@ class ClaudeAgent(
                 # here on the first look would fail sends that only needed a moment. `create`
                 # delivers the first message as soon as the session_started hook fires, which is
                 # when claude STARTS, not when its TUI has drawn.
-                return None
+                return
             raise DialogDetectedError(str(self.name), e.nickname, e.message) from e
 
     def _unpainted_pane_grace_seconds(self) -> float:
@@ -2839,7 +2708,7 @@ class ClaudeAgent(
         """
         return float(self.agent_config.post_submit_dialog_observe_seconds)
 
-    def _run_post_submit_dialog_check(self, tmux_target: TmuxWindowTarget | str) -> None:
+    def _run_post_submit_dialog_check(self, tmux_target: TmuxWindowTarget) -> None:
         """Leave a bare-``!`` shell-mode strand behind after a delivered message.
 
         Submitting a lone ``!`` runs nothing and stays in shell mode, hiding the ``❯``
@@ -2853,7 +2722,7 @@ class ClaudeAgent(
         """
         self._exit_empty_shell_mode(tmux_target)
 
-    def _press_enter(self, tmux_target: TmuxWindowTarget | str) -> None:
+    def _press_enter(self, tmux_target: TmuxWindowTarget) -> None:
         """Send a single Enter keystroke to the agent's pane (accepts a selector's highlighted default)."""
         send_enter_keystroke(self, tmux_target)
 
@@ -2867,7 +2736,7 @@ class ClaudeAgent(
             return SubmissionConfirmationPolicy.RELAXED
         return super()._determine_confirmation_policy(message)
 
-    def _exit_empty_shell_mode(self, tmux_target: TmuxWindowTarget | str) -> None:
+    def _exit_empty_shell_mode(self, tmux_target: TmuxWindowTarget) -> None:
         """Leave Claude's shell mode if a bare ``!`` submission stranded the agent on an empty line.
 
         Empty-only by design. Every message mngr delivers is submitted with Enter, so a
@@ -2903,12 +2772,12 @@ class ClaudeAgent(
         """
         return has_input_prompt_line
 
-    def _input_prompt_present(self, tmux_target: TmuxWindowTarget | str) -> bool:
+    def _input_prompt_present(self, tmux_target: TmuxWindowTarget) -> bool:
         """Whether the pane currently shows Claude Code's column-0 ``❯`` input prompt."""
         content = self._capture_pane_content(tmux_target)
         return content is not None and has_input_prompt_line(content)
 
-    def _press_backspace(self, tmux_target: TmuxWindowTarget | str) -> None:
+    def _press_backspace(self, tmux_target: TmuxWindowTarget) -> None:
         """Send a single Backspace keystroke to the agent's pane (leaves an empty shell mode)."""
         self._press_key(tmux_target, "BSpace")
 
@@ -3684,12 +3553,7 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     lifecycle makes -- so the reason and the state cannot disagree about one agent. The
     block is only consulted while ``active`` is present, since the classifier ignores it
     outside a turn.
-
-    Field generators run for every listed agent whatever its type, so an agent of
-    another type gets no field rather than a verdict read off markers it never writes.
     """
-    if not isinstance(agent, ClaudeAgent):
-        return None
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
     is_active = host.path_exists(agent_dir / "active")
     return classify_waiting_reason(is_active, is_active and agent.is_blocked_on_dialog())

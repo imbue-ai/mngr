@@ -110,18 +110,13 @@ second gateway URL or a different agent skill.
 6. **User approves.** The desktop client:
    1. Runs `latchkey services info <service>` to read `credentialStatus`,
       `authOptions`, and `setCredentialsExample` (the same call that
-      rendered the dialog's account picker and its credential form: shown
-      up front for a service with no browser sign-in, offered as an
-      alternative to the sign-in for one that has it).
+      rendered the dialog's account picker and, for a service with no
+      browser sign-in, its credential form).
    2. If credentials are not `valid` and the service advertises a
       `browser` auth option (or latchkey reports no `authOptions` at all,
       treated as the legacy fallback), runs `latchkey auth browser <service>`
       synchronously (transparently running the one-off `latchkey auth
-      browser-prepare <service>` step first when latchkey asks for it) --
-      unless the Approve carries credentials the user typed into the
-      dialog instead, which takes the manual path of step 6.3 (see
-      [Manual credential entry](#manual-credential-entry): a browser
-      service offers the form as an alternative to the sign-in).
+      browser-prepare <service>` step first when latchkey asks for it).
       Two kinds of service get a preparation of Imbue Studio's own on the way:
       a `google-*` service is signed in against the OAuth client Imbue Studio
       provides (and only that one: it is never self-set-up through
@@ -141,11 +136,8 @@ second gateway URL or a different agent skill.
       recorded as a denial.
    3. If credentials are not `valid` and the service does not advertise a
       `browser` auth option (e.g. AWS or Coolify, where `authOptions =
-      ["set"]`) -- or the Approve carries credentials typed into the
-      dialog's form -- Imbue Studio stores those values itself with the
-      service's `latchkey auth set` command, re-reads the credential status
-      and continues the grant. Credentials that do not check out leave the
-      request **pending** and re-show the form with the reason (see
+      ["set"]`), the grant is **refused for now** and the request stays
+      pending while the dialog collects the credentials (see
       [Manual credential entry](#manual-credential-entry) below). Imbue Studio
       never asks the user to open a terminal.
    4. Atomically rewrites the agent's `latchkey_permissions.json` so the gateway
@@ -202,38 +194,14 @@ Imbue Studio offers it **once**, at the moment it is worth the most: the
 first Approve that is about to open a browser for a sign-in (nothing signed
 in to the service yet, the account picker on "Add account", or a custom
 service with a login URL). Before submitting the approval, the dialog asks
-"Import your Chrome cookies?", says the import is optional, and gives two
-answers, of which going on without the import is the prominent one -- the
-import copies every cookie Chrome holds, which is more than most sign-ins
-need, so it is for a user who wants it rather than the default:
+"Want to skip logging in?" with two answers:
 
-* **Skip import** (the primary button) goes straight on to
-  the sign-in. Clicking the backdrop instead approves nothing, leaving the
-  Approve button for a click that means it.
 * **Import from Chrome** runs the import, showing progress, and then goes on
   to the sign-in, whose browser window is now already logged in. A failed
-  import shows why and offers "Continue to sign in" (or a retry); nothing
-  has been approved yet either way.
-
-On macOS 27 and later the OS lets no application without **Full Disk
-Access** read Chrome's profile, so the import is refused outright (an
-`EPERM` with no prompt) until the user grants that permission by hand; no
-API or entitlement can ask for it. Latchkey (>= 3.19) reports this as a
-coded failure (`CHROME_PROFILE_NOT_READABLE`, a JSON object on stderr),
-which the desktop client passes through as `error_code` on the import's
-result. Latchkey gives the same code to any OS that refuses the read (a
-plain file-permission problem gets it on Linux), so the desktop client,
-which runs where latchkey ran, also says whether Full Disk Access is the
-fix (`is_full_disk_access_needed`: that code, on macOS). Both the dialog
-and the Settings panel then show what to do instead of a bare error. On a
-Mac: open System Settings > Privacy & Security > Full Disk Access (an "Open
-System Settings" button opens that list directly in the desktop app), turn
-on Imbue Studio, then quit and reopen the app and run the import again from
-Settings. Elsewhere: make Chrome's profile folder readable by the account
-running the app (latchkey's sentence, which names the folder, is shown
-underneath), then run the import again from Settings. The dialog leaves out
-"Try again" in both cases, since nothing changes until the permission has
-been granted.
+  import shows latchkey's reason and offers "Continue to sign in" (or a
+  retry); nothing has been approved yet either way.
+* **Not now** goes straight on to the sign-in. Clicking the backdrop instead
+  approves nothing, leaving the Approve button for a click that means it.
 
 Shown is what counts: the desktop client records the offer as made
 (`is_browser_import_offered` in `~/.minds/config.toml`) as soon as the
@@ -434,32 +402,6 @@ Details worth knowing:
   account to a working one hides the form (and re-enables Approve) without
   a round trip. Approve stays disabled while any input is empty.
 
-* A service that *can* sign in through a browser gets the same form, as an
-  alternative, when latchkey reports `set` beside `browser` for it and it
-  advertises a usable `setCredentialsExample` (GitHub's is a bearer token,
-  GitLab's a `PRIVATE-TOKEN` header); the detail payload then carries the
-  form for it too, next to `is_browser_auth_supported`. A service whose
-  `services info` probe does not answer is assumed to sign in through a
-  browser and is offered no form, since nothing says it takes set
-  credentials. The sign-in stays the default: the dialog keeps the form out
-  of the way and offers a footnote under the Approve and Deny buttons,
-  right-aligned with them behind a hairline ("Already have a token? Paste
-  it instead of signing in"), while the selected account needs credentials
-  at all and no approval is running; taking it shows the form (its
-  instruction minus the "does not support browser sign-in" opening a
-  service with no sign-in gets), drops the "Sign in &" from Approve, and
-  puts the way back ("Sign in through the browser instead") on the form
-  itself. The copy names what the form asks for -- its inputs, as latchkey's
-  placeholders label them: "a token" for every browser service in the
-  catalog, "the access key id and secret access key" were a service to ask
-  for several -- and never says "credentials", which would read as a
-  username and password the dialog does not ask for. An Approve that carries typed
-  values takes the manual path whatever the service could have done, so the
-  desktop never opens a browser the user chose not to. Each request starts
-  on the sign-in again. A browser service whose example yields no inputs
-  (Slack's names an example token rather than a `<placeholder>`) is simply
-  offered no alternative, rather than an error it has no need of.
-
 * The account the credentials are stored under is the one the dialog's
   **Account** dropdown selects. The dialog has two shapes, not three:
   with nothing signed in there is no dropdown at all and Approve reads
@@ -475,9 +417,7 @@ Details worth knowing:
   back; nothing is signed in until Approve. A service with no accounts yet resolves to latchkey's
   unnamed default account; "Add account" on a service that already has
   one also asks for an **account name** (`is_account_name_needed`), since
-  a manual connection cannot discover it the way a browser sign-in does;
-  the flag is set however the service connects, and the dialog reads it
-  only while its credential form is up.
+  a manual connection cannot discover it the way a browser sign-in does.
 
 * Two different things can go wrong, and they read differently:
 
@@ -539,10 +479,7 @@ therefore knows the user's desktops, and lets a workspace address them:
   carries the `X-Latchkey-Multiple-Desktops-Matched: true` response header.
   Without the header the request goes to the most recently announced
   desktop, which is what every workspace built before the header did, so
-  nothing has to change at once. The exception is `GET /permissions/self`:
-  without the header the workspace's machine answers it itself, from the
-  policy it enforces, so an agent can read its permissions while no desktop
-  is reachable. A desktop that has gone to sleep is refused
+  nothing has to change at once. A desktop that has gone to sleep is refused
   quickly rather than waited on: the machine's sshd drops its tunnel within 90
   seconds of it going quiet.
 
@@ -716,9 +653,8 @@ changes rather than dropped. A new `/api/v1/agents/<id>/*` route
 therefore needs no permissions work: the agent notifications route
 (`POST .../agents/<id>/notifications`) and its read route
 (`POST .../agents/<id>/notifications/read`, which a workspace's chat app
-calls as the chat's agent when the chat becomes watched) and the
-folder-sync state read (`GET .../agents/<id>/folder-syncs`, which any agent
-of a workspace may call under its own id) are all covered by the same rule.
+calls as the chat's agent when the chat becomes watched) are both covered
+by the same rule.
 
 The bug-report route (`POST .../agents/<...>/report`) is the one
 exception: it sits in a rule *ahead* of the unauthorized gate, so it

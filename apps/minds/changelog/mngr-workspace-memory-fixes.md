@@ -1,0 +1,1 @@
+The `earlyoom-gvisor-shed-order` rollout page now lists the memory-pressure block among the reasons `minds-admin hotpatch-earlyoom --apply` leaves a workspace alone: a leased workspace whose available memory is within 5 points of earlyoom's `-m` kill line is `blocked` unless `--force` is passed.

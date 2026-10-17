@@ -1,14 +1,12 @@
-// One signed-in account's card on the Accounts page: identity row, the log-out
-// action, and the asynchronously-loaded plan/usage section. Port of the
-// account loop in templates/pages/Accounts.jinja + AccountPlanSection.jinja +
-// accounts.js. Which account a window shows is the titlebar switcher's
-// business, so the card has no default control.
+// One signed-in account's card on the Accounts page: identity row, actions,
+// and the asynchronously-loaded plan/usage section. Port of the account loop
+// in templates/pages/Accounts.jinja + AccountPlanSection.jinja + accounts.js.
 
 import m from "mithril";
-import { getAppContext } from "../../../app-context";
 import type { UiAccountEntry } from "../../../channel/messages";
 import type { AccountsDetailModel } from "../../../models/accountsDetail";
 import { Button } from "../../components/Button";
+import { webLogin } from "../../../models/webLogin";
 import { Card } from "../../components/Card";
 import { Link } from "../../components/Link";
 import { Notice } from "../../components/Notice";
@@ -16,6 +14,7 @@ import { routeLinkAttrs } from "../../components/route-link";
 import { Select } from "../../components/FormControls";
 import { Spinner } from "../../components/Spinner";
 import { renderSwitch, renderSwitchWord } from "../../components/Switch";
+import { StatusBadge } from "../../components/StatusBadge";
 
 interface AccountCardAttrs {
   model: AccountsDetailModel;
@@ -38,10 +37,7 @@ const PLAN_DESCRIPTION_BY_NAME: Record<string, string> = {
 const PLAN_LABEL_BY_NAME: Record<string, string> = { free: "Limited" };
 
 function planLabel(planName: string): string {
-  return (
-    PLAN_LABEL_BY_NAME[planName] ??
-    planName.charAt(0).toUpperCase() + planName.slice(1)
-  );
+  return PLAN_LABEL_BY_NAME[planName] ?? planName.charAt(0).toUpperCase() + planName.slice(1);
 }
 
 // Switching TO explorer is the analytics consent, so it needs an explicit
@@ -293,28 +289,9 @@ function planSection(
             Link,
             {
               extra: "type-helper",
-              ...routeLinkAttrs(
-                getAppContext().shell.hubRoute("/workspaces/destroyed"),
-              ),
+              ...routeLinkAttrs("/workspaces/destroyed"),
             },
             "Review destroyed workspace backups →",
-          ),
-        )
-      : null,
-    view.is_sharing_workspaces
-      ? m(
-          "div",
-          { class: "mt-2" },
-          m(
-            Link,
-            {
-              id: "account-shared-workspaces-link",
-              extra: "type-helper",
-              ...routeLinkAttrs(
-                getAppContext().shell.hubRoute("/workspaces/shared"),
-              ),
-            },
-            "Review shared workspaces →",
           ),
         )
       : null,
@@ -382,14 +359,58 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
       return m(Card, [
         m("div", { class: "flex items-center justify-between" }, [
           m("div", [
-            m("div", { class: "font-semibold" }, account.email),
+            m("div", { class: "font-semibold" }, [
+              account.email,
+              !account.is_enabled
+                ? m(
+                    StatusBadge,
+                    {
+                      variant: "warn",
+                      size: "xs",
+                      extra: "ml-2",
+                      title:
+                        "Session was rejected by the server. Sign in again to re-enable.",
+                    },
+                    "Signed out",
+                  )
+                : null,
+            ]),
             m(
               "div",
               { class: "type-helper text-tertiary" },
-              `${account.workspace_count} ${workspaceNoun}`,
+              `${account.workspace_count} ${workspaceNoun}${account.is_default ? " · Default" : ""}`,
             ),
           ]),
           m("div", { class: "flex gap-2" }, [
+            !account.is_enabled
+              ? m(
+                  Button,
+                  {
+                    variant: "primary",
+                    onclick: () =>
+                      void webLogin.start("", { isClosedOnSignIn: true }),
+                  },
+                  "Sign in again",
+                )
+              : null,
+            account.is_default
+              ? m(
+                  "span",
+                  {
+                    class:
+                      "inline-flex items-center justify-center px-3 py-2 rounded-md type-label bg-fill-subtle " +
+                      "text-primary border border-default opacity-60 cursor-default",
+                  },
+                  "Default",
+                )
+              : m(
+                  Button,
+                  {
+                    variant: "secondary",
+                    onclick: () => void model.setDefault(account.user_id),
+                  },
+                  "Set default",
+                ),
             m(
               Button,
               {

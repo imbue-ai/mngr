@@ -13,8 +13,7 @@ Archive agents (set the 'archived_at' label).
 
 Sets an 'archived_at' label with the current UTC timestamp on each
 targeted agent. By default, only non-running agents are archived; running
-agents are skipped with a warning. An agent whose state could not be read
-(e.g. on a host too loaded to answer in time) counts as running.
+agents are skipped with a warning.
 
 Use --force to stop running agents before archiving them.
 

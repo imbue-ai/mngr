@@ -1,0 +1,3 @@
+`new-fleet-base` is the integration base for the in-progress slice-fleet generation-2 program (specs/slice-fleet-gen2 and specs/slice-fleet): the squash of the formerly stacked PRs #571, #573, #574, #581, #609, and #614. It is deployed only to dev canaries and must not be deployed or merged as-is; follow-up PRs stack on it and the whole program lands on `main` as one change.
+
+For this project it carries only the now-public pinned docker / containerd apt version cores (`PINNED_DOCKER_APT_VERSION_CORE`, `PINNED_CONTAINERD_APT_VERSION_CORE`), which the gen-2 box prep's image customize combines with the guest's own os-release to pin the identical engine on trixie guests. See this directory's `mngr-slice-fleet-gen2-phase-3` entry.

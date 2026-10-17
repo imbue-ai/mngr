@@ -115,15 +115,6 @@ class ImbueCloudAccountSuspendedError(ImbueCloudError):
     """
 
 
-class ImbueCloudAccountDeletedError(ImbueCloudError):
-    """Raised when the connector refuses an action because the account is deleted.
-
-    Carries the connector's user-facing message from the structured 403
-    (``code: account_deleted``), which says the account has been deleted and
-    includes the support contact for the case where the holder did not do it.
-    """
-
-
 class ImbueCloudAccountError(ImbueCloudError):
     """Raised when an account (plan / entitlements / usage) operation fails."""
 
@@ -134,20 +125,6 @@ class ImbueCloudUserNotFoundError(ImbueCloudAccountError):
 
 class ImbueCloudRateLimitedError(ImbueCloudAccountError):
     """The connector refused a lookup because the caller's rolling rate limit is exhausted (HTTP 429)."""
-
-
-class ImbueCloudWorkspacesPresentError(ImbueCloudAccountError):
-    """The connector refused to delete or finalize an account that still holds Imbue Cloud hosts.
-
-    Carries the structured detail from the connector's 403 (``code:
-    workspaces_present``): ``workspace_count`` is how many hosts, running or
-    stopped, the account still holds. Typed so an operator tool can report
-    the refusal as a skip instead of reading the 403 as a bad admin key.
-    """
-
-    def __init__(self, message: str, workspace_count: int) -> None:
-        super().__init__(message)
-        self.workspace_count = workspace_count
 
 
 class ImbueCloudCleanupGrantBudgetError(ImbueCloudError):
@@ -195,16 +172,15 @@ class ImbueCloudBucketLimitError(ImbueCloudBucketError):
 
 
 class ImbueCloudSyncError(ImbueCloudError):
-    """Raised when a workspace-record, key-bundle, or account-document sync operation fails."""
+    """Raised when a workspace-record / key-bundle sync operation fails."""
 
 
 class ImbueCloudSyncConflictError(ImbueCloudSyncError):
-    """Raised on a 409 from a record or account-document push (revision CAS or active-agent conflict).
+    """Raised on a 409 from a record push (revision CAS or active-agent conflict).
 
     ``stored_record`` carries the server's current row (as a plain dict) when
     the conflict was a revision CAS failure, so the caller can merge and retry;
-    it is None for an active-agent uniqueness conflict and for a document push
-    that tried to insert a new row at a revision other than 1.
+    it is None for an active-agent uniqueness conflict.
     """
 
     def __init__(self, message: str, stored_record: dict[str, object] | None) -> None:
@@ -312,13 +288,12 @@ class ImbueCloudClientTooOldError(ImbueCloudError):
 
 
 class ImbueCloudRecordFormatTooNewError(ImbueCloudSyncError):
-    """Raised when a push is refused because the stored row's format is newer than the client's.
+    """Raised when a record push is refused because the stored row's record_format is newer.
 
-    The connector's structured 409 (``code: record_format_too_new`` for a
-    synced record, ``code: document_format_too_new`` for an account
-    document): the stored row's semantics postdate this client, so modifying
-    it could corrupt meaning the client cannot see. The row stays readable;
-    the remedy is updating the app.
+    The connector's structured 409 (``code: record_format_too_new``): the
+    stored record's semantics postdate this client, so modifying it could
+    corrupt meaning the client cannot see. The record stays readable; the
+    remedy is updating the app.
     """
 
 
@@ -387,18 +362,6 @@ def workspace_hold_message_in(text: str) -> str | None:
         if message in text:
             return message
     return None
-
-
-class ImbueCloudDocumentLimitError(ImbueCloudSyncError):
-    """Raised when the connector refuses a new account document at the per-kind cap (409 ``document_limit_exceeded``)."""
-
-    def __init__(self, message: str, limit: int | None) -> None:
-        super().__init__(message)
-        self.limit = limit
-
-
-class ImbueCloudDocumentNotFoundError(ImbueCloudSyncError):
-    """Raised when deleting an account document the connector holds no row for (404 ``document_not_found``)."""
 
 
 class UnrecognizedWorkspaceStatusError(ImbueCloudError):

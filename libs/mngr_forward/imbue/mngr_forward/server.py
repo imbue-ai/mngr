@@ -41,7 +41,7 @@ from typing import Final
 from urllib.parse import quote
 from urllib.parse import urlsplit
 
-import httpx2
+import httpx
 import paramiko
 import websockets
 import websockets.asyncio.client
@@ -50,7 +50,6 @@ from fastapi import Request
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
 from fastapi.responses import HTMLResponse
-from fastapi.responses import PlainTextResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.websockets import WebSocketState
@@ -109,7 +108,7 @@ _STALL_NOTICE_SECONDS: Final[float] = 30.0
 # verdict needs.
 _BACKEND_ANSWERED_ENVELOPE_INTERVAL_SECONDS: Final[float] = 5.0
 
-# Backstop for a backend that goes silent. httpx2 applies this per read, not to
+# Backstop for a backend that goes silent. httpx applies this per read, not to
 # the request as a whole, so it bounds the gap between bytes: a backend that
 # answers headers and then keeps trickling never trips it, and is bounded only
 # by its client staying connected. That is the first line of defence anyway --
@@ -147,7 +146,7 @@ _SSE_READ_TIMEOUT_SECONDS: Final[float] = 30.0
 _SSE_CLIENT_WRITE_TIMEOUT_SECONDS: Final[float] = 30.0
 
 # Timeout for the non-SSE forwarding path: short to connect, long to respond.
-_PROXY_TIMEOUT: Final[httpx2.Timeout] = httpx2.Timeout(
+_PROXY_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(
     connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
     pool=_PROXY_CONNECT_TIMEOUT_SECONDS,
     read=_PROXY_BACKSTOP_TIMEOUT_SECONDS,
@@ -156,14 +155,14 @@ _PROXY_TIMEOUT: Final[httpx2.Timeout] = httpx2.Timeout(
 
 # Timeout for the SSE forwarding path: the same short connect budget, and a read
 # budget just as short.
-_SSE_TIMEOUT: Final[httpx2.Timeout] = httpx2.Timeout(
+_SSE_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(
     connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
     pool=_PROXY_CONNECT_TIMEOUT_SECONDS,
     read=_SSE_READ_TIMEOUT_SECONDS,
     write=_SSE_READ_TIMEOUT_SECONDS,
 )
 
-# Explicit pool ceilings for the two proxying paths. Both exist because httpx2's
+# Explicit pool ceilings for the two proxying paths. Both exist because httpx's
 # default (100 connections) exactly matches hypercorn's h2_max_concurrent_streams,
 # so 100 wedged streaming responses used to dead-end every proxied request with a
 # pool timeout that never dialed the backend. What both values buy is distance
@@ -177,7 +176,7 @@ _SSE_TIMEOUT: Final[httpx2.Timeout] = httpx2.Timeout(
 #
 # The direct (loopback) client gets the higher of the two: a pooled slot there
 # costs one loopback socket and nothing else.
-_PROXY_POOL_LIMITS: Final[httpx2.Limits] = httpx2.Limits(max_connections=1000, max_keepalive_connections=20)
+_PROXY_POOL_LIMITS: Final[httpx.Limits] = httpx.Limits(max_connections=1000, max_keepalive_connections=20)
 
 # The per-tunnel transports get a lower ceiling, because a pooled slot there
 # costs more than a descriptor: ``ssh_tunnel._tunnel_accept_loop`` hands every
@@ -186,7 +185,7 @@ _PROXY_POOL_LIMITS: Final[httpx2.Limits] = httpx2.Limits(max_connections=1000, m
 # so unlike the single shared ceiling above, the process-wide worst case scales
 # with the number of remote agents -- which is the reason to keep the per-tunnel
 # number well below the shared one.
-_TUNNEL_POOL_LIMITS: Final[httpx2.Limits] = httpx2.Limits(max_connections=200, max_keepalive_connections=20)
+_TUNNEL_POOL_LIMITS: Final[httpx.Limits] = httpx.Limits(max_connections=200, max_keepalive_connections=20)
 
 _SUBDOMAIN_AUTH_PATH: Final[str] = "/_subdomain_auth"
 
@@ -383,7 +382,7 @@ def _unauthenticated_subdomain_response(
     """
     accept = request.headers.get("accept", "")
     if "text/html" not in accept:
-        return PlainTextResponse("Not authenticated", status_code=403)
+        return Response(status_code=403, content="Not authenticated")
     scheme = "https" if use_http2 else "http"
     next_url = request.url.path
     if request.url.query:
@@ -497,10 +496,10 @@ def _get_tunnel_http_client(
     tunnel_manager: SSHTunnelManager,
     backend_url: str,
     ssh_info: RemoteSSHInfo | None,
-    ssh_http_clients: dict[str, httpx2.AsyncClient],
+    ssh_http_clients: dict[str, httpx.AsyncClient],
     ssh_http_clients_lock: threading.Lock,
-) -> httpx2.AsyncClient | None:
-    """Return a cached httpx2 client tied to the per-tunnel Unix socket, or None for direct.
+) -> httpx.AsyncClient | None:
+    """Return a cached httpx client tied to the per-tunnel Unix socket, or None for direct.
 
     The client is cached on ``ssh_http_clients`` (owned by the FastAPI app's
     lifespan) keyed by the tunnel socket path, so its connection pool is reused
@@ -522,8 +521,8 @@ def _get_tunnel_http_client(
         cached = ssh_http_clients.get(socket_path_str)
         if cached is not None:
             return cached
-        transport = httpx2.AsyncHTTPTransport(uds=socket_path_str, limits=_TUNNEL_POOL_LIMITS)
-        client = httpx2.AsyncClient(
+        transport = httpx.AsyncHTTPTransport(uds=socket_path_str, limits=_TUNNEL_POOL_LIMITS)
+        client = httpx.AsyncClient(
             transport=transport,
             follow_redirects=False,
             timeout=_PROXY_TIMEOUT,
@@ -612,7 +611,7 @@ def _connect_failure_reason(was_backend_refused: Callable[[], bool]) -> SystemIn
 class _BackendBodyError(MngrForwardError):
     """Raised when a backend response failed *after* its headers had arrived.
 
-    Exists because httpx2 raises the same exceptions either side of that line,
+    Exists because httpx raises the same exceptions either side of that line,
     while the two mean opposite things to a consumer: before the headers the
     backend never answered at all (a connect-time failure the recovery UI acts
     on), after them it answered and then dropped the body (``SSE_EOF``). The
@@ -622,8 +621,8 @@ class _BackendBodyError(MngrForwardError):
 
 
 async def _send_and_read_backend_response(
-    http_client: httpx2.AsyncClient, backend_request: httpx2.Request
-) -> httpx2.Response:
+    http_client: httpx.AsyncClient, backend_request: httpx.Request
+) -> httpx.Response:
     """Send a buffered request, returning the response with its body read.
 
     Streams rather than using ``request()`` so the headers land before the body
@@ -634,7 +633,7 @@ async def _send_and_read_backend_response(
 
     A timeout is wrapped alongside the transport errors, and has to be: a body
     that stalls and a backend that never sent headers both raise
-    ``httpx2.ReadTimeout``, so the phase is the only thing separating them and
+    ``httpx.ReadTimeout``, so the phase is the only thing separating them and
     this is the last point that still knows it. Left unwrapped it would reach
     the caller's timeout branch and be reported as an unreachable backend,
     against a backend that demonstrably answered.
@@ -647,17 +646,17 @@ async def _send_and_read_backend_response(
     response = await http_client.send(backend_request, stream=True)
     try:
         await response.aread()
-    except (httpx2.ReadError, httpx2.RemoteProtocolError, httpx2.TimeoutException) as e:
+    except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
         raise _BackendBodyError(_describe_backend_failure_cause(e)) from e
     finally:
-        # httpx2 closes the response itself when ``aread`` ends, read or failed,
-        # so this is normally a no-op; it keeps the pool slot's release from
-        # resting on that library detail. Guarded so an error raised here cannot
-        # replace the _BackendBodyError above and be reported as a backend that
-        # never answered.
+        # A read that completed has already closed the response and released the
+        # connection; httpx only skips the close on a *failed* read, so this is
+        # the real close of a connection that has just broken. Guarded so an
+        # error raised here cannot replace the _BackendBodyError above and be
+        # reported as a backend that never answered.
         try:
             await response.aclose()
-        except (httpx2.HTTPError, OSError) as close_error:
+        except (httpx.HTTPError, OSError) as close_error:
             logger.trace("Error closing the backend response: {}", close_error)
     return response
 
@@ -832,7 +831,7 @@ def _request_headers_for(reader: RequestHeadersFileReader | None, agent_id: Agen
 async def _forward_workspace_http(
     request: Request,
     backend_url: str,
-    http_client: httpx2.AsyncClient,
+    http_client: httpx.AsyncClient,
     agent_id: AgentId,
     envelope_writer: EnvelopeWriter,
     stall_notice_seconds: float,
@@ -910,9 +909,9 @@ async def _forward_workspace_http(
                 # abandon a request whose client is in fact still waiting.
                 disconnect_task.result()
                 logger.debug("Client disconnected before the backend stream for {} opened", agent_id)
-                return PlainTextResponse("Client disconnected", status_code=499)
+                return Response(status_code=499, content="Client disconnected")
             backend_response = handoff_task.result()
-        except (httpx2.ConnectError, httpx2.RemoteProtocolError, httpx2.ReadError) as e:
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
             # All three mean the same thing here, because ``send(stream=True)``
             # returns as soon as the response headers are in: the backend never
             # answered. Typical when the system interface died between the SSH
@@ -924,7 +923,7 @@ async def _forward_workspace_http(
             logger.debug("Failed to reach the backend for {} at {}: {}", agent_id, backend_url, e)
             _emit_backend_failure(envelope_writer, agent_id, _connect_failure_reason(was_backend_refused), None, e)
             return _service_unavailable_response(request)
-        except httpx2.PoolTimeout as e:
+        except httpx.PoolTimeout as e:
             # PoolTimeout fires while waiting to check out a pooled connection,
             # before the backend is ever dialed: the proxy's own pool is
             # exhausted (e.g. by leaked streaming responses), and the backend's
@@ -935,8 +934,8 @@ async def _forward_workspace_http(
             _emit_backend_failure(
                 envelope_writer, agent_id, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, None, e
             )
-            return PlainTextResponse("Proxy connection pool exhausted", status_code=504)
-        except httpx2.TimeoutException as e:
+            return Response(status_code=504, content="Proxy connection pool exhausted")
+        except httpx.TimeoutException as e:
             # A wedged-but-listening backend produces a TimeoutException
             # rather than ConnectError. Surface this as CONNECT_ERROR so a
             # consumer still treats the agent as failing, matching the
@@ -945,7 +944,7 @@ async def _forward_workspace_http(
             _emit_backend_failure(
                 envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, e
             )
-            return PlainTextResponse("Backend stream timed out", status_code=504)
+            return Response(status_code=504, content="Backend stream timed out")
         finally:
             # Cancelling the loser is what releases its resources; a no-op on
             # whichever task already finished, so the success path leaves
@@ -972,7 +971,7 @@ async def _forward_workspace_http(
             finally:
                 await backend_response.aclose()
             logger.debug("Client disconnected as the backend stream for {} opened", agent_id)
-            return PlainTextResponse("Client disconnected", status_code=499)
+            return Response(status_code=499, content="Client disconnected")
 
         if is_shell_target and 200 <= backend_response.status_code < 300:
             _emit_backend_answered(envelope_writer, answered_envelope_limiter, agent_id, backend_response.status_code)
@@ -983,7 +982,7 @@ async def _forward_workspace_http(
             try:
                 async for chunk in backend_response.aiter_bytes():
                     yield chunk
-            except (httpx2.ReadError, httpx2.RemoteProtocolError, httpx2.TimeoutException) as e:
+            except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
                 logger.warning("Backend SSE stream failed for {}: {}", request.url.path, e)
                 _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None, e)
 
@@ -1033,9 +1032,9 @@ async def _forward_workspace_http(
             # it exists only to end the ASGI exchange. No envelope either: a
             # client that gave up is evidence about the client, not the backend.
             logger.debug("Client disconnected before the backend for {} answered at {}", agent_id, backend_url)
-            return PlainTextResponse("Client disconnected", status_code=499)
+            return Response(status_code=499, content="Client disconnected")
         backend_response = backend_task.result()
-    except (httpx2.ConnectError, httpx2.RemoteProtocolError, httpx2.ReadError) as e:
+    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
         # System interface may not yet be listening, or it may have closed the
         # connection before sending headers (typical during startup). Surface
         # a 503 (and the failure envelope below) so a consumer can react (e.g.
@@ -1060,14 +1059,14 @@ async def _forward_workspace_http(
         # starting does not produce this.
         logger.warning("Lost the backend connection for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None, e)
-        return PlainTextResponse("Backend connection lost", status_code=502)
-    except httpx2.PoolTimeout as e:
+        return Response(status_code=502, content="Backend connection lost")
+    except httpx.PoolTimeout as e:
         # Same distinction as the SSE branch above: the proxy's own pool is
         # exhausted and the backend was never dialed.
         logger.warning("Exhausted the proxy connection pool for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, None, e)
-        return PlainTextResponse("Proxy connection pool exhausted", status_code=504)
-    except httpx2.TimeoutException as e:
+        return Response(status_code=504, content="Proxy connection pool exhausted")
+    except httpx.TimeoutException as e:
         # Either the dial timed out, or the backstop expired on a backend that
         # never answered at all. Both are genuine failures (the stall notice
         # already covers merely-slow), so surface CONNECT_ERROR.
@@ -1076,7 +1075,7 @@ async def _forward_workspace_http(
         # accepted it and then stayed silent is a different condition.
         logger.warning("Timed out reaching the backend for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, e)
-        return PlainTextResponse("Backend timed out", status_code=504)
+        return Response(status_code=504, content="Backend timed out")
     finally:
         stall_notice.cancel()
         # Cancelling the loser is what actually releases the backend
@@ -1125,14 +1124,14 @@ _POOL_TIMEOUT_DESCRIPTION: Final[str] = (
 def _describe_backend_failure_cause(exc: BaseException) -> str:
     """Describe the exception behind a backend failure, for a consumer to show or log.
 
-    Its message, except that several httpx2 exceptions do not carry one: both
+    Its message, except that several httpx exceptions do not carry one: both
     ``ReadError`` and every ``TimeoutException`` stringify empty, which is
     exactly the RST and the stalled read this plugin classifies most carefully.
     Reporting those as an empty string leaves a consumer with the bare category
     name again, so the class name stands in -- the only thing a message-less
     exception still says about itself.
     """
-    if isinstance(exc, httpx2.PoolTimeout):
+    if isinstance(exc, httpx.PoolTimeout):
         return _POOL_TIMEOUT_DESCRIPTION
     return str(exc) or type(exc).__name__
 
@@ -1243,7 +1242,7 @@ def _service_unavailable_response(request: Request) -> Response:
     accepts_html = "text/html" in request.headers.get("accept", "")
     if accepts_html:
         return HTMLResponse(content=_SERVICE_UNAVAILABLE_HTML, status_code=503)
-    return PlainTextResponse("Backend not yet available", status_code=503)
+    return Response(status_code=503, content="Backend not yet available")
 
 
 def _sanitize_next_url(value: str) -> str:
@@ -1281,7 +1280,7 @@ def _handle_subdomain_auth_bridge(
     if not verify_subdomain_auth_token(
         token=token, signing_key=signing_key, origin_coordinate=str(host_info.coordinate)
     ):
-        return PlainTextResponse("Invalid or expired subdomain auth token", status_code=403)
+        return Response(status_code=403, content="Invalid or expired subdomain auth token")
     cookie_value = create_session_cookie(signing_key=signing_key)
     response = Response(status_code=302, headers={"Location": next_url})
     _set_forward_session_cookie(
@@ -1332,8 +1331,8 @@ async def _handle_workspace_forward_http(
     auth_store: AuthStoreInterface,
     resolver: ForwardResolver,
     tunnel_manager: SSHTunnelManager,
-    http_client: httpx2.AsyncClient,
-    ssh_http_clients: dict[str, httpx2.AsyncClient],
+    http_client: httpx.AsyncClient,
+    ssh_http_clients: dict[str, httpx.AsyncClient],
     ssh_http_clients_lock: threading.Lock,
     preauth_cookie_value: str | None,
     listen_port: int,
@@ -1382,7 +1381,7 @@ async def _handle_workspace_forward_http(
                 next_path = f"{next_path}?{request.url.query}"
             location = f"{scheme}://{label_prefix}{agent_id}.localhost:{listen_port}{next_path}"
             return Response(status_code=301, headers={"Location": location})
-        return PlainTextResponse("This origin moved to its agent-keyed URL; reload.", status_code=404)
+        return Response(status_code=404, content="This origin moved to its agent-keyed URL; reload.")
 
     # CLEANUP: drop this redirect (with ``_parse_legacy_service_path`` and
     # ``ForwardResolver.is_shell_target``) once no supported workspace predates
@@ -1761,7 +1760,7 @@ def _handle_browser_bridge(
     # Compare bytes: compare_digest raises TypeError on non-ASCII str, and the
     # token comes straight from the query string.
     if not token or not secrets.compare_digest(token.encode("utf-8"), browser_bridge_token.encode("utf-8")):
-        return PlainTextResponse("Invalid browser bridge token", status_code=403)
+        return Response(status_code=403, content="Invalid browser bridge token")
     next_url = _sanitize_next_url(request.query_params.get("next", "/"))
     signing_key = auth_store.get_signing_key()
     cookie_value = create_session_cookie(signing_key=signing_key)
@@ -1874,10 +1873,10 @@ async def _managed_lifespan(
     # or unreadable file raises here, and a missing one is minted once (the key is
     # never silently re-minted afterward).
     inner_app.state.auth_store.get_signing_key()
-    inner_app.state.http_client = httpx2.AsyncClient(
+    inner_app.state.http_client = httpx.AsyncClient(
         follow_redirects=False, timeout=_PROXY_TIMEOUT, limits=_PROXY_POOL_LIMITS
     )
-    # Per-tunnel httpx2 clients are cached here so they outlive a single request
+    # Per-tunnel httpx clients are cached here so they outlive a single request
     # and their connection pools are reused. Lifespan teardown aclose's them
     # all; without this every request to a remote agent would leak a fresh
     # AsyncClient + AsyncHTTPTransport. The lock guards the cache's
@@ -1899,7 +1898,7 @@ async def _managed_lifespan(
             try:
                 await ssh_client.aclose()
             except (OSError, RuntimeError) as e:
-                logger.trace("Error closing per-tunnel httpx2 client: {}", e)
+                logger.trace("Error closing per-tunnel httpx client: {}", e)
         inner_app.state.ssh_http_clients.clear()
         await inner_app.state.http_client.aclose()
 

@@ -1,0 +1,1 @@
+Fixed `test_cli_create_from_git_url`, which failed on every branch since the private-repo cutover: it clones the public `imbue-ai/mngr` URL, which is now a filtered mirror that does not publish `CLAUDE.md`, and asserted that file's existence. The assertion now targets `README.md`, which the mirror keeps.

@@ -53,13 +53,13 @@ uv run python scripts/extract_antigravity_proto_schema.py "$(which agy)" --out /
 
 This scans the binary for embedded `FileDescriptorProto`s (anchored on the
 `0x0A <len> "<name>.proto"` name field), validates them, and writes/greps them. On agy
-1.4.5 it recovers ~370 descriptors, including `codeium_common.proto` (which defines
-`ChatToolCall`). `--grep` prints matching message/enum layouts.
+1.0.8 it recovers ~163 descriptors. `--grep` prints matching message/enum layouts.
 
-Descriptors can sit back to back in the binary, so the extractor ends each one's extent at
-the next one's `name` field.
+A few large descriptors registered via protobuf-go's legacy gzip path are not recovered
+(e.g. `codeium_common.proto`, which defines `ChatToolCall`/`ModelUsageStats`). The decoder
+does not need them for the message text -- only for full tool-call/usage detail.
 
-## The recovered schema (agy 1.4.5 -- re-verify on each release)
+## The recovered schema (agy 1.0.8 -- re-verify on each release)
 
 SQLite tables map to `exa.analytics_pb` "Cortex trajectory" messages:
 `trajectory_meta` <- `RecordCortexTrajectoryRequest`; each `steps` row's `step_payload`
@@ -73,7 +73,7 @@ gemini_coder.Step:
   f6  subtrajectory gemini_coder.Trajectory          (subagent steps)
   f10 code_action   exa.cortex_pb.CortexStepCodeAction
   f19 user_input    exa.cortex_pb.CortexStepUserInput        { f1 query; f2 user_response }
-  f20 planner_response exa.cortex_pb.CortexStepPlannerResponse { f1 response; f3 thinking; f7 tool_calls[] -> exa.codeium_common_pb.ChatToolCall { f2 name; f3 arguments_json } }
+  f20 planner_response exa.cortex_pb.CortexStepPlannerResponse { f1 response; f3 thinking; f7 tool_calls[] }
   f24 error_message exa.cortex_pb.CortexStepErrorMessage { f3 error -> CortexErrorDetails { f1 user_error_message, f2 short_error, f3 full_error } }
   ... ~60 more tool/browser step types
 ```
@@ -135,12 +135,5 @@ so re-verify or update the field map after each release:
    To inspect the raw layout by hand instead, run the extractor and diff the `gemini_coder.Step`
    / `CortexStepType` / `CortexStepSource` output against the tables above:
    `uv run python scripts/extract_antigravity_proto_schema.py "$(which agy)" --grep CortexStep`.
-
-   A `KeyError` naming a whole message (e.g. `gemini_coder.Step`) means either agy renamed or
-   moved that message, or the extractor missed the `.proto` file that defines it. It is the
-   extractor if the file's name is still in the binary
-   (`LC_ALL=C grep -ac third_party/gemini_coder/proto/trajectory.proto "$(which agy)"`) but the
-   extractor's `--out` directory has no `.fdp` for it
-   (`third_party__gemini_coder__proto__trajectory.proto.fdp`); then fix the extractor.
 2. If anything moved, update the constants in `decode_agy_transcript.py`, then re-run the test.
 3. Decode a fresh `.db` and confirm user/assistant text round-trips.

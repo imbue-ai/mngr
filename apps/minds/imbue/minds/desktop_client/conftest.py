@@ -1,10 +1,8 @@
 import base64
 import json
 import tempfile
-from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
-from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -20,7 +18,6 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -30,20 +27,8 @@ from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
 from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
-from imbue.minds.desktop_client.connections.account_lifecycle import list_signed_in_accounts_from_session_store
-from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
-from imbue.minds.desktop_client.connections.data_types import ConnectionCredentials
-from imbue.minds.desktop_client.connections.data_types import SignedInAccount
-from imbue.minds.desktop_client.connections.primitives import CONNECTION_DOCUMENT_KIND
-from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
-from imbue.minds.desktop_client.connections.primitives import ConnectionId
-from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.minds.desktop_client.dek_store import delete_dek
-from imbue.minds.desktop_client.dek_store import ensure_dek
-from imbue.minds.desktop_client.dek_store import set_master_password_for_account
-from imbue.minds.desktop_client.imbue_cloud_cli import AuthRefreshOutcome
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -66,7 +51,6 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.supertokens_routes import _web_login_flows
 from imbue.minds.desktop_client.supertokens_routes import _web_login_flows_lock
-from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.primitives import ServiceName
@@ -141,20 +125,6 @@ class FakeImbueCloudCli(ImbueCloudCli):
         default=False,
         description="When True, get_share_status raises ImbueCloudCliError (simulates a connector hiccup)",
     )
-    create_share_error_to_raise: ImbueCloudCliError | None = Field(
-        default=None,
-        description=(
-            "Error create_share raises instead of creating a share, when set (an ImbueCloudQuotaExceededCliError "
-            "plays the connector's structured quota refusal); honored by every create_share override"
-        ),
-    )
-    share_details_by_host_id: dict[str, ShareCliInfo] = Field(
-        default_factory=dict,
-        description=(
-            "Per host id, the full share row list_shares answers with (workspace id, stamps); a share "
-            "without an entry here is answered in the canned get_share_status shape"
-        ),
-    )
     relays_to_return: dict[str, tuple[str, ...]] = Field(
         default_factory=dict,
         description=(
@@ -189,29 +159,6 @@ class FakeImbueCloudCli(ImbueCloudCli):
         if self.is_auth_list_failing:
             raise ImbueCloudCliError("fake transient auth list failure")
         return list(self.accounts_to_return)
-
-    auth_refresh_outcome_to_return: AuthRefreshOutcome = Field(
-        default=AuthRefreshOutcome.REFRESHED, description="What auth_refresh_outcome reports for every account"
-    )
-    refreshed_accounts: list[str] = Field(
-        default_factory=list, description="Every account auth_refresh_outcome was called with, in order"
-    )
-    signed_out_accounts: list[str] = Field(
-        default_factory=list, description="Every account auth_signout was called with, in order"
-    )
-
-    def auth_refresh_outcome(self, account: str) -> AuthRefreshOutcome:
-        self.refreshed_accounts.append(account)
-        return self.auth_refresh_outcome_to_return
-
-    def auth_signout(self, account: str) -> None:
-        self.signed_out_accounts.append(account)
-        if self.is_auth_signout_failing:
-            raise ImbueCloudCliError("fake auth signout failure")
-        self.remove_account_by_email(account)
-
-    def remove_account_by_email(self, email: str) -> None:
-        self.accounts_to_return = [a for a in self.accounts_to_return if a.email != email]
 
     def auth_resend_verification(self, account: str) -> bool:
         self.resent_verification_emails.append(account)
@@ -271,32 +218,15 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def remove_account(self, user_id: str) -> None:
         self.accounts_to_return = [a for a in self.accounts_to_return if a.user_id != user_id]
 
+    def auth_signout(self, account: str) -> None:
+        if self.is_auth_signout_failing:
+            raise ImbueCloudCliError("fake auth signout failure")
+        self.accounts_to_return = [a for a in self.accounts_to_return if a.email != account]
+
     # In-memory machine shares (drives the teardown tests)
 
     def add_share(self, account: str, host_id: str) -> None:
         self.shares_by_account.setdefault(account, {})[host_id] = "active"
-
-    def _raise_create_share_error_if_configured(self) -> None:
-        if self.create_share_error_to_raise is not None:
-            raise self.create_share_error_to_raise
-
-    def create_share(
-        self,
-        *,
-        account: str,
-        host_id: str,
-        entry_label: str | None = None,
-        preferred_region: str | None = None,
-        workspace_id: str | None = None,
-    ) -> ShareCliInfo:
-        self._raise_create_share_error_if_configured()
-        return super().create_share(
-            account=account,
-            host_id=host_id,
-            entry_label=entry_label,
-            preferred_region=preferred_region,
-            workspace_id=workspace_id,
-        )
 
     def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
         if self.is_share_lookup_failing:
@@ -315,20 +245,6 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def delete_share(self, *, account: str, host_id: str) -> None:
         self.deleted_share_host_ids.append(host_id)
         self.shares_by_account.get(account, {}).pop(host_id, None)
-
-    def list_shares(self, *, account: str) -> list[ShareCliInfo]:
-        if self.is_share_lookup_failing:
-            raise ImbueCloudCliError("fake transient share listing failure")
-        rows: list[ShareCliInfo] = []
-        for host_id, state in self.shares_by_account.get(account, {}).items():
-            detailed = self.share_details_by_host_id.get(host_id)
-            if detailed is not None:
-                rows.append(detailed.model_copy_update(to_update(detailed.field_ref().state, state)))
-            else:
-                status = self.get_share_status(account=account, host_id=host_id)
-                assert status is not None
-                rows.append(status)
-        return rows
 
     def list_share_relays(self, *, account: str) -> dict[str, tuple[str, ...]]:
         return {region: tuple(endpoints) for region, endpoints in self.relays_to_return.items()}
@@ -487,54 +403,6 @@ class FakeImbueCloudCli(ImbueCloudCli):
         self.machine_show_call_count += 1
         return next((machine for machine in self.machines if machine.host_id == machine_ref), None)
 
-    resize_calls: list[tuple[str, str, int | None, int | None]] = Field(
-        default_factory=list, description="Every resize_machine call: (account, machine ref, units, disk GB)"
-    )
-    resize_error_to_raise: Exception | None = Field(
-        default=None, description="Error resize_machine raises instead of recording the targets, when set"
-    )
-
-    def resize_machine(
-        self, account: str, machine_ref: str, target_memory_units: int | None, target_disk_gb: int | None
-    ) -> MachineSizeCliInfo:
-        self.resize_calls.append((account, machine_ref, target_memory_units, target_disk_gb))
-        if self.resize_error_to_raise is not None:
-            raise self.resize_error_to_raise
-        machine = next((entry for entry in self.machines if entry.host_id == machine_ref), None)
-        if machine is None:
-            raise ImbueCloudCliError(f"machines resize: no machine matches {machine_ref!r} (fake)")
-        # The connector's semantics: a target equal to the current size clears that dimension.
-        recorded = machine.model_copy_update(
-            to_update(
-                machine.field_ref().target_memory_units,
-                None
-                if target_memory_units is None or target_memory_units == machine.memory_units
-                else target_memory_units,
-            ),
-            to_update(
-                machine.field_ref().target_disk_gb,
-                None if target_disk_gb is None or target_disk_gb == machine.disk_gb else target_disk_gb,
-            ),
-        )
-        stamped = recorded.model_copy_update(
-            to_update(
-                recorded.field_ref().is_restart_needed_to_apply,
-                recorded.target_memory_units is not None or recorded.target_disk_gb is not None,
-            )
-        )
-        self.machines = [stamped if entry.host_id == machine_ref else entry for entry in self.machines]
-        return stamped
-
-    account_info_by_email: dict[str, dict[str, Any]] = Field(
-        default_factory=dict, description="The raw `account show` document get_account_info answers per account email"
-    )
-
-    def get_account_info(self, account: str) -> dict[str, Any]:
-        info = self.account_info_by_email.get(account)
-        if info is None:
-            raise ImbueCloudCliError(f"account show: connector unreachable for {account} (fake)")
-        return info
-
     # In-memory workspace-sync backend (mirrors the connector's semantics)
 
     sync_records_by_email: dict[str, dict[str, dict[str, object]]] = Field(
@@ -601,90 +469,7 @@ class FakeImbueCloudCli(ImbueCloudCli):
             if record.get("encrypted_secrets") is not None:
                 record["encrypted_secrets"] = None
                 scrubbed += 1
-        for by_doc_id in self.sync_documents_by_email.get(account, {}).values():
-            for document in by_doc_id.values():
-                document["encrypted_payload"] = None
         return scrubbed
-
-    # In-memory account documents (mirrors the connector's /sync/documents semantics)
-
-    sync_documents_by_email: dict[str, dict[str, dict[str, dict[str, Any]]]] = Field(
-        default_factory=dict, description="email -> kind -> doc_id -> wire document (the fake server state)"
-    )
-    document_push_count: int = Field(default=0, description="How many document pushes reached the fake server")
-    on_sync_documents_pull: Callable[[str], None] | None = Field(
-        default=None,
-        description=(
-            "Invoked with the account email on every document pull, before it answers: a test's hook for "
-            "something happening (a signout) while a sync pass is mid-pull"
-        ),
-    )
-
-    def seed_connection_document(
-        self,
-        account: str,
-        doc_id: str,
-        metadata: Mapping[str, Any],
-        encrypted_payload: str | None = None,
-        revision: int = 1,
-    ) -> None:
-        """Place an ACTIVE connection document on the fake server, as another device would have pushed it."""
-        by_doc_id = self.sync_documents_by_email.setdefault(account, {}).setdefault(CONNECTION_DOCUMENT_KIND, {})
-        by_doc_id[doc_id] = {
-            "kind": CONNECTION_DOCUMENT_KIND,
-            "doc_id": doc_id,
-            "metadata": dict(metadata),
-            "encrypted_payload": encrypted_payload,
-            "state": "active",
-            "revision": revision,
-            "document_format": 1,
-        }
-
-    def sync_documents_pull(self, account: str, kind: str) -> list[dict[str, Any]]:
-        self._check_sync_online("sync documents pull")
-        if self.on_sync_documents_pull is not None:
-            self.on_sync_documents_pull(account)
-        by_doc_id = self.sync_documents_by_email.get(account, {}).get(kind, {})
-        return [dict(document) for document in by_doc_id.values()]
-
-    def sync_document_push(self, account: str, document: Mapping[str, Any]) -> dict[str, Any]:
-        self._check_sync_online("sync documents push")
-        self.document_push_count += 1
-        kind = str(document["kind"])
-        doc_id = str(document["doc_id"])
-        by_doc_id = self.sync_documents_by_email.setdefault(account, {}).setdefault(kind, {})
-        existing = by_doc_id.get(doc_id)
-        pushed_revision = int(str(document["revision"]))
-        expected_revision = 1 if existing is None else int(str(existing["revision"])) + 1
-        if pushed_revision != expected_revision:
-            conflict = ImbueCloudSyncConflictCliError("sync documents push: revision conflict")
-            conflict.stored_record = dict(existing) if existing is not None else None
-            raise conflict
-        if existing is not None and int(str(document.get("document_format", 1))) < int(
-            str(existing.get("document_format", 1))
-        ):
-            too_new = ImbueCloudCliError("sync documents push failed: document_format_too_new")
-            too_new.stderr = '{"error": "document format too new", "error_class": "ImbueCloudRecordFormatTooNewError"}'
-            raise too_new
-        # The payload is preserved when absent from the push and cleared by an explicit null.
-        stored: dict[str, Any] = dict(existing) if existing is not None else {}
-        stored.update(dict(document))
-        previous_state = existing.get("state") if existing is not None else None
-        if stored.get("state") == "deleted":
-            if previous_state != "deleted":
-                stored["deleted_at"] = "2026-01-01T00:00:00+00:00"
-        else:
-            stored["deleted_at"] = None
-        by_doc_id[doc_id] = stored
-        return dict(stored)
-
-    def tombstone_connection_document(self, account: str, doc_id: str) -> None:
-        """Tombstone a connection document on the fake server, as another device's removal would have."""
-        stored = self.sync_documents_by_email[account][CONNECTION_DOCUMENT_KIND][doc_id]
-        stored["state"] = "deleted"
-        stored["revision"] = int(str(stored["revision"])) + 1
-        stored["encrypted_payload"] = None
-        stored["deleted_at"] = "2026-01-01T00:00:00+00:00"
 
     def sync_bundle_pull(self, account: str) -> dict[str, object] | None:
         self._check_sync_online("sync bundle pull")
@@ -738,7 +523,6 @@ class SucceedingCreateShareCli(FakeImbueCloudCli):
         workspace_id: str | None = None,
     ) -> ShareCliInfo:
         self.create_share_calls.append((account, host_id, entry_label, preferred_region, workspace_id))
-        self._raise_create_share_error_if_configured()
         self.add_share(account, host_id)
         return ShareCliInfo(
             host_id=host_id,
@@ -823,17 +607,12 @@ def make_fake_imbue_cloud_cli() -> FakeImbueCloudCli:
 
 
 def make_session_store_for_test(
-    data_dir: Path,
-    cli: ImbueCloudCli | None = None,
-    mngr_host_dir: Path | None = None,
-    connection_store: ConnectionStore | None = None,
+    data_dir: Path, cli: ImbueCloudCli | None = None, mngr_host_dir: Path | None = None
 ) -> MultiAccountSessionStore:
     """Build a :class:`MultiAccountSessionStore` (with its record store) over a fake CLI by default.
 
     ``mngr_host_dir`` (default None: disabled) enables the identity cache's
-    on-disk sessions-dir coherence check, exactly as the app wires it;
-    ``connection_store`` (default None) lets the record store classify
-    connection rows, as the app wires it.
+    on-disk sessions-dir coherence check, exactly as the app wires it.
     """
     effective_cli = cli or make_fake_imbue_cloud_cli()
     record_store = WorkspaceRecordStore(
@@ -841,85 +620,19 @@ def make_session_store_for_test(
         cli=effective_cli,
         device_id=device_id_for_test("session-store"),
         device_label="test-device",
-        connection_store=connection_store,
     )
     return MultiAccountSessionStore(
         data_dir=data_dir, cli=effective_cli, record_store=record_store, mngr_host_dir=mngr_host_dir
     )
 
 
-def make_sync_test_device(
-    base_dir: Path, name: str, cli: FakeImbueCloudCli
-) -> tuple[WorkspaceRecordStore, MultiAccountSessionStore]:
-    """One device of a multi-device sync test: its own stores (and device id) over ``cli``'s shared fake connector."""
-    paths = InstallationPaths(data_dir=base_dir / name)
-    paths.data_dir.mkdir(parents=True, exist_ok=True)
-    record_store = WorkspaceRecordStore(
-        paths=paths,
-        cli=cli,
-        device_id=device_id_for_test(name),
-        device_label=name,
-    )
-    session_store = MultiAccountSessionStore(data_dir=paths.data_dir, cli=cli, record_store=record_store)
-    return record_store, session_store
-
-
-def make_fresh_device_scheduler(base_dir: Path, cli: FakeImbueCloudCli) -> WorkspaceSyncScheduler:
-    """A sync scheduler over a fresh device (no records pulled yet) sharing ``cli``'s fake connector."""
-    record_store, session_store = make_sync_test_device(base_dir, f"fresh-{uuid4().hex}", cli)
-    empty_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
-    return WorkspaceSyncScheduler(record_store=record_store, session_store=session_store, resolver=empty_resolver)
-
-
-def push_remote_workspace_record(
-    base_dir: Path, cli: FakeImbueCloudCli, user_id: str, workspace_name: str = "ws-1"
-) -> None:
-    """Simulate another device having synced one active workspace for the account."""
-    _, session_store = make_sync_test_device(base_dir, f"pusher-{uuid4().hex}", cli)
-    agent_id = AgentId.generate()
-    host_id = HostId.generate()
-    agents = [
-        {"id": str(agent_id), "labels": {"is_primary": "true"}, "host": {"id": str(host_id), "name": workspace_name}}
-    ]
-    resolver = make_resolver_with_data(agents_json=json.dumps({"agents": agents}))
-    session_store.associate_workspace(user_id, str(agent_id), resolver)
-
-
-def associate_hosted_workspace(
-    store: MultiAccountSessionStore,
-    agent_id: AgentId,
-    resolver: BackendResolverInterface,
-    user_id: str,
-    display_name: str = "alpha",
-) -> str:
-    """Associate the workspace ``resolver`` discovers as ``agent_id`` with ``user_id``'s account; returns its host id.
-
-    The setup of a workspace this device hosts under a signed-in account,
-    which the sharing paths resolve back to the account through the host id.
-    """
-    display_info = resolver.get_agent_display_info(agent_id)
-    assert display_info is not None
-    host_id = str(display_info.host_id)
-    store.associate_created_workspace(
-        user_id=user_id,
-        agent_id=str(agent_id),
-        host_id=host_id,
-        display_name=display_name,
-        color=None,
-        is_cloud_row=False,
-    )
-    return host_id
-
-
-def make_profiled_device_with_connections_for_test(
+def make_profiled_device_for_test(
     base: Path, name: str, cli: FakeImbueCloudCli
-) -> tuple[InstallationPaths, WorkspaceRecordStore, MultiAccountSessionStore, ConnectionStore, Path]:
-    """A device (paths, record store, session store, connection store) whose mngr profile dir exists, plus that
-    profile dir.
+) -> tuple[InstallationPaths, WorkspaceRecordStore, MultiAccountSessionStore, Path]:
+    """A device (paths, record store, session store) whose mngr profile dir exists, plus that profile dir.
 
-    Host access material collection and materialization need the profile dir;
-    the per-host key of a cloud machine lives under it. The connection store is
-    wired into the record store, so rows on the device's connections resolve.
+    SSH material collection and materialization need the profile dir; the
+    per-host key of a cloud machine lives under it.
     """
     paths = InstallationPaths(data_dir=base / name)
     paths.data_dir.mkdir(parents=True, exist_ok=True)
@@ -928,103 +641,15 @@ def make_profiled_device_with_connections_for_test(
     profile_dir = mngr_host_dir / "profiles" / profile_id
     profile_dir.mkdir(parents=True)
     (mngr_host_dir / "config.toml").write_text(f'profile = "{profile_id}"\n')
-    connection_store = ConnectionStore(paths=paths, cli=cli, device_label=name)
     record_store = WorkspaceRecordStore(
         paths=paths,
         mngr_host_dir=mngr_host_dir,
         cli=cli,
         device_id=device_id_for_test(name),
         device_label=name,
-        connection_store=connection_store,
     )
     session_store = MultiAccountSessionStore(data_dir=paths.data_dir, cli=cli, record_store=record_store)
-    return paths, record_store, session_store, connection_store, profile_dir
-
-
-def make_profiled_device_for_test(
-    base: Path, name: str, cli: FakeImbueCloudCli
-) -> tuple[InstallationPaths, WorkspaceRecordStore, MultiAccountSessionStore, Path]:
-    """:func:`make_profiled_device_with_connections_for_test` for tests that never touch the connection store."""
-    paths, record_store, session_store, _, profile_dir = make_profiled_device_with_connections_for_test(
-        base, name, cli
-    )
     return paths, record_store, session_store, profile_dir
-
-
-def make_connection_store_for_test(data_dir: Path, cli: ImbueCloudCli | None = None) -> ConnectionStore:
-    """Build a :class:`ConnectionStore` over a fake CLI by default."""
-    return ConnectionStore(
-        paths=InstallationPaths(data_dir=data_dir),
-        cli=cli or make_fake_imbue_cloud_cli(),
-        device_label="test-device",
-    )
-
-
-def unlock_account_with_master_password_for_test(paths: InstallationPaths, user_id: str) -> None:
-    """Make ``user_id`` an unlocked account with a master password set: the state a synced connection needs."""
-    ensure_dek(paths, user_id)
-    set_master_password_for_account(paths, user_id, SecretStr("pw"))
-
-
-def add_modal_connection_for_test(
-    store: ConnectionStore,
-    owner_user_id: str,
-    alias: str,
-    *,
-    connection_id: ConnectionId | None = None,
-    token_id: str = "ak",
-    token_secret: str = "as",
-) -> ConnectionId:
-    """Add a Modal connection with fake credentials under ``owner_user_id``; returns its id.
-
-    A test that snapshots the materialized block pins ``connection_id`` (it names
-    the instance) and the token it expects to see written.
-    """
-    connection_id = connection_id or ConnectionId.generate()
-    store.add_connection(
-        owner_user_id,
-        connection_id,
-        ConnectionBackend.MODAL,
-        alias,
-        f"{token_id}…",
-        {},
-        ConnectionCredentials(token_id=token_id, token_secret=SecretStr(token_secret)),
-    )
-    return connection_id
-
-
-def lock_account_for_test(connection_store: ConnectionStore, user_id: str) -> None:
-    """Make ``user_id`` a locked account: a synced connection proves a master password elsewhere, and no DEK is here."""
-    unlock_account_with_master_password_for_test(connection_store.paths, user_id)
-    add_modal_connection_for_test(connection_store, user_id, "elsewhere modal")
-    delete_dek(connection_store.paths, user_id)
-
-
-def make_provider_materializer_for_test(
-    root_name: str,
-    connection_store: ConnectionStore,
-    list_accounts: Callable[[], Sequence[SignedInAccount] | None],
-    connector_url: str = str(FAKE_CONNECTOR_URL),
-) -> ProviderSettingsMaterializer:
-    """Build a :class:`ProviderSettingsMaterializer` with no discovery bounce (tests assert on the file).
-
-    ``list_accounts`` is the account source: a fixed list for a pure
-    materializer test, or :func:`session_store_account_source` for a device
-    whose signed-in accounts the fake plugin tracks.
-    """
-    return ProviderSettingsMaterializer(
-        root_name=root_name,
-        connection_store=connection_store,
-        connector_url=connector_url.rstrip("/"),
-        list_accounts=list_accounts,
-    )
-
-
-def session_store_account_source(
-    session_store: MultiAccountSessionStore,
-) -> Callable[[], Sequence[SignedInAccount] | None]:
-    """The materializer's production account source over a session store (None when the listing failed)."""
-    return lambda: list_signed_in_accounts_from_session_store(session_store)
 
 
 def build_desktop_client_for_test(
@@ -1060,17 +685,19 @@ def build_desktop_client_for_test(
 def build_desktop_client_with_accounts(
     tmp_path: Path,
     signed_in_user_ids: tuple[str, ...],
+    stored_default_account_id: str,
     cli: FakeImbueCloudCli | None = None,
 ) -> tuple[FlaskClient, MindsConfig]:
-    """An authenticated desktop client with ``signed_in_user_ids`` signed in (as ``<user_id>@example.com``).
+    """An authenticated desktop client whose config stores ``stored_default_account_id`` as the default account.
 
-    The accounts are signed in on ``cli``, a fresh fake by default. Returns the
-    client and its config.
+    Each of ``signed_in_user_ids`` is signed in (as ``<user_id>@example.com``)
+    on ``cli``, a fresh fake by default. Returns the client and its config.
     """
     effective_cli = cli or make_fake_imbue_cloud_cli()
     for user_id in signed_in_user_ids:
         effective_cli.add_account(user_id=user_id, email=f"{user_id}@example.com")
     minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    minds_config.set_default_account_id(stored_default_account_id)
     client, _app, _auth_store = build_desktop_client_for_test(
         tmp_path,
         is_authenticated=True,

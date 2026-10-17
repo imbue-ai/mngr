@@ -26,7 +26,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-import httpx2
+import httpx
 import pytest
 from click.testing import CliRunner
 from click.testing import Result
@@ -332,12 +332,12 @@ def test_login_fails_fast_against_a_connector_without_the_accounts_surface(
     timeout -- the worst possible way to learn the env needs a redeploy.
     """
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(404, json={"detail": "Not Found"})
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Not Found"})
 
     client = ImbueCloudConnectorClient(
         base_url=AnyUrl("https://example.com"),
-        transport=httpx2.MockTransport(handler),
+        transport=httpx.MockTransport(handler),
     )
     with pytest.raises(SystemExit):
         _ensure_connector_supports_browser_login(client)
@@ -379,17 +379,17 @@ def test_signout_revoke_refreshes_an_expired_token_first(tmp_path: Path) -> None
     assert session is not None
     revoke_bearers: list[str] = []
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/auth/session/refresh":
-            return httpx2.Response(
+            return httpx.Response(
                 200, json={"status": "OK", "tokens": {"access_token": "fresh-at", "refresh_token": "rt-2"}}
             )
         if request.url.path == "/auth/session/revoke":
             revoke_bearers.append(request.headers["authorization"])
-            return httpx2.Response(200, json={"status": "OK", "revoked_count": 3})
+            return httpx.Response(200, json={"status": "OK", "revoked_count": 3})
         raise AssertionError(f"unexpected path {request.url.path}")
 
-    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
 
     _revoke_server_sessions(store, client, account, session, all_devices=True)
 
@@ -408,33 +408,19 @@ def test_signout_revoke_falls_back_to_the_stored_token_when_refresh_fails(tmp_pa
     assert session is not None
     revoke_bearers: list[str] = []
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/auth/session/refresh":
-            return httpx2.Response(401, json={"detail": "refresh token revoked"})
+            return httpx.Response(401, json={"detail": "refresh token revoked"})
         if request.url.path == "/auth/session/revoke-current":
             revoke_bearers.append(request.headers["authorization"])
-            return httpx2.Response(401, json={"detail": "expired"})
+            return httpx.Response(401, json={"detail": "expired"})
         raise AssertionError(f"unexpected path {request.url.path}")
 
-    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
 
     assert _revoke_server_sessions(store, client, account, session, all_devices=False) is True
 
     assert revoke_bearers == ["Bearer stale-at"]
-
-
-def test_signout_revoke_falls_back_to_the_stored_token_when_the_connector_is_unreachable(tmp_path: Path) -> None:
-    """An outage during the refresh is not a dead session, but signout must still drop the local tokens offline."""
-    store, account = _store_with_stale_session(tmp_path)
-    session = store.load_by_account(account)
-    assert session is not None
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        raise httpx2.ConnectError("simulated outage", request=request)
-
-    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
-
-    assert _revoke_server_sessions(store, client, account, session, all_devices=False) is False
 
 
 def _client_whose_revoke_endpoints_fail(
@@ -451,14 +437,14 @@ def _client_whose_revoke_endpoints_fail(
     """
     store, account = _store_with_stale_session(tmp_path)
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/auth/session/refresh":
-            return httpx2.Response(401, json={"detail": "refresh token revoked"})
+            return httpx.Response(401, json={"detail": "refresh token revoked"})
         if request.url.path in ("/auth/session/revoke", "/auth/session/revoke-current"):
-            return httpx2.Response(500, json={"detail": "internal error"})
+            return httpx.Response(500, json={"detail": "internal error"})
         raise AssertionError(f"unexpected path {request.url.path}")
 
-    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
     return store, account, client
 
 
@@ -630,11 +616,11 @@ def test_sigterm_while_holding_the_listener_lease_still_releases_it() -> None:
     """The desktop stops ``auth login`` with SIGTERM on quit; the connector must still learn the listener is gone."""
     lease_requests: list[str] = []
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
         lease_requests.append(f"{request.method} {request.url.path}")
-        return httpx2.Response(200, json={"status": "OK"})
+        return httpx.Response(200, json={"status": "OK"})
 
-    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
     challenge = compute_pkce_challenge(make_pkce_verifier())
     # The handler is only installed on the main thread; elsewhere the raised SIGTERM would kill the test process.
     assert threading.current_thread() is threading.main_thread()

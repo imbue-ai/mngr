@@ -47,21 +47,12 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SkipValidation
-from wsgidav.dav_error import DAVError
-from wsgidav.dav_error import HTTP_FORBIDDEN
-from wsgidav.dir_browser import WsgiDavDirBrowser
-from wsgidav.error_printer import ErrorPrinter
 from wsgidav.fs_dav_provider import FilesystemProvider
-from wsgidav.http_authenticator import HTTPAuthenticator
-from wsgidav.mw.base_mw import BaseMiddleware
-from wsgidav.mw.cors import Cors
-from wsgidav.request_resolver import RequestResolver
 from wsgidav.wsgidav_app import WsgiDAVApp
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.api_key_auth import is_request_authenticated
-from imbue.minds.desktop_client.api_transport import is_local_trusted_environ
 
 # Callable that resolves the current central Imbue Studio API key. Wrapped so
 # the WebDAV gate can look it up fresh on every request via
@@ -82,8 +73,6 @@ def _build_bearer_auth_gate(inner: WSGIApplication, expected_key_provider: Expec
     """
 
     def app(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
-        if is_local_trusted_environ(environ):
-            return inner(environ, start_response)
         authorization = environ.get("HTTP_AUTHORIZATION")
         expected_key = expected_key_provider()
         if expected_key is None or not is_request_authenticated(authorization, expected_key):
@@ -160,41 +149,6 @@ def _is_under_any_share_root(path: str, share_roots: Sequence[Path]) -> bool:
     )
 
 
-class _PermissionErrorAsForbidden(BaseMiddleware):
-    """WsgiDAV middleware answering 403 for any filesystem call the OS refuses.
-
-    WsgiDAV's own ``ErrorPrinter`` maps only ``EACCES`` to 403; every other
-    ``OSError`` becomes a 500 that it logs at error level. macOS privacy
-    protection (TCC) refuses access to folders such as the Photos or Music
-    libraries with ``EPERM``, which agents crawling the home share hit
-    routinely. Both errnos are a ``PermissionError``, and both are the OS
-    saying no, so both answer 403. Sits directly below ``ErrorPrinter``,
-    which renders the ``DAVError`` raised here.
-    """
-
-    def __call__(self, environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
-        try:
-            # Iterate rather than return the inner iterable: handlers such as
-            # PROPFIND do their filesystem work while the response is produced.
-            yield from self.next_app(environ, start_response)
-        except PermissionError as e:
-            logger.debug("WebDAV {} refused by the OS ({}); answering 403", environ.get("REQUEST_METHOD"), e.strerror)
-            raise DAVError(HTTP_FORBIDDEN, e.strerror) from None
-
-
-# WsgiDAV's default middleware stack (``wsgidav.default_conf.DEFAULT_CONFIG``) with
-# ``_PermissionErrorAsForbidden`` directly below ``ErrorPrinter``. A test pins it to the
-# installed WsgiDAV's default so an upgrade that changes the default fails loudly.
-_MIDDLEWARE_STACK: Final[tuple[type[BaseMiddleware], ...]] = (
-    Cors,
-    ErrorPrinter,
-    _PermissionErrorAsForbidden,
-    HTTPAuthenticator,
-    WsgiDavDirBrowser,
-    RequestResolver,
-)
-
-
 def _build_wsgidav_config(share_roots: tuple[Path, ...]) -> dict[str, Any]:
     """Build the WsgiDAV config dict for ``share_roots``."""
     provider_mapping: dict[str, FilesystemProvider] = {}
@@ -213,7 +167,6 @@ def _build_wsgidav_config(share_roots: tuple[Path, ...]) -> dict[str, Any]:
         provider_mapping[str(root).lower()] = FilesystemProvider(str(root), readonly=False)
     return {
         "provider_mapping": provider_mapping,
-        "middleware_stack": list(_MIDDLEWARE_STACK),
         # Auth is enforced by the outer WSGI bearer-token gate; WsgiDAV
         # itself accepts any caller (the gate guarantees no anonymous
         # caller ever reaches it).

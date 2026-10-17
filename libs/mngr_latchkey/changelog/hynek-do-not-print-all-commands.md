@@ -1,0 +1,3 @@
+The scripts that move credential material to and from a machine no longer appear in the logs. Opening the permissions view of a workspace, or changing a permission, ran a script that embedded the credential store being moved, the key it was to be re-encrypted under, or the permission policy being applied, and the whole thing -- artificially large, since a base64-encoded store rides on one line -- was traced verbatim. Those runs are now scoped with `commands_kept_out_of_logs`, so the log records only what kind of script ran and how big it was. The same applies to the probe that tests a candidate encryption key against a machine's store.
+
+Also removes `run_remote_latchkey`, which has had no callers since the machine updates moved into a single remote command.

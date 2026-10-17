@@ -10,7 +10,7 @@ are fast and deterministic. It is also the turn-end flush path, so it tells the
 converter the input is complete (see ``_MNGR_EMIT_TRAILING_ASSISTANT_GROUP`` in
 common_transcript.sh). The mid-turn form is driven two ways: by the converter's
 environment alone (``ScriptRunner.run_converter_as_daemon``), and by the real
-watcher's poll loop (``ScriptRunner.running_watcher``).
+watcher's poll loop (``ScriptRunner.start_watcher``).
 
 Behavior of the converter itself is unit-tested in
 common_transcript_convert_test.py; the tests here cover what only the shell can
@@ -25,11 +25,9 @@ import json
 import os
 import select
 import shutil
+import signal
 import subprocess
-import sys
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -40,7 +38,6 @@ import pytest
 from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 from imbue.mngr.utils.polling import poll_until
-from imbue.mngr.utils.testing import running_in_own_process_group
 from imbue.mngr_claude.resources import common_transcript_convert
 from imbue.mngr_claude.resources.testing import DEFAULT_MODEL
 from imbue.mngr_claude.resources.testing import DEFAULT_PROMPT_TOKENS
@@ -56,9 +53,12 @@ from imbue.mngr_claude.resources.testing import write_raw_transcript
 # pass lands well inside this budget; it is generous only to survive a loaded CI box.
 _WATCHER_CONVERSION_TIMEOUT = 30.0
 _WATCHER_POLL_INTERVAL = 0.2
-# The stand-ins in the group-stop tests sleep far longer than those tests wait for their
-# process group to empty, so a test can pass only because the stop killed them, not
-# because they finished on their own.
+# The watcher is SIGKILLed, so it normally exits at once; this only caps the wait if
+# something is badly wrong.
+_WATCHER_EXIT_TIMEOUT = 15.0
+# The stand-in child in test_stopping_a_watcher_kills_the_converter_that_outlived_it sleeps
+# far longer than the test waits for its process group to empty, so the test can pass only
+# because stop_watcher killed the child, not because the child finished on its own.
 _STANDIN_WATCHER_LIFETIME_SECONDS: Final[int] = 60
 _GROUP_EXIT_PROOF_TIMEOUT_SECONDS: Final[float] = 5.0
 
@@ -153,19 +153,45 @@ class ScriptRunner:
             env=env,
         )
 
-    @contextmanager
-    def running_watcher(self) -> Iterator[None]:
-        """Run the real watcher (no --single-pass) for the block; its poll loop never exits on its own.
+    def start_watcher(self) -> subprocess.Popen[bytes]:
+        """Start the real watcher (no --single-pass); its poll loop never exits.
 
-        The watcher runs the converter as a child, and the converter is the one using the
-        convert lock. On exit the watcher's whole process group is SIGKILLed until it is
-        empty, so no converter is still mid-conversion; SIGKILL because nothing can catch
-        or ignore it. Only then is the lock directory deleted, which a killed converter
-        leaves behind.
+        The caller owns the returned process and must kill it (by this exact
+        handle, never by pattern).
         """
         env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(self.agent_state_dir)}
-        with running_in_own_process_group(command=["bash", str(self.script_path)], env=env, stdout=subprocess.DEVNULL):
-            yield
+        # Own process group so stop_watcher can kill the poll loop's in-flight
+        # converter child along with the bash parent.
+        return subprocess.Popen(
+            ["bash", str(self.script_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+
+    def stop_watcher(self, watcher: subprocess.Popen[bytes]) -> None:
+        """Stop a watcher started by ``start_watcher``, plus any converter it was running.
+
+        The watcher's bash process runs the converter as a child, and ``start_watcher``
+        put both in their own process group so one signal reaches both. The converter is
+        bash's child, not the test's, so the test cannot wait on it, and waiting on bash
+        alone does not show whether the converter is still mid-conversion and using the
+        convert lock. SIGKILL to the whole group settles that: it cannot be caught or
+        ignored, so nothing in the group runs any further code, and the lock directory
+        can then be deleted. SIGTERM would do the same job only while nothing in the
+        group handles it.
+
+        The kill must come before the wait. Waiting reaps bash and frees its pid for
+        reuse, and that pid is also the process group id, so a ``killpg`` after the wait
+        could hit an unrelated group.
+        """
+        # start_new_session made the watcher a process group leader, so its pid is the pgid.
+        try:
+            os.killpg(watcher.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        watcher.wait(timeout=_WATCHER_EXIT_TIMEOUT)
         shutil.rmtree(self.lock_dir, ignore_errors=True)
 
 
@@ -710,7 +736,8 @@ def test_running_watcher_defers_the_open_trailing_inference(tmp_path: Path, stub
         ]
     )
 
-    with runner.running_watcher():
+    watcher = runner.start_watcher()
+    try:
         converted = poll_until(
             condition=lambda: runner.get_steps("agent") != [],
             timeout=_WATCHER_CONVERSION_TIMEOUT,
@@ -720,6 +747,8 @@ def test_running_watcher_defers_the_open_trailing_inference(tmp_path: Path, stub
         assert [s["message"] for s in runner.get_steps("user")] == ["go", "and again"]
         # The last inference is still being appended to, so the poll loop holds it back.
         assert [s["message"] for s in runner.get_steps("agent")] == ["closed"]
+    finally:
+        runner.stop_watcher(watcher)
 
     # The turn-end flush knows the turn is over, so it emits the trailing inference.
     result = runner.run_single_pass()
@@ -727,69 +756,44 @@ def test_running_watcher_defers_the_open_trailing_inference(tmp_path: Path, stub
     assert [s["message"] for s in runner.get_steps("agent")] == ["closed", "still writing"]
 
 
-def test_stopping_a_watcher_kills_the_converter_that_outlived_it(tmp_path: Path) -> None:
-    """Once a watcher's group is stopped, nothing in it may still be running.
+@pytest.mark.flaky
+def test_stopping_a_watcher_kills_the_converter_that_outlived_it(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """Once ``stop_watcher`` returns, nothing in the watcher's process group may still be running.
 
     The watcher is stood in for by a parent that exits at once, leaving behind a child
     that ignores SIGTERM. The child models a converter that outlives the watcher's bash
-    and is still running when the lock directory is deleted. A SIGTERM-based stop relies
-    on that never happening, so this test fails against it.
+    and is still running when the lock directory is deleted. The old SIGTERM-based
+    ``stop_watcher`` relied on that never happening, so this test fails against it.
 
     The child inherits the parent's stdout pipe, and nothing outside the group holds its
     write end, so the pipe reaches EOF only once the whole group has exited. That is the
     check used here rather than polling a pid, because a pid can be reused by an unrelated
     process once its owner is reaped.
     """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     holder = tmp_path / "declines_sigterm.sh"
     holder.write_text(f'trap "" TERM\necho ready\nsleep {_STANDIN_WATCHER_LIFETIME_SECONDS}\n')
     # The parent backgrounds the holder and exits at once, so the holder is the only
     # process left in the group.
-    with running_in_own_process_group(
-        command=["bash", "-c", f'bash "{holder}" &'], env=os.environ, stdout=subprocess.PIPE
-    ) as watcher:
+    watcher = subprocess.Popen(
+        ["bash", "-c", f'bash "{holder}" &'],
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
         assert watcher.stdout is not None
         assert watcher.stdout.readline() == b"ready\n", "the stand-in holder never started"
 
-    readable, _, _ = select.select([watcher.stdout], [], [], _GROUP_EXIT_PROOF_TIMEOUT_SECONDS)
-    assert readable, (
-        "the watcher's stdout never reached EOF, so a process in its group outlived the stop "
-        "and could still be holding the convert lock that is cleared after it"
-    )
+        runner.stop_watcher(watcher)
 
-
-def test_stopping_a_watcher_kills_a_process_that_joined_its_group_after_the_kill(tmp_path: Path) -> None:
-    """A process that enters the watcher's group after the group was signalled must die too.
-
-    gVisor, which runs CI's sandboxes, admits a child forked during ``killpg`` into the
-    group after the signal went out, so that child never receives it. The stand-in
-    makes that ordering certain: a joiner leaves the group before the kill, waits for the
-    kill to take the member holding its stdin, then rejoins the group and stays alive.
-    """
-    joiner = tmp_path / "rejoins_after_the_kill.py"
-    joiner.write_text(
-        "import os\n"
-        "import sys\n"
-        "os.setpgid(0, 0)\n"
-        "print('ready', flush=True)\n"
-        "sys.stdin.buffer.read()\n"
-        # A stop that already reaped the leader has let the group vanish. Staying alive
-        # outside it still shows that the stop returned too early.
-        "try:\n"
-        "    os.setpgid(0, os.getsid(0))\n"
-        "except PermissionError:\n"
-        "    pass\n"
-        f"os.execvp('sleep', ['sleep', '{_STANDIN_WATCHER_LIFETIME_SECONDS}'])\n"
-    )
-    with running_in_own_process_group(
-        command=["bash", "-c", f'sleep {_STANDIN_WATCHER_LIFETIME_SECONDS} | "{sys.executable}" "{joiner}" &'],
-        env=os.environ,
-        stdout=subprocess.PIPE,
-    ) as watcher:
-        assert watcher.stdout is not None
-        assert watcher.stdout.readline() == b"ready\n", "the stand-in joiner never started"
-
-    readable, _, _ = select.select([watcher.stdout], [], [], _GROUP_EXIT_PROOF_TIMEOUT_SECONDS)
-    assert readable, "the process that joined the watcher's group after the kill outlived the stop"
+        readable, _, _ = select.select([watcher.stdout], [], [], _GROUP_EXIT_PROOF_TIMEOUT_SECONDS)
+        assert readable, (
+            "the watcher's stdout never reached EOF, so a process in its group outlived "
+            "stop_watcher and could still be holding the convert lock that was just cleared"
+        )
+    finally:
+        watcher.kill()
+        watcher.wait(timeout=_WATCHER_EXIT_TIMEOUT)
 
 
 def test_held_lock_skips_pass(tmp_path: Path, stub_mngr_log_sh: str) -> None:

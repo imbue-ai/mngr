@@ -1,0 +1,1 @@
+The SSH tunnel manager no longer falls back to trust-on-first-use (paramiko `AutoAddPolicy`) when a host's known_hosts file is missing: connecting without a pinned host key is now a hard `SSHTunnelError`, matching the strict host-key checking used everywhere else.

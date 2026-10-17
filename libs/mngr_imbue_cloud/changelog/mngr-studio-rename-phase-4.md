@@ -1,0 +1,1 @@
+The share status wire type's `chrome_origin` field description gives `https://studio.imbue.com` as its example hosted web-chrome origin, matching the connector's `share_chrome_origin` and the tier `deploy.toml` files after the Imbue Studio cutover (PR 4 of the rename); `minds.imbue.com` is now a legacy chrome origin that redirects.

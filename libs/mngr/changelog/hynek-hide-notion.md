@@ -1,0 +1,3 @@
+Pin `restic` in the mngr container/offload image to the same version minds bundles (0.18.1, SHA256-verified) instead of installing the distro package.
+
+Debian bookworm ships restic 0.14, which is roughly 10x slower than 0.18 (slow enough that minds backup tests blew past their timeouts under loaded offload sandboxes, surfacing as a SIGKILL / "exit -9") and predates flags the minds backup code relies on (e.g. `--insecure-no-password`, added in 0.17). The image now downloads the pinned restic release for the build arch, matching what end users get from the bundled binary. Keep the version in sync with `apps/minds/scripts/download-binaries.js`.

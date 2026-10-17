@@ -1,0 +1,3 @@
+The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
+
+The source of those groups, `standard_ratchet_checks.py`, carries the same markers in place of its banners; the sync script derives the group order from it, so adding a group needs no script edit.

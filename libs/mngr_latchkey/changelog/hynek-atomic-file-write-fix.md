@@ -1,0 +1,5 @@
+Fixed two spurious failures that could abort VPS gateway provisioning after the work had actually succeeded. Both came from the same cause: a command sent with `execute_idempotent_command` is retried on a transient SSH error (a reloaded sshd, a dropped channel), including when the far side had already run it, so any command that consumes a file fails on the replay.
+
+Writing minds' `config.json` onto the VPS could fail with `Failed to move temp file to final location ... mv: cannot stat '.config.json.<id>.tmp': No such file or directory`, even though the config had been written correctly. The fix is in `imbue-mngr`'s atomic write; see that project's entry.
+
+Installing the desktop-gateway proxy extension had the same problem in its own compare-and-swap script: on a replay the staged copy was gone, which the content comparison read as "differs", sending it into a rename with no source. It now skips the swap when the staged copy has already been consumed, and still fails loudly if the staged copy and the installed extension are both missing.

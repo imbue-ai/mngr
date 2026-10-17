@@ -11,7 +11,6 @@ import { Icon16 } from "../../components/Icon";
 import { CopyField } from "../../components/Layout";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
-import { routeLinkAttrs } from "../../components/route-link";
 import { Skeleton, SkeletonRegion } from "../../components/Skeleton";
 import { Spinner } from "../../components/Spinner";
 import type {
@@ -20,10 +19,7 @@ import type {
   InvitationStatusIndicator,
   MobileLinkState,
   SharePanelModel,
-  VisitingAgentInviteState,
-  WorkspaceAccess,
 } from "../../../models/sharePanel";
-import type { VisitingAgentEntry } from "../../../models/workspaceOptions";
 import { GRANT_ADD_KINDS, toGrantAddKind } from "../../../models/sharePanel";
 import { formatRelativeAgo } from "../../../models/backups";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
@@ -80,22 +76,6 @@ const ADD_UNKNOWN_TOOLTIP =
 // a reader learns the feature exists and what switch turns it on.
 const MOBILE_LINK_LABEL = "Email me a Mobile Access Link";
 
-const VISITING_AGENTS_HEADING = "Visiting agents";
-const VISITING_AGENTS_WORKSPACE_SENTENCE =
-  "Invite a coding agent running somewhere else (on your computer, in a cloud " +
-  "agent product, on a collaborator's machine) to work in this workspace with " +
-  "exactly this workspace's access, and nothing more.";
-const VISITING_AGENTS_APP_SENTENCE =
-  "Invite a coding agent running somewhere else to use only this app.";
-const VISITING_AGENT_INVITE_LABEL = "Invite an agent";
-const VISITING_AGENT_COPY_LABEL = "Copy the instructions";
-const VISITING_AGENT_DONE_LABEL = "Done";
-const VISITING_AGENT_REVOKE_LABEL = "Revoke";
-const VISITING_AGENTS_EMPTY = "No agents have been invited.";
-const VISITING_AGENTS_RETRY_LABEL = "Try again";
-const VISITING_AGENT_INSTRUCTIONS_LEAD =
-  "Paste these instructions to the agent. The code works once and expires in fifteen minutes.";
-
 const MOBILE_LINK_OFF_TOOLTIP =
   "Enable sharing and web access to access this link on mobile";
 
@@ -118,21 +98,10 @@ const LINK_BOX_CLASS =
   "flex flex-1 min-w-0 items-center gap-2 rounded-md border border-default " +
   "bg-fill-subtle px-3 py-2 type-body text-tertiary";
 
-// A one-line row, for an entry with nothing to say under its name.
+// Every row is the same height whatever it holds, so a long list scans as a
+// single column.
 const ROW_CLASS =
   "flex h-10 flex-none items-center gap-2 overflow-hidden rounded-md border px-3";
-
-// A person's card. Its first line is the same height on every card, so a long
-// list scans as a single column; the lines under it wrap rather than cut
-// anything short.
-const CARD_CLASS =
-  "flex flex-none flex-col gap-0.5 overflow-hidden rounded-md border px-3 py-2";
-
-const CARD_NAME_LINE_CLASS = "flex h-6 items-center gap-2";
-
-// pl-8 is the lead's width plus the line's gap, which starts the words where
-// the name starts.
-const CARD_DETAIL_CLASS = "pl-8 type-helper";
 
 // A domain row's outline is mixed from its surface, so the two read as one
 // mark.
@@ -240,23 +209,7 @@ function renderPublishWidget(
               id: "ws-share-publish-error",
               class: "type-helper text-important",
             },
-            [
-              publishWrite.message,
-              publishWrite.remedyPath !== ""
-                ? [
-                    " ",
-                    m(
-                      "a",
-                      {
-                        id: "ws-share-publish-remedy",
-                        class: "underline",
-                        ...routeLinkAttrs(publishWrite.remedyPath),
-                      },
-                      "Review shared workspaces",
-                    ),
-                  ]
-                : null,
-            ],
+            publishWrite.message,
           )
         : null,
       share.loadErrorMessage === null
@@ -497,11 +450,7 @@ function renderNavEntry(
         // The space is the text's own: a margin is not one, and a reader would
         // otherwise announce the two names run together.
         share.isDisplayNameAmbiguous(target)
-          ? m(
-              "span",
-              { class: "ml-1.5 type-helper text-tertiary" },
-              ` ${target}`,
-            )
+          ? m("span", { class: "ml-1.5 type-helper text-tertiary" }, ` ${target}`)
           : null,
       ]),
       // An app registers its address when it starts, so one that has never run
@@ -605,7 +554,6 @@ function renderTargetPane(
           ),
         ),
     renderGrantList(share, local),
-    renderVisitingAgentsSection(share, local, target),
   ];
 }
 
@@ -751,11 +699,7 @@ function submitAddRow(share: SharePanelModel): void {
   share.addGrant(target, row.kind, row.value);
 }
 
-/** The target's own grant list.
- *
- * It never scrolls on its own; the whole right column does. A list scrolling
- * inside that flex column is the one block its siblings can squeeze, down to
- * no height.
+/** The target's own grant list: the one part of the pane that scrolls.
  *
  * An app's pane leads with what the whole workspace already admits, collapsed,
  * because those permissions apply here too and a reader deciding who can reach
@@ -784,7 +728,9 @@ function renderGrantList(
     "div",
     {
       id: "ws-share-grants",
-      class: "mt-4 flex shrink-0 flex-col gap-1.5",
+      class:
+        "mt-4 flex flex-1 min-h-0 flex-col gap-1.5 overflow-y-auto " +
+        "[scrollbar-gutter:stable]",
     },
     // Every row carries a key, and Mithril wants all of a list's children
     // keyed or none of them: the inherited group is built in rather than left
@@ -848,8 +794,7 @@ function inheritedSummary(count: number): string {
 }
 
 /**
- * One grant, as a card: who it names on the first line, and what is known
- * about them on the lines under it.
+ * One grant, as a row.
  *
  * `isOwned` is false for a row this pane only inherits: it belongs to the
  * whole workspace, and the controls that would change it are left off rather
@@ -864,81 +809,71 @@ function renderGrantRow(
   const grantee = grant.grantee;
   const isDomain = grantee.kind === "email_domain";
   const text = grantText(share, grant);
-  const invitation = share.invitationStatusIndicator(
-    share.currentTarget,
-    grant,
-  );
-  // An inherited row's grant, and so its visits, belong to the whole workspace.
-  const access = share.workspaceAccessFor(
-    isOwned ? share.currentTarget : share.wholeService,
-    grant,
-  );
   return m(
     "div",
     {
       key: grant.key,
       "data-grant-row": grant.key,
       class:
-        CARD_CLASS +
+        ROW_CLASS +
         " " +
         rowSurfaceClass(share, isDomain) +
         (isJustAdded(share, grant) ? " grant-row-added" : ""),
+      // Nobody is told about a domain grant; the row admits people the granter
+      // has never named.
+      ...(isDomain
+        ? {
+            "data-tooltip":
+              `People at ${grantee.value} will not hear about this ` +
+              "unless you send them the link yourself",
+          }
+        : {}),
     },
     [
-      m("div", { class: CARD_NAME_LINE_CLASS }, [
-        renderGrantLead(share, grant),
-        // The name takes the line's slack and truncates under pressure, so the
-        // remove control to its right always keeps its place.
-        m(
-          "span",
-          {
-            class: "min-w-0 flex-1 flex items-baseline gap-2 overflow-hidden",
-          },
-          [
-            m(
-              "span",
-              {
-                "data-grant-name": grant.key,
-                class:
-                  "min-w-0 max-w-full shrink-0 truncate type-body text-primary",
-              },
-              text.primary,
-            ),
-            // The email gives way first: the name is who the card is about.
-            text.secondary === null
-              ? null
-              : m(
-                  "span",
-                  {
-                    "data-grant-note": grant.key,
-                    class: "min-w-0 truncate type-body text-tertiary",
-                  },
-                  text.secondary,
-                ),
-          ],
-        ),
-        isOwned
-          ? m(
-              "button",
-              {
-                type: "button",
-                class:
-                  "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-md text-tertiary " +
-                  "hover:bg-fill-hover hover:text-important cursor-pointer transition-colors",
-                "aria-label": isDomain
-                  ? `Remove anyone at ${grantee.value}`
-                  : `Remove ${text.primary}`,
-                onclick: () =>
-                  share.removeGrant(share.currentTarget, grant.key),
-              },
-              m(Icon16, { name: "close" }),
-            )
-          : // The row keeps the width the control would have taken, so an
-            // inherited row lines up with the pane's own rows below it.
-            m("span", { class: "h-6 w-6 shrink-0" }),
-      ]),
-      renderGrantDetails(share, grant, access, invitation),
-      renderInvitationRefusal(grant, invitation),
+      renderGrantLead(share, grant),
+      // The name takes the row's slack and truncates under pressure, so the status indicator and the
+      // remove control to its right always keep their place inside the row.
+      m(
+        "span",
+        { class: "min-w-0 flex-1 flex items-baseline gap-2 overflow-hidden" },
+        [
+          m(
+            "span",
+            {
+              "data-grant-name": grant.key,
+              class: "min-w-0 truncate type-body text-primary",
+            },
+            text.primary,
+          ),
+          text.secondary === null
+            ? null
+            : m(
+                "span",
+                { class: "shrink-0 type-body text-tertiary" },
+                text.secondary,
+              ),
+        ],
+      ),
+      renderInvitationStatusIndicator(share, grant),
+      renderGrantState(share, grant),
+      isOwned
+        ? m(
+            "button",
+            {
+              type: "button",
+              class:
+                "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-md text-tertiary " +
+                "hover:bg-fill-hover hover:text-important cursor-pointer transition-colors",
+              "aria-label": isDomain
+                ? `Remove anyone at ${grantee.value}`
+                : `Remove ${text.primary}`,
+              onclick: () => share.removeGrant(share.currentTarget, grant.key),
+            },
+            m(Icon16, { name: "close" }),
+          )
+        : // The row keeps the width the control would have taken, so an
+          // inherited row lines up with the pane's own rows below it.
+          m("span", { class: "h-6 w-6 shrink-0" }),
     ],
   );
 }
@@ -950,202 +885,135 @@ function rowSurfaceClass(share: SharePanelModel, isDomain: boolean): string {
   return isDomain ? ROW_DOMAIN_CLASS : ROW_PERSON_CLASS;
 }
 
-/** What is known about the card's person, as short facts joined by dots, or
- * the card's own save state while it has one. */
-function renderGrantDetails(
-  share: SharePanelModel,
-  grant: Grant,
-  access: WorkspaceAccess | null,
-  invitation: InvitationStatusIndicator,
-): m.Children {
-  const pieces = grantDetailPieces(share, grant, access, invitation);
-  if (pieces.length === 0) return null;
-  // Each dot is bound to the fact after it, so a wrap never strands one at the
-  // end of a line.
-  const line = pieces.map((piece, index) =>
-    index === 0
-      ? piece
-      : m("span", { class: "inline-flex items-center gap-1.5" }, [
-          m("span", { "aria-hidden": "true" }, "·"),
-          piece,
-        ]),
-  );
+/** The one typed thing the row's invitation status indicator shows (the model reduces the request, the
+ * refusal, and the outcome to a single value, so exactly one is ever on screen): a fixed-height
+ * cell so an outcome arriving never moves the row, holding the status and, when a re-invite can
+ * be requested, an "Invite again" control. The first invitation is automatic, so there is no
+ * first "Invite" button here. */
+function renderInvitationStatusIndicator(share: SharePanelModel, grant: Grant): m.Children {
+  const target = share.currentTarget;
+  const state = share.invitationStatusIndicator(target, grant);
   return m(
-    "div",
+    "span",
     {
-      "data-grant-details": grant.key,
-      class:
-        CARD_DETAIL_CLASS +
-        " flex flex-wrap items-center gap-x-1.5 text-tertiary",
+      "data-slot": "invitation",
+      class: "flex h-6 min-w-0 shrink items-center gap-1.5 type-helper",
     },
-    line,
-  );
-}
-
-function grantDetailPieces(
-  share: SharePanelModel,
-  grant: Grant,
-  access: WorkspaceAccess | null,
-  invitation: InvitationStatusIndicator,
-): m.Children[] {
-  const status = grant.status;
-  if (status.state === "saving")
-    return [
-      m("span", { class: "flex items-center gap-1.5" }, [
-        m(Spinner, { size: "sm", extra: "shrink-0" }),
-        SAVING_LABEL,
-      ]),
-    ];
-  if (status.state === "failed")
-    return [
-      m("span", { class: "text-important" }, status.failureMessage),
-      textButton("Retry", () =>
-        share.retryGrant(share.currentTarget, grant.key),
-      ),
-    ];
-  const grantee = grant.grantee;
-  // Nobody is told about a domain grant; the card admits people the granter
-  // has never named.
-  if (grantee.kind === "email_domain")
-    return [
-      m(
-        "span",
-        `People at ${grantee.value} will not hear about this unless you ` +
-          "send them the link yourself.",
-      ),
-    ];
-  const pieces: m.Children[] = [];
-  if (access !== null) pieces.push(renderWorkspaceAccess(access));
-  const invitationStatus = renderInvitationStatus(invitation);
-  if (invitationStatus !== null) pieces.push(invitationStatus);
-  if (isReinviteOffered(invitation)) pieces.push(reinviteButton(share, grant));
-  return pieces;
-}
-
-/** Where the person's invitation stands, or null when the details have nothing
- * to say about it: none was asked for, a refusal is said in full on a line of
- * its own, and someone who joined is already said to have opened the
- * workspace. The first invitation is automatic, so there is no first "Invite"
- * control. */
-function renderInvitationStatus(state: InvitationStatusIndicator): m.Children {
-  switch (state.kind) {
-    case "inviting":
-      return m(
-        "span",
-        { "data-slot": "invitation", class: "flex items-center gap-1.5" },
-        [m(Spinner, { size: "sm", extra: "shrink-0" }), "Inviting"],
-      );
-    case "invited":
-      return m(
-        "span",
-        {
-          "data-slot": "invitation",
-          ...(state.at === null
-            ? {}
-            : { "data-tooltip": `Invited ${localeTime(state.at)}` }),
-        },
-        state.at === null
-          ? "Invited"
-          : `Invited ${formatRelativeAgo(state.at, Date.now())}`,
-      );
-    case "could_not_invite":
-      return m(
-        "span",
-        { "data-slot": "invitation", class: "text-warning" },
-        "Could not invite",
-      );
-    case "none":
-    case "refused":
-    case "joined":
-      return null;
-  }
-}
-
-function isReinviteOffered(state: InvitationStatusIndicator): boolean {
-  return (
-    (state.kind === "invited" ||
-      state.kind === "could_not_invite" ||
-      state.kind === "refused") &&
-    state.canReinvite
-  );
-}
-
-/** A refusal is written as a sentence, so it gets a line of its own, where it
- * wraps rather than being cut short. */
-function renderInvitationRefusal(
-  grant: Grant,
-  state: InvitationStatusIndicator,
-): m.Children {
-  if (state.kind !== "refused") return null;
-  return m(
-    "p",
-    {
-      "data-invite-refusal": grant.key,
-      class: CARD_DETAIL_CLASS + " text-important",
-    },
-    state.message,
+    invitationStatusIndicatorContents(share, grant, state),
   );
 }
 
 function reinviteButton(share: SharePanelModel, grant: Grant): m.Children {
-  return textButton(
-    "Invite again",
-    () => void share.invite(share.currentTarget, grant.key),
-    { "data-invite": grant.key, "aria-label": "Invite again" },
-  );
-}
-
-/** A control set in a card's details, as words among the other words. */
-function textButton(
-  label: string,
-  onclick: () => void,
-  attrs: Record<string, string> = {},
-): m.Children {
   return m(
-    "button",
+    Button,
     {
-      type: "button",
-      class: "cursor-pointer font-semibold text-primary hover:underline",
-      onclick,
-      ...attrs,
+      variant: "ghost",
+      size: "icon",
+      "data-invite": grant.key,
+      "aria-label": "Invite again",
+      onclick: () => void share.invite(share.currentTarget, grant.key),
     },
-    label,
+    "Invite again",
   );
 }
 
-/** Whether the card's person has opened the workspace, with the time of their
- * latest visit on hover once they have. */
-function renderWorkspaceAccess(access: WorkspaceAccess): m.Children {
-  const text = workspaceAccessText(access, Date.now());
+function indicatorText(classes: string, text: string, tooltip: string | null): m.Children {
   return m(
     "span",
-    {
-      "data-grant-access": access.kind,
-      ...(access.kind === "accessed" && access.at !== null
-        ? { "data-tooltip": `Accessed ${localeTime(access.at)}` }
-        : {}),
-    },
+    { class: `min-w-0 truncate ${classes}`, ...(tooltip === null ? {} : { "data-tooltip": tooltip }) },
     text,
   );
 }
 
-function workspaceAccessText(access: WorkspaceAccess, nowMs: number): string {
-  switch (access.kind) {
-    case "not_a_user":
-      return "Hasn't signed up for Imbue Studio yet";
-    case "never":
-      return "Never accessed your workspace";
-    case "accessed": {
-      const ago = access.at === null ? "" : formatRelativeAgo(access.at, nowMs);
-      return ago === ""
-        ? "Accessed your workspace"
-        : `Accessed your workspace ${ago}`;
-    }
+function invitationStatusIndicatorContents(
+  share: SharePanelModel,
+  grant: Grant,
+  state: InvitationStatusIndicator,
+): m.Children {
+  const nowMs = Date.now();
+  switch (state.kind) {
+    case "none":
+      return null;
+    case "inviting":
+      return [m(Spinner, { size: "sm", extra: "shrink-0" }), indicatorText("text-tertiary", "Inviting", null)];
+    case "invited":
+      return [
+        indicatorText(
+          "text-tertiary",
+          state.at === null ? "Invited" : `Invited ${formatRelativeAgo(state.at, nowMs)}`,
+          state.at === null ? null : `Invited ${localeTime(state.at)}`,
+        ),
+        state.canReinvite ? reinviteButton(share, grant) : null,
+      ];
+    case "could_not_invite":
+      return [
+        indicatorText("text-warning", "Could not invite", null),
+        state.canReinvite ? reinviteButton(share, grant) : null,
+      ];
+    case "refused":
+      return [
+        indicatorText("text-important", state.message, state.message),
+        state.canReinvite ? reinviteButton(share, grant) : null,
+      ];
+    case "joined":
+      return indicatorText(
+        "text-success",
+        state.firstAt === null ? "Joined" : `Joined ${formatRelativeAgo(state.firstAt, nowMs)}`,
+        visitsTooltip(state.firstAt, state.lastAt),
+      );
   }
+}
+
+function visitsTooltip(firstAt: string | null, lastAt: string | null): string | null {
+  const parts: string[] = [];
+  if (firstAt !== null) parts.push(`First visited ${localeTime(firstAt)}`);
+  if (lastAt !== null) parts.push(`last visited ${localeTime(lastAt)}`);
+  return parts.length === 0 ? null : parts.join(", ");
 }
 
 function localeTime(iso: string): string {
   return new Date(iso).toLocaleString();
+}
+
+function renderGrantState(share: SharePanelModel, grant: Grant): m.Children {
+  const status = grant.status;
+  if (status.state === "saving")
+    return m(
+      "span",
+      {
+        // The address beside this never yields: it cannot shrink below its own
+        // text, so something has to give when a long one leaves no room. This
+        // does, down to the spinner alone, rather than pushing the address out
+        // of the row.
+        class:
+          "flex min-w-0 items-center gap-1.5 overflow-hidden " +
+          "type-helper text-tertiary",
+      },
+      [
+        m(Spinner, { size: "sm", extra: "shrink-0" }),
+        m("span", { class: "min-w-0 truncate" }, SAVING_LABEL),
+      ],
+    );
+  if (status.state !== "failed") return null;
+  return m("span", { class: "flex min-w-0 items-center gap-1.5" }, [
+    m(
+      "span",
+      {
+        class: "min-w-0 truncate type-helper text-important",
+        "data-tooltip": status.failureMessage,
+      },
+      status.failureMessage,
+    ),
+    m(
+      Button,
+      {
+        variant: "ghost",
+        size: "icon",
+        onclick: () => share.retryGrant(share.currentTarget, grant.key),
+      },
+      "Retry",
+    ),
+  ]);
 }
 
 /** The box every row leads with, so the names line up down the list. */
@@ -1193,7 +1061,13 @@ function grantText(
   if (grantee.kind === "email_domain")
     return { primary: `Anyone at ${grantee.value}`, secondary: null };
   if (grantee.kind === "email")
-    return { primary: grantee.value, secondary: null };
+    return {
+      primary: grantee.value,
+      // Only a row the workspace has taken back can say this: until the account
+      // lookup has answered, nobody knows whether they have signed up.
+      secondary:
+        grant.status.state === "settled" ? "(hasn't signed up yet)" : null,
+    };
   const record = share.identityFor(grantee.userId);
   const email = record?.email ?? grantee.value;
   const name = record?.display_name ?? "";
@@ -1261,12 +1135,7 @@ function renderLinkSection(
                     ? "Copy the link"
                     : `Copy the link to ${targetTitle(share, target)}`,
                 onclick: () => {
-                  void copyToClipboardWithFlash(
-                    share,
-                    local,
-                    share.currentTarget,
-                    url,
-                  );
+                  void copyLink(share, local, url);
                 },
               },
               m(Icon16, { name: isCopied ? "check" : "copy" }),
@@ -1335,287 +1204,25 @@ function renderMobileLinkStatus(state: MobileLinkState): m.Children {
   }
 }
 
-/** Write `text` to the clipboard and flash the check on the control keyed `target`. */
-async function copyToClipboardWithFlash(
+async function copyLink(
   share: SharePanelModel,
   local: ShareTabLocalState,
-  target: string,
-  text: string,
+  url: string,
 ): Promise<void> {
   const clipboard = navigator.clipboard;
-  // The text is on screen and selectable either way, so a clipboard that
+  // The link is on screen and selectable either way, so a clipboard that
   // refuses costs the confirmation and nothing else.
   if (!clipboard) return;
   try {
-    await clipboard.writeText(text);
+    await clipboard.writeText(url);
   } catch {
     return;
   }
-  local.copied = { target, atMs: share.nowMs() };
+  local.copied = { target: share.currentTarget, atMs: share.nowMs() };
   if (local.copyFlashHandle !== null) share.cancel(local.copyFlashHandle);
   local.copyFlashHandle = share.schedule(() => {
     local.copyFlashHandle = null;
     m.redraw();
   }, COPY_FLASH_MS);
   m.redraw();
-}
-
-// Visiting agents.
-
-/** The section inviting outside coding agents into the target, and listing those already in. */
-function renderVisitingAgentsSection(
-  share: SharePanelModel,
-  local: ShareTabLocalState,
-  target: string,
-): m.Children {
-  const isWhole = target === share.wholeService;
-  const inviteState = share.visitingAgentInviteState;
-  return m(
-    "section",
-    {
-      id: "ws-share-agents",
-      class: "mt-6 shrink-0",
-      oncreate: () => void share.ensureVisitingAgentsLoaded(),
-    },
-    [
-      m("p", { class: "type-label text-primary" }, VISITING_AGENTS_HEADING),
-      m(
-        "p",
-        { class: "mt-1 type-helper text-tertiary" },
-        isWhole
-          ? VISITING_AGENTS_WORKSPACE_SENTENCE
-          : VISITING_AGENTS_APP_SENTENCE,
-      ),
-      m("div", { class: "mt-3 flex items-center gap-2" }, [
-        m(
-          Button,
-          {
-            id: "ws-share-agents-invite",
-            variant: "secondary",
-            "aria-disabled":
-              inviteState.state === "minting" ? "true" : undefined,
-            onclick: () => void share.inviteVisitingAgent(target),
-          },
-          [
-            inviteState.state === "minting"
-              ? m(Spinner, { size: "sm", extra: "shrink-0" })
-              : m(Icon16, { name: "user-plus" }),
-            VISITING_AGENT_INVITE_LABEL,
-          ],
-        ),
-        inviteState.state === "refused" && inviteState.target === target
-          ? m(
-              "p",
-              {
-                id: "ws-share-agents-invite-error",
-                class: "type-helper text-important",
-              },
-              inviteState.message,
-            )
-          : null,
-      ]),
-      inviteState.state === "minted" && inviteState.target === target
-        ? renderVisitingAgentInstructions(share, local, inviteState)
-        : null,
-      renderVisitingAgentList(share, isWhole),
-    ],
-  );
-}
-
-function renderVisitingAgentInstructions(
-  share: SharePanelModel,
-  local: ShareTabLocalState,
-  inviteState: Extract<VisitingAgentInviteState, { state: "minted" }>,
-): m.Children {
-  const { invite } = inviteState;
-  const copied = local.copied;
-  const isCopied =
-    copied !== null &&
-    copied.target === `agent:${invite.code}` &&
-    share.nowMs() - copied.atMs < COPY_FLASH_MS;
-  return m("div", { id: "ws-share-agents-instructions", class: "mt-3" }, [
-    m(
-      "p",
-      { class: "type-helper text-secondary" },
-      VISITING_AGENT_INSTRUCTIONS_LEAD,
-    ),
-    m("textarea", {
-      id: "ws-share-agents-instructions-text",
-      class:
-        "mt-2 w-full h-48 rounded-md border border-default bg-fill-subtle p-2 " +
-        "font-mono type-helper text-primary",
-      readonly: true,
-      "aria-label": "Instructions for the agent",
-      value: invite.instructions,
-    }),
-    m("div", { class: "mt-2 flex items-center gap-2" }, [
-      m(
-        Button,
-        {
-          id: "ws-share-agents-copy",
-          variant: "primary",
-          onclick: () => {
-            void copyToClipboardWithFlash(
-              share,
-              local,
-              `agent:${invite.code}`,
-              invite.instructions,
-            );
-          },
-        },
-        [
-          m(Icon16, { name: isCopied ? "check" : "copy" }),
-          VISITING_AGENT_COPY_LABEL,
-        ],
-      ),
-      m(
-        Button,
-        {
-          id: "ws-share-agents-done",
-          variant: "secondary",
-          onclick: () => share.dismissVisitingAgentInvite(),
-        },
-        VISITING_AGENT_DONE_LABEL,
-      ),
-      m(
-        "span",
-        { class: "type-helper text-tertiary" },
-        `Code ${invite.code}, expires ${localeTime(invite.expires_at)}`,
-      ),
-    ]),
-  ]);
-}
-
-function renderVisitingAgentList(
-  share: SharePanelModel,
-  isWhole: boolean,
-): m.Children {
-  const loadState = share.visitingAgentsLoadState;
-  if (loadState === "idle" || loadState === "loading") {
-    return m(
-      "p",
-      {
-        id: "ws-share-agents-loading",
-        class: "mt-3 flex items-center gap-2 type-helper text-tertiary",
-      },
-      [
-        m(Spinner, { size: "sm", extra: "shrink-0" }),
-        "Reading the visiting agents",
-      ],
-    );
-  }
-  if (loadState === "failed") {
-    // The read runs in the workspace, so a stopped one fails it; the control is
-    // how the list comes back once the workspace runs again.
-    return m(
-      "div",
-      {
-        id: "ws-share-agents-error",
-        class: "mt-3 flex items-center gap-2",
-      },
-      [
-        m(
-          "p",
-          { class: "min-w-0 type-helper text-important" },
-          share.visitingAgentsLoadError ?? "",
-        ),
-        m(
-          Button,
-          {
-            id: "ws-share-agents-retry",
-            variant: "secondary",
-            onclick: () => void share.reloadVisitingAgents(),
-          },
-          VISITING_AGENTS_RETRY_LABEL,
-        ),
-      ],
-    );
-  }
-  // The whole-workspace pane lists every agent; an app pane only those scoped to that app.
-  const agents = share.visitingAgentList.filter(
-    (agent) =>
-      isWhole ||
-      (Array.isArray(agent.scope) && agent.scope.includes(share.currentTarget)),
-  );
-  const revokeError = share.visitingAgentRevokeErrorMessage;
-  return m(
-    "div",
-    { id: "ws-share-agents-list", class: "mt-3 flex flex-col gap-2" },
-    [
-      agents.length === 0
-        ? m("p", { class: "type-helper text-tertiary" }, VISITING_AGENTS_EMPTY)
-        : agents.map((agent) => renderVisitingAgentRow(share, agent)),
-      revokeError === null
-        ? null
-        : m(
-            "p",
-            {
-              id: "ws-share-agents-revoke-error",
-              class: "type-helper text-important",
-            },
-            revokeError,
-          ),
-    ],
-  );
-}
-
-function visitingAgentScopeText(agent: VisitingAgentEntry): string {
-  if (Array.isArray(agent.scope)) return agent.scope.join(", ");
-  return agent.scope === "workspace" ? "whole workspace" : agent.scope;
-}
-
-function visitingAgentGranterText(agent: VisitingAgentEntry): string {
-  return agent.granter.startsWith("agent:")
-    ? "invited by another agent"
-    : "invited by a person";
-}
-
-function renderVisitingAgentRow(
-  share: SharePanelModel,
-  agent: VisitingAgentEntry,
-): m.Children {
-  const isRevoking = share.isRevokingVisitingAgent(agent.agent_id);
-  const lastSeen =
-    agent.last_seen_at === null
-      ? "never connected"
-      : `seen ${formatRelativeAgo(agent.last_seen_at, share.nowMs())}`;
-  return m(
-    "div",
-    {
-      class: `${ROW_CLASS} ${ROW_PERSON_CLASS}`,
-      "data-agent-id": agent.agent_id,
-    },
-    [
-      m(
-        "span",
-        {
-          class: `${ROW_LEAD_CLASS} bg-fill-subtle type-helper font-semibold text-secondary`,
-        },
-        monogram(agent.name),
-      ),
-      m(
-        "span",
-        { class: "min-w-0 flex-1 truncate type-body text-primary" },
-        agent.name,
-      ),
-      m("span", { class: COUNT_BADGE_CLASS }, visitingAgentScopeText(agent)),
-      m(
-        "span",
-        { class: "shrink-0 type-helper text-tertiary" },
-        `${visitingAgentGranterText(agent)}, ${lastSeen}`,
-      ),
-      m(
-        Button,
-        {
-          variant: "secondary",
-          "aria-label": `Revoke ${agent.name}`,
-          "aria-disabled": isRevoking ? "true" : undefined,
-          onclick: () => void share.revokeVisitingAgent(agent.agent_id),
-        },
-        isRevoking
-          ? m(Spinner, { size: "sm", extra: "shrink-0" })
-          : VISITING_AGENT_REVOKE_LABEL,
-      ),
-    ],
-  );
 }

@@ -23,7 +23,6 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
@@ -344,7 +343,7 @@ def test_requests_payload_excludes_unresolvable_hosts(tmp_path: Path) -> None:
     )
 
     displayable = displayable_pending_requests(inbox, backend_resolver)
-    payload = _build_requests_payload(displayable, backend_resolver)
+    payload = _build_requests_payload(inbox, backend_resolver)
 
     assert [req.request_id for req in displayable] == [visible_request.request_id]
     assert payload["count"] == 1
@@ -836,7 +835,7 @@ def test_dispatcher_returns_400_when_no_handler_claims_request_type(tmp_path: Pa
 def test_notifications_snapshot_tracks_a_request_from_arrival_to_approval(tmp_path: Path) -> None:
     """The channel snapshot's notifications frame is derived end-to-end from the request inbox.
 
-    Covers the real wiring behind ``derive_requests_and_notifications``: the displayable
+    Covers the real wiring behind ``derive_notifications``: the displayable
     pending set, the inbox-card display derivation (catalog title, workspace
     attribution, brand-mark service), and resolution via a recorded response.
     """
@@ -853,7 +852,7 @@ def test_notifications_snapshot_tracks_a_request_from_arrival_to_approval(tmp_pa
     publisher = state.ui_publisher
     assert publisher is not None
 
-    snapshot = publisher.build_snapshot(LOCAL_PROFILE_USER_ID)
+    snapshot = publisher.build_snapshot()
 
     assert snapshot.notifications.unresolved_count == 1
     (entry,) = snapshot.notifications.entries
@@ -874,7 +873,7 @@ def test_notifications_snapshot_tracks_a_request_from_arrival_to_approval(tmp_pa
     )
     inbox.record_response(response_event)
 
-    resolved_snapshot = publisher.build_snapshot(LOCAL_PROFILE_USER_ID)
+    resolved_snapshot = publisher.build_snapshot()
 
     assert resolved_snapshot.notifications.unresolved_count == 0
     (resolved_entry,) = resolved_snapshot.notifications.entries

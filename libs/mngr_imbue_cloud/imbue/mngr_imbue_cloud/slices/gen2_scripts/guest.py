@@ -96,7 +96,7 @@ sub read_first_line {
 }
 
 # Replaces $path by rename from a fresh temp file beside it, created so that
-# no planted name can be written through. True once $path holds $content.
+# no planted name can be written through.
 sub write_replacing {
     my ($path, $content) = @_;
     my ($fh, $tmp);
@@ -105,57 +105,10 @@ sub write_replacing {
         last if sysopen($fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
         undef $fh;
     }
-    return 0 unless defined $fh;
+    return unless defined $fh;
     print {$fh} $content;
-    close($fh) or do { unlink $tmp; return 0 };
-    return 1 if rename($tmp, $path);
-    unlink $tmp;
-    return 0;
-}
-
-# Overwrites $path in place, so it keeps its inode. Only a regular file of
-# exactly the content's length is overwritten; anything else (the first write,
-# an older format, a planted symlink or fifo) is replaced by rename. True once
-# $path holds $content.
-sub write_in_place {
-    my ($path, $content) = @_;
-    if (sysopen(my $fh, $path, O_WRONLY | O_NOFOLLOW | O_NONBLOCK)) {
-        if (-f $fh && -s _ == length($content)) {
-            my $written = syswrite($fh, $content);
-            close($fh);
-            return 1 if defined $written && $written == length($content);
-        } else {
-            close($fh);
-        }
-    }
-    return write_replacing($path, $content);
-}
-
-# Points $path at a complete copy of $content while the sandbox only ever sees
-# two inodes. gVisor's gofer keeps an entry for every distinct inode the sandbox
-# sees, for its lifetime, so replacing $path with a fresh file on every rewrite
-# grows it without bound; overwriting $path itself would let a reader catch a
-# half-written file. Instead the content is written in place into whichever of
-# two slot files $path does not name, which is then renamed onto $path through
-# a hard link.
-sub publish_through_slot {
-    my ($path, $content) = @_;
-    my @published = lstat($path);
-    my @slot0 = lstat("$path.slot0");
-    my $slot = @published && @slot0 && $published[0] == $slot0[0] && $published[1] == $slot0[1] ? 1 : 0;
-    my $slot_path = "$path.slot$slot";
-    write_in_place($slot_path, $content) or return;
-    my $link;
-    for (1 .. 100) {
-        $link = sprintf('%s.%08x', $path, int(rand(4294967296)));
-        last if link($slot_path, $link);
-        return unless $!{EEXIST};
-        undef $link;
-    }
-    return unless defined $link;
-    # A rename onto a name for the same file does nothing and leaves $link behind.
-    rename($link, $path);
-    unlink $link;
+    close($fh) or do { unlink $tmp; return };
+    rename($tmp, $path) or unlink $tmp;
 }
 
 sub publish {
@@ -163,30 +116,26 @@ sub publish {
     # A container can stop, and its cgroup vanish, between any two reads.
     my $limit = read_first_line("$cgroup_dir/memory.max") // return;
     if ($limit eq 'max') {
-        unlink $target_file, "$target_file.slot0", "$target_file.slot1";
+        unlink $target_file;
         return;
     }
     return unless $limit =~ /^\d+$/;
     my $usage = read_first_line("$cgroup_dir/memory.current") // return;
     return unless $usage =~ /^\d+$/;
     open(my $stat, '<', "$cgroup_dir/memory.stat") or return;
-    my $inactive_file = 0;
+    my $reclaimable = 0;
     while (my $line = <$stat>) {
         my ($key, $value) = split ' ', $line;
         next unless defined $value && $value =~ /^\d+$/;
-        $inactive_file = $value if $key eq 'inactive_file';
+        $reclaimable += $value if $key eq 'active_file' || $key eq 'inactive_file' || $key eq 'slab_reclaimable';
     }
     close($stat);
-    my $available = $limit - $usage + $inactive_file;
+    my $available = $limit - $usage + $reclaimable;
     $available = 0 if $available < 0;
     $available = $limit if $available > $limit;
-    # Fixed-width fields, so every rewrite of a slot has the same length (see write_in_place).
-    publish_through_slot(
+    write_replacing(
         $target_file,
-        sprintf(
-            "MemTotal: %15d kB\nMemAvailable: %15d kB\nTimestamp: %15d\n",
-            $limit / 1024, $available / 1024, time,
-        ),
+        sprintf("MemTotal: %d kB\nMemAvailable: %d kB\nTimestamp: %d\n", $limit / 1024, $available / 1024, time),
     );
 }
 
@@ -332,17 +281,12 @@ def render_guest_container_meminfo_publisher_script(cgroup_parent: str) -> str:
     Under gVisor the container's own /proc/meminfo cannot see the memory the
     runtime is charged, so an earlyoom inside run with ``--host-meminfo``
     reads this file too. It holds the container cgroup's limit as MemTotal
-    and, as MemAvailable, the limit minus the usage plus the inactive file
-    cache, the kubelet's eviction signal. Active file cache and reclaimable
-    slab are not counted: near the limit they are what the kernel thrashes
-    rather than frees, so counting them can hold the figure above earlyoom's
-    SIGKILL threshold while the cgroup runs out. Each rewrite goes into one of
-    two slot files beside it, alternately, and is renamed onto it: the reader
-    reopens it on every poll and always sees a complete file, and gVisor, which
-    keeps an entry for every distinct inode the sandbox sees for its lifetime,
-    sees only the two. Each container's volume directory is its named volume's bind
-    device, which exists whether or not the container runs; a container
-    without a limit gets no file.
+    and, as MemAvailable, the limit minus the usage plus what the kernel can
+    reclaim (page cache and reclaimable slab; shmem, where gVisor keeps the
+    sandbox's memory, is not page cache here). It is replaced by rename, since
+    the reader rereads it on every poll. Each container's volume directory is
+    its named volume's bind device, which exists whether or not the container
+    runs; a container without a limit gets no file.
     """
     header = f"""\
 #!/usr/bin/perl
@@ -352,7 +296,7 @@ def render_guest_container_meminfo_publisher_script(cgroup_parent: str) -> str:
 # there, and bash cannot open with O_NOFOLLOW.
 use strict;
 use warnings;
-use Fcntl qw(O_WRONLY O_CREAT O_EXCL O_NOFOLLOW O_NONBLOCK);
+use Fcntl qw(O_WRONLY O_CREAT O_EXCL O_NOFOLLOW);
 
 my $cgroup_parent = '{cgroup_parent}';
 my $host_id_label = '{GEN2_HOST_ID_CONTAINER_LABEL}';
@@ -514,8 +458,7 @@ def _build_firstboot_script(host_dir: str) -> str:
 
     The gen-2 base image pre-installs docker + the package set (via the prep
     stage's virt-customize), so the apt block is a presence-guarded fallback for
-    images staged before a customization existed, followed by a best-effort
-    ca-certificates upgrade. The btrfs block sets up the
+    images staged before a customization existed. The btrfs block sets up the
     data disk (selected by label, else the blank writable non-root disk): it is
     formatted when not already btrfs (so re-runs and restored disks survive),
     mounted at a fixed path, and ``host_dir`` symlinked to it.
@@ -555,12 +498,6 @@ test -f /etc/ssl/certs/ca-certificates.crt || PKGS_TO_INSTALL="$PKGS_TO_INSTALL 
 if [ -n "$PKGS_TO_INSTALL" ]; then
     apt_get_retry update -qq
     apt_get_retry install -y -qq $PKGS_TO_INSTALL
-fi
-# The staged image keeps the CA bundle it was customized with until its next
-# re-stage, so every first boot upgrades it. Best effort: an apt outage must not
-# fail the first boot.
-if ! {{ apt_get_retry update -qq && apt_get_retry install -y -qq --only-upgrade ca-certificates; }}; then
-    echo "WARNING: could not upgrade ca-certificates; the VM keeps its staged CA bundle" >&2
 fi
 
 # Format + mount the btrfs data disk and symlink host_dir to it. Idempotent:

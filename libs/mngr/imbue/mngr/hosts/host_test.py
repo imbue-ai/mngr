@@ -47,10 +47,8 @@ from pyinfra.api.command import StringCommand
 from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessTimeoutError
-from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
@@ -75,13 +73,12 @@ from imbue.mngr.hosts.host import ONBOARDING_TEXT
 from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
 from imbue.mngr.hosts.host import _LOCK_ACQUIRED_MARKER
 from imbue.mngr.hosts.host import _LOCK_TIMED_OUT_MARKER
-from imbue.mngr.hosts.host import _MAX_SAFE_SEND_KEYS_LENGTH
 from imbue.mngr.hosts.host import _START_AGENT_LAUNCH_TIMEOUT_SECONDS
 from imbue.mngr.hosts.host import _TMUX_SET_TITLES_STRING
 from imbue.mngr.hosts.host import _TMUX_STATUS_LEFT_LENGTH
+from imbue.mngr.hosts.host import _build_agent_launch_steps
 from imbue.mngr.hosts.host import _build_generation_increment_fragment
 from imbue.mngr.hosts.host import _build_remote_lock_command
-from imbue.mngr.hosts.host import _build_sourced_launch_steps
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
 from imbue.mngr.hosts.host import _increment_local_generation_counter
@@ -122,9 +119,6 @@ from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.command_logging import commands_kept_out_of_logs
-from imbue.mngr.utils.progress import ProgressEvent
-from imbue.mngr.utils.progress import ProgressEventKind
-from imbue.mngr.utils.progress import ProgressEventSinkReporter
 from imbue.mngr.utils.testing import HostSubclassT
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import get_cleanup_failures
@@ -1026,19 +1020,6 @@ def test_build_start_agent_shell_command_includes_additional_windows(
     assert "htop" in result
 
 
-def test_build_start_agent_shell_command_escapes_trailing_semicolon_of_additional_window_command(
-    local_provider: LocalProviderInstance,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-) -> None:
-    """A window command ending in `;` is typed with its `;`, which tmux would otherwise take as a separator."""
-    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
-    additional_commands = [NamedCommand(command=CommandString("make watch;"), window_name="build")]
-    result = _build_command_with_defaults(agent, temp_host_dir, additional_commands=additional_commands)
-
-    assert "-l -- 'make watch\\;'" in result
-
-
 def test_build_start_agent_shell_command_send_keys_uses_end_of_options_separator(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
@@ -1197,13 +1178,11 @@ def test_build_start_agent_shell_command_includes_sigwinch_hook(
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir)
 
-    # Persistent hook in slot [98] (distinct from the one-shot onboarding [99]), running the
-    # shipped script via if-shell -b with an empty command, so tmux never displays its result.
+    # Persistent hook in slot [98] (distinct from the one-shot onboarding [99]),
+    # running the shipped script via run-shell -b against this session's window.
     assert "set-hook" in result
     assert "client-attached[98]" in result
-    assert 'if-shell -b "bash ' in result
-    assert 'fit #{client_width} #{client_height}" ""\'' in result
-    assert "run-shell" not in result
+    assert "run-shell -b" in result
     assert "commands/sigwinch_panes.sh" in result
     # It must be persistent: no self-removal (set-hook -u) like the onboarding hook has.
     assert "set-hook -u -t" not in result
@@ -1312,12 +1291,12 @@ def test_build_start_agent_shell_command_writes_agent_command_to_launch_script(
     assert f"mkdir -p {expected_script_path.parent}" in result
 
 
-def test_build_start_agent_shell_command_types_short_additional_window_commands_directly(
+def test_build_start_agent_shell_command_types_additional_window_commands_directly(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """Additional windows short enough to type have their commands typed, not sourced.
+    """Additional windows keep having their commands typed, never sourced from a script.
 
     Those windows inherit the user's tmux default-command, which need not be a POSIX shell --
     elvish, for instance, has no `.` builtin, so a sourced line would be a syntax error there.
@@ -1336,97 +1315,11 @@ def test_build_start_agent_shell_command_types_short_additional_window_commands_
         "htop",
         f". {_get_expected_launch_script_path(temp_host_dir, agent)}",
     ]
-    # Only the agent's command is written to a script.
+    # Only the agent's command is ever written to a script.
     assert result.count("printf '%s\\n'") == 1
 
 
-def test_build_start_agent_shell_command_sources_over_long_additional_window_commands(
-    local_provider: LocalProviderInstance,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-) -> None:
-    """Each additional window is judged on its own command's length, and scripts are named by index.
-
-    A command past the pty's canonical-mode buffer cannot be typed at all: the pane keeps the
-    first 1KB and drops the rest along with the Enter, leaving the truncated text sitting at the
-    prompt.
-    """
-    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
-    long_additional_command = "echo " + "y" * 4000
-    additional_commands = [
-        NamedCommand(command=CommandString(long_additional_command), window_name="terminal"),
-        NamedCommand(command=CommandString("htop"), window_name=None),
-    ]
-    result = _build_command_with_defaults(
-        agent, temp_host_dir, command="sleep 1000", additional_commands=additional_commands
-    )
-
-    state_dir = get_agent_state_dir_path(temp_host_dir, agent.id)
-    window_script_path = state_dir / "launch_window_1.sh"
-    assert _get_send_keys_literal_payloads(result) == [
-        f". {window_script_path}",
-        "htop",
-        f". {_get_expected_launch_script_path(temp_host_dir, agent)}",
-    ]
-    assert f"printf '%s\\n' {shlex.quote(long_additional_command)} > {window_script_path}" in result
-
-
-def test_build_start_agent_shell_command_measures_additional_window_commands_in_bytes(
-    local_provider: LocalProviderInstance,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-) -> None:
-    """The pty counts bytes, so a command of multi-byte characters must be judged in bytes.
-
-    A command well under the bound in characters can be several times over it in bytes, and would
-    be typed -- and truncated -- if the gate counted characters.
-    """
-    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
-    multibyte_command = "echo " + "漢" * 400
-    assert len(multibyte_command) < _MAX_SAFE_SEND_KEYS_LENGTH <= len(multibyte_command.encode())
-    result = _build_command_with_defaults(
-        agent,
-        temp_host_dir,
-        command="sleep 1000",
-        additional_commands=[NamedCommand(command=CommandString(multibyte_command), window_name="wide")],
-    )
-
-    window_script_path = get_agent_state_dir_path(temp_host_dir, agent.id) / "launch_window_1.sh"
-    assert _get_send_keys_literal_payloads(result)[0] == f". {window_script_path}"
-
-
-def test_build_start_agent_shell_command_never_types_a_payload_the_pty_would_truncate(
-    local_provider: LocalProviderInstance,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-) -> None:
-    """No window's typed payload may approach the pty's canonical-mode input buffer.
-
-    Every pane's shell is still in canonical mode when these keys arrive, and a pty silently
-    discards input past its buffer (1KB on macOS) -- including the trailing newline -- while both
-    the write and tmux report success. Any window whose payload tracked its command's length
-    would therefore be left holding a truncated line at its prompt, with nothing logged anywhere.
-    """
-    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
-    additional_commands = [
-        NamedCommand(command=CommandString("echo " + "y" * 4000), window_name="terminal"),
-        NamedCommand(command=CommandString("htop"), window_name=None),
-    ]
-    result = _build_command_with_defaults(
-        agent,
-        temp_host_dir,
-        command="echo " + "x" * 4000,
-        additional_commands=additional_commands,
-    )
-
-    payloads = _get_send_keys_literal_payloads(result)
-    assert len(payloads) == 3
-    for payload in payloads:
-        payload_length = len(payload.encode())
-        assert payload_length < _MAX_SAFE_SEND_KEYS_LENGTH, f"typed payload of {payload_length} bytes risks truncation"
-
-
-def test_build_sourced_launch_steps_writes_command_verbatim(tmp_path: Path) -> None:
+def test_build_agent_launch_steps_writes_command_verbatim(tmp_path: Path) -> None:
     """Running the generated write steps must reproduce the command byte-for-byte.
 
     Launch commands carry shell metacharacters, quotes, and backslashes that a careless
@@ -1439,7 +1332,7 @@ def test_build_sourced_launch_steps_writes_command_verbatim(tmp_path: Path) -> N
         ' export X="${S:-fallback}" && { test -s "$D/f.jsonl" || find "$D" -name \'*.jsonl\' | grep -q . ; }'
         r" && printf 'literal \n not newline' && claude --resume \"$X\""
     )
-    steps = _build_sourced_launch_steps(
+    steps = _build_agent_launch_steps(
         launch_script_path=launch_script_path,
         command=command,
         quoted_exact_window=shlex.quote("=mngr-test:=agent"),
@@ -1823,73 +1716,6 @@ def test_reap_agent_process_tree_kills_pane_and_env_marked_orphans_but_not_the_s
     assert not any("kill-session" in command for command in commands)
 
 
-def _kill_command_pids(commands: list[str]) -> set[str]:
-    """The pids named in the recorded SIGTERM/SIGKILL loop."""
-    kill_command = next(command for command in commands if "kill -TERM" in command)
-    return set(kill_command.split(";", 1)[0].removeprefix("for p in ").split())
-
-
-def test_reap_agent_process_tree_kills_every_pane_descendant_from_one_ps_snapshot(
-    local_provider: LocalProviderInstance,
-) -> None:
-    agent = make_test_agent_details("reap-ps-snapshot-agent")
-    ps_output = "\n".join(
-        [
-            "1 0 init",
-            "41001 1 bash",
-            "41002 41001 claude",
-            "41003 41002 node",
-            "42001 1 bash",
-            "42002 42001 tee",
-            "43001 1 sshd",
-            "43002 43001 bash",
-        ]
-    )
-
-    def handle(command: str) -> CommandResult:
-        if "list-windows" in command:
-            return CommandResult(stdout="0\n1", stderr="", success=True)
-        if "list-panes" in command:
-            pane_pid = "41001" if ":0" in command else "42001"
-            return CommandResult(stdout=pane_pid, stderr="", success=True)
-        if command.startswith("ps -e"):
-            return CommandResult(stdout=ps_output, stderr="", success=True)
-        return CommandResult(stdout="", stderr="", success=True)
-
-    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
-
-    failures = host.reap_agent_process_tree(cast(AgentInterface, agent))
-
-    assert failures == []
-    commands = [command for command, _ in recorded]
-    assert sum(1 for command in commands if command.startswith("ps -e")) == 1
-    assert _kill_command_pids(commands) == {"41001", "41002", "41003", "42001", "42002"}
-
-
-@pytest.mark.allow_warnings(match=r"^Cleanup step left a resource behind on host")
-def test_reap_agent_process_tree_records_a_ps_error_and_still_kills_the_pane(
-    local_provider: LocalProviderInstance,
-) -> None:
-    agent = make_test_agent_details("reap-ps-error-agent")
-
-    def handle(command: str) -> CommandResult:
-        if "list-windows" in command:
-            return CommandResult(stdout="0", stderr="", success=True)
-        if "list-panes" in command:
-            return CommandResult(stdout="44001", stderr="", success=True)
-        if command.startswith("ps -e"):
-            return CommandResult(stdout="", stderr="ps: cannot read /proc", success=False)
-        return CommandResult(stdout="", stderr="", success=True)
-
-    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
-
-    failures = host.reap_agent_process_tree(cast(AgentInterface, agent))
-
-    assert [failure.category for failure in failures] == [CleanupFailureCategory.PROCESSES_REMAIN]
-    assert "ps: cannot read /proc" in failures[0].message
-    assert _kill_command_pids([command for command, _ in recorded]) == {"44001"}
-
-
 def _make_local_command_intercepting_host(
     local_provider: LocalProviderInstance,
     agent: AgentInterface,
@@ -1918,36 +1744,27 @@ def _is_reap_step(command: str) -> bool:
     return "tmux list-windows" in command or "/proc/[0-9]*/environ" in command or "kill -TERM" in command
 
 
-# What tmux prints for a session that does not exist on a running server.
-_NO_SESSION_PROBE_RESULT: Final[CommandResult] = CommandResult(
-    stdout="", stderr="can't find session: mngr-agent\n", success=False
-)
-
-
-@pytest.mark.parametrize("is_probe_timed_out", [True, False], ids=["timeout", "tmux-failure"])
-def test_start_agents_raises_and_reaps_nothing_when_the_session_probe_cannot_answer(
-    is_probe_timed_out: bool,
+def test_start_agents_raises_and_reaps_nothing_when_the_session_probe_times_out(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """A session probe that times out or fails without saying the session is absent aborts the start.
+    """A timed-out session probe aborts the start; it must never be read as "no session".
 
-    It must never be read as "no session": start_agents would then reap the LIVE agent's whole
-    process tree (for a minds services agent: supervisord and every service under it).
+    Regression guard: the probe used to report a timeout as ``success=False``, which is
+    indistinguishable from "no session", and start_agents then reaped the LIVE agent's
+    whole process tree (for a minds services agent: supervisord and every service under it).
     """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
 
     def handle(command: str) -> CommandResult:
         if _is_session_probe(command):
-            if is_probe_timed_out:
-                raise CommandTimeoutError(f"Command timed out after 10.0s: {command}")
-            return CommandResult(stdout="", stderr="lost server\n", success=False)
+            raise CommandTimeoutError(f"Command timed out after 10.0s: {command}")
         return CommandResult(stdout="", stderr="", success=True)
 
     host, recorded = _make_local_command_intercepting_host(local_provider, agent, handle)
 
-    with pytest.raises(HostError):
+    with pytest.raises(CommandTimeoutError):
         host.start_agents([agent.id])
 
     commands = [command for command, _ in recorded]
@@ -1966,7 +1783,7 @@ def test_start_agents_reaps_then_launches_on_a_definitive_no_session_answer(
 
     def handle(command: str) -> CommandResult:
         if _is_session_probe(command):
-            return _NO_SESSION_PROBE_RESULT
+            return CommandResult(stdout="", stderr="", success=False)
         return CommandResult(stdout="", stderr="", success=True)
 
     host, recorded = _make_local_command_intercepting_host(local_provider, agent, handle)
@@ -1993,7 +1810,7 @@ def test_start_agents_bounds_the_launch_batch_and_fails_loudly_when_it_times_out
 
     def handle(command: str) -> CommandResult:
         if _is_session_probe(command):
-            return _NO_SESSION_PROBE_RESULT
+            return CommandResult(stdout="", stderr="", success=False)
         if "tmux new-session" in command:
             raise CommandTimeoutError(f"Command timed out after {_START_AGENT_LAUNCH_TIMEOUT_SECONDS}s: {command}")
         return CommandResult(stdout="", stderr="", success=True)
@@ -4810,37 +4627,6 @@ def test_host_provision_agent_with_extra_provision_commands(
     assert "provisioned" in marker_file.read_text()
 
 
-def test_host_provision_agent_never_reports_a_failed_extra_provision_command_completed(
-    local_host: Host,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    events: list[ProgressEvent] = []
-    mngr_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().progress_reporter, ProgressEventSinkReporter(emit=events.append))
-    )
-    options = CreateAgentOptions(
-        name=AgentName("failing-provision-agent"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-        provisioning=AgentProvisioningOptions(extra_provision_commands=("true", "exit 3")),
-    )
-    agent = local_host.create_agent_state(temp_work_dir, options)
-
-    with pytest.raises(ConcurrencyExceptionGroup) as raised:
-        local_host.provision_agent(agent, options, mngr_ctx)
-
-    assert raised.value.only_exception_is_instance_of(MngrError)
-    assert "Extra provision command failed: exit 3" in str(raised.value.get_only_exception())
-
-    assert [(event.kind, str(event.step_id)) for event in events] == [
-        (ProgressEventKind.STARTED, "provisioning.command_0"),
-        (ProgressEventKind.COMPLETED, "provisioning.command_0"),
-        (ProgressEventKind.STARTED, "provisioning.command_1"),
-    ]
-
-
 def test_host_provision_agent_with_create_directories(
     local_host: Host,
     temp_host_dir: Path,
@@ -5034,22 +4820,6 @@ def test_host_get_agent_by_id_returns_none_when_not_found(
     host = local_host
     result = host._get_agent_by_id(AgentId.generate())
     assert result is None
-
-
-def test_host_get_agent_by_id_reads_only_that_agent(
-    local_host: Host,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-) -> None:
-    """Looking up one agent must not read its neighbors, so a neighbor's unparseable data.json cannot break it."""
-    agent = _create_generic_agent_state(local_host, temp_work_dir)
-    corrupt_neighbor = _create_generic_agent_state(local_host, temp_work_dir)
-    (get_agent_state_dir_path(temp_host_dir, corrupt_neighbor.id) / "data.json").write_text("{not json")
-
-    result = local_host._get_agent_by_id(agent.id)
-
-    assert result is not None
-    assert (result.id, result.name, result.agent_type) == (agent.id, agent.name, agent.agent_type)
 
 
 # Tests for Host._create_host_tmux_config

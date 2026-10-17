@@ -1,0 +1,3 @@
+- The desktop app now logs `[startup] env-setup finished in Ns` once its first-launch dependency setup (`uv sync`) succeeds, so electron.log records how long setup took.
+
+- The macOS launch smoke test (`macos-launch.spec.js`) gives first-launch dependency setup its own 5-minute budget before its existing 3-minute budget for the backend and first page. A first launch on a CI runner downloads about 112 MB of wheels from PyPI, whose CDN intermittently stalls for minutes from GitHub's macOS runners. When setup runs out of time or fails, the test now fails with that reason and the tail of uv's log, not a generic "no content window" timeout.

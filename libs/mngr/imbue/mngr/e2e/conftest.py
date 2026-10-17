@@ -12,7 +12,6 @@ import sys
 import tempfile
 import threading
 from collections.abc import Generator
-from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -25,7 +24,6 @@ import pytest
 import tomlkit
 from loguru import logger
 
-from imbue.imbue_common.conftest_hooks import RELEASE_TEST_TIMEOUT_SECONDS
 from imbue.mngr.api.connect import CONNECT_COMMAND_ACTIVE_ENV_VAR
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
@@ -37,7 +35,6 @@ from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.skitwright.data_types import CommandResult
 from imbue.skitwright.data_types import OutputLine
 from imbue.skitwright.data_types import OutputSource
-from imbue.skitwright.redaction import redact_secret_values
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
 
@@ -51,16 +48,6 @@ _PTY_CONNECT_LAUNCHER = "import pty, sys; raise SystemExit(pty.spawn(['sh', '-c'
 # the alarm kills it, and a shell reports a signal death as 128 + the signal.
 BOUND_EXPIRED_EXIT_CODE: Final[int] = 128 + int(signal.SIGALRM)
 
-# Budget for a command that reaches a remote provider. Provisioning a container,
-# snapshotting a host and listing a provider are network round-trips, so they get
-# this instead of the local-command default on ``run``. A release test's whole
-# duration -- setup, every command it runs, and fixture teardown -- is capped by
-# RELEASE_TEST_TIMEOUT_SECONDS, so the slowest single command gets that cap minus
-# a reserve for the rest of the test. A command that needs more than the cap
-# allows belongs to a test that declares its own `pytest.mark.timeout`.
-_REMAINDER_OF_TEST_RESERVE_SECONDS: Final[float] = 60.0
-REMOTE_COMMAND_TIMEOUT_SECONDS: Final[float] = RELEASE_TEST_TIMEOUT_SECONDS - _REMAINDER_OF_TEST_RESERVE_SECONDS
-
 
 def require_binary(binary: str, install_hint: str) -> None:
     """Fail immediately when ``binary`` is absent, naming how to install it.
@@ -72,16 +59,6 @@ def require_binary(binary: str, install_hint: str) -> None:
     while these blocks exercised nothing.
     """
     assert shutil.which(binary) is not None, f"{binary} is not installed ({install_hint})"
-
-
-# Comma-separated names of the environment variables that hold credentials. The
-# workflow that injects the credentials sets it, so the list is whatever was
-# actually injected rather than a guess from variable names. Unset outside CI.
-SECRET_ENV_NAMES_VAR = "MNGR_SECRET_ENV_NAMES"
-
-
-def _secret_env_names(env: Mapping[str, str]) -> list[str]:
-    return [name for name in env.get(SECRET_ENV_NAMES_VAR, "").split(",") if name]
 
 
 def time_bounded(seconds: float, command: str) -> str:
@@ -926,9 +903,7 @@ def e2e(
     # Always keep the directory if the env is being kept (for the destroy script).
     if save_artifacts or keep_env:
         transcript_path = test_output_dir / "transcript.txt"
-        # Local agents inherit this env, so a test that dumps an agent's env
-        # prints the runner's credentials; they must not reach the saved artifact.
-        transcript_path.write_text(redact_secret_values(session.transcript, env, _secret_env_names(env)))
+        transcript_path.write_text(session.transcript)
         # Capture the test's docstring (the scope anchor: the verbatim tutorial
         # block plus crystallized scope) so the detail renderer can show it.
         docstring = inspect.cleandoc(request.node.function.__doc__ or "")

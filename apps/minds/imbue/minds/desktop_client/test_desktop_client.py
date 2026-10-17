@@ -8,7 +8,7 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 
-import httpx2
+import httpx
 import pytest
 from flask import Response
 from flask.testing import FlaskClient
@@ -27,6 +27,8 @@ from imbue.imbue_common.sentry.testing import TEST_S3_BUCKET
 from imbue.imbue_common.sentry.testing import capturing_sentry_client
 from imbue.imbue_common.sentry.testing import recording_s3_bucket
 from imbue.imbue_common.sentry.testing import registered_attachments_uploader
+from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
+from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_requests_payload
@@ -42,23 +44,12 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
-from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_agents_json
-from imbue.minds.desktop_client.conftest import make_connection_store_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_profiled_device_for_test
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
-from imbue.minds.desktop_client.conftest import unlock_account_with_master_password_for_test
-from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
-from imbue.minds.desktop_client.connections.data_types import CONNECTION_STATE_DELETED
-from imbue.minds.desktop_client.connections.primitives import CONNECTION_DOCUMENT_KIND
-from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
-from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
-from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
-from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
-from imbue.minds.desktop_client.connections.provider_settings import legacy_imbue_cloud_provider_name_for_account
 from imbue.minds.desktop_client.console_log_staging import ELECTRON_CONSOLE_TAIL_FILENAME
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import _COOKIE_MAX_AGE_SECONDS
@@ -77,8 +68,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import create_request_response_event
 from imbue.minds.desktop_client.minds_config import MindsConfig
-from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateMode
-from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateOverride
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
@@ -99,15 +88,16 @@ from imbue.minds.desktop_client.testing import skill_chat_launch_stdout
 from imbue.minds.desktop_client.testing import tamper_session_cookie_signed_content
 from imbue.minds.desktop_client.testing import write_dead_destroy_marker
 from imbue.minds.desktop_client.testing import write_stub_mngr
-from imbue.minds.desktop_client.ui_api_inbox import displayable_pending_requests
-from imbue.minds.desktop_client.ui_models import UiClientStateMessage
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceSecretsPayload
 from imbue.minds.desktop_client.workspace_record_store import encode_encrypted_secrets
+from imbue.minds.mngr_settings.imbue_cloud_accounts import set_imbue_cloud_provider_for_account
+from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
+from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
@@ -120,7 +110,7 @@ from imbue.mngr.utils.polling import wait_for
 def _create_test_desktop_client(
     tmp_path: Path,
     backend_resolver: BackendResolverInterface,
-    http_client: httpx2.Client | None,
+    http_client: httpx.Client | None,
     agent_creator: AgentCreator | None = None,
     minds_config: MindsConfig | None = None,
 ) -> tuple[FlaskClient, FileAuthStore]:
@@ -641,7 +631,7 @@ def test_build_workspace_list_says_why_a_cloud_row_cannot_open_from_this_device(
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
     paths, record_store, session_store, _profile_dir = make_profiled_device_for_test(tmp_path, "this", cli)
-    instance_name = imbue_cloud_provider_name_for_user("user-1")
+    instance_name = imbue_cloud_provider_name_for_account("a@b.com")
     agent_id = AgentId.generate()
     host_id = HostId.generate()
     agents = [
@@ -671,9 +661,7 @@ def test_build_workspace_list_says_why_a_cloud_row_cannot_open_from_this_device(
     delete_dek(paths, "user-1")
     assert _build_workspace_list(backend_resolver, session_store)[0]["key_state"] == "locked"
     # With the key on disk the row opens like any other, whatever the lock state.
-    found = record_store.find_active_record(str(agent_id))
-    assert found is not None
-    key_path = record_store.host_access_key_path(found[0], found[1])
+    key_path = record_store.imbue_cloud_host_ssh_key_path("a@b.com", str(host_id))
     assert key_path is not None
     key_path.parent.mkdir(parents=True)
     key_path.write_text("not-a-real-key\n")
@@ -700,50 +688,6 @@ def test_build_workspace_list_never_flags_a_local_row_for_a_missing_key(tmp_path
     assert "key_state" not in rows[0]
 
 
-def test_build_workspace_list_names_each_rows_owning_account_signed_in_or_not(tmp_path: Path) -> None:
-    """A row carries its record's association as ``account_user_id`` whether or not that account is signed in here.
-
-    The per-window projection lists a row under that id, so a signed-out
-    account's workspaces stay its own (named by the email its replica last
-    synced under) rather than falling to the device, which only takes the rows
-    associated with no account.
-    """
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-here", email="here@example.com")
-    session_store = make_session_store_for_test(tmp_path, cli=cli)
-    record_store = session_store.record_store
-    assert record_store is not None
-    here_agent, gone_agent, device_agent = AgentId.generate(), AgentId.generate(), AgentId.generate()
-    backend_resolver = make_resolver_with_data(
-        agents_json=make_agents_json(here_agent, gone_agent, device_agent, host_name="ws")
-    )
-    session_store.associate_created_workspace(
-        user_id="user-here",
-        agent_id=str(here_agent),
-        host_id="host-here",
-        display_name="here-ws",
-        color=None,
-        is_cloud_row=False,
-    )
-    record_store.upsert_local_record(
-        "user-gone",
-        "gone@example.com",
-        ReplicaRecord(host_id="host-gone", agent_id=str(gone_agent), display_name="gone-ws"),
-    )
-
-    rows = {row["id"]: row for row in _build_workspace_list(backend_resolver, session_store)}
-    assert (rows[str(here_agent)]["account_user_id"], rows[str(here_agent)]["account"]) == (
-        "user-here",
-        "here@example.com",
-    )
-    assert (rows[str(gone_agent)]["account_user_id"], rows[str(gone_agent)]["account"]) == (
-        "user-gone",
-        "gone@example.com",
-    )
-    assert "account_user_id" not in rows[str(device_agent)]
-    assert "account" not in rows[str(device_agent)]
-
-
 def test_destroying_marker_includes_ids_with_live_destroy(tmp_path: Path) -> None:
     """An agent with an alive destroy pid + still in the resolver shows up as running.
 
@@ -764,16 +708,14 @@ def test_destroying_marker_includes_ids_with_live_destroy(tmp_path: Path) -> Non
     # The pid is alive, so the record is RUNNING regardless of host state; an
     # empty resolver is enough to drive the helper.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    marker = _finalize_and_mark_destroying(paths, backend_resolver, None, None, None)
+    marker = _finalize_and_mark_destroying(paths, backend_resolver, None, None)
     assert marker == {str(agent_id): "running"}
 
 
 def test_destroying_marker_returns_empty_when_paths_is_none() -> None:
     """The test-server helper builds a minimal app without InstallationPaths;
     the helper must tolerate that without raising."""
-    assert (
-        _finalize_and_mark_destroying(None, StaticBackendResolver(url_by_agent_and_service={}), None, None, None) == {}
-    )
+    assert _finalize_and_mark_destroying(None, StaticBackendResolver(url_by_agent_and_service={}), None, None) == {}
 
 
 def test_finalize_and_mark_destroying_finalizes_when_host_gone(tmp_path: Path) -> None:
@@ -802,7 +744,7 @@ def test_finalize_and_mark_destroying_finalizes_when_host_gone(tmp_path: Path) -
     # gone -> the destroy is DONE.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
 
-    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli, None)
+    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli)
 
     assert marker == {}
     assert not (paths.data_dir / "destroying" / str(agent_id)).exists()
@@ -812,38 +754,6 @@ def test_finalize_and_mark_destroying_finalizes_when_host_gone(tmp_path: Path) -
     records = session_store.record_store.list_records("user-1")
     assert len(records) == 1
     assert records[0].state == "destroyed"
-
-
-@pytest.mark.witnesses("workspace-updates.removed-workspace-forgets-its-setting")
-def test_a_removed_workspace_forgets_its_own_auto_update_setting(tmp_path: Path) -> None:
-    paths = InstallationPaths(data_dir=tmp_path)
-    removed_agent_id = AgentId.generate()
-    kept_agent_id = AgentId.generate()
-    write_dead_destroy_marker(paths, removed_agent_id, HostId.generate())
-    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
-    manual = WorkspaceAutoUpdateOverride(mode=WorkspaceAutoUpdateMode.MANUAL)
-    minds_config.set_workspace_auto_update_override(str(removed_agent_id), manual)
-    minds_config.set_workspace_auto_update_override(str(kept_agent_id), manual)
-
-    _finalize_and_mark_destroying(paths, StaticBackendResolver(url_by_agent_and_service={}), None, None, minds_config)
-
-    assert minds_config.get_workspace_auto_update_overrides() == {str(kept_agent_id): manual}
-
-
-def test_an_unreadable_config_does_not_hold_up_finalizing_a_removed_workspace(tmp_path: Path) -> None:
-    paths = InstallationPaths(data_dir=tmp_path)
-    agent_id = AgentId.generate()
-    write_dead_destroy_marker(paths, agent_id, HostId.generate())
-    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
-    minds_config.data_dir.mkdir()
-    (minds_config.data_dir / "config.toml").write_text("not = [valid toml\n")
-
-    marker = _finalize_and_mark_destroying(
-        paths, StaticBackendResolver(url_by_agent_and_service={}), None, None, minds_config
-    )
-
-    assert marker == {}
-    assert not (paths.data_dir / "destroying" / str(agent_id)).exists()
 
 
 def test_finalize_and_mark_destroying_keeps_failed_when_host_still_up(tmp_path: Path) -> None:
@@ -869,7 +779,7 @@ def test_finalize_and_mark_destroying_keeps_failed_when_host_still_up(tmp_path: 
     # Resolver still lists the workspace agent as active -> host still up -> FAILED.
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}})
 
-    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli, None)
+    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli)
 
     assert marker == {str(agent_id): "failed"}
     assert (paths.data_dir / "destroying" / str(agent_id)).exists()
@@ -909,7 +819,7 @@ def test_workspaces_message_lists_a_failed_destroy_whose_host_is_gone(tmp_path: 
     publisher = get_state(app).ui_publisher
     assert publisher is not None
 
-    message = publisher.build_snapshot(LOCAL_PROFILE_USER_ID).workspaces
+    message = publisher.build_snapshot().workspaces
 
     assert message.failed_destroy_agent_ids == (str(agent_id),)
     assert message.destroying_agent_ids == (str(agent_id),)
@@ -1016,7 +926,7 @@ def test_cloud_record_outside_discovery_is_badged_with_its_provider_not_the_crea
         user_id="user-1",
         email="a@b.com",
         agent_id=cloud_agent_id,
-        provider_kind=legacy_imbue_cloud_provider_name_for_account("a@b.com"),
+        provider_kind=imbue_cloud_provider_name_for_account("a@b.com"),
         device_label="mac",
         encrypted_secrets=None,
     )
@@ -1042,45 +952,6 @@ def test_cloud_record_outside_discovery_is_badged_with_its_provider_not_the_crea
     assert other_device_tile.location == "mac"
 
 
-def test_record_on_an_account_connection_is_badged_with_the_alias_and_stays_a_cloud_tile_once_removed(
-    tmp_path: Path,
-) -> None:
-    """A row written on an account-owned connection has no hosting device and is badged with the connection's
-    alias while the account holds it; once the connection is gone from the account it must still render as a
-    cloud row (with the missing-connection state), never as a machine on the device that created it."""
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-1", email="a@b.com")
-    connection_store = make_connection_store_for_test(tmp_path, cli)
-    session_store = make_session_store_for_test(tmp_path, cli=cli, connection_store=connection_store)
-    unlock_account_with_master_password_for_test(InstallationPaths(data_dir=tmp_path), "user-1")
-    connection_id = add_modal_connection_for_test(connection_store, "user-1", "team modal")
-    agent_id = AgentId.generate()
-    _upsert_remote_record(
-        session_store,
-        user_id="user-1",
-        email="a@b.com",
-        agent_id=agent_id,
-        provider_kind=provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id),
-        device_label="mac",
-        encrypted_secrets=None,
-    )
-    resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
-
-    (tile,) = _collect_remote_workspace_tiles(resolver, session_store)
-
-    assert tile.kind is RemoteWorkspaceKind.CLOUD
-    assert tile.location == "team modal (Modal)"
-    assert tile.state == ""
-
-    connection_store.remove_connection("user-1", "a@b.com", str(connection_id))
-
-    (tile,) = _collect_remote_workspace_tiles(resolver, session_store)
-
-    assert tile.kind is RemoteWorkspaceKind.CLOUD
-    assert tile.location == "Modal"
-    assert tile.state == "missing_connection"
-
-
 def test_remote_tile_backup_access_follows_where_the_credentials_are(tmp_path: Path) -> None:
     """The tile says whether this device can read the backups now, and if not, why.
 
@@ -1096,7 +967,7 @@ def test_remote_tile_backup_access_follows_where_the_credentials_are(tmp_path: P
     session_store = make_session_store_for_test(tmp_path, cli=cli)
     record_store = session_store.record_store
     assert record_store is not None
-    provider_kind = legacy_imbue_cloud_provider_name_for_account("a@b.com")
+    provider_kind = imbue_cloud_provider_name_for_account("a@b.com")
 
     local_env_agent_id = AgentId.generate()
     _upsert_remote_record(
@@ -1132,7 +1003,7 @@ def test_remote_tile_backup_access_follows_where_the_credentials_are(tmp_path: P
     unlocked_user_id = "user-2"
     unlocked_email = "c@d.com"
     cli.add_account(user_id=unlocked_user_id, email=unlocked_email)
-    unlocked_provider_kind = legacy_imbue_cloud_provider_name_for_account(unlocked_email)
+    unlocked_provider_kind = imbue_cloud_provider_name_for_account(unlocked_email)
     dek = ensure_dek(record_store.paths, unlocked_user_id)
     synced_agent_id = AgentId.generate()
     _upsert_remote_record(
@@ -1185,11 +1056,9 @@ class _AllAgentsKnownStaticResolver(StaticBackendResolver):
 def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    expected = {"count": 0, "request_ids": [], "workspace_agent_ids": [], "workspace_agent_id_by_request_id": {}}
-    assert _build_requests_payload(displayable_pending_requests(None, resolver), resolver) == expected
-    assert (
-        _build_requests_payload(displayable_pending_requests(StaticPendingRequests(), resolver), resolver) == expected
-    )
+    expected = {"count": 0, "request_ids": [], "workspace_agent_ids": []}
+    assert _build_requests_payload(None, resolver) == expected
+    assert _build_requests_payload(StaticPendingRequests(), resolver) == expected
 
 
 def test_build_requests_payload_carries_pending_ids() -> None:
@@ -1197,9 +1066,7 @@ def test_build_requests_payload_carries_pending_ids() -> None:
     agent_id = str(AgentId())
     event = create_predefined_permission_request(agent_id=agent_id, scope="slack-api", rationale="post updates")
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    payload = _build_requests_payload(
-        displayable_pending_requests(StaticPendingRequests(pending=(event,)), resolver), resolver
-    )
+    payload = _build_requests_payload(StaticPendingRequests(pending=(event,)), resolver)
     assert payload["count"] == 1
     assert payload["request_ids"] == [event.request_id]
 
@@ -1228,8 +1095,8 @@ def test_build_requests_payload_distinguishes_equal_count_different_contents() -
     )
 
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    payload_a = _build_requests_payload(displayable_pending_requests(inbox_with_a, resolver), resolver)
-    payload_b = _build_requests_payload(displayable_pending_requests(inbox_with_b, resolver), resolver)
+    payload_a = _build_requests_payload(inbox_with_a, resolver)
+    payload_b = _build_requests_payload(inbox_with_b, resolver)
     assert payload_a["count"] == payload_b["count"] == 1
     assert payload_a != payload_b
     assert payload_b["request_ids"] == [request_b.request_id]
@@ -1253,9 +1120,6 @@ def _create_test_client_with_stores(
     # collection subprocess -- resolving ``mngr`` via PATH, so tests stub it
     # there -- instead of short-circuiting.
     root_concurrency_group: ConcurrencyGroup | None = None,
-    # When set, wired into the app state so the routes that move or list
-    # cloud connections (e.g. the clear-password re-homing) see it.
-    connection_store: ConnectionStore | None = None,
 ) -> tuple[FlaskClient, FileAuthStore]:
     """Create a desktop client with session store and config for testing new routes.
 
@@ -1284,7 +1148,6 @@ def _create_test_client_with_stores(
         imbue_cloud_cli=imbue_cloud_cli,
         sync_scheduler=sync_scheduler,
         root_concurrency_group=root_concurrency_group,
-        connection_store=connection_store,
     )
     client = app.test_client()
     return client, auth_store
@@ -1363,6 +1226,58 @@ def test_old_requests_page_route_removed(tmp_path: Path) -> None:
     _authenticate_client(client, auth_store)
     response = client.get("/requests/evt-anything")
     assert response.status_code == 404
+
+
+def test_set_default_account(tmp_path: Path) -> None:
+    """Setting a default account works correctly."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.post(
+        "/accounts/set-default",
+        data={"user_id": "user-default-123"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_default_account_id() == "user-default-123"
+
+
+def test_disabling_an_account_provider_republishes_the_accounts_frame(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """Manage Accounts renders from the accounts frame and lists an account whose provider is off as signed out."""
+    stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-tname")
+    email = "only@example.com"
+    set_imbue_cloud_provider_for_account(
+        email, connector_url="https://test--rsc-api.modal.run", root=MindsRoot.from_environment()
+    )
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-only", email=email)
+    client, auth_store = _create_test_client_with_stores(
+        tmp_path, cli=cli, root_concurrency_group=root_concurrency_group
+    )
+    _authenticate_client(client, auth_store)
+    publisher = get_state(client.application).ui_publisher
+    assert publisher is not None
+    client_queue = publisher.broadcaster.register()
+    publisher.publish_now()
+    baseline = [frame for frame in drain_ui_channel_frames(client_queue) if frame["type"] == "accounts"]
+    assert baseline[-1]["accounts"][0]["is_enabled"] is True
+
+    publisher.start(root_concurrency_group)
+    try:
+        response = client.patch(
+            f"/api/v1/desktop/providers/{imbue_cloud_provider_name_for_account(email)}", json={"enabled": False}
+        )
+        assert response.status_code == 200
+
+        frame = _await_ui_frame(client_queue, "accounts")
+    finally:
+        publisher.stop()
+
+    assert [(entry["email"], entry["is_enabled"]) for entry in frame["accounts"]] == [(email, False)]
 
 
 # error-reporting consent + settings tests
@@ -1490,39 +1405,6 @@ def test_backup_password_change_may_return_to_the_empty_password(tmp_path: Path)
     assert verify_master_password_for_account(paths, "user-1", SecretStr("")) is True
     # Clearing scrubs the server: no bundle remains on the (fake) connector.
     assert "a@b.com" not in cli.sync_bundle_by_email
-
-
-def test_backup_password_change_clear_rehomes_the_accounts_connections_into_the_local_profile(
-    tmp_path: Path,
-) -> None:
-    """Clearing the password strips every connection payload server-side, so the account's
-    decryptable connections move into the local profile first, keeping their ids."""
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-1", email="a@b.com")
-    connection_store = make_connection_store_for_test(tmp_path, cli)
-    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli, connection_store=connection_store)
-    _authenticate_client(client, auth_store)
-    assert (
-        client.post(
-            "/_chrome/backup-password", json={"new_password": "temp", "new_password_confirm": "temp"}
-        ).status_code
-        == 200
-    )
-    connection_id = add_modal_connection_for_test(connection_store, "user-1", "my modal")
-    connection_store.push_connection("user-1", "a@b.com", str(connection_id))
-
-    response = client.post("/_chrome/backup-password", json={"new_password": "", "new_password_confirm": ""})
-
-    assert response.status_code == 200
-    assert response.get_json()["ok"] is True
-    assert connection_store.list_connections("user-1") == []
-    (local_record,) = connection_store.list_connections(LOCAL_PROFILE_USER_ID)
-    assert local_record.doc_id == str(connection_id)
-    assert local_record.payload is not None and local_record.payload["token_secret"] == "as"
-    # The account's copy is tombstoned on the (fake) connector, and the scrub left no payload behind.
-    stored = cli.sync_documents_by_email["a@b.com"][CONNECTION_DOCUMENT_KIND][str(connection_id)]
-    assert stored["state"] == CONNECTION_STATE_DELETED
-    assert stored["encrypted_payload"] is None
 
 
 def test_backup_password_change_refuses_accounts_locked_on_this_device(tmp_path: Path) -> None:
@@ -2230,9 +2112,6 @@ def test_a_health_edge_republishes_the_workspace_lists_backend_verdict(
     publisher = get_state(app).ui_publisher
     assert publisher is not None
     client_queue = publisher.broadcaster.register()
-    publisher.broadcaster.set_client_state(
-        client_queue, UiClientStateMessage(client_id="win", route="/", account_id=LOCAL_PROFILE_USER_ID)
-    )
 
     # With no outage of the machine's own yet, the errored poll is the freshest
     # thing said about that backend, so the band may name it. Publishing here
@@ -2470,7 +2349,7 @@ def test_finalize_and_mark_destroying_deletes_the_machines_share(tmp_path: Path)
     )
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
 
-    _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli, None)
+    _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli)
 
     assert cli.deleted_share_host_ids == [str(host_id)]
     assert cli.get_share_status(account="a@b.com", host_id=str(host_id)) is None
@@ -2501,7 +2380,7 @@ def test_finalize_and_mark_destroying_tombstones_even_if_the_share_delete_fails(
     )
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
 
-    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli, None)
+    marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli)
 
     assert marker == {}
     assert not (paths.data_dir / "destroying" / str(agent_id)).exists()

@@ -1,7 +1,5 @@
 """Shared host mocks for agent unit tests (imported explicitly, defines no tests)."""
 
-import shlex
-import subprocess
 from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,31 +8,6 @@ import pydantic
 
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import CommandResult
-
-
-def run_bash_against_stand_in_pane(script: str, pane_content: str) -> subprocess.CompletedProcess[str]:
-    """Run ``script`` under bash with ``tmux`` replaced by a shell function, so no tmux server is involved.
-
-    ``tmux capture-pane`` prints ``pane_content``; any other tmux command prints itself instead,
-    e.g. ``tmux send-keys -t =s:0 Enter``.
-    """
-    stand_in_tmux = (
-        f"tmux() {{ if [ \"$1\" = capture-pane ]; then printf '%s\\n' {shlex.quote(pane_content)}; "
-        "else printf 'tmux %s\\n' \"$*\"; fi; }"
-    )
-    return subprocess.run(
-        ["bash", "-c", f"{stand_in_tmux}\n{script}"], capture_output=True, text=True, check=False, timeout=5.0
-    )
-
-
-def is_send_preflight_command(command: str) -> bool:
-    """Whether a command is send preflight (resolving the agent's pane, leaving copy-mode) rather than the send itself.
-
-    Preflight runs before every send, so a stub that scripts results for the send serves preflight
-    outside its scripted queue. A mode-clear chained onto a write (`\\;`) is the write, so it is not
-    preflight.
-    """
-    return command.startswith("tmux show-options") or (command.startswith("tmux if-shell") and "\\;" not in command)
 
 
 class ScriptedHost(pydantic.BaseModel):
@@ -54,6 +27,11 @@ class ScriptedHost(pydantic.BaseModel):
     # back to the window target.
     pane_id: str | None = None
 
+    # Send preflight, not the command under test. Resolving the agent's pane and leaving copy-mode
+    # run before every send, so serving them outside the scripted queue keeps that queue lined up
+    # with the command each test actually means.
+    _PREFLIGHT_PREFIXES = ("tmux show-options", "tmux copy-mode")
+
     def execute_stateful_command(
         self, command: str, timeout_seconds: float | None = None, **_: object
     ) -> CommandResult:
@@ -63,7 +41,7 @@ class ScriptedHost(pydantic.BaseModel):
             if self.pane_id is None:
                 return CommandResult(stdout="", stderr="invalid option: @mngr_agent_pane", success=False)
             return CommandResult(stdout=f"{self.pane_id}\n", stderr="", success=True)
-        if is_send_preflight_command(command):
+        if command.startswith(self._PREFLIGHT_PREFIXES):
             return CommandResult(stdout="", stderr="", success=True)
         if self.scripted_results:
             return self.scripted_results.pop(0)
@@ -72,7 +50,7 @@ class ScriptedHost(pydantic.BaseModel):
     @property
     def sent_commands(self) -> list[str]:
         """Captured commands with send preflight filtered out."""
-        return [c for c in self.captured if not is_send_preflight_command(c)]
+        return [c for c in self.captured if not c.startswith(self._PREFLIGHT_PREFIXES)]
 
 
 class HangingTmuxHost(Host):
@@ -96,21 +74,3 @@ class HangingTmuxHost(Host):
             assert timeout_seconds is not None, f"unbounded tmux command: {command}"
             return super().execute_stateful_command("sleep 48213", timeout_seconds=timeout_seconds)
         return super().execute_stateful_command(command, user, cwd, env, timeout_seconds, on_output)
-
-
-class CommandCountingHost(Host):
-    """A real local host that records every command it runs, each of which is one process spawn."""
-
-    executed_commands: list[str] = pydantic.Field(default_factory=list)
-
-    def execute_idempotent_command(
-        self,
-        command: str,
-        user: str | None = None,
-        cwd: Path | None = None,
-        env: Mapping[str, str] | None = None,
-        timeout_seconds: float | None = None,
-        raise_on_timeout: bool = False,
-    ) -> CommandResult:
-        self.executed_commands.append(command)
-        return super().execute_idempotent_command(command, user, cwd, env, timeout_seconds, raise_on_timeout)

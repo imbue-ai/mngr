@@ -10,13 +10,9 @@ import {
   renderRoot,
   settle,
   sharePanelOptions,
-  withAttr,
 } from "../../../testing";
 import { createAppQueryClient } from "../../../models/queryClient";
-import type {
-  MachineSharingResponse,
-  VisitingAgentEntry,
-} from "../../../models/workspaceOptions";
+import type { MachineSharingResponse } from "../../../models/workspaceOptions";
 import { RESOLVE_USER_URL } from "../../../models/workspaceOptions";
 import type { Grant, SharePanelModelOptions } from "../../../models/sharePanel";
 import { GRANT_ADD_KINDS, SharePanelModel } from "../../../models/sharePanel";
@@ -123,23 +119,6 @@ function rowByText(root: unknown, text: string): AnyVnode {
   return row as AnyVnode;
 }
 
-/** The note saying whether a row's person has opened the workspace. */
-function accessNoteOf(row: AnyVnode): AnyVnode | undefined {
-  return withAttr(row, "data-grant-access")[0];
-}
-
-/** A row's first line: its name and its controls. */
-function firstLineOf(row: AnyVnode): AnyVnode {
-  const [line] = row.children as AnyVnode[];
-  expect(line, "the row has no first line").toBeDefined();
-  return line;
-}
-
-/** The line under a row's name, saying what is known about its person. */
-function detailsOf(row: AnyVnode): AnyVnode | undefined {
-  return withAttr(row, "data-grant-details")[0];
-}
-
 /** The controls of the add row, in the order they are read. */
 function addControls(root: unknown): AnyVnode[] {
   return [
@@ -237,11 +216,7 @@ describe("ShareTab publish widget", () => {
     );
     // The pane waits too, as a skeleton: there is no add row to disable and
     // no grant list to call empty until the document says so.
-    expect(addControls(renderTab(share))).toEqual([
-      undefined,
-      undefined,
-      undefined,
-    ]);
+    expect(addControls(renderTab(share))).toEqual([undefined, undefined, undefined]);
   });
 
   it("greys the switch out, rather than drawing it off, when the first read failed", async () => {
@@ -273,50 +248,6 @@ describe("ShareTab publish widget", () => {
     expect(collectVnodes(widget).some((vnode) => vnode.tag === Spinner)).toBe(
       false,
     );
-  });
-
-  /** A loaded panel whose publish the backend refuses with `body`. */
-  async function refusingPanel(status: number, body: unknown): Promise<SharePanelModel> {
-    const share = await readyPanel(
-      {},
-      {
-        fetchJson: (_url: string, init?: RequestInit) =>
-          init?.method === "PUT"
-            ? Promise.resolve({ ok: false, status, body })
-            : Promise.resolve({
-                ok: true,
-                status: 200,
-                body: {
-                  enabled: false,
-                  url: null,
-                  grants: {
-                    workspace: { emails: [], email_domains: [] },
-                    services: {},
-                  },
-                },
-              }),
-      },
-    );
-    await share.publish();
-    return share;
-  }
-
-  it("links a full-quota refusal to the shared-workspaces page, and an ordinary one to nothing", async () => {
-    const quota = await refusingPanel(403, {
-      error: "Shared workspace limit reached (50 of 50).",
-      code: "quota_exceeded",
-      shared_workspaces_path: "/workspaces/shared",
-    });
-    const quotaError = byId(renderTab(quota), "ws-share-publish-error");
-    expect(allText(quotaError)).toContain("limit reached");
-    const remedy = byId(quotaError, "ws-share-publish-remedy") as AnyVnode;
-    expect(attrsOf(remedy).href).toBe("/workspaces/shared");
-    expect(allText(remedy)).toBe("Review shared workspaces");
-
-    const plain = await refusingPanel(502, { error: "relay down" });
-    const plainError = byId(renderTab(plain), "ws-share-publish-error");
-    expect(allText(plainError)).toContain("relay down");
-    expect(byId(plainError, "ws-share-publish-remedy")).toBeUndefined();
   });
 
   it("spins the wait in the switch's knob while a toggle is in flight, without dimming it", async () => {
@@ -749,9 +680,9 @@ describe("ShareTab loading skeleton", () => {
           (vnode) => attrsOf(vnode)["data-share-count"] !== undefined,
         ),
       ).toBe(false);
-      expect(collectVnodes(entry).some((vnode) => vnode.tag === Skeleton)).toBe(
-        true,
-      );
+      expect(
+        collectVnodes(entry).some((vnode) => vnode.tag === Skeleton),
+      ).toBe(true);
     }
   });
 
@@ -1074,7 +1005,7 @@ describe("ShareTab grant list", () => {
     expect(classTokensOf(rows[1])).toContain("border-subtle");
   });
 
-  it("says nothing about a person until their row is saved", async () => {
+  it("waits for the lookup before saying nobody has signed up", async () => {
     const share = await readyPanel(
       { enabled: true, url: "https://m.relay.example/" },
       {
@@ -1101,80 +1032,50 @@ describe("ShareTab grant list", () => {
 
     const row = rowByText(renderTab(share), "newcomer@example.com");
     expect(share.grantsFor(WHOLE)[0].status.state).toBe("saving");
-    expect(withAttr(row, "data-grant-access")).toEqual([]);
+    expect(allText(row)).not.toContain("signed up");
   });
 
-  it("gives every card's first line the same height and never shortens a name", async () => {
+  it("gives every row the same height and never shortens a name", async () => {
     const share = await panelWithGrants();
 
     const rows = grantRows(renderTab(share));
 
     expect(rows).toHaveLength(4);
     for (const row of rows) {
+      expect(classTokensOf(row)).toContain("h-10");
       expect(classTokensOf(row)).toContain("flex-none");
-      const line = firstLineOf(row);
-      expect(classTokensOf(line)).toContain("h-6");
-      const name = collectVnodes(line).find(
+      const name = collectVnodes(row).find(
         (vnode) => attrsOf(vnode)["data-grant-name"] !== undefined,
       );
       expect(name).toBeDefined();
       expect(classTokensOf(name as AnyVnode)).toContain("truncate");
-      expect(classTokensOf(name as AnyVnode)).not.toContain(
-        "whitespace-nowrap",
-      );
+      expect(classTokensOf(name as AnyVnode)).not.toContain("whitespace-nowrap");
     }
   });
 
-  it("lets the note beside a name give way before the name does", async () => {
-    const share = await panelWithGrants();
-    const line = firstLineOf(rowByText(renderTab(share), "Carol Reyes"));
-
-    const name = withAttr(line, "data-grant-name")[0];
-    const note = withAttr(line, "data-grant-note")[0];
-
-    expect(classTokensOf(note)).toEqual(
-      expect.arrayContaining(["min-w-0", "truncate"]),
-    );
-    expect(classTokensOf(note)).not.toContain("shrink-0");
-    // The name never shrinks, but is held to the cell so it can truncate.
-    expect(classTokensOf(name)).toEqual(
-      expect.arrayContaining(["shrink-0", "max-w-full", "truncate"]),
-    );
-  });
-
-  it("keeps every card's content inside it, with no invitation status where there is none", async () => {
+  it("keeps one empty invitation status indicator on every row, within the row", async () => {
     const share = await panelWithGrants();
 
     for (const row of grantRows(renderTab(share))) {
-      // The card clips its own content, so nothing (a re-invite included) can float outside it.
+      // The row clips its own content, so nothing (a re-invite included) can float outside it.
       expect(classTokensOf(row)).toContain("overflow-hidden");
-      expect(withAttr(row, "data-slot")).toEqual([]);
+      const slots = collectVnodes(row).filter(
+        (vnode) => attrsOf(vnode)["data-slot"] !== undefined,
+      );
+      expect(slots.map((slot) => attrsOf(slot)["data-slot"])).toEqual(["invitation"]);
+      expect(allText(slots[0])).toBe("");
     }
   });
 
-  it("scrolls the whole right side as one, with nothing in it scrolling on its own", async () => {
+  it("scrolls the list alone, with nothing above it in the scroller", async () => {
     const share = await panelWithGrants();
-    const root = renderTab(share);
-    const list = byId(root, "ws-share-grants") as AnyVnode;
 
-    const scrollers = collectVnodes(root).filter((vnode) =>
-      classTokensOf(vnode).includes("overflow-y-auto"),
-    );
-    const column = scrollers.find((vnode) =>
-      collectVnodes(vnode).includes(list),
-    ) as AnyVnode;
+    const list = byId(renderTab(share), "ws-share-grants");
 
-    expect(allText(column)).toContain("Grant permission to");
-    expect(byId(column, "ws-share-agents")).toBeDefined();
-    // A scroller inside it would be the one block the rest could squeeze,
-    // down to no height at all.
-    expect(
-      collectVnodes(column).filter(
-        (vnode) =>
-          vnode !== column && classTokensOf(vnode).includes("overflow-y-auto"),
-      ),
-    ).toEqual([]);
-    expect(classTokensOf(list)).toContain("shrink-0");
+    expect(classTokensOf(list as AnyVnode)).toContain("overflow-y-auto");
+    expect(classTokensOf(list as AnyVnode)).toContain("flex-1");
+    expect(classTokensOf(list as AnyVnode)).toContain("min-h-0");
+    expect(allText(list)).not.toContain("Grant permission to");
   });
 
   it("marks a row while it saves, and offers a retry once it cannot", async () => {
@@ -1893,31 +1794,26 @@ describe("ShareTab grantee rows", () => {
     expect(allText(domain)).toBe("@");
   });
 
-  it("says nobody hears about a domain grant, on the card that made it", async () => {
+  it("says nobody hears about a domain grant, on the row that made it", async () => {
     const share = await everyKindPanel();
 
     const row = rowByText(renderTab(share), "Anyone at acme.example");
 
-    expect(allText(detailsOf(row))).toBe(
+    expect(attrsOf(row)["data-tooltip"]).toBe(
       "People at acme.example will not hear about this unless you send " +
-        "them the link yourself.",
+        "them the link yourself",
     );
   });
 
-  it("says whether each person has opened the workspace, or that they have not signed up yet", async () => {
+  it("says an invited address has not signed up only once it is saved", async () => {
     const share = await everyKindPanel();
-    const root = renderTab(share);
 
-    expect(allText(accessNoteOf(rowByText(root, "newcomer@example.com")))).toBe(
-      "Hasn't signed up for Imbue Studio yet",
-    );
-    expect(allText(accessNoteOf(rowByText(root, "Carol Reyes")))).toBe(
-      "Never accessed your workspace",
-    );
     expect(
-      withAttr(rowByText(root, "Anyone at acme.example"), "data-grant-access"),
-    ).toEqual([]);
-    expect(allText(root)).not.toContain("(hasn't signed up yet)");
+      allText(rowByText(renderTab(share), "newcomer@example.com")),
+    ).toContain("(hasn't signed up yet)");
+    expect(allText(rowByText(renderTab(share), "Carol Reyes"))).not.toContain(
+      "signed up",
+    );
   });
 });
 
@@ -2062,12 +1958,6 @@ describe("ShareTab invitations", () => {
     );
   }
 
-  function refusalOf(row: AnyVnode): AnyVnode | undefined {
-    return collectVnodes(row).find(
-      (vnode) => attrsOf(vnode)["data-invite-refusal"] !== undefined,
-    );
-  }
-
   it("fills the one status indicator with what the granter may learn, and nothing about a domain", async () => {
     const { share } = await invitationPanel({
       outcomes: [
@@ -2093,40 +1983,17 @@ describe("ShareTab invitations", () => {
 
     expect(
       allText(slotOf(rowByText(root, "friend@example.com"), "invitation")),
-    ).toMatch(/^Invited .* ago$|^Invited just now$/);
-    const carol = rowByText(root, "Carol Reyes");
-    // The access note already says Carol is in, so her card does not say it twice.
-    expect(allText(accessNoteOf(carol))).toMatch(/^Accessed your workspace /);
-    expect(allText(carol)).not.toContain("Joined");
-    expect(withAttr(carol, "data-slot")).toEqual([]);
-    // A joined person is in: no re-invite is offered.
-    expect(inviteControl(carol)).toBeUndefined();
+    ).toMatch(/^Invited .* ago.*|^Invited just now.*/);
+    const joined = slotOf(rowByText(root, "Carol Reyes"), "invitation");
+    expect(allText(joined)).toMatch(/^Joined /);
     expect(
-      withAttr(rowByText(root, "Anyone at acme.example"), "data-slot"),
-    ).toEqual([]);
-  });
-
-  it("puts what is known about a person on the line under their name, with the re-invite", async () => {
-    const { share } = await invitationPanel({
-      outcomes: [
-        {
-          kind: "email",
-          value: "friend@example.com",
-          app: WHOLE,
-          outcome: "invited",
-          invited_at: INVITED_AT,
-        },
-      ],
-    });
-
-    const row = rowByText(renderTab(share), "friend@example.com");
-    const details = detailsOf(row) as AnyVnode;
-
-    expect(allText(details)).toMatch(
-      /^Hasn't signed up for Imbue Studio yet · Invited .* · Invite again$/,
-    );
-    expect(inviteControl(firstLineOf(row))).toBeUndefined();
-    expect(allText(inviteControl(details))).toBe("Invite again");
+      collectVnodes(joined).some((vnode) =>
+        String(attrsOf(vnode)["data-tooltip"] ?? "").includes("last visited"),
+      ),
+    ).toBe(true);
+    // A joined person is in: no re-invite is offered.
+    expect(inviteControl(rowByText(root, "Carol Reyes"))).toBeUndefined();
+    expect(allText(slotOf(rowByText(root, "Anyone at acme.example"), "invitation"))).toBe("");
   });
 
   it("says could not invite, and no more than that, plus a re-invite", async () => {
@@ -2166,9 +2033,7 @@ describe("ShareTab invitations", () => {
     expect(attrsOf(friend as AnyVnode)["aria-label"]).toBe("Invite again");
     // The first invitation is automatic, so a person with no outcome shows no button.
     expect(inviteControl(rowByText(root, "Carol Reyes"))).toBeUndefined();
-    expect(
-      inviteControl(rowByText(root, "Anyone at acme.example")),
-    ).toBeUndefined();
+    expect(inviteControl(rowByText(root, "Anyone at acme.example"))).toBeUndefined();
 
     (attrsOf(friend as AnyVnode).onclick as () => void)();
     await settle();
@@ -2238,240 +2103,9 @@ describe("ShareTab invitations", () => {
     await settle();
 
     const row = rowByText(renderTab(share), "friend@example.com");
-    expect(allText(refusalOf(row))).toBe(
-      "You invited this person too recently.",
+    expect(allText(slotOf(row, "invitation"))).toContain(
+      "You invited this person too recently",
     );
     expect(allText(inviteControl(row))).toBe("Invite again");
-  });
-
-  it("says a refusal whole on a line of its own, under the name and what is known about the person", async () => {
-    const { share } = await invitationPanel({
-      respondToInvite: () =>
-        Promise.resolve({
-          ok: true,
-          status: 200,
-          body: { outcome: "over_allowance" },
-        }),
-    });
-    expect(
-      refusalOf(rowByText(renderTab(share), "friend@example.com")),
-    ).toBeUndefined();
-    const friend = share
-      .grantsFor(WHOLE)
-      .find((grant) => grant.grantee.value === "friend@example.com");
-
-    await share.invite(WHOLE, (friend as Grant).key);
-    await settle();
-
-    const row = rowByText(renderTab(share), "friend@example.com");
-    const refusal = refusalOf(row) as AnyVnode;
-    expect(allText(refusal)).toBe(
-      "Access granted, but you've reached your invitation email limit for now.",
-    );
-    // Wrapped, never cut short.
-    expect(classTokensOf(refusal)).not.toContain("truncate");
-    const line = firstLineOf(row);
-    const details = detailsOf(row) as AnyVnode;
-    expect(collectVnodes(line)).not.toContain(refusal);
-    expect(collectVnodes(details)).not.toContain(refusal);
-    expect(withAttr(line, "data-grant-name")).toHaveLength(1);
-    expect(allText(inviteControl(details))).toBe("Invite again");
-  });
-
-  it("says when someone last opened the workspace, with that time on hover", async () => {
-    const lastVisit = new Date(Date.now() - 3 * 3600_000).toISOString();
-    const { share } = await invitationPanel({
-      outcomes: [
-        {
-          kind: "user",
-          value: "user-2",
-          app: WHOLE,
-          outcome: "joined",
-          joined_at: "2026-09-28T00:00:00+00:00",
-          last_visited_at: lastVisit,
-        },
-      ],
-    });
-
-    const note = accessNoteOf(
-      rowByText(renderTab(share), "Carol Reyes"),
-    ) as AnyVnode;
-
-    expect(allText(note)).toBe("Accessed your workspace 3 hours ago");
-    expect(attrsOf(note)["data-tooltip"]).toBe(
-      `Accessed ${new Date(lastVisit).toLocaleString()}`,
-    );
-  });
-});
-
-describe("ShareTab visiting agents", () => {
-  const AGENT: VisitingAgentEntry = {
-    agent_id: "va-" + "1".repeat(32),
-    name: "Josh Claude",
-    fingerprint: "SHA256:abc",
-    scope: "workspace",
-    granter: "user:owner",
-    created_at: "2026-10-15T18:00:00+00:00",
-    expires_at: null,
-    last_seen_at: null,
-  };
-
-  /** A published panel whose agent routes answer `agents` and mint `invite`. */
-  async function agentsPanel(
-    agents: VisitingAgentEntry[],
-    invite: Record<string, unknown> = {
-      code: "7K3M-QX9A-2PFH",
-      expires_at: "2026-10-15T18:15:00+00:00",
-      scope: "workspace",
-      auth_origin: "https://auth-x.alpha.example.com",
-      instructions: "Join with 7K3M-QX9A-2PFH",
-    },
-  ): Promise<SharePanelModel> {
-    return publishedPanel(
-      {},
-      {
-        fetchJson: (url: string) => {
-          if (url.endsWith("/agents/invites"))
-            return Promise.resolve({ ok: true, status: 200, body: invite });
-          if (url.endsWith("/agents"))
-            return Promise.resolve({ ok: true, status: 200, body: { agents } });
-          if (url.endsWith("/invitation-outcomes"))
-            return Promise.resolve({
-              ok: true,
-              status: 200,
-              body: { outcomes: [] },
-            });
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            body: {
-              enabled: true,
-              url: "https://m.relay.example/",
-              grants: {
-                workspace: { emails: [], email_domains: [] },
-                services: {},
-              },
-            },
-          });
-        },
-      },
-    );
-  }
-
-  it("offers the invite under its heading and sentence, and lists the agents once read", async () => {
-    const share = await agentsPanel([AGENT]);
-    await share.ensureVisitingAgentsLoaded();
-    const root = renderTab(share);
-    const section = byId(root, "ws-share-agents");
-    expect(section).toBeDefined();
-    const text = allText(section);
-    expect(text).toContain("Visiting agents");
-    expect(text).toContain("exactly this workspace's access");
-    expect(text).toContain("Invite an agent");
-    expect(text).toContain("Josh Claude");
-    expect(text).toContain("whole workspace");
-    expect(text).toContain("never connected");
-    expect(text).toContain("Revoke");
-  });
-
-  it("offers to read again when the read failed", async () => {
-    let isBroken = true;
-    const share = await publishedPanel(
-      {},
-      {
-        fetchJson: (url: string) => {
-          if (url.endsWith("/agents"))
-            return Promise.resolve(
-              isBroken
-                ? { ok: false, status: 502, body: { error: "it is stopped" } }
-                : { ok: true, status: 200, body: { agents: [AGENT] } },
-            );
-          if (url.endsWith("/invitation-outcomes"))
-            return Promise.resolve({
-              ok: true,
-              status: 200,
-              body: { outcomes: [] },
-            });
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            body: {
-              enabled: true,
-              url: "https://m.relay.example/",
-              grants: {
-                workspace: { emails: [], email_domains: [] },
-                services: {},
-              },
-            },
-          });
-        },
-      },
-    );
-    await share.ensureVisitingAgentsLoaded();
-    const failed = byId(renderTab(share), "ws-share-agents-error");
-    expect(allText(failed)).toContain("it is stopped");
-    const retry = byId(failed, "ws-share-agents-retry");
-    expect(retry).toBeDefined();
-
-    isBroken = false;
-    (attrsOf(retry as AnyVnode).onclick as () => void)();
-    await settle();
-
-    const root = renderTab(share);
-    expect(byId(root, "ws-share-agents-error")).toBeUndefined();
-    expect(allText(byId(root, "ws-share-agents"))).toContain("Josh Claude");
-  });
-
-  it("says no agents have been invited when the list is empty", async () => {
-    const share = await agentsPanel([]);
-    await share.ensureVisitingAgentsLoaded();
-    expect(allText(byId(renderTab(share), "ws-share-agents"))).toContain(
-      "No agents have been invited.",
-    );
-  });
-
-  it("shows the minted instructions with the code and a copy control", async () => {
-    const share = await agentsPanel([]);
-    await share.ensureVisitingAgentsLoaded();
-    await share.inviteVisitingAgent(share.wholeService);
-    const root = renderTab(share);
-    const instructions = byId(root, "ws-share-agents-instructions");
-    expect(instructions).toBeDefined();
-    const textarea = collectVnodes(instructions).find(
-      (vnode) => vnode.tag === "textarea",
-    );
-    expect(textarea).toBeDefined();
-    expect(attrsOf(textarea as AnyVnode).value).toBe(
-      "Join with 7K3M-QX9A-2PFH",
-    );
-    expect(allText(instructions)).toContain("Copy the instructions");
-    expect(allText(instructions)).toContain("7K3M-QX9A-2PFH");
-    expect(byId(root, "ws-share-agents-done")).toBeDefined();
-
-    // The code carries the whole workspace's scope, which an app pane does not
-    // describe, so it is shown on the pane it was minted on and nowhere else.
-    share.selectTarget("web");
-    expect(
-      byId(renderTab(share), "ws-share-agents-instructions"),
-    ).toBeUndefined();
-    share.selectTarget(share.wholeService);
-    expect(
-      byId(renderTab(share), "ws-share-agents-instructions"),
-    ).toBeDefined();
-  });
-
-  it("scopes the invite to the app pane it is pressed on", async () => {
-    const share = await agentsPanel([
-      { ...AGENT, scope: ["web"], name: "Web helper" },
-      AGENT,
-    ]);
-    await share.ensureVisitingAgentsLoaded();
-    share.selectTarget("web");
-    const text = allText(byId(renderTab(share), "ws-share-agents"));
-    expect(text).toContain("to use only this app");
-    expect(text).toContain("Web helper");
-    expect(text).toContain("web");
-    expect(text).not.toContain("Josh Claude");
-    expect(share.visitingAgentScopeFor("web")).toEqual(["web"]);
   });
 });

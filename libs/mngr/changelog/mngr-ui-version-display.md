@@ -1,0 +1,1 @@
+Marked `test_lifecycle_hooks.py::test_on_before_command_receives_correct_params` as `@pytest.mark.flaky`. It timed out once in CI (PR #1575, a frontend-only change) when an in-process `mngr list` did not join all of its concurrency-group threads within the 10s test limit.

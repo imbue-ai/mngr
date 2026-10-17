@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import platform
 import shlex
-from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -11,15 +10,8 @@ from typing import Final
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
-from imbue.mngr.config.agent_class_registry import get_agent_class
-from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.agent_config_registry import is_known_agent_type
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
-from imbue.mngr.hosts.tmux import TMUX_NO_SERVER_STDERR_SUBSTRINGS
-from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.data_types import TmuxPaneListing
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import ActivitySource
@@ -194,6 +186,14 @@ HOST_LEVEL_ACTIVITY_SOURCES: Final[frozenset[ActivitySource]] = frozenset(
 )
 
 
+# Agent types that use a fixed expected process name instead of computing
+# from the stored command. This handles agents like ClaudeAgent where the
+# assembled command is a complex shell wrapper but the actual running
+# process has a known name.
+_EXPECTED_PROCESS_NAME_BY_AGENT_TYPE: Final[dict[str, str]] = {
+    "claude": "claude",
+}
+
 # Common shell names for lifecycle state detection
 SHELL_COMMANDS: Final[frozenset[str]] = frozenset({"bash", "sh", "zsh", "fish", "dash", "ksh", "tcsh", "csh"})
 
@@ -211,33 +211,24 @@ def _resolve_effective_agent_type(agent_type: str, config: MngrConfig) -> str:
     return agent_type
 
 
+@pure
 def resolve_expected_process_name(
     agent_type: str,
     command: CommandString,
     config: MngrConfig,
 ) -> str:
-    """Resolve the expected process name for lifecycle state detection, knowing only the agent's type.
+    """Resolve the expected process name for lifecycle state detection.
 
-    The registered agent class's ``fixed_process_name`` (custom types resolve through their
-    parent_type), the same name a loaded agent of that class reports; otherwise the command's
-    first word. Not marked @pure because it reads the global agent class registry.
+    For agent types with complex wrapper commands (like claude), returns the
+    known process name. For custom types with a parent_type, resolves through
+    the parent. Otherwise extracts the basename from the command.
     """
-    effective_type = normalize_agent_type_name(
-        _resolve_effective_agent_type(normalize_agent_type_name(agent_type), config)
-    )
-    if is_agent_class_registered(effective_type):
-        agent_class = get_agent_class(effective_type)
-        if issubclass(agent_class, AgentInterface) and agent_class.fixed_process_name is not None:
-            return agent_class.fixed_process_name
+    effective_type = _resolve_effective_agent_type(agent_type, config)
 
-    return get_command_basename(command)
+    if effective_type in _EXPECTED_PROCESS_NAME_BY_AGENT_TYPE:
+        return _EXPECTED_PROCESS_NAME_BY_AGENT_TYPE[effective_type]
 
-
-@pure
-def get_command_basename(command: str) -> str:
-    """The bare name of a command's first word, past any leading subshell syntax (e.g. ``( script.sh ... ) &``)."""
-    stripped = command.lstrip("( ")
-    return stripped.split()[0].split("/")[-1] if stripped else ""
+    return command.split()[0].split("/")[-1] if command else ""
 
 
 def check_agent_type_known(
@@ -327,12 +318,16 @@ def _parse_ps_output(ps_output: str) -> tuple[dict[str, list[str]], dict[str, st
 
 
 @pure
-def _collect_descendant_pids(root_pid: str, children_by_ppid: dict[str, list[str]]) -> list[str]:
-    """Collect the pids of all descendant processes via BFS, visiting each process once.
+def _collect_descendant_names(
+    root_pid: str,
+    children_by_ppid: dict[str, list[str]],
+    comm_by_pid: dict[str, str],
+) -> list[str]:
+    """Collect comm names of all descendant processes via BFS, visiting each process once.
 
     ps reads each process separately, so its parent links can form a cycle.
     """
-    descendant_pids: list[str] = []
+    descendant_names: list[str] = []
     visited_pids = {root_pid}
     queue = list(children_by_ppid.get(root_pid, []))
     while queue:
@@ -340,26 +335,10 @@ def _collect_descendant_pids(root_pid: str, children_by_ppid: dict[str, list[str
         if pid in visited_pids:
             continue
         visited_pids.add(pid)
-        descendant_pids.append(pid)
+        if pid in comm_by_pid:
+            descendant_names.append(comm_by_pid[pid])
         queue.extend(children_by_ppid.get(pid, []))
-    return descendant_pids
-
-
-@pure
-def _collect_descendant_names(
-    root_pid: str,
-    children_by_ppid: dict[str, list[str]],
-    comm_by_pid: dict[str, str],
-) -> list[str]:
-    """Collect the comm names of all descendant processes, in BFS order."""
-    return [comm_by_pid[pid] for pid in _collect_descendant_pids(root_pid, children_by_ppid)]
-
-
-@pure
-def get_descendant_pids(root_pid: str, ps_output: str) -> list[str]:
-    """Get the pids of all descendant processes from ``ps -e -o pid=,ppid=,comm=`` output."""
-    children_by_ppid, _comm_by_pid = _parse_ps_output(ps_output)
-    return _collect_descendant_pids(root_pid, children_by_ppid)
+    return descendant_names
 
 
 @pure
@@ -395,108 +374,22 @@ def _find_process_pid_by_name(
     return None
 
 
-# Separates a tmux pane line's session name, session agent id, and window name from its lifecycle fields.
-_TMUX_PANE_FIELD_SEPARATOR: Final[str] = "::MNGR::"
-
-TMUX_PANE_LISTING_FORMAT: Final[str] = _TMUX_PANE_FIELD_SEPARATOR.join(
-    (
-        "#{session_name}",
-        f"#{{{AGENT_ID_OPTION}}}",
-        "#{window_name}",
-        "#{pane_dead}|#{pane_current_command}|#{pane_pid}",
-    )
-)
-
-# Lists every pane. A host without tmux or with no tmux server lists no panes; any other tmux
-# failure fails the command.
-TMUX_PANES_SNAPSHOT_COMMAND: Final[str] = (
-    "tmux_status=0; tmux_stderr=; "
-    "if command -v tmux >/dev/null 2>&1; then "
-    "{ tmux_stderr=$(tmux list-panes -a -F "
-    f"{shlex.quote(TMUX_PANE_LISTING_FORMAT)} 2>&1 >&3); tmux_status=$?; }} 3>&1; "
-    "fi; "
-    'case "$tmux_status:$tmux_stderr" in '
-    f"0:*|{'|'.join(f'*{shlex.quote(substring)}*' for substring in TMUX_NO_SERVER_STDERR_SUBSTRINGS)}) ;; "
-    '*) echo "tmux list-panes failed: $tmux_stderr" >&2; exit 1 ;; '
-    "esac"
-)
-
-# Lists the process table. A host without ps (minimal images do not ship procps) lists no processes;
-# a ps that is there but fails fails the command.
-PROCESS_TABLE_SNAPSHOT_COMMAND: Final[str] = "if command -v ps >/dev/null 2>&1; then ps -e -o pid=,ppid=,comm=; fi"
-
-
-@pure
-def parse_tmux_pane_listings(block: str) -> tuple[TmuxPaneListing, ...]:
-    """Each well-formed line of a ``tmux list-panes -a -F TMUX_PANE_LISTING_FORMAT`` listing."""
-    panes: list[TmuxPaneListing] = []
-    for line in block.splitlines():
-        fields = line.split(_TMUX_PANE_FIELD_SEPARATOR)
-        if len(fields) == 4:
-            session_name, session_agent_id, window_name, pane_info = fields
-            panes.append(
-                TmuxPaneListing(
-                    session_name=session_name,
-                    session_agent_id=session_agent_id,
-                    window_name=window_name,
-                    pane_info=pane_info.strip(),
-                )
-            )
-    return tuple(panes)
-
-
-@pure
-def find_agent_session_name(
-    panes: Sequence[TmuxPaneListing],
-    # The agent's id (an agent state directory's name, for callers that have no parsed AgentId).
-    agent_id: str,
-    session_name_for_agent_name: str | None,
-) -> str | None:
-    """The session holding the agent: the one stamped with its id, else the one named after it, else None.
-
-    A rename moves the session before it rewrites data.json, so the name the agent was loaded with
-    can already be gone while the agent runs on; the id stamp survives the rename.
-    """
-    # CLEANUP: drop the name fallback once no running session predates the AGENT_ID_OPTION stamp,
-    # i.e. once every host has restarted its agents on an mngr that sets it.
-    for pane in panes:
-        if pane.session_agent_id == agent_id:
-            return pane.session_name
-    if session_name_for_agent_name is not None and any(
-        pane.session_name == session_name_for_agent_name for pane in panes
-    ):
-        return session_name_for_agent_name
-    return None
-
-
-@pure
-def find_first_pane_info(panes: Sequence[TmuxPaneListing], session_name: str, window_name: str) -> str | None:
-    """The first listed pane's lifecycle fields in the session's window, as targeting that window would report."""
-    for pane in panes:
-        if pane.session_name == session_name and pane.window_name == window_name:
-            return pane.pane_info
-    return None
-
-
 @pure
 def determine_lifecycle_probe_result(
     tmux_info: str | None,
     is_active: bool,
     is_blocked_on_dialog: bool,
     expected_process_name: str,
-    # None when the process table could not be read.
-    ps_output: str | None,
+    ps_output: str,
     is_agent_type_known: bool = True,
 ) -> LifecycleProbeResult:
     """Determine agent lifecycle state and main process PID from tmux info and ps output.
 
-    Works from pre-collected data and makes no host calls. The PID is that of the
-    running ``expected_process_name`` process when the agent is RUNNING or WAITING
-    (else None), drawn from the same already-parsed ps tree -- no extra probe.
-
-    With no process table, a pane whose foreground tmux reports as the expected
-    process reads RUNNING or WAITING without a PID, and any other live pane reads
-    UNKNOWN; a missing session or a dead pane needs no process table to settle.
+    This is a pure function that replicates the logic from
+    BaseAgent.get_lifecycle_state() using pre-collected data instead of making
+    SSH calls. The PID is that of the running ``expected_process_name`` process
+    when the agent is RUNNING or WAITING (else None), drawn from the same
+    already-parsed ps tree -- no extra probe.
 
     When is_agent_type_known is False, the expected_process_name cannot be
     trusted (because we don't know what binary the agent type runs). In that
@@ -515,17 +408,6 @@ def determine_lifecycle_probe_result(
     if pane_dead == "1":
         return LifecycleProbeResult(state=AgentLifecycleState.DONE)
 
-    # An agent holding on a dialog is inside a turn -- its `active` marker is still set -- but
-    # is making no progress, so its lifecycle is WAITING.
-    is_working = is_active and not is_blocked_on_dialog
-    running_state = AgentLifecycleState.RUNNING if is_working else AgentLifecycleState.WAITING
-
-    # Without the process table, only tmux's own report of the pane's foreground can settle a live pane.
-    if ps_output is None:
-        if current_command == expected_process_name:
-            return LifecycleProbeResult(state=running_state)
-        return LifecycleProbeResult(state=AgentLifecycleState.UNKNOWN)
-
     # Parse the ps output once for all subsequent checks. We use ps as the
     # authoritative source for process names because tmux's pane_current_command
     # can disagree with ps -- some programs modify their process title (e.g.,
@@ -534,7 +416,13 @@ def determine_lifecycle_probe_result(
     children_by_ppid, comm_by_pid = _parse_ps_output(ps_output)
     pid_str = _find_process_pid_by_name(pane_pid, expected_process_name, children_by_ppid, comm_by_pid)
     pid = int(pid_str) if pid_str is not None else None
-    running_result = LifecycleProbeResult(state=running_state, pid=pid)
+    # An agent holding on a dialog is inside a turn -- its `active` marker is still set -- but
+    # is making no progress, so its lifecycle is WAITING.
+    is_working = is_active and not is_blocked_on_dialog
+    running_result = LifecycleProbeResult(
+        state=AgentLifecycleState.RUNNING if is_working else AgentLifecycleState.WAITING,
+        pid=pid,
+    )
 
     # Check tmux's report first (fast path for well-behaved processes)
     if current_command == expected_process_name:

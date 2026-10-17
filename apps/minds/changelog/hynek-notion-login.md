@@ -1,0 +1,3 @@
+Approving a Notion MCP permission request (or connecting Notion MCP from a workspace's Permissions tab) now signs in through the Minds-hosted OAuth callback page: before the sign-in that registers Notion's OAuth client, the app pins the client's redirect URI with `latchkey auth prepare notion-mcp '{"redirectUri": ...}'`, the way it already prefers the Minds OAuth client for Google services. If the pin fails, the approval fails with latchkey's reason and the request stays pending for a retry, exactly like a failed sign-in.
+
+Documented in `docs/latchkey-permissions.md` (step 6 of the approval flow).

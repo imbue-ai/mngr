@@ -1,0 +1,11 @@
+Scrolling on local pages (Settings, Home, ...) now happens inside a per-page container pinned below the fixed titlebar, instead of scrolling the document: the scrollbar starts under the navbar and ends at the window bottom (it can never ride over the bar), it is removed together with the page on every in-place swap (nothing lingers after leaving Settings), and -- because the document never scrolls on any screen -- the titlebar spans the full window width everywhere, so its right-edge buttons no longer shift between pages with and without a scrollbar. The container keeps the native scrollbar (see below), with a stable gutter so page content doesn't shift sideways between scrolling and non-scrolling pages.
+
+Local pages now render inside the same inset rounded white card as the workspace content surface (4px insets, 12px corner radius), with the titlebar color bleeding around the card exactly as it does around a workspace -- so Settings, Home, and the workspace view all share one shape, and the page's scrollbar lives inside the card's rounded bounds.
+
+Scrollbars are left native (the OS overlay/auto-hiding bar) rather than custom-styled, so they match the platform, auto-align to each scroll container's edge, and adapt to light/dark; the document viewport-lock lives in app.css as a single universal rule instead of a per-mode class in a template <style>.
+
+Fixed short pages (Create, Creating, the auth flow) not centering after the switch to the scroll container: they had centered via body-level flex, which no longer applies now that page content lives inside the fixed local-page card. Centering moved to a wrapper inside the card (min-h-full flex), matching the other centered pages (Welcome, recovery, consent).
+
+The local-page scroll surface now matches whichever box the user perceives as its container: neutral all-white pages (Home, Create) are full-bleed to the window so the native scrollbar hugs the window's right edge, while workspace-scoped pages (with a colorful accent border) stay an inset rounded card so the scrollbar sits at the inner card's edge -- a constant distance from the relevant edge in both cases.
+
+Settings popup: the section nav stays pinned while only the right pane scrolls, with the native scrollbar at the popup's right edge.

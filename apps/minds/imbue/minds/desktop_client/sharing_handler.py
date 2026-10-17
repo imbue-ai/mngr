@@ -28,7 +28,7 @@ from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
-import httpx2
+import httpx
 from loguru import logger
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -47,7 +47,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
@@ -83,12 +82,6 @@ SHARE_READINESS_PROBE_TIMEOUT_SECONDS: Final[float] = 4.0
 # How long one relay latency probe (a bare TCP connect to the relay's
 # tunnel-control endpoint) may take before that relay is skipped.
 RELAY_LATENCY_PROBE_TIMEOUT_SECONDS: Final[float] = 1.5
-
-# The share states under which a share still exists for its owner: active
-# (holding a max_shared_workspaces slot) or suspended (the connector's kill
-# switch, which keeps the row). An inactive row is audit history at the
-# connector, so there is nothing left to delete or list.
-LISTED_SHARE_STATES: Final[frozenset[str]] = frozenset({"active", "suspended"})
 
 # Signals in the plugin's JSON error body for the two failures a user can
 # actually do something about. Matched on the message text because the plugin
@@ -134,14 +127,6 @@ def describe_connector_failure(exc: Exception) -> str:
 
 class SharingError(RuntimeError):
     """Raised on a soft sharing failure; carries a single user-presentable message."""
-
-
-class ShareQuotaExceededError(SharingError):
-    """Raised when the connector refused to publish because the account's share quota is full.
-
-    Kept apart from the other soft failures so the routes can answer with a
-    structured code: the fix is on the shared-workspaces page, not a retry.
-    """
 
 
 class GrantsRefusedError(SharingError):
@@ -398,10 +383,7 @@ def _record_saved_grants(
         forward_identity.mark_shared(str(agent_id), str(owner_account.user_id))
 
 
-def owner_account_for_workspace(
-    session_store: MultiAccountSessionStore | None, agent_id: AgentId
-) -> AccountSession | None:
-    """The signed-in account associated with the workspace, or None when there is none."""
+def _owner_account_for(session_store: MultiAccountSessionStore | None, agent_id: AgentId) -> AccountSession | None:
     return session_store.get_account_for_workspace(str(agent_id)) if session_store is not None else None
 
 
@@ -467,7 +449,7 @@ def publish_workspace(host_id: str, backend_resolver: BackendResolverInterface) 
         service_labels=service_labels,
         identity_cache=state.identity_cache,
         forward_identity=state.forward_identity,
-        owner_account=owner_account_for_workspace(session_store, agent_id),
+        owner_account=_owner_account_for(session_store, agent_id),
         grants=None,
     )
 
@@ -499,7 +481,7 @@ def publish_workspace_with_grants(
         service_labels=resolve_share_target_labels(backend_resolver, agent_id),
         identity_cache=state.identity_cache,
         forward_identity=state.forward_identity,
-        owner_account=owner_account_for_workspace(session_store, agent_id),
+        owner_account=_owner_account_for(session_store, agent_id),
         grants=grants,
     )
 
@@ -752,8 +734,6 @@ def _create_share_and_write_materials(
             preferred_region=preferred_region,
             workspace_id=str(agent_id),
         )
-    except ImbueCloudQuotaExceededCliError as exc:
-        raise ShareQuotaExceededError(f"Could not publish this workspace: {describe_connector_failure(exc)}") from exc
     except ImbueCloudCliError as exc:
         raise SharingError(f"Could not publish this workspace: {describe_connector_failure(exc)}") from exc
     if share.relay_token is None:
@@ -879,7 +859,7 @@ def enable_web_access_for_workspace(
         service_labels=service_labels,
         identity_cache=identity_cache,
         forward_identity=forward_identity,
-        owner_account=owner_account_for_workspace(session_store, agent_id),
+        owner_account=_owner_account_for(session_store, agent_id),
         grants=None,
     )
 
@@ -1008,7 +988,7 @@ def get_sharing(
             service_labels,
             identity_cache,
             forward_identity,
-            owner_account_for_workspace(session_store, agent_id),
+            _owner_account_for(session_store, agent_id),
         )
     try:
         grants_toml_text = read_share_grants_from_agent(
@@ -1167,7 +1147,7 @@ def unpublish_workspace(
         raise SharingError(
             f"Could not read the workspace's sharing status: {describe_connector_failure(exc)}"
         ) from exc
-    if existing is not None and existing.state in LISTED_SHARE_STATES:
+    if existing is not None and existing.state == "active":
         try:
             cli.delete_share(account=account_email, host_id=host_id)
         except ImbueCloudCliError as exc:
@@ -1368,7 +1348,7 @@ def list_invitation_outcomes_for_workspace(
         raise SharingError(f"Could not read the invitation outcomes: {describe_connector_failure(exc)}") from exc
 
 
-def probe_share_readiness(http_client: httpx2.Client, probe_host: str) -> bool:
+def probe_share_readiness(http_client: httpx.Client, probe_host: str) -> bool:
     """Report whether the shared hostname is live end to end.
 
     ``probe_host`` must be a ROUTABLE share origin -- a ``<label>.<machine
@@ -1387,7 +1367,7 @@ def probe_share_readiness(http_client: httpx2.Client, probe_host: str) -> bool:
     """
     try:
         http_client.get(f"https://{probe_host}/", timeout=SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
-    except httpx2.HTTPError as exc:
+    except httpx.HTTPError as exc:
         logger.debug("Probed share host {} but it is not ready yet: {}", probe_host, exc)
         return False
     return True

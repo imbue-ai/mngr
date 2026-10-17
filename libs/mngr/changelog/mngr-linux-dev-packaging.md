@@ -1,0 +1,1 @@
+The README's "For development" section (mirrored into the PyPI README) now points Linux users who want to run the minds desktop app from source at `apps/minds/scripts/install-linux.sh`, with the curl one-liner and a link to `apps/minds/docs/dev-setup.md`. The installer itself is described in the minds changelog.

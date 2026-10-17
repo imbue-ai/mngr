@@ -3,8 +3,8 @@
 The ``Latchkey`` class consolidates four responsibilities that all
 ultimately shell out to the same upstream binary:
 
-1. Spawning and tracking the single shared ``latchkey gateway``
-   subprocess (one for all minds-managed agents).
+1. Spawning, adopting, and tracking the single shared
+   ``latchkey gateway`` subprocess (one for all minds-managed agents).
 2. Deriving the gateway's shared password and minting per-agent
    permissions-override JWTs via ``latchkey gateway create-jwt``.
 3. Probing credential status for a service via ``latchkey services info``.
@@ -17,7 +17,6 @@ locking concerns, and exactly one place to mock or replace when something
 needs to change.
 """
 
-import errno
 import hashlib
 import json
 import os
@@ -27,7 +26,6 @@ import stat
 import tempfile
 import threading
 import time
-from collections import deque
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -58,7 +56,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.utils.file_utils import atomic_write
-from imbue.mngr_latchkey._spawn import spawn_latchkey_ensure_browser
+from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.mngr_latchkey.additional_services import AdditionalServicesCatalogError
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.app_name_prefix import inject_app_name_prefix_into_env
@@ -93,13 +91,6 @@ _DEFAULT_LISTEN_HOST: Final[str] = "127.0.0.1"
 # liveness probe would fail and trigger a spurious second spawn.
 _GATEWAY_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
 _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
-
-# How much of a spawning gateway's own output a failed bind reports: the last
-# lines it printed, each cut to a bounded length. Enough to hold a startup
-# error and the frames just above it, small enough to stay one readable log
-# record (and so one Sentry breadcrumb) per failed spawn.
-_GATEWAY_OUTPUT_TAIL_MAX_LINES: Final[int] = 20
-_GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS: Final[int] = 300
 
 # Maximum request body size the gateway accepts, passed as ``--max-body-size``
 # to every gateway spawn (here and in :mod:`imbue.mngr_latchkey.remote.provisioning`).
@@ -186,7 +177,7 @@ PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 # code strictly needs: the newest release with a hard dependency here is
 # 3.17.0, the first to accept the ``--strict`` flag :meth:`Latchkey.auth_browser_login`
 # always passes.
-LATCHKEY_MIN_VERSION: Final[str] = "3.21.0"
+LATCHKEY_MIN_VERSION: Final[str] = "3.18.3"
 
 # Fixed port at which every containerized/VM/VPS agent reaches the Latchkey
 # gateway. A desktop-gateway agent sees it on its own 127.0.0.1 (a per-agent
@@ -220,6 +211,9 @@ _ENV_EXTENSION_PERMISSIONS_ROOT: Final[str] = "LATCHKEY_EXTENSION_PERMISSIONS_RO
 # ``latchkey gateway`` (>= 2.9.0) loads ``.mjs`` extension files.
 _GATEWAY_EXTENSIONS_SUBDIR: Final[str] = "extensions"
 
+# The desktop and VPS gateways intentionally load disjoint extension sets. The
+# desktop owns all stateful Imbue Studio endpoints; the VPS loads only the transparent
+# forwarder that sends those endpoint families back to the desktop gateway.
 # The catalog the gateway extensions validate against. Named because it is the
 # one bundled file that is not shipped verbatim: custom services are overlaid
 # onto it at materialization time (see ``overlaid_services_catalog_content``).
@@ -232,11 +226,6 @@ SERVICES_CATALOG_FILENAME: Final[str] = "services.json"
 # :func:`merge_minds_latchkey_config` writes this package's half of both;
 # :func:`read_registered_services` reads the latter back.
 CONFIG_FILENAME: Final[str] = "config.json"
-
-# The desktop and VPS gateways intentionally load disjoint extension sets. The
-# desktop owns all stateful Imbue Studio endpoints; the VPS loads only the
-# forwarder that sends those endpoint families back to the desktop gateway (and
-# answers an agent's read of its own permissions from the policy the VPS enforces).
 DESKTOP_GATEWAY_EXTENSION_FILENAMES: Final[tuple[str, ...]] = (
     "device_list.mjs",
     "minds_api_proxy.mjs",
@@ -486,27 +475,6 @@ def _wait_for_port_listening(host: str, port: int, timeout: float) -> bool:
     return _is_port_listening(host, port, timeout=_GATEWAY_BIND_POLL_INTERVAL_SECONDS)
 
 
-def _describe_port_bindability(host: str, port: int) -> str:
-    """Report whether ``host:port`` could be bound right now: ``"free"``, or the errno name that refused it.
-
-    Separates "the port is held by something else" (e.g. ``EADDRINUSE``) from
-    "the port was free and the gateway still never listened". ``SO_REUSEADDR``
-    is set as the gateway's own listener sets it, so a socket of the dead
-    gateway lingering in ``TIME_WAIT`` does not read as a conflict the gateway
-    itself would not hit. Any ``OSError`` is reported rather than raised, so
-    the diagnosis never replaces the bind-timeout error it annotates.
-    """
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((host, port))
-    except OSError as e:
-        if e.errno is None:
-            return type(e).__name__
-        return errno.errorcode.get(e.errno, str(e.errno))
-    return "free"
-
-
 def _parse_one_credential_status(raw_status: object, service_name: str) -> CredentialStatus:
     """Map a single account's ``credentialStatus`` string to the enum, UNKNOWN on any oddity."""
     if not isinstance(raw_status, str):
@@ -744,11 +712,13 @@ def _build_gateway_env(
 ) -> dict[str, str]:
     """Build the env dict for the ``latchkey gateway`` subprocess.
 
-    The gateway reads its listen host/port + permissions config path + listen
-    password from these env vars (the upstream ``latchkey`` CLI exposes them
-    as the documented gateway-config surface). ``extension_permissions_root``
-    is consumed by the bundled ``permissions.mjs`` extension to clamp the set
-    of files it will read or write.
+    Mirrors the env shape that ``_spawn.spawn_detached_latchkey_gateway``
+    used to set up. The gateway reads its listen host/port + permissions
+    config path + listen password from these env vars (the upstream
+    ``latchkey`` CLI exposes them as the documented gateway-config
+    surface). ``extension_permissions_root`` is consumed by the bundled
+    ``permissions.mjs`` extension to clamp the set of files it will
+    read or write.
     """
     latchkey_directory.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -916,83 +886,6 @@ def summarize_latchkey_failure(raw_output: str, fallback: str) -> str:
     return summary
 
 
-class LatchkeyErrorCode(UpperCaseStrEnum):
-    """The machine-readable failure codes latchkey (>= 3.19) prints for the failures a surface can act on.
-
-    A coded failure reaches stderr as one JSON line,
-    ``{"errorCode": ..., "errorMessage": ...}``, instead of the crash dump
-    :func:`summarize_latchkey_failure` condenses. Values are the codes as
-    latchkey spells them.
-    """
-
-    # ``auth import-chrome``: the Chrome profile is there but its files could
-    # not be read. On macOS (27 and later) that is the OS denying every
-    # application without Full Disk Access a look at Chrome's data; the user
-    # has to grant it by hand in System Settings, and no API can ask for it.
-    CHROME_PROFILE_NOT_READABLE = auto()
-
-
-class CodedLatchkeyFailure(FrozenModel):
-    """A failure latchkey reported with a code, as parsed off its stderr."""
-
-    code: str = Field(description="The code as latchkey printed it, known to LatchkeyErrorCode or not")
-    message: str = Field(description="Latchkey's own sentence about the failure")
-
-    @property
-    def known_code(self) -> LatchkeyErrorCode | None:
-        """The code as a member, or None for a code newer than this package."""
-        if self.code in LatchkeyErrorCode:
-            return LatchkeyErrorCode(self.code)
-        return None
-
-
-# The key latchkey's ``formatCodedErrorAsJson`` writes first, which is what
-# places the object in the output; a crash dump never names it.
-_CODED_FAILURE_KEY: Final[str] = '"errorCode"'
-
-
-def parse_coded_latchkey_failure(raw_output: str) -> CodedLatchkeyFailure | None:
-    """The coded failure in a failed latchkey CLI's output, or None when it printed none.
-
-    The object is decoded from wherever it opens rather than from a line of
-    its own: Node writes its own warnings to stderr ahead of it, and nothing
-    here depends on latchkey keeping it on one line.
-    """
-    key_index = raw_output.find(_CODED_FAILURE_KEY)
-    if key_index == -1:
-        return None
-    start = raw_output.rfind("{", 0, key_index)
-    if start == -1:
-        return None
-    try:
-        payload, _ = json.JSONDecoder().raw_decode(raw_output, start)
-    except json.JSONDecodeError as e:
-        logger.warning(
-            "Ignoring latchkey output that names an error code but is not a JSON object: {} ({})",
-            raw_output[start:],
-            e,
-        )
-        return None
-    if not isinstance(payload, dict):
-        return None
-    code = payload.get("errorCode")
-    message = payload.get("errorMessage")
-    if isinstance(code, str) and isinstance(message, str):
-        return CodedLatchkeyFailure(code=code, message=message)
-    return None
-
-
-class ChromeImportOutcome(FrozenModel):
-    """What one ``latchkey auth import-chrome`` run came to."""
-
-    is_success: bool = Field(description="Whether the import completed")
-    detail: str = Field(description="Why the import did not happen; empty on success")
-    error_code: LatchkeyErrorCode | None = Field(
-        default=None,
-        description="The failure's code when latchkey gave one this package knows, so a surface can act on it",
-    )
-
-
 def merge_minds_latchkey_config(
     existing_config_json: str | None,
     custom_service_entries: Mapping[str, JsonValue] | None = None,
@@ -1093,8 +986,7 @@ def _log_gateway_output_line(line: str, is_stdout: bool) -> None:
     """Forward one line of ``latchkey gateway`` output to the supervisor's structured log.
 
     :class:`ConcurrencyGroup` always pipes a child's stdout/stderr through a
-    per-line callback; :meth:`_GatewayOutputTail.on_output` (that callback for
-    the gateway) hands each line here. The gateway is a
+    per-line callback; this plays that callback role. The gateway is a
     subprocess whose output is unstructured text we cannot emit as native JSONL
     events ourselves, so instead of teeing it into a separate, unrotated file we
     route each line through loguru at DEBUG. That folds it into the supervisor's
@@ -1106,96 +998,6 @@ def _log_gateway_output_line(line: str, is_stdout: bool) -> None:
     """
     del is_stdout
     logger.debug("[latchkey gateway] {}", line.rstrip("\n"))
-
-
-class _GatewayOutputTail(MutableModel):
-    """Rolling record of the last few output lines of one ``latchkey gateway`` spawn.
-
-    The gateway's output otherwise only reaches the local JSONL log at DEBUG (see
-    :func:`_log_gateway_output_line`), so a gateway that fails at startup leaves
-    nothing in the error a remote reader sees. :meth:`on_output` keeps that DEBUG
-    routing and also remembers the newest lines, so a failed bind can report what
-    the gateway said before it died. Holds at most
-    :data:`_GATEWAY_OUTPUT_TAIL_MAX_LINES` lines however long the gateway runs.
-    """
-
-    # Appended from the process's output reader thread, read from the spawning thread.
-    _lines: deque[str] = PrivateAttr(default_factory=lambda: deque(maxlen=_GATEWAY_OUTPUT_TAIL_MAX_LINES))
-    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-
-    def on_output(self, line: str, is_stdout: bool) -> None:
-        """``on_output`` callback for the gateway subprocess: route the line to the log and remember it."""
-        _log_gateway_output_line(line, is_stdout)
-        with self._lock:
-            self._lines.append(line.rstrip("\n"))
-
-    def render(self, redacted_values: Collection[str]) -> str:
-        """Return the remembered lines, newest last, with every ``redacted_values`` occurrence replaced.
-
-        The gateway's environment carries its listen password and the
-        credential-store encryption key; replacing those exact values keeps
-        them out of the log even if the gateway ever echoed its configuration.
-        Each line is cut to :data:`_GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS`.
-        """
-        with self._lock:
-            lines = list(self._lines)
-        rendered: list[str] = []
-        for line in lines:
-            for value in redacted_values:
-                if value:
-                    line = line.replace(value, "<redacted>")
-            if len(line) > _GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS:
-                line = line[:_GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS] + "...<truncated>"
-            rendered.append(line)
-        return "\n".join(rendered)
-
-
-def _terminate_and_diagnose_unbound_gateway(
-    process: RunningProcess,
-    output_tail: _GatewayOutputTail,
-    host: str,
-    port: int,
-    is_reused_port: bool,
-    redacted_values: Collection[str],
-    events_log_path: Path,
-) -> LatchkeyError:
-    """Terminate a gateway that never bound ``host:port`` and return the error that says why.
-
-    Logs the gateway's redacted output tail at WARNING, then builds an error
-    naming whether the gateway had exited (and with which code) or was still
-    starting, whether the port is bindable once the gateway is gone, and
-    whether the attempt reused the previous gateway's port.
-    """
-    # Read before ``terminate()`` so it reflects the gateway itself: an exit
-    # code means it died on its own (a port conflict or a startup fault),
-    # ``None`` that it was still starting. The output is logged here too, so
-    # it is recorded even if ``terminate()`` raises.
-    exit_code_at_deadline = process.poll()
-    logger.warning(
-        "Latchkey gateway output before it failed to bind {}:{}:\n{}",
-        host,
-        port,
-        output_tail.render(redacted_values) or "<no output>",
-    )
-    try:
-        process.terminate()
-    except (OSError, RuntimeError) as e:
-        logger.warning("Failed to terminate half-started latchkey gateway: {}", e)
-    # After cleanup, so the probe sees whatever holds the port other than this spawn.
-    port_bindability = _describe_port_bindability(host, port)
-    gateway_state = "still running" if exit_code_at_deadline is None else f"exited with code {exit_code_at_deadline}"
-    return LatchkeyError(
-        "Spawned latchkey gateway did not bind {}:{} within {:.1f}s "
-        "(gateway {} at the deadline; port {} after cleanup; {}); see {} for details".format(
-            host,
-            port,
-            _GATEWAY_BIND_TIMEOUT_SECONDS,
-            gateway_state,
-            port_bindability,
-            "reused the previous gateway's port" if is_reused_port else "fresh port",
-            events_log_path,
-        )
-    )
 
 
 class _RunningGateway(FrozenModel):
@@ -1224,16 +1026,15 @@ class _RunningGateway(FrozenModel):
 class Latchkey(MutableModel):
     """Wraps every interaction with the upstream ``latchkey`` CLI.
 
-    Spawns and tracks the single shared ``latchkey gateway`` subprocess;
-    derives the gateway's shared password and mints per-agent
-    permissions-override JWTs via ``latchkey gateway create-jwt``;
+    Spawns, adopts, and tracks the single shared ``latchkey gateway``
+    subprocess; derives the gateway's shared password and mints
+    per-agent permissions-override JWTs via ``latchkey gateway create-jwt``;
     exposes ``services_info`` to query credential state and supported auth
     options; and ``auth_browser`` to launch the interactive sign-in flow.
-    The gateway is a child of whichever process calls ``start_gateway`` (it
-    runs in the concurrency group passed in; in practice the ``mngr latchkey
-    forward`` that owns the directory), so it ends with that process. Nothing
-    adopts a gateway an earlier process left behind: ``initialize()`` does no
-    cross-process gateway-record reconciliation (see its docstring).
+    The gateway is spawned detached (``start_new_session=True`` inside
+    :func:`spawn_detached_latchkey_gateway`) so it survives desktop-client
+    restarts; its lifecycle is reconciled against the persisted record on
+    ``initialize()``.
     """
 
     latchkey_binary: str = Field(default=LATCHKEY_BINARY, frozen=True, description="Path to Latchkey binary")
@@ -1280,10 +1081,6 @@ class Latchkey(MutableModel):
     # ``_lock`` (which is held only for short state-mutation critical
     # sections) so the slow spawn path doesn't block fast-path readers.
     _spawn_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    # Spawn attempts that have failed since the last successful one. Read and
-    # written only while holding ``_spawn_lock``. Logged with every respawn so a
-    # gateway that keeps failing to come back reads as one counted streak.
-    _consecutive_failed_spawns: int = PrivateAttr(default=0)
     _is_initialized: bool = PrivateAttr(default=False)
     _has_ensured_browser: bool = PrivateAttr(default=False)
 
@@ -1403,31 +1200,7 @@ class Latchkey(MutableModel):
             if running is not None and running.process.poll() is None:
                 return running.port
             preferred_port = running.port if running is not None else None
-            failed_spawns_before = self._consecutive_failed_spawns
-            # ``running`` is the last gateway that came up: a failed spawn is
-            # never recorded, so after a failure streak this is still the gateway
-            # whose death began the streak, and the exit code logged is its own.
-            if running is not None:
-                logger.info(
-                    "Respawning shared Latchkey gateway on its previous port {}:{} "
-                    "(last running gateway exit code {}; {} consecutive failed spawn(s) before this attempt)",
-                    self.listen_host,
-                    preferred_port,
-                    running.process.poll(),
-                    failed_spawns_before,
-                )
-            # Counted as failed until it returns, so every way out of
-            # ``_spawn_gateway`` other than success extends the streak.
-            self._consecutive_failed_spawns = failed_spawns_before + 1
             port, process = self._spawn_gateway(concurrency_group, plugin_dir, preferred_port=preferred_port)
-            self._consecutive_failed_spawns = 0
-            if failed_spawns_before > 0:
-                logger.info(
-                    "Shared Latchkey gateway came up on {}:{} after {} consecutive failed spawn(s)",
-                    self.listen_host,
-                    port,
-                    failed_spawns_before,
-                )
             with self._lock:
                 self._running_gateway = _RunningGateway(port=port, process=process)
         return port
@@ -1664,7 +1437,6 @@ class Latchkey(MutableModel):
         # reading it, so the child must always see EOF.
         stdin_bytes = b"" if destination_key is None else destination_key.get_secret_value().encode("utf-8")
         cg = ConcurrencyGroup(name="latchkey-reencrypt")
-        start_time = time.monotonic()
         try:
             with cg:
                 result = cg.run_process_to_completion(
@@ -1678,23 +1450,11 @@ class Latchkey(MutableModel):
             if not group.only_exception_is_instance_of(ProcessSetupError):
                 raise
             raise LatchkeyError(f"Failed to launch 'latchkey auth re-encrypt': {group}") from group
-        elapsed_seconds = time.monotonic() - start_time
         if result.returncode != 0:
-            # A signal exit (e.g. -15) reads the same whether our own timeout
-            # killed the child or something outside this process did, so the
-            # message carries what tells them apart: whether the timeout had
-            # passed and how long the run took.
             raise LatchkeyError(
-                "'latchkey auth re-encrypt' exited {} writing {} (timed_out={}, "
-                "elapsed={:.2f}s of {:.0f}s timeout, services={}, has_destination_key={}, has_account={}): {}".format(
+                "'latchkey auth re-encrypt' exited {} writing {}: {}".format(
                     result.returncode,
                     destination,
-                    result.is_timed_out,
-                    elapsed_seconds,
-                    _REENCRYPT_TIMEOUT_SECONDS,
-                    len(service_names),
-                    destination_key is not None,
-                    account is not None,
                     result.stderr.strip() or result.stdout.strip(),
                 )
             )
@@ -2167,7 +1927,7 @@ class Latchkey(MutableModel):
             timeout_seconds=_AUTH_SET_TIMEOUT_SECONDS,
         )
 
-    def import_chrome_browser_state(self) -> ChromeImportOutcome:
+    def import_chrome_browser_state(self) -> tuple[bool, str]:
         """Run ``latchkey auth import-chrome`` (latchkey >= 3.16) and report the outcome.
 
         Imports the cookies of the user's default Google Chrome profile, and the
@@ -2179,12 +1939,10 @@ class Latchkey(MutableModel):
 
         Latchkey copies the profile and reads it through a headless Chrome, so
         the call takes tens of seconds; it is bounded by
-        :data:`_IMPORT_CHROME_TIMEOUT_SECONDS`. A clean exit is a success --
-        the exit status is the whole contract; what latchkey prints about the
-        import only reaches the log. A failure carries the reason (no Chrome
-        installed, no default profile, ...) and, when latchkey (>= 3.19)
-        reported it with a code this package knows, that code, so a surface
-        can say what to do about it rather than quote the sentence.
+        :data:`_IMPORT_CHROME_TIMEOUT_SECONDS`. Returns ``(True, "")`` on a
+        clean exit -- the exit status is the whole contract; what latchkey
+        prints about the import only reaches the log -- or ``(False, detail)``
+        with the reason (no Chrome installed, no default profile, ...).
         """
         result = self._run_latchkey_subprocess(
             log_label="auth import-chrome",
@@ -2194,24 +1952,13 @@ class Latchkey(MutableModel):
         )
         if result.returncode == 0:
             logger.info("latchkey auth import-chrome succeeded: {}", result.stdout.strip())
-            return ChromeImportOutcome(is_success=True, detail="")
+            return True, ""
         if result.is_timed_out:
             logger.warning("latchkey auth import-chrome timed out after {}s", _IMPORT_CHROME_TIMEOUT_SECONDS)
-            return ChromeImportOutcome(
-                is_success=False,
-                detail=f"Importing from Chrome did not finish within {_IMPORT_CHROME_TIMEOUT_SECONDS:.0f} seconds.",
-            )
+            return False, f"Importing from Chrome did not finish within {_IMPORT_CHROME_TIMEOUT_SECONDS:.0f} seconds."
         raw_message = result.stderr.strip() or result.stdout.strip() or "latchkey auth import-chrome failed"
         logger.warning("latchkey auth import-chrome exited {}: {}", result.returncode, raw_message)
-        coded_failure = parse_coded_latchkey_failure(raw_message)
-        if coded_failure is not None:
-            return ChromeImportOutcome(
-                is_success=False, detail=coded_failure.message, error_code=coded_failure.known_code
-            )
-        return ChromeImportOutcome(
-            is_success=False,
-            detail=summarize_latchkey_failure(raw_message, fallback="latchkey auth import-chrome failed"),
-        )
+        return False, summarize_latchkey_failure(raw_message, fallback="latchkey auth import-chrome failed")
 
     def _run_latchkey_auth_command(
         self,
@@ -2391,8 +2138,8 @@ class Latchkey(MutableModel):
             raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
 
         # Fire off ``latchkey ensure-browser`` in parallel the first time we
-        # actually spawn the gateway in this minds session. It runs in the
-        # background alongside the gateway spawn below and we don't wait for
+        # actually spawn the gateway in this minds session. It runs
+        # detached alongside the gateway spawn below and we don't wait for
         # it.
         self._ensure_browser_once(plugin_dir)
 
@@ -2400,8 +2147,10 @@ class Latchkey(MutableModel):
         # we always materialize an empty-rules default file before
         # spawning the gateway. This guarantees that any request that
         # fails to attach a valid permissions-override JWT is denied for
-        # every service rather than implicitly granted. A pre-existing
-        # file is left alone in case the user inspected it.
+        # every service rather than implicitly granted. Pre-existing
+        # files are left untouched; minds always rewrites them with
+        # empty rules anyway, but on adoption we leave the existing one
+        # alone in case the user inspected it.
         default_perms = default_permissions_path(plugin_dir)
         if not default_perms.is_file():
             save_permissions(default_perms, LatchkeyPermissionsConfig())
@@ -2428,7 +2177,6 @@ class Latchkey(MutableModel):
         # Reuse the previously-bound port when respawning a dead gateway; otherwise
         # allocate a fresh free port for the first spawn.
         port = preferred_port if preferred_port is not None else _allocate_free_port(self.listen_host)
-        encryption_key = self._load_encryption_key()
         env = _build_gateway_env(
             listen_host=self.listen_host,
             listen_port=port,
@@ -2437,9 +2185,8 @@ class Latchkey(MutableModel):
             listen_password=password,
             extension_permissions_root=plugin_dir,
             local_device=self.device,
-            encryption_key=encryption_key,
+            encryption_key=self._load_encryption_key(),
         )
-        output_tail = _GatewayOutputTail()
 
         with log_span(
             "Starting shared Latchkey gateway on {}:{}",
@@ -2450,7 +2197,7 @@ class Latchkey(MutableModel):
                 process = concurrency_group.run_process_in_background(
                     command=[self.latchkey_binary, "gateway", "--max-body-size", str(GATEWAY_MAX_BODY_SIZE_BYTES)],
                     env=env,
-                    on_output=output_tail.on_output,
+                    on_output=_log_gateway_output_line,
                     # The supervisor's own gateway health check owns respawning a dead
                     # gateway, so this is not a group-checked strand: were it checked, a
                     # mid-session crash (non-zero exit) would make every subsequent
@@ -2461,7 +2208,6 @@ class Latchkey(MutableModel):
                 )
             except (ConcurrencyExceptionGroup, OSError) as e:
                 raise LatchkeyError(f"Failed to spawn shared Latchkey gateway: {e}") from e
-            spawned_at = time.monotonic()
 
             # Block until the freshly-spawned subprocess actually binds
             # its port. Returning earlier would let a caller use the
@@ -2470,21 +2216,15 @@ class Latchkey(MutableModel):
             # it so the caller doesn't end up with a half-started
             # subprocess they don't know about.
             if not _wait_for_port_listening(self.listen_host, port, timeout=_GATEWAY_BIND_TIMEOUT_SECONDS):
-                raise _terminate_and_diagnose_unbound_gateway(
-                    process=process,
-                    output_tail=output_tail,
-                    host=self.listen_host,
-                    port=port,
-                    is_reused_port=preferred_port is not None,
-                    redacted_values=(password, encryption_key.get_secret_value()),
-                    events_log_path=forward_events_log_path(plugin_dir),
+                try:
+                    process.terminate()
+                except (OSError, RuntimeError) as e:
+                    logger.warning("Failed to terminate half-started latchkey gateway: {}", e)
+                raise LatchkeyError(
+                    "Spawned latchkey gateway did not bind {}:{} within {:.1f}s; see {} for details".format(
+                        self.listen_host, port, _GATEWAY_BIND_TIMEOUT_SECONDS, forward_events_log_path(plugin_dir)
+                    )
                 )
-            logger.info(
-                "Latchkey gateway bound {}:{} {:.2f}s after spawning",
-                self.listen_host,
-                port,
-                time.monotonic() - spawned_at,
-            )
 
         return port, process
 
@@ -2504,7 +2244,7 @@ class Latchkey(MutableModel):
             self._has_ensured_browser = True
         log_path = ensure_browser_log_path(plugin_dir)
         try:
-            pid = spawn_latchkey_ensure_browser(
+            pid = spawn_detached_latchkey_ensure_browser(
                 latchkey_binary=self.latchkey_binary,
                 log_path=log_path,
                 latchkey_directory=self.latchkey_directory,

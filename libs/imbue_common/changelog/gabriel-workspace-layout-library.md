@@ -1,0 +1,1 @@
+The `Args:`-in-docstrings ratchet no longer counts a name that ends in `Args` followed by a colon, such as the return annotation `-> ShowArgs:` or `class FooArgs:` a few lines after a docstring. A real `Args:` section still counts, so a project's count can only go down.

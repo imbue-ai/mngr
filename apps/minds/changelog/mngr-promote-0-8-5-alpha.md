@@ -1,0 +1,1 @@
+- Promote minds 0.8.5 to the alpha channels: the desktop alpha channel serves ToDesktop build `2610066k8bzbhej` (mac and Linux, 100%), and browser-created alpha workspaces pin to `minds-v0.8.5`. Beta and stable stay on 0.8.4.

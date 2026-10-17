@@ -72,7 +72,7 @@ class PendingCreateAttemptRequest(FrozenModel):
     account_email: str = Field(default="", description="Owning account's email, empty for a private workspace")
     branch_or_tag: str = Field(default="", description="Resolved template version for imbue_cloud leases")
     region: str = Field(default="", description="Resolved region, empty for region-less providers")
-    cloud_account: str = Field(default="", description="Connection instance name (``<backend>_<hex>``), if any")
+    cloud_account: str = Field(default="", description="Bring-your-own-key account block name, if any")
     instance_type: str = Field(default="", description="Per-create machine size, if the mode has one")
     cpu_count: int | None = Field(default=None, description="Chosen CPU count, for the modes sized by numbers")
     memory_gb: int | None = Field(default=None, description="Chosen memory in GB, for the modes sized by numbers")
@@ -85,12 +85,6 @@ class PendingCreateAttemptRequest(FrozenModel):
     )
     backup_api_key_env: str = Field(
         default="", description="User-supplied restic env block for API_KEY backups (local-only, like restic.env)"
-    )
-    is_onboarding_driven_by_agent: bool = Field(
-        default=False,
-        description="Whether the creation page shows its onboarding examples while this workspace is built "
-        "(the first-run start flow's creates do; a create from the form does only when its "
-        "'Show onboarding examples?' switch is on)",
     )
 
 

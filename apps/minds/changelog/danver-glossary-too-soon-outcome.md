@@ -1,0 +1,1 @@
+Added `too soon` as a fifth granter-visible invitation outcome and delivery outcome in the workspace glossary, for an invitation refused by the per-grant cooldown, so that `over allowance` keeps its one precise meaning.

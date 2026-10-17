@@ -11,8 +11,6 @@ const assert = require('node:assert');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
-const LINK_VECTORS = require('../../electron/link-externality-vectors.json');
-
 const MODULE_URL = pathToFileURL(
   path.join(__dirname, '..', '..', 'imbue', 'minds', 'desktop_client', 'static', 'embed_contract.js'),
 ).href;
@@ -291,8 +289,7 @@ test('workspace endpoint validates the capabilities and reattach payloads', () =
   const seen = [];
   contract.createWorkspaceEndpoint({
     handlers: {
-      [contract.EMBEDDER_CAPABILITIES]: (msg) =>
-        seen.push(['caps', msg.canPopOut, msg.opensExternalLinks, msg.opensCustomSchemeLinks, msg.opensLocalFiles]),
+      [contract.EMBEDDER_CAPABILITIES]: (msg) => seen.push(['caps', msg.canPopOut, msg.opensExternalLinks]),
       [contract.REATTACH_WINDOW]: (msg) => seen.push(['reattach', msg.windowId, msg.frame === undefined]),
       [contract.TEAR_OUT]: (msg) => seen.push(['tear', msg.windowId, msg.phase]),
     },
@@ -304,11 +301,7 @@ test('workspace endpoint validates the capabilities and reattach payloads', () =
   deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: true });
   deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: true, opensExternalLinks: true });
   deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: true, opensExternalLinks: 'yes' });
-  deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: true, opensExternalLinks: true, opensCustomSchemeLinks: true });
-  deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: true, opensExternalLinks: true, opensCustomSchemeLinks: 1 });
   deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: 'yes' });
-  deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: false, opensExternalLinks: true, opensLocalFiles: true });
-  deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: false, opensLocalFiles: 1 });
   deliver({ type: contract.REATTACH_WINDOW, windowId: 'win-abc' });
   deliver({ type: contract.REATTACH_WINDOW, windowId: 'win-abc', frame: { x: 0.1, y: 0.2, width: 0.5, height: 0.5 } });
   deliver({ type: contract.REATTACH_WINDOW, windowId: 'win-abc', frame: { x: 0.1, y: 0.2, width: 0.5 } });
@@ -316,10 +309,8 @@ test('workspace endpoint validates the capabilities and reattach payloads', () =
   deliver({ type: contract.REATTACH_WINDOW, windowId: 'agent-abc' });
   assert.deepStrictEqual(seen, [
     ['tear', 'win-abc', 'out'],
-    ['caps', true, undefined, undefined, undefined],
-    ['caps', true, true, undefined, undefined],
-    ['caps', true, true, true, undefined],
-    ['caps', false, true, undefined, true],
+    ['caps', true, undefined],
+    ['caps', true, true],
     ['reattach', 'win-abc', true],
     ['reattach', 'win-abc', false],
   ]);
@@ -376,13 +367,13 @@ test('workspace endpoint takes a provider sign-in ack only with a boolean relay'
   assert.deepStrictEqual(seen, [true, false]);
 });
 
-test('embedder endpoint reads opensLinks and opensCustomSchemeLinks on a readiness announcement only as booleans or absent', () => {
+test('embedder endpoint reads opensLinks on a readiness announcement only as a boolean or absent', () => {
   const frameWin = makeWindowDouble();
   const seen = [];
   contract.createEmbedderEndpoint({
     getFrameWindow: () => frameWin,
     isExpectedOrigin: () => true,
-    handlers: { [contract.WORKSPACE_READY]: (msg) => seen.push([msg.opensLinks, msg.opensCustomSchemeLinks]) },
+    handlers: { [contract.WORKSPACE_READY]: (msg) => seen.push(msg.opensLinks) },
   });
   const announce = (payload) =>
     win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.WORKSPACE_READY, ...payload } });
@@ -392,17 +383,10 @@ test('embedder endpoint reads opensLinks and opensCustomSchemeLinks on a readine
   announce({ opensLinks: 'yes' });
   announce({ opensLinks: 1 });
   announce({ opensLinks: null });
-  announce({ opensLinks: true, opensCustomSchemeLinks: true });
-  announce({ opensLinks: true, opensCustomSchemeLinks: 'yes' });
-  assert.deepStrictEqual(seen, [
-    [undefined, undefined],
-    [true, undefined],
-    [false, undefined],
-    [true, true],
-  ]);
+  assert.deepStrictEqual(seen, [undefined, true, false]);
 });
 
-test('workspace endpoint accepts an open-link only for an absolute http(s), mailto, tel or custom-scheme URL within the length bound', () => {
+test('workspace endpoint accepts an open-link only for an absolute http(s), mailto or tel URL within the length bound', () => {
   const seen = [];
   contract.createWorkspaceEndpoint({
     handlers: { [contract.OPEN_LINK]: (msg) => seen.push(msg.url) },
@@ -418,43 +402,23 @@ test('workspace endpoint accepts an open-link only for an absolute http(s), mail
   deliver({ url: 42 });
   deliver({ url: '' });
   deliver({ url: '/relative/path' });
+  deliver({ url: 'localhost:8000/no-scheme' });
   deliver({ url: 'javascript:alert(1)' });
   deliver({ url: 'file:///etc/passwd' });
   deliver({ url: 'mailto:someone@example.com' });
   deliver({ url: 'tel:+15551234567' });
   deliver({ url: 'data:text/html,<p>hi</p>' });
-  deliver({ url: 'about:blank' });
-  deliver({ url: 'blob:http://localhost:8000/0f1e2d3c' });
-  deliver({ url: 'ws://localhost:8000/socket' });
   deliver({ url: 'http://exa mple.com/' });
-  deliver({ url: 'slack://channel?id=C1' });
   assert.deepStrictEqual(seen, [
     'http://localhost:8000/docs?q=1#top',
     'https://web.agent-0a1b.localhost:8421/page',
     atBound,
     'mailto:someone@example.com',
     'tel:+15551234567',
-    'slack://channel?id=C1',
   ]);
 });
 
-test("workspace endpoint takes an open-link of the shared link vectors' schemes exactly when the URL is custom-scheme", () => {
-  const seen = [];
-  contract.createWorkspaceEndpoint({
-    handlers: { [contract.OPEN_LINK]: (msg) => seen.push(msg.url) },
-  });
-  const isOfLinkScheme = (url) => /^(?:https?|mailto|tel):/i.test(url);
-  const otherSchemeVectors = LINK_VECTORS.filter((vector) => !isOfLinkScheme(vector.url));
-  const customSchemeUrls = otherSchemeVectors.filter((vector) => vector.isCustomScheme).map((vector) => vector.url);
-  assert.ok(customSchemeUrls.length > 0);
-  assert.ok(customSchemeUrls.length < otherSchemeVectors.length);
-  for (const { url } of otherSchemeVectors) {
-    win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.OPEN_LINK, url } });
-  }
-  assert.deepStrictEqual(seen, customSchemeUrls);
-});
-
-test('embedder endpoint accepts an open-external only for an absolute http(s), mailto, tel or custom-scheme URL within the length bound', () => {
+test('embedder endpoint accepts an open-external only for an absolute http(s), mailto or tel URL within the length bound', () => {
   const frameWin = makeWindowDouble();
   const seen = [];
   contract.createEmbedderEndpoint({
@@ -473,15 +437,8 @@ test('embedder endpoint accepts an open-external only for an absolute http(s), m
   deliver({});
   deliver({ url: 'javascript:alert(1)' });
   deliver({ url: 'file:///etc/passwd' });
-  deliver({ url: 'data:text/html,<p>hi</p>' });
   deliver({ url: 'smb://server/share' });
-  assert.deepStrictEqual(seen, [
-    'https://example.com/a',
-    'mailto:someone@example.com',
-    'tel:+15551234567',
-    atBound,
-    'smb://server/share',
-  ]);
+  assert.deepStrictEqual(seen, ['https://example.com/a', 'mailto:someone@example.com', 'tel:+15551234567', atBound]);
 });
 
 test('workspace endpoint never honours an open-external, which only travels to the embedder', () => {
@@ -502,52 +459,5 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
     handlers: { [contract.OPEN_LINK]: (msg) => seen.push(msg.url) },
   });
   win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.OPEN_LINK, url: 'http://localhost/' } });
-  assert.deepStrictEqual(seen, []);
-});
-
-test('embedder endpoint takes an open-local-files ask, which carries nothing', () => {
-  const frameWin = makeWindowDouble();
-  const seen = [];
-  contract.createEmbedderEndpoint({
-    getFrameWindow: () => frameWin,
-    isExpectedOrigin: () => true,
-    handlers: { [contract.OPEN_LOCAL_FILES]: (msg) => seen.push(msg.type) },
-  });
-  win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.OPEN_LOCAL_FILES } });
-  assert.deepStrictEqual(seen, [contract.OPEN_LOCAL_FILES]);
-});
-
-test('workspace endpoint never honours an open-local-files, which only travels to the embedder', () => {
-  const seen = [];
-  contract.createWorkspaceEndpoint({
-    handlers: { [contract.OPEN_LOCAL_FILES]: () => seen.push('workspace') },
-  });
-  win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.OPEN_LOCAL_FILES } });
-  assert.deepStrictEqual(seen, []);
-});
-
-test('embedder endpoint takes a highlight-chrome only for a known anchor or null', () => {
-  const frameWin = makeWindowDouble();
-  const seen = [];
-  contract.createEmbedderEndpoint({
-    getFrameWindow: () => frameWin,
-    isExpectedOrigin: () => true,
-    handlers: { [contract.HIGHLIGHT_CHROME]: (msg) => seen.push(msg.anchor) },
-  });
-  const from = (data) => win.deliver({ source: frameWin, origin: 'o', data });
-  from({ type: contract.HIGHLIGHT_CHROME });
-  from({ type: contract.HIGHLIGHT_CHROME, anchor: 'sidebar' });
-  from({ type: contract.HIGHLIGHT_CHROME, anchor: 7 });
-  assert.deepStrictEqual(seen, []);
-  for (const anchor of contract.CHROME_ANCHORS) from({ type: contract.HIGHLIGHT_CHROME, anchor });
-  from({ type: contract.HIGHLIGHT_CHROME, anchor: null });
-  assert.deepStrictEqual(seen, [...contract.CHROME_ANCHORS, null]);
-  assert.deepStrictEqual(contract.CHROME_ANCHORS, ['workspace-switcher', 'permissions', 'settings', 'share', 'help']);
-});
-
-test('workspace endpoint never honours a highlight-chrome, which only travels to the embedder', () => {
-  const seen = [];
-  contract.createWorkspaceEndpoint({ handlers: { [contract.HIGHLIGHT_CHROME]: (msg) => seen.push(msg) } });
-  win.deliver({ source: parentWin, origin: 'o', data: { type: contract.HIGHLIGHT_CHROME, anchor: 'share' } });
   assert.deepStrictEqual(seen, []);
 });

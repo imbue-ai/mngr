@@ -1,0 +1,3 @@
+- A cloud workspace an operator retired (its version cannot run on the new fleet; its data was archived) shows a "Retired" badge, no Start control, and a notice saying it cannot be started again and pointing at its backups (or at support when it has none). The desktop's own start and recovery paths stand down for it exactly as for a maintenance hold.
+
+- Runbook: `docs/deploy/gen2-cutover.md` gains "Retiring the workspaces the migrate cannot take" (`minds-admin archives` + `workspaces retire`), and `next_deploy.md` carries connector migration 044 and the dated cleanup of the `archives/` prefix.

@@ -1,0 +1,1 @@
+The peek panel now asks `mngr transcript` for `--role agent` alongside `--role user --role assistant`, so agents on ATIF-shaped transcripts (which name that role `agent`) show their conversation in the panel instead of appearing empty.

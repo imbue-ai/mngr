@@ -30,6 +30,7 @@ from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -48,19 +49,16 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
-from imbue.mngr.primitives import ProgressStepId
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
-from imbue.mngr.providers.host_access_manifest import host_access_key_dir
-from imbue.mngr.providers.host_access_manifest import host_access_per_host_dir
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.host_key_store import pin_sole_endpoint_host_key
 from imbue.mngr.providers.local.volume import LocalVolume
@@ -75,10 +73,6 @@ from imbue.mngr.providers.ssh_utils import resolve_keypair_with_fallback
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
-from imbue.mngr_lima.constants import LIMA_HOST_ACCESS_MANIFEST
-from imbue.mngr_lima.constants import LIMA_HOST_KEY_NAME
-from imbue.mngr_lima.constants import LIMA_KNOWN_HOSTS_NAME
-from imbue.mngr_lima.constants import LIMA_ROOT_SSH_KEY_NAME
 from imbue.mngr_lima.constants import lima_host_data_disk_name
 from imbue.mngr_lima.data_types import LimaResizeOutcome
 from imbue.mngr_lima.data_types import LimaSizeRequest
@@ -96,9 +90,7 @@ from imbue.mngr_lima.lima_yaml import load_user_lima_yaml
 from imbue.mngr_lima.lima_yaml import merge_lima_yaml
 from imbue.mngr_lima.lima_yaml import parse_build_args_for_yaml_path
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
-from imbue.mngr_lima.limactl import LIMA_START_VM_STEP
 from imbue.mngr_lima.limactl import LimaSshConfig
-from imbue.mngr_lima.limactl import LimaStartProgressCallback
 from imbue.mngr_lima.limactl import is_transient_lima_download_error
 from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
 from imbue.mngr_lima.limactl import limactl_delete
@@ -133,6 +125,14 @@ _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
     "Broken": HostState.CRASHED,
     "Unknown": HostState.UNKNOWN,
 }
+
+# Filename of the pre-injected ed25519 sshd host key stored per host on disk.
+_HOST_KEY_NAME = "ssh_host_ed25519_key"
+
+# Filename of the root client key mngr uses to reach the VM when is_run_as_root
+# is set. Per-host under the host's keys dir for new VMs; the same name directly
+# under the provider keys dir is the legacy provider-wide pair older VMs authorize.
+_ROOT_SSH_KEY_NAME = "root_ssh_key"
 
 # Substrings that, when present in a LimaCommandError message, indicate the
 # targeted VM or disk is already gone (so the cleanup failure is benign rather
@@ -283,25 +283,25 @@ class LimaProviderInstance(BaseProviderInstance):
     @property
     def _keys_dir(self) -> Path:
         """Directory for SSH keys."""
-        return host_access_key_dir(self._provider_dir, LIMA_HOST_ACCESS_MANIFEST)
+        return self._provider_dir / "keys"
 
     def _host_keys_dir(self, host_id: HostId) -> Path:
         """Directory holding this host's pre-injected sshd host keypair and matching known_hosts file."""
-        return host_access_per_host_dir(self._provider_dir, LIMA_HOST_ACCESS_MANIFEST, host_id)
+        return self._keys_dir / "hosts" / str(host_id)
 
     def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
         """Return (private_key_path, public_key_path) for this host's pre-injected sshd host key."""
         host_keys_dir = self._host_keys_dir(host_id)
-        return host_keys_dir / LIMA_HOST_KEY_NAME, host_keys_dir / f"{LIMA_HOST_KEY_NAME}.pub"
+        return host_keys_dir / _HOST_KEY_NAME, host_keys_dir / f"{_HOST_KEY_NAME}.pub"
 
     def _host_known_hosts_path(self, host_id: HostId) -> Path:
         """Path to this host's per-host known_hosts file, under its keys dir."""
-        return self._host_keys_dir(host_id) / LIMA_KNOWN_HOSTS_NAME
+        return self._host_keys_dir(host_id) / "known_hosts"
 
     def _ensure_host_keypair(self, host_id: HostId) -> tuple[str, str]:
         """Generate (or load) this host's ed25519 keypair, returning ``(private_key_pem, public_key_openssh)``."""
         private_key_path, public_key_openssh = load_or_create_host_keypair(
-            self._host_keys_dir(host_id), LIMA_HOST_KEY_NAME
+            self._host_keys_dir(host_id), _HOST_KEY_NAME
         )
         return private_key_path.read_text(), public_key_openssh
 
@@ -585,20 +585,14 @@ sudo poweroff
             before_sleep=_DeleteInstanceBeforeRetry(cg=self.mngr_ctx.concurrency_group, instance_name=instance_name),
             reraise=True,
         )
-        with self.mngr_ctx.progress_reporter.step(
-            LIMA_START_VM_STEP, "Starting the virtual machine", CreatePhase.CREATING_HOST.step_id
-        ):
-            retryer(
-                limactl_start_new,
-                self.mngr_ctx.concurrency_group,
-                instance_name,
-                yaml_path,
-                start_args=start_args,
-                timeout=self.config.vm_start_timeout_seconds,
-                on_output=LimaStartProgressCallback(
-                    cg=self.mngr_ctx.concurrency_group, reporter=self.mngr_ctx.progress_reporter
-                ),
-            )
+        retryer(
+            limactl_start_new,
+            self.mngr_ctx.concurrency_group,
+            instance_name,
+            yaml_path,
+            start_args=start_args,
+            timeout=self.config.vm_start_timeout_seconds,
+        )
 
     def _save_failed_host_record(
         self,
@@ -657,14 +651,7 @@ sudo poweroff
         could not run the command at all (e.g. it cannot reach the instance),
         which aborts creation via the caller's error handling.
         """
-        with (
-            self.mngr_ctx.progress_reporter.step(
-                ProgressStepId("lima.wait_cloud_init"),
-                "Waiting for the machine to finish booting",
-                CreatePhase.CREATING_HOST.step_id,
-            ),
-            log_span("Waiting for cloud-init to complete in {}", instance_name),
-        ):
+        with log_span("Waiting for cloud-init to complete in {}", instance_name):
             limactl_shell(
                 self.mngr_ctx.concurrency_group,
                 instance_name,
@@ -681,7 +668,7 @@ sudo poweroff
 
     def _create_per_host_root_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
         """Mint (or load) this host's own root client keypair, under its per-host keys dir."""
-        return load_or_create_ssh_keypair(self._host_keys_dir(host_id), LIMA_ROOT_SSH_KEY_NAME)
+        return load_or_create_ssh_keypair(self._host_keys_dir(host_id), _ROOT_SSH_KEY_NAME)
 
     def _root_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
         """Client keypair mngr uses to reach the VM as root when is_run_as_root is set.
@@ -693,7 +680,7 @@ sudo poweroff
         private_key_path, public_key = resolve_keypair_with_fallback(
             self._host_keys_dir(host_id),
             self._keys_dir,
-            LIMA_ROOT_SSH_KEY_NAME,
+            _ROOT_SSH_KEY_NAME,
             lambda: self._create_per_host_root_ssh_keypair(host_id),
         )
         # CLEANUP: drop this heal (and its test) once lima hosts get per-host
@@ -708,7 +695,7 @@ sudo poweroff
         # key's own dir can never hold a valid sibling.
         if private_key_path.parent != self._host_keys_dir(host_id):
             if self._link_legacy_root_key_into_host_dir(host_id):
-                per_host_private = self._host_keys_dir(host_id) / LIMA_ROOT_SSH_KEY_NAME
+                per_host_private = self._host_keys_dir(host_id) / _ROOT_SSH_KEY_NAME
                 return per_host_private, public_key
             logger.warning(
                 "Not healing the legacy root client key into {}: an unrelated partial keypair occupies it; "
@@ -729,7 +716,7 @@ sudo poweroff
         """
         host_keys_dir = self._host_keys_dir(host_id)
         host_keys_dir.mkdir(parents=True, exist_ok=True)
-        file_names = (LIMA_ROOT_SSH_KEY_NAME, f"{LIMA_ROOT_SSH_KEY_NAME}.pub")
+        file_names = (_ROOT_SSH_KEY_NAME, f"{_ROOT_SSH_KEY_NAME}.pub")
         for file_name in file_names:
             link_path = host_keys_dir / file_name
             if not link_path.is_symlink() and not link_path.exists():
@@ -775,8 +762,15 @@ sudo poweroff
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         snapshot: SnapshotName | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> Host:
         """Create a new Lima VM host."""
+        if published_ports:
+            raise PublishedPortUnsupportedError(
+                self.name,
+                str(published_ports[0]),
+                "this provider does not publish ports yet",
+            )
         self._ensure_lima_available()
         host_id = HostId.generate()
         # Derive the limactl instance name from the immutable host id, not the
@@ -907,12 +901,7 @@ sudo poweroff
             ssh_config = self._get_ssh_config(instance_name)
 
             # Wait for SSH to be ready
-            with (
-                self.mngr_ctx.progress_reporter.step(
-                    ProgressStepId("lima.wait_ssh"), "Waiting for the machine's SSH", CreatePhase.CREATING_HOST.step_id
-                ),
-                log_span("Waiting for SSH to be ready..."),
-            ):
+            with log_span("Waiting for SSH to be ready..."):
                 wait_for_sshd(ssh_config.hostname, ssh_config.port, self.config.ssh_connect_timeout)
 
             # Create the Host object

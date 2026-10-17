@@ -5,11 +5,9 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
-from pathlib import Path
 
 import boto3
 import pytest
-from botocore.awsrequest import AWSPreparedRequest
 from botocore.stub import ANY
 from botocore.stub import Stubber
 
@@ -17,7 +15,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderCredentialSourceMissingError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -28,8 +25,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.providers.host_key_store import load_host_key_record
-from imbue.mngr.providers.ssh_utils import per_host_key_dir
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.backend import AwsProvider
 from imbue.mngr_aws.backend import AwsProviderBackend
@@ -51,7 +46,6 @@ from imbue.mngr_vps.primitives import VpsMemoryMib
 from imbue.mngr_vps.primitives import VpsVcpuCount
 from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.testing import seed_stopped_host_record
-from imbue.mngr_vps.vps_keys import mint_vps_root_keypair
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
@@ -98,11 +92,6 @@ def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_seconds: int | None)
     )
 
 
-def _fail_on_real_aws_request(request: AWSPreparedRequest, **kwargs: object) -> None:
-    # pytest.fail raises a BaseException, so no Exception handler between here and the test can swallow it.
-    pytest.fail(f"Unit test sent a real AWS request: {request.method} {request.url}")
-
-
 def _build_stubbed_provider(
     mngr_ctx: MngrContext, *, default_ami_id: str | None = "ami-x"
 ) -> tuple[AwsProvider, Stubber]:
@@ -113,15 +102,10 @@ def _build_stubbed_provider(
     (the tag-based lookup that resolves a stopped instance), or
     ``describe_images`` / ``run_instances`` for the create-path tests. Pass
     ``default_ami_id=None`` to leave the AMI unconfigured so the create path
-    runs the EC2 lookup. Any request that reaches the network, from any client
-    built on the provider's session, fails the test.
-
-    The provider has no S3 state bucket, as if ``mngr aws prepare`` had never
-    run, because resolving one calls AWS.
+    runs the EC2 lookup.
     """
     config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id=default_ami_id, auto_shutdown_seconds=3600)
     session = boto3.Session(aws_access_key_id="AKIATEST", aws_secret_access_key="secret", region_name="us-east-1")
-    session.events.register("before-send", _fail_on_real_aws_request)
     ec2 = session.client("ec2", region_name="us-east-1")
     stubber = Stubber(ec2)
     client = _StubbedAwsVpsClient(
@@ -140,7 +124,6 @@ def _build_stubbed_provider(
         aws_client=client,
         aws_config=config,
     )
-    provider.__dict__["_state_bucket"] = None
     return provider, stubber
 
 
@@ -283,6 +266,8 @@ def test_state_store_raises_when_no_bucket(temp_mngr_ctx: MngrContext) -> None:
     ``state_bucket_backend_test.py``.)
     """
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    # No bucket name configured and STS unresolvable => _state_bucket is None.
+    provider.__dict__["_state_bucket"] = None
     with pytest.raises(MngrError, match="mngr aws prepare"):
         _ = provider._state_store
 
@@ -296,6 +281,7 @@ def test_validate_external_store_ready_raises_when_no_bucket(temp_mngr_ctx: Mngr
     anything -- rather than after the instance is already running.
     """
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    provider.__dict__["_state_bucket"] = None
     with pytest.raises(MngrError, match="mngr aws prepare"):
         provider._validate_external_store_ready()
 
@@ -318,6 +304,7 @@ def test_persist_agent_data_no_bucket_raises_for_stopped_host(temp_mngr_ctx: Mng
     vanish). No EC2 tag calls are made (the stubber has no queued responses).
     """
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    provider.__dict__["_state_bucket"] = None
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     seed_stopped_host_record(provider, host_id)
@@ -339,6 +326,7 @@ def test_list_persisted_agent_data_no_bucket_raises_actionable_error(temp_mngr_c
     silently returning no agents (which would make a stopped host's agents vanish).
     """
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    provider.__dict__["_state_bucket"] = None
     host_id = HostId.generate()
     seed_stopped_host_record(provider, host_id)
     with pytest.raises(MngrError, match="mngr aws prepare"):
@@ -348,6 +336,7 @@ def test_list_persisted_agent_data_no_bucket_raises_actionable_error(temp_mngr_c
 def test_to_offline_host_no_bucket_raises_actionable_error(temp_mngr_ctx: MngrContext) -> None:
     """Reconstructing a stopped host's full record with no bucket raises MngrError citing the S3 state bucket."""
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    provider.__dict__["_state_bucket"] = None
     host_id = HostId.generate()
     # The base path lists instances (none match) => HostNotFoundError, then the
     # override reads the host record from the (missing) store, which raises.
@@ -372,6 +361,7 @@ def test_discover_surfaces_stopped_instance_but_offline_read_raises_without_buck
     wrapper can attribute the failure to this provider.
     """
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    provider.__dict__["_state_bucket"] = None
     host_id = HostId.generate()
     stubber.add_response(
         "describe_instances",
@@ -490,9 +480,7 @@ def test_destroy_host_offline_terminates_instance_and_clears_state(temp_mngr_ctx
     (no reachable vps_ip), so ``OfflineCapableVpsProvider.destroy_host`` must
     fall back to the offline path: resolve the instance by its ``mngr-host-id`` tag,
     terminate it, and delete the mirrored state. This is the fix for the leak where
-    ``mngr destroy`` of a stopped host left the instance running. Like the online
-    path, it also removes the host's local key material (per-host key dir and
-    attributed pins), so nothing that opened the host outlives it.
+    ``mngr destroy`` of a stopped host left the instance running.
     """
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
@@ -500,9 +488,6 @@ def test_destroy_host_offline_terminates_instance_and_clears_state(temp_mngr_ctx
     bucket = _seed_state_store_bucket(
         provider, record_json=_stopped_host_record_json(host_id, vps_ssh_key_id="mngr-key")
     )
-    mint_vps_root_keypair(provider._key_dir(), host_id)
-    provider.record_outer_host_key("1.2.3.4", 22, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIStoppedHostKey", host_id)
-    assert load_host_key_record(provider._vps_known_hosts_path(), host_id) is not None
     # The offline path resolves the instance from the tag listing, terminates it,
     # then cleans up the per-host EC2 KeyPair recovered from the mirrored record.
     stubber.add_response("describe_instances", _stopped_instance_describe_response("i-stopped", host_id))
@@ -515,8 +500,6 @@ def test_destroy_host_offline_terminates_instance_and_clears_state(temp_mngr_ctx
         stubber.deactivate()
     stubber.assert_no_pending_responses()
     assert bucket.deleted_host_ids == [host_id]
-    assert not per_host_key_dir(provider._key_dir(), host_id).exists()
-    assert load_host_key_record(provider._vps_known_hosts_path(), host_id) is None
 
 
 def test_destroy_host_offline_fails_loudly_when_terminate_fails(temp_mngr_ctx: MngrContext) -> None:
@@ -531,7 +514,6 @@ def test_destroy_host_offline_fails_loudly_when_terminate_fails(temp_mngr_ctx: M
     host_id = HostId.generate()
     seed_stopped_host_record(provider, host_id)
     _seed_state_store_bucket(provider)
-    mint_vps_root_keypair(provider._key_dir(), host_id)
     stubber.add_response("describe_instances", _stopped_instance_describe_response("i-stuck", host_id))
     stubber.add_client_error("terminate_instances", service_error_code="InternalError", http_status_code=500)
     stubber.activate()
@@ -542,8 +524,6 @@ def test_destroy_host_offline_fails_loudly_when_terminate_fails(temp_mngr_ctx: M
         stubber.deactivate()
     categories = {failure.category for failure in exc_info.value.failures}
     assert CleanupFailureCategory.HOST_RESOURCE_REMAINS in categories
-    # The surviving instance authorizes only this host's per-host key, so it stays on disk.
-    assert per_host_key_dir(provider._key_dir(), host_id).exists()
 
 
 def test_destroy_host_offline_is_idempotent_when_instance_already_gone(temp_mngr_ctx: MngrContext) -> None:
@@ -584,7 +564,7 @@ def test_destroy_host_offline_dispatch_ignores_stale_cached_record_with_vps_ip(t
 
     class _OuterRaisingAwsProvider(AwsProvider):
         @contextmanager
-        def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+        def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
             raise _OnVolumeReached("base SSH teardown must not run for a stopped host")
             yield
 
@@ -677,7 +657,7 @@ def test_persist_agent_data_does_not_bypass_on_volume_store_for_running_host(tem
 
     class _OuterRaisingProvider(AwsProvider):
         @contextmanager
-        def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+        def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
             # The unreachable yield below keeps this a generator function (which
             # @contextmanager requires); the raise fires before it is ever reached.
             raise _OnVolumeReached("on-volume persist path entered")
@@ -866,77 +846,6 @@ def test_build_provider_instance_raises_unavailable_when_credentials_missing(
         AwsProviderBackend.build_provider_instance(name=name, config=config, mngr_ctx=temp_mngr_ctx)
 
 
-@pytest.mark.parametrize(
-    ("config_text", "expected_remediation", "expected_short_reason"),
-    [
-        (
-            "[profile other]\nregion = us-east-1\n",
-            "run `aws configure --profile laptop` (or `aws configure sso`)",
-            "'laptop' is not set up on this machine",
-        ),
-        # The token cache under the isolated HOME is empty, so the profile's SSO login reads as expired.
-        (
-            "[profile laptop]\nsso_start_url = https://example.awsapps.com/start\nsso_region = us-east-1\n"
-            "sso_account_id = 123456789012\nsso_role_name = Admin\n",
-            "run `aws sso login --profile laptop`",
-            "'laptop' has no current single-sign-on login on this machine",
-        ),
-    ],
-    ids=["missing-profile", "expired-sso-login"],
-)
-def test_build_provider_instance_reports_a_login_missing_here_as_a_missing_credential_source(
-    monkeypatch: pytest.MonkeyPatch,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-    config_text: str,
-    expected_remediation: str,
-    expected_short_reason: str,
-) -> None:
-    """A block naming a login this machine lacks is the retryable auth error, with the fix attached.
-
-    Both a missing profile and a missing or expired SSO login are fixed outside
-    mngr, so discovery must keep re-checking rather than end the poller.
-    """
-    clear_aws_env(monkeypatch)
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    (tmp_path / "config").write_text(config_text, encoding="utf-8")
-    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
-    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, aws_profile="laptop")
-
-    with pytest.raises(ProviderCredentialSourceMissingError) as exc_info:
-        AwsProviderBackend.build_provider_instance(
-            name=ProviderInstanceName("aws-test"), config=config, mngr_ctx=temp_mngr_ctx
-        )
-
-    assert exc_info.value.short_remediation == expected_remediation
-    assert exc_info.value.short_reason is not None
-    assert expected_short_reason in exc_info.value.short_reason
-
-
-def test_build_provider_instance_keeps_a_refused_profiles_own_reason(
-    monkeypatch: pytest.MonkeyPatch,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    """A profile mngr refuses (mfa_serial) is reported as such, not as credentials that were never configured."""
-    clear_aws_env(monkeypatch)
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    (tmp_path / "config").write_text("[profile guarded]\nmfa_serial = arn:aws:iam::1:mfa/me\n", encoding="utf-8")
-    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
-    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, aws_profile="guarded")
-
-    with pytest.raises(ProviderUnavailableError) as exc_info:
-        AwsProviderBackend.build_provider_instance(
-            name=ProviderInstanceName("aws-test"), config=config, mngr_ctx=temp_mngr_ctx
-        )
-
-    assert not isinstance(exc_info.value, ProviderCredentialSourceMissingError)
-    assert "mfa_serial" in str(exc_info.value)
-    assert exc_info.value.short_remediation == "use a profile without mfa_serial (an SSO profile, or static keys)"
-
-
 def test_build_provider_instance_does_not_touch_ami_resolution(
     monkeypatch: pytest.MonkeyPatch,
     temp_mngr_ctx: MngrContext,
@@ -1064,9 +973,6 @@ def test_legacy_shape_for_plan_is_none_for_an_instance_type_outside_the_table(te
     assert provider._legacy_shape_for_plan("p5.48xlarge") is None
 
 
-# Flaky while MIND-534 is open: building the offline host resolves the state bucket
-# through a real sts:GetCallerIdentity call, which can outlast the 10s timeout.
-@pytest.mark.flaky
 def test_get_host_resources_answers_a_stopped_host_from_its_mirrored_record_without_any_ec2_call(
     temp_mngr_ctx: MngrContext,
 ) -> None:

@@ -1,0 +1,1 @@
+`mngr wait --host` no longer treats `UNAUTHENTICATED` as a terminal host state. It now follows `UNKNOWN` semantics (non-terminal): when a host's access credential is rejected, or the host otherwise cannot be observed, a wait keeps polling rather than settling on that non-evidence. Terminal host states are now just `STOPPED`, `PAUSED`, `CRASHED`, `FAILED`, and `DESTROYED`.

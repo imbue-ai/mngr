@@ -1,0 +1,1 @@
+The `R2KeyInfo.enforced_access` wire-field description now documents the connector's new in-flight `'pending'` value (a quota-enforcement downgrade/restore whose Cloudflare outcome is unconfirmed; treated as read-only), alongside the existing `'read'` and `None` states. Documentation-only; no client behavior changes.

@@ -8,7 +8,6 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from typing import ClassVar
 
 import click
 from loguru import logger
@@ -20,7 +19,6 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import build_stderr_tee_redirect
 from imbue.mngr.agents.base_agent import describe_failed_send_command
-from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.output_styles import read_output_style_files
@@ -401,13 +399,7 @@ class PiCodingAgentConfig(AgentTypeConfig):
         default=None,
         description="Pin the pi CLI version to install (e.g., '1.2.3'). When set, installation runs "
         "`npm install -g @earendil-works/pi-coding-agent@<version>` and provisioning verifies the installed "
-        "pi matches (see `version_mismatch`), whether or not `check_installation` is set. When None (the "
-        "default), installs the latest version.",
-    )
-    version_mismatch: VersionMismatchPolicy = Field(
-        default=VersionMismatchPolicy.ERROR,
-        description="What provisioning does when the installed pi does not report the pinned `version`. "
-        "`ERROR` (default): fail the create. `WARN`: log a warning and continue on the installed binary.",
+        "pi matches, erroring on a mismatch. When None (the default), installs the latest version.",
     )
     update_policy: AgentUpdatePolicy | None = Field(
         default=None,
@@ -555,9 +547,6 @@ class PiCodingAgent(
     ``send_message``), so this subclasses ``BaseAgent`` directly rather than
     ``InteractiveTuiAgent`` -- it uses none of the latter's paste/Enter pipeline.
     """
-
-    # Pi sets process.title = "pi" in cli.ts.
-    fixed_process_name: ClassVar[str | None] = "pi"
 
     @property
     def is_common_transcript_enabled(self) -> bool:
@@ -715,7 +704,7 @@ class PiCodingAgent(
         ``-e <extension>`` loads the lifecycle extension (marker, readiness
         sentinel, transcripts). No background helper is launched, so the
         foreground (and lifecycle-detected) process is plain ``pi``
-        (``fixed_process_name`` pins ``"pi"`` regardless).
+        (``get_expected_process_name`` pins ``"pi"`` regardless).
 
         When ``auto_dismiss_dialogs_at_startup`` is set, ``--approve`` is added so pi
         auto-trusts the project folder for the run (its native unattended
@@ -791,6 +780,13 @@ class PiCodingAgent(
             "(is the mngr lifecycle extension loading?)"
             + (f"\nPane content:\n{pane_content}" if pane_content else ""),
         )
+
+    def get_expected_process_name(self) -> str:
+        """Return 'pi' as the expected process name.
+
+        Pi sets process.title = "pi" in cli.ts.
+        """
+        return "pi"
 
     def on_before_provisioning(
         self,
@@ -993,13 +989,13 @@ class PiCodingAgent(
 
         if config.check_installation:
             ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
-        if config.version is not None:
-            verify_pinned_cli_version(
-                host,
-                binary_name=self.get_install_binary_name(),
-                pinned_version=config.version,
-                mismatch_policy=config.version_mismatch,
-            )
+            if config.version is not None:
+                verify_pinned_cli_version(
+                    host,
+                    command=str(config.command),
+                    binary_name=self.get_install_binary_name(),
+                    pinned_version=config.version,
+                )
 
         # Trust gate first (consent + durable global record), so a declined /
         # non-interactive-without-opt-in case exits cleanly before any setup.
@@ -1318,12 +1314,7 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     reason is ``END_OF_TURN`` (the agent is idle). Wired through the same shared
     ``classify_waiting_reason`` the other plugins use, so the single-value result
     is a real extension point if pi ever gains an approval gate.
-
-    Field generators run for every listed agent whatever its type, so an agent of
-    another type gets no field rather than a verdict read off markers it never writes.
     """
-    if not isinstance(agent, PiCodingAgent):
-        return None
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
     is_active = host.path_exists(agent_dir / _ACTIVE_MARKER_NAME)
     return classify_waiting_reason(is_active, is_blocked_on_permission=False)

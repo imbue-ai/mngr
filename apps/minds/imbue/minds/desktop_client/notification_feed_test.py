@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import AgentMessageCard
@@ -539,7 +538,6 @@ def _agent_message(
     body: str = "Finished the migration; 3 tables moved.",
     workspace_agent_id: str = _WORKSPACE_ID,
     chat_agent_id: str = _CHAT_ID,
-    destination: NotificationDestination | None = None,
 ) -> AgentMessageCard:
     return AgentMessageCard(
         chat_agent_id=chat_agent_id,
@@ -548,22 +546,14 @@ def _agent_message(
         workspace_agent_id=workspace_agent_id,
         workspace_name="alpha",
         workspace_accent="#aabbcc",
-        destination=destination,
     )
 
 
-def _routine_destination() -> NotificationDestination:
-    return NotificationDestination.model_validate({"type": "minds:show-routine", "routine_id": "inbox-digest"})
-
-
-def _system_event(
-    workspace_agent_id: str = _WORKSPACE_ID, title: str = "Backup setup failed", account_id: str = ""
-) -> SystemEventCard:
+def _system_event(workspace_agent_id: str = _WORKSPACE_ID, title: str = "Backup setup failed") -> SystemEventCard:
     return SystemEventCard(
         title=title,
         body="Couldn't reach the backup host.",
         workspace_agent_id=workspace_agent_id,
-        account_id=account_id,
         workspace_name="alpha" if workspace_agent_id else "me@example.com",
         workspace_accent="#aabbcc",
     )
@@ -808,45 +798,6 @@ def test_an_agent_message_dispatches_the_chat_deep_link_with_the_workspace_as_ti
     assert request.entry == entry
 
 
-def test_an_agent_message_with_a_destination_carries_it_and_dispatches_the_bare_workspace_link() -> None:
-    dispatcher = _make_recording_dispatcher()
-    feed = _make_feed(dispatcher=dispatcher)
-
-    entry = feed.append_agent_message(_agent_message(destination=_routine_destination()))
-    message = feed.reconcile((), {})
-
-    (listed,) = message.entries
-    assert listed.destination == _routine_destination()
-    assert listed.model_dump(mode="json")["destination"] == {
-        "type": "minds:show-routine",
-        "routine_id": "inbox-digest",
-    }
-    # The entry action delivers the destination once the workspace is up; a
-    # ``?chat=`` deep link would focus the chat on top of it.
-    (request,) = dispatcher.dispatched
-    assert request.url == f"/workspace/{_WORKSPACE_ID}"
-    assert request.entry == entry
-
-
-def test_an_agent_message_from_an_agent_that_is_not_a_chat_dispatches_the_bare_workspace_link() -> None:
-    dispatcher = _make_recording_dispatcher()
-    feed = _make_feed(dispatcher=dispatcher)
-
-    feed.append_agent_message(_agent_message(chat_agent_id=""))
-
-    (request,) = dispatcher.dispatched
-    assert request.url == f"/workspace/{_WORKSPACE_ID}"
-
-
-def test_reading_a_chat_leaves_a_message_from_an_agent_that_is_not_a_chat_unread() -> None:
-    feed = _make_feed()
-    feed.append_agent_message(_agent_message(chat_agent_id=""))
-
-    assert feed.mark_chat_read("") is False
-    assert feed.mark_chat_read(_CHAT_ID) is False
-    assert feed.reconcile((), {}).unresolved_count == 1
-
-
 def test_native_banner_event_carries_the_feed_entry_for_the_shared_open_action(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -870,49 +821,14 @@ def test_a_workspace_system_event_dispatches_a_link_to_its_backups_page() -> Non
     assert request.url == f"/workspace/{_WORKSPACE_ID}/backups"
 
 
-def test_a_system_event_with_its_own_link_dispatches_that_link() -> None:
-    dispatcher = _make_recording_dispatcher()
-    feed = _make_feed(dispatcher=dispatcher)
-
-    entry = feed.append_system_event(
-        SystemEventCard(
-            title="Sharing was not enabled",
-            body="The account's share quota is full.",
-            workspace_agent_id=_WORKSPACE_ID,
-            workspace_name="alpha",
-            workspace_accent="#aabbcc",
-            link_path="/workspaces/shared",
-        )
-    )
-
-    (request,) = dispatcher.dispatched
-    assert request.url == "/workspaces/shared"
-    assert entry.link_path == "/workspaces/shared"
-
-
 def test_an_account_level_system_event_titles_itself_with_the_account_and_links_to_accounts() -> None:
-    dispatcher = _make_recording_dispatcher()
-    feed = _make_feed(dispatcher=dispatcher)
-
-    entry = feed.append_system_event(
-        _system_event(workspace_agent_id="", title="Backup cleanup finished", account_id="user-me")
-    )
-
-    # The entry names its account, so only that account's windows hear it, and the
-    # banner opens the accounts page as that account's overlay.
-    assert entry.account_id == "user-me"
-    (request,) = dispatcher.dispatched
-    assert request.title == "me@example.com"
-    assert request.url == "/accounts?account=user-me"
-
-
-def test_an_account_level_system_event_naming_no_account_links_to_the_bare_accounts_page() -> None:
     dispatcher = _make_recording_dispatcher()
     feed = _make_feed(dispatcher=dispatcher)
 
     feed.append_system_event(_system_event(workspace_agent_id="", title="Backup cleanup finished"))
 
     (request,) = dispatcher.dispatched
+    assert request.title == "me@example.com"
     assert request.url == "/accounts"
 
 

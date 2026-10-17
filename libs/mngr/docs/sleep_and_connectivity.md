@@ -28,8 +28,6 @@ Meanwhile a new connection made after the wake works at once. So the right respo
 
 mngr does this in `SuspensionWatchdog` (`imbue/mngr/utils/suspension_watchdog.py`). Every SSH transport `OuterHost` opens registers with the `MngrContext`'s watchdog, which checks every 5 seconds of awake time and closes any transport established before a suspension. Closing it wakes every channel blocked on it, and mngr's transient-SSH retry reconnects. `mngr forward`'s tunnels do the same for their own connections (`SSHTunnelManager` rebuilds a tunnel whose connection predates a suspension).
 
-`mngr connect` hands its terminal to an `ssh` process, which notices a dead connection only when it next reads or writes, and then exits with 255. When it does, `connect_to_agent` switches off the terminal modes the remote session may have left on, asks the provider for the host's current state, restores the host if it paused meanwhile (it comes back on a new address), and reattaches. A drop whose `ssh` run spanned a suspension reconnects without waiting or spending a retry.
-
 ## What this means for new code
 
 - To tell that a sleep happened, ask the clocks (`was_suspended_since`), or let the watchdog handle the connection. Do not infer it from how long something took.

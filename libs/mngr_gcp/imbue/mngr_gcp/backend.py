@@ -127,10 +127,9 @@ def _resolve_credentials_project_and_zone_or_unavailable(
     ``default_zone`` is pinned -- then resolve ADC (``google.auth.default()``),
     which yields both the credentials and the project ADC
     infers from the environment (``GOOGLE_CLOUD_PROJECT`` / ``gcloud config set
-    project`` / the GCE metadata server, the last only with
-    ``use_gce_metadata_server``), used by ``resolve_project_id`` as the fallback
-    when no explicit ``project_id`` is set. A single ``default()`` call serves
-    both, so we never probe twice.
+    project`` / metadata), used by ``resolve_project_id`` as the fallback when no
+    explicit ``project_id`` is set. A single ``default()`` call serves both, so we
+    never probe twice.
 
     A failure here means we could not authenticate to GCP (or the configured
     zone/region are self-inconsistent), so the provider's state is *unknown* --
@@ -381,7 +380,7 @@ class GcpProvider(OfflineCapableVpsProvider):
             timeout_seconds=timeout_seconds,
         )
 
-    # The shared ``OfflineCapableVpsProvider._list_provider_vps_entries``
+    # The shared ``OfflineCapableVpsProvider._list_provider_vps_hostnames``
     # (cached listing -> non-empty main_ip) covers GCP unchanged: a stopped GCE
     # instance loses its external IP and is excluded by the non-empty IP check.
 
@@ -415,10 +414,6 @@ class GcpProvider(OfflineCapableVpsProvider):
     # at ``mngr stop`` to the GCS state bucket; ``_host_dir_backend`` (selected
     # below) is bucket-backed when the bucket exists and the feature is enabled,
     # and the no-op backend otherwise.
-
-    def _host_id_marker_for_instance(self, instance: Mapping[str, Any]) -> str | None:
-        """Read the host id from instance metadata (GCE labels cannot hold a raw mngr host id)."""
-        return self._metadata_dict(instance).get(HOST_ID_METADATA_KEY)
 
     def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
         """Match on the host id stored verbatim in instance metadata (GCE labels cannot hold a raw mngr host id)."""

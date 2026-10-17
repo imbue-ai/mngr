@@ -24,14 +24,7 @@ export interface AppStores {
 
 export interface BootContext {
   stores: AppStores;
-  seed: {
-    accent: string;
-    isMac: boolean;
-    mngrForwardOrigin: string;
-    isOnboardingComplete: boolean;
-    /** The account the served URL resolved to: the window's account at first paint. */
-    accountId: string;
-  };
+  seed: { accent: string; isMac: boolean; mngrForwardOrigin: string; isOnboardingComplete: boolean };
   schemaVersion: number;
 }
 
@@ -42,15 +35,14 @@ declare global {
 }
 
 export function createEmptyStores(): AppStores {
-  const workspaces = new WorkspacesStore();
   return {
-    workspaces,
+    workspaces: new WorkspacesStore(),
     health: new HealthStore(),
     requests: new RequestsStore(),
     notifications: new NotificationsStore(),
     accounts: new AccountsStore(),
     providers: new ProvidersStore(),
-    updates: new UpdatesStore((agentId) => workspaces.entryByAnyId(agentId)?.liveness ?? ""),
+    updates: new UpdatesStore(),
   };
 }
 
@@ -64,7 +56,6 @@ export function bootFromBootstrap(bootstrap: UiBootstrap): BootContext {
       isMac: bootstrap.seed.is_mac,
       mngrForwardOrigin: bootstrap.seed.mngr_forward_origin,
       isOnboardingComplete: bootstrap.seed.is_onboarding_complete,
-      accountId: bootstrap.seed.account_id,
     },
     schemaVersion: bootstrap.schema_version,
   };

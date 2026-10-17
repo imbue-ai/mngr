@@ -62,18 +62,13 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.ui_api import read_vite_entry_tags
-from imbue.minds.desktop_client.ui_models import AccountPanelState
-from imbue.minds.desktop_client.ui_models import ConnectionPanelStatus
 from imbue.minds.desktop_client.ui_models import NotificationKind
 from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
-from imbue.minds.desktop_client.ui_models import RemoteTileState
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiAccountEntry
-from imbue.minds.desktop_client.ui_models import UiAccountProvidersEntry
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiBootstrap
 from imbue.minds.desktop_client.ui_models import UiBootstrapSeed
-from imbue.minds.desktop_client.ui_models import UiConnectionEntry
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
@@ -317,61 +312,37 @@ def build_spa_fixture_bootstrap() -> UiBootstrap:
                 "agent-00000000000000000000000000000001",
                 "host-00000000000000000000000000000001",
             ),
-            remote_workspace_states={
-                "agent-00000000000000000000000000000004": RemoteTileState(state="", detail=None),
-            },
+            remote_workspace_states={"agent-00000000000000000000000000000004": ""},
         ),
         accounts=UiAccountsMessage(
-            account_id="user-alice",
             has_accounts=True,
+            account_email="alice@example.com",
+            extra_account_count=1,
             accounts=(
                 UiAccountEntry(
                     user_id="user-alice",
                     email="alice@example.com",
-                    display_name="Alice Nguyen",
                     workspace_count=3,
+                    is_default=True,
+                    is_enabled=True,
                 ),
-                UiAccountEntry(user_id="user-bob", email="bob@example.com", workspace_count=0),
+                UiAccountEntry(
+                    user_id="user-bob", email="bob@example.com", workspace_count=0, is_default=False, is_enabled=True
+                ),
             ),
         ),
         providers=UiProvidersMessage(
-            accounts=(
-                UiAccountProvidersEntry(
-                    user_id="00000000-0000-4000-8000-000000000001",
-                    email="alice@example.com",
-                    state=AccountPanelState.SIGNED_IN,
-                    is_connection_owner_eligible=True,
-                    imbue_cloud=UiProviderEntry(
-                        name="imbue_cloud_00000000-0000-4000-8000-000000000001",
-                        backend="imbue_cloud",
-                        status=ProviderPanelStatus.OK,
-                    ),
-                    connections=(
-                        UiConnectionEntry(
-                            id="conn-00000000000000000000000000000001",
-                            instance="modal_00000000000000000000000000000001",
-                            backend="modal",
-                            backend_label="Modal",
-                            alias="team modal",
-                            identifier="ak-...0001",
-                            placement={},
-                            status=ConnectionPanelStatus.ERROR,
-                            error_type="AuthError",
-                            error_message="Modal token expired.",
-                            workspace_count=1,
-                        ),
-                    ),
-                ),
-                UiAccountProvidersEntry(
-                    user_id="local",
-                    email="",
-                    state=AccountPanelState.SIGNED_IN,
-                    is_connection_owner_eligible=True,
-                    imbue_cloud=None,
-                    connections=(),
+            providers=(
+                UiProviderEntry(name="local", backend="local", status=ProviderPanelStatus.OK, is_enabled=True),
+                UiProviderEntry(
+                    name="modal",
+                    backend=None,
+                    status=ProviderPanelStatus.ERROR,
+                    is_enabled=True,
+                    error_type="AuthError",
+                    error_message="Modal token expired.",
                 ),
             ),
-            device_providers=(UiProviderEntry(name="docker", backend="docker", status=ProviderPanelStatus.OK),),
             last_event_at="2026-01-01T00:00:00+00:00",
             last_full_snapshot_at="2026-01-01T00:00:00+00:00",
         ),
@@ -410,12 +381,14 @@ def build_spa_fixture_bootstrap() -> UiBootstrap:
                     availability=UpdateAvailability.OUT_OF_DATE,
                     current_version="minds-v0.3.9",
                     supported_version="minds-v0.4.1",
+                    is_version_from_label=False,
                     activity=UpdateActivity.IDLE,
                 ),
                 "agent-00000000000000000000000000000002": UiWorkspaceUpdate(
                     availability=UpdateAvailability.OUT_OF_DATE,
                     current_version="minds-v0.3.1",
                     supported_version="minds-v0.4.1",
+                    is_version_from_label=True,
                     activity=UpdateActivity.IDLE,
                     is_scheduled=True,
                     last_skip_reason="Agents were still working in this machine during the last update window.",
@@ -424,12 +397,14 @@ def build_spa_fixture_bootstrap() -> UiBootstrap:
                     availability=UpdateAvailability.OUT_OF_DATE,
                     current_version="minds-v0.4.0",
                     supported_version="minds-v0.4.1",
+                    is_version_from_label=False,
                     activity=UpdateActivity.APPLYING,
                 ),
                 "agent-00000000000000000000000000000008": UiWorkspaceUpdate(
                     availability=UpdateAvailability.OUT_OF_DATE,
                     current_version="minds-v0.4.0",
                     supported_version="minds-v0.4.1",
+                    is_version_from_label=False,
                     activity=UpdateActivity.RUNNING,
                     chat_agent_name="update-108129",
                 ),
@@ -437,6 +412,7 @@ def build_spa_fixture_bootstrap() -> UiBootstrap:
                     availability=UpdateAvailability.UP_TO_DATE,
                     current_version="minds-v0.4.1",
                     supported_version="minds-v0.4.1",
+                    is_version_from_label=False,
                     activity=UpdateActivity.IDLE,
                     verdict=UpdateVerdict.UPDATED,
                     success_note_version="minds-v0.4.1",
@@ -445,6 +421,7 @@ def build_spa_fixture_bootstrap() -> UiBootstrap:
                     availability=UpdateAvailability.UNKNOWN,
                     current_version="",
                     supported_version="minds-v0.4.1",
+                    is_version_from_label=False,
                     activity=UpdateActivity.IDLE,
                 ),
             },
@@ -461,7 +438,6 @@ def build_spa_fixture_bootstrap() -> UiBootstrap:
         is_mac=True,
         mngr_forward_origin="https://localhost:8421",
         is_onboarding_complete=True,
-        account_id="user-alice",
     )
     return UiBootstrap(seed=seed, schema_version=UI_SCHEMA_VERSION, snapshot=snapshot)
 

@@ -1,0 +1,3 @@
+Bump the pinned Claude Code version in `libs/mngr/imbue/mngr/resources/Dockerfile` from 2.1.227 to 2.1.269 (the `latest` release channel at the time of the bump; `stable` still sat at 2.1.236).
+
+2.1.269 is the first pin whose binary carries the `claude-fable-5-1` model id, and its `fable` / `fable[1m]` aliases resolve to Claude Fable 5.1, so on the old pin neither the release tests nor a dev agent created from this repo's templates could select Fable 5.1. The release test `test_claude_code_version_matches_default_workspace_template_pin` requires this literal to equal default-workspace-template's `[agent_types.claude].version`, so it lands together with the matching bump there.

@@ -1,0 +1,1 @@
+`LimaSliceVpsClient` gains `run_in_vm_as_root`, which runs a shell command as root inside a slice VM through the box's lima user (`limactl shell ... sudo bash -c`). The `repair-keys` sweep used a private copy of this; it now calls the shared method, and the new `repair-home-layout` command uses it too.

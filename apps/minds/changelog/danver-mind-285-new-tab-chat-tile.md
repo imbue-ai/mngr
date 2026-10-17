@@ -1,0 +1,5 @@
+Fixed the deterministic failure of the snapshot-resume Electron e2e (`test_create_workspace_and_sign_in_via_modal_then_chat_via_electron`) that turned `main` CI red on 2026-09-14 (MIND-285). The workspace template's dockview shell made the New Tab page an ordinary tab (default-workspace-template #581): the add-tab button is now always shown and every press opens another New Tab page, while a background page keeps its tiles hidden in the DOM. The e2e harness still assumed a visible add button meant no New Tab page, so it always opened a second page and then waited on the first (hidden) tile in DOM order until the 60s timeout.
+
+The harness (`e2e_workspace_runner._press_new_tab_tile` and the mirrored logic in `scripts/launch_to_msg_e2e.py`) now presses the add button only when no New Tab page is showing, and scopes the tile wait and click to the visible page (`.new-tab-launcher:visible ...`), the same idiom the template's own e2e uses. Timeouts and the visibility requirement are unchanged.
+
+Also corrected the stale `@pytest.mark.flaky` justification comment on the test, which described a sign-in click timeout that is not this failure.

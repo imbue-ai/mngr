@@ -1,0 +1,9 @@
+Closing every window while Minds is still starting no longer kills the startup. The load of the loading screen is abandoned when its window goes away, and the sequence that owns the backend start and the one-time login code now runs on without it, so the app comes back on the next dock click instead of sitting dead with no backend.
+
+The launch-to-msg end-to-end test finds the in-chat permission card's "Review & respond" button by its label rather than by a CSS class the default workspace template no longer gives it. The class went away on 2026-09-06 and the test had timed out after 360s on every run since, without clicking Deny, so the Slack permission flow could not pass.
+
+A permission click that never lands now names the buttons the chat was actually showing, and a failed macOS launch test now saves the app's `electron.log` beside its `minds.log` snapshot. Both failures previously reported only that a wait had expired.
+
+The launch-to-msg test no longer gives up on a chat that is already there. The chat docks inside the workspace within about a tenth of a second, but the test watched a frame list that Electron only refreshes once something reaches into the workspace, so it waited out the full 60s beside a working chat. It now reaches in on every pass, and if it still finds nothing it names the workspace, the frames under it, and the iframes actually in its DOM.
+
+Hopping the workspace between two machines' chats now lands on the machine it is aiming at. The test took whichever chat it saw first after the hop, and the chat it was leaving stays listed for a moment and stays usable, so the follow-up could go to the previous machine -- whose agent answers with the word being waited for, letting the hop pass without ever being made. It now pins the chat to the machine it navigated to and waits for a composer it can type into.

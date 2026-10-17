@@ -1,7 +1,6 @@
-// The titlebar's popup icons -- the machine tabs, the account switcher, the
-// notification bell, and the bug-report button -- and the raised copy of them
-// that every one of their surfaces draws over the dimmed titlebar while it is
-// open.
+// The titlebar's popup icons -- the machine tabs, the notification bell, and
+// the bug-report button -- and the raised copy of them that every one of their
+// surfaces draws over the dimmed titlebar while it is open.
 //
 // Every one of those surfaces (the docked options panel, the request popup,
 // the bell's feed, Get help) raises the same strip, so any icon is one click
@@ -20,8 +19,6 @@ import { Icon16 } from "../components/Icon";
 import type { IconName } from "../components/icons";
 import type { ShellState } from "./shell-state";
 import { isTitlebarPopupRoutePath } from "./classify";
-import type { TitlebarStatus } from "./titlebar-status";
-import { titlebarStatusPillClass, titlebarStatusPillContent } from "./titlebar-status";
 import type { OptionsTab } from "../../models/workspaceOptions";
 import { defaultFetchJson } from "../../models/workspaceOptions";
 import { warmPermissionsOverview } from "../../models/permissionsPrefetch";
@@ -29,7 +26,7 @@ import { warmPermissionsOverview } from "../../models/permissionsPrefetch";
 /** Which of the titlebar's popup icons a surface belongs to. The three
  * machine tabs keep their `OptionsTab` names, so the ?tab parse, the
  * titlebar's highlight and this strip all speak one vocabulary. */
-export type TitlebarPopupId = OptionsTab | "account" | "notifications" | "help";
+export type TitlebarPopupId = OptionsTab | "notifications" | "help";
 
 export interface TitlebarPopupIcon {
   id: TitlebarPopupId;
@@ -39,7 +36,7 @@ export interface TitlebarPopupIcon {
   label: string;
 }
 
-/** The six icons, left to right as the titlebar shows them. The one place
+/** The five icons, left to right as the titlebar shows them. The one place
  * the registration lives: the titlebar's buttons, the raised strip and the
  * ?tab parse all resolve through it. */
 export const TITLEBAR_POPUP_ICONS: readonly TitlebarPopupIcon[] = [
@@ -60,12 +57,6 @@ export const TITLEBAR_POPUP_ICONS: readonly TitlebarPopupIcon[] = [
     buttonId: "ws-tab-share",
     icon: "user-plus",
     label: "Sharing",
-  },
-  {
-    id: "account",
-    buttonId: "account-switcher-btn",
-    icon: "user",
-    label: "Switch account",
   },
   {
     id: "notifications",
@@ -111,8 +102,6 @@ export interface TitlebarAnchors {
   rectOf(id: TitlebarPopupId): AnchorRect | null;
   /** The `#ws-tab-strip` rect, which the docked panels hang their card from. */
   stripRect(): AnchorRect | null;
-  /** The titlebar status pill's rect, or null while there is no pill. */
-  statusPillRect(): AnchorRect | null;
   /** Re-read every rect, redrawing only if one actually moved. */
   remeasure(): void;
 }
@@ -124,7 +113,6 @@ export interface TitlebarAnchors {
 export function titlebarAnchors(): TitlebarAnchors {
   const rects = new Map<string, AnchorRect>();
   let strip: AnchorRect | null = null;
-  let statusPill: AnchorRect | null = null;
 
   function measure(): boolean {
     let hasChanged = false;
@@ -141,12 +129,6 @@ export function titlebarAnchors(): TitlebarAnchors {
       strip = nextStrip;
       hasChanged = true;
     }
-    // Unlike the icons, the pill comes and goes with its status, so its absence is a reading too.
-    const nextStatusPill = readAnchorRect("titlebar-status-pill");
-    if (nextStatusPill === null ? statusPill !== null : !isSameRect(statusPill, nextStatusPill)) {
-      statusPill = nextStatusPill;
-      hasChanged = true;
-    }
     return hasChanged;
   }
 
@@ -159,7 +141,6 @@ export function titlebarAnchors(): TitlebarAnchors {
       return rects.get(entry.buttonId) ?? null;
     },
     stripRect: () => strip,
-    statusPillRect: () => statusPill,
     remeasure() {
       if (measure()) m.redraw();
     },
@@ -174,7 +155,7 @@ export interface RaisedTitlebarIconsAttrs {
   /** Put the open surface away -- the selected icon's own click, like the
    * titlebar button it stands in for. */
   onDismiss: () => void;
-  /** Go to another icon's surface, leaving this one. */
+  /** Go to one of the other four surfaces, leaving this one. */
   onSelect: (id: TitlebarPopupId) => void;
   /** The bell's unresolved count; 0 draws no badge. */
   unresolvedCount: number;
@@ -185,11 +166,6 @@ export interface RaisedTitlebarIconsAttrs {
   /** Machine the three tabs belong to, for the Permissions hover warm; null
    * on a hub page, where those tabs are not shown at all. */
   agentId: string | null;
-  /** What the account switcher's copy says: the window's account, as the real button names it. */
-  accountLabel: string;
-  /** The titlebar's status pill, raised with the icons so it stays readable
-   * (and clickable) over the dimmed titlebar; null for none. */
-  status: TitlebarStatus | null;
 }
 
 /** The raised copy of the titlebar's popup icons, drawn over the dimmed real
@@ -211,10 +187,7 @@ export function RaisedTitlebarIcons(): m.Component<RaisedTitlebarIconsAttrs> {
         unresolvedCount,
         hasWorkspaceRequestDot,
         agentId,
-        accountLabel,
-        status,
       } = vnode.attrs;
-      const statusPillRect = anchors.statusPillRect();
       return m(
         "div",
         {
@@ -223,8 +196,7 @@ export function RaisedTitlebarIcons(): m.Component<RaisedTitlebarIconsAttrs> {
           "aria-label": "Titlebar panels",
           class: "contents",
         },
-        [
-          ...TITLEBAR_POPUP_ICONS.map((entry) => {
+        TITLEBAR_POPUP_ICONS.map((entry) => {
           const rect = anchors.rectOf(entry.id);
           if (rect === null) return null;
           const isSelected = entry.id === selected;
@@ -239,34 +211,26 @@ export function RaisedTitlebarIcons(): m.Component<RaisedTitlebarIconsAttrs> {
               "aria-label": isSelected ? `Close ${entry.label}` : entry.label,
               "data-tooltip": isSelected ? "Close" : entry.label,
               // Same warm the titlebar key does: arriving at Permissions from
-              // any other icon reads the same overview, and pointing at the
-              // tab is the same head start.
+              // any of the other four reads the same overview, and pointing at
+              // the tab is the same head start.
               onpointerenter: () => {
                 if (entry.id === "permissions" && agentId !== null)
                   warmPermissionsOverview(agentId, defaultFetchJson);
               },
               class:
-                "pointer-events-auto fixed inline-flex items-center justify-center gap-1 p-1.5 rounded-md " +
+                "pointer-events-auto fixed inline-flex items-center justify-center p-1.5 rounded-md " +
                 "cursor-pointer focus-visible:outline-2 focus-visible:outline-accent " +
                 (isSelected
                   ? "bg-surface-primary rounded-b-none text-primary"
                   : "titlebar-surface text-secondary hover:bg-fill-hover active:bg-fill-active hover:text-primary"),
               style: `left: ${rect.x}px; top: ${rect.y}px; width: ${rect.width}px; height: ${rect.height}px`,
               // The selected icon is the surface you are on, so it puts the
-              // surface away; the others are different surfaces, so they go
-              // there.
+              // surface away; the other four are different surfaces, so they
+              // go there.
               onclick: () => (isSelected ? onDismiss() : onSelect(entry.id)),
             },
             [
               m(Icon16, { name: entry.icon }),
-              // The switcher's copy carries its label too: its box is as wide as the name it shows.
-              entry.id === "account"
-                ? m(
-                    "span",
-                    { class: "type-label truncate max-w-[160px]" },
-                    accountLabel,
-                  )
-                : null,
               entry.id === "notifications" && unresolvedCount > 0
                 ? m(
                     "span",
@@ -296,28 +260,9 @@ export function RaisedTitlebarIcons(): m.Component<RaisedTitlebarIconsAttrs> {
             ],
           );
         }),
-          status !== null && statusPillRect !== null ? raisedStatusPill(status, statusPillRect) : null,
-        ],
       );
     },
   };
-}
-
-/** The status pill's raised copy, at the real pill's rect. */
-function raisedStatusPill(status: TitlebarStatus, rect: AnchorRect): m.Children {
-  return m(
-    "button",
-    {
-      id: "titlebar-status-pill-raised",
-      "data-status": status.key,
-      class: `titlebar-surface pointer-events-auto fixed ${titlebarStatusPillClass(status)}`,
-      style: `left: ${rect.x}px; top: ${rect.y}px; height: ${rect.height}px`,
-      type: "button",
-      "data-tooltip": status.tooltip,
-      onclick: () => status.onClick(),
-    },
-    titlebarStatusPillContent(status),
-  );
 }
 
 /** Go from whichever titlebar popup is open to the one `id` names, putting the
@@ -332,10 +277,6 @@ export function openTitlebarPopup(
 ): void {
   if (id === "notifications") {
     shell.switchToNotifications();
-    return;
-  }
-  if (id === "account") {
-    shell.switchToAccountSwitcher();
     return;
   }
   // The feed (local state, not a route) is deliberately NOT closed here: the

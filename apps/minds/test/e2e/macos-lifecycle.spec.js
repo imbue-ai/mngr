@@ -32,10 +32,9 @@ const {
   captureAppOutput,
 } = require('./fixtures');
 
-// The windowless state exists on every platform now (closing the last window
-// leaves the app behind its tray icon), but every entry point exercised here
-// is a macOS one: the dock-icon activate and the open-url delivery.
-test.skip(() => process.platform !== 'darwin', 'the dock activate and open-url entry points are macOS-only');
+// Every behavior here is macOS-only by construction: elsewhere closing the
+// last window quits the app, so "windowless" never happens.
+test.skip(() => process.platform !== 'darwin', 'windowless app state is macOS-only');
 
 const BACKEND_READY_RE = /\[startup\] Backend ready at (http:\/\/localhost:\d+)/;
 // Logged each time main computes the first-window route (computeStartupRouting).
@@ -143,16 +142,8 @@ test.describe('healthy app', () => {
     await expect
       .poll(countRouteComputations, { timeout: 2 * 60 * 1000 })
       .toBeGreaterThan(launchRouteComputations);
-    // Mid-navigation, liveUrl falls back to page.url(), which need not be a full URL
-    // before the new window's first commit; keep polling instead of throwing.
     await expect
-      .poll(
-        async () => {
-          const url = await liveUrl(reopened);
-          return URL.canParse(url) ? new URL(url).pathname : url;
-        },
-        { timeout: 2 * 60 * 1000 },
-      )
+      .poll(async () => new URL(await liveUrl(reopened)).pathname, { timeout: 2 * 60 * 1000 })
       .toBe(launchPath);
     expect((await reopenLoads()).slice(0, 3)).toEqual(ROUTE_AFTER_LOADING_SCREEN);
   });

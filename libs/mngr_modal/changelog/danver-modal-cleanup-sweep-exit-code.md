@@ -1,0 +1,10 @@
+mngr_modal: the Modal test-environment reaper now lives in this plugin instead of base mngr.
+
+`imbue.mngr.utils.modal_cli` and the "Modal test environment cleanup utilities" section of `imbue.mngr.utils.testing` were Modal-specific code sitting in the provider-agnostic core, which ships to PyPI without this plugin. They are now `imbue.mngr_modal.modal_cli` and `imbue.mngr_modal.cleanup`, the latter alongside `imbue.mngr_vultr.cleanup`, which is the same age-based test-resource reaper for Vultr. `ModalCliOutputError` moved with them, from `imbue.mngr.errors` into this plugin's own `ModalMngrError` hierarchy.
+
+The reaper's six `modal` CLI invocations now go through `ConcurrencyGroup.run_process_to_completion` instead of `subprocess.run`, so its child processes are tracked and cleaned up like every other spawned process in the codebase. They are unchecked, because each caller reads the return code itself; a timeout now arrives as data on the result rather than as an exception, which is what lets these functions keep their "warn and carry on, never raise" contract. A failure to launch `uv` still raises, now as `ProcessSetupError`.
+
+Otherwise moved, not rewritten: `list_modal_test_environments`, `find_old_test_environments`, `delete_modal_apps_in_environment`, `delete_modal_volumes_in_environment`, `delete_modal_environment`, `sweep_old_modal_test_environment` and `cleanup_old_modal_test_environments` behave as before. The leak-tracking registries they use (`ModalCleanupOutcome`, `register_modal_test_*`, `TEST_ENV_PATTERN`) stay in core, which the plugin may import: the dependency now points one way, from plugin to core.
+
+One real bug came out of the move: `delete_modal_apps_in_environment` ran `modal app stop <id> --yes` without `--env`. Unscoped, that resolves the id in your *default* Modal environment, where a test environment's apps are not visible, so every stop would have failed with "No App with ID ... found". It went unnoticed because the wrong-JSON-key bug meant the loop body never ran at all. The stop is now scoped with `--env`, matching the equivalent calls in `mngr_schedule` and `scripts/modal_nuke.py`.
+

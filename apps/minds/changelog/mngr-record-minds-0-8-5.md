@@ -1,0 +1,1 @@
+- Record the minds 0.8.5 cut, its release-test runs, and its staging deploy and bake in `docs/deploy/history/minds-v0.8.5.md`, and queue the remaining production steps in `docs/deploy/next_deploy.md`.

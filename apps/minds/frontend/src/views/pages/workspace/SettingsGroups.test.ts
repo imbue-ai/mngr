@@ -18,8 +18,6 @@ import type { AnyVnode } from "../../../testing";
 import {
   allText,
   attrsOf,
-  byId,
-  classesOf,
   collectVnodes,
   jsonResponse,
   renderDeep,
@@ -32,11 +30,13 @@ import { SettingsGroups } from "./SettingsGroups";
 // is being drawn.
 const UNBACKED = "agent-" + "a".repeat(8);
 const BACKED = "agent-" + "b".repeat(8);
+const NO_BACKUP_QUESTION = "This workspace has no backups.";
 
 const OUT_OF_DATE: UiWorkspaceUpdate = {
   availability: "OUT_OF_DATE",
   current_version: "minds-v0.3.9",
   supported_version: "minds-v0.4.1",
+  is_version_from_label: false,
   activity: "IDLE",
 };
 
@@ -53,6 +53,22 @@ interface Harness {
   models: Map<string, WorkspaceOptionsModel>;
 }
 
+/** The Updates group of one drawn pane; the destroy and unlink dialogs carry a
+ * "Cancel" of their own. */
+function updatesGroup(root: m.Children): AnyVnode {
+  const group = collectVnodes(root).find(
+    (vnode) => attrsOf(vnode).id === "ws-updates-group",
+  );
+  if (group === undefined) throw new Error("the Updates group was not drawn");
+  return group;
+}
+
+/** The same group, rendered through its components, for the assertions that
+ * reach inside one -- the specific-version field lives in a collapsible. */
+function updatesGroupDeep(root: m.Children): AnyVnode {
+  return updatesGroup(renderDeep(root) as m.Children);
+}
+
 function pressableWithLabel(
   node: AnyVnode,
   label: string,
@@ -62,6 +78,24 @@ function pressableWithLabel(
       typeof attrsOf(vnode).onclick === "function" &&
       allText(vnode.children).includes(label),
   );
+}
+
+/** The specific-version field of one drawn Updates group. */
+function overrideField(node: AnyVnode): AnyVnode {
+  const field = collectVnodes(node).find(
+    (vnode) => attrsOf(vnode).id === "update-override-input",
+  );
+  if (field === undefined)
+    throw new Error("the specific-version field was not drawn");
+  return field;
+}
+
+/** Type into that field: its oninput is the only writer of the typed ref. */
+function typeOverride(node: AnyVnode, value: string): void {
+  const oninput = attrsOf(overrideField(node)).oninput as (
+    event: InputEvent,
+  ) => void;
+  oninput({ target: { value } } as unknown as InputEvent);
 }
 
 function press(node: AnyVnode, label: string): void {
@@ -92,7 +126,8 @@ function harness(
     requests.push(url);
     return respond(url, init);
   });
-  // A successful press routes and redraws; there is no mount for either.
+  // No ?override=1, which would open the specific-version field. A successful
+  // dispatch enters the machine and redraws; there is no mount for either.
   vi.spyOn(m.route, "get").mockReturnValue(
     "/workspace/x/options?tab=settings&group=updates",
   );
@@ -116,7 +151,7 @@ function harness(
         color: "#aabbcc",
         palette: { blue: "#aabbcc", pink: "#e8a7a8" },
         is_stale: false,
-        is_account_owned_provider: false,
+        is_leased_imbue_cloud: false,
         leased_owner_email: "",
         has_account: false,
         account_email: "",
@@ -160,35 +195,228 @@ afterEach(() => {
   clearAppContextForTests();
 });
 
-describe("the Updates entry in the settings nav", () => {
-  function navDot(root: m.Children): AnyVnode | undefined {
-    return byId(root, "updates-nav-dot");
-  }
+describe("the Updates settings group's no-backup question", () => {
+  it("holds a press on a machine without backups and asks in place of the controls", () => {
+    const { draw, requests } = harness();
 
-  it("wears the titlebar pill's colour while the pill shows, and nothing otherwise", () => {
-    const { draw } = harness();
-    // Out of date, nothing handling it: the pill's orange dot.
-    expect(classesOf(navDot(draw(BACKED)) as AnyVnode)).toContain("bg-warning");
+    press(updatesGroup(draw(UNBACKED)), "Update now");
 
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: { [BACKED]: { ...OUT_OF_DATE, availability: "UP_TO_DATE", verdict: "UPDATED_WITH_REBUILD_ITEMS" } },
-      update_window: "2:00 AM-5:00 AM",
-    });
-    // A landed update with a note: good news, green.
-    expect(classesOf(navDot(draw(BACKED)) as AnyVnode)).toContain("bg-success");
+    const asked = updatesGroup(draw(UNBACKED));
+    expect(allText(asked)).toContain(NO_BACKUP_QUESTION);
+    // A live "Update now" under "Go ahead?" would be a second way to answer.
+    expect(pressableWithLabel(asked, "Update now")).toBeUndefined();
+    expect(requests).toEqual([]);
+  });
 
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: { [BACKED]: { ...OUT_OF_DATE, is_scheduled: true } },
-      update_window: "2:00 AM-5:00 AM",
-    });
-    // A schedule asks nothing, so there is no pill and no dot.
-    expect(navDot(draw(BACKED))).toBeUndefined();
+  it("dispatches only once the question is answered, and only for the machine it asked about", async () => {
+    const { draw, requests } = harness();
+
+    press(updatesGroup(draw(UNBACKED)), "Update now");
+    press(updatesGroup(draw(UNBACKED)), "Go ahead without backups");
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${UNBACKED}/now`]);
+    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
+      NO_BACKUP_QUESTION,
+    );
+  });
+
+  it("takes back the press when the question is cancelled", () => {
+    const { draw, requests } = harness();
+
+    press(updatesGroup(draw(UNBACKED)), "Update now");
+    press(updatesGroup(draw(UNBACKED)), "Cancel");
+
+    const settled = updatesGroup(draw(UNBACKED));
+    expect(allText(settled)).not.toContain(NO_BACKUP_QUESTION);
+    expect(pressableWithLabel(settled, "Update now")).toBeDefined();
+    expect(requests).toEqual([]);
+  });
+
+  it("never puts one machine's question in front of another, nor answers it for one", async () => {
+    // A route change between machines preserves this instance, so A's question
+    // must neither stand over B nor dispatch to it.
+    const { draw, requests } = harness();
+    press(updatesGroup(draw(UNBACKED)), "Update now");
+
+    const other = updatesGroup(draw(BACKED));
+    expect(allText(other)).not.toContain(NO_BACKUP_QUESTION);
+    press(other, "Update now");
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${BACKED}/now`]);
+    // Unanswered, not discarded: the machine it was raised for still has it.
+    expect(allText(updatesGroup(draw(UNBACKED)))).toContain(NO_BACKUP_QUESTION);
+  });
+
+  it("keeps a dispatch's spinner and its refusal on the machine the dispatch was made for", async () => {
+    // A dispatch can take minutes, so the reader may switch machines while it is out.
+    let answer: ((response: Response) => void) | null = null;
+    const { draw, requests } = harness(
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    press(updatesGroup(draw(BACKED)), "Update now");
+    expect(requests).toEqual([`/ui/api/updates/${BACKED}/now`]);
+
+    const other = updatesGroup(draw(UNBACKED));
+    const otherButton = pressableWithLabel(other, "Update now");
+    expect(otherButton).toBeDefined();
+    expect(attrsOf(otherButton as AnyVnode).disabled).toBe(false);
+
+    (answer as unknown as (response: Response) => void)(
+      jsonResponse(
+        { error: "An update is already running in this workspace." },
+        409,
+      ),
+    );
+    await settleDispatch();
+
+    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
+      "An update is already running",
+    );
+    expect(allText(updatesGroup(draw(BACKED)))).toContain(
+      "An update is already running",
+    );
+  });
+
+  it("quotes the machine's own verdict under the refusal", async () => {
+    // The reason a wedged machine gives is the only thing that tells the reader
+    // retrying will not help, so it has to survive all the way onto the pane.
+    const { draw } = harness(() =>
+      Promise.resolve(
+        jsonResponse(
+          {
+            error: "Couldn't start the update agent in this workspace.",
+            detail:
+              "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
+          },
+          502,
+        ),
+      ),
+    );
+
+    press(updatesGroup(draw(BACKED)), "Update now");
+    await settleDispatch();
+
+    const refused = allText(updatesGroup(draw(BACKED)));
+    expect(refused).toContain(
+      "Couldn't start the update agent in this workspace.",
+    );
+    expect(refused).toContain(
+      "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
+    );
   });
 });
 
-describe("the Account settings group on a workspace on an account-owned provider", () => {
+describe("the Updates settings group's scheduled update", () => {
+  it("asks the no-backup question for a schedule press too, and arms the schedule once answered", async () => {
+    const { draw, requests } = harness();
+
+    press(updatesGroup(draw(UNBACKED)), "Schedule update");
+    expect(allText(updatesGroup(draw(UNBACKED)))).toContain(NO_BACKUP_QUESTION);
+    expect(requests).toEqual([]);
+
+    press(updatesGroup(draw(UNBACKED)), "Go ahead without backups");
+    await settleDispatch();
+
+    // A held schedule press arms a schedule, not a run.
+    expect(requests).toEqual([`/ui/api/updates/${UNBACKED}/schedule`]);
+  });
+
+  it("offers to cancel a scheduled machine's run in place of scheduling it again", async () => {
+    const { draw, requests } = harness();
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: {
+        [BACKED]: {
+          ...OUT_OF_DATE,
+          is_backup_configured: true,
+          is_scheduled: true,
+        },
+      },
+      update_window: "2:00 AM-5:00 AM",
+    });
+
+    const group = updatesGroup(draw(BACKED));
+    expect(allText(group)).toContain(
+      "Scheduled to update in the next update window (2:00 AM-5:00 AM)",
+    );
+    expect(pressableWithLabel(group, "Schedule update")).toBeUndefined();
+    press(group, "Cancel schedule");
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${BACKED}/schedule/cancel`]);
+  });
+});
+
+describe("the Updates settings group's specific-version field", () => {
+  it("keeps a typed ref on the machine it was typed for", () => {
+    const { draw } = harness();
+
+    // The disclosure is one toggle for the pane, so it stays open across the switch.
+    press(updatesGroupDeep(draw(UNBACKED)), "Update to a specific version");
+    typeOverride(updatesGroupDeep(draw(UNBACKED)), "upstream/some-branch");
+
+    const other = updatesGroupDeep(draw(BACKED));
+    expect(attrsOf(overrideField(other)).value).toBe("");
+    // Nothing was typed for this machine, so there is nothing to send.
+    const otherDispatch = pressableWithLabel(other, "Update to this version");
+    expect(otherDispatch).toBeDefined();
+    expect(attrsOf(otherDispatch as AnyVnode).disabled).toBe(true);
+
+    // Kept for the machine it was typed for, not wiped on every switch.
+    expect(attrsOf(overrideField(updatesGroupDeep(draw(UNBACKED)))).value).toBe(
+      "upstream/some-branch",
+    );
+  });
+});
+
+describe("the Updates settings group after an update that never went out", () => {
+  function recordFailureOnBacked(): void {
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: {
+        [UNBACKED]: { ...OUT_OF_DATE, is_backup_configured: false },
+        [BACKED]: {
+          ...OUT_OF_DATE,
+          is_backup_configured: true,
+          dispatch_failure: "Couldn't start this workspace to run the update.",
+          dispatch_failure_detail: "ERROR: The box behind host-5821 is gone",
+        },
+      },
+      update_window: "2:00 AM-5:00 AM",
+    });
+  }
+
+  it("shows the machine's recorded reason, on that machine only", () => {
+    const { draw } = harness();
+    recordFailureOnBacked();
+
+    const backed = allText(updatesGroup(draw(BACKED)));
+    expect(backed).toContain("Couldn't start this workspace to run the update.");
+    expect(backed).toContain("ERROR: The box behind host-5821 is gone");
+    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
+      "Couldn't start this workspace",
+    );
+  });
+
+  it("holds the recorded reason back while a new press is out", () => {
+    // The press is the newer question; the old answer beside its spinner would read as its reply.
+    const { draw } = harness(() => new Promise<Response>(() => undefined));
+    recordFailureOnBacked();
+
+    press(updatesGroup(draw(BACKED)), "Update now");
+
+    expect(allText(updatesGroup(draw(BACKED)))).not.toContain(
+      "Couldn't start this workspace",
+    );
+  });
+});
+
+describe("the Account settings group on a machine leased from Imbue Cloud", () => {
   /** The drawn Account section's text, whitespace collapsed, and whether it offers an Unlink. */
   function accountSection(root: m.Children): {
     text: string;
@@ -214,35 +442,13 @@ describe("the Account settings group on a workspace on an account-owned provider
     const { draw } = harness();
     const section = accountSection(
       draw(UNBACKED, "account", {
-        is_account_owned_provider: true,
+        is_leased_imbue_cloud: true,
         leased_owner_email: "owner@example.com",
       }),
     );
 
     expect(section.text).toBe(
-      "This workspace is owned by owner@example.com. This workspace runs on a provider owned by its account (Imbue Cloud, or one of the account's cloud connections), so its account link is fixed and cannot be changed.",
-    );
-    expect(section.hasUnlink).toBe(false);
-  });
-
-  it("names the linked account for a workspace on its own account's provider, with no Unlink", () => {
-    const { draw } = harness();
-    const section = accountSection(
-      draw(UNBACKED, "account", {
-        is_account_owned_provider: true,
-        has_account: true,
-        account_email: "me@example.com",
-        current_account: {
-          user_id: "user-1",
-          email: "me@example.com",
-          display_name: null,
-        },
-        leased_owner_email: "",
-      }),
-    );
-
-    expect(section.text).toBe(
-      "Linked to me@example.com. This workspace runs on a provider owned by its account (Imbue Cloud, or one of the account's cloud connections), so its account link is fixed and cannot be changed.",
+      "Workspaces running in Imbue Cloud can't be moved to a different account. This workspace is owned by owner@example.com.",
     );
     expect(section.hasUnlink).toBe(false);
   });
@@ -251,71 +457,15 @@ describe("the Account settings group on a workspace on an account-owned provider
     const { draw } = harness();
     const section = accountSection(
       draw(UNBACKED, "account", {
-        is_account_owned_provider: true,
+        is_leased_imbue_cloud: true,
         leased_owner_email: "",
       }),
     );
 
     expect(section.text).toBe(
-      "This workspace runs on a provider owned by its account (Imbue Cloud, or one of the account's cloud connections), so its account link is fixed and cannot be changed.",
+      "Workspaces running in Imbue Cloud can't be moved to a different account.",
     );
     expect(section.hasUnlink).toBe(false);
-  });
-});
-
-describe("the Account settings group's link to an account", () => {
-  const OFFERED = {
-    user_id: "user-1",
-    email: "me@example.com",
-    display_name: null,
-  };
-
-  /** A pane whose PATCH of the association answers `patchStatus`, and whose options reload answers the drawn data. */
-  function linkingHarness(patchStatus: number): Harness {
-    let drawn: Harness | null = null;
-    const pane = harness((url, init) => {
-      if (init?.method === "PATCH")
-        return Promise.resolve(
-          jsonResponse(
-            patchStatus === 200 ? {} : { error: "refused" },
-            patchStatus,
-          ),
-        );
-      const model = drawn?.models.get(UNBACKED);
-      return Promise.resolve(jsonResponse(model?.data ?? {}));
-    });
-    drawn = pane;
-    return pane;
-  }
-
-  it("leaves for the window's account's hub once the workspace belongs to the account", async () => {
-    const { draw, requests } = linkingHarness(200);
-    const routeSet = vi.spyOn(m.route, "set");
-    const root = draw(UNBACKED, "account", { accounts: [OFFERED] });
-
-    press(root as AnyVnode, `Link to ${OFFERED.email}`);
-    await settleDispatch();
-
-    // The association is patched, then the options reloaded (which fetches the panes' own data too).
-    expect(requests.slice(0, 2)).toEqual([
-      `/api/v1/workspaces/${UNBACKED}`,
-      `/ui/api/workspaces/${UNBACKED}/options`,
-    ]);
-    expect(routeSet.mock.calls.map((call) => call[0])).toEqual([
-      "/account/local/",
-    ]);
-  });
-
-  it("stays put and shows the refusal when the association is refused", async () => {
-    const { draw, models } = linkingHarness(400);
-    const routeSet = vi.spyOn(m.route, "set");
-    const root = draw(UNBACKED, "account", { accounts: [OFFERED] });
-
-    press(root as AnyVnode, `Link to ${OFFERED.email}`);
-    await settleDispatch();
-
-    expect(routeSet).not.toHaveBeenCalled();
-    expect(models.get(UNBACKED)?.accountErrorMessage).toBe("refused");
   });
 });
 
@@ -449,8 +599,7 @@ describe("the General settings group's Machine size section", () => {
   ): m.Children {
     h.draw(agentId, "general");
     const model = h.models.get(agentId);
-    if (model === undefined)
-      throw new Error("the machine's model was not built");
+    if (model === undefined) throw new Error("the machine's model was not built");
     model.machineSize = size;
     return h.draw(agentId, "general");
   }
@@ -472,57 +621,19 @@ describe("the General settings group's Machine size section", () => {
     const field = sizeFields(section).find(
       (vnode) => attrsOf(vnode).dimension === dimension,
     );
-    if (field === undefined)
-      throw new Error(`no ${dimension} field to type into`);
+    if (field === undefined) throw new Error(`no ${dimension} field to type into`);
     (attrsOf(field).oninput as (text: string) => void)(value);
   }
 
-  it("says the size is being read, not reported, or not readable before it is known, and shows it read-only for a machine that cannot be resized", () => {
+  it("is left out until a size is known, and read-only for a machine that cannot be resized", () => {
     const h = harness();
 
-    const reading = machineSizeSection(drawWithSize(h, UNBACKED, null));
-    if (reading === undefined) throw new Error("the section was not drawn");
-    expect(allText(reading)).toContain("Reading the machine's size");
-
-    const model = h.models.get(UNBACKED);
-    if (model === undefined)
-      throw new Error("the machine's model was not built");
-    model.machineSizeState = "unavailable";
-    const unreported = machineSizeSection(h.draw(UNBACKED, "general"));
-    if (unreported === undefined) throw new Error("the section was not drawn");
-    expect(allText(unreported)).toContain("does not report its size");
-
-    // A read that failed is not a machine without a size.
-    model.machineSizeState = "load_failed";
-    const unread = machineSizeSection(h.draw(UNBACKED, "general"));
-    if (unread === undefined) throw new Error("the section was not drawn");
-    expect(allText(unread)).toContain("could not be read");
-    expect(allText(unread)).not.toContain("does not report its size");
+    expect(machineSizeSection(drawWithSize(h, UNBACKED, null))).toBeUndefined();
 
     const section = machineSizeSection(drawWithSize(h, UNBACKED, RECORDED));
     if (section === undefined) throw new Error("the section was not drawn");
     expect(allText(section)).toContain("4 CPUs · 8 GB RAM");
-    expect(allText(section)).not.toContain("Reading the machine's size");
     expect(sizeFields(section)).toEqual([]);
-    expect(pressableWithLabel(section, "Apply and restart")).toBeUndefined();
-  });
-
-  it("shows the size with a loading state in place of the controls until the resize offer is read", () => {
-    const section = machineSizeSection(
-      drawWithSize(harness(), UNBACKED, {
-        ...RECORDED,
-        cpu_count: null,
-        disk_gb: 28,
-        is_resize_offer_pending: true,
-      }),
-    );
-    if (section === undefined) throw new Error("the section was not drawn");
-
-    expect(allText(section)).toContain("8 GB RAM · 28 GB disk");
-    expect(allText(section)).toContain(
-      "Checking whether this machine's size can be changed",
-    );
-    expect(pressableWithLabel(section, "Save size")).toBeUndefined();
     expect(pressableWithLabel(section, "Apply and restart")).toBeUndefined();
   });
 
@@ -550,11 +661,11 @@ describe("the General settings group's Machine size section", () => {
     const docker = machineSizeSection(
       drawWithSize(h, UNBACKED, { ...RECORDED, is_resizable: true }),
     );
-    if (docker === undefined)
-      throw new Error("the docker section was not drawn");
-    expect(sizeFields(docker).map((field) => attrsOf(field).dimension)).toEqual(
-      ["cpu_count", "memory_gb"],
-    );
+    if (docker === undefined) throw new Error("the docker section was not drawn");
+    expect(sizeFields(docker).map((field) => attrsOf(field).dimension)).toEqual([
+      "cpu_count",
+      "memory_gb",
+    ]);
     expect(pressableWithLabel(docker, "Apply and restart")).toBeDefined();
 
     const lima = machineSizeSection(
@@ -602,228 +713,10 @@ describe("the General settings group's Machine size section", () => {
       `/api/v1/workspaces/${UNBACKED}/machine-size`,
       `/ui/api/workspaces/${UNBACKED}/machine-size`,
     ]);
-    expect(allText(after)).toContain(
-      "The machine is restarting to apply the new size.",
-    );
-    // No second resize while the restart runs.
-    const apply = pressableWithLabel(after, "Apply and restart");
-    expect(apply === undefined ? undefined : attrsOf(apply).disabled).toBe(
-      true,
-    );
+    expect(allText(after)).toContain("The machine is restarting to apply it.");
     const memoryField = sizeFields(after).find(
       (field) => attrsOf(field).dimension === "memory_gb",
     );
-    expect(
-      memoryField === undefined ? undefined : attrsOf(memoryField).value,
-    ).toBe("16");
-  });
-
-  const CLOUD: WorkspaceMachineSizeData = {
-    ...RECORDED,
-    cpu_count: null,
-    disk_gb: 28,
-    is_resizable: true,
-    is_disk_resizable: true,
-    is_running: true,
-    is_transitioning: false,
-    memory_choices_gb: [8, 16, 24, 32],
-    is_memory_capped_by_plan: true,
-    plan_memory_limit_gb: 40,
-    other_machines_memory_gb: 8,
-    max_disk_gb: 200,
-    plan_disk_limit_gb: 280,
-    other_machines_disk_gb: 28,
-  };
-
-  /** The RAM select of a drawn section, rendered through its component. */
-  function memorySelect(section: AnyVnode): AnyVnode {
-    const select = collectVnodes(renderDeep(section) as m.Children).find(
-      (vnode) => vnode.tag === "select" && attrsOf(vnode).name === "memory_gb",
-    );
-    if (select === undefined) throw new Error("the RAM select was not drawn");
-    return select;
-  }
-
-  it("offers an Imbue Cloud machine the RAM sizes its plan allows, a bounded disk, and no CPUs", () => {
-    const section = machineSizeSection(
-      drawWithSize(harness(), UNBACKED, CLOUD),
-    );
-    if (section === undefined) throw new Error("the section was not drawn");
-
-    expect(allText(section)).toContain("8 GB RAM · 28 GB disk");
-    const options = collectVnodes(memorySelect(section)).filter(
-      (vnode) => vnode.tag === "option",
-    );
-    expect(options.map((option) => attrsOf(option).value)).toEqual([
-      "8",
-      "16",
-      "24",
-      "32",
-    ]);
-    expect(allText(options[options.length - 1])).toBe("32 GB (plan limit)");
-    expect(
-      sizeFields(section).map((field) => attrsOf(field).dimension),
-    ).toEqual(["disk_gb"]);
-    const disk = sizeFields(section)[0];
-    expect(attrsOf(disk).min).toBe("28");
-    expect(attrsOf(disk).max).toBe("200");
-    expect(pressableWithLabel(section, "Save size")).toBeDefined();
-    expect(pressableWithLabel(section, "Apply and restart")).toBeUndefined();
-    expect(allText(section)).toContain(
-      "Your plan allows 40 GB of RAM across running machines",
-    );
-    expect(allText(section)).toContain("other running machines use 8 GB");
-    expect(allText(section)).toContain("The disk can grow to 200 GB");
-
-    // The quota leaves no disk headroom: the bound is floored at the current disk.
-    const full = machineSizeSection(
-      drawWithSize(harness(), UNBACKED, { ...CLOUD, max_disk_gb: 28 }),
-    );
-    if (full === undefined) throw new Error("the section was not drawn");
-    expect(allText(full)).toContain(
-      "The plan leaves no room to grow the disk.",
-    );
-    expect(allText(full)).not.toContain("can grow to");
-  });
-
-  it("offers a running Imbue Cloud machine with a pending size a restart, and a stopped one only a note", () => {
-    const h = harness();
-    const pending = {
-      ...CLOUD,
-      target_memory_gb: 16,
-      is_restart_needed_to_apply: true,
-    };
-
-    const running = machineSizeSection(drawWithSize(h, UNBACKED, pending));
-    if (running === undefined)
-      throw new Error("the running section was not drawn");
-    expect(allText(running)).toContain(
-      "A new size is pending (16 GB RAM · 28 GB disk)",
-    );
-    expect(allText(running)).toContain("backs up the machine's disks first");
-    expect(pressableWithLabel(running, "Restart now")).toBeDefined();
-
-    const stopped = machineSizeSection(
-      drawWithSize(h, BACKED, { ...pending, is_running: false }),
-    );
-    if (stopped === undefined)
-      throw new Error("the stopped section was not drawn");
-    expect(pressableWithLabel(stopped, "Restart now")).toBeUndefined();
-    expect(allText(stopped)).toContain(
-      "Restart this workspace's machine to apply it.",
-    );
-  });
-
-  it("holds the Imbue Cloud controls while the machine is starting or stopping", () => {
-    const section = machineSizeSection(
-      drawWithSize(harness(), UNBACKED, {
-        ...CLOUD,
-        is_running: false,
-        is_transitioning: true,
-      }),
-    );
-    if (section === undefined) throw new Error("the section was not drawn");
-
-    expect(allText(section)).toContain("starting or stopping");
-    const save = pressableWithLabel(section, "Save size");
-    expect(save === undefined ? undefined : attrsOf(save).disabled).toBe(true);
-    expect(attrsOf(memorySelect(section)).disabled).toBe(true);
-  });
-
-  it("saves a picked Imbue Cloud size without a restart, then offers the restart", async () => {
-    const posted: unknown[] = [];
-    let recorded: WorkspaceMachineSizeData = CLOUD;
-    const h = harness((url, init) => {
-      if (url.startsWith("/api/v1/")) {
-        posted.push(JSON.parse(String(init?.body)));
-        recorded = {
-          ...CLOUD,
-          target_memory_gb: 16,
-          is_restart_needed_to_apply: true,
-        };
-        return Promise.resolve(
-          jsonResponse({ is_restart_dispatched: false, operation_id: null }),
-        );
-      }
-      return Promise.resolve(jsonResponse(recorded));
-    });
-    const section = machineSizeSection(drawWithSize(h, UNBACKED, CLOUD));
-    if (section === undefined) throw new Error("the section was not drawn");
-
-    const onchange = attrsOf(memorySelect(section)).onchange as (
-      event: Event,
-    ) => void;
-    onchange({ target: { value: "16" } } as unknown as Event);
-    const picked = machineSizeSection(h.draw(UNBACKED, "general"));
-    if (picked === undefined) throw new Error("the section was not redrawn");
-    press(picked, "Save size");
-    await settleDispatch();
-    const after = machineSizeSection(h.draw(UNBACKED, "general"));
-    if (after === undefined) throw new Error("the section was not redrawn");
-
-    expect(posted).toEqual([{ memory_gb: 16 }]);
-    expect(h.requests).toEqual([
-      `/api/v1/workspaces/${UNBACKED}/machine-size`,
-      `/ui/api/workspaces/${UNBACKED}/machine-size`,
-    ]);
-    // The pending size is the one notice about it; no second "saved" line.
-    expect(allText(after)).toContain(
-      "A new size is pending (16 GB RAM · 28 GB disk)",
-    );
-    expect(
-      collectVnodes(after).find(
-        (vnode) => attrsOf(vnode).id === "machine-resize-notice",
-      ),
-    ).toBeUndefined();
-    expect(pressableWithLabel(after, "Restart now")).toBeDefined();
-  });
-
-  it("says the machine is restarting, offers no second restart, and holds the controls", () => {
-    const h = harness();
-    const pending = {
-      ...CLOUD,
-      target_memory_gb: 16,
-      is_restart_needed_to_apply: true,
-    };
-
-    // Dispatched from this page: the connector still reports the machine
-    // running with its size pending, which must not offer the restart again.
-    drawWithSize(h, UNBACKED, pending);
-    const model = h.models.get(UNBACKED);
-    if (model === undefined)
-      throw new Error("the machine's model was not built");
-    model.isRestartDispatched = true;
-    const dispatched = machineSizeSection(h.draw(UNBACKED, "general"));
-    if (dispatched === undefined) throw new Error("the section was not drawn");
-    expect(allText(dispatched)).toContain(
-      "The machine is restarting to apply the new size (16 GB RAM · 28 GB disk)",
-    );
-    expect(allText(dispatched)).not.toContain("A new size is pending");
-    expect(pressableWithLabel(dispatched, "Restart now")).toBeUndefined();
-    const save = pressableWithLabel(dispatched, "Save size");
-    expect(save === undefined ? undefined : attrsOf(save).disabled).toBe(true);
-
-    // Reported by the app (a restart under way from anywhere, or the page reopened mid-restart).
-    const reported = machineSizeSection(
-      drawWithSize(h, BACKED, { ...pending, is_restart_in_progress: true }),
-    );
-    if (reported === undefined) throw new Error("the section was not drawn");
-    expect(allText(reported)).toContain("The machine is restarting");
-    expect(pressableWithLabel(reported, "Restart now")).toBeUndefined();
-
-    // A recovery the app reports with no size pending and nothing dispatched
-    // from this page (a stopped machine's start, the recovery card's restart)
-    // is not applying a size: the section only waits it out.
-    const plain = machineSizeSection(
-      drawWithSize(h, BACKED, { ...CLOUD, is_restart_in_progress: true }),
-    );
-    if (plain === undefined) throw new Error("the section was not drawn");
-    expect(allText(plain)).toContain("The machine is starting or restarting");
-    expect(allText(plain)).not.toContain("apply the new size");
-    expect(allText(plain)).not.toContain("backs up");
-    const plainSave = pressableWithLabel(plain, "Save size");
-    expect(
-      plainSave === undefined ? undefined : attrsOf(plainSave).disabled,
-    ).toBe(true);
+    expect(memoryField === undefined ? undefined : attrsOf(memoryField).value).toBe("16");
   });
 });

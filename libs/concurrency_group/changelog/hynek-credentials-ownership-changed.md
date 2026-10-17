@@ -1,0 +1,1 @@
+`ConcurrencyGroup.run_process_to_completion` and `run_process_in_background` accept `stdin_bytes`: bytes handed to the child on standard input, which is then closed. This is how a value that must not appear in a process listing (a secret, for instance) reaches a command that reads it from stdin. Without it, children keep seeing an empty stdin as before.

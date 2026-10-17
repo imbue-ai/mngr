@@ -20,7 +20,6 @@
 // drawing at a guessed rect.
 
 import m from "mithril";
-import { titlebarStatusFor } from "./workspace-notices";
 import type { ShellState } from "./shell-state";
 import type { TitlebarPopupId } from "./RaisedTitlebarIcons";
 import {
@@ -28,7 +27,6 @@ import {
   openTitlebarPopup,
   titlebarAnchors,
 } from "./RaisedTitlebarIcons";
-import { accountSwitcherLabel } from "./AccountSwitcher";
 import { OverlayBackdrop } from "./OverlayBackdrop";
 import { DialogCloseButton } from "../components/Modal";
 import type { CardBox } from "./card-resize";
@@ -262,8 +260,6 @@ export function OverlayShell(): m.Component<OverlayShellAttrs> {
                 shell.displayedWorkspaceAgentId(),
               ),
             agentId: shell.displayedWorkspaceAgentId(),
-            accountLabel: accountSwitcherLabel(shell),
-            status: titlebarStatusFor(shell, shell.displayedWorkspaceAgentId()),
           }),
     ];
   }

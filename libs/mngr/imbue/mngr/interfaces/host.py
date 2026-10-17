@@ -26,7 +26,6 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTailRead
 from imbue.mngr.interfaces.data_types import HostBootInfo
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
-from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SizeBytes
@@ -43,6 +42,8 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TmuxHeight
 from imbue.mngr.primitives import TmuxWidth
@@ -145,6 +146,15 @@ class HostInterface(MutableModel, ABC):
         """Return the base image used for this host, or None if not applicable."""
         ...
 
+    def get_published_endpoints(self) -> list[PublishedEndpoint]:
+        """Where each port the host was created with ``--publish`` is reachable from this mngr client.
+
+        Empty for a host with no declarations. Derived from the provider's own records, so it is
+        answered for stopped hosts too; a provider that re-picks host ports on a start (Imbue
+        Cloud) answers the current ones. See ``specs/published-ports/spec.md``.
+        """
+        return []
+
     @abstractmethod
     def get_tags(self) -> dict[str, str]:
         """Return all metadata tags associated with this host."""
@@ -242,17 +252,11 @@ class HostFileReadInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def read_file_tail_from_offset(
-        self, path: Path, start_byte: int, max_byte_count: int | None = None
-    ) -> FileTailRead:
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
         """Read a file's bytes from ``start_byte`` to EOF, never past the ``file_size`` the same call reports.
 
-        ``max_byte_count`` caps how many bytes come back, so a large file can be read
-        in bounded pieces; a host with no ranged read may return the rest of the file
-        regardless. A zero ``max_byte_count`` asks for the size only and must return no
-        content on every host, without reading the file. A ``file_size`` below the
-        caller's saved offset means the file was truncated or rotated. Raises
-        FileNotFoundError if the file does not exist.
+        A ``file_size`` below the caller's saved offset means the file was truncated or
+        rotated. Raises FileNotFoundError if the file does not exist.
         """
         ...
 
@@ -676,15 +680,6 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
     @abstractmethod
     def get_agents(self) -> list[AgentInterface]:
         """Return a list of all agents running on this host."""
-        ...
-
-    @abstractmethod
-    def read_lifecycle_snapshot(self) -> HostLifecycleSnapshot | None:
-        """Read every tmux pane and then the process table.
-
-        None when the panes cannot be read (a failure or a timeout); a process table that cannot be
-        read leaves the snapshot's ``ps_output`` None.
-        """
         ...
 
     @abstractmethod
@@ -1276,4 +1271,8 @@ class NewHostOptions(FrozenModel):
     provisioning: HostProvisioningOptions = Field(
         default_factory=HostProvisioningOptions,
         description="Post-create provisioning hooks",
+    )
+    published_ports: tuple[PublishedPortDeclaration, ...] = Field(
+        default=(),
+        description="Guest ports the provider publishes for the host's workload (the --publish declarations)",
     )

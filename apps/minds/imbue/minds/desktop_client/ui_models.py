@@ -32,22 +32,17 @@ from pydantic import TypeAdapter
 from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.desktop_client.connections.data_types import DEFAULT_CREDENTIAL_SOURCE_NAME
-from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
+from imbue.minds.desktop_client.folder_sync import FolderSyncState
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
-from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
-from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
-from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateMode
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
-from imbue.minds.desktop_client.update_status import UpdateStartedBy
 from imbue.minds.desktop_client.update_status import UpdateUnknownReason
 from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.mngr_latchkey.desktop_egress import DesktopEgressMode
@@ -60,7 +55,7 @@ from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 28
+UI_SCHEMA_VERSION: int = 25
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -118,13 +113,6 @@ class UiWorkspaceEntry(FrozenModel):
         ),
     )
     account: str = Field(default="", description="Owning account email, when known")
-    account_user_id: str = Field(
-        default="",
-        description=(
-            "Owning account's user id (the record's association, whether or not that account is signed in "
-            "here); empty for a workspace associated with no account, which belongs to the device's 'local' id"
-        ),
-    )
     create_attempt_state: str = Field(
         default="", description="creating / interrupted / failed for create-attempt rows; empty for real workspaces"
     )
@@ -165,34 +153,10 @@ class UiHelloMessage(FrozenModel):
     schema_version: int = Field(description="UI_SCHEMA_VERSION the server was built with")
 
 
-class RemoteTileState(FrozenModel):
-    """The derived access state of a remote tile (a workspace known only from a synced record)."""
-
-    state: str = Field(
-        description=(
-            "'' (plain), 'locked', 'missing_connection', 'no_credentials', 'read_only', 'connecting', "
-            "'unreachable', or 'error'"
-        )
-    )
-    detail: str | None = Field(default=None, description="The failure detail behind the 'error' state (chip tooltip)")
-
-
 class UiWorkspacesMessage(FrozenModel):
-    """Full workspace-list state (always the complete list, never a delta).
-
-    Scoped per window: ``workspaces`` holds the receiving window's account's rows,
-    and ``account_id`` names that account, so the Electron main process, which
-    hears every window's frame, can keep one list per account.
-    """
+    """Full workspace-list state (always the complete list, never a delta)."""
 
     type: Literal["workspaces"] = "workspaces"
-    account_id: str = Field(
-        default="",
-        description=(
-            "The receiving window's account id ('local' for the device); empty on the install-wide "
-            "list before the publisher projects it for a window"
-        ),
-    )
     workspaces: tuple[UiWorkspaceEntry, ...] = Field(
         description="Every visible workspace/create/remote row, in display order"
     )
@@ -207,140 +171,57 @@ class UiWorkspacesMessage(FrozenModel):
     restorable_workspace_ids: tuple[str, ...] = Field(
         description="Agent ids AND host ids that window restore may target (both coordinates, see UiWorkspaceEntry)"
     )
-    remote_workspace_states: dict[str, RemoteTileState] = Field(
-        description="agent_id -> derived access state (and its detail) for remote tiles"
-    )
-    workspace_count_by_account_id: dict[str, int] = Field(
-        default_factory=dict,
-        description=(
-            "account id ('local' for the device) -> how many rows that account's windows list; every account's, "
-            "so a window with none of its own can point at the accounts that have some. Empty on the "
-            "install-wide list before the publisher projects it for a window"
-        ),
+    remote_workspace_states: dict[str, str] = Field(
+        description="agent_id -> derived access state for remote tiles (empty string = plain remote)"
     )
 
 
 class UiAccountEntry(FrozenModel):
-    """One account the titlebar's account switcher lists (signed in, or signed out with workspaces still here)."""
+    """One signed-in account, as Manage Accounts lists it."""
 
     user_id: str = Field(description="The account's user id")
     email: str = Field(description="The account's email")
-    display_name: str = Field(default="", description="The account's display name; empty when it has none")
     workspace_count: int = Field(description="Number of machines owned by this account")
+    is_default: bool = Field(description="Whether this account is the default for new machines")
+    is_enabled: bool = Field(description="False when the provider block was disabled (shown as signed out)")
 
 
 class UiAccountsMessage(FrozenModel):
-    """The window's account and the switcher's list: every signed-in account, and the signed-out ones with workspaces.
-
-    Scoped per window: ``account_id`` is the account the receiving window shows
-    (a SuperTokens user id, or ``local`` for the device). The two lists are the
-    same for every window of the install.
-    """
+    """The signed-in accounts: the bottom-left launcher's label and Manage Accounts' list."""
 
     type: Literal["accounts"] = "accounts"
-    account_id: str = Field(description="The receiving window's account id, or 'local' for the device")
     has_accounts: bool = Field(description="Whether any account is signed in")
+    account_email: str = Field(description="Label email for the launcher, empty when signed out")
+    extra_account_count: int = Field(description="How many additional signed-in accounts beyond the label one")
     accounts: tuple[UiAccountEntry, ...] = Field(description="Every signed-in account, session-store order")
-    signed_out_accounts: tuple[UiAccountEntry, ...] = Field(
-        default=(),
-        description="Accounts with no session here whose workspaces are still on this install, user-id order",
-    )
 
 
 class ProviderPanelStatus(UpperCaseStrEnum):
-    """Status bucket for a provider instance row in the providers panel."""
+    """Status bucket for a provider row in the providers panel."""
 
     OK = auto()
     ERROR = auto()
-    # Discovery has not reported the instance yet (a freshly written block
-    # before the bounced observer's first snapshot).
-    UNLISTED = auto()
-
-
-class ConnectionPanelStatus(UpperCaseStrEnum):
-    """Status bucket for a connection row: discovery's verdict, or why the connection is not materialized here."""
-
-    OK = auto()
-    ERROR = auto()
-    UNLISTED = auto()
-    # The owning account has no DEK on this device.
-    LOCKED = auto()
-    # The credentials payload was scrubbed server-side (master password cleared).
-    NO_CREDENTIALS = auto()
-    # Written by a newer app version; shown, never materialized or edited here.
-    READ_ONLY = auto()
-    # The connection names a login (an AWS profile, an az login, a Modal profile) this machine does not have.
-    PROFILE_MISSING = auto()
-
-
-class AccountPanelState(UpperCaseStrEnum):
-    """Whether an account section's owner is signed in here, signed in but locked, or signed out."""
-
-    SIGNED_IN = auto()
-    LOCKED = auto()
-    SIGNED_OUT = auto()
+    DISABLED = auto()
 
 
 class UiProviderEntry(FrozenModel):
-    """One provider instance row: a device provider, or an account's imbue_cloud instance."""
+    """One provider row in the providers panel."""
 
     name: str = Field(description="Provider instance name")
-    backend: str | None = Field(description="Provider backend, None when errored or unlisted")
+    backend: str | None = Field(description="Provider backend, None when errored/disabled")
     status: ProviderPanelStatus = Field(description="Panel status bucket")
+    is_enabled: bool = Field(description="Whether Imbue Studio's settings enable the provider")
     error_type: str | None = Field(default=None, description="Discovery error type for errored providers")
     error_message: str | None = Field(default=None, description="Discovery error message for errored providers")
-
-
-class UiConnectionEntry(FrozenModel):
-    """One connection row under its owner's section."""
-
-    id: str = Field(description="The connection id")
-    instance: str = Field(description="The connection's provider instance name, <backend>_<hex>")
-    backend: str = Field(description="Cloud backend name (aws / gcp / azure / modal, or one this app does not know)")
-    backend_label: str = Field(
-        description="Display label of the backend (the raw name for one this app does not know)"
-    )
-    alias: str = Field(description="User-chosen display alias")
-    identifier: str = Field(description="Masked credential hint; never a secret")
-    placement: dict[str, str] = Field(description="Backend-specific placement defaults, as display strings")
-    status: ConnectionPanelStatus = Field(description="Discovery's verdict, or why the connection is unusable here")
-    error_type: str | None = Field(default=None, description="Discovery error type for errored connections")
-    error_message: str | None = Field(default=None, description="Discovery error message for errored connections")
-    remediation: str | None = Field(
-        default=None,
-        description="The command that sets up the missing login (PROFILE_MISSING), or the provider's fix for an error",
-    )
-    credential_source: str = Field(
-        default=DEFAULT_CREDENTIAL_SOURCE_NAME,
-        description="'pasted' or 'local_profile': whether the connection names a local login",
-    )
-    workspace_count: int = Field(description="Active workspaces on the connection (disables Remove while > 0)")
-
-
-class UiAccountProvidersEntry(FrozenModel):
-    """One account's section of the providers panel (the local profile is the section with user_id 'local')."""
-
-    user_id: str = Field(description="The account's user id, or 'local' for the local profile")
-    email: str = Field(description="The account's email; empty for the local profile or when unknown")
-    state: AccountPanelState = Field(description="Signed in, locked, or signed out here")
-    is_connection_owner_eligible: bool = Field(
-        description="Whether a new synced connection can be added under this owner here: the account is unlocked "
-        "with a master password set (always true for the local profile)"
-    )
-    imbue_cloud: UiProviderEntry | None = Field(description="The account instance; None for the local profile")
-    connections: tuple[UiConnectionEntry, ...] = Field(description="The owner's connections, alias order")
+    is_cloud_account: bool = Field(default=False, description="Bring-your-own-key account row (deletable)")
+    workspace_count: int = Field(default=0, description="Active workspaces on this provider (for byok Delete gating)")
 
 
 class UiProvidersMessage(FrozenModel):
-    """Providers panel state: one section per account plus the local profile, and the device providers."""
+    """Providers panel state."""
 
     type: Literal["providers"] = "providers"
-    accounts: tuple[UiAccountProvidersEntry, ...] = Field(
-        description="Signed-in accounts in session-store order, then signed-out ones, then the local profile"
-    )
-    device_providers: tuple[UiProviderEntry, ...] = Field(
-        description="Providers that belong to no account (docker, lima, vultr), sorted by name"
-    )
+    providers: tuple[UiProviderEntry, ...] = Field(description="Sorted provider entries")
     last_event_at: str | None = Field(description="ISO timestamp of the last discovery event, None before any")
     last_full_snapshot_at: str | None = Field(description="ISO timestamp of the last full discovery snapshot")
 
@@ -354,13 +235,6 @@ class UiRequestsMessage(FrozenModel):
     workspace_agent_ids: tuple[str, ...] = Field(
         default=(),
         description="Workspace primary agent ids with pending requests, independent of notification dismissal",
-    )
-    workspace_agent_id_by_request_id: dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "request event id -> the primary agent id of the workspace that filed it; a request whose "
-            "workspace could not be named is absent, and every window keeps it"
-        ),
     )
 
 
@@ -415,38 +289,16 @@ class UiNotificationEntry(FrozenModel):
     body: str = Field(description="Detail line snapshotted at creation; may be empty")
     request_id: str = Field(description="The originating request event id for permission requests; '' otherwise")
     chat_agent_id: str = Field(
-        default="",
-        description=(
-            "Stable chat destination for an agent message (agent id for older chats); '' otherwise, including "
-            "a message from a workspace's primary agent, which is not a chat"
-        ),
-    )
-    destination: NotificationDestination | None = Field(
-        default=None,
-        description=(
-            "For an agent message, the workspace message its click posts into the workspace frame (an app's page "
-            "opens for it) instead of focusing a chat; None lands in the chat, or on the workspace alone"
-        ),
+        default="", description="Stable chat destination for an agent message (agent id for older chats); '' otherwise"
     )
     workspace_agent_id: str = Field(
         description="Origin workspace's agent id; '' when unresolvable or for an account-level system event"
-    )
-    account_id: str = Field(
-        default="",
-        description="For an account-level system event, the account's user id, so the entry reaches that account's windows",
     )
     workspace_name: str = Field(
         description="Origin workspace's display name (the account for an account-level event), snapshotted at creation"
     )
     workspace_accent: str = Field(description="Origin workspace's ``#rrggbb`` accent, snapshotted at creation")
     service_name: str = Field(description="Catalog service for the brand mark; '' when none")
-    link_path: str = Field(
-        default="",
-        description=(
-            "For a system event, the in-app route its click opens; '' means the default (the workspace's "
-            "backups page, or the accounts page for an account-level event)"
-        ),
-    )
 
 
 class UiNotificationsMessage(FrozenModel):
@@ -500,18 +352,6 @@ class UiHealthMessage(FrozenModel):
     )
 
 
-class UiWorkspaceAutoUpdateOverride(FrozenModel):
-    """One workspace's own auto-update setting, in place of the app-wide one."""
-
-    mode: WorkspaceAutoUpdateMode = Field(description="Auto-update in its own window, or never")
-    window_start_hour: int | None = Field(
-        default=None, description="Local hour its window opens at, for CUSTOM_WINDOW; None for MANUAL"
-    )
-    window_end_hour: int | None = Field(
-        default=None, description="Local hour its window closes at, for CUSTOM_WINDOW; None for MANUAL"
-    )
-
-
 class UiWorkspaceUpdate(FrozenModel):
     """One workspace's update situation: what the store composes and what the SPA reads, one model.
 
@@ -520,8 +360,7 @@ class UiWorkspaceUpdate(FrozenModel):
     """
 
     availability: UpdateAvailability = Field(
-        description="Up to date / out of date / patch available / security update / unknown / app behind / "
-        "needs recreation"
+        description="Up to date / out of date / unknown / app behind / needs recreation"
     )
     unknown_reason: UpdateUnknownReason | None = Field(
         default=None,
@@ -530,6 +369,10 @@ class UiWorkspaceUpdate(FrozenModel):
     current_version: str = Field(description="The workspace's version, empty when unknown")
     supported_version: str = Field(
         description="The ref this app is pinned to; a branch rather than a minds-v* tag when it imposes no ceiling"
+    )
+    is_version_from_label: bool = Field(
+        description="Whether the version came from the create-time label because the machine's own git "
+        "has not been read this session (it has been unreachable throughout, or every read so far failed)"
     )
     activity: UpdateActivity = Field(description="What an update run is doing right now")
     run_started_at: datetime | None = Field(
@@ -552,42 +395,11 @@ class UiWorkspaceUpdate(FrozenModel):
     in_place_compatible_ref: str = Field(
         default="", description="Newest version still applicable in place, offered alongside a refusal"
     )
-    is_workspace_readable: bool = Field(
-        default=False,
-        description="Whether the last sweep read the workspace's updates (running, and its read answered), which "
-        "is what it takes for auto-update to arm it",
+    is_scheduled: bool = Field(default=False, description="Whether a scheduled update is armed")
+    scheduled_target_ref: str = Field(
+        default="", description="The exact ref the armed schedule targets; '' for the skill's default"
     )
-    is_scheduled: bool = Field(
-        default=False, description="Whether the workspace's own schedule file is armed, as its last read said"
-    )
-    override_ref: str = Field(
-        default="", description="The exact version the user typed for the armed schedule; '' for the app's ceiling"
-    )
-    is_schedule_auto_armed: bool = Field(
-        default=False, description="Whether auto-update armed the schedule, rather than the user; False when none"
-    )
-    schedule_window_start_minute_utc: int | None = Field(
-        default=None, description="Minutes past UTC midnight the armed schedule's window opens at; None when none"
-    )
-    schedule_window_length_minutes: int | None = Field(
-        default=None, description="How long the armed schedule's window stays open, in minutes; None when none"
-    )
-    last_skip_reason: str = Field(default="", description="Why the last update window closed without a start")
-    needs_sign_in: bool = Field(
-        default=False,
-        description="Whether an arm or a start was refused, or a window skipped, for want of a signed-in AI account",
-    )
-    is_update_skipped: bool = Field(
-        default=False,
-        description="Whether the user skipped the app's current release for this workspace under auto-update",
-    )
-    is_decision_pending: bool = Field(
-        default=False,
-        description="Whether the last run ended needing the user's decision about something the update cannot keep",
-    )
-    started_by: UpdateStartedBy | None = Field(
-        default=None, description="How the row's run was started; None when unknown"
-    )
+    last_skip_reason: str = Field(default="", description="Why the last scheduled attempt did not run")
     dispatch_failure: str = Field(
         default="",
         description="Why the last update asked for never went out, as a sentence; '' when it went out, or since "
@@ -605,39 +417,15 @@ class UiWorkspaceUpdate(FrozenModel):
         default="",
         description="Name of the run's chat agent; empty when no run has claimed this machine",
     )
-    chat_agent_id: str = Field(
-        default="", description="The run's chat's id, for opening it from the app; '' when unknown or deleted"
-    )
-    is_chat_gone: bool = Field(
-        default=False, description="Whether a listing found the run's chat deleted, so there is no chat left to open"
-    )
-    last_dispatch_target_ref: str = Field(
-        default="",
-        description="The release the update chat last created there aimed at, which auto-update does not arm "
-        "again; '' when no record says",
-    )
     is_backup_configured: bool = Field(
         default=False,
         description="Whether backups exist for this machine (keys the go-ahead-without-backups confirmation)",
     )
-    is_auto_update_enabled: bool = Field(
-        default=False,
-        description="Whether auto-update arms this workspace's update itself, under its own setting or the app's",
-    )
-    update_window: str = Field(
-        default="",
-        description="The local window this workspace's scheduled updates start in, e.g. '2:00 AM-5:00 AM': its "
-        "own when it has a custom window, else the app's",
-    )
-    auto_update_override: UiWorkspaceAutoUpdateOverride | None = Field(
-        default=None, description="The workspace's own auto-update setting; None while it follows the app's"
-    )
 
     @property
     def is_update_offered(self) -> bool:
-        """Whether the app has positively read that this workspace is a minor release behind, or below the
-        security floor: the badge, the titlebar status, and bulk actions."""
-        return self.availability in (UpdateAvailability.OUT_OF_DATE, UpdateAvailability.SECURITY_UPDATE)
+        """Whether the app has positively read that this workspace is a minor release behind: the badge, the band, and bulk actions."""
+        return self.availability is UpdateAvailability.OUT_OF_DATE
 
     @property
     def is_update_dispatchable(self) -> bool:
@@ -651,7 +439,6 @@ class UiWorkspaceUpdate(FrozenModel):
         """
         return self.availability in (
             UpdateAvailability.OUT_OF_DATE,
-            UpdateAvailability.SECURITY_UPDATE,
             UpdateAvailability.PATCH_AVAILABLE,
             UpdateAvailability.UNKNOWN,
         )
@@ -671,16 +458,6 @@ class UiWorkspaceUpdatesMessage(FrozenModel):
     )
     update_window: str = Field(
         description="Human-readable local window scheduled updates run in, e.g. '2:00 AM-5:00 AM'"
-    )
-    update_window_start_hour: int = Field(
-        default=DEFAULT_UPDATE_WINDOW[0], description="Local hour the app-wide window opens at"
-    )
-    update_window_end_hour: int = Field(
-        default=DEFAULT_UPDATE_WINDOW[1], description="Local hour the app-wide window closes at"
-    )
-    is_auto_update_enabled: bool = Field(
-        default=False,
-        description="The app-wide auto-update switch; each workspace's own effective value rides its update",
     )
 
 
@@ -777,13 +554,6 @@ class UiClientStateMessage(FrozenModel):
         default=False,
         description="Whether the OS reports the screen locked (desktop app on macOS and Windows only)",
     )
-    account_id: str = Field(
-        default="",
-        description=(
-            "The account this window shows (a user id, or 'local' for the device); the server scopes the "
-            "frames it sends this connection to it. Empty until the window has reported one."
-        ),
-    )
 
 
 # Everything the server may send. The discriminator makes both pydantic
@@ -837,38 +607,6 @@ class UiBootstrapSeed(FrozenModel):
     is_onboarding_complete: bool = Field(
         description="Whether this install is past the first-run start flow (drives the home page's /start redirect)"
     )
-    account_id: str = Field(
-        description=(
-            "The account the served URL resolves to (its hub segment, its workspace's association, its "
-            "?account= parameter, else the install's most recently used account): the window's account at first paint"
-        )
-    )
-
-
-class UiSwitchAccountRequest(FrozenModel):
-    """Body of POST /ui/api/windows/switch-account: move the asking window to another account."""
-
-    account_id: str = Field(description="The account to switch to (a user id, or 'local' for the device)")
-    client_id: str = Field(description="The asking window's channel client id, so its own workspace is not counted")
-    is_desktop: bool = Field(
-        default=True,
-        description=(
-            "Whether the asker is a desktop window. Browser tabs are not deduplicated, so a workspace another "
-            "tab shows is still a landing for one of them"
-        ),
-    )
-
-
-class UiSwitchAccountResponse(FrozenModel):
-    """The route the asking window navigates to: the account's most recent free workspace, else its hub."""
-
-    route: str = Field(description="The SPA route to navigate the window to")
-
-
-class UiRouteAccountResponse(FrozenModel):
-    """Answer of GET /ui/api/windows/route-account: the account a SPA route belongs to (see ``resolve_window_account_id``)."""
-
-    account_id: str = Field(description="The account the route's window shows (a user id, or 'local' for the device)")
 
 
 class UiBootstrap(FrozenModel):
@@ -1285,6 +1023,3 @@ class UiWireSchema(FrozenModel):
     )
     folder_syncs: UiFolderSyncs = Field(description="folder-syncs poll payload")
     permission_grant_group: UiPermissionGrantGroup = Field(description="one grant-dialog permission group")
-    switch_account: UiSwitchAccountRequest = Field(description="windows/switch-account request body")
-    switch_account_response: UiSwitchAccountResponse = Field(description="windows/switch-account response")
-    route_account_response: UiRouteAccountResponse = Field(description="windows/route-account response")

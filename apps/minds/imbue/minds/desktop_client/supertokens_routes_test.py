@@ -9,7 +9,6 @@ surface the Mithril UI polls.
 """
 
 import time
-import tomllib
 from pathlib import Path
 from uuid import uuid4
 
@@ -26,23 +25,14 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
-from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
-from imbue.minds.desktop_client.conftest import make_connection_store_for_test
+from imbue.minds.desktop_client.conftest import build_desktop_client_with_accounts
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
-from imbue.minds.desktop_client.conftest import make_provider_materializer_for_test
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
-from imbue.minds.desktop_client.conftest import session_store_account_source
-from imbue.minds.desktop_client.connections.account_lifecycle import CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE
-from imbue.minds.desktop_client.connections.data_types import ProviderMaterializationOutcome
-from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudWebLoginIncompleteCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import WebLoginIncompleteReason
 from imbue.minds.desktop_client.minds_config import MindsConfig
-from imbue.minds.desktop_client.mock_agent_creator_test import InFlightCreateAttempt
-from imbue.minds.desktop_client.mock_agent_creator_test import make_in_flight_agent_creator
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.supertokens_routes import _WebLoginFlowStatus
 from imbue.minds.desktop_client.supertokens_routes import _read_web_login_status
@@ -51,7 +41,6 @@ from imbue.minds.desktop_client.supertokens_routes import _run_web_login_subproc
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import OutputFormat
-from imbue.minds.testing import stub_mngr_host_dir
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
@@ -149,9 +138,11 @@ def test_run_web_login_subprocess_marks_flow_done_without_flask_app_context(tmp_
         imbue_cloud_cli=cli,
         session_store=make_session_store_for_test(tmp_path, cli),
         sync_scheduler=None,
+        minds_config=None,
         output_format=OutputFormat.JSON,
+        latchkey_forward_supervisor=None,
+        connector_url=str(FAKE_CONNECTOR_URL),
         notify_accounts_changed=_do_nothing,
-        provider_materializer=None,
     )
 
     status = _read_web_login_status(flow_id)
@@ -164,75 +155,125 @@ def test_run_web_login_subprocess_marks_flow_done_without_flask_app_context(tmp_
     assert not url_file.exists()
 
 
-@pytest.mark.parametrize(
-    ("is_create_on_the_accounts_provider", "is_create_associated_with_the_account"),
-    [(True, True), (False, True), (False, False)],
-)
-def test_logout_waits_for_a_workspace_still_being_created_on_the_accounts_providers(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    is_create_on_the_accounts_provider: bool,
-    is_create_associated_with_the_account: bool,
-) -> None:
-    """Signout removes the account's blocks, which a create still running on one of them needs, and a create
-    on a device provider that will associate its workspace with the account needs the account signed in."""
+def _sign_in_with_stored_default(
+    tmp_path: Path, stored_default_account_id: str, is_auth_list_failing: bool = False
+) -> tuple[MindsConfig, str]:
+    """Run a sign-in of a fresh account over a config whose stored default is ``stored_default_account_id``.
+
+    ``user-kept`` is signed in alongside the fresh account. Returns the config
+    and the newly signed-in account's user id.
+    """
+    new_user_id = f"user-{uuid4().hex}"
+    new_email = f"{new_user_id}@example.com"
     cli = make_fake_imbue_cloud_cli()
-    user_id = str(uuid4())
-    cli.add_account(user_id=user_id, email="busy@example.com")
-    in_flight_provider = imbue_cloud_provider_name_for_user(user_id) if is_create_on_the_accounts_provider else "lima"
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path,
-        is_authenticated=True,
+    cli.add_account(user_id="user-kept", email="kept@example.com")
+    cli.add_account(user_id=new_user_id, email=new_email)
+    cli.login_session_to_return = ImbueCloudAuthSession(user_id=new_user_id, email=new_email, display_name=None)
+    cli.is_auth_list_failing = is_auth_list_failing
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    minds_config.set_default_account_id(stored_default_account_id)
+    flow_id = f"flow-{uuid4().hex}"
+    url_file = tmp_path / "login-url.txt"
+    _record_web_login_status(
+        flow_id, _WebLoginFlowStatus(state="running", login_url_file=str(url_file), deadline=time.monotonic() + 60)
+    )
+
+    _run_web_login_subprocess(
+        flow_id=flow_id,
+        url_file=url_file,
         imbue_cloud_cli=cli,
-        session_store=make_session_store_for_test(tmp_path / "session-store", cli),
-        root_concurrency_group=root_concurrency_group,
-        agent_creator=make_in_flight_agent_creator(
-            tmp_path,
-            root_concurrency_group,
-            (
-                InFlightCreateAttempt(
-                    provider_instance_name=in_flight_provider,
-                    host_name="still-creating",
-                    account_id=user_id if is_create_associated_with_the_account else "",
-                ),
-            ),
-        ),
+        session_store=make_session_store_for_test(tmp_path, cli),
+        sync_scheduler=None,
+        minds_config=minds_config,
+        output_format=OutputFormat.JSON,
+        latchkey_forward_supervisor=None,
+        connector_url=str(FAKE_CONNECTOR_URL),
+        notify_accounts_changed=lambda: None,
     )
 
-    response = client.post(f"/accounts/{user_id}/logout")
-
-    if is_create_on_the_accounts_provider or is_create_associated_with_the_account:
-        assert response.status_code == 409
-        assert response.get_data(as_text=True) == CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE
-        assert cli.signed_out_accounts == []
-    else:
-        assert response.status_code == 303
-        assert cli.signed_out_accounts == ["busy@example.com"]
+    status = _read_web_login_status(flow_id)
+    assert status is not None
+    assert status.state == "done"
+    return minds_config, new_user_id
 
 
-def test_materializing_from_a_failed_account_listing_leaves_the_provider_settings_alone(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("stored_default_account_id", "is_auth_list_failing", "is_new_account_expected"),
+    [
+        # Switching accounts (sign out, then sign in as another) makes the new account the default.
+        pytest.param("user-departed", False, True, id="signed-out-default-replaced"),
+        pytest.param("user-kept", False, False, id="signed-in-default-kept"),
+        # A transient ``auth list`` failure must not pass for the stored default having signed out.
+        pytest.param("user-kept", True, False, id="failed-listing-keeps-default"),
+    ],
+)
+def test_sign_in_replaces_only_a_signed_out_default(
+    tmp_path: Path,
+    stored_default_account_id: str,
+    is_auth_list_failing: bool,
+    is_new_account_expected: bool,
 ) -> None:
-    """A failed `auth list` is not an empty one: the account's blocks must survive it."""
-    root_name = "minds-dev-tname"
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, root_name)
-    cli = make_fake_imbue_cloud_cli()
-    user_id = str(uuid4())
-    cli.accounts_to_return = [ImbueCloudAuthAccount(user_id=user_id, email="alice@example.com")]
-    connection_store = make_connection_store_for_test(tmp_path / f".{root_name}")
-    session_store = make_session_store_for_test(tmp_path / "minds", cli, connection_store=connection_store)
-    materializer = make_provider_materializer_for_test(
-        root_name, connection_store, session_store_account_source(session_store)
+    minds_config, new_user_id = _sign_in_with_stored_default(
+        tmp_path, stored_default_account_id=stored_default_account_id, is_auth_list_failing=is_auth_list_failing
     )
-    account_instance = imbue_cloud_provider_name_for_user(user_id)
 
-    assert materializer.materialize() is ProviderMaterializationOutcome.CHANGED
-    assert account_instance in tomllib.loads(settings_path.read_text())["providers"]
+    expected_default = new_user_id if is_new_account_expected else stored_default_account_id
+    assert minds_config.get_default_account_id() == expected_default
 
-    cli.is_auth_list_failing = True
-    session_store.invalidate_identity_cache()
-    assert materializer.materialize() is ProviderMaterializationOutcome.SKIPPED
-    assert account_instance in tomllib.loads(settings_path.read_text())["providers"]
+
+@pytest.mark.parametrize(
+    (
+        "signed_in_user_ids",
+        "stored_default",
+        "signed_out_user_id",
+        "is_auth_signout_failing",
+        "is_auth_list_failing",
+        "expected_default",
+    ),
+    [
+        pytest.param(
+            ("user-a", "user-b", "user-c"),
+            "user-b",
+            "user-b",
+            False,
+            False,
+            "user-a",
+            id="default-hands-off-to-first-remaining",
+        ),
+        pytest.param(
+            ("user-a", "user-b"), "user-b", "user-a", False, False, "user-b", id="other-account-keeps-default"
+        ),
+        pytest.param(("user-a",), "user-a", "user-a", False, False, None, id="last-account-clears-default"),
+        # An account whose plugin signout failed is still signed in, so it stays the default.
+        pytest.param(
+            ("user-a", "user-b"), "user-b", "user-b", True, False, "user-b", id="failed-signout-keeps-default"
+        ),
+        # A failed listing cannot name a successor; its empty fallback must not clear the default.
+        pytest.param(
+            ("user-a", "user-b"), "user-b", "user-b", False, True, "user-b", id="failed-listing-keeps-default"
+        ),
+    ],
+)
+def test_signing_out_hands_off_the_default_account(
+    tmp_path: Path,
+    signed_in_user_ids: tuple[str, ...],
+    stored_default: str,
+    signed_out_user_id: str,
+    is_auth_signout_failing: bool,
+    is_auth_list_failing: bool,
+    expected_default: str | None,
+) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.is_auth_signout_failing = is_auth_signout_failing
+    cli.is_auth_list_failing = is_auth_list_failing
+    client, minds_config = build_desktop_client_with_accounts(
+        tmp_path, signed_in_user_ids, stored_default_account_id=stored_default, cli=cli
+    )
+
+    response = client.post(f"/accounts/{signed_out_user_id}/logout")
+
+    assert response.status_code == 303
+    assert minds_config.get_default_account_id() == expected_default
 
 
 def test_run_web_login_subprocess_notifies_once_the_new_account_is_listed(tmp_path: Path) -> None:
@@ -259,8 +300,10 @@ def test_run_web_login_subprocess_notifies_once_the_new_account_is_listed(tmp_pa
         imbue_cloud_cli=cli,
         session_store=session_store,
         sync_scheduler=None,
+        minds_config=None,
         output_format=OutputFormat.JSON,
-        provider_materializer=None,
+        latchkey_forward_supervisor=None,
+        connector_url=str(FAKE_CONNECTOR_URL),
         notify_accounts_changed=lambda: listed_at_notify.append(
             [str(account.email) for account in session_store.list_accounts()]
         ),
@@ -292,9 +335,11 @@ def test_run_web_login_subprocess_records_error_status_when_mirroring_crashes(tm
             imbue_cloud_cli=cli,
             session_store=exploding_store,
             sync_scheduler=None,
+            minds_config=None,
             output_format=OutputFormat.JSON,
+            latchkey_forward_supervisor=None,
+            connector_url=str(FAKE_CONNECTOR_URL),
             notify_accounts_changed=_do_nothing,
-            provider_materializer=None,
         )
 
     status = _read_web_login_status(flow_id)
@@ -335,9 +380,11 @@ def test_run_web_login_subprocess_marks_finishing_before_mirroring(tmp_path: Pat
         imbue_cloud_cli=cli,
         session_store=store,
         sync_scheduler=None,
+        minds_config=None,
         output_format=OutputFormat.JSON,
+        latchkey_forward_supervisor=None,
+        connector_url=str(FAKE_CONNECTOR_URL),
         notify_accounts_changed=_do_nothing,
-        provider_materializer=None,
     )
 
     # The mirror observed the flow already flipped to "finishing"...
@@ -362,9 +409,11 @@ def test_run_web_login_subprocess_records_error_when_the_plugin_fails(tmp_path: 
         imbue_cloud_cli=cli,
         session_store=make_session_store_for_test(tmp_path, cli),
         sync_scheduler=None,
+        minds_config=None,
         output_format=OutputFormat.JSON,
+        latchkey_forward_supervisor=None,
+        connector_url=str(FAKE_CONNECTOR_URL),
         notify_accounts_changed=_do_nothing,
-        provider_materializer=None,
     )
 
     status = _read_web_login_status(flow_id)
@@ -413,8 +462,10 @@ def test_run_web_login_subprocess_names_why_an_incomplete_sign_in_failed(
             imbue_cloud_cli=cli,
             session_store=make_session_store_for_test(tmp_path, cli),
             sync_scheduler=None,
+            minds_config=None,
             output_format=OutputFormat.JSON,
-            provider_materializer=None,
+            latchkey_forward_supervisor=None,
+            connector_url=str(FAKE_CONNECTOR_URL),
             notify_accounts_changed=_do_nothing,
         )
     finally:
@@ -446,8 +497,10 @@ def test_run_web_login_subprocess_fails_the_flow_when_the_login_crashes(
             imbue_cloud_cli=cli,
             session_store=make_session_store_for_test(tmp_path, cli),
             sync_scheduler=None,
+            minds_config=None,
             output_format=OutputFormat.JSON,
-            provider_materializer=None,
+            latchkey_forward_supervisor=None,
+            connector_url=str(FAKE_CONNECTOR_URL),
             notify_accounts_changed=_do_nothing,
         )
 
@@ -516,6 +569,8 @@ def test_web_login_start_and_status_round_trip(tmp_path: Path, root_concurrency_
     assert body["state"] == "done"
     assert body["email"] == email
     assert body["login_url"] == cli.login_url_to_write
+    # The signin bookkeeping ran: the first account became the default.
+    assert minds_config.get_default_account_id() is not None
 
 
 def test_web_login_start_joins_the_flow_already_in_flight(

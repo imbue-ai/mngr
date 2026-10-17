@@ -41,7 +41,6 @@ from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
-from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.wire import WireModel
 
 _DEFAULT_TIMEOUT_SECONDS = 60.0
@@ -93,15 +92,6 @@ _LEASE_ACTIVE_CODE_SIGNAL = "lease_active"
 # answer with when no account matches; a miss is an expected answer (the
 # address may simply have no account yet), never a failure.
 _USER_NOT_FOUND_CODE_SIGNAL = "user_not_found"
-# The plugin's error_class marker for a session the connector will no longer
-# refresh (a dead or revoked refresh token, or no session at all), written by
-# handle_imbue_cloud_errors for ``auth refresh``; the plugin's discovery raises
-# the same class for an account instance whose session expired, which is what
-# the sync scheduler matches. The plugin's refresh reports an unreachable
-# connector as ImbueCloudUnreachableError and any other status as
-# ImbueCloudConnectorError, so those (and a crash) are transient and say
-# nothing about the session.
-IMBUE_CLOUD_AUTH_ERROR_CLASS: Final[str] = ImbueCloudAuthError.__name__
 
 # The plugin's error_class marker for a structured auth rejection, written by
 # ``_persist_auth_response`` in the plugin's auth CLI whenever the connector
@@ -216,7 +206,7 @@ class ImbueCloudLeaseActiveCliError(ImbueCloudCliError):
 
 
 class ImbueCloudSyncConflictCliError(ImbueCloudCliError):
-    """A record or account-document push hit a 409 (revision CAS, or for a record an active-agent conflict).
+    """A record push hit a 409 (revision CAS or active-agent conflict).
 
     ``stored_record`` carries the server's current row when the conflict was a
     revision CAS failure, so the caller can rebase and retry; None otherwise.
@@ -244,19 +234,6 @@ class ImbueCloudShareRefusedCliError(ImbueCloudCliError):
     """
 
     code: str = ""
-
-
-class AuthRefreshOutcome(UpperCaseStrEnum):
-    """What a forced token refresh proved about an account's session."""
-
-    # The connector rotated the tokens: the session is alive.
-    REFRESHED = auto()
-    # The connector refused the refresh token: the session is dead and the
-    # account must sign in again.
-    SESSION_DEAD = auto()
-    # The refresh could not be completed (connector unreachable, a server
-    # error); the session may well be fine.
-    TRANSIENT_FAILURE = auto()
 
 
 class ImbueCloudAuthSession(WireModel):
@@ -323,11 +300,6 @@ class MachineSizeCliInfo(WireModel):
 
 _MACHINES_LISTING_ADAPTER: Final = TypeAdapter(list[MachineSizeCliInfo])
 
-# The command repr `resize_machine` raises its failures under: every message
-# of a wrapped `mngr imbue_cloud machines resize` failure starts with it (as
-# "<repr>: ..." for a typed refusal, "<repr> failed: ..." for a plain one).
-MACHINES_RESIZE_COMMAND_REPR: Final[str] = "machines resize"
-
 
 class LiteLLMKeyMaterial(WireModel):
     """Result of `mngr imbue_cloud keys litellm create`."""
@@ -366,15 +338,6 @@ class ShareCliInfo(WireModel):
     relays: tuple[ShareCliRelayLogin, ...] = ()
     relay_token: SecretStr | None = None
     last_tunnel_login_at: str | None = None
-    # When the workspace's tunnel last proved itself alive (a relay Login or
-    # heartbeat, stamped at most once per fifteen minutes); the shared-
-    # workspaces page tells a live share from a leaked one by it. None for a
-    # share never seen, or against a connector that predates the stamp.
-    last_seen_at: str | None = None
-    created_at: str | None = None
-    updated_at: str | None = None
-    entry_label: str | None = None
-    share_label: str | None = None
     cert_not_after: str | None = None
     # The tier's hosted web-chrome origin, stamped into share.env as
     # SHARE_CHROME_ORIGIN; None against a connector that predates the field or
@@ -631,7 +594,7 @@ class ImbueCloudCli(MutableModel):
             auth_exc.stderr = result.stderr
             raise auth_exc
         # Log the full subprocess output server-side -- it may be a multi-line
-        # Python traceback (e.g. an httpx2 transport error inside the connector
+        # Python traceback (e.g. an httpx transport error inside the connector
         # subprocess) -- but keep the exception *message* clean and
         # traceback-free, so routes that surface ``str(exc)`` to an API caller
         # never leak it. The full detail stays on ``.stderr`` for any caller that
@@ -737,23 +700,6 @@ class ImbueCloudCli(MutableModel):
         )
         return self._expect_success(result, "auth refresh")
 
-    def auth_refresh_outcome(self, account: str) -> AuthRefreshOutcome:
-        """Force a refresh and classify the result: alive, provably dead, or unknown (transient failure).
-
-        Only the plugin's own auth error class counts as proof that the session
-        is dead; every other failure leaves the account active.
-        """
-        try:
-            self.auth_refresh(account)
-        except ImbueCloudCliError as exc:
-            body = _parse_stderr_error_body(exc.stderr)
-            if body is not None and body.get("error_class") == IMBUE_CLOUD_AUTH_ERROR_CLASS:
-                logger.info("The session of {} is dead: {}", account, body.get("error"))
-                return AuthRefreshOutcome.SESSION_DEAD
-            logger.warning("Could not refresh the session of {} (treating it as transient): {}", account, exc)
-            return AuthRefreshOutcome.TRANSIENT_FAILURE
-        return AuthRefreshOutcome.REFRESHED
-
     def auth_resend_verification(self, account: str) -> bool:
         """Re-send ``account``'s verification email; False when the server cooldown suppressed it."""
         result = self._run(
@@ -796,7 +742,8 @@ class ImbueCloudCli(MutableModel):
         """The machine's sizes for one leased host (by mngr host id, row id, or name), or None when unknown.
 
         None covers both "no such machine" and any CLI failure: the settings
-        surface then says the machine's size could not be read.
+        surface renders the size read-only and simply omits it when it cannot
+        be fetched.
         """
         result = self._run(
             ["machines", "show", machine_ref, "--account", account],
@@ -813,30 +760,6 @@ class ImbueCloudCli(MutableModel):
         body = _parse_stdout_json(result.stdout, "machines show")
         if not isinstance(body, dict):
             return None
-        return MachineSizeCliInfo.model_validate(body)
-
-    def resize_machine(
-        self,
-        account: str,
-        machine_ref: str,
-        target_memory_units: int | None,
-        target_disk_gb: int | None,
-    ) -> MachineSizeCliInfo:
-        """Record a resize for one leased machine (``mngr imbue_cloud machines resize``), applied at its next restart.
-
-        Returns the connector's recorded sizes. A quota refusal raises
-        :class:`ImbueCloudQuotaExceededCliError`; any other refusal (a size
-        outside the allowed set, a disk shrink, a machine mid-start) raises
-        :class:`ImbueCloudCliError` carrying the plugin's own words.
-        """
-        args = ["machines", "resize", machine_ref]
-        if target_memory_units is not None:
-            args.extend(["--units", str(target_memory_units)])
-        if target_disk_gb is not None:
-            args.extend(["--disk-gb", str(target_disk_gb)])
-        args.extend(["--account", account])
-        result = self._run(args, cg_name="imbue-cloud-machines-resize")
-        body = self._expect_success(result, MACHINES_RESIZE_COMMAND_REPR)
         return MachineSizeCliInfo.model_validate(body)
 
     def list_machines(self, account: str) -> list[MachineSizeCliInfo]:
@@ -1330,23 +1253,6 @@ class ImbueCloudCli(MutableModel):
 
     # Workspace sync (records + key bundle)
 
-    def _run_with_json_input_file(
-        self, args: Sequence[str], *, cg_name: str, payload: Mapping[str, Any]
-    ) -> MngrCallResult:
-        """Run a plugin command that takes its JSON body via ``--input-file``.
-
-        The JSON travels via a 0600 temp file so secret payloads never ride a
-        command line or a log; the file is removed once the command returns.
-        """
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
-            os.fchmod(handle.fileno(), 0o600)
-            _json.dump(dict(payload), handle)
-            input_path = handle.name
-        try:
-            return self._run([*args, "--input-file", input_path], cg_name=cg_name)
-        finally:
-            Path(input_path).unlink(missing_ok=True)
-
     def sync_records_pull(self, account: str) -> SyncRecordsPullResult:
         """The account's records plus its shared agent ids (absent against a CLI too old to report them)."""
         result = self._run(["sync", "records", "pull", "--account", account], cg_name="imbue-cloud-sync-records-pull")
@@ -1365,11 +1271,29 @@ class ImbueCloudCli(MutableModel):
         )
 
     def sync_record_push(self, account: str, record: Mapping[str, Any]) -> dict[str, Any]:
-        """Push one record; returns the stored row. Raises ImbueCloudSyncConflictCliError on a 409."""
-        result = self._run_with_json_input_file(
-            ["sync", "records", "push", "--account", account], cg_name="imbue-cloud-sync-record-push", payload=record
-        )
-        _raise_if_sync_conflict(result, "sync records push: revision/agent conflict")
+        """Push one record; returns the stored row. Raises ImbueCloudSyncConflictCliError on a 409.
+
+        The record JSON travels via a 0600 temp file (--input-file) so secret
+        payloads never ride a command line or a log.
+        """
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            _json.dump(dict(record), handle)
+            input_path = handle.name
+        try:
+            result = self._run(
+                ["sync", "records", "push", "--account", account, "--input-file", input_path],
+                cg_name="imbue-cloud-sync-record-push",
+            )
+        finally:
+            Path(input_path).unlink(missing_ok=True)
+        if result.returncode != 0 and "ImbueCloudSyncConflictError" in result.stderr:
+            conflict = ImbueCloudSyncConflictCliError("sync records push: revision/agent conflict")
+            conflict.exit_code = result.returncode if result.returncode is not None else 1
+            conflict.stdout = result.stdout
+            conflict.stderr = result.stderr
+            conflict.stored_record = _parse_conflict_stored(result.stderr)
+            raise conflict
         body = self._expect_success(result, "sync records push")
         return body if isinstance(body, dict) else {}
 
@@ -1397,9 +1321,17 @@ class ImbueCloudCli(MutableModel):
         return bundle if isinstance(bundle, dict) else None
 
     def sync_bundle_push(self, account: str, bundle: Mapping[str, Any]) -> None:
-        result = self._run_with_json_input_file(
-            ["sync", "bundle", "push", "--account", account], cg_name="imbue-cloud-sync-bundle-push", payload=bundle
-        )
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            _json.dump(dict(bundle), handle)
+            input_path = handle.name
+        try:
+            result = self._run(
+                ["sync", "bundle", "push", "--account", account, "--input-file", input_path],
+                cg_name="imbue-cloud-sync-bundle-push",
+            )
+        finally:
+            Path(input_path).unlink(missing_ok=True)
         self._expect_success(result, "sync bundle push")
 
     def sync_bundle_delete(self, account: str) -> None:
@@ -1407,54 +1339,6 @@ class ImbueCloudCli(MutableModel):
             ["sync", "bundle", "delete", "--account", account], cg_name="imbue-cloud-sync-bundle-delete"
         )
         self._expect_success(result, "sync bundle delete")
-
-    # Account documents (cloud connections)
-
-    def sync_documents_pull(self, account: str, kind: str) -> list[dict[str, Any]]:
-        """Every document of ``kind`` the account holds, tombstones included."""
-        result = self._run(
-            ["sync", "documents", "pull", "--kind", kind, "--account", account],
-            cg_name="imbue-cloud-sync-documents-pull",
-        )
-        body = self._expect_success(result, "sync documents pull")
-        if not isinstance(body, dict):
-            raise ImbueCloudCliError(
-                f"Malformed sync documents pull output: expected an object, got {_describe_body_shape(body)}"
-            )
-        documents = body.get("documents", [])
-        if not isinstance(documents, list):
-            raise ImbueCloudCliError("Malformed sync documents pull output: documents must be a list")
-        # A dropped entry would read as a server-side deletion of that document.
-        if not all(isinstance(entry, dict) for entry in documents):
-            raise ImbueCloudCliError("Malformed sync documents pull output: every document must be an object")
-        return documents
-
-    def sync_document_push(self, account: str, document: Mapping[str, Any]) -> dict[str, Any]:
-        """Push one document; returns the stored row. Raises ImbueCloudSyncConflictCliError on a 409.
-
-        Only the keys present in ``document`` are sent: leave ``encrypted_payload``
-        out to keep the stored payload.
-        """
-        result = self._run_with_json_input_file(
-            ["sync", "documents", "push", "--account", account],
-            cg_name="imbue-cloud-sync-document-push",
-            payload=document,
-        )
-        _raise_if_sync_conflict(result, "sync documents push: revision conflict")
-        body = self._expect_success(result, "sync documents push")
-        return body if isinstance(body, dict) else {}
-
-
-def _raise_if_sync_conflict(result: MngrCallResult, description: str) -> None:
-    """Map a sync push the connector answered 409 to ``ImbueCloudSyncConflictCliError`` (with the stored row)."""
-    if result.returncode == 0 or "ImbueCloudSyncConflictError" not in result.stderr:
-        return
-    conflict = ImbueCloudSyncConflictCliError(description)
-    conflict.exit_code = result.returncode if result.returncode is not None else 1
-    conflict.stdout = result.stdout
-    conflict.stderr = result.stderr
-    conflict.stored_record = _parse_conflict_stored(result.stderr)
-    raise conflict
 
 
 def _machines_listing_shape_error(stdout: str, exc: ValidationError) -> ImbueCloudCliError:

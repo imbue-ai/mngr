@@ -10,14 +10,12 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future
-from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any
 from typing import Final
-from typing import Iterator
 from typing import Mapping
 from typing import ParamSpec
 from typing import Sequence
@@ -47,6 +45,7 @@ from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
@@ -87,7 +86,6 @@ from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import DiscoveredHostSize
@@ -96,15 +94,14 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ImageReference
-from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.primitives import read_checked_out_branch
 from imbue.mngr.providers.base_provider import BaseProviderInstance
-from imbue.mngr.providers.host_access_manifest import host_access_key_dir
 from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import remove_host_key_record
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
@@ -117,22 +114,12 @@ from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_host_setup import build_start_volume_sync_command
-from imbue.mngr.providers.ssh_host_setup import log_client_key_configuration
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
-from imbue.mngr.utils.docker_build_progress import count_dockerfile_instructions
 from imbue.mngr.utils.ssh import build_ssh_connect_command
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
-from imbue.mngr_modal.build_progress import MODAL_BUILD_STEP
-from imbue.mngr_modal.build_progress import ModalBuildOutputWatcher
-from imbue.mngr_modal.build_progress import ModalBuildProgressParser
 from imbue.mngr_modal.config import ModalProviderConfig
-from imbue.mngr_modal.constants import MODAL_HOST_ACCESS_MANIFEST
-from imbue.mngr_modal.constants import MODAL_HOST_KEY_NAME
-from imbue.mngr_modal.constants import MODAL_KNOWN_HOSTS_NAME
-from imbue.mngr_modal.constants import MODAL_SSH_KEY_NAME
-from imbue.mngr_modal.errors import ModalHostKeyMissingError
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import ModalSandboxDiedMngrError
 from imbue.mngr_modal.errors import ModalSandboxTimeoutMngrError
@@ -146,7 +133,8 @@ from imbue.mngr_modal.ssh_utils import create_pyinfra_host
 from imbue.mngr_modal.ssh_utils import load_or_create_per_host_client_keypair
 from imbue.mngr_modal.ssh_utils import load_or_create_per_host_host_keypair
 from imbue.mngr_modal.ssh_utils import per_host_key_dir
-from imbue.mngr_modal.ssh_utils import resolve_modal_client_keypair
+from imbue.mngr_modal.ssh_utils import resolve_per_host_client_keypair
+from imbue.mngr_modal.ssh_utils import resolve_per_host_host_keypair
 from imbue.mngr_modal.ssh_utils import wait_for_sshd_with_retry
 from imbue.mngr_modal.volume import ModalVolume
 from imbue.modal_proxy.data_types import StreamType
@@ -518,10 +506,6 @@ def check_host_name_is_unique(
         raise HostNameConflictError(provider_name, name)
 
 
-# Bound on waiting for the build watcher's final drain after a build ends.
-_BUILD_WATCHER_JOIN_TIMEOUT_SECONDS: Final[float] = 5.0
-
-
 class ModalProviderInstance(BaseProviderInstance):
     """Provider instance for managing Modal sandboxes as hosts.
 
@@ -586,39 +570,34 @@ class ModalProviderInstance(BaseProviderInstance):
 
     @property
     def _keys_dir(self) -> Path:
-        """The per-instance key dir, ``<profile>/providers/modal/<instance>/keys/``.
+        """Get the directory for SSH keys (profile-specific)."""
+        return self.mngr_ctx.profile_dir / "providers" / "modal"
 
-        The same shape as the vps providers' key dir, so a consumer that
-        carries a host's access material to another machine handles every
-        backend with one layout: per-host material under
-        ``keys/host_keys/<host uuid hex>/`` and the pins in ``keys/known_hosts``.
-        """
-        instance_dir = self.mngr_ctx.profile_dir / "providers" / "modal" / str(self.name)
-        return host_access_key_dir(instance_dir, MODAL_HOST_ACCESS_MANIFEST)
-
+    # CLEANUP: the legacy shared modal_ssh_key / host_key files under _keys_dir
+    # only serve sandboxes created before per-host keys existed. Sandboxes cycle
+    # within about a day, so the shared files (and these resolvers' legacy
+    # fallbacks) can be dropped once no pre-per-host-key sandbox remains.
     def _get_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
-        """The client keypair that opens this host: its per-host pair, else the instance's shared pair; never minted.
+        """Resolve the client keypair that opens this host: per-host first, legacy shared as fallback.
 
-        Only ``create_host`` mints a client key. A read path that minted one
-        would present a key the sandbox never authorized, and that key would
-        then win over a shared key installed later (see
-        ``resolve_modal_client_keypair``, which raises
-        ``ModalHostKeyMissingError`` when this machine holds neither).
+        A per-host key dir carries a ``known_hosts`` symlink so key-sibling
+        consumers (the forward SSH tunnel) keep finding the pinned host keys.
         """
-        return resolve_modal_client_keypair(self._keys_dir, host_id)
+        return resolve_per_host_client_keypair(self._keys_dir, host_id, "modal_ssh_key", "known_hosts")
 
     def _get_host_keypair(self, host_id: HostId) -> tuple[Path, str]:
-        """The per-host sshd host keypair for this host's sandbox, minted if it is not on disk yet.
+        """Resolve the sshd host keypair for this host's sandbox: per-host first, legacy fallback.
 
         The key is injected into the sandbox at every boot (create and
-        snapshot-restore alike), so restore re-serves the same per-host key.
+        snapshot-restore alike), so restore re-serves the same per-host key
+        while pre-per-host-key sandboxes keep their legacy shared one.
         """
-        return load_or_create_per_host_host_keypair(self._keys_dir, host_id, MODAL_HOST_KEY_NAME)
+        return resolve_per_host_host_keypair(self._keys_dir, host_id, "host_key")
 
     @property
     def _known_hosts_path(self) -> Path:
         """Get the path to the known_hosts file for this provider instance."""
-        return self._keys_dir / MODAL_KNOWN_HOSTS_NAME
+        return self._keys_dir / "known_hosts"
 
     # Host Volume Methods
 
@@ -1284,14 +1263,7 @@ class ModalProviderInstance(BaseProviderInstance):
     ) -> None:
         """Wait for sshd to be ready to accept connections."""
         private_key_path, _ = self._get_ssh_keypair(host_id)
-        wait_for_sshd_with_retry(
-            hostname,
-            port,
-            timeout_seconds,
-            private_key_path,
-            username=DEFAULT_SSH_USER,
-            known_hosts_path=self._known_hosts_path,
-        )
+        wait_for_sshd_with_retry(hostname, port, timeout_seconds, private_key_path, username=DEFAULT_SSH_USER)
 
     def _create_pyinfra_host(self, hostname: str, port: int, private_key_path: Path) -> PyinfraHost:
         """Create a pyinfra host with SSH connector."""
@@ -1396,13 +1368,6 @@ class ModalProviderInstance(BaseProviderInstance):
                 args=(sandbox, host_id, host_name, user_tags, config, host_data, ssh_host, ssh_port, host_public_key),
             )
 
-            log_client_key_configuration(
-                host_id,
-                self.name,
-                self.mngr_ctx.get_profile_user_id(),
-                client_public_key,
-                tuple(authorized_keys or ()),
-            )
             # Start sshd with our host key
             self._start_sshd_in_sandbox(
                 sandbox,
@@ -1418,14 +1383,7 @@ class ModalProviderInstance(BaseProviderInstance):
                 add_host_to_known_hosts(self._known_hosts_path, ssh_host, ssh_port, host_public_key, host_id=host_id)
 
             # Wait for sshd to be ready
-            with (
-                self.mngr_ctx.progress_reporter.step(
-                    ProgressStepId("modal.wait_ssh"),
-                    "Waiting for the sandbox's SSH",
-                    CreatePhase.CREATING_HOST.step_id,
-                ),
-                info_span("Waiting for sshd to be ready..."),
-            ):
+            with info_span("Waiting for sshd to be ready..."):
                 self._wait_for_sshd(ssh_host, ssh_port, host_id, self.config.ssh_connect_timeout)
 
             with log_span("Executing post-ssh operations"):
@@ -1716,27 +1674,6 @@ log "=== Shutdown script completed ==="
         Raises ModalProxyAuthError if Modal credentials are not configured.
         """
         return self.modal_app.app
-
-    @contextmanager
-    def _watch_build_output(self, dockerfile: Path | None, captured_length_before_build: int) -> Iterator[None]:
-        """Feed the build's captured output to the step-count parser on a side thread while the build runs."""
-        total_steps = count_dockerfile_instructions(dockerfile.read_text()) if dockerfile is not None else None
-        watcher = ModalBuildOutputWatcher(
-            read_captured_output=self.get_captured_output,
-            parser=ModalBuildProgressParser(reporter=self.mngr_ctx.progress_reporter, total_steps=total_steps),
-            start_offset=captured_length_before_build,
-        )
-        thread = start_mngr_thread(
-            concurrency_group=self.mngr_ctx.concurrency_group,
-            target=watcher.run_until_stopped,
-            name="modal-build-progress",
-            is_checked=False,
-        )
-        try:
-            yield
-        finally:
-            watcher.stop()
-            thread.join(_BUILD_WATCHER_JOIN_TIMEOUT_SECONDS)
 
     def get_captured_output(self) -> str:
         """Get all captured Modal output for this provider instance.
@@ -2039,12 +1976,19 @@ log "=== Shutdown script completed ==="
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         snapshot: SnapshotName | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] | None = None,
     ) -> Host:
         """Create a new Modal sandbox host.
 
         If snapshot is provided, the host is created from the snapshot image
         instead of building a new one.
         """
+        if published_ports:
+            raise PublishedPortUnsupportedError(
+                self.name,
+                str(published_ports[0]),
+                "this provider does not publish ports yet",
+            )
         # Generate host ID
         host_id = HostId.generate()
 
@@ -2099,13 +2043,7 @@ log "=== Shutdown script completed ==="
                 build_attempt = _ImageBuildAttempt(
                     image=modal_image, captured_length_before_build=len(self.get_captured_output())
                 )
-                with (
-                    self.mngr_ctx.progress_reporter.step(
-                        MODAL_BUILD_STEP, "Building the image", CreatePhase.CREATING_HOST.step_id
-                    ),
-                    log_span("Building Modal image"),
-                    self._watch_build_output(dockerfile_path, build_attempt.captured_length_before_build),
-                ):
+                with log_span("Building Modal image"):
                     modal_image.build(app)
 
             # Build volume mounts from build args
@@ -2167,11 +2105,13 @@ log "=== Shutdown script completed ==="
             updated_at=now,
         )
 
-        # Mint this host's own client + host keypairs up front. A clone
+        # Mint this host's own client + host keypairs up front so the setup
+        # helper's per-host resolution uses them for the new sandbox instead of
+        # falling back to the legacy shared pair from older sandboxes. A clone
         # (create_host --snapshot) lands here with a fresh host_id, so it mints
         # fresh keypairs rather than inheriting the source host's.
-        load_or_create_per_host_client_keypair(self._keys_dir, host_id, MODAL_SSH_KEY_NAME, MODAL_KNOWN_HOSTS_NAME)
-        load_or_create_per_host_host_keypair(self._keys_dir, host_id, MODAL_HOST_KEY_NAME)
+        load_or_create_per_host_client_keypair(self._keys_dir, host_id, "modal_ssh_key", "known_hosts")
+        load_or_create_per_host_host_keypair(self._keys_dir, host_id, "host_key")
 
         # Set up SSH and create host object using shared helper
         with log_span("Setting up SSH and creating Host object for {}", host_id):
@@ -2718,9 +2658,6 @@ log "=== Shutdown script completed ==="
                 if host_obj is not None:
                     hosts.append(host_obj)
                     discovery_state[host_obj.id] = HostState.RUNNING
-            except ModalHostKeyMissingError as e:
-                logger.info("No key for sandbox {} on this machine yet; skipping it: {}", future_host_id, e)
-                continue
             except (KeyError, ValueError, HostConnectionError) as e:
                 if isinstance(e, HostConnectionError):
                     self.on_connection_error(future_host_id)
@@ -2765,10 +2702,6 @@ log "=== Shutdown script completed ==="
                 host_obj = self._create_host_from_sandbox(sandbox, host_record=host_record)
                 if host_obj is not None:
                     return host_obj, HostState.RUNNING
-            except ModalHostKeyMissingError as e:
-                # Expected while a sandbox created elsewhere has no access material
-                # here yet, so not a warning on every poll; the record still lists it.
-                logger.info("No key for sandbox {} on this machine yet; surfacing it from its record: {}", host_id, e)
             except (KeyError, ValueError, HostConnectionError) as e:
                 if isinstance(e, HostConnectionError):
                     # must call on_connection_error when there is a connection error (to properly clear the cache)

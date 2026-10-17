@@ -1,15 +1,14 @@
 {
   "name": "imbue-studio",
   "productName": "Imbue Studio",
-  "version": "0.9.5",
+  "version": "0.8.6",
   "description": "Imbue Studio - Self-improving, persistent AI agents",
   "homepage": "https://github.com/imbue-ai/mngr",
   "author": "Imbue <dev@imbue.com>",
   "main": "electron/main.js",
   "scripts": {
     "prestart": "node scripts/ensure-binaries.js && pnpm run build:ui",
-    "start": "pnpm run start:prebuilt",
-    "start:prebuilt": "MINDS_DISABLE_CRASHPAD=1 electron .",
+    "start": "MINDS_DISABLE_CRASHPAD=1 electron .",
     "build": "node scripts/build.js",
     "build:ui": "pnpm -C frontend install --frozen-lockfile && pnpm -C frontend run generate && pnpm -C frontend run build",
     "dist": "pnpm build && pnpm exec todesktop build",
@@ -17,22 +16,22 @@
     "test:e2e": "playwright test --config=test/e2e/playwright.config.js"
   },
   "dependencies": {
-    "@sentry/electron": "^7.20.1",
-    "@todesktop/runtime": "^2.1.4",
+    "@sentry/electron": "^7.13.0",
+    "@todesktop/runtime": "^1.6.0",
     "builder-util-runtime": "9.7.0",
     "electron-updater": "6.8.9",
-    "latchkey": "^3.21.0",
+    "latchkey": "^3.18.3",
     "semver": "^7.6.3",
-    "smol-toml": "^1.9.1"
+    "smol-toml": "^1.6.1"
   },
   "devDependencies": {
     "@playwright/test": "1.60.0",
     "@todesktop/cli": "^1.28.1",
-    "electron": "45.1.0",
+    "electron": "40.10.1",
     "playwright": "1.60.0"
   },
   "engines": {
-    "node": "24.22.1",
+    "node": "24.15.0",
     "pnpm": "10.33.4"
   }
 }

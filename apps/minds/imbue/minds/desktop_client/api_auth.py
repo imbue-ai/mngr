@@ -17,7 +17,6 @@ from flask import request
 
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client.api_key_auth import is_request_authenticated
-from imbue.minds.desktop_client.api_transport import is_local_trusted_environ
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.responses import make_response
@@ -34,12 +33,8 @@ def json_response(data: dict[str, object], status_code: int = 200) -> Response:
     )
 
 
-def json_error(message: str, status_code: int, code: str | None = None) -> Response:
-    """An error body; ``code`` names the failure for a client that branches on it (the status alone is ambiguous)."""
-    body: dict[str, object] = {"error": message}
-    if code is not None:
-        body["code"] = code
-    return json_response(body, status_code=status_code)
+def json_error(message: str, status_code: int) -> Response:
+    return json_response({"error": message}, status_code=status_code)
 
 
 def json_field_error(message: str, field: str, status_code: int = 400) -> Response:
@@ -84,18 +79,16 @@ def _is_bearer_authenticated() -> bool:
 
 
 def require_api_or_cookie_auth(view: Callable[_ViewParams, Response]) -> Callable[_ViewParams, Response]:
-    """Allow the central bearer key (agents, via the gateway), the session cookie (the UI), or the local socket.
+    """Allow either the central bearer key (agents, via the gateway) or the session cookie (the UI).
 
-    The cross-workspace routes are reached by in-workspace agents (which
-    present the gateway-injected bearer), by the desktop UI itself (which
-    presents the session cookie), and by same-machine agents over the Unix
-    socket, whose listener already verified the caller is this user (see
-    ``api_transport``), so they accept any of the three.
+    The cross-workspace routes are reached both by in-workspace agents (which
+    present the gateway-injected bearer) and by the desktop UI itself (which
+    presents the session cookie), so they accept either credential.
     """
 
     @wraps(view)
     def wrapper(*args: _ViewParams.args, **kwargs: _ViewParams.kwargs) -> Response:
-        if is_local_trusted_environ(request.environ) or _is_bearer_authenticated() or _is_cookie_authenticated():
+        if _is_bearer_authenticated() or _is_cookie_authenticated():
             return view(*args, **kwargs)
         return json_error("Not authenticated", 401)
 

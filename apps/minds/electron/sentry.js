@@ -27,11 +27,6 @@ const SENTRY_FRONTEND_DSN_PRODUCTION = 'https://70356438f3a945b8e58cb0a6f8773d0a
 const SENTRY_FRONTEND_DSN_STAGING = 'https://b8ce0a0ea4d38de2bda94e5ff6168572@o4504335315501056.ingest.us.sentry.io/4511620045144064';
 const SENTRY_FRONTEND_DSN_DEV = 'https://ddc0f18beba95166b72eacd9d4b48bf0@o4504335315501056.ingest.us.sentry.io/4511620043243520';
 
-// Presence-only env var the e2e harness (imbue/minds/desktop_client/e2e_workspace_runner.py)
-// sets on the Electron it launches. Its events are tagged so they can be told
-// apart from a developer's own install -- both land in the development project.
-const E2E_HARNESS_MARKER_ENV_VAR = 'MINDS_LAUNCHED_BY_E2E_HARNESS';
-
 /**
  * Parse the per-machine user config (`<dataDir>/config.toml`), or return `{}` when
  * the file is absent or unreadable.
@@ -148,16 +143,6 @@ function fixupReleaseId(releaseId) {
 }
 
 /**
- * Whether Sentry's native-crash (Crashpad) integration runs in this process --
- * every run except the dev launcher's, which sets MINDS_DISABLE_CRASHPAD (see
- * the `integrations` comment in initSentry). Electron's crashReporter APIs may
- * only be used once that integration has started Crashpad.
- */
-function isNativeCrashReportingEnabled() {
-  return process.env.MINDS_DISABLE_CRASHPAD !== '1';
-}
-
-/**
  * Initialize Sentry for the Electron main process. The SDK is always
  * initialized so it is ready to capture startup errors, but a `beforeSend` hook
  * reads `report_unexpected_errors` live on every event and drops the event while
@@ -192,9 +177,10 @@ function initSentry(options = {}) {
     // minidump reporting on for every other run -- packaged builds and a plain
     // `electron .` alike.
     integrations: (defaults) => {
-      const kept = isNativeCrashReportingEnabled()
-        ? defaults
-        : defaults.filter((integration) => integration.name !== 'SentryMinidump');
+      const kept =
+        process.env.MINDS_DISABLE_CRASHPAD === '1'
+          ? defaults.filter((integration) => integration.name !== 'SentryMinidump')
+          : defaults;
       // Replace the default ChildProcess integration so an out-of-memory renderer
       // death is captured as a Sentry EVENT, not just a breadcrumb. Its default
       // ``events`` list is ['abnormal-exit', 'launch-failed', 'integrity-failure']
@@ -233,9 +219,6 @@ function initSentry(options = {}) {
     },
   });
   Sentry.setTag('git_sha', gitSha);
-  if (process.env[E2E_HARNESS_MARKER_ENV_VAR]) {
-    Sentry.setTag('launched_by', 'e2e_harness');
-  }
   console.log(
     `[sentry] Initialized (environment=${environment}, release=${fixupReleaseId(releaseId)}); ` +
       'automatic reporting gated live by the report_unexpected_errors user setting.'
@@ -448,7 +431,6 @@ function captureManualReport({ message, details }) {
 module.exports = {
   initSentry,
   isErrorReportingEnabled,
-  isNativeCrashReportingEnabled,
   resolveEnvironment,
   fixupReleaseId,
   getOrCreateAnonymousUserId,
