@@ -1166,6 +1166,24 @@ kill -TERM 1
         container.reload()
         return read_published_endpoints_from_port_bindings(container.ports, declarations, self._get_ssh_host())
 
+    def _read_published_endpoints_or_remove_container(
+        self, container: docker.models.containers.Container, declarations: Sequence[PublishedPortDeclaration]
+    ) -> list[PublishedEndpoint]:
+        """Read a just-run container's published endpoints, removing the container when the read fails.
+
+        The container exists from this point on, so a declared port with no binding (most often a
+        container whose command exited at once) must not leave it behind the failed host record.
+        """
+        try:
+            return self._read_published_endpoints(container, declarations)
+        except MngrError as e:
+            logger.warning("Reading the published ports of the new container failed, removing it: {}", e)
+            try:
+                container.remove(force=True)
+            except docker.errors.DockerException as remove_error:
+                logger.warning("Could not remove container {}: {}", container.short_id, remove_error)
+            raise
+
     def _runtime_not_registered_error_or_none(self, error: ProcessError) -> DockerRuntimeNotRegisteredError | None:
         """Map a `docker run` `ProcessError` to a typed runtime error, when applicable.
 
@@ -1591,7 +1609,7 @@ kill -TERM 1
                     ),
                     publish_specs=self._publish_specs_for_new_container(declarations),
                 )
-                published_endpoints = self._read_published_endpoints(container, declarations)
+                published_endpoints = self._read_published_endpoints_or_remove_container(container, declarations)
 
         except docker.errors.APIError as e:
             failure_reason = str(e)
