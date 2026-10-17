@@ -385,6 +385,10 @@ class GcpVpsClient(VpsClientInterface):
                 self.published_firewall_name,
                 self.project_id,
             )
+        else:
+            logger.debug(
+                "Published-ports firewall rule {} already allows the configured ports", self.published_firewall_name
+            )
         logger.info(
             "Ensured published-ports firewall rule {} (tag {}) in project {}",
             self.published_firewall_name,
