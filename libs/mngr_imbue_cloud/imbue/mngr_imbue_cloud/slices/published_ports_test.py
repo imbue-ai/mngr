@@ -5,6 +5,7 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortDeclarati
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortProtocol
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePublishedPort
 from imbue.mngr_imbue_cloud.slices.published_ports import build_slice_container_publish_start_args
+from imbue.mngr_imbue_cloud.slices.published_ports import declarations_missing_from_wire
 from imbue.mngr_imbue_cloud.slices.published_ports import published_endpoints_from_slice_ports
 from imbue.mngr_imbue_cloud.slices.published_ports import published_endpoints_from_wire
 from imbue.mngr_imbue_cloud.slices.published_ports import slice_declarations_from_wire
@@ -59,3 +60,16 @@ def test_wire_entries_with_an_unknown_protocol_are_dropped_not_guessed() -> None
         PublishedEndpoint(guest_port=8080, protocol=PortProtocol.TCP, host="203.0.113.9", host_port=22014),
     ]
     assert published_endpoints_from_wire((), "203.0.113.9") == []
+
+
+def test_declarations_missing_from_wire_names_the_declared_ports_the_lease_lacks() -> None:
+    declarations = parse_published_port_declarations(["59000/udp", "59000/tcp", "8080"])
+    entries = (
+        PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22012),
+        PublishedPortInfo(guest_port=8080, protocol=PublishedPortProtocol.TCP, host_port=22014),
+    )
+    assert declarations_missing_from_wire(declarations, entries) == [declarations[1]]
+    assert declarations_missing_from_wire(declarations, ()) == list(declarations)
+    # A lease that publishes more than was declared still honours every declaration.
+    assert declarations_missing_from_wire(declarations[:1], entries) == []
+    assert declarations_missing_from_wire((), ()) == []

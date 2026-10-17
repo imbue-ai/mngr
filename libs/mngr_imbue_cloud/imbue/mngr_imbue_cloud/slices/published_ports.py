@@ -90,6 +90,23 @@ def slice_declarations_from_wire(entries: Sequence[PublishedPortInfo]) -> tuple[
     return tuple(declarations)
 
 
+@pure
+def declarations_missing_from_wire(
+    declarations: Sequence[PublishedPortDeclaration], entries: Sequence[PublishedPortInfo]
+) -> list[PublishedPortDeclaration]:
+    """The declared ports a lease's wire entries do not carry, in declaration order.
+
+    Empty when the connector honoured every declaration; a connector from before published
+    ports ignores the request's declarations and leases any host, which this exposes.
+    """
+    published = {(entry.guest_port, entry.protocol.value) for entry in entries}
+    return [
+        declaration
+        for declaration in declarations
+        if (declaration.guest_port, declaration.protocol.value.lower()) not in published
+    ]
+
+
 def published_endpoints_from_wire(entries: Sequence[PublishedPortInfo], box_address: str) -> list[PublishedEndpoint]:
     """The host-record endpoints of a lease's wire entries, reachable at the box's address.
 

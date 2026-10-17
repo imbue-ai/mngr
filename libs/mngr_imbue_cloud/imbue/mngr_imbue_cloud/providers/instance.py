@@ -62,6 +62,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
@@ -166,6 +167,7 @@ from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provide
 from imbue.mngr_imbue_cloud.providers.slice_provider import read_container_ca_trust_files_from_vm
 from imbue.mngr_imbue_cloud.providers.wipe import build_pool_host_wipe_script
 from imbue.mngr_imbue_cloud.repo_identity import canonicalize_repo_source
+from imbue.mngr_imbue_cloud.slices.published_ports import declarations_missing_from_wire
 from imbue.mngr_imbue_cloud.slices.published_ports import published_endpoints_from_wire
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
@@ -2090,6 +2092,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
 
         host_id = HostId(lease_result.host_id)
         with self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "fast-path setup"):
+            self._ensure_lease_publishes_declared_ports(lease_result, published_ports)
             # Install the keypair inside the guard: the connector has already
             # marked the host leased, so a failure here (e.g. an OSError while
             # moving the key files) must still release the lease.
@@ -2197,6 +2200,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
 
         host_id = HostId(lease_result.host_id)
         with self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "slow-path rebuild"):
+            self._ensure_lease_publishes_declared_ports(lease_result, published_ports)
             # Install the keypair inside the guard: the connector has already
             # marked the host leased, so a failure here (e.g. an OSError while
             # moving the key files) must still release the lease.
@@ -2385,6 +2389,25 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             yield outer
         finally:
             outer.disconnect()
+
+    def _ensure_lease_publishes_declared_ports(
+        self, lease_result: LeaseResult, published_ports: Sequence[PublishedPortDeclaration]
+    ) -> None:
+        """Refuse a lease that does not carry every declared port; raises PublishedPortUnsupportedError.
+
+        The exact match lives in the connector's lease query, and a connector from before
+        published ports ignores the request's declarations and leases any host; checking the
+        answer keeps such a lease from becoming a host that quietly publishes nothing
+        (specs/published-ports/spec.md, D3). Called inside the release guard, so the lease
+        goes back to the pool.
+        """
+        missing = declarations_missing_from_wire(published_ports, lease_result.published_ports)
+        if missing:
+            raise PublishedPortUnsupportedError(
+                self.name,
+                str(missing[0]),
+                "the connector leased a host that does not publish it; upgrade the connector or rebake the pool",
+            )
 
     @contextmanager
     def _release_lease_on_failure(

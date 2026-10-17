@@ -35,6 +35,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -269,6 +270,36 @@ def _make_release_guard_provider() -> tuple[_ReleaseGuardProvider, _RecordingRel
         _cleanup_calls=[],
     )
     return provider, client
+
+
+def _make_lease_result(published_ports: list[PublishedPortInfo]) -> LeaseResult:
+    return LeaseResult(
+        host_db_id=LeaseDbId("lease-db-id"),
+        vps_address="203.0.113.99",
+        ssh_port=23010,
+        ssh_user="root",
+        container_ssh_port=23011,
+        agent_id=str(AgentId.generate()),
+        host_id=str(HostId.generate()),
+        host_name="fresh-host",
+        published_ports=tuple(published_ports),
+    )
+
+
+def test_ensure_lease_publishes_declared_ports_refuses_a_lease_lacking_a_declared_port() -> None:
+    """A connector from before published ports ignores the declarations and leases any host; the
+    client refuses such a lease rather than creating a host that publishes nothing."""
+    provider, _client = _make_release_guard_provider()
+    declarations = parse_published_port_declarations(["59000/udp", "59000/tcp"])
+    lease_result = _make_lease_result(
+        published_ports=[PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22012)]
+    )
+
+    with pytest.raises(PublishedPortUnsupportedError, match="59000/tcp"):
+        provider._ensure_lease_publishes_declared_ports(lease_result, declarations)
+
+    provider._ensure_lease_publishes_declared_ports(lease_result, declarations[:1])
+    provider._ensure_lease_publishes_declared_ports(_make_lease_result(published_ports=[]), ())
 
 
 def test_release_lease_on_failure_releases_once_and_propagates() -> None:
