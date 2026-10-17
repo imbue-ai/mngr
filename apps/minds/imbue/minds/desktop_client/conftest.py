@@ -3,6 +3,7 @@ import json
 import tempfile
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -751,19 +752,31 @@ def short_tmp_path() -> Iterator[Path]:
 _FIXED_TEST_HOST_ID: str = "host-00000000000000000000000000000000"
 
 
-def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None, host_name: str | None = None) -> str:
+def make_agents_json(
+    *agent_ids: AgentId,
+    labels: dict[str, str] | None = None,
+    host_name: str | None = None,
+    published_endpoints: Sequence[Mapping[str, object]] | None = None,
+) -> str:
     """Build a JSON string matching `mngr list --format json` output for the given agent IDs.
 
     When ``host_name`` is given, each agent carries a ``host`` object with that
     name so the resolver's ``host_name_by_host_id`` (the canonical host-name
-    source) is populated, mirroring real discovery output.
+    source) is populated, mirroring real discovery output. ``published_endpoints``
+    (raw ``PublishedEndpoint`` objects) lands on that host object as
+    ``host.published_endpoints``.
     """
     effective_labels = labels if labels is not None else {"is_primary": "true"}
 
     def _agent(agent_id: AgentId) -> dict[str, object]:
         entry: dict[str, object] = {"id": str(agent_id), "labels": effective_labels}
-        if host_name is not None:
-            entry["host"] = {"id": _FIXED_TEST_HOST_ID, "name": host_name}
+        if host_name is not None or published_endpoints is not None:
+            host: dict[str, object] = {"id": _FIXED_TEST_HOST_ID}
+            if host_name is not None:
+                host["name"] = host_name
+            if published_endpoints is not None:
+                host["published_endpoints"] = [dict(endpoint) for endpoint in published_endpoints]
+            entry["host"] = host
         return entry
 
     return json.dumps({"agents": [_agent(agent_id) for agent_id in agent_ids]})
@@ -847,6 +860,7 @@ def make_resolver_with_data(
                 discovered_agents=discovered,
                 ssh_info_by_agent_id=parsed.ssh_info_by_agent_id,
                 host_name_by_host_id=parsed.host_name_by_host_id,
+                published_endpoints_by_agent_id=parsed.published_endpoints_by_agent_id,
             )
         )
 

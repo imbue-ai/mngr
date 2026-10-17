@@ -461,3 +461,82 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
   win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.OPEN_LINK, url: 'http://localhost/' } });
   assert.deepStrictEqual(seen, []);
 });
+
+test('the contract is at version 9', () => {
+  assert.strictEqual(contract.CONTRACT_VERSION, '9');
+});
+
+test('embedder endpoint takes an immersive request only with a window id and a boolean on', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.IMMERSIVE_REQUEST]: (msg) => seen.push([msg.windowId, msg.on]) },
+  });
+  const deliver = (payload) =>
+    win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.IMMERSIVE_REQUEST, ...payload } });
+  deliver({ windowId: 'win-0123456789abcdef', on: true });
+  deliver({ windowId: 'win-0123456789abcdef', on: false });
+  deliver({ windowId: 'win-0123456789abcdef', on: 'true' });
+  deliver({ windowId: 'win-0123456789abcdef' });
+  deliver({ windowId: 'agent-abc', on: true });
+  deliver({ windowId: 'win-../x', on: true });
+  deliver({ on: true });
+  assert.deepStrictEqual(seen, [
+    ['win-0123456789abcdef', true],
+    ['win-0123456789abcdef', false],
+  ]);
+});
+
+test('workspace endpoint never honours an immersive request, which only travels to the embedder', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.IMMERSIVE_REQUEST]: (msg) => seen.push(msg.on) },
+  });
+  win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.IMMERSIVE_REQUEST, windowId: 'win-abc', on: true } });
+  assert.deepStrictEqual(seen, []);
+});
+
+test('workspace endpoint takes an immersive change only with two booleans and an optional short error', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.IMMERSIVE_CHANGED]: (msg) => seen.push([msg.on, msg.keyboardLocked, msg.error]) },
+  });
+  const deliver = (payload) =>
+    win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.IMMERSIVE_CHANGED, ...payload } });
+  deliver({ on: true, keyboardLocked: true });
+  deliver({ on: true, keyboardLocked: false });
+  deliver({ on: false, keyboardLocked: false, error: 'fullscreen refused' });
+  deliver({ on: false, keyboardLocked: false, error: 'x'.repeat(contract.MAX_IMMERSIVE_ERROR_LENGTH) });
+  deliver({ on: false, keyboardLocked: false, error: 'x'.repeat(contract.MAX_IMMERSIVE_ERROR_LENGTH + 1) });
+  deliver({ on: false, keyboardLocked: false, error: 42 });
+  deliver({ on: true });
+  deliver({ keyboardLocked: true });
+  deliver({ on: 'on', keyboardLocked: true });
+  assert.deepStrictEqual(seen, [
+    [true, true, undefined],
+    [true, false, undefined],
+    [false, false, 'fullscreen refused'],
+    [false, false, 'x'.repeat(contract.MAX_IMMERSIVE_ERROR_LENGTH)],
+  ]);
+});
+
+test('workspace endpoint reads the immersive capability only as a boolean or absent', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.EMBEDDER_CAPABILITIES]: (msg) => seen.push(msg.immersive) },
+  });
+  const deliver = (payload) =>
+    win.deliver({
+      source: parentWin,
+      origin: 'http://chrome',
+      data: { type: contract.EMBEDDER_CAPABILITIES, canPopOut: true, ...payload },
+    });
+  deliver({});
+  deliver({ immersive: true });
+  deliver({ immersive: false });
+  deliver({ immersive: 'yes' });
+  deliver({ immersive: 1 });
+  assert.deepStrictEqual(seen, [undefined, true, false]);
+});

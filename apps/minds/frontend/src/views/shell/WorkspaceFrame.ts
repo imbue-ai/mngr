@@ -11,7 +11,12 @@
 import m from "mithril";
 import { electronBridge } from "../../electron-bridge";
 import { fetchJson } from "../../models/create";
-import { armProviderRelay, stopProviderRelay } from "../../models/providerRelay";
+import {
+  armProviderRelay,
+  stopProviderRelay,
+} from "../../models/providerRelay";
+import type { ImmersiveChange } from "./immersive";
+import { ImmersiveController } from "./immersive";
 import type {
   DetachedWindowEntry,
   FocusChatSender,
@@ -54,6 +59,8 @@ interface EmbedContractModule {
   TEAR_OUT: string;
   OPEN_LINK: string;
   OPEN_EXTERNAL: string;
+  IMMERSIVE_REQUEST: string;
+  IMMERSIVE_CHANGED: string;
   REQUEST_ID_PATTERN: RegExp;
   createEmbedderEndpoint(options: {
     getFrameWindow: () => Window | null;
@@ -141,9 +148,19 @@ export interface EmbedHandlerDeps {
     beginDrag: (request: WorkspaceWindowDragRequest) => void;
     /** The shell's own drag gesture ended, having detached the window or not, and cancelled or released
      * (null from a shell that does not say). */
-    endDrag: (workspaceId: string, windowId: string, isDetached: boolean, isCancelled: boolean | null) => void;
+    endDrag: (
+      workspaceId: string,
+      windowId: string,
+      isDetached: boolean,
+      isCancelled: boolean | null,
+    ) => void;
     detachedWindows: (windows: readonly DetachedWindowEntry[]) => void;
   } | null;
+  /** The workspace asked to enter or leave immersive mode for one of its
+   * windows (minds:immersive-request); null in a chrome that cannot, which
+   * then never answers with the capability either. Called synchronously from
+   * the handler, so the fullscreen request keeps the click's activation. */
+  immersive: { request: (on: boolean) => void } | null;
 }
 
 /** The message-type -> handler map the embedder endpoint dispatches through.
@@ -224,26 +241,41 @@ export function buildEmbedHandlers(
     sendAck(contract.EMBEDDER_CAPABILITIES, {
       canPopOut: deps.popout !== null,
       opensExternalLinks: deps.openExternalLink !== null,
+      immersive: deps.immersive !== null,
     });
   };
+  const immersive = deps.immersive;
+  if (immersive !== null) {
+    // The contract validated the shape; only the flag is read.
+    handlers[contract.IMMERSIVE_REQUEST] = (message) =>
+      immersive.request(message.on === true);
+  }
   const openExternalLink = deps.openExternalLink;
   if (openExternalLink !== null) {
-    handlers[contract.OPEN_EXTERNAL] = (message) => openExternalLink(String(message.url));
+    handlers[contract.OPEN_EXTERNAL] = (message) =>
+      openExternalLink(String(message.url));
   }
   const popout = deps.popout;
   if (popout !== null) {
     // The contract validated every field's shape; the fields are re-read
     // here so nothing else of a message rides into main.
-    const openRequestOf = (message: Record<string, unknown>): PopoutOpenRequest => ({
+    const openRequestOf = (
+      message: Record<string, unknown>,
+    ): PopoutOpenRequest => ({
       workspaceId: workspaceAgentId(),
       windowId: String(message.windowId),
       title: String(message.title),
       width: Number(message.width),
       height: Number(message.height),
     });
-    handlers[contract.POP_OUT_WINDOW] = (message) => popout.open(openRequestOf(message));
+    handlers[contract.POP_OUT_WINDOW] = (message) =>
+      popout.open(openRequestOf(message));
     handlers[contract.WINDOW_DRAG_STARTED] = (message) =>
-      popout.beginDrag({ ...openRequestOf(message), grabX: Number(message.grabX), grabY: Number(message.grabY) });
+      popout.beginDrag({
+        ...openRequestOf(message),
+        grabX: Number(message.grabX),
+        grabY: Number(message.grabY),
+      });
     handlers[contract.WINDOW_DRAG_ENDED] = (message) =>
       popout.endDrag(
         workspaceAgentId(),
@@ -258,7 +290,10 @@ export function buildEmbedHandlers(
         if (typeof raw !== "object" || raw === null) continue;
         const entry = raw as Record<string, unknown>;
         if (typeof entry.windowId !== "string") continue;
-        entries.push({ windowId: entry.windowId, title: typeof entry.title === "string" ? entry.title : "" });
+        entries.push({
+          windowId: entry.windowId,
+          title: typeof entry.title === "string" ? entry.title : "",
+        });
       }
       popout.detachedWindows(entries);
     };
@@ -314,7 +349,8 @@ export async function pushResolutionSnapshot(
 export class FrameLinkHandling {
   private workspaceId: string | null = null;
   private opensLinks = false;
-  private lastReport: WorkspaceLinkHandlingReport | null | undefined = undefined;
+  private lastReport: WorkspaceLinkHandlingReport | null | undefined =
+    undefined;
   private readonly report: (report: WorkspaceLinkHandlingReport | null) => void;
   private readonly sendOpenLink: (url: string) => void;
 
@@ -351,8 +387,13 @@ export class FrameLinkHandling {
    * to a page that announced it opens links, and nowhere otherwise. */
   openLink(url: string): void {
     if (this.workspaceId === null || !this.opensLinks) {
-      const why = this.workspaceId === null ? "no workspace is mounted" : "its page has not announced opensLinks";
-      console.warn(`[link-routing] dropped a link main handed back, since ${why}: ${url}`);
+      const why =
+        this.workspaceId === null
+          ? "no workspace is mounted"
+          : "its page has not announced opensLinks";
+      console.warn(
+        `[link-routing] dropped a link main handed back, since ${why}: ${url}`,
+      );
       return;
     }
     this.sendOpenLink(url);
@@ -360,17 +401,58 @@ export class FrameLinkHandling {
 
   private publish(): void {
     const next =
-      this.workspaceId === null ? null : { workspaceId: this.workspaceId, opensLinks: this.opensLinks };
+      this.workspaceId === null
+        ? null
+        : { workspaceId: this.workspaceId, opensLinks: this.opensLinks };
     const last = this.lastReport;
     const isUnchanged =
       last !== undefined &&
       (last === null || next === null
         ? last === next
-        : last.workspaceId === next.workspaceId && last.opensLinks === next.opensLinks);
+        : last.workspaceId === next.workspaceId &&
+          last.opensLinks === next.opensLinks);
     if (isUnchanged) return;
     this.lastReport = next;
     this.report(next);
   }
+}
+
+/** The frame's `navigator.keyboard`, where the browser has one. Typed here
+ * because lib.dom knows no Keyboard Lock API. */
+function keyboardLockSurfaceOf(
+  nav: Navigator,
+): { lock(): Promise<void>; unlock(): void } | null {
+  const keyboard = (
+    nav as Navigator & { keyboard?: { lock?: unknown; unlock?: unknown } }
+  ).keyboard;
+  if (
+    !keyboard ||
+    typeof keyboard.lock !== "function" ||
+    typeof keyboard.unlock !== "function"
+  )
+    return null;
+  return {
+    lock: () => (keyboard.lock as () => Promise<void>).call(keyboard),
+    unlock: () => (keyboard.unlock as () => void).call(keyboard),
+  };
+}
+
+/** Immersive mode over the real frame, document and desktop bridge; null
+ * without a frame element to take fullscreen. */
+function buildImmersiveController(
+  frame: HTMLIFrameElement | null,
+  doc: Document,
+  send: (change: ImmersiveChange) => void,
+): ImmersiveController | null {
+  if (frame === null) return null;
+  return new ImmersiveController({
+    requestFullscreen: () => frame.requestFullscreen(),
+    isFullscreen: () => doc.fullscreenElement !== null,
+    exitFullscreen: () => doc.exitFullscreen(),
+    keyboard: keyboardLockSurfaceOf(navigator),
+    setDesktopImmersive: (on) => electronBridge.setImmersive(on),
+    send,
+  });
 }
 
 // electronBridge.onCloseActiveTab has no unregister, so the preload callback
@@ -417,6 +499,11 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   );
   let frameHandle: WorkspaceFrameHandle | null = null;
   let isRemoved = false;
+  // Immersive mode for the mounted frame (immersive.ts); built at mount so
+  // the frame element exists, and told about every navigation and the
+  // document's fullscreenchange, which is where it ends.
+  let immersive: ImmersiveController | null = null;
+  const onFullscreenChange = (): void => immersive?.fullscreenChanged();
   // Whether the page the frame currently holds has announced that its
   // endpoint is listening; a send before that is lost, so a focus-chat ask
   // waits in the shell until it arrives. Cleared at the navigation, the only
@@ -439,13 +526,21 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     armedWorkspaceAnyId = workspaceAnyId;
     armedSoloWindowId = soloWindowId;
     armedIsSoloReopened = isSoloReopened;
-    const expected = shell.stores.workspaces.workspaceFrameUrl(workspaceAnyId, soloWindowId, isSoloReopened);
+    const expected = shell.stores.workspaces.workspaceFrameUrl(
+      workspaceAnyId,
+      soloWindowId,
+      isSoloReopened,
+    );
     const isNavigating = frameElement.getAttribute("src") !== expected;
     if (isNavigating) {
       isMountedPageReady = false;
+      immersive?.frameNavigated();
       frameElement.src = expected;
     }
-    linkHandling.frameArmed(shell.stores.workspaces.toAgentScopedId(workspaceAnyId), isNavigating);
+    linkHandling.frameArmed(
+      shell.stores.workspaces.toAgentScopedId(workspaceAnyId),
+      isNavigating,
+    );
   }
 
   // Re-navigate the frame even though the URL is unchanged: assigning src
@@ -456,16 +551,29 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   function reloadFrame(shell: ShellState): void {
     if (frameElement === null || armedWorkspaceAnyId === null) return;
     isMountedPageReady = false;
-    frameElement.src =
-      shell.stores.workspaces.workspaceFrameUrl(armedWorkspaceAnyId, armedSoloWindowId, armedIsSoloReopened);
-    linkHandling.frameArmed(shell.stores.workspaces.toAgentScopedId(armedWorkspaceAnyId), true);
+    immersive?.frameNavigated();
+    frameElement.src = shell.stores.workspaces.workspaceFrameUrl(
+      armedWorkspaceAnyId,
+      armedSoloWindowId,
+      armedIsSoloReopened,
+    );
+    linkHandling.frameArmed(
+      shell.stores.workspaces.toAgentScopedId(armedWorkspaceAnyId),
+      true,
+    );
   }
 
   return {
     oncreate(vnode) {
-      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } = vnode.attrs;
+      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } =
+        vnode.attrs;
       frameElement = vnode.dom.querySelector("#content-frame");
       frameElement?.addEventListener("load", stampFrameLoad);
+      immersive = buildImmersiveController(frameElement, document, (change) => {
+        if (contract !== null)
+          endpoint?.send(contract.IMMERSIVE_CHANGED, { ...change });
+      });
+      document.addEventListener("fullscreenchange", onFullscreenChange);
       armFrame(shell, workspaceAnyId, soloWindowId, isSoloReopened);
       // The armed id, not the attr, is what the shell asks about: this frame is
       // re-armed by onupdate, and it is mounted for the workspace an app modal
@@ -482,7 +590,12 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       // lands and the URL therefore changes to the workspace-id form.
       unsubscribeWorkspaces = shell.stores.workspaces.onChanged(() => {
         if (armedWorkspaceAnyId !== null) {
-          armFrame(shell, armedWorkspaceAnyId, armedSoloWindowId, armedIsSoloReopened);
+          armFrame(
+            shell,
+            armedWorkspaceAnyId,
+            armedSoloWindowId,
+            armedIsSoloReopened,
+          );
         }
       });
 
@@ -526,12 +639,22 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           openExternalLink: electronBridge.opensExternalLinks
             ? (url) => electronBridge.openExternalLink(url)
             : null,
+          immersive:
+            immersive === null
+              ? null
+              : { request: (on) => immersive?.request(on) },
           popout: electronBridge.canPopOut
             ? {
                 open: (request) => electronBridge.openPopoutWindow(request),
-                beginDrag: (request) => electronBridge.beginWorkspaceWindowDrag(request),
+                beginDrag: (request) =>
+                  electronBridge.beginWorkspaceWindowDrag(request),
                 endDrag: (workspaceId, windowId, isDetached, isCancelled) =>
-                  electronBridge.endWorkspaceWindowDrag(workspaceId, windowId, isDetached, isCancelled),
+                  electronBridge.endWorkspaceWindowDrag(
+                    workspaceId,
+                    windowId,
+                    isDetached,
+                    isCancelled,
+                  ),
                 detachedWindows: (windows) =>
                   shell.handleDetachedWindows(
                     windows,
@@ -584,12 +707,22 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         };
         shell.registerFocusChatSender(focusChatSender);
         reattachWindowSender = (windowId, frame) => {
-          endpoint?.send(loaded.REATTACH_WINDOW, frame === null ? { windowId } : { windowId, frame });
+          endpoint?.send(
+            loaded.REATTACH_WINDOW,
+            frame === null ? { windowId } : { windowId, frame },
+          );
         };
         shell.registerReattachWindowSender(reattachWindowSender);
         tearOutSender = (report: TearOutReport) => {
-          if (report.workspaceId !== shell.stores.workspaces.toAgentScopedId(mountedAnyId())) return;
-          endpoint?.send(loaded.TEAR_OUT, { windowId: report.windowId, phase: report.phase });
+          if (
+            report.workspaceId !==
+            shell.stores.workspaces.toAgentScopedId(mountedAnyId())
+          )
+            return;
+          endpoint?.send(loaded.TEAR_OUT, {
+            windowId: report.windowId,
+            phase: report.phase,
+          });
         };
         shell.registerTearOutSender(tearOutSender);
         openLinkSender = (url) => linkHandling.openLink(url);
@@ -620,7 +753,8 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       });
     },
     onupdate(vnode) {
-      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } = vnode.attrs;
+      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } =
+        vnode.attrs;
       armFrame(shell, workspaceAnyId, soloWindowId, isSoloReopened);
     },
     onremove(vnode) {
@@ -658,6 +792,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         linkHandling.unmounted();
       }
       frameHandle = null;
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      immersive?.frameNavigated();
+      immersive = null;
       if (onFrameLoad !== null)
         frameElement?.removeEventListener("load", onFrameLoad);
       onFrameLoad = null;
@@ -683,8 +820,11 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           class: "workspace-surface bg-surface-primary pointer-events-none",
         }),
         m("iframe#content-frame", {
+          // allow-pointer-lock: a pointer lock needs it in every sandbox
+          // list on the way (the Screen's viewer takes one; the workspace
+          // shell's page frames add it too).
           sandbox:
-            "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals",
+            "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-pointer-lock",
           allow: "clipboard-read *; clipboard-write *; fullscreen *",
           class: "workspace-surface border-0 bg-surface-primary",
           style: "box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;",

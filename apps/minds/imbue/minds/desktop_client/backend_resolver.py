@@ -16,6 +16,7 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import ValidationError
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -35,6 +36,7 @@ from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
@@ -346,6 +348,16 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return {}
 
+    def get_published_endpoints(self, agent_id: AgentId) -> list[PublishedEndpoint]:
+        """Where each port the agent's host was created with ``--publish`` is reachable from this desktop.
+
+        The desktop's reading of ``HostInterface.get_published_endpoints``: the host record as
+        discovery last reported it (``host.published_endpoints``), which on Imbue Cloud is the
+        connector's current ports. Empty for a host with none. Default implementation returns
+        an empty list.
+        """
+        return []
+
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Return SSH connection info for the agent's host, or None for local agents.
 
@@ -485,6 +497,11 @@ class StaticBackendResolver(BackendResolverInterface):
         frozen=True,
         description="Optional recorded size keyed by host ID string, for tests of the size surfaces.",
     )
+    published_endpoints_by_agent_id: Mapping[str, tuple[PublishedEndpoint, ...]] = Field(
+        default_factory=dict,
+        frozen=True,
+        description="Optional published endpoints keyed by agent ID string, for tests of the Screen routes.",
+    )
 
     def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
         services = self.url_by_agent_and_service.get(str(agent_id))
@@ -503,6 +520,9 @@ class StaticBackendResolver(BackendResolverInterface):
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         return self.ssh_info_by_agent_id.get(str(agent_id))
+
+    def get_published_endpoints(self, agent_id: AgentId) -> list[PublishedEndpoint]:
+        return list(self.published_endpoints_by_agent_id.get(str(agent_id), ()))
 
     def get_host_size(self, host_id: HostId) -> DiscoveredHostSize | None:
         return self.host_size_by_host_id.get(str(host_id))
@@ -534,6 +554,10 @@ class ParsedAgentsResult(FrozenModel):
         default_factory=dict,
         description="The recorded size keyed by host ID string, for hosts whose provider reported one",
     )
+    published_endpoints_by_agent_id: Mapping[str, tuple[PublishedEndpoint, ...]] = Field(
+        default_factory=dict,
+        description="The host's published endpoints keyed by agent ID string, for agents on a host that reported any",
+    )
 
 
 def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
@@ -553,6 +577,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
     agents = data.get("agents", [])
     agent_ids: list[AgentId] = []
     ssh_info_by_id: dict[str, RemoteSSHInfo] = {}
+    published_endpoints_by_id: dict[str, tuple[PublishedEndpoint, ...]] = {}
     host_state_by_host_id: dict[str, HostState] = {}
     host_name_by_host_id: dict[str, str] = {}
 
@@ -578,6 +603,11 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
         if isinstance(host_id_value, str) and isinstance(name_value, str):
             host_name_by_host_id[host_id_value] = name_value
 
+        # Absent from an older mngr's output, and from a host with nothing published.
+        raw_endpoints = host.get("published_endpoints")
+        if isinstance(raw_endpoints, list):
+            published_endpoints_by_id[agent_id_str] = _parse_published_endpoints(agent_id_str, raw_endpoints)
+
         ssh = host.get("ssh")
         if ssh is None:
             continue
@@ -602,7 +632,19 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
         ssh_info_by_agent_id=ssh_info_by_id,
         host_state_by_host_id=host_state_by_host_id,
         host_name_by_host_id=host_name_by_host_id,
+        published_endpoints_by_agent_id=published_endpoints_by_id,
     )
+
+
+def _parse_published_endpoints(agent_id_str: str, raw_endpoints: Sequence[object]) -> tuple[PublishedEndpoint, ...]:
+    """Every well-formed entry of a host's ``published_endpoints``; a malformed one is skipped with a warning."""
+    endpoints: list[PublishedEndpoint] = []
+    for raw in raw_endpoints:
+        try:
+            endpoints.append(PublishedEndpoint.model_validate(raw))
+        except ValidationError as e:
+            logger.warning("Skipping a malformed published endpoint for agent {}: {}", agent_id_str, e)
+    return tuple(endpoints)
 
 
 def parse_agent_ids_from_json(json_output: str | None) -> tuple[AgentId, ...]:
@@ -1826,6 +1868,11 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return SSH info for the agent's host, or None for local agents."""
         with self._lock:
             return self._agents_result.ssh_info_by_agent_id.get(str(self._resolve_agent_id_locked(agent_id)))
+
+    def get_published_endpoints(self, agent_id: AgentId) -> list[PublishedEndpoint]:
+        with self._lock:
+            resolved = str(self._resolve_agent_id_locked(agent_id))
+            return list(self._agents_result.published_endpoints_by_agent_id.get(resolved, ()))
 
     def resolve_agent_id(self, agent_id: AgentId) -> AgentId:
         with self._lock:
