@@ -30,7 +30,8 @@ function makeFixture(
   const sent: ImmersiveChange[] = [];
   const desktop: boolean[] = [];
   let isFullscreen = false;
-  let fullscreenRequest = deferred<void>();
+  // One deferred per requestFullscreen call, so a test can settle a specific one.
+  const fullscreenRequests: ReturnType<typeof deferred<void>>[] = [];
   let lockRequest = deferred<void>();
   const keyboard: KeyboardLockSurface | null =
     options.hasKeyboard === false
@@ -50,8 +51,9 @@ function makeFixture(
   const controller = new ImmersiveController({
     requestFullscreen: () => {
       calls.push("requestFullscreen");
-      fullscreenRequest = deferred<void>();
-      return fullscreenRequest.promise;
+      const request = deferred<void>();
+      fullscreenRequests.push(request);
+      return request.promise;
     },
     isFullscreen: () => isFullscreen,
     exitFullscreen: () => {
@@ -70,11 +72,13 @@ function makeFixture(
     calls,
     sent,
     desktop,
-    grantFullscreen: () => {
+    /** Settle the latest fullscreen request, or the one at `index`. */
+    grantFullscreen: (index = fullscreenRequests.length - 1) => {
       isFullscreen = true;
-      fullscreenRequest.resolve();
+      fullscreenRequests[index].resolve();
     },
-    refuseFullscreen: (error: unknown) => fullscreenRequest.reject(error),
+    refuseFullscreen: (error: unknown) =>
+      fullscreenRequests[fullscreenRequests.length - 1].reject(error),
     grantLock: () => lockRequest.resolve(),
     /** The browser left fullscreen on its own (the user held Escape, the OS). */
     leaveFullscreenExternally: () => {
@@ -216,6 +220,41 @@ describe("ImmersiveController", () => {
     expect(fixture.controller.isImmersive).toBe(false);
     expect(fixture.desktop).toEqual([false]);
     expect(fixture.sent).toEqual([{ on: false, keyboardLocked: false }]);
+  });
+
+  it("exits a fullscreen that lands after a leave request superseded the entry", async () => {
+    const fixture = makeFixture();
+    fixture.controller.request(true);
+    // The workspace changes its mind while the fullscreen request is pending.
+    fixture.controller.request(false);
+    expect(fixture.sent).toEqual([{ on: false, keyboardLocked: false }]);
+    fixture.grantFullscreen();
+    fixture.grantLock();
+    await flush();
+    expect(fixture.calls).toContain("exitFullscreen");
+    expect(fixture.controller.isImmersive).toBe(false);
+    // The leave restored the desktop at once; nothing turns it back on.
+    expect(fixture.desktop).toEqual([false]);
+    // The exit's own fullscreenchange adds nothing: the mode was already off.
+    expect(fixture.sent).toEqual([{ on: false, keyboardLocked: false }]);
+  });
+
+  it("leaves a newer entry's fullscreen alone when a superseded one completes", async () => {
+    const fixture = makeFixture();
+    fixture.controller.request(true);
+    fixture.controller.frameNavigated();
+    fixture.controller.request(true);
+    // The first request's fullscreen lands while the second entry is in flight.
+    fixture.grantFullscreen(0);
+    fixture.grantLock();
+    await flush();
+    expect(fixture.calls.filter((call) => call === "exitFullscreen")).toEqual(
+      [],
+    );
+    fixture.grantFullscreen(1);
+    await flush();
+    expect(fixture.controller.isImmersive).toBe(true);
+    expect(fixture.sent.at(-1)).toEqual({ on: true, keyboardLocked: true });
   });
 
   it("answers a leave request while off without touching anything", () => {

@@ -131,7 +131,10 @@ export class ImmersiveController {
     void fullscreen.then(
       async () => {
         const isLocked = await locked;
-        if (generation !== this.generation) return;
+        if (generation !== this.generation) {
+          this.releaseSupersededFullscreen();
+          return;
+        }
         this.isEntering = false;
         this.isOn = true;
         this.deps.setDesktopImmersive(true);
@@ -163,6 +166,15 @@ export class ImmersiveController {
       return;
     }
     this.ended();
+  }
+
+  /** A fullscreen that landed after a leave or a navigation ended its entry
+   * belongs to no mode: exit it, unless a newer entry is on or in flight and
+   * the document's fullscreen is now that entry's. The exit's own
+   * fullscreenchange finds the mode already off and says nothing more. */
+  private releaseSupersededFullscreen(): void {
+    if (this.isOn || this.isEntering || !this.deps.isFullscreen()) return;
+    void this.deps.exitFullscreen().catch(() => undefined);
   }
 
   private ended(): void {
