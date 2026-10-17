@@ -426,8 +426,9 @@ class CertifiedHostData(FrozenModel):
     is_published_endpoints_repicked_on_start: bool = Field(
         default=False,
         description=(
-            "Whether the provider picks fresh host ports for the published endpoints on every start (Imbue Cloud) "
-            "rather than keeping them for the host's life (Docker, Lima, the VPS providers, Modal)"
+            "Whether the provider picks fresh host-side endpoints for the published ports on every start (Modal, "
+            "whose tunnels belong to the sandbox a start creates; Imbue Cloud, which re-picks box ports on a "
+            "restore) rather than keeping them for the host's life (Docker, Lima, the VPS providers)"
         ),
     )
 

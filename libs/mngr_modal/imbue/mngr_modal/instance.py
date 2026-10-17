@@ -1363,12 +1363,14 @@ class ModalProviderInstance(BaseProviderInstance):
             ssh_host, ssh_port = tunnels[CONTAINER_SSH_PORT].tcp_socket
             logger.trace("Found SSH endpoint available", ssh_host=ssh_host, ssh_port=ssh_port)
             # Every sandbox start allocates fresh tunnels, so the published endpoints
-            # recorded on the host are the ones this sandbox got.
+            # recorded on the host are the ones this sandbox got, and the record says
+            # so for consumers that cache endpoints across a stop.
             host_data = host_data.model_copy_update(
                 to_update(
                     host_data.field_ref().published_endpoints,
                     tuple(published_endpoints_from_tunnels(tunnels, config.published_ports)),
                 ),
+                to_update(host_data.field_ref().is_published_endpoints_repicked_on_start, True),
             )
 
             # Get SSH keypairs

@@ -150,8 +150,8 @@ class HostInterface(MutableModel, ABC):
         """Where each port the host was created with ``--publish`` is reachable from this mngr client.
 
         Empty for a host with no declarations. Derived from the provider's own records, so it is
-        answered for stopped hosts too; a provider that re-picks host ports on a start (Imbue
-        Cloud) answers the current ones. See ``specs/published-ports/spec.md``.
+        answered for stopped hosts too; a provider that re-picks host-side endpoints on a start
+        (Modal, Imbue Cloud) answers the current ones. See ``specs/published-ports/spec.md``.
         """
         return []
 
