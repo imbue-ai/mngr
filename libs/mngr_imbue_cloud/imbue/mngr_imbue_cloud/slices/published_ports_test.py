@@ -1,7 +1,6 @@
 from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import parse_published_port_declarations
-from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortDeclaration
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePortProtocol
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePublishedPort
@@ -51,13 +50,12 @@ def test_wire_entries_with_an_unknown_protocol_are_dropped_not_guessed() -> None
         PublishedPortInfo(guest_port=7000, protocol=PublishedPortProtocol.UNKNOWN, host_port=22013),
         PublishedPortInfo(guest_port=8080, protocol=PublishedPortProtocol.TCP, host_port=22014),
     )
-    with allow_warnings():
-        assert slice_declarations_from_wire(entries) == (
-            SlicePortDeclaration(guest_port=59000, protocol=SlicePortProtocol.UDP),
-            SlicePortDeclaration(guest_port=8080, protocol=SlicePortProtocol.TCP),
-        )
-        assert published_endpoints_from_wire(entries, "203.0.113.9") == [
-            PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="203.0.113.9", host_port=22012),
-            PublishedEndpoint(guest_port=8080, protocol=PortProtocol.TCP, host="203.0.113.9", host_port=22014),
-        ]
+    assert slice_declarations_from_wire(entries) == (
+        SlicePortDeclaration(guest_port=59000, protocol=SlicePortProtocol.UDP),
+        SlicePortDeclaration(guest_port=8080, protocol=SlicePortProtocol.TCP),
+    )
+    assert published_endpoints_from_wire(entries, "203.0.113.9") == [
+        PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="203.0.113.9", host_port=22012),
+        PublishedEndpoint(guest_port=8080, protocol=PortProtocol.TCP, host="203.0.113.9", host_port=22014),
+    ]
     assert published_endpoints_from_wire((), "203.0.113.9") == []

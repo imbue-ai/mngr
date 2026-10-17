@@ -80,10 +80,9 @@ def slice_declarations_from_wire(entries: Sequence[PublishedPortInfo]) -> tuple[
             case PublishedPortProtocol.UDP:
                 protocol = SlicePortProtocol.UDP
             case PublishedPortProtocol.UNKNOWN:
-                logger.warning(
-                    "Ignoring published port {} with a protocol this client does not recognize; update the app",
-                    entry.guest_port,
-                )
+                # The wire layer already warned once when it coerced the unknown value; this runs
+                # on every listing, so it only traces.
+                logger.trace("Ignoring published port {} with a protocol this client does not recognize", entry.guest_port)
                 continue
             case _ as unreachable:
                 assert_never(unreachable)
