@@ -586,7 +586,8 @@ class PublishedPortUnsupportedError(HostCreationError):
 
     def __init__(self, provider_name: ProviderInstanceName, declaration: str, reason: str) -> None:
         self.declaration = declaration
-        super().__init__(provider_name, f"Cannot publish port {declaration}: {reason}")
+        self.reason = reason
+        super().__init__(provider_name, f"Provider '{provider_name}' cannot publish port {declaration}: {reason}")
 
 
 class HostNameConflictError(ProviderError):
