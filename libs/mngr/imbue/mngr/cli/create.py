@@ -941,6 +941,9 @@ def _create_agent(
     _is_local = target_host is None or (
         isinstance(target_host, DiscoveredHost) and target_host.provider_name == ProviderInstanceName("local")
     )
+    published_port_declarations = _parse_published_ports(opts.publish)
+    if isinstance(target_host, DiscoveredHost) and not _is_local:
+        _refuse_published_ports_on_existing_remote_host(published_port_declarations)
     if _is_local and setup.host_lifecycle != HostLifecycleOptions():
         raise UserInputError(
             "Idle timeout and idle mode are not supported for the local provider. "
@@ -1001,6 +1004,8 @@ def _create_agent(
             if opts.update:
                 # --reuse --update: stop the existing agent, then re-create in place
                 existing_agent, existing_host = reuse_result
+                if not existing_host.is_local:
+                    _refuse_published_ports_on_existing_remote_host(published_port_declarations)
                 logger.info("Updating existing agent: {}", existing_agent.name)
                 existing_host.stop_agents([existing_agent.id])
                 # If the user didn't specify a target path (via :PATH in the address
@@ -1060,7 +1065,7 @@ def _create_agent(
     # This ensures local hosts get any --host-label values.
     if isinstance(resolved_target_host, OnlineHostInterface):
         _apply_host_labels(resolved_target_host, opts.host_label)
-        _apply_published_ports_to_existing_host(resolved_target_host, opts.publish)
+        _apply_published_ports_to_existing_host(resolved_target_host, published_port_declarations)
 
     # Set auto-derived labels (project, remote) on the agent (labels are agent-level, not host-level).
     # User-specified --label values take precedence over auto-derived ones.
@@ -1530,21 +1535,28 @@ def _parse_published_ports(values: tuple[str, ...]) -> tuple[PublishedPortDeclar
         raise UserInputError(f"Invalid --publish value: {e}") from e
 
 
-def _apply_published_ports_to_existing_host(host: OnlineHostInterface, values: tuple[str, ...]) -> None:
-    """Record identity endpoints for --publish on the local host; refuse it for any other existing host.
+def _refuse_published_ports_on_existing_remote_host(declarations: Sequence[PublishedPortDeclaration]) -> None:
+    """Refuse --publish for an existing host other than the local one; raises UserInputError.
 
-    Ports are published at create only (a provider cannot publish a port on a running
-    host), so the one existing host that can honour a declaration is the local machine,
-    where the workload binds the port itself and the endpoint is the port on loopback.
+    Ports are published at create only (a provider cannot publish a port on a running host),
+    so the one existing host that can honour a declaration is the local machine. Called before
+    the create stops or starts anything, so a refused create leaves the host as it found it.
     """
-    declarations = _parse_published_ports(values)
-    if not declarations:
-        return
-    if not host.is_local:
+    if declarations:
         raise UserInputError(
             "--publish only applies when creating a new host (or to the local host): ports cannot be "
             "published on an existing host after it was created."
         )
+
+
+def _apply_published_ports_to_existing_host(
+    host: OnlineHostInterface, declarations: Sequence[PublishedPortDeclaration]
+) -> None:
+    """Record identity endpoints for --publish on the local host, where the workload binds the port itself."""
+    if not declarations:
+        return
+    if not host.is_local:
+        _refuse_published_ports_on_existing_remote_host(declarations)
     endpoints = merge_published_endpoints(host.get_published_endpoints(), identity_published_endpoints(declarations))
     record_published_endpoints_on_host(host, endpoints, is_repicked_on_start=False)
 

@@ -18,6 +18,7 @@ from imbue.mngr.cli.create import _AutoLabels
 from imbue.mngr.cli.create import _CreateCommand
 from imbue.mngr.cli.create import _RECOVERED_MESSAGE_FILENAME
 from imbue.mngr.cli.create import _apply_host_labels
+from imbue.mngr.cli.create import _apply_published_ports_to_existing_host
 from imbue.mngr.cli.create import _check_source_does_not_contain_state_dir
 from imbue.mngr.cli.create import _compute_loader_provider_filter
 from imbue.mngr.cli.create import _editor_cleanup_scope
@@ -29,6 +30,7 @@ from imbue.mngr.cli.create import _parse_branch_flag
 from imbue.mngr.cli.create import _parse_host_lifecycle_options
 from imbue.mngr.cli.create import _parse_project_name
 from imbue.mngr.cli.create import _parse_target_host
+from imbue.mngr.cli.create import _refuse_published_ports_on_existing_remote_host
 from imbue.mngr.cli.create import _rescue_editor_content
 from imbue.mngr.cli.create import _resolve_agent_type_name
 from imbue.mngr.cli.create import _resolve_initial_message_content
@@ -58,8 +60,10 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import PortProtocol
+from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import PublishedPortDeclaration
+from imbue.mngr.primitives import parse_published_port_declarations
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.editor import EditorSession
@@ -1400,6 +1404,27 @@ def test_apply_host_labels_adds_tags_to_local_host(
     tags = local_provider.get_host_tags(local_host)
     assert tags.get("env") == "prod"
     assert tags.get("team") == "infra"
+
+
+def test_refuse_published_ports_on_existing_remote_host_raises_only_for_declarations() -> None:
+    """The refusal fires before the create stops or starts anything, so a remote host facing a
+    template that declares ports is left untouched; without declarations there is nothing to refuse."""
+    _refuse_published_ports_on_existing_remote_host(())
+
+    with pytest.raises(UserInputError, match="only applies when creating a new host"):
+        _refuse_published_ports_on_existing_remote_host(parse_published_port_declarations(["59000/udp"]))
+
+
+def test_apply_published_ports_to_existing_host_records_identity_endpoints_on_the_local_host(
+    local_provider: LocalProviderInstance,
+) -> None:
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
+
+    _apply_published_ports_to_existing_host(local_host, parse_published_port_declarations(["59000/udp"]))
+
+    assert local_host.get_published_endpoints() == [
+        PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="127.0.0.1", host_port=59000)
+    ]
 
 
 def test_apply_host_labels_empty_tuple_is_noop(
