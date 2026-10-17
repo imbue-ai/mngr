@@ -55,6 +55,7 @@ from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.instance import attempt_cloud_resource_teardown
 from imbue.mngr_vps.interfaces import HostRealizer
+from imbue.mngr_vps.published_ports import vps_published_endpoints
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import VPS_HOST_KEY_NAME
 from imbue.mngr_vps.primitives import VpsInstanceId
@@ -292,6 +293,12 @@ class OfflineCapableVpsProvider(VpsProvider):
             updated_data = certified.model_copy_update(
                 to_update(certified.field_ref().stop_reason, None),
                 to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
+                # The published ports are reachable at the VM's address, which an
+                # ephemeral-IP resume changes, so they follow vps_ip.
+                to_update(
+                    certified.field_ref().published_endpoints,
+                    tuple(vps_published_endpoints(new_ip, record.config.published_ports)),
+                ),
             )
             updated_record = record.model_copy_update(
                 to_update(record.field_ref().vps_ip, new_ip),

@@ -53,6 +53,7 @@ from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import IsolationMode
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.published_ports import vps_published_endpoints
 from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
 
 # =========================================================================
@@ -180,6 +181,42 @@ def test_offline_resume_mirrors_record_with_cleared_stop_reason(temp_mngr_ctx: M
     assert store.written.certified_host_data.stop_reason is None
     assert store.written.vps_ip == "10.0.0.9"
     assert provider._mirrored_record is store.written
+
+
+def test_offline_resume_moves_published_endpoints_to_the_fresh_address(temp_mngr_ctx: MngrContext) -> None:
+    """A resume on an ephemeral-IP cloud answers a fresh address; the published endpoints are reachable
+    at the VM's address, so the resumed record names the new one beside ``vps_ip``."""
+    host_id = HostId.generate()
+    declaration = PublishedPortDeclaration(guest_port=59000, protocol=PortProtocol.UDP)
+    config = VpsHostConfig(
+        vps_instance_id=VpsInstanceId("i-resume"), region="r", plan="p", published_ports=(declaration,)
+    )
+    certified = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="resumed-host",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        stop_reason=HostState.STOPPED.value,
+        published_endpoints=tuple(vps_published_endpoints("10.0.0.1", (declaration,))),
+    )
+    store = _CapturingHostStore(VpsHostRecord(certified_host_data=certified, vps_ip=None, config=config))
+    provider = _ResumeMirrorProvider(
+        name=ProviderInstanceName("offline-test"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=VpsProviderConfig(backend=ProviderBackendName("offline-test")),
+        vps_client=ExternallyManagedVpsClient(),
+    )
+    provider._realizer_cache = {IsolationMode.CONTAINER: cast(HostRealizer, _FakeRealizer(cast(VpsHostStore, store)))}
+
+    with pytest.raises(_MirrorCalled):
+        provider.start_host(host_id)
+
+    assert store.written is not None
+    assert store.written.vps_ip == "10.0.0.9"
+    assert store.written.certified_host_data.published_endpoints == tuple(
+        vps_published_endpoints("10.0.0.9", (declaration,))
+    )
 
 
 class _HostKeyWaitProvider(_ResumeMirrorProvider):
