@@ -2152,6 +2152,7 @@ def _parse_share_info(body: dict[str, Any], state: str) -> ShareInfo:
     )
     raw_chrome_origin = body.get("chrome_origin")
     raw_workspace_id = body.get("workspace_id")
+    raw_media_port = body.get("media_port")
     return ShareInfo(
         host_id=str(body.get("host_id", "")),
         workspace_id=str(raw_workspace_id) if raw_workspace_id else None,
@@ -2165,4 +2166,5 @@ def _parse_share_info(body: dict[str, Any], state: str) -> ShareInfo:
         cert_not_after=body.get("cert_not_after"),
         chrome_origin=str(raw_chrome_origin) if raw_chrome_origin else None,
         needs_reshare=body.get("needs_reshare") is True,
+        media_port=raw_media_port if isinstance(raw_media_port, int) else None,
     )

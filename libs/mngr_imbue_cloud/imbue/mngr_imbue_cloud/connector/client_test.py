@@ -1752,6 +1752,27 @@ def test_get_share_status_parses_status_document(monkeypatch: pytest.MonkeyPatch
     assert info.needs_reshare is False
 
 
+def test_get_share_status_parses_the_media_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "host_id": _SHARE_HOST_ID,
+                "workspace_domain": _SHARE_DOMAIN,
+                "region": "us1",
+                "state": "active",
+                "media_port": 40123,
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    info = client.get_share_status(SecretStr("tok"), _SHARE_HOST_ID)
+
+    assert info is not None
+    assert info.media_port == 40123
+
+
 def test_get_share_status_parses_the_needs_reshare_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
