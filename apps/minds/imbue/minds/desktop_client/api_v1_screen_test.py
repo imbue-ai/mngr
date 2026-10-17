@@ -123,8 +123,10 @@ def test_ice_servers_answers_the_owning_accounts_credential_and_caches_it(tmp_pa
     assert first.status_code == 200
     body = json.loads(first.data)
     assert body["expires_at"] == "2026-10-17T13:00:00+00:00"
-    assert body["ice_servers"][0] == {"urls": ["stun:stun.cloudflare.com:3478"], "username": None, "credential": None}
+    # The list passes through as the connector answered it: a STUN entry carries no TURN fields.
+    assert body["ice_servers"][0] == {"urls": ["stun:stun.cloudflare.com:3478"]}
     assert body["ice_servers"][1]["username"] == "u-1"
+    assert body["ice_servers"][1]["credential"] is not None
     assert json.loads(again.data) == body
     assert turn_client.minted_for() == [_ACCOUNT_USER_ID]
 

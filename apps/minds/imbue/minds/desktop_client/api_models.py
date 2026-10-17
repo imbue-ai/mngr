@@ -14,11 +14,14 @@ documented contract and the enforced contract can never drift.
 """
 
 from typing import Annotated
+from typing import Any
 from typing import Literal
 
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import RootModel
+from pydantic import SerializerFunctionWrapHandler
+from pydantic import model_serializer
 from pydantic import StrictBool
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -673,6 +676,13 @@ class IceServer(FrozenModel):
     urls: list[str] | str = Field(description="The server's STUN or TURN URLs")
     username: str | None = Field(default=None, description="The TURN username, absent on a STUN entry")
     credential: str | None = Field(default=None, description="The TURN credential, absent on a STUN entry")
+
+    @model_serializer(mode="wrap")
+    def _without_absent_turn_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # A STUN entry arrives without the two TURN fields and leaves the same way, so the list
+        # reaches the viewer as the connector answered it.
+        serialized = handler(self)
+        return {key: value for key, value in serialized.items() if key not in ("username", "credential") or value is not None}
 
 
 class IceServersResponse(FrozenModel):
