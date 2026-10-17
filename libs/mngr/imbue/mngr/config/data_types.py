@@ -846,7 +846,11 @@ class CreateCliOptions(CommonCliOptions):
 
     @field_validator("publish", mode="before")
     @classmethod
-    def _normalize_publish(cls, value: tuple[str | int, ...] | list[str | int]) -> tuple[str, ...]:
+    def _normalize_publish(cls, value: object) -> object:
         # A template's TOML naturally writes a bare port as an integer (``publish = [59000]``);
         # the declaration parser reads strings, so each value is spelled out before validation.
-        return tuple(str(item) for item in value)
+        # Anything but a list is left to the field's own validation (a bare string must not
+        # be split into its characters).
+        if isinstance(value, (list, tuple)):
+            return tuple(str(item) for item in value)
+        return value

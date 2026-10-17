@@ -10,6 +10,7 @@ import pluggy
 import pytest
 import tomlkit
 from click.testing import CliRunner
+from pydantic import ValidationError
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.address_parsers import parse_new_agent_location
@@ -2484,6 +2485,10 @@ def test_create_cli_options_spell_template_publish_integers_as_strings(
     spells it out so the declaration parser reads it like the CLI's text."""
     opts = CreateCliOptions.model_validate({**default_create_cli_opts.model_dump(), "publish": (59000, "8080/udp")})
     assert opts.publish == ("59000", "8080/udp")
+
+    # A bare string is not a list of declarations and must not be split into its characters.
+    with pytest.raises(ValidationError):
+        CreateCliOptions.model_validate({**default_create_cli_opts.model_dump(), "publish": "59000"})
 
 
 def test_parse_target_host_threads_publish_declarations(
