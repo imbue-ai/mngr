@@ -289,6 +289,11 @@ def _handle_notification_read(agent_id: str) -> OkResponse | Response:
 # X-Imbue-Identity is involved (the proxy's injected key is the authentication).
 
 
+def _is_known_agent(agent_id: AgentId, backend_resolver: BackendResolverInterface) -> bool:
+    """Whether discovery knows the agent (by id or alias); an unknown one is a caller error, not an empty answer."""
+    return backend_resolver.resolve_agent_id(agent_id) in backend_resolver.list_known_agent_ids()
+
+
 def _workspace_agent_id_for_agent(agent_id: AgentId, backend_resolver: BackendResolverInterface) -> AgentId:
     """The primary agent of the workspace ``agent_id`` belongs to, which is what the desktop keys accounts by."""
     workspace_name = backend_resolver.get_workspace_name(agent_id)
@@ -309,7 +314,7 @@ def _handle_agent_media_endpoints(agent_id: str) -> MediaEndpointsResponse | Res
     """
     backend_resolver = get_state().backend_resolver
     parsed_id = AgentId(agent_id)
-    if backend_resolver.resolve_agent_id(parsed_id) not in backend_resolver.list_known_agent_ids():
+    if not _is_known_agent(parsed_id, backend_resolver):
         return _json_error(f"Unknown agent {agent_id}", 404)
     return MediaEndpointsResponse(
         candidates=[
@@ -334,10 +339,13 @@ def _handle_agent_ice_servers(agent_id: str) -> IceServersResponse | Response:
     viewer then proceeds with host candidates alone.
     """
     state = get_state()
+    parsed_id = AgentId(agent_id)
+    if not _is_known_agent(parsed_id, state.backend_resolver):
+        return _json_error(f"Unknown agent {agent_id}", 404)
     empty = IceServersResponse(ice_servers=[], expires_at=None)
     if state.turn_credential_broker is None or state.session_store is None:
         return empty
-    workspace_agent_id = _workspace_agent_id_for_agent(AgentId(agent_id), state.backend_resolver)
+    workspace_agent_id = _workspace_agent_id_for_agent(parsed_id, state.backend_resolver)
     account = state.session_store.get_account_for_workspace(str(workspace_agent_id))
     if account is None:
         logger.debug("Answering no relay servers for {}: no signed-in account owns the workspace", agent_id)

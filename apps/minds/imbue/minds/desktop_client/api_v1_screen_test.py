@@ -5,6 +5,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
+import pytest
 from flask.testing import FlaskClient
 
 from imbue.minds.config.data_types import InstallationPaths
@@ -87,12 +88,13 @@ def test_media_endpoints_is_empty_for_a_host_with_nothing_published(tmp_path: Pa
     assert json.loads(response.data) == {"candidates": []}
 
 
-def test_media_endpoints_rejects_an_unknown_agent_and_requires_the_bearer(tmp_path: Path) -> None:
+@pytest.mark.parametrize("route", ["media-endpoints", "ice-servers"])
+def test_screen_routes_reject_an_unknown_agent_and_require_the_bearer(tmp_path: Path, route: str) -> None:
     known = AgentId.generate()
     client = _client(tmp_path, make_resolver_with_data(make_agents_json(known, host_name="ws")))
 
-    unknown = client.get(f"/api/v1/agents/{AgentId.generate()}/media-endpoints", headers=_auth_header())
-    unauthenticated = client.get(f"/api/v1/agents/{known}/media-endpoints")
+    unknown = client.get(f"/api/v1/agents/{AgentId.generate()}/{route}", headers=_auth_header())
+    unauthenticated = client.get(f"/api/v1/agents/{known}/{route}")
 
     assert unknown.status_code == 404
     assert unauthenticated.status_code == 401
