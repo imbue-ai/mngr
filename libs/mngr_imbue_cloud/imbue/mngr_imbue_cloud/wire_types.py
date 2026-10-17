@@ -353,6 +353,14 @@ class ShareInfo(WireModel):
             "that predates the field."
         ),
     )
+    media_port: int | None = Field(
+        default=None,
+        description=(
+            "The relay TCP port allocated to the share for the Screen's media proxy "
+            "(specs/screen-studio-integration/spec.md, section 6); None from a connector that predates "
+            "the field, a share not yet re-shared since it exists, or a region whose range is exhausted."
+        ),
+    )
 
 
 class ShareGrantsPushResult(WireModel):

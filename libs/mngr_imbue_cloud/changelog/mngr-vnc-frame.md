@@ -1,0 +1,1 @@
+- `ShareInfo` gains `media_port`: the relay TCP port the connector allocated to the share for the Screen's media proxy (`specs/screen-studio-integration/spec.md`, section 6), None against a connector that predates the field or for a share not yet re-shared since it exists.
