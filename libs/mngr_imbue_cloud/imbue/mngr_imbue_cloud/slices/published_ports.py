@@ -112,8 +112,9 @@ def declarations_missing_from_wire(
 def published_endpoints_from_wire(entries: Sequence[PublishedPortInfo], box_address: str) -> list[PublishedEndpoint]:
     """The host-record endpoints of a lease's wire entries, reachable at the box's address.
 
-    An entry whose protocol this client does not recognize is left out (with
-    a warning) rather than reported under a guessed protocol.
+    An entry whose protocol this client does not recognize is left out
+    (``slice_declarations_from_wire`` drops it) rather than reported under a
+    guessed protocol.
     """
     declarations = slice_declarations_from_wire(entries)
     known_entries = [entry for entry in entries if entry.protocol is not PublishedPortProtocol.UNKNOWN]
