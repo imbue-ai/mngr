@@ -24,21 +24,31 @@ const CREATE_ATTEMPT_BADGE_LABELS: Record<string, string> = {
 };
 
 // Lucide stroke icons for non-running liveness states (sidebar_workspace_row.js).
-// Both transitional states share the loader arc.
-const TRANSITION_ICON_PATH = "M21 12a9 9 0 1 1-6.219-8.56";
-const STATUS_ICON_PATHS: Record<string, string> = {
-  STOPPED:
-    "m15 18-.722-3.25 M2 8a10.645 10.645 0 0 0 20 0 m20 15-1.726-2.05 m4 15 1.726-2.05 m9 18 .722-3.25",
-  STOPPING: TRANSITION_ICON_PATH,
-  STARTING: TRANSITION_ICON_PATH,
-  UNKNOWN:
-    "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3 M12 9v4 M12 17h.01",
+// Both transitional states share the loader arc. Each entry is one <path>:
+// Lucide's segments open with a relative "m", so joined into a single d they
+// would be placed relative to the previous segment's end instead of the origin.
+const TRANSITION_ICON_PATHS = ["M21 12a9 9 0 1 1-6.219-8.56"];
+const STATUS_ICON_PATHS: Record<string, readonly string[]> = {
+  STOPPED: [
+    "m15 18-.722-3.25",
+    "M2 8a10.645 10.645 0 0 0 20 0",
+    "m20 15-1.726-2.05",
+    "m4 15 1.726-2.05",
+    "m9 18 .722-3.25",
+  ],
+  STOPPING: TRANSITION_ICON_PATHS,
+  STARTING: TRANSITION_ICON_PATHS,
+  UNKNOWN: [
+    "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3",
+    "M12 9v4",
+    "M12 17h.01",
+  ],
 };
 
-function statusIcon(liveness: string): m.Children {
-  const path = STATUS_ICON_PATHS[liveness];
+export function statusIcon(liveness: string): m.Children {
+  const paths = STATUS_ICON_PATHS[liveness];
   const title = MIND_LIVENESS_LABELS[liveness];
-  if (path === undefined || title === undefined) return null;
+  if (paths === undefined || title === undefined) return null;
   return m(
     "span",
     {
@@ -56,7 +66,7 @@ function statusIcon(liveness: string): m.Children {
         "stroke-linecap": "round",
         "stroke-linejoin": "round",
       },
-      path.split(" M").map((segment, idx) => m("path", { d: (idx === 0 ? "" : "M") + segment })),
+      paths.map((d) => m("path", { d })),
     ),
   );
 }
