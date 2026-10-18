@@ -10,4 +10,4 @@
 
 - `docs/deploy/setup/host-pool-setup.md` explains that a pool host publishes exactly the ports the bake's create templates declare, that pool hosts baked before published ports existed never match a lease that declares them, and that the pool must be rebaked at a template tag that starts declaring ports before that tag is promoted.
 
-- `test_mngr_settings.py::test_a_refused_session_refresh_reaches_the_sync_pass_through_a_real_observe_stream` is marked flaky: its stub connector occasionally resets the refresh connection instead of answering 401, which CI saw once on this branch.
+- `test_mngr_settings.py::test_a_refused_session_refresh_reaches_the_sync_pass_through_a_real_observe_stream` is marked flaky: CI once saw its stub connector reset the refresh connection instead of answering `200 {"status": "ERROR"}`. The stub now drains the refresh request body before answering, so closing the socket no longer turns into a TCP reset; the mark stays until CI confirms the fix.
