@@ -623,6 +623,9 @@ class _RefusingRefreshConnectorHandler(BaseHTTPRequestHandler):
     lock: threading.Lock = threading.Lock()
 
     def do_POST(self) -> None:
+        # Drain the request body first: a response written over unread request bytes makes the
+        # close a reset, which the client reports as an unreachable connector instead of the refusal.
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
         if self.path != "/auth/session/refresh":
             self.send_response(404)
             self.end_headers()
