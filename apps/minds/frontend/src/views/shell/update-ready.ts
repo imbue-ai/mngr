@@ -19,13 +19,17 @@ export interface UpdateInstallTerms {
 
 // The macOS policy, and what a state that names none means: the browser
 // build and partial test stubs report no terms at all.
-const INSTALL_ON_QUIT: UpdateInstallTerms = { policy: "on-quit", needsPassword: false };
+const INSTALL_ON_QUIT: UpdateInstallTerms = {
+  policy: "on-quit",
+  needsPassword: false,
+};
 
 /** The terms a main-process state reports, with silence meaning on-quit. */
 export function installTermsOf(state: UpdateState): UpdateInstallTerms {
   return {
     policy: state.installPolicy ?? INSTALL_ON_QUIT.policy,
-    needsPassword: state.needsPasswordToInstall ?? INSTALL_ON_QUIT.needsPassword,
+    needsPassword:
+      state.needsPasswordToInstall ?? INSTALL_ON_QUIT.needsPassword,
   };
 }
 
@@ -55,7 +59,10 @@ export function watchUpdateStatus(onChange: () => void): void {
     .then((state) => {
       if (state === null) return;
       installTerms = installTermsOf(state);
-      if (state.status.type === "update-downloaded" && state.status.version !== undefined) {
+      if (
+        state.status.type === "update-downloaded" &&
+        state.status.version !== undefined
+      ) {
         readyVersion = state.status.version;
       }
       onChange();
@@ -64,7 +71,9 @@ export function watchUpdateStatus(onChange: () => void): void {
       // Logged, not surfaced: the Settings panel reports this to the user. The
       // console line is what separates "nothing was downloaded" from "the
       // bridge call threw", which an absent card looks identical for.
-      console.debug(`[update] Could not read the update state: ${String(error)}`);
+      console.debug(
+        `[update] Could not read the update state: ${String(error)}`,
+      );
     });
   electronBridge.onUpdateStatus((status: UpdateStatus) => {
     // Only a check that reached the feed may withdraw an offer. Neither
@@ -75,7 +84,9 @@ export function watchUpdateStatus(onChange: () => void): void {
     // `version` is optional on the shared status shape; without one, offer
     // nothing rather than a card reading "Imbue Studio undefined is ready".
     const offeredVersion =
-      status.type === "update-downloaded" && status.version !== undefined ? status.version : null;
+      status.type === "update-downloaded" && status.version !== undefined
+        ? status.version
+        : null;
     // A failed install described the version that was offered before; a
     // different offer starts with no history.
     if (offeredVersion !== readyVersion) installError = null;

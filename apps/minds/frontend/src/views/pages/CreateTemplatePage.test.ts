@@ -1,7 +1,14 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AnyVnode } from "../../testing";
-import { allText, attrsOf, collectVnodes, createFormDefaults, jsonResponse, settle } from "../../testing";
+import {
+  allText,
+  attrsOf,
+  collectVnodes,
+  createFormDefaults,
+  jsonResponse,
+  settle,
+} from "../../testing";
 import type { CreateFormDefaults } from "../../models/create";
 import { CreateTemplatePage } from "./CreateTemplatePage";
 import { PresetCards } from "./create/PresetCards";
@@ -12,10 +19,15 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const ROUTE: Record<string, string> = { git_url: "https://github.com/example/template.git", start: "create" };
+const ROUTE: Record<string, string> = {
+  git_url: "https://github.com/example/template.git",
+  start: "create",
+};
 
 /** The full page, already on "Where should it run?", rendered afresh as vnodes on each call. */
-async function pageOnWhereToRun(defaults: CreateFormDefaults): Promise<() => AnyVnode[]> {
+async function pageOnWhereToRun(
+  defaults: CreateFormDefaults,
+): Promise<() => AnyVnode[]> {
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   vi.spyOn(m.route, "param").mockImplementation(((key?: string) =>
     key === undefined ? undefined : ROUTE[key]) as typeof m.route.param);
@@ -43,7 +55,14 @@ describe("CreateTemplatePage", () => {
     const render = await pageOnWhereToRun(
       createFormDefaults({
         byok_clouds_enabled: true,
-        cloud_accounts: [{ name: "aws_acct", alias: "team aws", backend: "aws", region: "us-west-2" }],
+        cloud_accounts: [
+          {
+            name: "aws_acct",
+            alias: "team aws",
+            backend: "aws",
+            region: "us-west-2",
+          },
+        ],
       }),
     );
 

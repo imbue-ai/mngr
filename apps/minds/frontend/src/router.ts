@@ -92,7 +92,9 @@ export function mountRouter(root: Element, shell: ShellState): void {
       // Settings never tears down and reloads the workspace iframe.
       // A popout keeps its window's workspace surface mounted the same way.
       const workspaceParam =
-        workspaceSurfaceIdFromPath(path) ?? popoutFromPath(path)?.workspaceAnyId ?? null;
+        workspaceSurfaceIdFromPath(path) ??
+        popoutFromPath(path)?.workspaceAnyId ??
+        null;
       shell.handleRouteChanged(path, search);
       // The options panel an app-level modal was opened over: the same page as
       // the routed one on the options route, so the Shell's single slot for it

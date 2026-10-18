@@ -12,7 +12,10 @@
 import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { electronBridge } from "../../electron-bridge";
-import type { CreateFormDefaults, LocalBackendPrerequisite } from "../../models/create";
+import type {
+  CreateFormDefaults,
+  LocalBackendPrerequisite,
+} from "../../models/create";
 import type { ResendOutcome } from "../../models/emailVerification";
 import type { MachineSizeDimension } from "../../models/machineSize";
 import {
@@ -24,17 +27,30 @@ import {
 import type { WebLoginState } from "../../models/webLogin";
 import { webLogin } from "../../models/webLogin";
 import { Button, ButtonSubmit } from "../components/Button";
-import { FormLabel, Select, TextInput, Textarea } from "../components/FormControls";
+import {
+  FormLabel,
+  Select,
+  TextInput,
+  Textarea,
+} from "../components/FormControls";
 import { Link } from "../components/Link";
 import { PageNarrowContainer } from "../components/Layout";
 import { MachineSizeInput } from "../components/MachineSizeInput";
 import { DialogCloseButton, Modal } from "../components/Modal";
 import { Notice } from "../components/Notice";
-import { CloudAccountsModal, CloudAccountsModalState, cloudAccountOptions } from "./create/CloudAccountsModal";
+import {
+  CloudAccountsModal,
+  CloudAccountsModalState,
+  cloudAccountOptions,
+} from "./create/CloudAccountsModal";
 import { PresetCards } from "./create/PresetCards";
 import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
 import type { CreateSubmitBody, PresetName } from "./create/form-model";
-import { CreateFormModel, normalizeCreateApiError, presetOpensAdvanced } from "./create/form-model";
+import {
+  CreateFormModel,
+  normalizeCreateApiError,
+  presetOpensAdvanced,
+} from "./create/form-model";
 import { VerificationWait } from "./create/verification-wait";
 import { renderSwitch, renderSwitchWord } from "../components/Switch";
 import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
@@ -57,14 +73,22 @@ export interface CreatePageAttrs {
  * both render it inside a keyed fragment and name it for tests.
  */
 export function createFormModal(
-  attrs: Omit<CreatePageAttrs, "mode"> & { key: string; id: string; onClose: () => void },
+  attrs: Omit<CreatePageAttrs, "mode"> & {
+    key: string;
+    id: string;
+    onClose: () => void;
+  },
 ): m.Children {
   const { key, id, onClose, ...form } = attrs;
-  return m(Modal, { key, id, isOpen: true, size: "xl", onClose, cardExtra: "relative" }, [
-    m(DialogCloseButton, { onClose }),
-    m("h2", { class: "type-heading mb-4 pr-8" }, "Create a workspace"),
-    m(CreatePage, { mode: "embedded", ...form }),
-  ]);
+  return m(
+    Modal,
+    { key, id, isOpen: true, size: "xl", onClose, cardExtra: "relative" },
+    [
+      m(DialogCloseButton, { onClose }),
+      m("h2", { class: "type-heading mb-4 pr-8" }, "Create a workspace"),
+      m(CreatePage, { mode: "embedded", ...form }),
+    ],
+  );
 }
 
 /**
@@ -93,7 +117,9 @@ const RESEND_NOTICE_BY_OUTCOME: Record<ResendOutcome, string> = {
   failed: "Could not send the email. Please try again.",
 };
 
-export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) => {
+export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (
+  initialVnode,
+) => {
   const attrs = initialVnode.attrs;
   const isEmbedded = attrs.mode === "embedded";
   const model = new CreateFormModel();
@@ -126,9 +152,16 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
   }
 
   /** The notice for one local backend's unmet prerequisite, or nothing. */
-  function prerequisiteNotice(prerequisite: LocalBackendPrerequisite | null, id: string): m.Children {
+  function prerequisiteNotice(
+    prerequisite: LocalBackendPrerequisite | null,
+    id: string,
+  ): m.Children {
     if (prerequisite === null) return null;
-    return m(PrerequisiteNotice, { prerequisite, onCheckAgain: checkPrerequisitesAgain, id });
+    return m(PrerequisiteNotice, {
+      prerequisite,
+      onCheckAgain: checkPrerequisitesAgain,
+      id,
+    });
   }
 
   function selectPreset(name: PresetName): void {
@@ -148,8 +181,15 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
       }
       const url = model.hostNameAvailabilityUrl();
       const sequence = ++availabilitySequence;
-      fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } })
-        .then((response) => (response.ok ? (response.json() as Promise<{ available?: boolean }>) : null))
+      fetch(url, {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      })
+        .then((response) =>
+          response.ok
+            ? (response.json() as Promise<{ available?: boolean }>)
+            : null,
+        )
         .then((data) => {
           if (sequence !== availabilitySequence || data === null) return;
           model.applyAvailabilityVerdict(url, data.available !== false);
@@ -188,7 +228,9 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
 
   function syncSignIn(): void {
     if (!isAwaitingSignIn) return;
-    switch (signInOutcome(webLogin.state, getAppContext().stores.accounts.hasAccounts)) {
+    switch (
+      signInOutcome(webLogin.state, getAppContext().stores.accounts.hasAccounts)
+    ) {
       case "signed-in":
         isAwaitingSignIn = false;
         webLogin.noteSignedIn();
@@ -215,10 +257,14 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
         m.redraw();
       },
       (error: unknown) => {
-        console.error("Could not load the signed-in account for the create", error);
+        console.error(
+          "Could not load the signed-in account for the create",
+          error,
+        );
         if (isRemoved) return;
         model.isSubmitting = false;
-        model.submitError = "Signed in, but could not load your account. Press Create to try again.";
+        model.submitError =
+          "Signed in, but could not load your account. Press Create to try again.";
         m.redraw();
       },
     );
@@ -248,7 +294,8 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
       if ((model.defaults?.accounts.length ?? 0) > 0) {
         model.isAccountErrorShown = true;
       } else if (isAfterSignIn) {
-        model.submitError = "Signed in, but the account is not available yet. Press Create to try again.";
+        model.submitError =
+          "Signed in, but the account is not available yet. Press Create to try again.";
       } else {
         signInThenCreate();
       }
@@ -272,12 +319,17 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     // The connector refuses an Imbue Cloud create for an unverified email, so
     // Create stays held until the emailed link is clicked rather than letting
     // the create fail on the creation page.
-    verificationWait.require(email, () => postCreate(body, isAfterSignIn), refuseUncheckedVerification);
+    verificationWait.require(
+      email,
+      () => postCreate(body, isAfterSignIn),
+      refuseUncheckedVerification,
+    );
   }
 
   function refuseUncheckedVerification(): void {
     model.isSubmitting = false;
-    model.submitError = "Could not check whether your email is verified. Please try again.";
+    model.submitError =
+      "Could not check whether your email is verified. Please try again.";
     m.redraw();
   }
 
@@ -289,7 +341,10 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
         m.redraw();
         return;
       }
-      if (result.status === 202 && typeof result.data.operation_id === "string") {
+      if (
+        result.status === 202 &&
+        typeof result.data.operation_id === "string"
+      ) {
         if (attrs.onSubmitted) {
           attrs.onSubmitted(result.data.operation_id);
         } else {
@@ -317,23 +372,47 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     const email = verificationWait.email;
     if (email === null) return null;
     const outcome = verificationWait.resendOutcome;
-    const resendNotice = outcome === null ? null : RESEND_NOTICE_BY_OUTCOME[outcome];
-    return m(Notice, { variant: "info", id: "verification-wait", role: "status", extra: "!mt-6 !mb-0 !px-5 !py-4 text-center" }, [
-      m("p", { class: "type-body text-primary" }, [
-        "Workspaces on Imbue Cloud require a verified email. Click the link emailed to ",
-        m("strong", email),
-        " when you created your account, and your workspace will be created.",
-      ]),
-      m("div", { class: "mt-3 flex justify-center gap-3" }, [
-        m(
-          Button,
-          { variant: "secondary", id: "verification-resend", onclick: () => verificationWait.resend() },
-          "Resend email",
-        ),
-        m(Button, { variant: "ghost", id: "verification-cancel", onclick: cancelVerificationWait }, "Cancel"),
-      ]),
-      resendNotice === null ? null : m("p", { class: "mt-2 type-helper text-secondary" }, resendNotice),
-    ]);
+    const resendNotice =
+      outcome === null ? null : RESEND_NOTICE_BY_OUTCOME[outcome];
+    return m(
+      Notice,
+      {
+        variant: "info",
+        id: "verification-wait",
+        role: "status",
+        extra: "!mt-6 !mb-0 !px-5 !py-4 text-center",
+      },
+      [
+        m("p", { class: "type-body text-primary" }, [
+          "Workspaces on Imbue Cloud require a verified email. Click the link emailed to ",
+          m("strong", email),
+          " when you created your account, and your workspace will be created.",
+        ]),
+        m("div", { class: "mt-3 flex justify-center gap-3" }, [
+          m(
+            Button,
+            {
+              variant: "secondary",
+              id: "verification-resend",
+              onclick: () => verificationWait.resend(),
+            },
+            "Resend email",
+          ),
+          m(
+            Button,
+            {
+              variant: "ghost",
+              id: "verification-cancel",
+              onclick: cancelVerificationWait,
+            },
+            "Cancel",
+          ),
+        ]),
+        resendNotice === null
+          ? null
+          : m("p", { class: "mt-2 type-helper text-secondary" }, resendNotice),
+      ],
+    );
   }
 
   function fieldRing(fieldId: string): string {
@@ -346,7 +425,10 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     const draft = model.machineSizeDraft();
     if (defaults === null || draft === null) return null;
     const invalid = new Set(model.invalidMachineSizeDimensions());
-    const machineSizeField = (dimension: MachineSizeDimension, label: string): m.Children =>
+    const machineSizeField = (
+      dimension: MachineSizeDimension,
+      label: string,
+    ): m.Children =>
       m(MachineSizeInput, {
         dimension,
         label,
@@ -357,7 +439,11 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     return m("div", { id: "machine-size-row" }, [
       m("div", { class: "flex items-start justify-between gap-3" }, [
         m("div", [
-          m(FormLabel, { target: "machine-size-cpu_count", inline: true }, "Machine size"),
+          m(
+            FormLabel,
+            { target: "machine-size-cpu_count", inline: true },
+            "Machine size",
+          ),
           m(
             "p",
             { class: "mt-1 type-helper text-tertiary" },
@@ -367,13 +453,27 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
           ),
         ]),
         m("div", { class: "flex flex-wrap items-center justify-end gap-3" }, [
-          defaults.cpu_count === null ? null : machineSizeField("cpu_count", "CPUs"),
-          defaults.memory_gb === null ? null : machineSizeField("memory_gb", "GB RAM"),
-          defaults.disk_gb === null ? null : machineSizeField("disk_gb", "GB disk"),
+          defaults.cpu_count === null
+            ? null
+            : machineSizeField("cpu_count", "CPUs"),
+          defaults.memory_gb === null
+            ? null
+            : machineSizeField("memory_gb", "GB RAM"),
+          defaults.disk_gb === null
+            ? null
+            : machineSizeField("disk_gb", "GB disk"),
         ]),
       ]),
       invalid.size > 0
-        ? m("p", { id: "machine-size-error", class: "mt-1 type-helper text-important", role: "alert" }, "Each size must be a whole number of at least 1.")
+        ? m(
+            "p",
+            {
+              id: "machine-size-error",
+              class: "mt-1 type-helper text-important",
+              role: "alert",
+            },
+            "Each size must be a whole number of at least 1.",
+          )
         : null,
     ]);
   }
@@ -382,309 +482,434 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     const regionOptions = model.regionOptions();
     const instanceTypeOptions = model.instanceTypeOptions();
     const byokPinnedRegion = model.byokPinnedRegion();
-    return m("div", { id: "advanced-view", class: model.isAdvancedOpen ? "mt-8" : "hidden mt-8" }, [
-      m("div", { class: "mx-auto max-w-[560px] flex flex-col gap-4" }, [
-        m("div", [
-          m(FormLabel, { target: "host_name" }, "Name"),
-          m("p", { class: "mb-1 type-helper text-tertiary" }, "Leave empty to name it automatically"),
-          m(TextInput, {
-            id: "host_name",
-            name: "host_name",
-            placeholder: "my-workspace",
-            value: model.hostName,
-            extra: model.hostNameError ? "!border-important focus:!outline-important" : "",
-            oninput: (event: InputEvent) => {
-              model.hostName = (event.target as HTMLInputElement).value;
-              scheduleHostNameValidation();
-            },
-          }),
-          model.hostNameError
-            ? m("p", { id: "host-name-error", class: "mt-1 type-helper text-important" }, model.hostNameError)
-            : m("p", { id: "host-name-error", class: "hidden" }),
-        ]),
-        m("div", [
-          m("div", { class: "flex items-start justify-between gap-3" }, [
-            m("div", [
-              m(FormLabel, { target: "launch_mode", inline: true }, "Compute provider"),
-              model.launchValue === "MODAL"
-                ? m("p", { id: "modal-direct-note", class: "mt-1 type-helper text-tertiary" }, [
-                    "Modal creates sandboxes from this computer using your own Modal token. Sandboxes are ",
-                    "ephemeral (~1 day) -- testing only.",
-                  ])
-                : null,
-            ]),
+    return m(
+      "div",
+      {
+        id: "advanced-view",
+        class: model.isAdvancedOpen ? "mt-8" : "hidden mt-8",
+      },
+      [
+        m("div", { class: "mx-auto max-w-[560px] flex flex-col gap-4" }, [
+          m("div", [
+            m(FormLabel, { target: "host_name" }, "Name"),
             m(
-              Select,
-              {
-                id: "launch_mode",
-                name: "launch_mode",
-                width: "w-48",
-                extra: fieldRing("launch_mode"),
-                value: model.launchValue,
-                onchange: (event: Event) => {
-                  const value = (event.target as HTMLSelectElement).value;
-                  if (value.startsWith("ADD:")) {
-                    byokModal.openForBackend(value.slice(4), defaults.region_selected_by_launch_mode);
-                    // Revert the select to the previous real selection.
-                    (event.target as HTMLSelectElement).value = model.launchValue;
-                    return;
-                  }
-                  model.launchValue = value;
-                  model.selectedPreset = null;
-                  scheduleHostNameValidation();
-                },
+              "p",
+              { class: "mb-1 type-helper text-tertiary" },
+              "Leave empty to name it automatically",
+            ),
+            m(TextInput, {
+              id: "host_name",
+              name: "host_name",
+              placeholder: "my-workspace",
+              value: model.hostName,
+              extra: model.hostNameError
+                ? "!border-important focus:!outline-important"
+                : "",
+              oninput: (event: InputEvent) => {
+                model.hostName = (event.target as HTMLInputElement).value;
+                scheduleHostNameValidation();
               },
-              [
-                defaults.launch_modes.map((mode) =>
+            }),
+            model.hostNameError
+              ? m(
+                  "p",
+                  {
+                    id: "host-name-error",
+                    class: "mt-1 type-helper text-important",
+                  },
+                  model.hostNameError,
+                )
+              : m("p", { id: "host-name-error", class: "hidden" }),
+          ]),
+          m("div", [
+            m("div", { class: "flex items-start justify-between gap-3" }, [
+              m("div", [
+                m(
+                  FormLabel,
+                  { target: "launch_mode", inline: true },
+                  "Compute provider",
+                ),
+                model.launchValue === "MODAL"
+                  ? m(
+                      "p",
+                      {
+                        id: "modal-direct-note",
+                        class: "mt-1 type-helper text-tertiary",
+                      },
+                      [
+                        "Modal creates sandboxes from this computer using your own Modal token. Sandboxes are ",
+                        "ephemeral (~1 day) -- testing only.",
+                      ],
+                    )
+                  : null,
+              ]),
+              m(
+                Select,
+                {
+                  id: "launch_mode",
+                  name: "launch_mode",
+                  width: "w-48",
+                  extra: fieldRing("launch_mode"),
+                  value: model.launchValue,
+                  onchange: (event: Event) => {
+                    const value = (event.target as HTMLSelectElement).value;
+                    if (value.startsWith("ADD:")) {
+                      byokModal.openForBackend(
+                        value.slice(4),
+                        defaults.region_selected_by_launch_mode,
+                      );
+                      // Revert the select to the previous real selection.
+                      (event.target as HTMLSelectElement).value =
+                        model.launchValue;
+                      return;
+                    }
+                    model.launchValue = value;
+                    model.selectedPreset = null;
+                    scheduleHostNameValidation();
+                  },
+                },
+                [
+                  defaults.launch_modes.map((mode) =>
+                    m(
+                      "option",
+                      {
+                        value: mode,
+                        selected: model.launchValue === mode,
+                        disabled:
+                          mode === "IMBUE_CLOUD" &&
+                          model.accountId === "" &&
+                          defaults.accounts.length === 0,
+                      },
+                      launchModeLabel(mode),
+                    ),
+                  ),
+                  defaults.byok_clouds_enabled
+                    ? [
+                        cloudAccountOptions(
+                          defaults.cloud_accounts,
+                          model.launchValue,
+                        ),
+                        m("option", { value: "ADD:aws" }, "add AWS account…"),
+                        m("option", { value: "ADD:gcp" }, "add GCP account…"),
+                        m(
+                          "option",
+                          { value: "ADD:azure" },
+                          "add Azure account…",
+                        ),
+                      ]
+                    : null,
+                ],
+              ),
+            ]),
+            model.accountId === "" && model.launchValue === "IMBUE_CLOUD"
+              ? m(
+                  "p",
+                  {
+                    id: "launch-mode-account-error",
+                    class: "mt-1 type-helper text-warning text-right",
+                  },
+                  "imbue_cloud requires a selected account.",
+                )
+              : null,
+            byokPinnedRegion !== ""
+              ? m(
+                  "p",
+                  {
+                    id: "byok-region-note",
+                    class: "mt-1 type-helper text-tertiary",
+                  },
+                  `Runs in ${byokPinnedRegion} — fixed when this account was added. For a different region, add ` +
+                    "another account entry with the same keys.",
+                )
+              : null,
+            // The compute mode's own requirement (Docker's daemon, Lima's QEMU and
+            // KVM); the runtime's (runsc) is annotated under the runtime selector.
+            prerequisiteNotice(
+              model.unmetPrerequisiteForLaunchMode(),
+              "launch-mode-prerequisite",
+            ),
+          ]),
+          m("div", [
+            m("div", { class: "flex items-center justify-between gap-3" }, [
+              m(
+                FormLabel,
+                { target: "backup_provider", inline: true },
+                "Backup provider",
+              ),
+              m(
+                Select,
+                {
+                  id: "backup_provider",
+                  name: "backup_provider",
+                  width: "w-48",
+                  extra: fieldRing("backup_provider"),
+                  value: model.backupProvider,
+                  onchange: (event: Event) => {
+                    model.backupProvider = (
+                      event.target as HTMLSelectElement
+                    ).value;
+                    model.selectedPreset = null;
+                  },
+                },
+                defaults.backup_providers.map((provider) =>
                   m(
                     "option",
                     {
-                      value: mode,
-                      selected: model.launchValue === mode,
-                      disabled: mode === "IMBUE_CLOUD" && model.accountId === "" && defaults.accounts.length === 0,
+                      value: provider,
+                      selected: model.backupProvider === provider,
+                      disabled:
+                        provider === "IMBUE_CLOUD" &&
+                        model.accountId === "" &&
+                        defaults.accounts.length === 0,
                     },
-                    launchModeLabel(mode),
+                    backupProviderLabel(provider),
                   ),
-                ),
-                defaults.byok_clouds_enabled
-                  ? [
-                      cloudAccountOptions(defaults.cloud_accounts, model.launchValue),
-                      m("option", { value: "ADD:aws" }, "add AWS account…"),
-                      m("option", { value: "ADD:gcp" }, "add GCP account…"),
-                      m("option", { value: "ADD:azure" }, "add Azure account…"),
-                    ]
-                  : null,
-              ],
-            ),
-          ]),
-          model.accountId === "" && model.launchValue === "IMBUE_CLOUD"
-            ? m(
-                "p",
-                { id: "launch-mode-account-error", class: "mt-1 type-helper text-warning text-right" },
-                "imbue_cloud requires a selected account.",
-              )
-            : null,
-          byokPinnedRegion !== ""
-            ? m(
-                "p",
-                { id: "byok-region-note", class: "mt-1 type-helper text-tertiary" },
-                `Runs in ${byokPinnedRegion} — fixed when this account was added. For a different region, add ` +
-                  "another account entry with the same keys.",
-              )
-            : null,
-          // The compute mode's own requirement (Docker's daemon, Lima's QEMU and
-          // KVM); the runtime's (runsc) is annotated under the runtime selector.
-          prerequisiteNotice(model.unmetPrerequisiteForLaunchMode(), "launch-mode-prerequisite"),
-        ]),
-        m("div", [
-          m("div", { class: "flex items-center justify-between gap-3" }, [
-            m(FormLabel, { target: "backup_provider", inline: true }, "Backup provider"),
-            m(
-              Select,
-              {
-                id: "backup_provider",
-                name: "backup_provider",
-                width: "w-48",
-                extra: fieldRing("backup_provider"),
-                value: model.backupProvider,
-                onchange: (event: Event) => {
-                  model.backupProvider = (event.target as HTMLSelectElement).value;
-                  model.selectedPreset = null;
-                },
-              },
-              defaults.backup_providers.map((provider) =>
-                m(
-                  "option",
-                  {
-                    value: provider,
-                    selected: model.backupProvider === provider,
-                    disabled: provider === "IMBUE_CLOUD" && model.accountId === "" && defaults.accounts.length === 0,
-                  },
-                  backupProviderLabel(provider),
                 ),
               ),
-            ),
-          ]),
-          model.accountId === "" && model.backupProvider === "IMBUE_CLOUD"
-            ? m(
-                "p",
-                { id: "backup-provider-account-error", class: "mt-1 type-helper text-warning text-right" },
-                "imbue_cloud requires a selected account.",
-              )
-            : null,
-          model.backupProvider === "API_KEY"
-            ? m("div", { id: "backup-api-key-row", class: "mt-2" }, [
-                m(FormLabel, { target: "backup_api_key_env" }, "restic environment"),
-                m("p", { class: "mb-1 type-helper text-tertiary" }, [
-                  "Written verbatim to restic.env. Don't set RESTIC_PASSWORD -- Imbue Studio assigns each workspace its ",
-                  "own. See the ",
+            ]),
+            model.accountId === "" && model.backupProvider === "IMBUE_CLOUD"
+              ? m(
+                  "p",
+                  {
+                    id: "backup-provider-account-error",
+                    class: "mt-1 type-helper text-warning text-right",
+                  },
+                  "imbue_cloud requires a selected account.",
+                )
+              : null,
+            model.backupProvider === "API_KEY"
+              ? m("div", { id: "backup-api-key-row", class: "mt-2" }, [
                   m(
-                    Link,
-                    {
-                      href: "https://restic.readthedocs.io/en/stable/040_backup.html#environment-variables",
-                      target: "_blank",
-                      rel: "noopener",
-                    },
-                    "restic docs",
+                    FormLabel,
+                    { target: "backup_api_key_env" },
+                    "restic environment",
                   ),
-                  ".",
-                ]),
-                m(Textarea, {
-                  id: "backup_api_key_env",
-                  name: "backup_api_key_env",
-                  rows: 6,
-                  extra: "font-mono",
-                  value: model.backupApiKeyEnv,
-                  oninput: (event: InputEvent) => {
-                    model.backupApiKeyEnv = (event.target as HTMLTextAreaElement).value;
+                  m("p", { class: "mb-1 type-helper text-tertiary" }, [
+                    "Written verbatim to restic.env. Don't set RESTIC_PASSWORD -- Imbue Studio assigns each workspace its ",
+                    "own. See the ",
+                    m(
+                      Link,
+                      {
+                        href: "https://restic.readthedocs.io/en/stable/040_backup.html#environment-variables",
+                        target: "_blank",
+                        rel: "noopener",
+                      },
+                      "restic docs",
+                    ),
+                    ".",
+                  ]),
+                  m(Textarea, {
+                    id: "backup_api_key_env",
+                    name: "backup_api_key_env",
+                    rows: 6,
+                    extra: "font-mono",
+                    value: model.backupApiKeyEnv,
+                    oninput: (event: InputEvent) => {
+                      model.backupApiKeyEnv = (
+                        event.target as HTMLTextAreaElement
+                      ).value;
+                    },
+                  }),
+                ])
+              : null,
+          ]),
+          m("div", { id: "web-access-row" }, [
+            m("div", { class: "flex items-center justify-between gap-3" }, [
+              m(
+                FormLabel,
+                { target: "enable_web_access", inline: true },
+                ENABLE_SHARING_LABEL,
+              ),
+              m("span", { class: "flex shrink-0 items-center gap-2" }, [
+                renderSwitch({
+                  id: "enable_web_access",
+                  isOn: model.enableWebAccess,
+                  label: ENABLE_SHARING_LABEL,
+                  onFlip: (isOn) => {
+                    model.enableWebAccess = isOn;
                   },
                 }),
+                renderSwitchWord({
+                  id: "web-access-word",
+                  isOn: model.enableWebAccess,
+                }),
+              ]),
+            ]),
+            m(
+              "p",
+              { class: "mt-1 type-helper text-tertiary" },
+              SHARING_SENTENCE,
+            ),
+            model.enableWebAccess && model.accountId === ""
+              ? m(
+                  "p",
+                  {
+                    id: "web-access-account-error",
+                    class: "mt-1 type-helper text-warning",
+                  },
+                  "Sharing requires a selected account.",
+                )
+              : null,
+          ]),
+          regionOptions.length > 0
+            ? m("div", { id: "region-row" }, [
+                m("div", { class: "flex items-start justify-between gap-3" }, [
+                  m("div", [
+                    m(FormLabel, { target: "region", inline: true }, "Region"),
+                    m(
+                      "p",
+                      { class: "mt-1 type-helper text-tertiary" },
+                      "Where the machine is created. If a region is out of capacity, try another.",
+                    ),
+                  ]),
+                  m(
+                    Select,
+                    {
+                      id: "region",
+                      name: "region",
+                      width: "w-48",
+                      extra: fieldRing("region"),
+                      value: model.selectedRegion(),
+                      onchange: (event: Event) => {
+                        model.setRegion(
+                          (event.target as HTMLSelectElement).value,
+                        );
+                        scheduleHostNameValidation();
+                      },
+                    },
+                    regionOptions.map((region) =>
+                      m(
+                        "option",
+                        {
+                          value: region,
+                          selected: region === model.selectedRegion(),
+                        },
+                        region,
+                      ),
+                    ),
+                  ),
+                ]),
               ])
             : null,
-        ]),
-        m("div", { id: "web-access-row" }, [
-          m("div", { class: "flex items-center justify-between gap-3" }, [
-            m(FormLabel, { target: "enable_web_access", inline: true }, ENABLE_SHARING_LABEL),
-            m("span", { class: "flex shrink-0 items-center gap-2" }, [
-              renderSwitch({
-                id: "enable_web_access",
-                isOn: model.enableWebAccess,
-                label: ENABLE_SHARING_LABEL,
-                onFlip: (isOn) => {
-                  model.enableWebAccess = isOn;
-                },
-              }),
-              renderSwitchWord({ id: "web-access-word", isOn: model.enableWebAccess }),
-            ]),
-          ]),
-          m("p", { class: "mt-1 type-helper text-tertiary" }, SHARING_SENTENCE),
-          model.enableWebAccess && model.accountId === ""
-            ? m(
-                "p",
-                { id: "web-access-account-error", class: "mt-1 type-helper text-warning" },
-                "Sharing requires a selected account.",
-              )
+          instanceTypeOptions.length > 0
+            ? m("div", { id: "instance-type-row" }, [
+                m("div", { class: "flex items-start justify-between gap-3" }, [
+                  m("div", [
+                    m(
+                      FormLabel,
+                      { target: "instance_type", inline: true },
+                      "Machine size",
+                    ),
+                    m(
+                      "p",
+                      { class: "mt-1 type-helper text-tertiary" },
+                      "Billed to your account while the machine runs. 8 GB is the tested default.",
+                    ),
+                  ]),
+                  m(
+                    Select,
+                    {
+                      id: "instance_type",
+                      name: "instance_type",
+                      width: "w-80",
+                      value: model.selectedInstanceType(),
+                      onchange: (event: Event) => {
+                        model.setInstanceType(
+                          (event.target as HTMLSelectElement).value,
+                        );
+                      },
+                    },
+                    instanceTypeOptions.map(([value, label]) =>
+                      m(
+                        "option",
+                        {
+                          value,
+                          selected: value === model.selectedInstanceType(),
+                        },
+                        label,
+                      ),
+                    ),
+                  ),
+                ]),
+              ])
             : null,
-        ]),
-        regionOptions.length > 0
-          ? m("div", { id: "region-row" }, [
-              m("div", { class: "flex items-start justify-between gap-3" }, [
-                m("div", [
-                  m(FormLabel, { target: "region", inline: true }, "Region"),
+          machineSizeRow(),
+          model.isRuntimeShown()
+            ? m("div", { id: "runtime-row" }, [
+                m("div", { class: "flex items-center justify-between gap-3" }, [
                   m(
-                    "p",
-                    { class: "mt-1 type-helper text-tertiary" },
-                    "Where the machine is created. If a region is out of capacity, try another.",
+                    FormLabel,
+                    { target: "runtime", inline: true },
+                    "Container runtime",
+                  ),
+                  m(
+                    Select,
+                    {
+                      id: "runtime",
+                      name: "runtime",
+                      width: "w-48",
+                      value: model.runtime,
+                      onchange: (event: Event) => {
+                        model.runtime = (
+                          event.target as HTMLSelectElement
+                        ).value;
+                      },
+                    },
+                    defaults.docker_runtimes.map((runtime) =>
+                      m(
+                        "option",
+                        { value: runtime, selected: runtime === model.runtime },
+                        runtime.toLowerCase(),
+                      ),
+                    ),
                   ),
                 ]),
-                m(
-                  Select,
-                  {
-                    id: "region",
-                    name: "region",
-                    width: "w-48",
-                    extra: fieldRing("region"),
-                    value: model.selectedRegion(),
-                    onchange: (event: Event) => {
-                      model.setRegion((event.target as HTMLSelectElement).value);
-                      scheduleHostNameValidation();
-                    },
-                  },
-                  regionOptions.map((region) =>
-                    m("option", { value: region, selected: region === model.selectedRegion() }, region),
-                  ),
+                prerequisiteNotice(
+                  model.unmetPrerequisiteForRuntime(),
+                  "runtime-prerequisite",
                 ),
-              ]),
-            ])
-          : null,
-        instanceTypeOptions.length > 0
-          ? m("div", { id: "instance-type-row" }, [
-              m("div", { class: "flex items-start justify-between gap-3" }, [
-                m("div", [
-                  m(FormLabel, { target: "instance_type", inline: true }, "Machine size"),
-                  m(
-                    "p",
-                    { class: "mt-1 type-helper text-tertiary" },
-                    "Billed to your account while the machine runs. 8 GB is the tested default.",
-                  ),
-                ]),
-                m(
-                  Select,
-                  {
-                    id: "instance_type",
-                    name: "instance_type",
-                    width: "w-80",
-                    value: model.selectedInstanceType(),
-                    onchange: (event: Event) => {
-                      model.setInstanceType((event.target as HTMLSelectElement).value);
-                    },
-                  },
-                  instanceTypeOptions.map(([value, label]) =>
-                    m("option", { value, selected: value === model.selectedInstanceType() }, label),
-                  ),
-                ),
-              ]),
-            ])
-          : null,
-        machineSizeRow(),
-        model.isRuntimeShown()
-          ? m("div", { id: "runtime-row" }, [
-              m("div", { class: "flex items-center justify-between gap-3" }, [
-                m(FormLabel, { target: "runtime", inline: true }, "Container runtime"),
-                m(
-                  Select,
-                  {
-                    id: "runtime",
-                    name: "runtime",
-                    width: "w-48",
-                    value: model.runtime,
-                    onchange: (event: Event) => {
-                      model.runtime = (event.target as HTMLSelectElement).value;
-                    },
-                  },
-                  defaults.docker_runtimes.map((runtime) =>
-                    m("option", { value: runtime, selected: runtime === model.runtime }, runtime.toLowerCase()),
-                  ),
-                ),
-              ]),
-              prerequisiteNotice(model.unmetPrerequisiteForRuntime(), "runtime-prerequisite"),
-            ])
-          : null,
-        m("hr", { class: "border-t border-dashed border-default my-2" }),
-        m("div", [
-          m(FormLabel, { target: "git_url" }, "Repository"),
-          m("p", { class: "mb-1 type-helper text-tertiary" }, "Git URL or local path"),
-          m(TextInput, {
-            id: "git_url",
-            name: "git_url",
-            placeholder: "https://github.com/user/repo.git",
-            required: true,
-            extra: fieldRing("git_url"),
-            value: model.gitUrl,
-            oninput: (event: InputEvent) => {
-              model.gitUrl = (event.target as HTMLInputElement).value;
-            },
-          }),
+              ])
+            : null,
+          m("hr", { class: "border-t border-dashed border-default my-2" }),
+          m("div", [
+            m(FormLabel, { target: "git_url" }, "Repository"),
+            m(
+              "p",
+              { class: "mb-1 type-helper text-tertiary" },
+              "Git URL or local path",
+            ),
+            m(TextInput, {
+              id: "git_url",
+              name: "git_url",
+              placeholder: "https://github.com/user/repo.git",
+              required: true,
+              extra: fieldRing("git_url"),
+              value: model.gitUrl,
+              oninput: (event: InputEvent) => {
+                model.gitUrl = (event.target as HTMLInputElement).value;
+              },
+            }),
+          ]),
+          m("div", [
+            m(FormLabel, { target: "branch" }, "Branch"),
+            m(
+              "p",
+              { class: "mb-1 type-helper text-tertiary" },
+              "Defaults to the template version this app was released with",
+            ),
+            m(TextInput, {
+              id: "branch",
+              name: "branch",
+              placeholder: "this app's version",
+              value: model.branch,
+              oninput: (event: InputEvent) => {
+                model.branch = (event.target as HTMLInputElement).value;
+              },
+            }),
+          ]),
         ]),
-        m("div", [
-          m(FormLabel, { target: "branch" }, "Branch"),
-          m(
-            "p",
-            { class: "mb-1 type-helper text-tertiary" },
-            "Defaults to the template version this app was released with",
-          ),
-          m(TextInput, {
-            id: "branch",
-            name: "branch",
-            placeholder: "this app's version",
-            value: model.branch,
-            oninput: (event: InputEvent) => {
-              model.branch = (event.target as HTMLInputElement).value;
-            },
-          }),
-        ]),
-      ]),
-    ]);
+      ],
+    );
   }
 
   return {
@@ -695,7 +920,8 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
           model.applyDefaults(defaults);
           // An embedded caller's opening preset, unless a retry prefill
           // already decided it.
-          if (defaults.prefill === null && attrs.initialPreset !== undefined) selectPreset(attrs.initialPreset);
+          if (defaults.prefill === null && attrs.initialPreset !== undefined)
+            selectPreset(attrs.initialPreset);
           m.redraw();
         })
         .catch(() => {
@@ -725,10 +951,24 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
       // Embedded, the modal is the page: no centering container, and the
       // masthead is the modal's own title.
       const container = (content: m.Children): m.Children =>
-        isEmbedded ? m("div", { class: "w-full" }, content) : m(PageNarrowContainer, { padding: "form", maxWidth: "max-w-[720px]" }, content);
+        isEmbedded
+          ? m("div", { class: "w-full" }, content)
+          : m(
+              PageNarrowContainer,
+              { padding: "form", maxWidth: "max-w-[720px]" },
+              content,
+            );
       return container(
         defaults === null
-          ? m("p", { class: "type-helper text-tertiary text-center " + (isEmbedded ? "py-12" : "pt-24") }, model.loadError || "Loading…")
+          ? m(
+              "p",
+              {
+                class:
+                  "type-helper text-tertiary text-center " +
+                  (isEmbedded ? "py-12" : "pt-24"),
+              },
+              model.loadError || "Loading…",
+            )
           : m(
               "form",
               {
@@ -755,103 +995,152 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                 isEmbedded
                   ? null
                   : m("div", { class: "text-center mb-12" }, [
-                      m("p", { class: "type-label uppercase tracking-wide text-secondary" }, "Create a workspace"),
-                      m("h1", { class: "type-heading-lg text-primary mt-1" }, "Where should it run?"),
+                      m(
+                        "p",
+                        {
+                          class:
+                            "type-label uppercase tracking-wide text-secondary",
+                        },
+                        "Create a workspace",
+                      ),
+                      m(
+                        "h1",
+                        { class: "type-heading-lg text-primary mt-1" },
+                        "Where should it run?",
+                      ),
                     ]),
                 model.submitError
                   ? m(
                       "p",
-                      { id: "create-error", role: "alert", class: "mb-6 type-helper text-important text-center" },
+                      {
+                        id: "create-error",
+                        role: "alert",
+                        class: "mb-6 type-helper text-important text-center",
+                      },
                       model.submitError,
                     )
                   : m("p", { id: "create-error", class: "hidden" }),
-                m("div", { id: "simple-view", class: model.isAdvancedOpen ? "hidden" : "" }, [
-                  // The radio group owns only the cards: the notice below it
-                  // carries its own controls, which are not part of the choice.
-                  m(
-                    "div",
-                    { role: "radiogroup", "aria-label": "Where to run your workspace" },
-                    m(PresetCards, {
-                      selectedPreset: model.selectedPreset,
-                      onSelect: selectPreset,
-                    }),
-                  ),
-                  // The local card stays selectable: the notice says what to
-                  // install so the machine can run it, and "Check again"
-                  // re-probes without leaving the page. It covers whatever
-                  // holds Create, so a selection made in Advanced (a compute
-                  // mode, the runsc runtime) is still explained here after
-                  // "Back to simple configuration", where its own notice is
-                  // hidden with the panel.
-                  prerequisiteNotice(model.unmetPrerequisiteForSubmit(), "submit-prerequisite"),
-                ]),
-                verificationNotice(),
-                m("div", { class: "flex items-center justify-between mt-8 type-helper" }, [
-                  m(
-                    "select",
-                    {
-                      id: "account_id",
-                      name: "account_id",
-                      class:
-                        "max-w-[220px] type-helper text-tertiary bg-transparent border-0 rounded-md px-1 py-1 -ml-1 " +
-                        "outline-none cursor-pointer hover:text-primary focus:outline-none focus:ring-0" +
-                        (model.isAccountErrorShown ? " !ring-1 ring-important" : ""),
-                      value: model.accountId,
-                      onchange: (event: Event) => {
-                        model.accountId = (event.target as HTMLSelectElement).value;
-                        if (!model.imbueCloudNeedsAccount()) model.isAccountErrorShown = false;
-                        scheduleHostNameValidation();
+                m(
+                  "div",
+                  {
+                    id: "simple-view",
+                    class: model.isAdvancedOpen ? "hidden" : "",
+                  },
+                  [
+                    // The radio group owns only the cards: the notice below it
+                    // carries its own controls, which are not part of the choice.
+                    m(
+                      "div",
+                      {
+                        role: "radiogroup",
+                        "aria-label": "Where to run your workspace",
                       },
-                    },
-                    [
-                      defaults.accounts.map((account) =>
+                      m(PresetCards, {
+                        selectedPreset: model.selectedPreset,
+                        onSelect: selectPreset,
+                      }),
+                    ),
+                    // The local card stays selectable: the notice says what to
+                    // install so the machine can run it, and "Check again"
+                    // re-probes without leaving the page. It covers whatever
+                    // holds Create, so a selection made in Advanced (a compute
+                    // mode, the runsc runtime) is still explained here after
+                    // "Back to simple configuration", where its own notice is
+                    // hidden with the panel.
+                    prerequisiteNotice(
+                      model.unmetPrerequisiteForSubmit(),
+                      "submit-prerequisite",
+                    ),
+                  ],
+                ),
+                verificationNotice(),
+                m(
+                  "div",
+                  {
+                    class: "flex items-center justify-between mt-8 type-helper",
+                  },
+                  [
+                    m(
+                      "select",
+                      {
+                        id: "account_id",
+                        name: "account_id",
+                        class:
+                          "max-w-[220px] type-helper text-tertiary bg-transparent border-0 rounded-md px-1 py-1 -ml-1 " +
+                          "outline-none cursor-pointer hover:text-primary focus:outline-none focus:ring-0" +
+                          (model.isAccountErrorShown
+                            ? " !ring-1 ring-important"
+                            : ""),
+                        value: model.accountId,
+                        onchange: (event: Event) => {
+                          model.accountId = (
+                            event.target as HTMLSelectElement
+                          ).value;
+                          if (!model.imbueCloudNeedsAccount())
+                            model.isAccountErrorShown = false;
+                          scheduleHostNameValidation();
+                        },
+                      },
+                      [
+                        defaults.accounts.map((account) =>
+                          m(
+                            "option",
+                            {
+                              value: account.user_id,
+                              selected: model.accountId === account.user_id,
+                            },
+                            account.email,
+                          ),
+                        ),
                         m(
                           "option",
-                          { value: account.user_id, selected: model.accountId === account.user_id },
-                          account.email,
+                          { value: "", selected: model.accountId === "" },
+                          "No account (private workspace)",
                         ),
-                      ),
-                      m("option", { value: "", selected: model.accountId === "" }, "No account (private workspace)"),
-                    ],
-                  ),
-                  !model.isAdvancedOpen
-                    ? m(
-                        "span",
-                        { id: "advanced-toggle-wrap" },
-                        m(
-                          Button,
-                          {
-                            variant: "ghost",
-                            id: "toggle-advanced",
-                            extra: LINK_BUTTON_EXTRA,
-                            onclick: () => {
-                              model.isAdvancedOpen = true;
+                      ],
+                    ),
+                    !model.isAdvancedOpen
+                      ? m(
+                          "span",
+                          { id: "advanced-toggle-wrap" },
+                          m(
+                            Button,
+                            {
+                              variant: "ghost",
+                              id: "toggle-advanced",
+                              extra: LINK_BUTTON_EXTRA,
+                              onclick: () => {
+                                model.isAdvancedOpen = true;
+                              },
                             },
-                          },
-                          "Advanced Configuration",
-                        ),
-                      )
-                    : m(
-                        "span",
-                        { id: "simple-toggle-wrap" },
-                        m(
-                          Button,
-                          {
-                            variant: "ghost",
-                            id: "back-to-simple",
-                            extra: LINK_BUTTON_EXTRA,
-                            onclick: () => {
-                              model.isAdvancedOpen = false;
+                            "Advanced Configuration",
+                          ),
+                        )
+                      : m(
+                          "span",
+                          { id: "simple-toggle-wrap" },
+                          m(
+                            Button,
+                            {
+                              variant: "ghost",
+                              id: "back-to-simple",
+                              extra: LINK_BUTTON_EXTRA,
+                              onclick: () => {
+                                model.isAdvancedOpen = false;
+                              },
                             },
-                          },
-                          "Back to simple configuration",
+                            "Back to simple configuration",
+                          ),
                         ),
-                      ),
-                ]),
+                  ],
+                ),
                 model.isAccountErrorShown
                   ? m(
                       "p",
-                      { id: "account-error", class: "mt-2 type-helper text-important text-center" },
+                      {
+                        id: "account-error",
+                        class: "mt-2 type-helper text-important text-center",
+                      },
                       "Pick an account to run on Imbue Cloud, or choose a different option for the providers.",
                     )
                   : m("p", { id: "account-error", class: "hidden" }),
@@ -864,7 +1153,9 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                     {
                       id: "create-submit",
                       extra: "w-80",
-                      disabled: model.isSubmitting || model.unmetPrerequisiteForSubmit() !== null,
+                      disabled:
+                        model.isSubmitting ||
+                        model.unmetPrerequisiteForSubmit() !== null,
                     },
                     verificationWait.email !== null
                       ? "Waiting for email verification..."
@@ -875,7 +1166,8 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                 ),
                 m(CloudAccountsModal, {
                   state: byokModal,
-                  regionOptionsByBackend: defaults.region_options_by_launch_mode,
+                  regionOptionsByBackend:
+                    defaults.region_options_by_launch_mode,
                   onAccountAdded: (account) => {
                     defaults.cloud_accounts.push(account);
                     model.launchValue = `BYOK:${account.name}`;

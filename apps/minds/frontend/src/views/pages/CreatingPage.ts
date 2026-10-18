@@ -15,8 +15,16 @@
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import type { CreateAttemptDetail, CreateAttemptRequestSummary, LiveCreateAttemptDetail } from "../../models/create";
-import { CreateAttemptWatcher, fetchCreateAttemptDetail, progressForElapsed } from "../../models/create";
+import type {
+  CreateAttemptDetail,
+  CreateAttemptRequestSummary,
+  LiveCreateAttemptDetail,
+} from "../../models/create";
+import {
+  CreateAttemptWatcher,
+  fetchCreateAttemptDetail,
+  progressForElapsed,
+} from "../../models/create";
 import {
   INTERRUPTED_LINE,
   READY_LINE,
@@ -48,7 +56,14 @@ import { Notice } from "../components/Notice";
 import { PageContainer } from "../components/Layout";
 import { Spinner } from "../components/Spinner";
 import { createFormModal } from "./CreatePage";
-import { TRANSCRIPT_COLUMN_CLASS, agentTurn, answerRow, disclosureList, scrollAnchor, userTurn } from "./start/transcript";
+import {
+  TRANSCRIPT_COLUMN_CLASS,
+  agentTurn,
+  answerRow,
+  disclosureList,
+  scrollAnchor,
+  userTurn,
+} from "./start/transcript";
 import { transcriptTurns } from "./StartPage";
 
 const DEFAULT_EXPECTED_DURATION_SECONDS = 60;
@@ -97,7 +112,10 @@ export function enterWorkspaceFromRedirect(redirectUrl: string): void {
 }
 
 function isReducedMotion(): boolean {
-  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  return (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
 }
 
 /**
@@ -121,15 +139,31 @@ export function failureTurn(workspaceName: string, error: string): m.Children {
 /** The recognized-error guidance under a failure, when the error kind has some. */
 export function failureGuidance(errorKind: string): m.Children {
   if (errorKind === "GITHUB_AUTH_REQUIRED") {
-    return m(Notice, { key: "creation-guidance", id: "github-auth-help", extra: "max-w-[calc(100%-100px)]" }, [
-      "This repository looks private. Install the GitHub app or use a repository URL that includes ",
-      "credentials, then retry.",
-    ]);
+    return m(
+      Notice,
+      {
+        key: "creation-guidance",
+        id: "github-auth-help",
+        extra: "max-w-[calc(100%-100px)]",
+      },
+      [
+        "This repository looks private. Install the GitHub app or use a repository URL that includes ",
+        "credentials, then retry.",
+      ],
+    );
   }
   if (errorKind === "GIT_AUTH_REQUIRED") {
-    return m(Notice, { key: "creation-guidance", id: "git-auth-help", extra: "max-w-[calc(100%-100px)]" }, [
-      "This git host rejected anonymous access. Use a repository URL that includes credentials, then retry.",
-    ]);
+    return m(
+      Notice,
+      {
+        key: "creation-guidance",
+        id: "git-auth-help",
+        extra: "max-w-[calc(100%-100px)]",
+      },
+      [
+        "This git host rejected anonymous access. Use a repository URL that includes credentials, then retry.",
+      ],
+    );
   }
   return null;
 }
@@ -176,7 +210,8 @@ export const CreatingPage: m.ClosureComponent = () => {
   // measurement would name where the box was).
   function washOrigin(): { x: number; y: number } {
     const blob = document.getElementById("creating-blob");
-    if (blob === null) return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    if (blob === null)
+      return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
     const rect = blob.getBoundingClientRect();
     return {
       x: Math.min(Math.max(rect.left + rect.width / 2, 0), window.innerWidth),
@@ -208,7 +243,12 @@ export const CreatingPage: m.ClosureComponent = () => {
           return;
         }
         const accent = accentForAttempt();
-        wash.start(accent, washOrigin(), { width: window.innerWidth, height: window.innerHeight }, enter);
+        wash.start(
+          accent,
+          washOrigin(),
+          { width: window.innerWidth, height: window.innerHeight },
+          enter,
+        );
       });
     }, startOptionsAtMs() + READY_HOLD_MS);
   }
@@ -222,17 +262,26 @@ export const CreatingPage: m.ClosureComponent = () => {
     const request = state.detail?.live?.request;
     if (request === undefined || request === null) return Promise.resolve();
     const entries = state.isFromStartFlow ? startFlow.state.entries : [];
-    const isCloudPreset = state.isFromStartFlow && startFlow.isSubmittedCreateCloudPreset;
-    return postWelcomeChat(state.createAttemptId, welcomeChatBody(entries, request, isCloudPreset)).then(
+    const isCloudPreset =
+      state.isFromStartFlow && startFlow.isSubmittedCreateCloudPreset;
+    return postWelcomeChat(
+      state.createAttemptId,
+      welcomeChatBody(entries, request, isCloudPreset),
+    ).then(
       () => undefined,
       (error: unknown) => {
-        console.warn("The conversation could not be handed to the new workspace:", error);
+        console.warn(
+          "The conversation could not be handed to the new workspace:",
+          error,
+        );
       },
     );
   }
 
   function accentForAttempt(): string {
-    const cached = getAppContext().stores.workspaces.accentEntry(state.createAttemptId);
+    const cached = getAppContext().stores.workspaces.accentEntry(
+      state.createAttemptId,
+    );
     return cached?.accent ?? "#000000";
   }
 
@@ -267,10 +316,13 @@ export const CreatingPage: m.ClosureComponent = () => {
 
   function dismissAttempt(): void {
     state.isActionPending = true;
-    fetch(`/api/v1/workspaces/create-attempts/${encodeURIComponent(state.createAttemptId)}`, {
-      method: "DELETE",
-      credentials: "same-origin",
-    })
+    fetch(
+      `/api/v1/workspaces/create-attempts/${encodeURIComponent(state.createAttemptId)}`,
+      {
+        method: "DELETE",
+        credentials: "same-origin",
+      },
+    )
       .then(() => m.route.set("/"))
       .catch(() => {
         state.isActionPending = false;
@@ -280,10 +332,13 @@ export const CreatingPage: m.ClosureComponent = () => {
 
   function discardAttempt(): void {
     state.isActionPending = true;
-    fetch(`/api/v1/workspaces/create-attempts/${encodeURIComponent(state.createAttemptId)}/discard`, {
-      method: "POST",
-      credentials: "same-origin",
-    })
+    fetch(
+      `/api/v1/workspaces/create-attempts/${encodeURIComponent(state.createAttemptId)}/discard`,
+      {
+        method: "POST",
+        credentials: "same-origin",
+      },
+    )
       .then(() => m.route.set("/"))
       .catch(() => {
         state.isActionPending = false;
@@ -299,8 +354,12 @@ export const CreatingPage: m.ClosureComponent = () => {
    * reload falls back to the settings, the way the rest of this page already
    * degrades to a record view.
    */
-  function summaryTurn(request: CreateAttemptRequestSummary, isInstant: boolean): m.Children {
-    const isCloudPreset = state.isFromStartFlow && startFlow.isSubmittedCreateCloudPreset;
+  function summaryTurn(
+    request: CreateAttemptRequestSummary,
+    isInstant: boolean,
+  ): m.Children {
+    const isCloudPreset =
+      state.isFromStartFlow && startFlow.isSubmittedCreateCloudPreset;
     return userTurn({
       key: "creation-summary",
       delayMs: 0,
@@ -309,16 +368,27 @@ export const CreatingPage: m.ClosureComponent = () => {
     });
   }
 
-  function loadingBox(workspaceName: string, live: LiveCreateAttemptDetail | null, arriveAtMs: number): m.Children {
+  function loadingBox(
+    workspaceName: string,
+    live: LiveCreateAttemptDetail | null,
+    arriveAtMs: number,
+  ): m.Children {
     const elapsedSeconds = (Date.now() - state.startedAtMs) / 1000;
-    const expectedDurationSeconds = live?.expected_duration_seconds ?? DEFAULT_EXPECTED_DURATION_SECONDS;
-    const percent = state.isDone ? 100 : Math.min(99.5, progressForElapsed(elapsedSeconds, expectedDurationSeconds));
+    const expectedDurationSeconds =
+      live?.expected_duration_seconds ?? DEFAULT_EXPECTED_DURATION_SECONDS;
+    const percent = state.isDone
+      ? 100
+      : Math.min(
+          99.5,
+          progressForElapsed(elapsedSeconds, expectedDurationSeconds),
+        );
     return m(
       "div",
       {
         key: "creation-box",
         id: "creating-box",
-        class: "start-chat-in mt-5 w-full rounded-lg border border-default bg-surface-primary p-4",
+        class:
+          "start-chat-in mt-5 w-full rounded-lg border border-default bg-surface-primary p-4",
         style: `--start-chat-delay: ${arriveAtMs}ms; --start-chat-fade: 280ms;`,
       },
       [
@@ -330,18 +400,27 @@ export const CreatingPage: m.ClosureComponent = () => {
             style: `background-color: ${accentForAttempt()};`,
             "aria-hidden": "true",
           }),
-          m("span", { class: "font-semibold" }, workspaceName || "your workspace"),
+          m(
+            "span",
+            { class: "font-semibold" },
+            workspaceName || "your workspace",
+          ),
         ]),
         m(
           "div",
           { class: "mt-3 h-1.5 bg-fill-subtle rounded-full overflow-hidden" },
           m("div", {
             id: "bar-fill",
-            class: "h-full rounded-full transition-[width] duration-300 ease-out",
+            class:
+              "h-full rounded-full transition-[width] duration-300 ease-out",
             style: `width: ${percent.toFixed(1)}%`,
           }),
         ),
-        m("p", { id: "stage", class: "mt-2 type-helper text-secondary min-h-5" }, state.stageText),
+        m(
+          "p",
+          { id: "stage", class: "mt-2 type-helper text-secondary min-h-5" },
+          state.stageText,
+        ),
         m(
           "div",
           { class: "mt-1" },
@@ -349,7 +428,8 @@ export const CreatingPage: m.ClosureComponent = () => {
             Button,
             {
               variant: "ghost",
-              extra: "!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:underline",
+              extra:
+                "!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:underline",
               onclick: () => {
                 state.isLogOpen = !state.isLogOpen;
               },
@@ -362,7 +442,8 @@ export const CreatingPage: m.ClosureComponent = () => {
               "pre",
               {
                 id: "logs",
-                class: "mt-3 type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-[22vh] overflow-y-auto",
+                class:
+                  "mt-3 type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-[22vh] overflow-y-auto",
                 onupdate: (vnode) => {
                   const element = vnode.dom as HTMLElement;
                   element.scrollTop = element.scrollHeight;
@@ -392,7 +473,10 @@ export const CreatingPage: m.ClosureComponent = () => {
   }
 
   /** Retry / Dismiss (a failed attempt) or Retry / Discard (an interrupted one). */
-  function recoveryButtons(secondLabel: string, onSecond: () => void): m.Children {
+  function recoveryButtons(
+    secondLabel: string,
+    onSecond: () => void,
+  ): m.Children {
     return answerRow({
       key: "creation-recovery",
       delayMs: FLOW_THINK_MS,
@@ -418,20 +502,37 @@ export const CreatingPage: m.ClosureComponent = () => {
   }
 
   /** The failure turn, followed by the recognized-error guidance when the error kind has some. */
-  function failureTurns(workspaceName: string, error: string, errorKind: string): m.Children[] {
+  function failureTurns(
+    workspaceName: string,
+    error: string,
+    errorKind: string,
+  ): m.Children[] {
     const guidance = failureGuidance(errorKind);
-    return [failureTurn(workspaceName, error), ...(guidance !== null ? [guidance] : [])];
+    return [
+      failureTurn(workspaceName, error),
+      ...(guidance !== null ? [guidance] : []),
+    ];
   }
 
   /** A record-backed attempt with no live thread: the failure with its log tail, or the interrupted notice. */
-  function recordTurns(record: NonNullable<CreateAttemptDetail["record"]>): m.Children[] {
+  function recordTurns(
+    record: NonNullable<CreateAttemptDetail["record"]>,
+  ): m.Children[] {
     if (record.state === "failed") {
-      const turns = failureTurns(record.workspace_name, record.error ?? "unknown error", record.error_kind ?? "");
+      const turns = failureTurns(
+        record.workspace_name,
+        record.error ?? "unknown error",
+        record.error_kind ?? "",
+      );
       if (record.log_tail.length > 0) {
         turns.push(
           m(
             "pre",
-            { key: "creation-log-tail", class: "mt-3 type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-64 overflow-y-auto max-w-[calc(100%-100px)]" },
+            {
+              key: "creation-log-tail",
+              class:
+                "mt-3 type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-64 overflow-y-auto max-w-[calc(100%-100px)]",
+            },
             record.log_tail.join("\n"),
           ),
         );
@@ -440,7 +541,12 @@ export const CreatingPage: m.ClosureComponent = () => {
       return turns;
     }
     return [
-      agentTurn({ key: "creation-interrupted", text: INTERRUPTED_LINE, startAtMs: FLOW_THINK_MS, isInstant: true }),
+      agentTurn({
+        key: "creation-interrupted",
+        text: INTERRUPTED_LINE,
+        startAtMs: FLOW_THINK_MS,
+        isInstant: true,
+      }),
       recoveryButtons("Discard", discardAttempt),
     ];
   }
@@ -459,25 +565,51 @@ export const CreatingPage: m.ClosureComponent = () => {
         else state.openSectionIds.add(id);
       },
       detailFor: (section) =>
-        section.detail.split("\n\n").map((paragraph, index) => m("p", { class: index === 0 ? "" : "mt-2" }, paragraph)),
+        section.detail
+          .split("\n\n")
+          .map((paragraph, index) =>
+            m("p", { class: index === 0 ? "" : "mt-2" }, paragraph),
+          ),
     });
   }
 
   /** A live attempt: the setup line, then either the live failure or the reading material and the loading box (and the ready line). */
-  function liveTurns(live: LiveCreateAttemptDetail | null, workspaceName: string, isInstant: boolean): m.Children[] {
+  function liveTurns(
+    live: LiveCreateAttemptDetail | null,
+    workspaceName: string,
+    isInstant: boolean,
+  ): m.Children[] {
     const setupAt = isInstant ? 0 : FLOW_THINK_MS;
-    const turns: m.Children[] = [agentTurn({ key: "creation-setup", text: SETUP_LINE, startAtMs: setupAt, isInstant })];
+    const turns: m.Children[] = [
+      agentTurn({
+        key: "creation-setup",
+        text: SETUP_LINE,
+        startAtMs: setupAt,
+        isInstant,
+      }),
+    ];
     if (state.isFailed) {
-      turns.push(...failureTurns(workspaceName, state.errorText, state.errorKind));
+      turns.push(
+        ...failureTurns(workspaceName, state.errorText, state.errorKind),
+      );
       turns.push(recoveryButtons("Dismiss", dismissAttempt));
       return turns;
     }
-    const guideAt = isInstant ? 0 : setupAt + streamDurationMs(SETUP_LINE) + FLOW_OPTIONS_GAP_MS;
+    const guideAt = isInstant
+      ? 0
+      : setupAt + streamDurationMs(SETUP_LINE) + FLOW_OPTIONS_GAP_MS;
     turns.push(setupGuide(guideAt, isInstant));
     const boxAt = isInstant ? 0 : guideAt + FLOW_OPTIONS_GAP_MS * 2;
     turns.push(loadingBox(workspaceName, live, boxAt));
     if (state.isDone) {
-      turns.push(agentTurn({ key: "creation-ready", text: READY_LINE, startAtMs: FLOW_THINK_MS, class: "type-heading" }));
+      turns.push(
+        agentTurn({
+          key: "creation-ready",
+          text: READY_LINE,
+          startAtMs: FLOW_THINK_MS,
+          class: "type-heading",
+        }),
+      );
       turns.push(startOptionsList(startOptionsAtMs()));
       turns.push(startFallbackLine(startOptionsAtMs()));
     }
@@ -491,7 +623,8 @@ export const CreatingPage: m.ClosureComponent = () => {
       {
         key: "creation-start-options",
         id: "start-options",
-        class: "start-chat-in mt-3 flex max-w-[calc(100%-100px)] list-decimal flex-col gap-3 pl-6 leading-[1.5]",
+        class:
+          "start-chat-in mt-3 flex max-w-[calc(100%-100px)] list-decimal flex-col gap-3 pl-6 leading-[1.5]",
         style: `--start-chat-delay: ${arriveAtMs}ms; --start-chat-fade: 280ms;`,
       },
       START_OPTIONS.map((option) =>
@@ -526,8 +659,18 @@ export const CreatingPage: m.ClosureComponent = () => {
         startAtMs: 0,
         isInstant: true,
       }),
-      userTurn({ key: "manifesto-question", delayMs: 0, isInstant: true, text: MANIFESTO_QUESTION }),
-      agentTurn({ key: "manifesto-answer", text: MANIFESTO_HEADING, startAtMs: 0, isInstant: true }),
+      userTurn({
+        key: "manifesto-question",
+        delayMs: 0,
+        isInstant: true,
+        text: MANIFESTO_QUESTION,
+      }),
+      agentTurn({
+        key: "manifesto-answer",
+        text: MANIFESTO_HEADING,
+        startAtMs: 0,
+        isInstant: true,
+      }),
       disclosureList({
         key: "manifesto-points",
         startAtMs: 0,
@@ -558,10 +701,18 @@ export const CreatingPage: m.ClosureComponent = () => {
 
   function creationTurns(detail: CreateAttemptDetail): m.Children[] {
     const isInstant = detail.kind === "record" || !state.isFromStartFlow;
-    const request = detail.kind === "record" ? detail.record?.request : detail.live?.request;
-    const workspaceName = (detail.kind === "record" ? detail.record?.workspace_name : detail.live?.workspace_name) ?? "";
-    const summary = request !== undefined && request !== null ? [summaryTurn(request, isInstant)] : [];
-    if (detail.kind === "record" && detail.record !== null) return [...summary, ...recordTurns(detail.record)];
+    const request =
+      detail.kind === "record" ? detail.record?.request : detail.live?.request;
+    const workspaceName =
+      (detail.kind === "record"
+        ? detail.record?.workspace_name
+        : detail.live?.workspace_name) ?? "";
+    const summary =
+      request !== undefined && request !== null
+        ? [summaryTurn(request, isInstant)]
+        : [];
+    if (detail.kind === "record" && detail.record !== null)
+      return [...summary, ...recordTurns(detail.record)];
     return [...summary, ...liveTurns(detail.live, workspaceName, isInstant)];
   }
 
@@ -602,7 +753,8 @@ export const CreatingPage: m.ClosureComponent = () => {
     },
     onbeforeupdate(vnode) {
       const createAttemptId = attemptIdOf(vnode);
-      if (createAttemptId !== state.createAttemptId) loadAttempt(createAttemptId);
+      if (createAttemptId !== state.createAttemptId)
+        loadAttempt(createAttemptId);
     },
     onremove() {
       stopWatching();
@@ -610,23 +762,43 @@ export const CreatingPage: m.ClosureComponent = () => {
     view() {
       const detail = state.detail;
       if (detail === null) {
-        return m(PageContainer, { id: "creating", "data-agent-id": state.createAttemptId }, [
-          m("div", { class: "flex justify-center pt-24" }, m(Spinner, { size: "lg" })),
-        ]);
+        return m(
+          PageContainer,
+          { id: "creating", "data-agent-id": state.createAttemptId },
+          [
+            m(
+              "div",
+              { class: "flex justify-center pt-24" },
+              m(Spinner, { size: "lg" }),
+            ),
+          ],
+        );
       }
       const prelude = [
         ...manifestoTurns(),
         ...(state.isFromStartFlow
-          ? transcriptTurns(startFlow.state.entries, { isInstant: true, isPressable: false })
+          ? transcriptTurns(startFlow.state.entries, {
+              isInstant: true,
+              isPressable: false,
+            })
           : []),
       ];
       const turns = creationTurns(detail);
       return m(
         "div",
-        { id: "creating", "data-agent-id": state.createAttemptId, class: TRANSCRIPT_COLUMN_CLASS },
+        {
+          id: "creating",
+          "data-agent-id": state.createAttemptId,
+          class: TRANSCRIPT_COLUMN_CLASS,
+        },
         // Every child is keyed: Mithril rejects a fragment that mixes keyed
         // vnodes with holes, so the modal is appended only while it is open.
-        [...prelude, ...turns, scrollAnchor(prelude.length + turns.length), ...(state.isRetryFormOpen ? [retryForm()] : [])],
+        [
+          ...prelude,
+          ...turns,
+          scrollAnchor(prelude.length + turns.length),
+          ...(state.isRetryFormOpen ? [retryForm()] : []),
+        ],
       );
     },
   };

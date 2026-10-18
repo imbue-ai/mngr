@@ -6,7 +6,10 @@
 import m from "mithril";
 import { INPUT_BASE } from "../../components/constants";
 import { electronBridge } from "../../../electron-bridge";
-import type { FileSharingPermissionDetail as Detail, InboxModel } from "../../../models/inbox";
+import type {
+  FileSharingPermissionDetail as Detail,
+  InboxModel,
+} from "../../../models/inbox";
 import { collapseSharePathHome } from "../../../models/inbox";
 import { Button } from "../../components/Button";
 import { renderFolderSyncSetting } from "../../components/FolderSyncSetting";
@@ -19,24 +22,35 @@ import { PermissionsShell } from "./PermissionsShell";
  * the Local files card draws, so what is approved here is what that card
  * will show. */
 function renderSyncOption(model: InboxModel, detail: Detail): m.Children {
-  return m("div", { class: "mt-1 pt-3 border-t border-subtle", id: "file-sharing-sync" }, [
-    renderFolderSyncSetting({
-      path: detail.file_path,
-      access: detail.access === "WRITE" ? "WRITE" : "READ",
-      isOn: model.isSharePathSynced,
-      unavailableReason: detail.sync_unavailable_reason,
-      conflict: model.sharePathSyncConflict,
-      onToggle: (enabled) => {
-        model.isSharePathSynced = enabled;
-      },
-      onConflictChange: (conflict) => {
-        model.sharePathSyncConflict = conflict;
-      },
-      note: detail.is_sync_requested
-        ? m("p", { class: "type-helper text-info m-0", id: "file-sharing-sync-requested" }, "The agent asked for this.")
-        : null,
-    }),
-  ]);
+  return m(
+    "div",
+    { class: "mt-1 pt-3 border-t border-subtle", id: "file-sharing-sync" },
+    [
+      renderFolderSyncSetting({
+        path: detail.file_path,
+        access: detail.access === "WRITE" ? "WRITE" : "READ",
+        isOn: model.isSharePathSynced,
+        unavailableReason: detail.sync_unavailable_reason,
+        conflict: model.sharePathSyncConflict,
+        onToggle: (enabled) => {
+          model.isSharePathSynced = enabled;
+        },
+        onConflictChange: (conflict) => {
+          model.sharePathSyncConflict = conflict;
+        },
+        note: detail.is_sync_requested
+          ? m(
+              "p",
+              {
+                class: "type-helper text-info m-0",
+                id: "file-sharing-sync-requested",
+              },
+              "The agent asked for this.",
+            )
+          : null,
+      }),
+    ],
+  );
 }
 
 export interface FileSharingPermissionDetailAttrs {
@@ -44,7 +58,10 @@ export interface FileSharingPermissionDetailAttrs {
   detail: Detail;
 }
 
-async function browseForPath(model: InboxModel, mode: "file" | "directory"): Promise<void> {
+async function browseForPath(
+  model: InboxModel,
+  mode: "file" | "directory",
+): Promise<void> {
   const selected = await electronBridge
     .showFilePicker({ defaultPath: model.filePathValue.trim(), mode })
     .catch(() => null);
@@ -78,18 +95,31 @@ export function FileSharingPermissionDetailView(): m.Component<FileSharingPermis
               type: "text",
               id: "file-sharing-path-input",
               value: model.filePathValue,
-              class: "flex-1 w-full leading-tight font-mono " + INPUT_BASE + " rounded-md",
+              class:
+                "flex-1 w-full leading-tight font-mono " +
+                INPUT_BASE +
+                " rounded-md",
               oninput: (event: Event) => {
                 model.filePathValue = (event.target as HTMLInputElement).value;
               },
             }),
             hasPicker
-              ? m(Button, { variant: "secondary", onclick: () => void browseForPath(model, "file") }, "Choose file…")
+              ? m(
+                  Button,
+                  {
+                    variant: "secondary",
+                    onclick: () => void browseForPath(model, "file"),
+                  },
+                  "Choose file…",
+                )
               : null,
             hasPicker
               ? m(
                   Button,
-                  { variant: "secondary", onclick: () => void browseForPath(model, "directory") },
+                  {
+                    variant: "secondary",
+                    onclick: () => void browseForPath(model, "directory"),
+                  },
                   "Choose folder…",
                 )
               : null,
@@ -97,7 +127,10 @@ export function FileSharingPermissionDetailView(): m.Component<FileSharingPermis
           model.isSharePathHintShown()
             ? m(
                 "p",
-                { id: "file-sharing-path-hint", class: "type-helper text-important" },
+                {
+                  id: "file-sharing-path-hint",
+                  class: "type-helper text-important",
+                },
                 "This path is outside the folders that can be shared.",
               )
             : null,

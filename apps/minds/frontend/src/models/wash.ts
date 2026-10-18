@@ -29,7 +29,11 @@ export interface ActiveWash {
 }
 
 /** A circle of radius WASH_DISC_PX / 2 at `origin` must reach the farthest corner of a `width` x `height` window. */
-export function washScaleFor(origin: WashOrigin, width: number, height: number): number {
+export function washScaleFor(
+  origin: WashOrigin,
+  width: number,
+  height: number,
+): number {
   const farthest = Math.max(
     Math.hypot(origin.x, origin.y),
     Math.hypot(width - origin.x, origin.y),
@@ -47,13 +51,19 @@ export class WashModel {
   // timers is not enough on its own: the scheduler is injectable.
   private generation = 0;
   private readonly redraw: () => void;
-  private readonly setTimer: (handler: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
+  private readonly setTimer: (
+    handler: () => void,
+    delayMs: number,
+  ) => ReturnType<typeof setTimeout>;
 
   constructor(
     redraw: () => void,
     // Wrapped rather than passed bare: called as a method, the host's own
     // setTimeout sees the model as `this` and Chrome throws "Illegal invocation".
-    setTimer: (handler: () => void, delayMs: number) => ReturnType<typeof setTimeout> = (handler, delayMs) =>
+    setTimer: (
+      handler: () => void,
+      delayMs: number,
+    ) => ReturnType<typeof setTimeout> = (handler, delayMs) =>
       setTimeout(handler, delayMs),
   ) {
     this.redraw = redraw;
@@ -64,10 +74,19 @@ export class WashModel {
    * Run the wash: cover the window in `accent` from `origin`, call `onSwap`
    * while the cover is whole, and lift. Any wash already running is replaced.
    */
-  start(accent: string, origin: WashOrigin, viewport: { width: number; height: number }, onSwap: () => void): void {
+  start(
+    accent: string,
+    origin: WashOrigin,
+    viewport: { width: number; height: number },
+    onSwap: () => void,
+  ): void {
     this.cancel();
     const generation = this.generation;
-    this.active = { accent, origin, scale: washScaleFor(origin, viewport.width, viewport.height) };
+    this.active = {
+      accent,
+      origin,
+      scale: washScaleFor(origin, viewport.width, viewport.height),
+    };
     this.redraw();
     this.timers.push(
       this.setTimer(() => {

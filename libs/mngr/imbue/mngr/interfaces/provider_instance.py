@@ -502,7 +502,6 @@ def bounded_result_from_cached_hosts(
         if ssh_info is None:
             continue
         host_ssh_infos.append((host.host_id, ssh_info))
-        # The endpoints ride on the SSH info event, so a failed read of them still emits the endpoint.
         try:
             published_endpoints = tuple(host_obj.get_published_endpoints())
         except (MngrError, OSError) as e:

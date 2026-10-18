@@ -35,7 +35,8 @@ const CONTENT_CLASS =
 const NAV_ENTRY_CLASS =
   "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left type-body cursor-pointer " +
   "transition-colors text-primary hover:bg-fill-hover";
-const NAV_ENTRY_SELECTED_CLASS = NAV_ENTRY_CLASS + " bg-fill-hover font-semibold";
+const NAV_ENTRY_SELECTED_CLASS =
+  NAV_ENTRY_CLASS + " bg-fill-hover font-semibold";
 
 /** One entry in a pane's left nav. The selected one fills and bolds, so the
  * list reads as the tabs it is rather than as links. */

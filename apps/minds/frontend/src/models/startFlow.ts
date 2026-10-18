@@ -66,14 +66,19 @@ export const MANIFESTO_POINTS: DisclosurePoint[] = [
 ];
 
 /** The manifesto answer as one text, for the length the streaming schedule is timed on. */
-export const MANIFESTO_ANSWER = [MANIFESTO_HEADING, "", ...MANIFESTO_POINTS.map((point) => point.label)].join("\n");
+export const MANIFESTO_ANSWER = [
+  MANIFESTO_HEADING,
+  "",
+  ...MANIFESTO_POINTS.map((point) => point.label),
+].join("\n");
 
 /**
  * The question that closes the manifesto. Answering it is what starts the
  * first-run questions, so every install answers it exactly once, before it is
  * asked anything else.
  */
-export const REPORTING_ASK = "Is it ok if we report errors to help improve Studio?";
+export const REPORTING_ASK =
+  "Is it ok if we report errors to help improve Studio?";
 /** What the ask does not say, a click away. */
 export const REPORTING_MORE_LABEL = "See more";
 export const REPORTING_MORE_DETAIL =
@@ -103,7 +108,10 @@ export const FLOW_OPTIONS_GAP_MS = 250;
 
 /** How long a stream of this text takes from its first character to its last landing. */
 export function streamDurationMs(text: string): number {
-  return Math.max(0, [...text].length - 1) * CHAT_STREAM_STEP_MS + CHAT_STREAM_FADE_MS;
+  return (
+    Math.max(0, [...text].length - 1) * CHAT_STREAM_STEP_MS +
+    CHAT_STREAM_FADE_MS
+  );
 }
 
 export interface ManifestoSchedule {
@@ -117,19 +125,24 @@ export interface ManifestoSchedule {
 export function manifestoSchedule(): ManifestoSchedule {
   const openerAt = CHAT_GAP_MS;
   // The reply waits out the whole opener, not just its first character.
-  const questionAt = openerAt + streamDurationMs(MANIFESTO_OPENER) + CHAT_REACT_MS;
+  const questionAt =
+    openerAt + streamDurationMs(MANIFESTO_OPENER) + CHAT_REACT_MS;
   const answerAt = questionAt + CHAT_BUBBLE_MS + CHAT_THINK_MS;
-  const reportingAt = answerAt + streamDurationMs(MANIFESTO_ANSWER) + CHAT_READ_MS;
+  const reportingAt =
+    answerAt + streamDurationMs(MANIFESTO_ANSWER) + CHAT_READ_MS;
   // The buttons follow their question the same beat later every other question's do.
-  const answersAt = reportingAt + streamDurationMs(REPORTING_ASK) + FLOW_OPTIONS_GAP_MS;
+  const answersAt =
+    reportingAt + streamDurationMs(REPORTING_ASK) + FLOW_OPTIONS_GAP_MS;
   return { openerAt, questionAt, answerAt, reportingAt, answersAt };
 }
 
-export type StepId = "run" | "auth" | "account" | "retry" | "again" | "verify" | "verify-again";
+export type StepId =
+  "run" | "auth" | "account" | "retry" | "again" | "verify" | "verify-again";
 const FORM_CHOICE_IDS = ["local", "own-cloud"] as const;
 /** The answers that open the create form instead of creating on Imbue Cloud. */
 export type FormChoiceId = (typeof FORM_CHOICE_IDS)[number];
-export type ChoiceId = "cloud" | FormChoiceId | "signup" | "signin" | "continue" | "verified";
+export type ChoiceId =
+  "cloud" | FormChoiceId | "signup" | "signin" | "continue" | "verified";
 
 export function isFormChoice(value: string | null): value is FormChoiceId {
   return FORM_CHOICE_IDS.some((id) => id === value);
@@ -249,7 +262,16 @@ export const FLOW: Record<StepId, FlowStep> = {
     ask:
       "A cloud workspace runs on our machines, so it needs an Imbue account. " +
       "Sign in with the account you downloaded Imbue Studio with.",
-    choices: [SIGNUP_CHOICE, { id: "signin", label: "Sign in", said: "", ack: SIGNIN_ACK, isEmphasized: true }],
+    choices: [
+      SIGNUP_CHOICE,
+      {
+        id: "signin",
+        label: "Sign in",
+        said: "",
+        ack: SIGNIN_ACK,
+        isEmphasized: true,
+      },
+    ],
   },
   // The account step when an account is already signed in: the entry's ack
   // names it, and the user may keep it or switch. Switching opens the browser
@@ -258,8 +280,20 @@ export const FLOW: Record<StepId, FlowStep> = {
   account: {
     ask: "Continue with this account or use a different one?",
     choices: [
-      { id: "signin", label: "Use a different account", said: "", ack: SIGNUP_CHOICE.ack, isEmphasized: false },
-      { id: "continue", label: "Continue", said: "", ack: SIGNIN_ACK, isEmphasized: true },
+      {
+        id: "signin",
+        label: "Use a different account",
+        said: "",
+        ack: SIGNUP_CHOICE.ack,
+        isEmphasized: false,
+      },
+      {
+        id: "continue",
+        label: "Continue",
+        said: "",
+        ack: SIGNIN_ACK,
+        isEmphasized: true,
+      },
     ],
   },
   retry: {
@@ -295,8 +329,14 @@ export function stepChoices(step: FlowStep): FlowChoice[] {
 }
 
 /** The agent's text for a question: its bold lead, then the ack the previous answer earned, then the ask. */
-export function stepText(step: FlowStep, ack: string): { lead: string; body: string } {
-  return { lead: step.lead ?? "", body: [ack, step.ask].filter((part) => part !== "").join(" ") };
+export function stepText(
+  step: FlowStep,
+  ack: string,
+): { lead: string; body: string } {
+  return {
+    lead: step.lead ?? "",
+    body: [ack, step.ask].filter((part) => part !== "").join(" "),
+  };
 }
 
 export function verificationAsk(email: string): string {
@@ -304,7 +344,10 @@ export function verificationAsk(email: string): string {
 }
 
 /** Only an outcome the server confirmed may point the user at an inbox. */
-export function verificationEmailSentNote(email: string, outcome: ResendOutcome): string {
+export function verificationEmailSentNote(
+  email: string,
+  outcome: ResendOutcome,
+): string {
   switch (outcome) {
     case "sent":
       return `Sent another email to ${email}.`;
@@ -361,7 +404,8 @@ export type TranscriptEntry =
   | { kind: "note"; text: string };
 
 /** Which modal, if any, the flow is waiting on before it can record an answer; a form choice is the create form, opened on it. */
-export type PendingModal = FormChoiceId | "signup" | "signin" | "existing-login" | null;
+export type PendingModal =
+  FormChoiceId | "signup" | "signin" | "existing-login" | null;
 
 export interface StartFlowState {
   /** The manifesto's button has been pressed; the questions are live. */
@@ -402,14 +446,26 @@ function stepEntry(id: StepId, ack: string): TranscriptEntry {
 }
 
 /** The account step after the cloud answer: asking for an account, or offering to continue as the one signed in. */
-function accountStepEntry(signedInAccount: FlowAccount | null): TranscriptEntry {
+function accountStepEntry(
+  signedInAccount: FlowAccount | null,
+): TranscriptEntry {
   if (signedInAccount === null) return stepEntry("auth", CLOUD_CHOICE.ack);
   const email = signedInAccount.email;
-  return { kind: "step", id: "account", ack: signedInAck(email), answer: null, said: "", email };
+  return {
+    kind: "step",
+    id: "account",
+    ack: signedInAck(email),
+    answer: null,
+    said: "",
+    email,
+  };
 }
 
 /** The user answered the reporting question, whichever way; `said` is the button they pressed. */
-export function startQuestions(state: StartFlowState, said: string): StartFlowState {
+export function startQuestions(
+  state: StartFlowState,
+  said: string,
+): StartFlowState {
   if (state.isStarted) return state;
   return {
     ...state,
@@ -418,7 +474,12 @@ export function startQuestions(state: StartFlowState, said: string): StartFlowSt
   };
 }
 
-function withAnswer(entries: TranscriptEntry[], at: number, answer: ChoiceId, said: string): TranscriptEntry[] {
+function withAnswer(
+  entries: TranscriptEntry[],
+  at: number,
+  answer: ChoiceId,
+  said: string,
+): TranscriptEntry[] {
   return entries.map((entry, index) =>
     index === at && entry.kind === "step" ? { ...entry, answer, said } : entry,
   );
@@ -447,7 +508,9 @@ export function answerStep(
 ): StartFlowState {
   const entry = state.entries[at];
   if (entry === undefined || entry.kind !== "step") return state;
-  const choice = stepChoices(FLOW[entry.id]).find((candidate) => candidate.id === choiceId);
+  const choice = stepChoices(FLOW[entry.id]).find(
+    (candidate) => candidate.id === choiceId,
+  );
   if (choice === undefined) return state;
   // Pressing "I verified it" is a request to check, not an answer: the view
   // checks, then records the outcome with observeEmailVerified or
@@ -473,7 +536,12 @@ export function answerStep(
     return {
       ...state,
       entries: [
-        ...withAnswer(state.entries, at, choiceId, continueAsSaid(offered.email)),
+        ...withAnswer(
+          state.entries,
+          at,
+          choiceId,
+          continueAsSaid(offered.email),
+        ),
         { kind: "note", text: choice.ack },
       ],
       pending: null,
@@ -484,23 +552,36 @@ export function answerStep(
   if (isFormChoice(choiceId)) {
     return {
       ...state,
-      entries: [...withAnswer(state.entries, at, choiceId, choice.said), { kind: "note", text: choice.ack }],
+      entries: [
+        ...withAnswer(state.entries, at, choiceId, choice.said),
+        { kind: "note", text: choice.ack },
+      ],
       pending: choiceId,
     };
   }
   // The sign-ins: nothing is recorded until the modal reports an account.
-  return { ...state, pending: choiceId, knownAccountIds: context.knownAccountIds };
+  return {
+    ...state,
+    pending: choiceId,
+    knownAccountIds: context.knownAccountIds,
+  };
 }
 
 /**
  * The account offered at the account step is no longer signed in: the same
  * question is asked again in place, about whichever account is signed in now.
  */
-function reofferAccountStep(state: StartFlowState, at: number, signedInAccount: FlowAccount | null): StartFlowState {
+function reofferAccountStep(
+  state: StartFlowState,
+  at: number,
+  signedInAccount: FlowAccount | null,
+): StartFlowState {
   const reasked = accountStepEntry(signedInAccount);
   return {
     ...state,
-    entries: state.entries.map((entry, index) => (index === at ? reasked : entry)),
+    entries: state.entries.map((entry, index) =>
+      index === at ? reasked : entry,
+    ),
     pending: null,
     offeredAccount: signedInAccount,
   };
@@ -518,9 +599,16 @@ export function landedAccount(
   completedSignInEmail: string,
 ): FlowAccount | null {
   if (state.pending !== "signup" && state.pending !== "signin") return null;
-  const reported = accounts.find((account) => completedSignInEmail !== "" && account.email === completedSignInEmail);
+  const reported = accounts.find(
+    (account) =>
+      completedSignInEmail !== "" && account.email === completedSignInEmail,
+  );
   if (reported !== undefined) return reported;
-  return accounts.find((account) => !state.knownAccountIds.includes(account.userId)) ?? null;
+  return (
+    accounts.find(
+      (account) => !state.knownAccountIds.includes(account.userId),
+    ) ?? null
+  );
 }
 
 /** The user pressed the quieter "I already have a workspace (log in)" under the first question. */
@@ -532,7 +620,11 @@ export function chooseExistingLogin(state: StartFlowState): StartFlowState {
 export function dismissPendingModal(state: StartFlowState): StartFlowState {
   if (state.pending === null) return state;
   if (isFormChoice(state.pending)) {
-    return { ...state, pending: null, entries: [...state.entries, stepEntry("retry", "")] };
+    return {
+      ...state,
+      pending: null,
+      entries: [...state.entries, stepEntry("retry", "")],
+    };
   }
   return { ...state, pending: null };
 }
@@ -547,15 +639,29 @@ export function finishPendingModal(state: StartFlowState): StartFlowState {
  * The buttons become the receipt, the agent acknowledges, and the cloud create
  * is owed. Ignored when the flow was not waiting on an account.
  */
-export function observeSignedIn(state: StartFlowState, account: FlowAccount): StartFlowState {
+export function observeSignedIn(
+  state: StartFlowState,
+  account: FlowAccount,
+): StartFlowState {
   if (state.pending !== "signup" && state.pending !== "signin") return state;
   const at = lastAccountStepIndex(state.entries);
   if (at < 0) return { ...state, pending: null };
   const step = state.entries[at];
   const pending = state.pending;
-  const choice = step.kind === "step" ? FLOW[step.id].choices.find((candidate) => candidate.id === pending) : undefined;
-  if (choice === undefined) throw new Error(`The account step does not offer the awaited "${pending}" choice`);
-  const entries = withAnswer(state.entries, at, state.pending, signedInSaid(account.email));
+  const choice =
+    step.kind === "step"
+      ? FLOW[step.id].choices.find((candidate) => candidate.id === pending)
+      : undefined;
+  if (choice === undefined)
+    throw new Error(
+      `The account step does not offer the awaited "${pending}" choice`,
+    );
+  const entries = withAnswer(
+    state.entries,
+    at,
+    state.pending,
+    signedInSaid(account.email),
+  );
   return {
     ...state,
     pending: null,
@@ -584,7 +690,9 @@ export function settleAwaitedSignIn(
  * refuse the cloud create until it is. The create waits; the flow asks for
  * the click on the emailed link instead.
  */
-export function requireEmailVerification(state: StartFlowState): StartFlowState {
+export function requireEmailVerification(
+  state: StartFlowState,
+): StartFlowState {
   if (!state.isCloudCreatePending || state.account === null) return state;
   const email = state.account.email;
   return {
@@ -603,7 +711,10 @@ export function observeEmailVerified(state: StartFlowState): StartFlowState {
     ...state,
     verificationEmail: null,
     isCloudCreatePending: true,
-    entries: [...withAnswer(state.entries, at, "verified", VERIFIED_CHOICE.said), { kind: "note", text: VERIFIED_CHOICE.ack }],
+    entries: [
+      ...withAnswer(state.entries, at, "verified", VERIFIED_CHOICE.said),
+      { kind: "note", text: VERIFIED_CHOICE.ack },
+    ],
   };
 }
 
@@ -613,23 +724,38 @@ export function reaskEmailVerification(state: StartFlowState): StartFlowState {
   if (state.verificationEmail === null || at < 0) return state;
   return {
     ...state,
-    entries: [...withAnswer(state.entries, at, "verified", VERIFIED_CHOICE.said), stepEntry("verify-again", "")],
+    entries: [
+      ...withAnswer(state.entries, at, "verified", VERIFIED_CHOICE.said),
+      stepEntry("verify-again", ""),
+    ],
   };
 }
 
 /** The verification email was (or was not) re-sent; the agent says which. */
-export function noteVerificationEmailSent(state: StartFlowState, outcome: ResendOutcome): StartFlowState {
+export function noteVerificationEmailSent(
+  state: StartFlowState,
+  outcome: ResendOutcome,
+): StartFlowState {
   if (state.verificationEmail === null) return state;
   return {
     ...state,
-    entries: [...state.entries, { kind: "note", text: verificationEmailSentNote(state.verificationEmail, outcome) }],
+    entries: [
+      ...state.entries,
+      {
+        kind: "note",
+        text: verificationEmailSentNote(state.verificationEmail, outcome),
+      },
+    ],
   };
 }
 
 function openVerificationStepIndex(entries: TranscriptEntry[]): number {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
-    if (entry.kind === "step" && (entry.id === "verify" || entry.id === "verify-again")) {
+    if (
+      entry.kind === "step" &&
+      (entry.id === "verify" || entry.id === "verify-again")
+    ) {
       return entry.answer === null ? index : -1;
     }
   }
@@ -641,10 +767,16 @@ function openVerificationStepIndex(entries: TranscriptEntry[]): number {
  * owes it. A refusal is said as the ack of the re-asked where-to-run question,
  * so the error and the question arrive as one agent turn.
  */
-export function settleCloudCreate(state: StartFlowState, refusal: string | null): StartFlowState {
+export function settleCloudCreate(
+  state: StartFlowState,
+  refusal: string | null,
+): StartFlowState {
   const settled = { ...state, isCloudCreatePending: false };
   if (refusal === null) return settled;
-  return { ...settled, entries: [...settled.entries, stepEntry("again", refusal)] };
+  return {
+    ...settled,
+    entries: [...settled.entries, stepEntry("again", refusal)],
+  };
 }
 
 /**
@@ -658,8 +790,16 @@ export function refuseCreateForSignedOutAccount(
   knownAccountIds: readonly string[],
 ): StartFlowState {
   const account = state.account;
-  if (!state.isCloudCreatePending || account === null || knownAccountIds.includes(account.userId)) return state;
-  return settleCloudCreate(state, `That did not work: ${account.email} is no longer signed in.`);
+  if (
+    !state.isCloudCreatePending ||
+    account === null ||
+    knownAccountIds.includes(account.userId)
+  )
+    return state;
+  return settleCloudCreate(
+    state,
+    `That did not work: ${account.email} is no longer signed in.`,
+  );
 }
 
 /**
@@ -684,14 +824,21 @@ export function undoAnswer(state: StartFlowState, at: number): StartFlowState {
     isCloudCreatePending: false,
     verificationEmail: null,
     account: null,
-    entries: [...state.entries.slice(0, at), { ...entry, answer: null, said: "" }],
+    entries: [
+      ...state.entries.slice(0, at),
+      { ...entry, answer: null, said: "" },
+    ],
   };
 }
 
 function lastAccountStepIndex(entries: TranscriptEntry[]): number {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
-    if (entry.kind === "step" && (entry.id === "auth" || entry.id === "account")) return index;
+    if (
+      entry.kind === "step" &&
+      (entry.id === "auth" || entry.id === "account")
+    )
+      return index;
   }
   return -1;
 }
@@ -699,7 +846,8 @@ function lastAccountStepIndex(entries: TranscriptEntry[]): number {
 /** The question the user is being asked right now, or null when none is open. */
 export function openStepIndex(state: StartFlowState): number | null {
   const last = state.entries[state.entries.length - 1];
-  if (last === undefined || last.kind !== "step" || last.answer !== null) return null;
+  if (last === undefined || last.kind !== "step" || last.answer !== null)
+    return null;
   return state.entries.length - 1;
 }
 

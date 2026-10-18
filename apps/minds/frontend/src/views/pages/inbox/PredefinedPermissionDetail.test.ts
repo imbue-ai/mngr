@@ -6,7 +6,13 @@ import { DESKTOPS } from "../../../models/workspacePermissions.testing";
 import { Select } from "../../components/FormControls";
 import { PredefinedPermissionDetailView } from "./PredefinedPermissionDetail";
 import type { AnyVnode } from "../../../testing";
-import { attrsOf, classesOf, collectText, collectVnodes, withAttr } from "../../../testing";
+import {
+  attrsOf,
+  classesOf,
+  collectText,
+  collectVnodes,
+  withAttr,
+} from "../../../testing";
 
 const DETAIL: PredefinedPermissionDetail = {
   kind: "predefined",
@@ -63,8 +69,20 @@ const DETAIL: PredefinedPermissionDetail = {
   ],
   checked_permissions: ["slack-chat-write"],
   account_choices: [
-    { value: "alice@x", label: "alice@x", hint: "", is_credential_setup_needed: false, is_account_name_needed: false },
-    { value: "bob@x", label: "bob@x", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false },
+    {
+      value: "alice@x",
+      label: "alice@x",
+      hint: "",
+      is_credential_setup_needed: false,
+      is_account_name_needed: false,
+    },
+    {
+      value: "bob@x",
+      label: "bob@x",
+      hint: "needs sign-in",
+      is_credential_setup_needed: true,
+      is_account_name_needed: false,
+    },
     {
       value: ":new-account",
       label: "Add account",
@@ -144,8 +162,15 @@ function makeModel(detail: PredefinedPermissionDetail = DETAIL): InboxModel {
 function renderComponent(vnode: m.Vnode): m.Children {
   const factory = vnode.tag as unknown as () => m.Component;
   const instance = factory();
-  const mounted = m(instance, vnode.attrs as m.Attributes, vnode.children) as m.Vnode;
-  return (instance.view as unknown as (v: m.Vnode) => m.Children).call(instance, mounted);
+  const mounted = m(
+    instance,
+    vnode.attrs as m.Attributes,
+    vnode.children,
+  ) as m.Vnode;
+  return (instance.view as unknown as (v: m.Vnode) => m.Children).call(
+    instance,
+    mounted,
+  );
 }
 
 function optionsOf(node: unknown): { value: unknown; label: string }[] {
@@ -215,7 +240,10 @@ describe("PredefinedPermissionDetailView summary", () => {
     const model = makeModel();
     model.showPermissionEditor();
     model.checkedPermissions.add("slack-read-all");
-    const back = findById(renderBody(model, DETAIL), "permissions-adjust-back-link");
+    const back = findById(
+      renderBody(model, DETAIL),
+      "permissions-adjust-back-link",
+    );
     expect(back).toBeDefined();
 
     ((back?.attrs ?? {}).onclick as () => void)();
@@ -240,7 +268,9 @@ describe("PredefinedPermissionDetailView account states", () => {
   const NEW_ACCOUNT = DETAIL.account_choices[2];
   const ALICE = DETAIL.account_choices[0];
 
-  function withChoices(choices: PredefinedPermissionDetail["account_choices"]): PredefinedPermissionDetail {
+  function withChoices(
+    choices: PredefinedPermissionDetail["account_choices"],
+  ): PredefinedPermissionDetail {
     return { ...DETAIL, account_choices: choices };
   }
 
@@ -250,7 +280,9 @@ describe("PredefinedPermissionDetailView account states", () => {
     const detail = withChoices([ALICE, NEW_ACCOUNT]);
     const account = renderShell(makeModel(detail), detail).account;
 
-    expect(collectVnodes(account).find((vnode) => vnode.tag === Select)).toBeDefined();
+    expect(
+      collectVnodes(account).find((vnode) => vnode.tag === Select),
+    ).toBeDefined();
     expect(optionsOf(account)).toEqual([
       { value: "alice@x", label: "alice@x" },
       { value: ":new-account", label: "Add account" },
@@ -261,7 +293,10 @@ describe("PredefinedPermissionDetailView account states", () => {
     const detail = withChoices([NEW_ACCOUNT]);
     const shell = renderShell(makeModel(detail), detail);
 
-    expect(shell.account, "nothing signed in means nothing to pick between").toBeNull();
+    expect(
+      shell.account,
+      "nothing signed in means nothing to pick between",
+    ).toBeNull();
     expect(shell.approveLabel).toBe("Sign in & approve");
   });
 
@@ -277,14 +312,26 @@ describe("PredefinedPermissionDetailView account states", () => {
 
     const shell = renderShell(model, DETAIL);
     expect(shell.approveLabel).toBe("Sign in & approve");
-    expect(shell.account, "and the dropdown stays, so the choice is reversible").not.toBeNull();
+    expect(
+      shell.account,
+      "and the dropdown stays, so the choice is reversible",
+    ).not.toBeNull();
   });
 
   it("says Approve will sign in for an account that has no usable credentials", () => {
     // An account the agent asked for that is not connected here (or a stored
     // one gone stale) runs the same browser hop as "Add account" does.
-    const personal = { value: "personal", label: "personal", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false };
-    const detail = { ...withChoices([ALICE, personal, NEW_ACCOUNT]), selected_account_value: "personal" };
+    const personal = {
+      value: "personal",
+      label: "personal",
+      hint: "needs sign-in",
+      is_credential_setup_needed: true,
+      is_account_name_needed: false,
+    };
+    const detail = {
+      ...withChoices([ALICE, personal, NEW_ACCOUNT]),
+      selected_account_value: "personal",
+    };
     const model = makeModel(detail);
 
     expect(renderShell(model, detail).approveLabel).toBe("Sign in & approve");
@@ -301,21 +348,31 @@ describe("PredefinedPermissionDetailView account states", () => {
       ...DETAIL,
       display_name: "AWS",
       service_name: "aws",
-      manual_credentials: { parameters: [{ name: "access-key-id", label: "Access key id" }], message: "" },
+      manual_credentials: {
+        parameters: [{ name: "access-key-id", label: "Access key id" }],
+        message: "",
+      },
       account_choices: [
         ALICE,
         { ...NEW_ACCOUNT, is_account_name_needed: true },
       ],
     };
 
-    expect(renderShell(makeModel(credentialsOnly), credentialsOnly).approveLabel).toBe("Approve");
+    expect(
+      renderShell(makeModel(credentialsOnly), credentialsOnly).approveLabel,
+    ).toBe("Approve");
 
     const staged = makeModel(credentialsOnly);
     staged.selectedAccount = credentialsOnly.new_account_value;
     expect(renderShell(staged, credentialsOnly).approveLabel).toBe("Approve");
 
-    const firstConnection = { ...credentialsOnly, account_choices: [credentialsOnly.account_choices[1]] };
-    expect(renderShell(makeModel(firstConnection), firstConnection).approveLabel).toBe("Approve");
+    const firstConnection = {
+      ...credentialsOnly,
+      account_choices: [credentialsOnly.account_choices[1]],
+    };
+    expect(
+      renderShell(makeModel(firstConnection), firstConnection).approveLabel,
+    ).toBe("Approve");
   });
 });
 
@@ -325,11 +382,20 @@ describe("PredefinedPermissionDetailView account picker", () => {
 
     // A dropdown, not radios: a radio per account is what this replaced.
     const picker = collectVnodes(account).find((vnode) => vnode.tag === Select);
-    expect(picker, "the account control is the shared Select primitive").toBeDefined();
-    expect(collectVnodes(account).filter((vnode) => (vnode.attrs ?? {}).type === "radio")).toEqual([]);
+    expect(
+      picker,
+      "the account control is the shared Select primitive",
+    ).toBeDefined();
+    expect(
+      collectVnodes(account).filter(
+        (vnode) => (vnode.attrs ?? {}).type === "radio",
+      ),
+    ).toEqual([]);
     // ...and that primitive really does render a <select> around the options.
     const rendered = renderComponent(picker as m.Vnode);
-    expect(collectVnodes(rendered).some((vnode) => vnode.tag === "select")).toBe(true);
+    expect(
+      collectVnodes(rendered).some((vnode) => vnode.tag === "select"),
+    ).toBe(true);
 
     expect(collectText(account)).toContain("Account");
     expect(optionsOf(account)).toEqual([
@@ -361,7 +427,9 @@ describe("PredefinedPermissionDetailView account picker", () => {
       account_choices: [DETAIL.account_choices[2]],
       selected_account_value: ":new-account",
     };
-    expect(renderShell(makeModel(firstConnection), firstConnection).account).toBeNull();
+    expect(
+      renderShell(makeModel(firstConnection), firstConnection).account,
+    ).toBeNull();
   });
 });
 
@@ -411,7 +479,8 @@ describe("PredefinedPermissionDetailView editor", () => {
     const model = makeModel();
     const body = renderEditor(model);
     const readAll = editorSwitches(body).find(
-      (control) => attrsOf(control)["data-grant-permission"] === "slack-read-all",
+      (control) =>
+        attrsOf(control)["data-grant-permission"] === "slack-read-all",
     );
     expect(attrsOf(readAll as AnyVnode).role).toBe("switch");
     expect(attrsOf(readAll as AnyVnode)["aria-checked"]).toBe("false");
@@ -423,11 +492,9 @@ describe("PredefinedPermissionDetailView editor", () => {
     const disabled = editorSwitches(renderEditor(model)).filter(
       (control) => attrsOf(control).disabled === true,
     );
-    expect(disabled.map((control) => attrsOf(control)["data-grant-permission"])).toEqual([
-      "slack-read-all",
-      "slack-chat-read",
-      "slack-chat-write",
-    ]);
+    expect(
+      disabled.map((control) => attrsOf(control)["data-grant-permission"]),
+    ).toEqual(["slack-read-all", "slack-chat-read", "slack-chat-write"]);
   });
 });
 
@@ -436,7 +503,10 @@ describe("PredefinedPermissionDetailView proxy", () => {
     ...DETAIL,
     proxy: { resulting_route: ["host-here", "self"], desktops: DESKTOPS },
   };
-  const NEXT_WITH_PROXY: PredefinedPermissionDetail = { ...WITH_PROXY, request_id: "req-next" };
+  const NEXT_WITH_PROXY: PredefinedPermissionDetail = {
+    ...WITH_PROXY,
+    request_id: "req-next",
+  };
 
   /** A model that loaded the detail the way the popup does, so the switch
    * starts where the model seeded it, and whose grant POSTs are recorded. */
@@ -449,10 +519,17 @@ describe("PredefinedPermissionDetailView proxy", () => {
       fetcher: (url, init) => {
         if (init?.method === "POST") {
           grants.push(init.body as FormData);
-          return Promise.resolve(new Response(JSON.stringify({ outcome: "GRANTED", message: "" })));
+          return Promise.resolve(
+            new Response(JSON.stringify({ outcome: "GRANTED", message: "" })),
+          );
         }
-        const requested = others.find((other) => String(url).includes(`/${other.request_id}/`)) ?? detail;
-        return Promise.resolve(new Response(JSON.stringify({ detail: requested })));
+        const requested =
+          others.find((other) =>
+            String(url).includes(`/${other.request_id}/`),
+          ) ?? detail;
+        return Promise.resolve(
+          new Response(JSON.stringify({ detail: requested })),
+        );
       },
     });
     await model.select(detail.request_id);
@@ -464,7 +541,9 @@ describe("PredefinedPermissionDetailView proxy", () => {
   }
 
   function proxySwitch(node: unknown): AnyVnode {
-    const switches = collectVnodes(node).filter((vnode) => vnode.attrs?.role === "switch");
+    const switches = collectVnodes(node).filter(
+      (vnode) => vnode.attrs?.role === "switch",
+    );
     expect(switches).toHaveLength(1);
     return switches[0];
   }
@@ -477,7 +556,9 @@ describe("PredefinedPermissionDetailView proxy", () => {
     const { model, grants } = await openModel(DETAIL);
     const body = renderBody(model, DETAIL);
     expect(findById(body, "permissions-proxy")).toBeUndefined();
-    expect(collectVnodes(body).filter((vnode) => vnode.attrs?.role === "switch")).toHaveLength(0);
+    expect(
+      collectVnodes(body).filter((vnode) => vnode.attrs?.role === "switch"),
+    ).toHaveLength(0);
     expect(textOf(body)).not.toContain("Proxy through my desktop");
 
     await model.approve();
@@ -488,7 +569,10 @@ describe("PredefinedPermissionDetailView proxy", () => {
 
   it("starts with the switch on and says in words where requests will leave from", async () => {
     const { model, grants } = await openModel(WITH_PROXY);
-    const section = findById(renderBody(model, WITH_PROXY), "permissions-proxy");
+    const section = findById(
+      renderBody(model, WITH_PROXY),
+      "permissions-proxy",
+    );
     expect(textOf(section)).toContain(
       "The agent asked for this workspace's requests to Slack to leave through this computer.",
     );
@@ -496,7 +580,9 @@ describe("PredefinedPermissionDetailView proxy", () => {
     expect(toggle.attrs?.["aria-label"]).toBe("Proxy through my desktop");
     expect(toggle.attrs?.["aria-checked"]).toBe("true");
     expect(toggle.attrs?.disabled).toBe(false);
-    expect(toggle.attrs?.["aria-describedby"]).toBe("permissions-proxy-summary");
+    expect(toggle.attrs?.["aria-describedby"]).toBe(
+      "permissions-proxy-summary",
+    );
     expect(textOf(findById(section, "permissions-proxy-summary"))).toBe(
       "Requests will leave from this computer, then the workspace's own machine.",
     );
@@ -509,24 +595,37 @@ describe("PredefinedPermissionDetailView proxy", () => {
 
   it("draws only the switch: no editor or badge", async () => {
     const { model } = await openModel(WITH_PROXY);
-    const section = findById(renderBody(model, WITH_PROXY), "permissions-proxy");
+    const section = findById(
+      renderBody(model, WITH_PROXY),
+      "permissions-proxy",
+    );
     expect(withAttr(section, "data-desktop-egress-adjust")).toHaveLength(0);
     expect(withAttr(section, "data-desktop-egress-editor")).toHaveLength(0);
     expect(withAttr(section, "data-desktop-egress-custom")).toHaveLength(0);
-    expect(collectVnodes(section).filter((vnode) => vnode.tag === "button")).toHaveLength(1);
+    expect(
+      collectVnodes(section).filter((vnode) => vnode.tag === "button"),
+    ).toHaveLength(1);
   });
 
   it("shows another computer on the resulting route by its device id, as an identifier", async () => {
     const viaOffice: PredefinedPermissionDetail = {
       ...DETAIL,
-      proxy: { resulting_route: ["host-here", "host-office", "self"], desktops: DESKTOPS },
+      proxy: {
+        resulting_route: ["host-here", "host-office", "self"],
+        desktops: DESKTOPS,
+      },
     };
     const { model } = await openModel(viaOffice);
-    const summary = findById(renderBody(model, viaOffice), "permissions-proxy-summary");
+    const summary = findById(
+      renderBody(model, viaOffice),
+      "permissions-proxy-summary",
+    );
     expect(textOf(summary)).toBe(
       "Requests will leave from this computer, then host-office, then the workspace's own machine.",
     );
-    const identifiers = collectVnodes(summary).filter((vnode) => classesOf(vnode).includes("font-mono"));
+    const identifiers = collectVnodes(summary).filter((vnode) =>
+      classesOf(vnode).includes("font-mono"),
+    );
     expect(identifiers.map(textOf)).toEqual(["host-office"]);
   });
 
@@ -534,7 +633,10 @@ describe("PredefinedPermissionDetailView proxy", () => {
     const { model, grants } = await openModel(WITH_PROXY);
     flip(model, WITH_PROXY);
 
-    const section = findById(renderBody(model, WITH_PROXY), "permissions-proxy");
+    const section = findById(
+      renderBody(model, WITH_PROXY),
+      "permissions-proxy",
+    );
     expect(proxySwitch(section).attrs?.["aria-checked"]).toBe("false");
     expect(textOf(findById(section, "permissions-proxy-summary"))).toBe(
       "Requests will keep leaving from where they do now.",
@@ -550,9 +652,14 @@ describe("PredefinedPermissionDetailView proxy", () => {
     flip(model, WITH_PROXY);
     flip(model, WITH_PROXY);
 
-    const section = findById(renderBody(model, WITH_PROXY), "permissions-proxy");
+    const section = findById(
+      renderBody(model, WITH_PROXY),
+      "permissions-proxy",
+    );
     expect(proxySwitch(section).attrs?.["aria-checked"]).toBe("true");
-    expect(textOf(findById(section, "permissions-proxy-summary"))).toContain("Requests will leave from this computer");
+    expect(textOf(findById(section, "permissions-proxy-summary"))).toContain(
+      "Requests will leave from this computer",
+    );
     await model.approve();
 
     expect(grants[0].get("proxy")).toBe("true");
@@ -561,11 +668,15 @@ describe("PredefinedPermissionDetailView proxy", () => {
   it("starts the next request that asks with the switch on again", async () => {
     const { model, grants } = await openModel(WITH_PROXY, [NEXT_WITH_PROXY]);
     flip(model, WITH_PROXY);
-    expect(proxySwitch(renderBody(model, WITH_PROXY)).attrs?.["aria-checked"]).toBe("false");
+    expect(
+      proxySwitch(renderBody(model, WITH_PROXY)).attrs?.["aria-checked"],
+    ).toBe("false");
 
     await model.select(NEXT_WITH_PROXY.request_id);
 
-    expect(proxySwitch(renderBody(model, NEXT_WITH_PROXY)).attrs?.["aria-checked"]).toBe("true");
+    expect(
+      proxySwitch(renderBody(model, NEXT_WITH_PROXY)).attrs?.["aria-checked"],
+    ).toBe("true");
     await model.approve();
     expect(grants).toHaveLength(1);
     expect(grants[0].get("proxy")).toBe("true");

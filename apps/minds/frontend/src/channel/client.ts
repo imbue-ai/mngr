@@ -194,7 +194,8 @@ export class UiChannelClient {
         has_focus: this.hasFocus(),
         // A pulled-out window shows no toasts, so its focus does not stand in
         // for a banner.
-        window_kind: popoutFromPath(this.currentRoute) === null ? "main" : "popout",
+        window_kind:
+          popoutFromPath(this.currentRoute) === null ? "main" : "popout",
         is_screen_locked: (this.options.isScreenLocked ?? isScreenLocked)(),
       }),
     );

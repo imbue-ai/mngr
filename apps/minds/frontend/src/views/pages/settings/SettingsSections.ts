@@ -27,7 +27,10 @@ import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
 import { Spinner } from "../../components/Spinner";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
-import { updateInstallingCopy, updateReadyCopy } from "../../shell/UpdateReadyCard";
+import {
+  updateInstallingCopy,
+  updateReadyCopy,
+} from "../../shell/UpdateReadyCard";
 import { installTermsOf } from "../../shell/update-ready";
 
 interface SectionsAttrs {
@@ -334,7 +337,11 @@ function browserImportPanel(model: SettingsModel): m.Children {
     ),
     m("div", { class: "flex flex-col gap-2 py-3 border-b border-subtle" }, [
       m("div", { class: "flex items-center justify-between gap-3" }, [
-        m("span", { class: "type-body text-primary" }, "Import from Google Chrome's default profile."),
+        m(
+          "span",
+          { class: "type-body text-primary" },
+          "Import from Google Chrome's default profile.",
+        ),
         m(
           Button,
           {
@@ -350,17 +357,29 @@ function browserImportPanel(model: SettingsModel): m.Children {
         ),
       ]),
       browserImport.isBusy
-        ? m("span", { class: "type-helper text-tertiary", role: "status" }, "This can take a moment.")
+        ? m(
+            "span",
+            { class: "type-helper text-tertiary", role: "status" },
+            "This can take a moment.",
+          )
         : null,
       outcome !== null && outcome.is_success
         ? m(
             "span",
-            { class: "type-helper", role: "status", id: "browser-import-result" },
+            {
+              class: "type-helper",
+              role: "status",
+              id: "browser-import-result",
+            },
             BROWSER_IMPORT_SUCCESS_MESSAGE,
           )
         : null,
       outcome !== null && !outcome.is_success
-        ? m(Notice, { variant: "error", role: "alert", id: "browser-import-result" }, outcome.detail)
+        ? m(
+            Notice,
+            { variant: "error", role: "alert", id: "browser-import-result" },
+            outcome.detail,
+          )
         : null,
     ]),
     m(
@@ -533,16 +552,21 @@ function signInsPanel(model: SettingsModel): m.Children {
         "select",
         {
           id: "sign-in-browser",
-          class: "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
+          class:
+            "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
           value: overview.sign_in_browser_id ?? DEFAULT_BROWSER_VALUE,
           onchange: (event: Event) => {
             const value = (event.target as HTMLSelectElement).value;
-            void model.setSignInBrowser(value === DEFAULT_BROWSER_VALUE ? null : value);
+            void model.setSignInBrowser(
+              value === DEFAULT_BROWSER_VALUE ? null : value,
+            );
           },
         },
         [
           m("option", { value: DEFAULT_BROWSER_VALUE }, "Default browser"),
-          ...browsers.map((browser) => m("option", { value: browser.browser_id }, browser.label)),
+          ...browsers.map((browser) =>
+            m("option", { value: browser.browser_id }, browser.label),
+          ),
         ],
       ),
     ]),
@@ -680,7 +704,11 @@ function updateStatusLine(model: SettingsModel): m.Children {
   // the status a later check publishes may have replaced `update-downloaded`.
   if (model.isUpdateInstalling && state.downloadedVersion != null) {
     const terms = installTermsOf(state);
-    const copy = updateInstallingCopy(state.downloadedVersion, terms.policy, terms.needsPassword);
+    const copy = updateInstallingCopy(
+      state.downloadedVersion,
+      terms.policy,
+      terms.needsPassword,
+    );
     return m(Notice, { variant: "info" }, `${copy.title}. ${copy.detail}.`);
   }
   const status = state.status;
@@ -692,7 +720,11 @@ function updateStatusLine(model: SettingsModel): m.Children {
     );
   }
   if (status.type === "update-downloaded") {
-    return m(Notice, { variant: "info" }, `Imbue Studio ${status.version} is downloaded. ${installInstruction(state)}`);
+    return m(
+      Notice,
+      { variant: "info" },
+      `Imbue Studio ${status.version} is downloaded. ${installInstruction(state)}`,
+    );
   }
   return null;
 }
@@ -707,7 +739,9 @@ function updateStatusLine(model: SettingsModel): m.Children {
 function installInstruction(state: UpdateState): string {
   const terms = installTermsOf(state);
   if (terms.policy === "on-quit") return "Restart to install.";
-  return terms.needsPassword ? "Install it below; you'll be asked for your password." : "Install it below.";
+  return terms.needsPassword
+    ? "Install it below; you'll be asked for your password."
+    : "Install it below.";
 }
 
 /** The label of the control that applies a staged update: the same words as the floating card's. */
@@ -719,7 +753,8 @@ function installActionLabel(state: UpdateState): string {
 /** The label of that control while it is held, again the floating card's words. */
 function installingActionLabel(state: UpdateState, version: string): string {
   const terms = installTermsOf(state);
-  return updateInstallingCopy(version, terms.policy, terms.needsPassword).action;
+  return updateInstallingCopy(version, terms.policy, terms.needsPassword)
+    .action;
 }
 
 /**
@@ -1029,7 +1064,9 @@ function updatesPanel(model: SettingsModel): m.Children {
               disabled: model.isUpdateInstalling,
               onclick: () => void model.installUpdateNow(),
             },
-            model.isUpdateInstalling ? installingActionLabel(state, state.downloadedVersion) : installActionLabel(state),
+            model.isUpdateInstalling
+              ? installingActionLabel(state, state.downloadedVersion)
+              : installActionLabel(state),
           )
         : null,
       // Disabled while the download it already started is running, because a
@@ -1101,7 +1138,9 @@ export function SettingsSections(): m.Component<SectionsAttrs> {
               ? notificationsPanel(model)
               : null,
             model.activeSection === "display" ? displayPanel(model) : null,
-            model.activeSection === "browser-import" ? browserImportPanel(model) : null,
+            model.activeSection === "browser-import"
+              ? browserImportPanel(model)
+              : null,
             model.activeSection === "error-reporting"
               ? errorReportingPanel(model)
               : null,

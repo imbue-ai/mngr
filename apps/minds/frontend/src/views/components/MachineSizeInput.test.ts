@@ -1,15 +1,25 @@
 import { describe, expect, it } from "vitest";
 import { MachineSizeInput } from "./MachineSizeInput";
 import type { MachineSizeInputAttrs } from "./MachineSizeInput";
-import { attrsOf, classTokensOf, collectVnodes, renderDeep, renderRoot } from "../../testing";
+import {
+  attrsOf,
+  classTokensOf,
+  collectVnodes,
+  renderDeep,
+  renderRoot,
+} from "../../testing";
 import type { AnyVnode } from "../../testing";
 
-function renderedInput(attrs: MachineSizeInputAttrs): { label: AnyVnode; input: AnyVnode } {
+function renderedInput(attrs: MachineSizeInputAttrs): {
+  label: AnyVnode;
+  input: AnyVnode;
+} {
   const tree = renderDeep(renderRoot(MachineSizeInput, attrs));
   const vnodes = collectVnodes(tree);
   const label = vnodes.find((vnode) => vnode.tag === "label");
   const input = vnodes.find((vnode) => vnode.tag === "input");
-  if (label === undefined || input === undefined) throw new Error("the field did not render a label and an input");
+  if (label === undefined || input === undefined)
+    throw new Error("the field did not render a label and an input");
   return { label, input };
 }
 
@@ -33,7 +43,9 @@ describe("MachineSizeInput", () => {
       disabled: false,
     });
     expect(classTokensOf(input)).not.toContain("!border-important");
-    (attrsOf(input).oninput as (event: unknown) => void)({ target: { value: "16" } });
+    (attrsOf(input).oninput as (event: unknown) => void)({
+      target: { value: "16" },
+    });
     expect(typed).toEqual(["16"]);
   });
 

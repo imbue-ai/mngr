@@ -16,11 +16,18 @@ function verificationUrl(email: string): string {
 }
 
 /** Whether ``email`` is verified. Rejects when the app could not find out. */
-export async function fetchIsEmailVerified(email: string, fetcher: FetchLike = defaultFetch): Promise<boolean> {
-  const response = await fetcher(verificationUrl(email), { credentials: "same-origin" });
-  if (!response.ok) throw new Error(`Verification check failed with status ${response.status}`);
+export async function fetchIsEmailVerified(
+  email: string,
+  fetcher: FetchLike = defaultFetch,
+): Promise<boolean> {
+  const response = await fetcher(verificationUrl(email), {
+    credentials: "same-origin",
+  });
+  if (!response.ok)
+    throw new Error(`Verification check failed with status ${response.status}`);
   const body = (await response.json()) as { verified?: unknown };
-  if (typeof body.verified !== "boolean") throw new Error("Verification check answered without a verdict");
+  if (typeof body.verified !== "boolean")
+    throw new Error("Verification check answered without a verdict");
   return body.verified;
 }
 
@@ -39,12 +46,17 @@ export async function resendVerificationEmail(
   fetcher: FetchLike = defaultFetch,
 ): Promise<ResendOutcome> {
   try {
-    const response = await fetcher(verificationUrl(email), { method: "POST", credentials: "same-origin" });
+    const response = await fetcher(verificationUrl(email), {
+      method: "POST",
+      credentials: "same-origin",
+    });
     if (!response.ok) return "failed";
     const body = (await response.json()) as { sent?: unknown };
     return body.sent === true ? "sent" : "suppressed";
   } catch (error: unknown) {
-    console.debug(`[verification] Could not re-send the verification email: ${String(error)}`);
+    console.debug(
+      `[verification] Could not re-send the verification email: ${String(error)}`,
+    );
     return "failed";
   }
 }

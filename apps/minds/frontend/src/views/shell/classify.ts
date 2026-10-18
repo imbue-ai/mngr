@@ -67,7 +67,9 @@ export function popoutFromPath(path: string): PopoutRoute | null {
 
 /** The create attempt id when `path` is the creation page, else null. */
 export function creatingAttemptIdFromPath(path: string): string | null {
-  const match = path.match(new RegExp(`^/creating/${CREATE_ATTEMPT_ID_SEGMENT}$`, "i"));
+  const match = path.match(
+    new RegExp(`^/creating/${CREATE_ATTEMPT_ID_SEGMENT}$`, "i"),
+  );
   return match ? match[1] : null;
 }
 
@@ -197,7 +199,12 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
   }
   const creatingAttemptId = creatingAttemptIdFromPath(path);
   if (creatingAttemptId !== null) {
-    return { kind: "creating", workspaceAnyId: creatingAttemptId, activeTab: null, pageLabel: "" };
+    return {
+      kind: "creating",
+      workspaceAnyId: creatingAttemptId,
+      activeTab: null,
+      pageLabel: "",
+    };
   }
   if (path === "/create" || path.startsWith("/creating/")) {
     return pageContext("New workspace");
@@ -214,7 +221,12 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
     return pageContext("Recently destroyed");
   if (path === "/consent") return pageContext("Consent");
   if (path === "/start") {
-    return { kind: "start", workspaceAnyId: null, activeTab: null, pageLabel: "" };
+    return {
+      kind: "start",
+      workspaceAnyId: null,
+      activeTab: null,
+      pageLabel: "",
+    };
   }
   return HOME_CONTEXT;
 }
@@ -224,5 +236,7 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
  * creation page takes its in-flight attempt's accent. */
 export function accentSourceForRoute(path: string, search = ""): string | null {
   const context = classifyRoute(path, search);
-  return context.kind === "workspace" || context.kind === "creating" ? context.workspaceAnyId : null;
+  return context.kind === "workspace" || context.kind === "creating"
+    ? context.workspaceAnyId
+    : null;
 }

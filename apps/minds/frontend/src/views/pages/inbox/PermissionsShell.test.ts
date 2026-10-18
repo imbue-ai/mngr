@@ -1,7 +1,10 @@
 import m from "mithril";
 import { describe, expect, it } from "vitest";
 import { InboxModel } from "../../../models/inbox";
-import type { ManualCredentialsPrompt, PredefinedPermissionDetail } from "../../../models/inbox";
+import type {
+  ManualCredentialsPrompt,
+  PredefinedPermissionDetail,
+} from "../../../models/inbox";
 import { Notice } from "../../components/Notice";
 import { PermissionsShell } from "./PermissionsShell";
 
@@ -26,12 +29,26 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
     {
       heading: "Full access",
       is_extras: false,
-      rows: [{ permission: "aws-read-all", label: "Read everything", description: "", is_wildcard: false }],
+      rows: [
+        {
+          permission: "aws-read-all",
+          label: "Read everything",
+          description: "",
+          is_wildcard: false,
+        },
+      ],
     },
     {
       heading: "Extras",
       is_extras: true,
-      rows: [{ permission: "any", label: "Everything (unrestricted)", description: "", is_wildcard: true }],
+      rows: [
+        {
+          permission: "any",
+          label: "Everything (unrestricted)",
+          description: "",
+          is_wildcard: true,
+        },
+      ],
     },
   ],
   checked_permissions: ["aws-read-all"],
@@ -60,7 +77,8 @@ interface ElementVnode {
 
 /** Flatten a rendered vnode tree into the element vnodes it contains. */
 function flatten(node: unknown): ElementVnode[] {
-  if (node === null || node === undefined || typeof node !== "object") return [];
+  if (node === null || node === undefined || typeof node !== "object")
+    return [];
   if (Array.isArray(node)) return node.flatMap(flatten);
   const vnode = node as ElementVnode;
   const children = "children" in vnode ? flatten(vnode.children) : [];
@@ -76,7 +94,10 @@ function modelWithDetail(detail: PredefinedPermissionDetail): InboxModel {
   return model;
 }
 
-function renderShell(model: InboxModel, account: m.Children = null): ElementVnode[] {
+function renderShell(
+  model: InboxModel,
+  account: m.Children = null,
+): ElementVnode[] {
   const instance = PermissionsShell() as unknown as m.Component;
   const attrs = {
     model,
@@ -88,12 +109,17 @@ function renderShell(model: InboxModel, account: m.Children = null): ElementVnod
     body: m("div", { id: "permissions-body" }),
   };
   const vnode = m(instance, attrs as unknown as m.Attributes) as m.Vnode;
-  const root = (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(instance, vnode);
+  const root = (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
+    instance,
+    vnode,
+  );
   return flatten(root);
 }
 
 function inputNames(nodes: ElementVnode[]): unknown[] {
-  return nodes.filter((node) => node.tag === "input").map((node) => node.attrs?.name);
+  return nodes
+    .filter((node) => node.tag === "input")
+    .map((node) => node.attrs?.name);
 }
 
 function hasApproveButton(nodes: ElementVnode[]): boolean {
@@ -122,7 +148,9 @@ function isErrorNotice(node: ElementVnode | undefined): boolean {
 /** Whether anything in the credential form asks to be scrolled into view. */
 function hasScrollHooks(nodes: ElementVnode[]): boolean {
   const form = findById(nodes, "permissions-manual-credentials");
-  return flatten(form).some((node) => typeof node.attrs?.oncreate === "function");
+  return flatten(form).some(
+    (node) => typeof node.attrs?.oncreate === "function",
+  );
 }
 
 describe("PermissionsShell layout", () => {
@@ -135,26 +163,43 @@ describe("PermissionsShell layout", () => {
     // The mark sits in its own square ahead of the title.
     const markBox = findById(nodes, "permissions-header-mark");
     expect(classesOf(markBox)).toContain("bg-fill-subtle");
-    expect(flatten(markBox?.children).some((node) => node.attrs?.id === "permissions-mark-glyph")).toBe(true);
+    expect(
+      flatten(markBox?.children).some(
+        (node) => node.attrs?.id === "permissions-mark-glyph",
+      ),
+    ).toBe(true);
     expect(JSON.stringify(nodes)).toContain("AWS");
     // The agent's reason is a titled section, not an unlabeled grey box.
-    expect(JSON.stringify(findById(nodes, "permissions-reason"))).toContain("Reason");
+    expect(JSON.stringify(findById(nodes, "permissions-reason"))).toContain(
+      "Reason",
+    );
 
-    const order = ["permissions-header-mark", "permissions-account", "permissions-reason", "permissions-body"];
+    const order = [
+      "permissions-header-mark",
+      "permissions-account",
+      "permissions-reason",
+      "permissions-body",
+    ];
     const positions = order.map((id) => indexOfId(nodes, id));
     expect(positions.every((position) => position > -1)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
   });
 
   it("closes with Deny then Approve, right-aligned and in their answer colors", () => {
-    const nodes = renderShell(modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: null }));
+    const nodes = renderShell(
+      modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: null }),
+    );
 
     const row = nodes.find((node) => classesOf(node).includes("justify-end"));
     expect(row, "the action row is right-aligned").toBeDefined();
     const buttons = flatten(row?.children).filter((node) =>
-      ["permissions-deny-btn", "permissions-approve-btn"].includes(String(node.attrs?.id)),
+      ["permissions-deny-btn", "permissions-approve-btn"].includes(
+        String(node.attrs?.id),
+      ),
     );
-    expect(buttons.map((node) => [node.attrs?.id, node.attrs?.variant])).toEqual([
+    expect(
+      buttons.map((node) => [node.attrs?.id, node.attrs?.variant]),
+    ).toEqual([
       ["permissions-deny-btn", "danger"],
       ["permissions-approve-btn", "success"],
     ]);
@@ -163,7 +208,9 @@ describe("PermissionsShell layout", () => {
 
 describe("PermissionsShell manual credentials", () => {
   it("renders no credential form for a service that signs in through a browser", () => {
-    const nodes = renderShell(modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: null }));
+    const nodes = renderShell(
+      modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: null }),
+    );
 
     expect(indexOfId(nodes, "permissions-manual-credentials")).toBe(-1);
     expect(hasApproveButton(nodes)).toBe(true);
@@ -172,8 +219,13 @@ describe("PermissionsShell manual credentials", () => {
   it("renders one labeled input per credential parameter, above the permissions body", () => {
     const nodes = renderShell(modelWithDetail(MANUAL_DETAIL));
 
-    expect(inputNames(nodes)).toEqual(["credential-access-key-id", "credential-secret-access-key"]);
-    const labels = nodes.filter((node) => node.tag === "span").flatMap((node) => flatten(node.children));
+    expect(inputNames(nodes)).toEqual([
+      "credential-access-key-id",
+      "credential-secret-access-key",
+    ]);
+    const labels = nodes
+      .filter((node) => node.tag === "span")
+      .flatMap((node) => flatten(node.children));
     expect(JSON.stringify(labels)).toContain("Access key id");
     // The form is the first thing the user sees under the rationale...
     const formIndex = indexOfId(nodes, "permissions-manual-credentials");
@@ -187,23 +239,32 @@ describe("PermissionsShell manual credentials", () => {
   it("also asks for an account name when the selected account needs one", () => {
     const detail: PredefinedPermissionDetail = {
       ...MANUAL_DETAIL,
-      account_choices: [{ ...MANUAL_DETAIL.account_choices[0], is_account_name_needed: true }],
+      account_choices: [
+        { ...MANUAL_DETAIL.account_choices[0], is_account_name_needed: true },
+      ],
     };
 
-    expect(inputNames(renderShell(modelWithDetail(detail)))).toContain("account_name");
+    expect(inputNames(renderShell(modelWithDetail(detail)))).toContain(
+      "account_name",
+    );
   });
 
   it("shows an error with no Approve button when there is nothing to ask for", () => {
     const nodes = renderShell(
       modelWithDetail({
         ...MANUAL_DETAIL,
-        manual_credentials: { parameters: [], message: "Imbue Studio cannot work out which credentials to ask for" },
+        manual_credentials: {
+          parameters: [],
+          message: "Imbue Studio cannot work out which credentials to ask for",
+        },
       }),
     );
 
     expect(inputNames(nodes)).toEqual([]);
     expect(hasApproveButton(nodes)).toBe(false);
-    expect(isErrorNotice(findById(nodes, "permissions-manual-credentials-message"))).toBe(true);
+    expect(
+      isErrorNotice(findById(nodes, "permissions-manual-credentials-message")),
+    ).toBe(true);
   });
 
   it("states the opening instruction as plain text, not as an error", () => {
@@ -217,7 +278,10 @@ describe("PermissionsShell manual credentials", () => {
   it("turns the form's message into an error notice once an attempt has failed", () => {
     const model = modelWithDetail(MANUAL_DETAIL);
     model.manualCredentialsFeedback = {
-      prompt: { ...AWS_PROMPT, message: "AWS did not accept those credentials." },
+      prompt: {
+        ...AWS_PROMPT,
+        message: "AWS did not accept those credentials.",
+      },
       isRejection: true,
     };
 
@@ -226,57 +290,98 @@ describe("PermissionsShell manual credentials", () => {
     const message = findById(nodes, "permissions-manual-credentials-message");
     expect(isErrorNotice(message)).toBe(true);
     // The inputs stay, so the rejected values can be corrected in place.
-    expect(inputNames(nodes)).toEqual(["credential-access-key-id", "credential-secret-access-key"]);
+    expect(inputNames(nodes)).toEqual([
+      "credential-access-key-id",
+      "credential-secret-access-key",
+    ]);
     expect(hasApproveButton(nodes)).toBe(true);
   });
 
   it("shows the agent's instructions as its own words, as plain text, between the message and the inputs", () => {
-    const instructions = "Open <b>Settings</b> -> [Apps](https://evil.example) and copy the API token.";
+    const instructions =
+      "Open <b>Settings</b> -> [Apps](https://evil.example) and copy the API token.";
     const nodes = renderShell(
-      modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: { ...AWS_PROMPT, instructions } }),
+      modelWithDetail({
+        ...MANUAL_DETAIL,
+        manual_credentials: { ...AWS_PROMPT, instructions },
+      }),
     );
 
-    const block = findById(nodes, "permissions-manual-credentials-instructions");
+    const block = findById(
+      nodes,
+      "permissions-manual-credentials-instructions",
+    );
     expect(JSON.stringify(block)).toContain("From the agent");
     // Rendered as text: markup and links stay inert, never trusted HTML.
-    expect(JSON.stringify(block)).toContain(JSON.stringify(instructions).slice(1, -1));
-    expect(flatten(block).some((node) => node.tag === "<" || node.tag === "a")).toBe(false);
-    const position = indexOfId(nodes, "permissions-manual-credentials-instructions");
-    expect(position).toBeGreaterThan(indexOfId(nodes, "permissions-manual-credentials-message"));
-    expect(position).toBeLessThan(nodes.findIndex((node) => node.tag === "input"));
+    expect(JSON.stringify(block)).toContain(
+      JSON.stringify(instructions).slice(1, -1),
+    );
+    expect(
+      flatten(block).some((node) => node.tag === "<" || node.tag === "a"),
+    ).toBe(false);
+    const position = indexOfId(
+      nodes,
+      "permissions-manual-credentials-instructions",
+    );
+    expect(position).toBeGreaterThan(
+      indexOfId(nodes, "permissions-manual-credentials-message"),
+    );
+    expect(position).toBeLessThan(
+      nodes.findIndex((node) => node.tag === "input"),
+    );
   });
 
   it("keeps the agent's instructions up after a rejected attempt", () => {
     const model = modelWithDetail(MANUAL_DETAIL);
     model.manualCredentialsFeedback = {
-      prompt: { ...AWS_PROMPT, message: "AWS did not accept those credentials.", instructions: "IAM -> Users" },
+      prompt: {
+        ...AWS_PROMPT,
+        message: "AWS did not accept those credentials.",
+        instructions: "IAM -> Users",
+      },
       isRejection: true,
     };
 
-    expect(JSON.stringify(findById(renderShell(model), "permissions-manual-credentials-instructions"))).toContain(
-      "IAM -> Users",
-    );
+    expect(
+      JSON.stringify(
+        findById(
+          renderShell(model),
+          "permissions-manual-credentials-instructions",
+        ),
+      ),
+    ).toContain("IAM -> Users");
   });
 
   it("shows no instructions block when the agent gave none", () => {
-    expect(indexOfId(renderShell(modelWithDetail(MANUAL_DETAIL)), "permissions-manual-credentials-instructions")).toBe(
-      -1,
-    );
+    expect(
+      indexOfId(
+        renderShell(modelWithDetail(MANUAL_DETAIL)),
+        "permissions-manual-credentials-instructions",
+      ),
+    ).toBe(-1);
   });
 
   it("scrolls a failure into view, and only a failure", () => {
     // The opening instruction is where the user already is: nothing to scroll.
-    expect(hasScrollHooks(renderShell(modelWithDetail(MANUAL_DETAIL)))).toBe(false);
+    expect(hasScrollHooks(renderShell(modelWithDetail(MANUAL_DETAIL)))).toBe(
+      false,
+    );
 
     const rejectedModel = modelWithDetail(MANUAL_DETAIL);
     rejectedModel.manualCredentialsFeedback = {
-      prompt: { ...AWS_PROMPT, message: "AWS did not accept those credentials." },
+      prompt: {
+        ...AWS_PROMPT,
+        message: "AWS did not accept those credentials.",
+      },
       isRejection: true,
     };
     expect(hasScrollHooks(renderShell(rejectedModel))).toBe(true);
 
     // An outright failure has its own notice, below the buttons.
-    const failedModel = modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: null });
+    const failedModel = modelWithDetail({
+      ...MANUAL_DETAIL,
+      manual_credentials: null,
+    });
     failedModel.errorMessage = "Sign-in did not complete";
     const nodes = renderShell(failedModel);
     const errorBox = findById(nodes, "permissions-error");

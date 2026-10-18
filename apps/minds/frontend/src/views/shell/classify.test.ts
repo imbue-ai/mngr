@@ -73,7 +73,9 @@ describe("classifyRoute", () => {
       kind: "creating",
       workspaceAnyId: "create-attempt-ff00",
     });
-    expect(accentSourceForRoute("/creating/create-attempt-ff00")).toBe("create-attempt-ff00");
+    expect(accentSourceForRoute("/creating/create-attempt-ff00")).toBe(
+      "create-attempt-ff00",
+    );
     // A creating path that names something other than an attempt stays a page.
     expect(classifyRoute("/creating/agent-ff00").kind).toBe("page");
     // Template over a machine is that machine's modal; standalone it is a
@@ -224,13 +226,19 @@ describe("workspaceSurfaceIdFromPath", () => {
 
 describe("parseWorkspaceIdFromUrl", () => {
   it("extracts workspace ids (agent- and legacy host-keyed) from origin, goto, and forward-bridge URLs", () => {
-    expect(parseWorkspaceIdFromUrl("http://web.host-ab12.localhost:8421/x")).toBe("host-ab12");
-    expect(parseWorkspaceIdFromUrl("http://web.agent-cd34.localhost:8421/x")).toBe("agent-cd34");
+    expect(
+      parseWorkspaceIdFromUrl("http://web.host-ab12.localhost:8421/x"),
+    ).toBe("host-ab12");
+    expect(
+      parseWorkspaceIdFromUrl("http://web.agent-cd34.localhost:8421/x"),
+    ).toBe("agent-cd34");
     expect(parseWorkspaceIdFromUrl("/goto/host-ab12/")).toBe("host-ab12");
-    expect(parseWorkspaceIdFromUrl("/forward-bridge?next=%2Fgoto%2Fhost-ab12%2F")).toBe("host-ab12");
-    expect(parseWorkspaceIdFromUrl("/forward-bridge?next=%2Fgoto%2Fagent-cd34%2F")).toBe(
-      "agent-cd34",
-    );
+    expect(
+      parseWorkspaceIdFromUrl("/forward-bridge?next=%2Fgoto%2Fhost-ab12%2F"),
+    ).toBe("host-ab12");
+    expect(
+      parseWorkspaceIdFromUrl("/forward-bridge?next=%2Fgoto%2Fagent-cd34%2F"),
+    ).toBe("agent-cd34");
     expect(parseWorkspaceIdFromUrl("/goto/agent-cd34/")).toBe("agent-cd34");
     expect(parseWorkspaceIdFromUrl("/workspace/agent-cd34")).toBe("agent-cd34");
     expect(parseWorkspaceIdFromUrl("/workspace/host-ab12")).toBe("host-ab12");
@@ -252,7 +260,9 @@ describe("popoutFromPath", () => {
       windowId: "win-0123456789abcdef",
     });
     // A cold-start restore may carry the host-scoped coordinate.
-    expect(popoutFromPath("/popout/host-99aa/win-01")?.workspaceAnyId).toBe("host-99aa");
+    expect(popoutFromPath("/popout/host-99aa/win-01")?.workspaceAnyId).toBe(
+      "host-99aa",
+    );
     expect(popoutFromPath("/popout/agent-ab12")).toBeNull();
     expect(popoutFromPath("/popout/agent-ab12/not-a-window")).toBeNull();
     expect(popoutFromPath("/popout/agent-ab12/win-01/more")).toBeNull();
@@ -264,7 +274,9 @@ describe("popoutFromPath", () => {
     expect(context.kind).toBe("workspace");
     expect(context.workspaceAnyId).toBe("agent-ab12");
     expect(context.activeTab).toBeNull();
-    expect(accentSourceForRoute("/popout/agent-ab12/win-01")).toBe("agent-ab12");
+    expect(accentSourceForRoute("/popout/agent-ab12/win-01")).toBe(
+      "agent-ab12",
+    );
     // The Shell mounts the popout's surface itself (with the solo window);
     // the plain surface matcher stays strict to /workspace routes.
     expect(workspaceSurfaceIdFromPath("/popout/agent-ab12/win-01")).toBeNull();

@@ -22,7 +22,9 @@ describe("warmRequestDetail", () => {
     warmRequestDetail("evt-1", fetcher);
 
     expect(fetcher).toHaveBeenCalledWith(requestDetailUrl("evt-1"));
-    await expect(readWarmedRequestDetail("evt-1")).resolves.toEqual({ kind: "predefined" });
+    await expect(readWarmedRequestDetail("evt-1")).resolves.toEqual({
+      kind: "predefined",
+    });
   });
 
   it("fetches once however many times the row is pointed at", async () => {

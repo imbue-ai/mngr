@@ -380,7 +380,8 @@ export class WorkspaceOptionsModel {
     this.resizeErrorMessage = "";
     this.resizeNotice = "";
     if (body === null) {
-      this.resizeErrorMessage = "Enter a new size as whole numbers of at least 1.";
+      this.resizeErrorMessage =
+        "Enter a new size as whole numbers of at least 1.";
       this.redrawImpl();
       return false;
     }

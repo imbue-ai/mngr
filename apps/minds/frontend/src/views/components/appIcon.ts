@@ -45,7 +45,12 @@ const FORBIDDEN_TAGS: readonly string[] = [
 const FORBIDDEN_ATTRIBUTES: readonly string[] = ["style", "class"];
 
 // Attributes that name a resource: only a same-document `#fragment` is kept.
-const REFERENCE_ATTRIBUTES: ReadonlySet<string> = new Set(["href", "xlink:href", "src", "xml:base"]);
+const REFERENCE_ATTRIBUTES: ReadonlySet<string> = new Set([
+  "href",
+  "xlink:href",
+  "src",
+  "xml:base",
+]);
 
 // DOMPurify's stock URI expression with the schemes taken out: any scheme at
 // all is refused, a scheme-less value or `#fragment` is kept.
@@ -93,9 +98,14 @@ function iconIdPrefix(markup: string): string {
  *  element with nothing beside it. */
 function onlyElementChild(fragment: DocumentFragment): Element | null {
   const children = Array.from(fragment.childNodes);
-  const elements = children.filter((node): node is Element => node.nodeType === Node.ELEMENT_NODE);
+  const elements = children.filter(
+    (node): node is Element => node.nodeType === Node.ELEMENT_NODE,
+  );
   if (elements.length !== 1) return null;
-  const hasStrayText = children.some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim() !== "");
+  const hasStrayText = children.some(
+    (node) =>
+      node.nodeType === Node.TEXT_NODE && node.textContent?.trim() !== "",
+  );
   return hasStrayText ? null : elements[0];
 }
 
@@ -139,7 +149,8 @@ function namespaceIds(root: Element, prefix: string): void {
         if (value === `#${id}`) value = `#${rename}`;
         value = value.split(`url(#${id})`).join(`url(#${rename})`);
       }
-      if (value !== attribute.value) element.setAttribute(attribute.name, value);
+      if (value !== attribute.value)
+        element.setAttribute(attribute.name, value);
     }
   }
 }
@@ -168,7 +179,8 @@ function normalizeRoot(root: Element, sizePx: number): boolean {
   root.setAttribute("height", String(sizePx));
   root.setAttribute("aria-hidden", "true");
   root.setAttribute("focusable", "false");
-  if (root.getAttribute("fill") === null) root.setAttribute("fill", "currentColor");
+  if (root.getAttribute("fill") === null)
+    root.setAttribute("fill", "currentColor");
   return true;
 }
 
@@ -182,7 +194,10 @@ function normalizeRoot(root: Element, sizePx: number): boolean {
  * against. Callers draw their fallback on null, so refusing an icon costs a
  * picture rather than a surface.
  */
-export function sanitizeIconMarkup(rawMarkup: string, sizePx: number): string | null {
+export function sanitizeIconMarkup(
+  rawMarkup: string,
+  sizePx: number,
+): string | null {
   const markup = rawMarkup.trim();
   if (markup === "" || markup.length > MAX_ICON_LENGTH) return null;
   const key = `${sizePx}|${markup}`;
@@ -208,7 +223,11 @@ function sanitizeUncached(markup: string, sizePx: number): string | null {
   });
   const root = onlyElementChild(fragment);
   if (root === null) return null;
-  if (root.namespaceURI !== SVG_NAMESPACE || root.tagName.toLowerCase() !== "svg") return null;
+  if (
+    root.namespaceURI !== SVG_NAMESPACE ||
+    root.tagName.toLowerCase() !== "svg"
+  )
+    return null;
   scrubAttributes(root);
   namespaceIds(root, iconIdPrefix(markup));
   if (!normalizeRoot(root, sizePx)) return null;
@@ -242,7 +261,12 @@ export function appMonogramMarkup(appName: string, sizePx: number): string {
 
 /** The markup a share target wears: its registered icon when usable, else its
  *  monogram -- the same chain the workspace draws it with. */
-export function shareTargetIconMarkup(rawIcon: string | null, serviceName: string, sizePx: number): string {
-  const sanitized = rawIcon === null ? null : sanitizeIconMarkup(rawIcon, sizePx);
+export function shareTargetIconMarkup(
+  rawIcon: string | null,
+  serviceName: string,
+  sizePx: number,
+): string {
+  const sanitized =
+    rawIcon === null ? null : sanitizeIconMarkup(rawIcon, sizePx);
   return sanitized ?? appMonogramMarkup(serviceName, sizePx);
 }

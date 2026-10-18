@@ -396,7 +396,9 @@ describe("the Updates settings group after an update that never went out", () =>
     recordFailureOnBacked();
 
     const backed = allText(updatesGroup(draw(BACKED)));
-    expect(backed).toContain("Couldn't start this workspace to run the update.");
+    expect(backed).toContain(
+      "Couldn't start this workspace to run the update.",
+    );
     expect(backed).toContain("ERROR: The box behind host-5821 is gone");
     expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
       "Couldn't start this workspace",
@@ -599,7 +601,8 @@ describe("the General settings group's Machine size section", () => {
   ): m.Children {
     h.draw(agentId, "general");
     const model = h.models.get(agentId);
-    if (model === undefined) throw new Error("the machine's model was not built");
+    if (model === undefined)
+      throw new Error("the machine's model was not built");
     model.machineSize = size;
     return h.draw(agentId, "general");
   }
@@ -621,7 +624,8 @@ describe("the General settings group's Machine size section", () => {
     const field = sizeFields(section).find(
       (vnode) => attrsOf(vnode).dimension === dimension,
     );
-    if (field === undefined) throw new Error(`no ${dimension} field to type into`);
+    if (field === undefined)
+      throw new Error(`no ${dimension} field to type into`);
     (attrsOf(field).oninput as (text: string) => void)(value);
   }
 
@@ -661,11 +665,11 @@ describe("the General settings group's Machine size section", () => {
     const docker = machineSizeSection(
       drawWithSize(h, UNBACKED, { ...RECORDED, is_resizable: true }),
     );
-    if (docker === undefined) throw new Error("the docker section was not drawn");
-    expect(sizeFields(docker).map((field) => attrsOf(field).dimension)).toEqual([
-      "cpu_count",
-      "memory_gb",
-    ]);
+    if (docker === undefined)
+      throw new Error("the docker section was not drawn");
+    expect(sizeFields(docker).map((field) => attrsOf(field).dimension)).toEqual(
+      ["cpu_count", "memory_gb"],
+    );
     expect(pressableWithLabel(docker, "Apply and restart")).toBeDefined();
 
     const lima = machineSizeSection(
@@ -717,6 +721,8 @@ describe("the General settings group's Machine size section", () => {
     const memoryField = sizeFields(after).find(
       (field) => attrsOf(field).dimension === "memory_gb",
     );
-    expect(memoryField === undefined ? undefined : attrsOf(memoryField).value).toBe("16");
+    expect(
+      memoryField === undefined ? undefined : attrsOf(memoryField).value,
+    ).toBe("16");
   });
 });

@@ -1,7 +1,13 @@
 // The downloaded-update offer: what it says, and which control does what.
 
 import { describe, expect, it } from "vitest";
-import { allText, attrsOf, collectVnodes, renderRoot, renderedText } from "../../testing";
+import {
+  allText,
+  attrsOf,
+  collectVnodes,
+  renderRoot,
+  renderedText,
+} from "../../testing";
 import { UpdateReadyCard, type UpdateReadyCardAttrs } from "./UpdateReadyCard";
 
 /** The card as the plain macOS offer, with `overrides` picking the state under test. */
@@ -21,12 +27,16 @@ function card(overrides: Partial<UpdateReadyCardAttrs> = {}) {
 
 /** The card's clickable controls, which is every vnode carrying an onclick. */
 function controls(root: unknown) {
-  return collectVnodes(root).filter((vnode) => typeof attrsOf(vnode).onclick === "function");
+  return collectVnodes(root).filter(
+    (vnode) => typeof attrsOf(vnode).onclick === "function",
+  );
 }
 
 /** The held button an installing card shows in place of a live one. */
 function heldControl(root: unknown) {
-  const held = collectVnodes(root).find((vnode) => attrsOf(vnode).disabled === true);
+  const held = collectVnodes(root).find(
+    (vnode) => attrsOf(vnode).disabled === true,
+  );
   expect(held).toBeDefined();
   return held!;
 }
@@ -46,13 +56,17 @@ describe("the update-ready card", () => {
     // click is followed by the system password prompt -- both worth saying
     // before the button is pressed, since "Restart now" would promise a
     // restart that instead pauses on a dialog.
-    const appImage = renderedText(card({ installPolicy: "on-request", needsPassword: false }));
+    const appImage = renderedText(
+      card({ installPolicy: "on-request", needsPassword: false }),
+    );
     expect(appImage).toContain("Installs when you ask");
     expect(appImage).not.toContain("password");
     expect(appImage).toContain("Install and restart");
     expect(appImage).not.toContain("Restart now");
 
-    const deb = renderedText(card({ installPolicy: "on-request", needsPassword: true }));
+    const deb = renderedText(
+      card({ installPolicy: "on-request", needsPassword: true }),
+    );
     expect(deb).toContain("you'll be asked for your password");
   });
 
@@ -68,8 +82,12 @@ describe("the update-ready card", () => {
 
     const clickable = controls(root);
     expect(clickable).toHaveLength(2);
-    const restart = clickable.find((vnode) => allText(vnode.children).includes("Restart now"));
-    const dismiss = clickable.find((vnode) => attrsOf(vnode)["aria-label"] === "Dismiss");
+    const restart = clickable.find((vnode) =>
+      allText(vnode.children).includes("Restart now"),
+    );
+    const dismiss = clickable.find(
+      (vnode) => attrsOf(vnode)["aria-label"] === "Dismiss",
+    );
     expect(restart).toBeDefined();
     expect(dismiss).toBeDefined();
 
@@ -90,7 +108,9 @@ describe("the update-ready card", () => {
       error: "Installing the update failed: Command failed: pkexec",
     });
 
-    expect(renderedText(failed)).toContain("Installing the update failed: Command failed: pkexec");
+    expect(renderedText(failed)).toContain(
+      "Installing the update failed: Command failed: pkexec",
+    );
     expect(controls(failed)).toHaveLength(2);
   });
 
@@ -99,14 +119,20 @@ describe("the update-ready card", () => {
     // with the password prompt as the only other sign of life; a card still
     // offering "Install and restart" through that reads as a click that did
     // nothing. Nothing is dismissible either: this is the only account of it.
-    const installing = card({ installPolicy: "on-request", needsPassword: true, isInstalling: true });
+    const installing = card({
+      installPolicy: "on-request",
+      needsPassword: true,
+      isInstalling: true,
+    });
 
     const text = renderedText(installing);
     expect(text).toContain("Installing Imbue Studio 0.4.2");
     expect(text).toContain("Enter your password when asked");
     expect(text).not.toContain("Install and restart");
     expect(controls(installing)).toHaveLength(0);
-    expect(allText(heldControl(installing).children)).toContain("Installing...");
+    expect(allText(heldControl(installing).children)).toContain(
+      "Installing...",
+    );
   });
 
   it("says it is restarting, not installing, where the update installs on quit", () => {
@@ -118,6 +144,8 @@ describe("the update-ready card", () => {
     const text = renderedText(restarting);
     expect(text).toContain("Restarting into Imbue Studio 0.4.2");
     expect(text).not.toContain("Installing");
-    expect(allText(heldControl(restarting).children)).toContain("Restarting...");
+    expect(allText(heldControl(restarting).children)).toContain(
+      "Restarting...",
+    );
   });
 });

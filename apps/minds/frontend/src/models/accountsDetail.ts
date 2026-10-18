@@ -142,7 +142,8 @@ export class AccountsDetailModel {
       accounts.map((account) => [account.user_id, account.is_enabled]),
     );
     for (const userId of cachedPlanByUserId.keys()) {
-      if (!this.listedIsEnabledByUserId.has(userId)) cachedPlanByUserId.delete(userId);
+      if (!this.listedIsEnabledByUserId.has(userId))
+        cachedPlanByUserId.delete(userId);
     }
     for (const account of accounts) {
       const wasEnabled = previous.get(account.user_id);
@@ -150,7 +151,9 @@ export class AccountsDetailModel {
         this.planByUserId.delete(account.user_id);
         this.notificationPreferencesByUserId.delete(account.user_id);
         // A signed-out account's read cannot succeed, so its old figures would only mislead.
-        const cached = account.is_enabled ? cachedPlanByUserId.get(account.user_id) : undefined;
+        const cached = account.is_enabled
+          ? cachedPlanByUserId.get(account.user_id)
+          : undefined;
         if (cached !== undefined) {
           const state = this.planStateFor(account.user_id);
           state.isLoaded = true;

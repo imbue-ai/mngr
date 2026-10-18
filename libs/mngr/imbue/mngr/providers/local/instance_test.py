@@ -385,9 +385,7 @@ def test_get_host_tags_returns_empty_when_labels_file_is_empty(temp_host_dir: Pa
     assert tags == {}
 
 
-# =============================================================================
 # Tests for get_max_destroyed_host_persisted_seconds (BaseProviderInstance)
-# =============================================================================
 
 
 def test_get_max_destroyed_host_persisted_seconds_uses_global_default(
@@ -463,9 +461,7 @@ def test_get_max_destroyed_host_persisted_seconds_provider_override_takes_preced
     assert result == provider_seconds
 
 
-# =============================================================================
 # Tests for LocalProviderInstance properties and methods
-# =============================================================================
 
 
 def test_get_host_name_returns_localhost(local_provider: LocalProviderInstance) -> None:

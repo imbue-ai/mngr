@@ -37,7 +37,10 @@ const PLAN_DESCRIPTION_BY_NAME: Record<string, string> = {
 const PLAN_LABEL_BY_NAME: Record<string, string> = { free: "Limited" };
 
 function planLabel(planName: string): string {
-  return PLAN_LABEL_BY_NAME[planName] ?? planName.charAt(0).toUpperCase() + planName.slice(1);
+  return (
+    PLAN_LABEL_BY_NAME[planName] ??
+    planName.charAt(0).toUpperCase() + planName.slice(1)
+  );
 }
 
 // Switching TO explorer is the analytics consent, so it needs an explicit
@@ -342,7 +345,8 @@ function notificationSection(
         isWaiting: preferences.isWriting,
         isDisabled: preferences.isWriting,
         data: { "data-email-notifications": account.user_id },
-        onFlip: (isOn) => void model.setEmailNotifications(account.user_id, isOn),
+        onFlip: (isOn) =>
+          void model.setEmailNotifications(account.user_id, isOn),
       }),
       renderSwitchWord({ isOn: isEnabled }),
     ]),

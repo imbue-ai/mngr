@@ -7,12 +7,17 @@
 // current state, and the UI surfaces it as a banner + manual actions instead
 // of navigating on the user's behalf.
 
-import type { UiDiscoveryHealthMessage, UiEnvironmentMessage, UiHealthMessage } from "../channel/messages";
+import type {
+  UiDiscoveryHealthMessage,
+  UiEnvironmentMessage,
+  UiHealthMessage,
+} from "../channel/messages";
 
 // Neither recovery state says the machine was stopped -- the unattended path
 // only starts it. Which one ran is `RecoveryKind` below; read that, never the
 // state name.
-export type WorkspaceHealth = "healthy" | "stuck" | "recovering" | "recovery_failed";
+export type WorkspaceHealth =
+  "healthy" | "stuck" | "recovering" | "recovery_failed";
 
 /** Which of the two host recoveries is running. Only "restart" stops the
  * machine, and only the user's own click asks for one. */
@@ -36,7 +41,8 @@ export type DiscoveryHealth = "healthy" | "reconnecting" | "blocked";
  * a wake is the provider, on the strength of no measurement at all. A surface
  * reading "UNKNOWN" blames nothing.
  */
-export type EnvironmentCondition = "NONE" | "OFFLINE" | "SSH_BLOCKED" | "UNKNOWN";
+export type EnvironmentCondition =
+  "NONE" | "OFFLINE" | "SSH_BLOCKED" | "UNKNOWN";
 
 export class HealthStore {
   discoveryHealth: DiscoveryHealth = "healthy";
@@ -75,7 +81,8 @@ export class HealthStore {
     this.statusByAgentId.set(message.agent_id, message.status);
     if (message.error) this.errorByAgentId.set(message.agent_id, message.error);
     else this.errorByAgentId.delete(message.agent_id);
-    if (message.is_recovery_a_no_op) this.isRecoveryANoOpByAgentId.add(message.agent_id);
+    if (message.is_recovery_a_no_op)
+      this.isRecoveryANoOpByAgentId.add(message.agent_id);
     else this.isRecoveryANoOpByAgentId.delete(message.agent_id);
     if (message.recovery_kind === null || message.recovery_kind === undefined) {
       this.recoveryKindByAgentId.delete(message.agent_id);

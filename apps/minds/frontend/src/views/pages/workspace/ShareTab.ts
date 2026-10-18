@@ -450,7 +450,11 @@ function renderNavEntry(
         // The space is the text's own: a margin is not one, and a reader would
         // otherwise announce the two names run together.
         share.isDisplayNameAmbiguous(target)
-          ? m("span", { class: "ml-1.5 type-helper text-tertiary" }, ` ${target}`)
+          ? m(
+              "span",
+              { class: "ml-1.5 type-helper text-tertiary" },
+              ` ${target}`,
+            )
           : null,
       ]),
       // An app registers its address when it starts, so one that has never run
@@ -890,7 +894,10 @@ function rowSurfaceClass(share: SharePanelModel, isDomain: boolean): string {
  * cell so an outcome arriving never moves the row, holding the status and, when a re-invite can
  * be requested, an "Invite again" control. The first invitation is automatic, so there is no
  * first "Invite" button here. */
-function renderInvitationStatusIndicator(share: SharePanelModel, grant: Grant): m.Children {
+function renderInvitationStatusIndicator(
+  share: SharePanelModel,
+  grant: Grant,
+): m.Children {
   const target = share.currentTarget;
   const state = share.invitationStatusIndicator(target, grant);
   return m(
@@ -917,10 +924,17 @@ function reinviteButton(share: SharePanelModel, grant: Grant): m.Children {
   );
 }
 
-function indicatorText(classes: string, text: string, tooltip: string | null): m.Children {
+function indicatorText(
+  classes: string,
+  text: string,
+  tooltip: string | null,
+): m.Children {
   return m(
     "span",
-    { class: `min-w-0 truncate ${classes}`, ...(tooltip === null ? {} : { "data-tooltip": tooltip }) },
+    {
+      class: `min-w-0 truncate ${classes}`,
+      ...(tooltip === null ? {} : { "data-tooltip": tooltip }),
+    },
     text,
   );
 }
@@ -935,12 +949,17 @@ function invitationStatusIndicatorContents(
     case "none":
       return null;
     case "inviting":
-      return [m(Spinner, { size: "sm", extra: "shrink-0" }), indicatorText("text-tertiary", "Inviting", null)];
+      return [
+        m(Spinner, { size: "sm", extra: "shrink-0" }),
+        indicatorText("text-tertiary", "Inviting", null),
+      ];
     case "invited":
       return [
         indicatorText(
           "text-tertiary",
-          state.at === null ? "Invited" : `Invited ${formatRelativeAgo(state.at, nowMs)}`,
+          state.at === null
+            ? "Invited"
+            : `Invited ${formatRelativeAgo(state.at, nowMs)}`,
           state.at === null ? null : `Invited ${localeTime(state.at)}`,
         ),
         state.canReinvite ? reinviteButton(share, grant) : null,
@@ -958,13 +977,18 @@ function invitationStatusIndicatorContents(
     case "joined":
       return indicatorText(
         "text-success",
-        state.firstAt === null ? "Joined" : `Joined ${formatRelativeAgo(state.firstAt, nowMs)}`,
+        state.firstAt === null
+          ? "Joined"
+          : `Joined ${formatRelativeAgo(state.firstAt, nowMs)}`,
         visitsTooltip(state.firstAt, state.lastAt),
       );
   }
 }
 
-function visitsTooltip(firstAt: string | null, lastAt: string | null): string | null {
+function visitsTooltip(
+  firstAt: string | null,
+  lastAt: string | null,
+): string | null {
   const parts: string[] = [];
   if (firstAt !== null) parts.push(`First visited ${localeTime(firstAt)}`);
   if (lastAt !== null) parts.push(`last visited ${localeTime(lastAt)}`);

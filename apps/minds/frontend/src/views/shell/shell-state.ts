@@ -21,7 +21,11 @@ import {
   workspaceSurfaceIdFromPath,
 } from "./classify";
 import type { PopoutRoute } from "./classify";
-import type { PopoutFrame, PopoutReattachAsk, TearOutReport } from "../../electron-bridge";
+import type {
+  PopoutFrame,
+  PopoutReattachAsk,
+  TearOutReport,
+} from "../../electron-bridge";
 import { electronBridge } from "../../electron-bridge";
 import { recoveryRoute } from "../../models/create";
 import { setPendingHelpLaunch } from "../../models/help";
@@ -233,17 +237,28 @@ export class ShellState {
   /** Whether this window's workspace frame is showing the workspace named. */
   isWorkspaceFrameOn(agentScopedId: string): boolean {
     const armed = this.workspaceFrame?.armedWorkspaceAnyId() ?? null;
-    return armed !== null && this.stores.workspaces.toAgentScopedId(armed) === agentScopedId;
+    return (
+      armed !== null &&
+      this.stores.workspaces.toAgentScopedId(armed) === agentScopedId
+    );
   }
 
   /** Rebuild this window's workspace view, if its frame is showing the one named
    * -- and, given a cutoff, only if its page last loaded before it: a page
    * loaded since already runs what the machine serves now. */
-  reloadWorkspaceFrame(agentScopedId: string, loadedBeforeMs: number | null): void {
+  reloadWorkspaceFrame(
+    agentScopedId: string,
+    loadedBeforeMs: number | null,
+  ): void {
     const frame = this.workspaceFrame;
     if (frame === null || !this.isWorkspaceFrameOn(agentScopedId)) return;
     const lastLoadedAtMs = frame.lastLoadedAtMs();
-    if (loadedBeforeMs !== null && lastLoadedAtMs !== null && lastLoadedAtMs >= loadedBeforeMs) return;
+    if (
+      loadedBeforeMs !== null &&
+      lastLoadedAtMs !== null &&
+      lastLoadedAtMs >= loadedBeforeMs
+    )
+      return;
     frame.reload();
   }
 
@@ -282,7 +297,8 @@ export class ShellState {
     if (
       targetAnyId === null ||
       (displayed !== null &&
-        workspaces.toAgentScopedId(displayed) === workspaces.toAgentScopedId(targetAnyId))
+        workspaces.toAgentScopedId(displayed) ===
+          workspaces.toAgentScopedId(targetAnyId))
     ) {
       setRoute();
       return;
@@ -447,7 +463,9 @@ export class ShellState {
    * and hands its URL back: the workspace opens it where it belongs. */
   handleOpenLink(url: string): void {
     if (this.openLinkSender === null) {
-      console.warn(`[link-routing] dropped a link main handed back, since no workspace frame is mounted: ${url}`);
+      console.warn(
+        `[link-routing] dropped a link main handed back, since no workspace frame is mounted: ${url}`,
+      );
       return;
     }
     this.openLinkSender(url);
@@ -461,7 +479,10 @@ export class ShellState {
   /** The title the mounted shell last reported for a pulled-out window, else
    * a placeholder until it does. */
   popoutWindowTitle(windowId: string): string {
-    return this.detachedWindows.find((entry) => entry.windowId === windowId)?.title ?? "…";
+    return (
+      this.detachedWindows.find((entry) => entry.windowId === windowId)
+        ?.title ?? "…"
+    );
   }
 
   /** The mounted shell reported its pulled-out windows. In a popout window
@@ -477,7 +498,9 @@ export class ShellState {
     this.detachedWindows = windows;
     const present = new Set(windows.map((entry) => entry.windowId));
     const waiting = this.reattachWaiters;
-    this.reattachWaiters = waiting.filter((waiter) => present.has(waiter.windowId));
+    this.reattachWaiters = waiting.filter((waiter) =>
+      present.has(waiter.windowId),
+    );
     for (const waiter of waiting) {
       if (present.has(waiter.windowId)) continue;
       clearTimeout(waiter.settleTimer);
@@ -490,7 +513,9 @@ export class ShellState {
       onGone();
       return;
     }
-    const previousTitle = previous.find((entry) => entry.windowId === popout.windowId)?.title;
+    const previousTitle = previous.find(
+      (entry) => entry.windowId === popout.windowId,
+    )?.title;
     if (own.title !== previousTitle) onTitle(own.title);
   }
 
@@ -505,11 +530,15 @@ export class ShellState {
   handleReattachPopoutWindow(ask: PopoutReattachAsk): Promise<boolean> {
     const sender = this.reattachWindowSender;
     const displayed = this.displayedWorkspaceAnyId;
-    if (sender === null || displayed === null || this.popoutRoute() !== null) return Promise.resolve(false);
+    if (sender === null || displayed === null || this.popoutRoute() !== null)
+      return Promise.resolve(false);
     // Either spelling on either side: a restored popout or a cold-started
     // main window may still name the workspace by its host-scoped id.
     const workspaces = this.stores.workspaces;
-    if (workspaces.toAgentScopedId(displayed) !== workspaces.toAgentScopedId(ask.workspaceId)) {
+    if (
+      workspaces.toAgentScopedId(displayed) !==
+      workspaces.toAgentScopedId(ask.workspaceId)
+    ) {
       return Promise.resolve(false);
     }
     const reportedBack = this.whenReportedBack(ask.windowId);
@@ -535,13 +564,16 @@ export class ShellState {
    * out to begin with. Taken before the reattach is sent, so a report that
    * follows the send is not missed. */
   private whenReportedBack(windowId: string): Promise<boolean> {
-    if (!this.detachedWindows.some((entry) => entry.windowId === windowId)) return Promise.resolve(false);
+    if (!this.detachedWindows.some((entry) => entry.windowId === windowId))
+      return Promise.resolve(false);
     return new Promise((resolve) => {
       const waiter: ReattachWaiter = {
         windowId,
         resolve,
         settleTimer: setTimeout(() => {
-          this.reattachWaiters = this.reattachWaiters.filter((candidate) => candidate !== waiter);
+          this.reattachWaiters = this.reattachWaiters.filter(
+            (candidate) => candidate !== waiter,
+          );
           resolve(false);
         }, REATTACH_SETTLE_TIMEOUT_MS),
       };

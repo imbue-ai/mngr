@@ -25,7 +25,13 @@ const CARD_A = {
   accent: "#123456",
   workspace_agent_id: WORKSPACE_ID,
 };
-const CARD_B = { ...CARD_A, id: "evt-b", ws_name: "beta", display_name: "Gmail", accent: "#654321" };
+const CARD_B = {
+  ...CARD_A,
+  id: "evt-b",
+  ws_name: "beta",
+  display_name: "Gmail",
+  accent: "#654321",
+};
 
 const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   kind: "predefined",
@@ -40,12 +46,25 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
     {
       heading: "Full access",
       is_extras: false,
-      rows: [{ permission: "slack-read-all", label: "Read everything", description: "", is_wildcard: false }],
+      rows: [
+        {
+          permission: "slack-read-all",
+          label: "Read everything",
+          description: "",
+          is_wildcard: false,
+        },
+      ],
     },
   ],
   checked_permissions: ["slack-read-all"],
   account_choices: [
-    { value: "", label: "Default account", hint: "", is_credential_setup_needed: false, is_account_name_needed: false },
+    {
+      value: "",
+      label: "Default account",
+      hint: "",
+      is_credential_setup_needed: false,
+      is_account_name_needed: false,
+    },
   ],
   selected_account_value: "",
   new_account_value: ":new-account",
@@ -82,24 +101,32 @@ async function mountPopup(
     if (url.endsWith("/detail")) {
       detailUrls.push(url);
       return Promise.resolve(
-        jsonResponse({ detail: { ...PREDEFINED_DETAIL, request_id: url.split("/")[4] } }),
+        jsonResponse({
+          detail: { ...PREDEFINED_DETAIL, request_id: url.split("/")[4] },
+        }),
       );
     }
-    if (url.endsWith("/grant")) return Promise.resolve(jsonResponse({ outcome: "GRANTED" }));
-    if (url.endsWith("/deny")) return Promise.resolve(jsonResponse({ ok: true }));
+    if (url.endsWith("/grant"))
+      return Promise.resolve(jsonResponse({ outcome: "GRANTED" }));
+    if (url.endsWith("/deny"))
+      return Promise.resolve(jsonResponse({ ok: true }));
     return Promise.resolve(jsonResponse({ cards }));
   });
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   const routeSelection = selected;
-  vi.spyOn(m.route, "param").mockImplementation(
-    ((name: string) => (name === "selected" ? (routeSelection ?? undefined) : undefined)) as typeof m.route.param,
-  );
+  vi.spyOn(m.route, "param").mockImplementation(((name: string) =>
+    name === "selected"
+      ? (routeSelection ?? undefined)
+      : undefined) as typeof m.route.param);
 
   const stores = createEmptyStores();
   const shell = new ShellState(stores);
-  shell.displayedWorkspaceAnyId = options.displayed === undefined ? WORKSPACE_ID : options.displayed;
+  shell.displayedWorkspaceAnyId =
+    options.displayed === undefined ? WORKSPACE_ID : options.displayed;
   const sent: [string, string][] = [];
-  shell.registerPermissionResolvedSender((requestId, verdict) => sent.push([requestId, verdict]));
+  shell.registerPermissionResolvedSender((requestId, verdict) =>
+    sent.push([requestId, verdict]),
+  );
   let closeCount = 0;
   vi.spyOn(shell, "closeAppOverlay").mockImplementation(() => {
     closeCount += 1;
@@ -114,7 +141,10 @@ async function mountPopup(
   await settle();
 
   const render = (): AnyVnode =>
-    (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(instance, vnode) as unknown as AnyVnode;
+    (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
+      instance,
+      vnode,
+    ) as unknown as AnyVnode;
   return {
     shell,
     render,
@@ -132,7 +162,9 @@ describe("the request popup's body", () => {
     expect(text).toContain("Permission request");
     expect(text).toContain("for");
     expect(text).toContain("alpha");
-    const dot = collectVnodes(root).find((vnode) => String(attrsOf(vnode).style ?? "").includes("#123456"));
+    const dot = collectVnodes(root).find((vnode) =>
+      String(attrsOf(vnode).style ?? "").includes("#123456"),
+    );
     expect(dot, "the eyebrow carries the machine's accent dot").toBeDefined();
   });
 
@@ -147,7 +179,9 @@ describe("the request popup's body", () => {
     // so there is nothing to pick from -- only the one being reviewed.
     const { render } = await mountPopup([CARD_A, CARD_B], "evt-a");
     const root = render();
-    const dialogs = collectVnodes(root).filter((vnode) => vnode.tag === PredefinedPermissionDetailView);
+    const dialogs = collectVnodes(root).filter(
+      (vnode) => vnode.tag === PredefinedPermissionDetailView,
+    );
     expect(dialogs).toHaveLength(1);
     expect(allText(root)).not.toContain("beta");
     expect(allText(root)).not.toContain("Gmail");
@@ -155,7 +189,9 @@ describe("the request popup's body", () => {
 
   it("says the queue is empty rather than showing a blank card", async () => {
     const { render } = await mountPopup([], null);
-    expect(allText(render())).toContain("You're all caught up — no pending requests.");
+    expect(allText(render())).toContain(
+      "You're all caught up — no pending requests.",
+    );
   });
 
   // The popup opens only when the user asks for it -- the in-chat card's
@@ -166,7 +202,9 @@ describe("the request popup's body", () => {
     const { render } = await mountPopup([CARD_A], "evt-a");
     const root = render();
     expect(allText(root).toLowerCase()).not.toContain("automatic");
-    const dialog = collectVnodes(root).find((vnode) => vnode.tag === PredefinedPermissionDetailView);
+    const dialog = collectVnodes(root).find(
+      (vnode) => vnode.tag === PredefinedPermissionDetailView,
+    );
     const model = attrsOf(dialog as AnyVnode).model as InboxModel;
     const surface = [
       ...Object.keys(model),
@@ -191,14 +229,16 @@ describe("the request popup's selection", () => {
     // A Waiting-on-you row clicked while the popup is up only changes the
     // query, which preserves this component instance.
     const { render, detailUrls } = await mountPopup([CARD_A, CARD_B], "evt-a");
-    vi.spyOn(m.route, "param").mockImplementation(
-      ((name: string) => (name === "selected" ? "evt-b" : undefined)) as typeof m.route.param,
-    );
+    vi.spyOn(m.route, "param").mockImplementation(((name: string) =>
+      name === "selected" ? "evt-b" : undefined) as typeof m.route.param);
 
     render();
     await settle();
 
-    expect(detailUrls).toEqual(["/ui/api/inbox/evt-a/detail", "/ui/api/inbox/evt-b/detail"]);
+    expect(detailUrls).toEqual([
+      "/ui/api/inbox/evt-a/detail",
+      "/ui/api/inbox/evt-b/detail",
+    ]);
     expect(allText(render())).toContain("beta");
   });
 });
@@ -206,7 +246,9 @@ describe("the request popup's selection", () => {
 describe("the request popup's resolution relay", () => {
   it("tells the asking workspace the moment its request is approved", async () => {
     const { render, sent } = await mountPopup([CARD_A, CARD_B], "evt-a");
-    const dialog = collectVnodes(render()).find((vnode) => vnode.tag === PredefinedPermissionDetailView);
+    const dialog = collectVnodes(render()).find(
+      (vnode) => vnode.tag === PredefinedPermissionDetailView,
+    );
     const model = attrsOf(dialog as AnyVnode).model as InboxModel;
 
     await model.approve();
@@ -218,8 +260,12 @@ describe("the request popup's resolution relay", () => {
     // The popup floats over whatever is on screen, so the request being reviewed
     // often belongs to some other machine; its id must not be handed to the
     // workspace that happens to be displayed.
-    const { render, sent } = await mountPopup([CARD_A], "evt-a", { displayed: "agent-other" });
-    const dialog = collectVnodes(render()).find((vnode) => vnode.tag === PredefinedPermissionDetailView);
+    const { render, sent } = await mountPopup([CARD_A], "evt-a", {
+      displayed: "agent-other",
+    });
+    const dialog = collectVnodes(render()).find(
+      (vnode) => vnode.tag === PredefinedPermissionDetailView,
+    );
 
     (attrsOf(dialog as AnyVnode).model as InboxModel).deny();
 
@@ -228,11 +274,14 @@ describe("the request popup's resolution relay", () => {
 
   it("dismisses itself through the shell once nothing is left to review", async () => {
     const { render, closeCount } = await mountPopup([CARD_A], "evt-a");
-    const dialog = collectVnodes(render()).find((vnode) => vnode.tag === PredefinedPermissionDetailView);
+    const dialog = collectVnodes(render()).find(
+      (vnode) => vnode.tag === PredefinedPermissionDetailView,
+    );
     const model = attrsOf(dialog as AnyVnode).model as InboxModel;
     // The queue is empty on the reload that follows the grant.
     vi.stubGlobal("fetch", (url: string) => {
-      if (url.endsWith("/grant")) return Promise.resolve(jsonResponse({ outcome: "GRANTED" }));
+      if (url.endsWith("/grant"))
+        return Promise.resolve(jsonResponse({ outcome: "GRANTED" }));
       return Promise.resolve(jsonResponse({ cards: [] }));
     });
 

@@ -515,7 +515,9 @@ describe("the Updates panel", () => {
         isUpdateInstalling: true,
       });
       const text = panelText(installing);
-      expect(text).toContain("Installing Imbue Studio 0.5.0. Enter your password when asked; Imbue Studio restarts when it's done.");
+      expect(text).toContain(
+        "Installing Imbue Studio 0.5.0. Enter your password when asked; Imbue Studio restarts when it's done.",
+      );
       expect(text).toContain("Installing...");
       expect(text).not.toContain("Install and restart");
 
@@ -525,12 +527,18 @@ describe("the Updates panel", () => {
       const afterFailedCheck = updatesModel({
         updateState: {
           ...installing.updateState!,
-          status: { type: "error", channel: "stable", message: "feed unreachable" },
+          status: {
+            type: "error",
+            channel: "stable",
+            message: "feed unreachable",
+          },
         },
         isUpdateInstalling: true,
       });
       const laterText = panelText(afterFailedCheck);
-      expect(laterText).toContain("Installing Imbue Studio 0.5.0. Enter your password when asked; Imbue Studio restarts when it's done.");
+      expect(laterText).toContain(
+        "Installing Imbue Studio 0.5.0. Enter your password when asked; Imbue Studio restarts when it's done.",
+      );
       expect(laterText).not.toContain("Update check failed");
     });
   });
@@ -551,7 +559,9 @@ describe("the Updates panel", () => {
         },
       });
       const text = panelText(deb);
-      expect(text).toContain("Imbue Studio 0.5.0 is downloaded. Install it below; you'll be asked for your password.");
+      expect(text).toContain(
+        "Imbue Studio 0.5.0 is downloaded. Install it below; you'll be asked for your password.",
+      );
       expect(text).toContain("Install and restart");
       expect(text).not.toContain("Restart now");
 
@@ -564,7 +574,9 @@ describe("the Updates panel", () => {
           needsPasswordToInstall: false,
         },
       });
-      expect(panelText(appImage)).toContain("Imbue Studio 0.5.0 is downloaded. Install it below.");
+      expect(panelText(appImage)).toContain(
+        "Imbue Studio 0.5.0 is downloaded. Install it below.",
+      );
     });
   });
 });
@@ -895,16 +907,27 @@ describe("Display panel", () => {
   it("offers every zoom size with the stored one selected", async () => {
     await withMindsNative({}, async () => {
       const tree = renderRoot(SettingsSections, { model: displayModel(125) });
-      const select = collectVnodes(tree).find((vnode) => vnode.tag === "select");
+      const select = collectVnodes(tree).find(
+        (vnode) => vnode.tag === "select",
+      );
       expect(select).toBeDefined();
       expect(attrsOf(select as AnyVnode).id).toBe("display-zoom-select");
       const options = collectVnodes(select as AnyVnode).filter(
         (vnode) => vnode.tag === "option",
       );
       expect(options.map((option) => attrsOf(option).value)).toEqual([
-        "80", "90", "100", "110", "125", "150", "175", "200",
+        "80",
+        "90",
+        "100",
+        "110",
+        "125",
+        "150",
+        "175",
+        "200",
       ]);
-      const selected = options.filter((option) => attrsOf(option).selected === true);
+      const selected = options.filter(
+        (option) => attrsOf(option).selected === true,
+      );
       expect(selected.map((option) => attrsOf(option).value)).toEqual(["125"]);
       expect(collectText(tree).join(" ")).toContain("100% (default)");
     });
@@ -913,8 +936,12 @@ describe("Display panel", () => {
   it("points at the browser's own zoom when the shell cannot scale windows", async () => {
     await withMindsNative(null, async () => {
       const tree = renderRoot(SettingsSections, { model: displayModel(null) });
-      expect(collectVnodes(tree).find((vnode) => vnode.tag === "select")).toBeUndefined();
-      expect(collectText(tree).join(" ")).toContain("use the browser's own zoom");
+      expect(
+        collectVnodes(tree).find((vnode) => vnode.tag === "select"),
+      ).toBeUndefined();
+      expect(collectText(tree).join(" ")).toContain(
+        "use the browser's own zoom",
+      );
     });
   });
 
@@ -922,7 +949,9 @@ describe("Display panel", () => {
     await withMindsNative({}, async () => {
       const model = displayModel(100);
       model.displayZoomError = "Unknown display zoom 137";
-      const text = collectText(renderRoot(SettingsSections, { model })).join(" ");
+      const text = collectText(renderRoot(SettingsSections, { model })).join(
+        " ",
+      );
       expect(text).toContain("Unknown display zoom 137");
     });
   });
@@ -936,11 +965,15 @@ describe("the Browser cookies panel", () => {
   }
 
   function runButton(model: SettingsModel): AnyVnode | undefined {
-    return collectVnodes(renderRoot(SettingsSections, { model })).find((node) => attrsOf(node).id === "browser-import-run");
+    return collectVnodes(renderRoot(SettingsSections, { model })).find(
+      (node) => attrsOf(node).id === "browser-import-run",
+    );
   }
 
   it("is listed among the sections and offers the import", () => {
-    expect(SETTINGS_SECTIONS.map((section) => section.name)).toContain("browser-import");
+    expect(SETTINGS_SECTIONS.map((section) => section.name)).toContain(
+      "browser-import",
+    );
     const model = browserImportModel();
     expect(panelText(model)).toContain("Import from Chrome");
     expect(attrsOf(runButton(model)!).disabled).toBe(false);
@@ -959,7 +992,10 @@ describe("the Browser cookies panel", () => {
     expect(panelText(succeeded)).toContain("Imported your Chrome cookies.");
 
     const failed = browserImportModel();
-    failed.browserImport.outcome = { is_success: false, detail: "Google Chrome is not installed." };
+    failed.browserImport.outcome = {
+      is_success: false,
+      detail: "Google Chrome is not installed.",
+    };
     expect(panelText(failed)).toContain("Google Chrome is not installed.");
   });
 });

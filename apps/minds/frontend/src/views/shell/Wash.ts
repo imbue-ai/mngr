@@ -14,7 +14,10 @@ export function Wash(): m.Component {
       if (active === null) return null;
       return m(
         "div",
-        { id: "wash-layer", class: "pointer-events-none fixed inset-0 z-[150] overflow-hidden" },
+        {
+          id: "wash-layer",
+          class: "pointer-events-none fixed inset-0 z-[150] overflow-hidden",
+        },
         m("div", {
           class: "wash-disc absolute rounded-full",
           style:

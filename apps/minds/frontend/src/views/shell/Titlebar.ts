@@ -34,8 +34,10 @@ export interface TitlebarAttrs {
 /** The bar across the top of every chrome (the titlebar and the popout's bar):
  * painted with the workspace accent while one is active (--titlebar-bg), else
  * the neutral surface. The workspace surface starts 38px below it. */
-export const CHROME_BAR_STYLE = "background-color: var(--titlebar-bg, var(--c-surface-primary));";
-export const CHROME_BAR_CLASS = "fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1";
+export const CHROME_BAR_STYLE =
+  "background-color: var(--titlebar-bg, var(--c-surface-primary));";
+export const CHROME_BAR_CLASS =
+  "fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1";
 
 /** The room a bar leaves under the native traffic lights on macOS (main.js
  * places them at the bar's left edge). */
@@ -58,8 +60,10 @@ export function leftWindowControls(shell: ShellState): m.Children {
 
 /** What each tab's dialog says on a creation page, where the workspace does not exist yet. */
 export const NOT_YET_CREATED_MESSAGE_BY_TAB: Record<OptionsTab, string> = {
-  permissions: "Check back here after the workspace is created to manage its permissions.",
-  settings: "Check back here after the workspace is created to change its settings.",
+  permissions:
+    "Check back here after the workspace is created to manage its permissions.",
+  settings:
+    "Check back here after the workspace is created to change its settings.",
   share: "Check back here after the workspace is created to share it.",
 };
 
@@ -81,15 +85,44 @@ function startTitlebar(shell: ShellState): m.Children {
       m("div", { class: "flex-1" }),
       m("img", {
         id: "start-mark",
-        class: "start-chrome-mark absolute left-1/2 top-1/2 h-5 w-auto -translate-x-1/2 -translate-y-1/2 select-none",
+        class:
+          "start-chrome-mark absolute left-1/2 top-1/2 h-5 w-auto -translate-x-1/2 -translate-y-1/2 select-none",
         src: lockupUrl,
         alt: "Imbue Studio",
         draggable: false,
       }),
       m("div", { class: "flex" + (isMacLayout(shell) ? " hidden" : "") }, [
-        m(TitlebarButton, { variant: "control", "aria-label": "Minimize", hidden: !isDesktop, onclick: () => electronBridge.minimize() }, m(Icon12, { name: "minimize" })),
-        m(TitlebarButton, { variant: "control", "aria-label": "Maximize", hidden: !isDesktop, onclick: () => electronBridge.maximize() }, m(Icon12, { name: "maximize" })),
-        m(TitlebarButton, { variant: "control", tone: "danger", "aria-label": "Close", hidden: !isDesktop, onclick: () => electronBridge.close() }, m(Icon12, { name: "close" })),
+        m(
+          TitlebarButton,
+          {
+            variant: "control",
+            "aria-label": "Minimize",
+            hidden: !isDesktop,
+            onclick: () => electronBridge.minimize(),
+          },
+          m(Icon12, { name: "minimize" }),
+        ),
+        m(
+          TitlebarButton,
+          {
+            variant: "control",
+            "aria-label": "Maximize",
+            hidden: !isDesktop,
+            onclick: () => electronBridge.maximize(),
+          },
+          m(Icon12, { name: "maximize" }),
+        ),
+        m(
+          TitlebarButton,
+          {
+            variant: "control",
+            tone: "danger",
+            "aria-label": "Close",
+            hidden: !isDesktop,
+            onclick: () => electronBridge.close(),
+          },
+          m(Icon12, { name: "close" }),
+        ),
       ]),
     ],
   );
@@ -122,9 +155,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
         ? workspaces.toAgentScopedId(context.workspaceAnyId ?? "")
         : null;
       const hasCurrentWorkspaceRequest =
-        shell.stores.requests.hasPendingForWorkspace(
-          currentWorkspaceAgentId,
-        );
+        shell.stores.requests.hasPendingForWorkspace(currentWorkspaceAgentId);
       const isDesktop = electronBridge.isDesktop;
       const isHomeSelected = context.kind === "home";
       // Every one of these five icons' surfaces (the docked options panel, the
@@ -257,7 +288,13 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                           },
                           onclick: () => {
                             if (isCreating) notYetTab = "permissions";
-                            else toggleWorkspaceOptions(shell, routePath, context, "permissions");
+                            else
+                              toggleWorkspaceOptions(
+                                shell,
+                                routePath,
+                                context,
+                                "permissions",
+                              );
                           },
                         },
                         [
@@ -303,7 +340,13 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                               : "",
                           onclick: () => {
                             if (isCreating) notYetTab = "settings";
-                            else toggleWorkspaceOptions(shell, routePath, context, "settings");
+                            else
+                              toggleWorkspaceOptions(
+                                shell,
+                                routePath,
+                                context,
+                                "settings",
+                              );
                           },
                         },
                         m(Icon16, { name: "settings" }),
@@ -323,7 +366,13 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                               : "",
                           onclick: () => {
                             if (isCreating) notYetTab = "share";
-                            else toggleWorkspaceOptions(shell, routePath, context, "share");
+                            else
+                              toggleWorkspaceOptions(
+                                shell,
+                                routePath,
+                                context,
+                                "share",
+                              );
                           },
                         },
                         m(Icon16, { name: "user-plus" }),
@@ -378,45 +427,49 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
               },
               m(Icon16, { name: "bug" }),
             ),
-            m("div", { class: "flex" + (isMacLayout(shell) ? " hidden" : "") }, [
-              m(
-                TitlebarButton,
-                {
-                  variant: "control",
-                  id: "min-btn",
-                  "aria-label": "Minimize",
-                  "data-tooltip": "Minimize",
-                  hidden: !isDesktop,
-                  onclick: () => electronBridge.minimize(),
-                },
-                m(Icon12, { name: "minimize" }),
-              ),
-              m(
-                TitlebarButton,
-                {
-                  variant: "control",
-                  id: "max-btn",
-                  "aria-label": "Maximize",
-                  "data-tooltip": "Maximize",
-                  hidden: !isDesktop,
-                  onclick: () => electronBridge.maximize(),
-                },
-                m(Icon12, { name: "maximize" }),
-              ),
-              m(
-                TitlebarButton,
-                {
-                  variant: "control",
-                  tone: "danger",
-                  id: "close-btn",
-                  "aria-label": "Close",
-                  "data-tooltip": "Close",
-                  hidden: !isDesktop,
-                  onclick: () => electronBridge.close(),
-                },
-                m(Icon12, { name: "close" }),
-              ),
-            ]),
+            m(
+              "div",
+              { class: "flex" + (isMacLayout(shell) ? " hidden" : "") },
+              [
+                m(
+                  TitlebarButton,
+                  {
+                    variant: "control",
+                    id: "min-btn",
+                    "aria-label": "Minimize",
+                    "data-tooltip": "Minimize",
+                    hidden: !isDesktop,
+                    onclick: () => electronBridge.minimize(),
+                  },
+                  m(Icon12, { name: "minimize" }),
+                ),
+                m(
+                  TitlebarButton,
+                  {
+                    variant: "control",
+                    id: "max-btn",
+                    "aria-label": "Maximize",
+                    "data-tooltip": "Maximize",
+                    hidden: !isDesktop,
+                    onclick: () => electronBridge.maximize(),
+                  },
+                  m(Icon12, { name: "maximize" }),
+                ),
+                m(
+                  TitlebarButton,
+                  {
+                    variant: "control",
+                    tone: "danger",
+                    id: "close-btn",
+                    "aria-label": "Close",
+                    "data-tooltip": "Close",
+                    hidden: !isDesktop,
+                    onclick: () => electronBridge.close(),
+                  },
+                  m(Icon12, { name: "close" }),
+                ),
+              ],
+            ),
           ],
         ),
       );
@@ -426,13 +479,25 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
         notYetTab !== null
           ? m(
               Modal,
-              { isOpen: true, id: "creating-not-yet-dialog", onClose: () => (notYetTab = null) },
+              {
+                isOpen: true,
+                id: "creating-not-yet-dialog",
+                onClose: () => (notYetTab = null),
+              },
               [
-                m("p", { class: "type-body text-primary mb-4" }, NOT_YET_CREATED_MESSAGE_BY_TAB[notYetTab]),
+                m(
+                  "p",
+                  { class: "type-body text-primary mb-4" },
+                  NOT_YET_CREATED_MESSAGE_BY_TAB[notYetTab],
+                ),
                 m(
                   "div",
                   { class: "flex justify-end" },
-                  m(Button, { variant: "secondary", onclick: () => (notYetTab = null) }, "Close"),
+                  m(
+                    Button,
+                    { variant: "secondary", onclick: () => (notYetTab = null) },
+                    "Close",
+                  ),
                 ),
               ],
             )

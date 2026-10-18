@@ -54,7 +54,9 @@ function verdictMessage(update: UiWorkspaceUpdate): string {
   // is only the fallback: its next sweep is an exec into a machine whose
   // services are still coming back from the apply, so for a while after a
   // verdict `current_version` still reads the version this run moved off.
-  const landed = displayVersion(update.success_note_version || update.current_version);
+  const landed = displayVersion(
+    update.success_note_version || update.current_version,
+  );
   switch (update.verdict) {
     case "UPDATED":
       return `This workspace was updated${landed ? ` to ${landed}` : ""}.`;
@@ -84,10 +86,14 @@ function modalTitle(update: UiWorkspaceUpdate, workspaceName: string): string {
   if (update.availability === "UNKNOWN") {
     // When this build is the side with no version the answer is the same for
     // every machine; titling it after this one invites a hunt for a fault in it.
-    return update.unknown_reason === "NO_APP_VERSION" ? "This build can't compare versions" : `${workspaceName}'s version`;
+    return update.unknown_reason === "NO_APP_VERSION"
+      ? "This build can't compare versions"
+      : `${workspaceName}'s version`;
   }
-  if (update.availability === "APP_BEHIND") return `${workspaceName} is ahead of Imbue Studio`;
-  if (isRecreationRequired(update)) return `${workspaceName} needs a new workspace`;
+  if (update.availability === "APP_BEHIND")
+    return `${workspaceName} is ahead of Imbue Studio`;
+  if (isRecreationRequired(update))
+    return `${workspaceName} needs a new workspace`;
   return `Update ${workspaceName}`;
 }
 
@@ -99,8 +105,13 @@ export function migrateCommandFor(workspaceName: string): string {
 /** What an armed schedule says, shared with the machine's Updates settings
  * group. Window-relative rather than "tonight": the window is configurable to
  * any hours. */
-export function scheduledLine(update: UiWorkspaceUpdate, updateWindow: string): string {
-  const target = update.scheduled_target_ref ? ` to ${displayVersion(update.scheduled_target_ref)}` : "";
+export function scheduledLine(
+  update: UiWorkspaceUpdate,
+  updateWindow: string,
+): string {
+  const target = update.scheduled_target_ref
+    ? ` to ${displayVersion(update.scheduled_target_ref)}`
+    : "";
   return `Scheduled to update${target} in the next update window (${updateWindow}).`;
 }
 
@@ -108,13 +119,23 @@ export function scheduledLine(update: UiWorkspaceUpdate, updateWindow: string): 
 export function updateVersionRow(label: string, value: string): m.Children {
   return m("div", { class: "flex items-baseline justify-between gap-4" }, [
     m("span", { class: "type-helper text-secondary shrink-0" }, label),
-    m("span", { class: "type-body text-primary font-mono min-w-0 text-right wrap-anywhere" }, displayVersion(value) || "unknown"),
+    m(
+      "span",
+      {
+        class:
+          "type-body text-primary font-mono min-w-0 text-right wrap-anywhere",
+      },
+      displayVersion(value) || "unknown",
+    ),
   ]);
 }
 
 /** The go-ahead-without-backups confirmation, drawn in place of the press it
  * holds. Shared with the machine's Updates settings group. */
-export function noBackupConfirmPrompt(handlers: { onConfirm: () => void; onCancel: () => void }): m.Children {
+export function noBackupConfirmPrompt(handlers: {
+  onConfirm: () => void;
+  onCancel: () => void;
+}): m.Children {
   return m("div", { class: "flex flex-col gap-2" }, [
     m(
       "p",
@@ -123,7 +144,11 @@ export function noBackupConfirmPrompt(handlers: { onConfirm: () => void; onCance
         "offers a rollback afterwards, but there's no full workspace restore to fall back on. Go ahead?",
     ),
     m("div", { class: "flex flex-wrap items-center gap-2" }, [
-      m(Button, { variant: "primary", onclick: handlers.onConfirm }, "Go ahead without backups"),
+      m(
+        Button,
+        { variant: "primary", onclick: handlers.onConfirm },
+        "Go ahead without backups",
+      ),
       m(Button, { variant: "secondary", onclick: handlers.onCancel }, "Cancel"),
     ]),
   ]);
@@ -158,15 +183,26 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
   }
 
   /** Clears the run's outcome server-side, so the row's badge goes with it. */
-  function dismissOutcomeButton(agentId: string, isBusy: boolean, onClose: () => void): m.Children {
+  function dismissOutcomeButton(
+    agentId: string,
+    isBusy: boolean,
+    onClose: () => void,
+  ): m.Children {
     return m(
       Button,
       {
         variant: "secondary",
         disabled: isBusy,
-        onclick: () => run("dismiss", () => getAppContext().stores.updates.dismissRunOutcome(agentId), onClose),
+        onclick: () =>
+          run(
+            "dismiss",
+            () => getAppContext().stores.updates.dismissRunOutcome(agentId),
+            onClose,
+          ),
       },
-      state.pendingAction === "dismiss" ? m(Spinner, { size: "sm" }) : "Dismiss",
+      state.pendingAction === "dismiss"
+        ? m(Spinner, { size: "sm" })
+        : "Dismiss",
     );
   }
 
@@ -201,7 +237,10 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       ),
       m("div", { class: "flex flex-col gap-1" }, [
         updateVersionRow("This workspace", update.current_version),
-        updateVersionRow("This build of Imbue Studio", update.supported_version),
+        updateVersionRow(
+          "This build of Imbue Studio",
+          update.supported_version,
+        ),
       ]),
       m(
         "p",
@@ -225,7 +264,10 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
   /** The too-old explainer: the versions, why no update is offered, and the
    * two steps that replace it. The app does neither step itself; the second
    * is a conversation in the new machine. */
-  function needsRecreationBody(update: UiWorkspaceUpdate, workspaceName: string): m.Children {
+  function needsRecreationBody(
+    update: UiWorkspaceUpdate,
+    workspaceName: string,
+  ): m.Children {
     return [
       m("div", { class: "flex flex-col gap-1" }, [
         updateVersionRow("This workspace", update.current_version),
@@ -237,14 +279,21 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         "This workspace is running a version of Imbue Studio too old to update in place. " +
           "To get it up to date, create a new workspace and move your work across.",
       ),
-      m("ol", { class: "type-helper text-secondary list-decimal pl-5 flex flex-col gap-1" }, [
-        m("li", "Create a new workspace."),
-        m("li", [
-          "Open the new workspace and ask its agent to run ",
-          m("code", { class: "font-mono" }, migrateCommandFor(workspaceName)),
-          ". It brings this workspace's work and settings across.",
-        ]),
-      ]),
+      m(
+        "ol",
+        {
+          class:
+            "type-helper text-secondary list-decimal pl-5 flex flex-col gap-1",
+        },
+        [
+          m("li", "Create a new workspace."),
+          m("li", [
+            "Open the new workspace and ask its agent to run ",
+            m("code", { class: "font-mono" }, migrateCommandFor(workspaceName)),
+            ". It brings this workspace's work and settings across.",
+          ]),
+        ],
+      ),
     ];
   }
 
@@ -268,7 +317,11 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
 
       const body: m.Children[] = [];
       if (update.availability === "UNKNOWN") {
-        body.push(update.unknown_reason === "NO_APP_VERSION" ? noAppVersionBody(update) : unreadableMachineBody());
+        body.push(
+          update.unknown_reason === "NO_APP_VERSION"
+            ? noAppVersionBody(update)
+            : unreadableMachineBody(),
+        );
       } else if (update.availability === "APP_BEHIND") {
         body.push(appBehindBody(update));
       } else if (isRecreationRequired(update)) {
@@ -277,7 +330,10 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         body.push(
           m("div", { class: "flex flex-col gap-1" }, [
             updateVersionRow("This workspace", update.current_version),
-            updateVersionRow("Supported by Imbue Studio", update.supported_version),
+            updateVersionRow(
+              "Supported by Imbue Studio",
+              update.supported_version,
+            ),
           ]),
         );
         const labelNote = update.is_version_from_label
@@ -304,18 +360,38 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
 
       const verdict = verdictMessage(update);
       if (verdict) {
-        body.push(m(Notice, { variant: isFailureVerdict(update.verdict) ? "error" : "success" }, verdict));
+        body.push(
+          m(
+            Notice,
+            { variant: isFailureVerdict(update.verdict) ? "error" : "success" },
+            verdict,
+          ),
+        );
       }
       if (update.verdict_detail) {
-        body.push(m("p", { class: "type-helper text-secondary" }, update.verdict_detail));
+        body.push(
+          m(
+            "p",
+            { class: "type-helper text-secondary" },
+            update.verdict_detail,
+          ),
+        );
       }
 
       if (update.is_scheduled) {
         body.push(
           m("div", { class: "flex flex-col gap-1" }, [
-            m("p", { class: "type-helper text-secondary" }, scheduledLine(update, updates.updateWindow)),
+            m(
+              "p",
+              { class: "type-helper text-secondary" },
+              scheduledLine(update, updates.updateWindow),
+            ),
             update.last_skip_reason
-              ? m("p", { class: "type-helper text-tertiary" }, `Last attempt: ${update.last_skip_reason}`)
+              ? m(
+                  "p",
+                  { class: "type-helper text-tertiary" },
+                  `Last attempt: ${update.last_skip_reason}`,
+                )
               : null,
           ]),
         );
@@ -339,10 +415,15 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             {
               type: "button",
               id: "update-modal-choose-version",
-              class: "type-helper text-secondary underline hover:text-primary cursor-pointer self-start text-left",
+              class:
+                "type-helper text-secondary underline hover:text-primary cursor-pointer self-start text-left",
               onclick: () => {
                 onClose();
-                shell.routeTo(`/workspace/${agentId}/options`, { tab: "settings", group: "updates", override: "1" });
+                shell.routeTo(`/workspace/${agentId}/options`, {
+                  tab: "settings",
+                  group: "updates",
+                  override: "1",
+                });
               },
             },
             "Update to a different version…",
@@ -353,7 +434,13 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       const error = state.error
         ? { message: state.error, detail: state.errorDetail }
         : recordedDispatchFailure(update, isUpdating);
-      if (error.message) body.push(m(Notice, { variant: "error" }, [error.message, machineVerdict(error.detail)]));
+      if (error.message)
+        body.push(
+          m(Notice, { variant: "error" }, [
+            error.message,
+            machineVerdict(error.detail),
+          ]),
+        );
 
       const actions: m.Children[] = [];
       if (isRecreationRequired(update)) {
@@ -382,10 +469,16 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
           shell.enterWorkspace(agentId);
           run("now", () => updates.updateNow(agentId), onClose);
         };
-        const runSchedule = (): void => run("schedule", () => updates.scheduleUpdate(agentId), () => undefined);
+        const runSchedule = (): void =>
+          run(
+            "schedule",
+            () => updates.scheduleUpdate(agentId),
+            () => undefined,
+          );
         if (state.noBackupConfirm !== null) {
           // The question replaces the action row so there is one way to answer it.
-          const heldPress = state.noBackupConfirm === "now" ? runNow : runSchedule;
+          const heldPress =
+            state.noBackupConfirm === "now" ? runNow : runSchedule;
           body.push(
             noBackupConfirmPrompt({
               onConfirm: () => {
@@ -414,7 +507,9 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
                   }
                 },
               },
-              state.pendingAction === "schedule" ? m(Spinner, { size: "sm" }) : "Schedule update",
+              state.pendingAction === "schedule"
+                ? m(Spinner, { size: "sm" })
+                : "Schedule update",
             ),
           );
           actions.push(
@@ -431,7 +526,9 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
                   }
                 },
               },
-              state.pendingAction === "now" ? m(Spinner, { size: "sm" }) : "Update now",
+              state.pendingAction === "now"
+                ? m(Spinner, { size: "sm" })
+                : "Update now",
             ),
           );
         }
@@ -439,8 +536,12 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       // A run's outcome outlives it and the row wears the badge until it is
       // cleared; a stall, or an update that never went out, wears a failure
       // badge too, so it gets the same Dismiss.
-      const isOutcomeShowing = Boolean(verdict) || update.activity === "STALLED" || Boolean(update.dispatch_failure);
-      if (isOutcomeShowing) actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
+      const isOutcomeShowing =
+        Boolean(verdict) ||
+        update.activity === "STALLED" ||
+        Boolean(update.dispatch_failure);
+      if (isOutcomeShowing)
+        actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
       if (update.is_scheduled) {
         actions.push(
           m(
@@ -448,9 +549,16 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             {
               variant: "secondary",
               disabled: isBusy,
-              onclick: () => run("cancel", () => updates.cancelSchedule(agentId), () => undefined),
+              onclick: () =>
+                run(
+                  "cancel",
+                  () => updates.cancelSchedule(agentId),
+                  () => undefined,
+                ),
             },
-            state.pendingAction === "cancel" ? m(Spinner, { size: "sm" }) : "Cancel schedule",
+            state.pendingAction === "cancel"
+              ? m(Spinner, { size: "sm" })
+              : "Cancel schedule",
           ),
         );
       }
@@ -462,9 +570,19 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
           m(DialogCloseButton, { onClose }),
           // "Update <name>" claims there is one, which is true only where a
           // version was read on both sides.
-          m("h2", { class: "type-heading text-primary pr-8" }, modalTitle(update, workspaceName)),
+          m(
+            "h2",
+            { class: "type-heading text-primary pr-8" },
+            modalTitle(update, workspaceName),
+          ),
           ...body,
-          actions.length > 0 ? m("div", { class: "flex flex-wrap items-center gap-2 pt-1" }, actions) : null,
+          actions.length > 0
+            ? m(
+                "div",
+                { class: "flex flex-wrap items-center gap-2 pt-1" },
+                actions,
+              )
+            : null,
         ]),
       );
     },

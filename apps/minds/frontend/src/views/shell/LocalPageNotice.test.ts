@@ -15,7 +15,10 @@ afterEach(() => {
 function noticeFor(environment: EnvironmentCondition): string {
   const health = new HealthStore();
   health.applyEnvironmentMessage({ type: "environment", state: environment });
-  registerAppContext({ stores: { health }, shell: {} } as unknown as AppContext);
+  registerAppContext({
+    stores: { health },
+    shell: {},
+  } as unknown as AppContext);
   // The bridge resolves window.mindsNative on every call, and vitest's node
   // environment has no window at all.
   vi.stubGlobal("window", {});
@@ -29,7 +32,9 @@ describe("LocalPageNotice", () => {
     // only thing that can speak, and this component's one line is what hands it
     // over. The copy selection itself is notice-band.ts's own business.
     expect(noticeFor("OFFLINE")).toContain("No network connection.");
-    expect(noticeFor("SSH_BLOCKED")).toContain("This network blocks the connection to your workspaces.");
+    expect(noticeFor("SSH_BLOCKED")).toContain(
+      "This network blocks the connection to your workspaces.",
+    );
   });
 
   it("says nothing about a device with no trouble to report, or none measured yet", () => {

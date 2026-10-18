@@ -50,8 +50,7 @@ DATADISK_OBJECT: Final[str] = "datadisk.zst.age"
 META_OBJECT: Final[str] = "meta.tar.zst.age"
 
 # Marker printed by a restore-reserve script on success, followed by the two
-# chosen sshd host ports, the ordinal, and the published box ports. Failure
-# markers mirror the bake reserve script's.
+# chosen sshd host ports, the ordinal, and the published box ports.
 RESTORE_RESERVED_MARKER: Final[str] = "MNGR_RESTORE_RESERVED"
 RESTORE_NO_PORTS_MARKER: Final[str] = "MNGR_RESTORE_NO_PORTS"
 # Marker the gen-2 restore-reserve prints when the budget math says there is

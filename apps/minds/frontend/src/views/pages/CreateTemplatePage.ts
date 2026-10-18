@@ -27,12 +27,20 @@ import { FormLabel, Select } from "../components/FormControls";
 import { PageNarrowContainer } from "../components/Layout";
 import { Icon16 } from "../components/Icon";
 import { StatusBadge } from "../components/StatusBadge";
-import { keyStateChipFor, livenessBadgeLabelFor, rowClickActionFor } from "./landing-controls";
+import {
+  keyStateChipFor,
+  livenessBadgeLabelFor,
+  rowClickActionFor,
+} from "./landing-controls";
 import { PRESET_TITLES, PresetCards } from "./create/PresetCards";
 import { cloudAccountOptions } from "./create/CloudAccountsModal";
 import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
 import type { PresetName } from "./create/form-model";
-import { CreateFormModel, normalizeCreateApiError, presetOpensAdvanced } from "./create/form-model";
+import {
+  CreateFormModel,
+  normalizeCreateApiError,
+  presetOpensAdvanced,
+} from "./create/form-model";
 
 // The chat command the add flow tells the user to paste.
 //
@@ -45,7 +53,6 @@ import { CreateFormModel, normalizeCreateApiError, presetOpensAdvanced } from ".
 // been created from (or updated to) a post-rename workspace template. A machine
 // on an older template will not recognise it.
 const ADOPT_COMMAND = " /use-template";
-
 
 const ID_SEGMENT = /^(?:agent|host)-[a-f0-9]+$/i;
 
@@ -71,7 +78,11 @@ function animateReveal(dom: Element, distance: number, duration: number): void {
 function animatePop(dom: Element): void {
   if (typeof dom.animate !== "function") return;
   dom.animate(
-    [{ transform: "scale(0.8)" }, { transform: "scale(1.06)", offset: 0.6 }, { transform: "scale(1)" }],
+    [
+      { transform: "scale(0.8)" },
+      { transform: "scale(1.06)", offset: 0.6 },
+      { transform: "scale(1)" },
+    ],
     { duration: 420, easing: "cubic-bezier(0.34, 1.56, 0.64, 1)" },
   );
 }
@@ -135,9 +146,16 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
   }
 
   /** The notice for one local backend's unmet prerequisite, or nothing. */
-  function prerequisiteNotice(prerequisite: LocalBackendPrerequisite | null, id: string): m.Children {
+  function prerequisiteNotice(
+    prerequisite: LocalBackendPrerequisite | null,
+    id: string,
+  ): m.Children {
     if (prerequisite === null) return null;
-    return m(PrerequisiteNotice, { prerequisite, onCheckAgain: checkPrerequisitesAgain, id });
+    return m(PrerequisiteNotice, {
+      prerequisite,
+      onCheckAgain: checkPrerequisitesAgain,
+      id,
+    });
   }
 
   function resetFlow(start: string): void {
@@ -175,7 +193,8 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
 
   function machineName(): string {
     return machineAnyId !== null
-      ? (getAppContext().stores.workspaces.accentEntry(machineAnyId)?.name ?? "this workspace")
+      ? (getAppContext().stores.workspaces.accentEntry(machineAnyId)?.name ??
+          "this workspace")
       : "";
   }
 
@@ -194,7 +213,9 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
   // TemplateCreate.jinja; the modal card scrolls itself, so it is exempt.)
   let isColumnPinned = false;
   function pageColumn(): HTMLElement | null {
-    return document.getElementById("template-content-top")?.parentElement ?? null;
+    return (
+      document.getElementById("template-content-top")?.parentElement ?? null
+    );
   }
   function pinPageColumn(): void {
     if (isModal() || isColumnPinned) return;
@@ -231,7 +252,10 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
   // no ?workspace); on the page it just advances.
   function chooseCreate(): void {
     if (isModal()) {
-      const params: Record<string, string> = { git_url: gitUrl, start: "create" };
+      const params: Record<string, string> = {
+        git_url: gitUrl,
+        start: "create",
+      };
       if (branchName) params.branch = branchName;
       m.route.set("/create/template", params);
       return;
@@ -241,7 +265,9 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
 
   function doCopy(): void {
     if (isMessageCopied) return;
-    navigator.clipboard?.writeText(`${ADOPT_COMMAND} ${gitUrl}`).catch(() => undefined);
+    navigator.clipboard
+      ?.writeText(`${ADOPT_COMMAND} ${gitUrl}`)
+      .catch(() => undefined);
     isMessageCopied = true;
     // Copying is what advances to the last step, so the message is always in
     // hand first; hold long enough that the green confirmation registers.
@@ -284,10 +310,16 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     })
       .then(async (response) => ({
         status: response.status,
-        data: (await response.json().catch(() => ({}))) as Record<string, unknown>,
+        data: (await response.json().catch(() => ({}))) as Record<
+          string,
+          unknown
+        >,
       }))
       .then((result) => {
-        if (result.status === 202 && typeof result.data.operation_id === "string") {
+        if (
+          result.status === 202 &&
+          typeof result.data.operation_id === "string"
+        ) {
           m.route.set(`/creating/${result.data.operation_id}`);
           return;
         }
@@ -308,9 +340,14 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     // Badge the settled-down and transitional states; UNKNOWN stays unbadged
     // here (this page has no liveness tracker, so an unknown reading is
     // common and not actionable from a template picker).
-    const isBadged = liveness === "STOPPED" || liveness === "STOPPING" || liveness === "STARTING";
+    const isBadged =
+      liveness === "STOPPED" ||
+      liveness === "STOPPING" ||
+      liveness === "STARTING";
     const livenessLabel =
-      (entry.supports_shutdown ?? false) && isBadged ? livenessBadgeLabelFor(liveness, entry.stop_kind ?? "") : null;
+      (entry.supports_shutdown ?? false) && isBadged
+        ? livenessBadgeLabelFor(liveness, entry.stop_kind ?? "")
+        : null;
     // A cloud machine this device holds no key for, or one an operator holds
     // stopped, cannot be opened: the row says why (the chip or the badge) in
     // place of the chevron and offers no click. This page has no health
@@ -338,14 +375,23 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
           : undefined,
       },
       [
-        m("span", { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" }, entry.name),
+        m(
+          "span",
+          { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" },
+          entry.name,
+        ),
         livenessLabel ? m(StatusBadge, livenessLabel) : null,
         keyChip === null
-          ? m("span", { class: "text-tertiary shrink-0" }, m(Icon16, { name: "chevron-right" }))
+          ? m(
+              "span",
+              { class: "text-tertiary shrink-0" },
+              m(Icon16, { name: "chevron-right" }),
+            )
           : m(
               "span",
               {
-                class: "inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important",
+                class:
+                  "inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important",
                 "data-tooltip": keyChip.tooltip,
               },
               keyChip.label,
@@ -356,10 +402,18 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
 
   function step1Body(): m.Children {
     return m("div", { class: "flex flex-col gap-3" }, [
-      m(Button, { variant: "secondary", block: true, onclick: () => chooseCreate() }, "Create a new workspace"),
       m(
         Button,
-        { variant: "secondary", block: true, onclick: () => chooseBranch("add") },
+        { variant: "secondary", block: true, onclick: () => chooseCreate() },
+        "Create a new workspace",
+      ),
+      m(
+        Button,
+        {
+          variant: "secondary",
+          block: true,
+          onclick: () => chooseBranch("add"),
+        },
         isModal() ? `Add to ${machineName()}` : "Add to an existing workspace",
       ),
     ]);
@@ -387,7 +441,10 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       // the machine can run it, and "Check again" re-probes without leaving
       // the page.
       model.selectedPreset === "local"
-        ? prerequisiteNotice(model.unmetPrerequisiteForLocalPreset(), "insp-local-preset-prerequisite")
+        ? prerequisiteNotice(
+            model.unmetPrerequisiteForLocalPreset(),
+            "insp-local-preset-prerequisite",
+          )
         : null,
     ];
   }
@@ -398,7 +455,11 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     const regionOptions = model.regionOptions();
     return m("div", { class: "mt-4 flex flex-col gap-6" }, [
       m("div", { class: "flex items-center justify-between gap-4" }, [
-        m(FormLabel, { target: "insp-launch-mode", inline: true }, "Compute provider"),
+        m(
+          FormLabel,
+          { target: "insp-launch-mode", inline: true },
+          "Compute provider",
+        ),
         m(
           Select,
           {
@@ -412,14 +473,24 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
           },
           [
             defaults.launch_modes.map((mode) =>
-              m("option", { value: mode, selected: model.launchValue === mode }, mode.toLowerCase()),
+              m(
+                "option",
+                { value: mode, selected: model.launchValue === mode },
+                mode.toLowerCase(),
+              ),
             ),
-            defaults.byok_clouds_enabled ? cloudAccountOptions(defaults.cloud_accounts, model.launchValue) : null,
+            defaults.byok_clouds_enabled
+              ? cloudAccountOptions(defaults.cloud_accounts, model.launchValue)
+              : null,
           ],
         ),
       ]),
       m("div", { class: "flex items-center justify-between gap-4" }, [
-        m(FormLabel, { target: "insp-backup-provider", inline: true }, "Backup provider"),
+        m(
+          FormLabel,
+          { target: "insp-backup-provider", inline: true },
+          "Backup provider",
+        ),
         m(
           Select,
           {
@@ -450,10 +521,18 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
                 name: "region",
                 width: "w-48",
                 value: model.selectedRegion(),
-                onchange: (event: Event) => model.setRegion((event.target as HTMLSelectElement).value),
+                onchange: (event: Event) =>
+                  model.setRegion((event.target as HTMLSelectElement).value),
               },
               regionOptions.map((region) =>
-                m("option", { value: region, selected: region === model.selectedRegion() }, region),
+                m(
+                  "option",
+                  {
+                    value: region,
+                    selected: region === model.selectedRegion(),
+                  },
+                  region,
+                ),
               ),
             ),
           ])
@@ -463,13 +542,30 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
 
   function createConfirmBody(): m.Children {
     const defaults = model.defaults;
-    if (defaults === null) return m("p", { class: "type-helper text-tertiary" }, "Loading…");
+    if (defaults === null)
+      return m("p", { class: "type-helper text-tertiary" }, "Loading…");
     return m("form", { onsubmit: submitCreate }, [
-      submitError ? m("p", { role: "alert", class: "mb-4 type-helper text-important" }, submitError) : null,
+      submitError
+        ? m(
+            "p",
+            { role: "alert", class: "mb-4 type-helper text-important" },
+            submitError,
+          )
+        : null,
       m("div", { class: "mb-4" }, [
         m("p", { class: "type-label" }, "Creating from"),
-        m("p", { class: "type-body text-primary font-mono mt-1 break-all" }, gitUrl),
-        branchName ? m("p", { class: "type-helper text-tertiary mt-1" }, `Version: ${branchName}`) : null,
+        m(
+          "p",
+          { class: "type-body text-primary font-mono mt-1 break-all" },
+          gitUrl,
+        ),
+        branchName
+          ? m(
+              "p",
+              { class: "type-helper text-tertiary mt-1" },
+              `Version: ${branchName}`,
+            )
+          : null,
       ]),
       m("div", { class: "mb-4" }, [
         m("p", { class: "type-label" }, "Account"),
@@ -485,14 +581,26 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
               value: model.accountId,
               onchange: (event: Event) => {
                 model.accountId = (event.target as HTMLSelectElement).value;
-                if (!model.imbueCloudNeedsAccount()) isAccountErrorShown = false;
+                if (!model.imbueCloudNeedsAccount())
+                  isAccountErrorShown = false;
               },
             },
             [
               ...defaults.accounts.map((account) =>
-                m("option", { value: account.user_id, selected: model.accountId === account.user_id }, account.email),
+                m(
+                  "option",
+                  {
+                    value: account.user_id,
+                    selected: model.accountId === account.user_id,
+                  },
+                  account.email,
+                ),
               ),
-              m("option", { value: "", selected: model.accountId === "" }, "No account (private workspace)"),
+              m(
+                "option",
+                { value: "", selected: model.accountId === "" },
+                "No account (private workspace)",
+              ),
             ],
           ),
         ),
@@ -504,32 +612,32 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
             `Pick an account to use Imbue Cloud, or choose "${PRESET_TITLES.local}" or "${PRESET_TITLES["own-cloud"]}".`,
           )
         : null,
-      m(
-        "label",
-        { class: "mt-6 flex items-center gap-3 cursor-pointer" },
-        [
-          m("input", {
-            type: "checkbox",
-            class: "shrink-0",
-            checked: isTrusted,
-            onchange: (event: Event) => {
-              isTrusted = (event.target as HTMLInputElement).checked;
+      m("label", { class: "mt-6 flex items-center gap-3 cursor-pointer" }, [
+        m("input", {
+          type: "checkbox",
+          class: "shrink-0",
+          checked: isTrusted,
+          onchange: (event: Event) => {
+            isTrusted = (event.target as HTMLInputElement).checked;
+          },
+        }),
+        m("span", [
+          m(
+            "span",
+            {
+              class:
+                "type-body font-semibold " +
+                (isTrusted ? "text-primary" : "text-important"),
             },
-          }),
-          m("span", [
-            m(
-              "span",
-              { class: "type-body font-semibold " + (isTrusted ? "text-primary" : "text-important") },
-              "I trust this Template",
-            ),
-            m(
-              "span",
-              { class: "block type-helper text-primary" },
-              "Templates are community content. This one has not been approved or verified by Imbue.",
-            ),
-          ]),
-        ],
-      ),
+            "I trust this Template",
+          ),
+          m(
+            "span",
+            { class: "block type-helper text-primary" },
+            "Templates are community content. This one has not been approved or verified by Imbue.",
+          ),
+        ]),
+      ]),
       m("div", { class: "mt-8" }, [
         m(
           "button",
@@ -537,7 +645,8 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
             type: "button",
             // The label stays centered whether or not the flanking rules are
             // shown, so opening/closing never shifts it (no jump to compensate).
-            class: "group w-full flex items-center justify-center gap-3 cursor-pointer bg-transparent",
+            class:
+              "group w-full flex items-center justify-center gap-3 cursor-pointer bg-transparent",
             onclick: () => {
               if (isAdvanced) {
                 isAdvanced = false;
@@ -557,14 +666,24 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
                   oncreate: (vnode: m.VnodeDOM) => animateRule(vnode.dom),
                 })
               : null,
-            m("span", { class: "flex items-center gap-1 type-helper text-tertiary group-hover:text-primary" }, [
-              "Advanced settings",
-              m(
-                "span",
-                { class: "transition-transform duration-200", style: isAdvanced ? "transform: rotate(180deg);" : "" },
-                m(Icon16, { name: "chevron-down" }),
-              ),
-            ]),
+            m(
+              "span",
+              {
+                class:
+                  "flex items-center gap-1 type-helper text-tertiary group-hover:text-primary",
+              },
+              [
+                "Advanced settings",
+                m(
+                  "span",
+                  {
+                    class: "transition-transform duration-200",
+                    style: isAdvanced ? "transform: rotate(180deg);" : "",
+                  },
+                  m(Icon16, { name: "chevron-down" }),
+                ),
+              ],
+            ),
             isAdvanced
               ? m("span", {
                   class: "flex-1 border-t border-dashed border-default",
@@ -578,7 +697,8 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
           ? m(
               "div",
               {
-                oncreate: (vnode: m.VnodeDOM) => animateReveal(vnode.dom, 12, 440),
+                oncreate: (vnode: m.VnodeDOM) =>
+                  animateReveal(vnode.dom, 12, 440),
                 // Release the pin however the panel closes (toggle, step-back, or unmount).
                 onremove: () => unpinPageColumn(),
               },
@@ -592,7 +712,10 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       // when the panel is open. It covers whatever holds the button: the
       // runtime (runsc) has no selector on this page, so its need can only be
       // explained here.
-      prerequisiteNotice(model.unmetPrerequisiteForSubmit(), "insp-submit-prerequisite"),
+      prerequisiteNotice(
+        model.unmetPrerequisiteForSubmit(),
+        "insp-submit-prerequisite",
+      ),
       m(
         "div",
         { class: "mt-6" },
@@ -601,7 +724,10 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
           {
             variant: "primary",
             block: true,
-            disabled: !isTrusted || model.isSubmitting || model.unmetPrerequisiteForSubmit() !== null,
+            disabled:
+              !isTrusted ||
+              model.isSubmitting ||
+              model.unmetPrerequisiteForSubmit() !== null,
           },
           model.isSubmitting ? "Creating..." : "Create from Template",
         ),
@@ -632,8 +758,10 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
             type: "text",
             readonly: true,
             value: `${ADOPT_COMMAND} ${gitUrl}`,
-            onclick: (event: Event) => (event.target as HTMLInputElement).select(),
-            class: "flex-1 bg-transparent border-0 type-body text-primary font-mono outline-none",
+            onclick: (event: Event) =>
+              (event.target as HTMLInputElement).select(),
+            class:
+              "flex-1 bg-transparent border-0 type-body text-primary font-mono outline-none",
           }),
           m(
             Button,
@@ -642,7 +770,9 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
               extra: "shrink-0 transition-colors duration-300",
               // The copy confirmation: the button goes solid green with white
               // "Copied" (inline style so it always wins and stays theme-aware).
-              style: isMessageCopied ? "background-color: var(--c-success); color: #ffffff;" : "",
+              style: isMessageCopied
+                ? "background-color: var(--c-success); color: #ffffff;"
+                : "",
             },
             isMessageCopied ? "Copied" : "Copy",
           ),
@@ -671,14 +801,20 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
           { class: "mt-4" },
           m(
             Button,
-            { variant: "secondary", block: true, onclick: () => getAppContext().shell.closeAppOverlay() },
+            {
+              variant: "secondary",
+              block: true,
+              onclick: () => getAppContext().shell.closeAppOverlay(),
+            },
             "Done",
           ),
         ),
       ]);
     }
     const machines = getAppContext().stores.workspaces.workspaces.filter(
-      (entry) => !(entry.is_remote ?? false) && (entry.create_attempt_state ?? "") === "",
+      (entry) =>
+        !(entry.is_remote ?? false) &&
+        (entry.create_attempt_state ?? "") === "",
     );
     return m("div", [
       m(
@@ -687,7 +823,11 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
         "It will open so you can paste the copied message into its chat.",
       ),
       machines.length > 0
-        ? m("div", { class: "flex flex-col gap-1.5" }, machines.map((entry) => machineRow(entry)))
+        ? m(
+            "div",
+            { class: "flex flex-col gap-1.5" },
+            machines.map((entry) => machineRow(entry)),
+          )
         : m("p", { class: "type-body text-secondary" }, [
             "You don't have any workspaces yet. ",
             m(
@@ -727,7 +867,10 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       body: step1Body,
     });
     if (branch === "create") {
-      const presetSummary = model.selectedPreset === null ? "" : PRESET_TITLES[model.selectedPreset];
+      const presetSummary =
+        model.selectedPreset === null
+          ? ""
+          : PRESET_TITLES[model.selectedPreset];
       if (activeStep >= 2)
         steps.push({
           number: 2,
@@ -776,9 +919,14 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
   function renderStep(spec: StepSpec, isLastVisible: boolean): m.Children {
     const state = spec.active ? "active" : spec.done ? "done" : "idle";
     const connector = !isLastVisible
-      ? m("span", { class: "absolute left-1/2 -translate-x-1/2 top-4 bottom-0 step-connector-line" })
+      ? m("span", {
+          class:
+            "absolute left-1/2 -translate-x-1/2 top-4 bottom-0 step-connector-line",
+        })
       : activeStep < 3
-        ? m("span", { class: "absolute left-1/2 -translate-x-1/2 step-connector-dots" })
+        ? m("span", {
+            class: "absolute left-1/2 -translate-x-1/2 step-connector-dots",
+          })
         : null;
     return m("div", { class: "flex gap-3" }, [
       m("div", { class: "relative flex flex-col items-center self-stretch" }, [
@@ -813,7 +961,9 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
           {
             class:
               "type-heading flex items-center min-h-8 " +
-              (spec.done ? "text-secondary cursor-pointer hover:underline" : "text-primary"),
+              (spec.done
+                ? "text-secondary cursor-pointer hover:underline"
+                : "text-primary"),
             onclick: spec.done ? () => goBack(spec.target) : undefined,
           },
           spec.title,
@@ -822,14 +972,30 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
           ? m(
               "div",
               { class: "mt-0.5 mb-2" },
-              m("span", { class: "flex items-center gap-2 type-body text-secondary" }, [
-                m("span", { class: "text-success shrink-0" }, m(Icon16, { name: "check" })),
-                spec.summary,
-              ]),
+              m(
+                "span",
+                { class: "flex items-center gap-2 type-body text-secondary" },
+                [
+                  m(
+                    "span",
+                    { class: "text-success shrink-0" },
+                    m(Icon16, { name: "check" }),
+                  ),
+                  spec.summary,
+                ],
+              ),
             )
           : null,
         spec.active
-          ? m("div", { class: "mt-4", oncreate: (vnode: m.VnodeDOM) => animateReveal(vnode.dom, 16, 520) }, spec.body())
+          ? m(
+              "div",
+              {
+                class: "mt-4",
+                oncreate: (vnode: m.VnodeDOM) =>
+                  animateReveal(vnode.dom, 16, 520),
+              },
+              spec.body(),
+            )
           : null,
       ]),
     ]);
@@ -859,19 +1025,33 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       const steps = buildSteps();
       const body = [
         m("div", { id: "template-content-top", class: "text-center mb-8" }, [
-          m("h1", { class: "type-heading-lg text-primary" }, "You've opened a Template"),
-          m("p", { class: "type-body text-secondary font-mono mt-2 break-all" }, gitUrl),
+          m(
+            "h1",
+            { class: "type-heading-lg text-primary" },
+            "You've opened a Template",
+          ),
+          m(
+            "p",
+            { class: "type-body text-secondary font-mono mt-2 break-all" },
+            gitUrl,
+          ),
         ]),
         m(
           "div",
-          steps.map((spec, index) => renderStep(spec, index === steps.length - 1)),
+          steps.map((spec, index) =>
+            renderStep(spec, index === steps.length - 1),
+          ),
         ),
       ];
       // The modal renders bare inside the Shell's app-overlay card (padding +
       // scroll live there); the full page uses the narrow page container.
       return isModal()
         ? m("div", body)
-        : m(PageNarrowContainer, { padding: "form", maxWidth: "max-w-[720px]" }, body);
+        : m(
+            PageNarrowContainer,
+            { padding: "form", maxWidth: "max-w-[720px]" },
+            body,
+          );
     },
   };
 };

@@ -12,7 +12,9 @@ import {
   summaryLines,
 } from "./creationTranscript";
 
-function request(overrides: Partial<CreateAttemptRequestSummary> = {}): CreateAttemptRequestSummary {
+function request(
+  overrides: Partial<CreateAttemptRequestSummary> = {},
+): CreateAttemptRequestSummary {
   return {
     display_name: "workspace-1",
     launch_mode: "IMBUE_CLOUD",
@@ -48,7 +50,11 @@ describe("summaryLines", () => {
   it("restates a custom create one setting per line, with the repository shortened", () => {
     expect(
       summaryLines(
-        request({ launch_mode: "DOCKER", backup_provider: "CONFIGURE_LATER", region: "" }),
+        request({
+          launch_mode: "DOCKER",
+          backup_provider: "CONFIGURE_LATER",
+          region: "",
+        }),
         false,
       ),
     ).toEqual([
@@ -63,7 +69,12 @@ describe("summaryLines", () => {
 
   it("omits blank settings such as region and machine size, and says latest for a blank branch", () => {
     const lines = summaryLines(
-      request({ launch_mode: "LIMA", backup_provider: "CONFIGURE_LATER", region: "", branch: "" }),
+      request({
+        launch_mode: "LIMA",
+        backup_provider: "CONFIGURE_LATER",
+        region: "",
+        branch: "",
+      }),
       false,
     );
     expect(lines).not.toContainEqual(expect.stringMatching(/^Region/));
@@ -73,12 +84,22 @@ describe("summaryLines", () => {
   });
 
   it("names the backup provider the way the create form's own option does", () => {
-    expect(summaryLines(request({ launch_mode: "LIMA", backup_provider: "API_KEY" }), false)).toContain("Backup — manual");
+    expect(
+      summaryLines(
+        request({ launch_mode: "LIMA", backup_provider: "API_KEY" }),
+        false,
+      ),
+    ).toContain("Backup — manual");
   });
 
   it("names a bring-your-own-key account as the compute, with its machine size", () => {
     const lines = summaryLines(
-      request({ launch_mode: "AWS", cloud_account: "byok-aws-team", region: "us-west-2", instance_type: "t3.large" }),
+      request({
+        launch_mode: "AWS",
+        cloud_account: "byok-aws-team",
+        region: "us-west-2",
+        instance_type: "t3.large",
+      }),
       false,
     );
     expect(lines).toContain("Compute — byok-aws-team");
@@ -89,7 +110,13 @@ describe("summaryLines", () => {
 describe("summaryLines machine size in numbers", () => {
   it("restates a size chosen in numbers the way the settings page reads it", () => {
     const lines = summaryLines(
-      request({ launch_mode: "LIMA", region: "", cpu_count: 2, memory_gb: 4, disk_gb: 100 }),
+      request({
+        launch_mode: "LIMA",
+        region: "",
+        cpu_count: 2,
+        memory_gb: 4,
+        disk_gb: 100,
+      }),
       false,
     );
     expect(lines).toContain("Machine size — 2 CPUs · 4 GB RAM · 100 GB disk");
@@ -100,14 +127,20 @@ describe("shortRepository", () => {
   it("trims only the github prefix and .git suffix", () => {
     expect(shortRepository("https://github.com/a/b.git")).toBe("a/b");
     expect(shortRepository("/Users/me/template")).toBe("/Users/me/template");
-    expect(shortRepository("https://gitlab.com/a/b.git")).toBe("https://gitlab.com/a/b");
+    expect(shortRepository("https://gitlab.com/a/b.git")).toBe(
+      "https://gitlab.com/a/b",
+    );
   });
 });
 
 describe("failureLine", () => {
   it("names the workspace and the error, with fallbacks for both", () => {
-    expect(failureLine("alpha", "clone blew up")).toBe("Could not create alpha: clone blew up");
-    expect(failureLine("", "")).toBe("Could not create the workspace: unknown error");
+    expect(failureLine("alpha", "clone blew up")).toBe(
+      "Could not create alpha: clone blew up",
+    );
+    expect(failureLine("", "")).toBe(
+      "Could not create the workspace: unknown error",
+    );
   });
 });
 
@@ -115,16 +148,24 @@ describe("startOptionsMarkdown", () => {
   it("numbers the ways to start as markdown headings, each with its detail under it", () => {
     const blocks = startOptionsMarkdown();
     expect(blocks).toHaveLength(START_OPTIONS.length);
-    expect(blocks[0]).toBe(`### 1. ${START_OPTIONS[0].title}\n\n${START_OPTIONS[0].detail}`);
-    expect(blocks[blocks.length - 1].startsWith(`### ${START_OPTIONS.length}. `)).toBe(true);
+    expect(blocks[0]).toBe(
+      `### 1. ${START_OPTIONS[0].title}\n\n${START_OPTIONS[0].detail}`,
+    );
+    expect(
+      blocks[blocks.length - 1].startsWith(`### ${START_OPTIONS.length}. `),
+    ).toBe(true);
   });
 
   it("puts the ready line one heading level above the options", () => {
-    expect(readyTurnMarkdown().startsWith(`## ${READY_LINE}\n\n### 1. `)).toBe(true);
+    expect(readyTurnMarkdown().startsWith(`## ${READY_LINE}\n\n### 1. `)).toBe(
+      true,
+    );
   });
 
   it("ends the closing turn with the fallback line as a plain paragraph after the last option", () => {
     const lastOption = startOptionsMarkdown()[START_OPTIONS.length - 1];
-    expect(readyTurnMarkdown().endsWith(`${lastOption}\n\n${START_FALLBACK_LINE}`)).toBe(true);
+    expect(
+      readyTurnMarkdown().endsWith(`${lastOption}\n\n${START_FALLBACK_LINE}`),
+    ).toBe(true);
   });
 });

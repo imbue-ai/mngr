@@ -10,7 +10,10 @@ import type { BackupSnapshot } from "../../../models/backups";
 export interface RestoreDialogAttrs {
   snapshot: BackupSnapshot | null;
   onCancel: () => void;
-  onConfirm: (snapshot: BackupSnapshot, choices: { updateAfter: boolean }) => void;
+  onConfirm: (
+    snapshot: BackupSnapshot,
+    choices: { updateAfter: boolean },
+  ) => void;
 }
 
 interface RestoreDialogState {
@@ -18,7 +21,10 @@ interface RestoreDialogState {
   openSnapshotId: string | null;
 }
 
-export function RestoreDialog(): m.Component<RestoreDialogAttrs, RestoreDialogState> {
+export function RestoreDialog(): m.Component<
+  RestoreDialogAttrs,
+  RestoreDialogState
+> {
   return {
     oninit(vnode) {
       vnode.state.isUpdateAfterChecked = true;
@@ -28,7 +34,10 @@ export function RestoreDialog(): m.Component<RestoreDialogAttrs, RestoreDialogSt
       const { snapshot, onCancel, onConfirm } = vnode.attrs;
       // Recommended default: every open starts checked, regardless of what a
       // previous restore chose.
-      if (snapshot !== null && vnode.state.openSnapshotId !== snapshot.snapshot_id) {
+      if (
+        snapshot !== null &&
+        vnode.state.openSnapshotId !== snapshot.snapshot_id
+      ) {
         vnode.state.openSnapshotId = snapshot.snapshot_id;
         vnode.state.isUpdateAfterChecked = true;
       }
@@ -46,23 +55,39 @@ export function RestoreDialog(): m.Component<RestoreDialogAttrs, RestoreDialogSt
                 `Your workspace's files will be replaced with the backup from ${new Date(snapshot.time).toLocaleString()}. ` +
                   "A safety backup of the current state is saved first.",
               ),
-              m("label", { class: "flex items-center gap-2 type-body text-primary cursor-pointer" }, [
-                m("input", {
-                  type: "checkbox",
-                  checked: vnode.state.isUpdateAfterChecked,
-                  onchange: (event: Event) => {
-                    vnode.state.isUpdateAfterChecked = (event.target as HTMLInputElement).checked;
-                  },
-                }),
-                "Update the backup software afterwards (recommended)",
-              ]),
+              m(
+                "label",
+                {
+                  class:
+                    "flex items-center gap-2 type-body text-primary cursor-pointer",
+                },
+                [
+                  m("input", {
+                    type: "checkbox",
+                    checked: vnode.state.isUpdateAfterChecked,
+                    onchange: (event: Event) => {
+                      vnode.state.isUpdateAfterChecked = (
+                        event.target as HTMLInputElement
+                      ).checked;
+                    },
+                  }),
+                  "Update the backup software afterwards (recommended)",
+                ],
+              ),
               m("div", { class: "flex items-center justify-end gap-2" }, [
-                m(Button, { variant: "secondary", onclick: onCancel }, "Cancel"),
+                m(
+                  Button,
+                  { variant: "secondary", onclick: onCancel },
+                  "Cancel",
+                ),
                 m(
                   Button,
                   {
                     variant: "primary",
-                    onclick: () => onConfirm(snapshot, { updateAfter: vnode.state.isUpdateAfterChecked }),
+                    onclick: () =>
+                      onConfirm(snapshot, {
+                        updateAfter: vnode.state.isUpdateAfterChecked,
+                      }),
                   },
                   "Restore",
                 ),

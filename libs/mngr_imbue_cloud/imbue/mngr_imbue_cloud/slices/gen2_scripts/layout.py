@@ -205,9 +205,8 @@ GEN2_PUBLISHED_PORTS_PLACEHOLDER: Final[str] = "__MNGR_PUBLISHED_PORTS__"
 # carve and restore reserves); ``published_port_placeholder(index)`` renders
 # the token of the index-th distinct guest port.
 _GEN2_PUBLISHED_PORT_PLACEHOLDER_PREFIX: Final[str] = "__MNGR_PUBLISHED_PORT_"
-# The bash ERE matching exactly one rendered entry (the helper's validator
-# and entry iterator both use it; ``{``/``}`` are literal in a bash ERE
-# only when escaped, hence the backslashes).
+# The bash ERE matching exactly one rendered entry (``{``/``}`` are literal in
+# a bash ERE only when escaped, hence the backslashes).
 GEN2_PUBLISHED_PORT_ENTRY_BASH_RE: Final[str] = '\\{"guest_port":[0-9]+,"protocol":"(tcp|udp)","host_port":[0-9]+\\}'
 _PUBLISHED_PORT_ENTRY_RE: Final[re.Pattern[str]] = re.compile(
     r'^\{"guest_port":(\d+),"protocol":"(tcp|udp)","host_port":(\d+)\}$'

@@ -18,11 +18,20 @@ export function RouteError(): m.Component<RouteErrorAttrs> {
   return {
     view(vnode) {
       const title = vnode.attrs.title ?? "Page not found";
-      const message = vnode.attrs.message ?? "That link doesn't lead anywhere in the app.";
+      const message =
+        vnode.attrs.message ?? "That link doesn't lead anywhere in the app.";
       return m(PageNarrowContainer, { maxWidth: "max-w-[460px]" }, [
         m("h1", { class: "type-heading text-primary" }, title),
         m("p", { class: "mt-2 text-primary" }, message),
-        m("div", { class: "mt-4" }, m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/") }, "Back to workspaces")),
+        m(
+          "div",
+          { class: "mt-4" },
+          m(
+            ButtonLink,
+            { variant: "primary", ...routeLinkAttrs("/") },
+            "Back to workspaces",
+          ),
+        ),
       ]);
     },
   };

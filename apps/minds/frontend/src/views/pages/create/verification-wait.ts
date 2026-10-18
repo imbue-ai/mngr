@@ -3,7 +3,11 @@
 // instead of being sent off to fail.
 
 import type { ResendOutcome } from "../../../models/emailVerification";
-import { VERIFICATION_POLL_MS, fetchIsEmailVerified, resendVerificationEmail } from "../../../models/emailVerification";
+import {
+  VERIFICATION_POLL_MS,
+  fetchIsEmailVerified,
+  resendVerificationEmail,
+} from "../../../models/emailVerification";
 
 export interface VerificationWaitDeps {
   isEmailVerified: (email: string) => Promise<boolean>;
@@ -25,7 +29,10 @@ export class VerificationWait {
   // that has since been replaced or cancelled is dropped.
   private generation = 0;
 
-  constructor(deps: Partial<VerificationWaitDeps> & Pick<VerificationWaitDeps, "redraw" | "bringAppToFront">) {
+  constructor(
+    deps: Partial<VerificationWaitDeps> &
+      Pick<VerificationWaitDeps, "redraw" | "bringAppToFront">,
+  ) {
     this.deps = {
       isEmailVerified: (email) => fetchIsEmailVerified(email),
       resendVerificationEmail: (email) => resendVerificationEmail(email),
@@ -39,7 +46,11 @@ export class VerificationWait {
    * else when the link is clicked. `onUnchecked` runs instead when the first
    * check cannot be made.
    */
-  require(email: string, onVerified: () => void, onUnchecked: () => void): void {
+  require(
+    email: string,
+    onVerified: () => void,
+    onUnchecked: () => void,
+  ): void {
     this.cancel();
     const generation = this.generation;
     this.deps.isEmailVerified(email).then(
@@ -53,7 +64,10 @@ export class VerificationWait {
         // No send here: the link went out when the account was created, and
         // originating another one would only burn the cooldown that the
         // user's own Resend press needs.
-        this.pollTimer = setInterval(() => void this.poll(generation, email, onVerified), this.deps.pollMs);
+        this.pollTimer = setInterval(
+          () => void this.poll(generation, email, onVerified),
+          this.deps.pollMs,
+        );
         this.deps.redraw();
       },
       (error: unknown) => {
@@ -85,14 +99,20 @@ export class VerificationWait {
   }
 
   /** One quiet check while the link is awaited; a failed check simply waits for the next. */
-  private async poll(generation: number, email: string, onVerified: () => void): Promise<void> {
+  private async poll(
+    generation: number,
+    email: string,
+    onVerified: () => void,
+  ): Promise<void> {
     if (this.isChecking) return;
     this.isChecking = true;
     let isVerified = false;
     try {
       isVerified = await this.deps.isEmailVerified(email);
     } catch (error: unknown) {
-      console.debug(`[verification] Check failed; retrying on the next poll: ${String(error)}`);
+      console.debug(
+        `[verification] Check failed; retrying on the next poll: ${String(error)}`,
+      );
     }
     if (generation !== this.generation) return;
     this.isChecking = false;

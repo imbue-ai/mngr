@@ -98,9 +98,7 @@ def _write_agent_type_command_to_settings(settings_path: Path, type_name: str, c
     save_config_file(settings_path, settings_doc)
 
 
-# =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
-# =============================================================================
 
 # Minimal command using _CreateCommand with the same argument declarations as
 # the real create command, but that simply records the parsed params.
@@ -197,9 +195,7 @@ def test_create_command_pre_and_post_dash_agent_args_merged() -> None:
     assert params["agent_args"] == ("extra", "--flag")
 
 
-# =============================================================================
 # Tests for _parse_host_lifecycle_options
-# =============================================================================
 
 
 def test_parse_host_lifecycle_options_all_none(default_create_cli_opts: CreateCliOptions) -> None:
@@ -300,9 +296,7 @@ def test_parse_host_lifecycle_options_all_provided(default_create_cli_opts: Crea
     assert result.activity_sources == (ActivitySource.CREATE, ActivitySource.PROCESS)
 
 
-# =============================================================================
 # Tests for _try_reuse_existing_agent
-# =============================================================================
 
 # Valid 32-character hex strings for test IDs
 TEST_HOST_ID_1 = "host-00000000000000000000000000000001"
@@ -652,9 +646,7 @@ def test_try_reuse_existing_agent_not_found_on_host(
     assert result is None
 
 
-# =============================================================================
 # Tests for _resolve_source_location and _resolve_target_host with is_start_desired
-# =============================================================================
 
 
 def test_resolve_source_location_with_auto_start_enabled(
@@ -742,9 +734,7 @@ def test_resolve_target_host_with_host_reference(
     assert isinstance(result, OnlineHostInterface)
 
 
-# =============================================================================
 # Tests for _parse_project_name
-# =============================================================================
 
 
 def test_parse_project_name_returns_explicit_project(
@@ -840,9 +830,7 @@ def test_parse_project_name_falls_back_to_folder_name(
     assert result == "some-project"
 
 
-# =============================================================================
 # Tests for _get_source_remote_url
-# =============================================================================
 
 
 def test_get_source_remote_url_returns_url_when_remote_exists(
@@ -901,9 +889,7 @@ def test_get_source_remote_url_returns_none_when_no_git(
     assert result is None
 
 
-# =============================================================================
 # Tests for _AutoLabels
-# =============================================================================
 
 
 def test_auto_labels_dump_includes_remote_when_set() -> None:
@@ -923,9 +909,7 @@ def test_auto_labels_dump_excludes_remote_when_none() -> None:
     assert meta.model_dump(exclude_none=True) == {"project": "my-project"}
 
 
-# =============================================================================
 # Tests for _split_cli_args
-# =============================================================================
 
 
 def test_split_cli_args_splits_space_separated_flag_and_value() -> None:
@@ -954,9 +938,7 @@ def test_split_cli_args_empty() -> None:
     assert _split_cli_args(()) == []
 
 
-# =============================================================================
 # Tests for _resolve_agent_type_name (shared resolution logic)
-# =============================================================================
 
 
 def test_resolve_agent_type_name_type_flag_wins() -> None:
@@ -1003,9 +985,7 @@ def test_resolve_agent_type_name_positional_beats_config_supplied_type() -> None
     assert _resolve_agent_type_name("from_config", False, "from_positional", ()) == "from_positional"
 
 
-# =============================================================================
 # Tests for _resolve_initial_message_content (shared between headless + non-headless)
-# =============================================================================
 
 
 def test_resolve_initial_message_content_from_message(default_create_cli_opts: CreateCliOptions) -> None:
@@ -1045,9 +1025,7 @@ def test_resolve_initial_message_content_rejects_both(
         _resolve_initial_message_content(opts)
 
 
-# =============================================================================
 # Tests for the headless CLI flow (create --foreground)
-# =============================================================================
 
 
 @pytest.mark.tmux
@@ -1133,9 +1111,7 @@ def test_create_headless_with_message_does_not_raise(
     assert "headless-test-output" in result.output
 
 
-# =============================================================================
 # Tests for incompatible flag rejection on the headless path
-# =============================================================================
 
 
 def test_create_headless_rejects_incompatible_flags(
@@ -1275,9 +1251,7 @@ def test_create_headless_rejects_conflicting_positional_and_type_flag(
     assert "Conflicting agent types" in result.output
 
 
-# =============================================================================
 # Tests for --foreground flag
-# =============================================================================
 
 
 def test_create_headless_without_foreground_is_rejected(
@@ -1332,9 +1306,7 @@ def test_create_without_any_type_is_rejected(
     assert "No agent type provided" in result.output
 
 
-# =============================================================================
 # Tests for shared source/transfer/git handling on the headless path
-# =============================================================================
 
 
 @pytest.mark.tmux
@@ -1382,9 +1354,7 @@ def test_create_headless_with_source_and_transfer_none_runs_in_place(
     assert str(resolved_source_dir) in result.output
 
 
-# =============================================================================
 # Tests for _apply_host_labels
-# =============================================================================
 #
 # _create_agent calls _apply_host_labels on resolved online hosts so that
 # --host-label KEY=VALUE entries are honored for both headless and
@@ -1468,9 +1438,7 @@ def test_apply_host_labels_raises_on_entries_without_equals(
         _apply_host_labels(local_host, ("no-equals-here", "env=prod"))
 
 
-# =============================================================================
 # Tests for --label option in _parse_agent_opts
-# =============================================================================
 
 
 def test_parse_agent_opts_includes_labels(
@@ -1625,9 +1593,7 @@ def test_parse_agent_opts_matching_type_and_positional_ok(
     assert str(result.agent_type) == "claude"
 
 
-# =============================================================================
 # Tests for _parse_branch_flag
-# =============================================================================
 
 
 def test_parse_branch_flag_base_only() -> None:
@@ -1717,9 +1683,7 @@ def test_parse_branch_flag_new_without_wildcard() -> None:
     assert has_explicit_base is False
 
 
-# =============================================================================
 # Tests for parse_new_agent_location
-# =============================================================================
 
 
 def test_parse_new_agent_location_empty_string() -> None:
@@ -1963,9 +1927,7 @@ def test_parse_new_agent_location_trailing_colon_no_path() -> None:
     assert result == NewAgentLocation(name=AgentName("foo"))
 
 
-# =============================================================================
 # Tests for --update / --reuse validation
-# =============================================================================
 
 
 def test_create_rejects_update_without_reuse(
@@ -1983,9 +1945,7 @@ def test_create_rejects_update_without_reuse(
     assert "--update requires --reuse" in result.output
 
 
-# =============================================================================
 # Tests for positional / --name mutual exclusivity
-# =============================================================================
 
 
 def test_create_rejects_positional_and_name_together(
@@ -2051,9 +2011,7 @@ def test_create_accepts_name_flag_alone(
     assert result.exit_code == 0
 
 
-# =============================================================================
 # Tests for --provider flag merge/conflict logic
-# =============================================================================
 
 
 @pytest.mark.tmux
@@ -2127,9 +2085,7 @@ def test_create_provider_flag_redundant_with_address_is_ok(
     assert result.exit_code == 0
 
 
-# =============================================================================
 # Tests for _rescue_editor_content
-# =============================================================================
 
 
 def test_rescue_editor_content_saves_content_to_recovery_file(
@@ -2192,9 +2148,7 @@ def test_rescue_editor_content_strips_trailing_whitespace(
     session.cleanup()
 
 
-# =============================================================================
 # Tests for _editor_cleanup_scope
-# =============================================================================
 
 
 def test_editor_cleanup_scope_rescues_content_on_exception(
@@ -2231,9 +2185,7 @@ def test_editor_cleanup_scope_does_not_rescue_on_success(
     assert not session.temp_file_path.exists()
 
 
-# =============================================================================
 # Tests for _check_source_does_not_contain_state_dir
-# =============================================================================
 
 
 def test_check_source_does_not_contain_state_dir_raises_when_source_is_parent(
@@ -2281,9 +2233,7 @@ def test_check_source_does_not_contain_state_dir_passes_for_child_of_state_dir(
     _check_source_does_not_contain_state_dir(child_dir, temp_mngr_ctx)
 
 
-# =============================================================================
 # Tests for _resolve_source_location without git repo
-# =============================================================================
 
 
 def test_resolve_source_location_raises_outside_git_repo(
@@ -2305,9 +2255,7 @@ def test_resolve_source_location_raises_outside_git_repo(
         )
 
 
-# =============================================================================
 # Tests for _compute_loader_provider_filter
-# =============================================================================
 
 
 def test_compute_loader_provider_filter_no_source_no_target_returns_none(

@@ -56,9 +56,7 @@ from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.published_ports import vps_published_endpoints
 from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
 
-# =========================================================================
 # Shared cloud stop/start lifecycle: resume mirrors the record externally
-# =========================================================================
 
 
 class _MirrorCalled(Exception):
@@ -283,10 +281,8 @@ def test_offline_resume_waits_for_expected_host_key_before_connecting(temp_mngr_
     assert provider._expected_key_arg == expected_vps_host_key
 
 
-# =========================================================================
 # Instance-marker realizer selection (discover/connect a bare host with the
 # right realizer before any on-host store is opened)
-# =========================================================================
 
 
 class _MarkerProvider(OfflineCapableVpsProvider):
@@ -394,9 +390,7 @@ def test_realizer_for_vps_ip_raises_mngr_error_on_corrupt_marker(temp_mngr_ctx: 
         provider._realizer_for_vps_ip("10.0.0.8")
 
 
-# =========================================================================
 # Post-finalize idle-watcher invariant (_on_host_finalized)
-# =========================================================================
 
 
 class _FinalizeProvider(_MarkerProvider):
@@ -471,9 +465,7 @@ def test_on_host_finalized_skips_record_check_for_self_stopping_placement(temp_m
     assert not provider._watcher_installed
 
 
-# =========================================================================
 # rename_host re-mirrors the cheap host-name identity (_remirror_host_name)
-# =========================================================================
 
 
 class _RenameProvider(_MarkerProvider):
@@ -521,9 +513,7 @@ def test_rename_host_remirrors_updated_name(temp_mngr_ctx: MngrContext) -> None:
     assert provider._remirror_calls == [(str(host_id), "newname")]
 
 
-# =========================================================================
 # Shared tag-based offline discovery default (_offline_discovered_host_from_instance)
-# =========================================================================
 
 
 class _TagDiscoveryProvider(_MarkerProvider):
@@ -568,9 +558,7 @@ def test_offline_discovered_host_from_instance_default_returns_none_without_host
     assert provider._offline_discovered_host_from_instance({"id": "i-2", "tags": ["DisplayName=mngr-x"]}) is None
 
 
-# =========================================================================
 # Shared bucket-store / host_dir-backend selection helpers
-# =========================================================================
 
 
 class _FakeStateBucket:
@@ -643,9 +631,7 @@ def test_select_bucket_host_dir_backend_is_null_when_no_bucket(temp_mngr_ctx: Mn
     assert isinstance(provider._select_bucket_host_dir_backend(None, enabled=True), NullHostDirBackend)
 
 
-# =========================================================================
 # Shared known_hosts add helper (resume rebind)
-# =========================================================================
 
 
 def test_add_known_hosts_for_ip_adds_both_endpoints(temp_mngr_ctx: MngrContext) -> None:
@@ -673,9 +659,7 @@ def test_add_known_hosts_for_ip_skips_endpoint_with_absent_key(temp_mngr_ctx: Mn
     assert not provider._container_known_hosts_path().exists()
 
 
-# =========================================================================
 # Concurrent host_dir capture upload (_write_files_concurrently)
-# =========================================================================
 
 
 def test_write_files_concurrently_overlaps_writers_and_persists_all_files() -> None:

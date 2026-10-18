@@ -74,10 +74,12 @@ function icon(strip: AnyVnode, id: string): AnyVnode {
 /** A shell that records which of its surface transitions were asked for,
  * standing on `routePath` (the machine surface unless a test says otherwise,
  * i.e. the feed's non-route case). */
-function makeShell(options: {
-  routePath?: string;
-  panelRouteBehindOverlay?: string;
-} = {}): {
+function makeShell(
+  options: {
+    routePath?: string;
+    panelRouteBehindOverlay?: string;
+  } = {},
+): {
   shell: ShellState;
   calls: () => string[];
 } {
@@ -171,10 +173,7 @@ describe("the raised titlebar icon strip", () => {
   });
 
   it("labels the icon you are on as the way out", () => {
-    const strip = renderStrip(
-      ["notifications-toggle", "help-toggle"],
-      "help",
-    );
+    const strip = renderStrip(["notifications-toggle", "help-toggle"], "help");
 
     expect(attrsOf(icon(strip, "help"))["aria-label"]).toBe(
       "Close Report a bug",

@@ -59,14 +59,18 @@ describe("WorkspacesStore", () => {
     // same-origin path, so the parameter is encoded once per layer.
     const store = new WorkspacesStore();
     store.applyWorkspacesMessage(workspacesMessage());
-    const gotoNext = "/goto/agent-aa11/?next=" + encodeURIComponent("/?solo=win-0123");
+    const gotoNext =
+      "/goto/agent-aa11/?next=" + encodeURIComponent("/?solo=win-0123");
     expect(store.workspaceFrameUrl("host-bb22", "win-0123")).toBe(
       "/forward-bridge?next=" + encodeURIComponent(gotoNext),
     );
-    const bridgeNext = new URL(store.workspaceFrameUrl("agent-aa11", "win-0123"), "http://x").searchParams.get(
+    const bridgeNext = new URL(
+      store.workspaceFrameUrl("agent-aa11", "win-0123"),
+      "http://x",
+    ).searchParams.get("next");
+    const soloNext = new URL(bridgeNext ?? "", "http://x").searchParams.get(
       "next",
     );
-    const soloNext = new URL(bridgeNext ?? "", "http://x").searchParams.get("next");
     expect(soloNext).toBe("/?solo=win-0123");
   });
 
@@ -75,7 +79,8 @@ describe("WorkspacesStore", () => {
     store.applyWorkspacesMessage(workspacesMessage());
     const frameUrl = store.workspaceFrameUrl("agent-aa11", "win-0123", true);
     const bridgeNext = new URL(frameUrl, "http://x").searchParams.get("next");
-    const soloNext = new URL(bridgeNext ?? "", "http://x").searchParams.get("next") ?? "";
+    const soloNext =
+      new URL(bridgeNext ?? "", "http://x").searchParams.get("next") ?? "";
     const shellParams = new URL(soloNext, "http://x").searchParams;
     expect(shellParams.get("solo")).toBe("win-0123");
     expect(shellParams.get("reopened")).toBe("1");

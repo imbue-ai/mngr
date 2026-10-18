@@ -25,7 +25,8 @@ import { requestDetailView } from "./inbox/RequestDetail";
  * parts are dropped while no card matches the selection (a stale id, or the
  * list still in flight), leaving the bare title. */
 function eyebrow(model: InboxModel): m.Children {
-  const selected = model.cards.find((card) => card.id === model.selectedId) ?? null;
+  const selected =
+    model.cards.find((card) => card.id === model.selectedId) ?? null;
   const { shell } = getAppContext();
   // Only when there IS a Permissions pane to go back to -- opened from the
   // in-chat card there is no menu above this, and a back arrow would promise
@@ -39,7 +40,8 @@ function eyebrow(model: InboxModel): m.Children {
       // so without this the line reading the window and the buttons ending it
       // sit 8px apart -- close enough to look like a mistake rather than two
       // rows. The row takes the X's 32px height so the three are one band.
-      class: "-mt-2 flex h-8 min-w-0 items-center gap-1.5 pr-8 type-label font-semibold text-primary",
+      class:
+        "-mt-2 flex h-8 min-w-0 items-center gap-1.5 pr-8 type-label font-semibold text-primary",
     },
     [
       isOpenedFromPermissions
@@ -71,7 +73,9 @@ function eyebrow(model: InboxModel): m.Children {
             "aria-hidden": "true",
             style: `background-color: ${selected.accent}`,
           }),
-      selected === null ? null : m("span", { class: "truncate" }, selected.ws_name),
+      selected === null
+        ? null
+        : m("span", { class: "truncate" }, selected.ws_name),
     ],
   );
 }
@@ -96,7 +100,11 @@ function detailPane(model: InboxModel): m.Children {
   // A failed list load already says so above; claiming the queue is empty on
   // top of that would contradict it.
   if (model.listErrorMessage !== null) return null;
-  return m("p", { class: "py-8 text-center type-body text-secondary" }, "You're all caught up — no pending requests.");
+  return m(
+    "p",
+    { class: "py-8 text-center type-body text-secondary" },
+    "You're all caught up — no pending requests.",
+  );
 }
 
 /** The request the URL names, or null for "whatever is pending". A named id is
@@ -160,13 +168,19 @@ function InboxPageComponent(): m.Component {
       // Every channel `requests` message redraws mithril, so reconciling from
       // the store here keeps the popup live without its own subscription.
       if (activeModel.isListLoaded)
-        void activeModel.refreshIfPendingChanged(getAppContext().stores.requests.requestIds);
+        void activeModel.refreshIfPendingChanged(
+          getAppContext().stores.requests.requestIds,
+        );
 
       return m("div#request-popup", { class: "flex flex-col gap-3" }, [
         eyebrow(activeModel),
         m("div#request-popup-detail", { class: "min-h-0" }, [
           activeModel.listErrorMessage !== null
-            ? m("div", { class: "mb-3" }, m(Notice, { variant: "error" }, activeModel.listErrorMessage))
+            ? m(
+                "div",
+                { class: "mb-3" },
+                m(Notice, { variant: "error" }, activeModel.listErrorMessage),
+              )
             : null,
           detailPane(activeModel),
         ]),

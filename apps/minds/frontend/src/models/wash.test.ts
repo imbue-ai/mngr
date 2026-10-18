@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { WASH_DISC_PX, WASH_SWAP_AT_MS, WASH_TOTAL_MS, WashModel, washScaleFor } from "./wash";
+import {
+  WASH_DISC_PX,
+  WASH_SWAP_AT_MS,
+  WASH_TOTAL_MS,
+  WashModel,
+  washScaleFor,
+} from "./wash";
 
 describe("washScaleFor", () => {
   it("grows the disc to reach the farthest corner from its origin", () => {
@@ -16,7 +22,10 @@ describe("washScaleFor", () => {
 
 describe("WashModel", () => {
   function fakeTimers(): {
-    setTimer: (handler: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
+    setTimer: (
+      handler: () => void,
+      delayMs: number,
+    ) => ReturnType<typeof setTimeout>;
     fire: (upToMs: number) => void;
   } {
     const scheduled: Array<{ handler: () => void; delayMs: number }> = [];
@@ -37,11 +46,22 @@ describe("WashModel", () => {
   it("covers, swaps while whole, and lifts on the shared timeline", () => {
     const redraws: number[] = [];
     const timers = fakeTimers();
-    const model = new WashModel(() => redraws.push(redraws.length), timers.setTimer);
+    const model = new WashModel(
+      () => redraws.push(redraws.length),
+      timers.setTimer,
+    );
     let swaps = 0;
-    model.start("#abcdef", { x: 10, y: 20 }, { width: 800, height: 600 }, () => (swaps += 1));
+    model.start(
+      "#abcdef",
+      { x: 10, y: 20 },
+      { width: 800, height: 600 },
+      () => (swaps += 1),
+    );
 
-    expect(model.active).toMatchObject({ accent: "#abcdef", origin: { x: 10, y: 20 } });
+    expect(model.active).toMatchObject({
+      accent: "#abcdef",
+      origin: { x: 10, y: 20 },
+    });
     expect(swaps).toBe(0);
     timers.fire(WASH_SWAP_AT_MS);
     expect(swaps).toBe(1);
@@ -55,7 +75,12 @@ describe("WashModel", () => {
     const timers = fakeTimers();
     const model = new WashModel(() => undefined, timers.setTimer);
     let swaps = 0;
-    model.start("#abcdef", { x: 10, y: 20 }, { width: 800, height: 600 }, () => (swaps += 1));
+    model.start(
+      "#abcdef",
+      { x: 10, y: 20 },
+      { width: 800, height: 600 },
+      () => (swaps += 1),
+    );
     model.cancel();
     expect(model.active).toBeNull();
     // Past the whole timeline: a cancelled wash swaps nothing and lifts nothing.
@@ -68,8 +93,12 @@ describe("WashModel", () => {
     const timers = fakeTimers();
     const model = new WashModel(() => undefined, timers.setTimer);
     const swapped: string[] = [];
-    model.start("#111111", { x: 10, y: 20 }, { width: 800, height: 600 }, () => swapped.push("first"));
-    model.start("#222222", { x: 30, y: 40 }, { width: 800, height: 600 }, () => swapped.push("second"));
+    model.start("#111111", { x: 10, y: 20 }, { width: 800, height: 600 }, () =>
+      swapped.push("first"),
+    );
+    model.start("#222222", { x: 30, y: 40 }, { width: 800, height: 600 }, () =>
+      swapped.push("second"),
+    );
     timers.fire(WASH_SWAP_AT_MS);
     expect(swapped).toEqual(["second"]);
   });

@@ -3,13 +3,21 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import { createEmptyStores } from "../../models/boot";
 import { ShellState } from "../shell/shell-state";
-import { applyRequestedTarget, panelRoute, rememberInUrl } from "./WorkspaceOptionsPage";
+import {
+  applyRequestedTarget,
+  panelRoute,
+  rememberInUrl,
+} from "./WorkspaceOptionsPage";
 
-const PANEL_ROUTE = "/workspace/agent-ab12/options?tab=permissions&section=conn:slack:";
+const PANEL_ROUTE =
+  "/workspace/agent-ab12/options?tab=permissions&section=conn:slack:";
 
 /** Register a shell whose live route is `live`, with the options panel either
  * being that route or frozen underneath a modal at `behind`. */
-function withRoutes(live: string, behind: string | null): { shell: ShellState; routeSets: string[] } {
+function withRoutes(
+  live: string,
+  behind: string | null,
+): { shell: ShellState; routeSets: string[] } {
   const shell = new ShellState(createEmptyStores());
   shell.panelRouteBehindOverlay = behind;
   registerAppContext({ stores: shell.stores, shell });
@@ -44,13 +52,18 @@ describe("options panel param routing", () => {
     // arriving meanwhile auto-opens the popup -- so a pane change genuinely
     // lands while the live route is the modal's. Writing it there would move
     // the modal and leave the panel to come back on its stale section.
-    const { shell, routeSets } = withRoutes("/inbox?workspace=agent-ab12&selected=evt-1", PANEL_ROUTE);
+    const { shell, routeSets } = withRoutes(
+      "/inbox?workspace=agent-ab12&selected=evt-1",
+      PANEL_ROUTE,
+    );
     expect(panelRoute()).toBe(PANEL_ROUTE);
 
     rememberInUrl({ section: "conn:notion:" });
 
     expect(routeSets).toEqual([]);
-    expect(shell.panelRouteBehindOverlay).toContain("/workspace/agent-ab12/options");
+    expect(shell.panelRouteBehindOverlay).toContain(
+      "/workspace/agent-ab12/options",
+    );
     expect(shell.panelRouteBehindOverlay).toContain("section=conn%3Anotion%3A");
     expect(shell.panelRouteBehindOverlay).not.toContain("/inbox");
   });
@@ -79,9 +92,15 @@ describe("options panel param routing", () => {
 
 const SHARE_ROUTE = "/workspace/agent-ab12/options?tab=share&target=web";
 
-function makeShare(): { share: { selectTarget(target: string): void }; selected: string[] } {
+function makeShare(): {
+  share: { selectTarget(target: string): void };
+  selected: string[];
+} {
   const selected: string[] = [];
-  return { share: { selectTarget: (target: string) => selected.push(target) }, selected };
+  return {
+    share: { selectTarget: (target: string) => selected.push(target) },
+    selected,
+  };
 }
 
 describe("applyRequestedTarget", () => {
@@ -104,7 +123,9 @@ describe("applyRequestedTarget", () => {
     let applied = applyRequestedTarget(share, null);
     applied = applyRequestedTarget(share, applied);
     expect(selected).toEqual(["web"]);
-    vi.spyOn(m.route, "get").mockReturnValue("/workspace/agent-ab12/options?tab=share&target=docs");
+    vi.spyOn(m.route, "get").mockReturnValue(
+      "/workspace/agent-ab12/options?tab=share&target=docs",
+    );
     applied = applyRequestedTarget(share, applied);
     expect(applied).toBe("docs");
     expect(selected).toEqual(["web", "docs"]);

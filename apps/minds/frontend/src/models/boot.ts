@@ -24,7 +24,12 @@ export interface AppStores {
 
 export interface BootContext {
   stores: AppStores;
-  seed: { accent: string; isMac: boolean; mngrForwardOrigin: string; isOnboardingComplete: boolean };
+  seed: {
+    accent: string;
+    isMac: boolean;
+    mngrForwardOrigin: string;
+    isOnboardingComplete: boolean;
+  };
   schemaVersion: number;
 }
 
@@ -61,7 +66,10 @@ export function bootFromBootstrap(bootstrap: UiBootstrap): BootContext {
   };
 }
 
-export function applySnapshotToStores(stores: AppStores, bootstrap: Pick<UiBootstrap, "snapshot">): void {
+export function applySnapshotToStores(
+  stores: AppStores,
+  bootstrap: Pick<UiBootstrap, "snapshot">,
+): void {
   const snapshot = bootstrap.snapshot;
   stores.workspaces.applyWorkspacesMessage(snapshot.workspaces);
   stores.accounts.applyAccountsMessage(snapshot.accounts);
@@ -70,6 +78,7 @@ export function applySnapshotToStores(stores: AppStores, bootstrap: Pick<UiBoots
   stores.notifications.applyNotificationsMessage(snapshot.notifications);
   stores.health.applyDiscoveryHealthMessage(snapshot.discovery_health);
   stores.health.applyEnvironmentMessage(snapshot.environment);
-  for (const health of snapshot.health) stores.health.applyHealthMessage(health);
+  for (const health of snapshot.health)
+    stores.health.applyHealthMessage(health);
   stores.updates.applyUpdatesMessage(snapshot.workspace_updates);
 }

@@ -4,7 +4,8 @@ import { electronBridge } from "../../electron-bridge";
 /** The lights sit where macOS puts its own (main.js places the native ones
  * 12px in), in the same 72px the bar leaves for those. */
 const CLUSTER_CLASS = "flex items-center gap-2 pl-3 w-[72px] shrink-0";
-const LIGHT_CLASS = "w-3 h-3 rounded-full border border-black/15 cursor-default p-0";
+const LIGHT_CLASS =
+  "w-3 h-3 rounded-full border border-black/15 cursor-default p-0";
 
 /**
  * macOS's traffic lights, drawn by the bar itself: the window controls of a

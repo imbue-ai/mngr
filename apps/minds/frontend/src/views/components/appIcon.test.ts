@@ -4,7 +4,11 @@
 // of the contract under test.
 import { describe, expect, it } from "vitest";
 
-import { appMonogramMarkup, sanitizeIconMarkup, shareTargetIconMarkup } from "./appIcon";
+import {
+  appMonogramMarkup,
+  sanitizeIconMarkup,
+  shareTargetIconMarkup,
+} from "./appIcon";
 
 const PLAIN_ICON = '<svg viewBox="0 0 24 24"><path d="M2 2h20v20H2z"/></svg>';
 
@@ -18,15 +22,21 @@ describe("sanitizeIconMarkup", () => {
   });
 
   it("derives a viewBox from a sized icon, and refuses sizeless art", () => {
-    expect(sanitizeIconMarkup('<svg width="32" height="32"><path d="M1 1"/></svg>', 16)).toContain(
-      'viewBox="0 0 32 32"',
-    );
+    expect(
+      sanitizeIconMarkup(
+        '<svg width="32" height="32"><path d="M1 1"/></svg>',
+        16,
+      ),
+    ).toContain('viewBox="0 0 32 32"');
     expect(sanitizeIconMarkup('<svg><path d="M1 1"/></svg>', 16)).toBeNull();
   });
 
   it("lets a monochrome icon inherit currentColor and leaves a painted one alone", () => {
     expect(sanitizeIconMarkup(PLAIN_ICON, 16)).toContain('fill="currentColor"');
-    const painted = sanitizeIconMarkup('<svg viewBox="0 0 24 24" fill="#f00"><path d="M1 1"/></svg>', 16);
+    const painted = sanitizeIconMarkup(
+      '<svg viewBox="0 0 24 24" fill="#f00"><path d="M1 1"/></svg>',
+      16,
+    );
     expect(painted).toContain('fill="#f00"');
   });
 
@@ -43,7 +53,15 @@ describe("sanitizeIconMarkup", () => {
     ];
     for (const markup of hostile) {
       const result = sanitizeIconMarkup(markup, 16);
-      for (const trace of ["script", "onload", "javascript", "evil.example", "foreignObject", "animate", "style"]) {
+      for (const trace of [
+        "script",
+        "onload",
+        "javascript",
+        "evil.example",
+        "foreignObject",
+        "animate",
+        "style",
+      ]) {
         expect(result ?? "", markup).not.toContain(trace);
       }
     }
@@ -54,7 +72,9 @@ describe("sanitizeIconMarkup", () => {
     expect(sanitizeIconMarkup(`${PLAIN_ICON}${PLAIN_ICON}`, 16)).toBeNull();
     expect(sanitizeIconMarkup("plain text", 16)).toBeNull();
     expect(sanitizeIconMarkup("", 16)).toBeNull();
-    expect(sanitizeIconMarkup("<svg " + "a".repeat(17000) + "/>", 16)).toBeNull();
+    expect(
+      sanitizeIconMarkup("<svg " + "a".repeat(17000) + "/>", 16),
+    ).toBeNull();
   });
 
   it("namespaces ids so two apps' gradients cannot collide", () => {
@@ -69,9 +89,15 @@ describe("sanitizeIconMarkup", () => {
 
 describe("shareTargetIconMarkup", () => {
   it("uses the registered icon when usable and the monogram otherwise", () => {
-    expect(shareTargetIconMarkup(PLAIN_ICON, "notes", 16)).toContain('d="M2 2h20v20H2z"');
-    expect(shareTargetIconMarkup("", "notes", 16)).toBe(appMonogramMarkup("notes", 16));
-    expect(shareTargetIconMarkup("<svg onload='x'>", "notes", 16)).toBe(appMonogramMarkup("notes", 16));
+    expect(shareTargetIconMarkup(PLAIN_ICON, "notes", 16)).toContain(
+      'd="M2 2h20v20H2z"',
+    );
+    expect(shareTargetIconMarkup("", "notes", 16)).toBe(
+      appMonogramMarkup("notes", 16),
+    );
+    expect(shareTargetIconMarkup("<svg onload='x'>", "notes", 16)).toBe(
+      appMonogramMarkup("notes", 16),
+    );
   });
 
   it("monograms with the escaped initial", () => {

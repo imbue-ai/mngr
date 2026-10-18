@@ -22,7 +22,10 @@ const TEXT_INPUT_CLASS =
  * it never fights the user's own scrolling on later redraws. */
 function scrollFailureIntoView(model: InboxModel, vnode: m.VnodeDOM): void {
   if (!model.takePendingFailureScroll()) return;
-  (vnode.dom as HTMLElement).scrollIntoView({ behavior: "smooth", block: "nearest" });
+  (vnode.dom as HTMLElement).scrollIntoView({
+    behavior: "smooth",
+    block: "nearest",
+  });
 }
 
 /** The credential form's heading: the opening instruction, or -- once an
@@ -30,7 +33,10 @@ function scrollFailureIntoView(model: InboxModel, vnode: m.VnodeDOM): void {
  *
  * A failure also carries the scroll-into-view hooks, on a plain wrapper because
  * that is what mithril's typings accept lifecycle hooks on. */
-function manualCredentialsMessage(model: InboxModel, message: string): m.Children {
+function manualCredentialsMessage(
+  model: InboxModel,
+  message: string,
+): m.Children {
   const attrs = { id: "permissions-manual-credentials-message", role: "alert" };
   if (!model.isManualCredentialsFailureShown()) {
     return m("p", { ...attrs, class: "type-body text-secondary" }, message);
@@ -53,20 +59,29 @@ function manualCredentialsForm(model: InboxModel): m.Children {
   if (prompt === null) return null;
   // Nothing to fill in: the message is the whole thing.
   if (prompt.parameters.length === 0) {
-    return m("div", { id: "permissions-manual-credentials" }, manualCredentialsMessage(model, prompt.message));
+    return m(
+      "div",
+      { id: "permissions-manual-credentials" },
+      manualCredentialsMessage(model, prompt.message),
+    );
   }
   return m(
     "div",
     {
       id: "permissions-manual-credentials",
-      class: "rounded-md border border-default bg-fill-subtle p-3 flex flex-col gap-2",
+      class:
+        "rounded-md border border-default bg-fill-subtle p-3 flex flex-col gap-2",
     },
     [
       manualCredentialsMessage(model, prompt.message),
       prompt.instructions
         ? m("div", { id: "permissions-manual-credentials-instructions" }, [
             m("h3", { class: "type-section text-tertiary" }, "From the agent"),
-            m("p", { class: "mt-1 type-body text-primary whitespace-pre-line" }, prompt.instructions),
+            m(
+              "p",
+              { class: "mt-1 type-body text-primary whitespace-pre-line" },
+              prompt.instructions,
+            ),
           ])
         : null,
       ...prompt.parameters.map((parameter) =>
@@ -80,7 +95,9 @@ function manualCredentialsForm(model: InboxModel): m.Children {
             spellcheck: "false",
             value: model.manualCredentialValues[parameter.name] ?? "",
             oninput: (event: Event) => {
-              model.manualCredentialValues[parameter.name] = (event.target as HTMLInputElement).value;
+              model.manualCredentialValues[parameter.name] = (
+                event.target as HTMLInputElement
+              ).value;
             },
           }),
         ]),
@@ -96,10 +113,16 @@ function manualCredentialsForm(model: InboxModel): m.Children {
               spellcheck: "false",
               value: model.manualAccountName,
               oninput: (event: Event) => {
-                model.manualAccountName = (event.target as HTMLInputElement).value;
+                model.manualAccountName = (
+                  event.target as HTMLInputElement
+                ).value;
               },
             }),
-            m("span", { class: "type-helper text-tertiary" }, "How this account is labelled in Imbue Studio."),
+            m(
+              "span",
+              { class: "type-helper text-tertiary" },
+              "How this account is labelled in Imbue Studio.",
+            ),
           ])
         : null,
     ],
@@ -126,12 +149,21 @@ export interface PermissionsShellAttrs {
 export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
   return {
     view(vnode) {
-      const { model, headerLabel, mark, rationale, account, progressLabel, body } = vnode.attrs;
+      const {
+        model,
+        headerLabel,
+        mark,
+        rationale,
+        account,
+        progressLabel,
+        body,
+      } = vnode.attrs;
       const approveLabel = vnode.attrs.approveLabel ?? "Approve";
       // A credential form with no inputs is a dead end (Imbue Studio cannot work out
       // what to ask for), so Approve goes away entirely.
       const manualPrompt = model.manualCredentialsPrompt();
-      const isApproveHidden = manualPrompt !== null && manualPrompt.parameters.length === 0;
+      const isApproveHidden =
+        manualPrompt !== null && manualPrompt.parameters.length === 0;
       return m("div", { class: "flex flex-col gap-4" }, [
         // The asking machine is named in the popup's eyebrow, so the header is
         // just the marked square and what is being asked for.
@@ -140,11 +172,16 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
             "span",
             {
               id: "permissions-header-mark",
-              class: "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-fill-subtle",
+              class:
+                "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-fill-subtle",
             },
             mark,
           ),
-          m("h2", { class: "min-w-0 flex-1 truncate type-heading-lg text-primary" }, headerLabel),
+          m(
+            "h2",
+            { class: "min-w-0 flex-1 truncate type-heading-lg text-primary" },
+            headerLabel,
+          ),
         ]),
         account ?? null,
         rationale
@@ -179,14 +216,25 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
                   onclick: () => void model.approve(),
                 },
                 model.isApproveBusy
-                  ? [m(Spinner, { size: "sm", tone: "inverse", extra: "mr-1.5" }), "Approving…"]
+                  ? [
+                      m(Spinner, {
+                        size: "sm",
+                        tone: "inverse",
+                        extra: "mr-1.5",
+                      }),
+                      "Approving…",
+                    ]
                   : approveLabel,
               ),
         ]),
         model.isProgressShown
           ? m(
               "div",
-              { id: "permissions-progress", class: "rounded-md border border-default bg-fill-subtle p-3 type-body text-secondary" },
+              {
+                id: "permissions-progress",
+                class:
+                  "rounded-md border border-default bg-fill-subtle p-3 type-body text-secondary",
+              },
               progressLabel,
             )
           : null,
@@ -195,13 +243,19 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
               "div",
               {
                 id: "permissions-error",
-                oncreate: (errorVnode: m.VnodeDOM) => scrollFailureIntoView(model, errorVnode),
-                onupdate: (errorVnode: m.VnodeDOM) => scrollFailureIntoView(model, errorVnode),
+                oncreate: (errorVnode: m.VnodeDOM) =>
+                  scrollFailureIntoView(model, errorVnode),
+                onupdate: (errorVnode: m.VnodeDOM) =>
+                  scrollFailureIntoView(model, errorVnode),
               },
               m(
                 Notice,
                 { variant: "error", role: "alert" },
-                m("span", { id: "permissions-error-message" }, model.errorMessage),
+                m(
+                  "span",
+                  { id: "permissions-error-message" },
+                  model.errorMessage,
+                ),
               ),
             )
           : null,

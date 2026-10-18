@@ -246,7 +246,6 @@ export function buildEmbedHandlers(
   };
   const immersive = deps.immersive;
   if (immersive !== null) {
-    // The contract validated the shape; only the flag is read.
     handlers[contract.IMMERSIVE_REQUEST] = (message) =>
       immersive.request(message.on === true);
   }

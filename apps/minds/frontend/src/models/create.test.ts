@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { jsonResponse } from "../testing";
-import { MindLivenessTracker, hostNameFormatError, progressForElapsed, submitCreateRequest } from "./create";
+import {
+  MindLivenessTracker,
+  hostNameFormatError,
+  progressForElapsed,
+  submitCreateRequest,
+} from "./create";
 import { OnboardingProgress } from "./onboarding";
 
 describe("hostNameFormatError", () => {
@@ -12,9 +17,15 @@ describe("hostNameFormatError", () => {
   it("names the first broken rule in plain language", () => {
     expect(hostNameFormatError("a.b")).toBe("Dots aren't allowed in a name.");
     expect(hostNameFormatError("a b")).toBe("Spaces aren't allowed in a name.");
-    expect(hostNameFormatError("a$b")).toBe("Use only letters, numbers, dashes, and underscores.");
-    expect(hostNameFormatError("-ab")).toBe("Can't start with a dash or underscore.");
-    expect(hostNameFormatError("ab_")).toBe("Can't end with a dash or underscore.");
+    expect(hostNameFormatError("a$b")).toBe(
+      "Use only letters, numbers, dashes, and underscores.",
+    );
+    expect(hostNameFormatError("-ab")).toBe(
+      "Can't start with a dash or underscore.",
+    );
+    expect(hostNameFormatError("ab_")).toBe(
+      "Can't end with a dash or underscore.",
+    );
   });
 });
 
@@ -89,12 +100,19 @@ describe("submitCreateRequest", () => {
       { git_url: "https://example/repo" },
       (url, init) => {
         calls.push({ url, body: JSON.parse(String(init?.body)) });
-        return Promise.resolve(jsonResponse({ operation_id: "create-attempt-1" }, 202));
+        return Promise.resolve(
+          jsonResponse({ operation_id: "create-attempt-1" }, 202),
+        );
       },
       progress,
     );
-    expect(calls).toEqual([{ url: "/api/v1/workspaces", body: { git_url: "https://example/repo" } }]);
-    expect(result).toEqual({ status: 202, data: { operation_id: "create-attempt-1" } });
+    expect(calls).toEqual([
+      { url: "/api/v1/workspaces", body: { git_url: "https://example/repo" } },
+    ]);
+    expect(result).toEqual({
+      status: 202,
+      data: { operation_id: "create-attempt-1" },
+    });
     expect(progress.isComplete).toBe(true);
   });
 
@@ -111,7 +129,11 @@ describe("submitCreateRequest", () => {
 
   it("reports status 0 when the server cannot be reached", async () => {
     const progress = progressSeededIncomplete();
-    const result = await submitCreateRequest({}, () => Promise.reject(new Error("offline")), progress);
+    const result = await submitCreateRequest(
+      {},
+      () => Promise.reject(new Error("offline")),
+      progress,
+    );
     expect(result).toEqual({ status: 0, data: {} });
     expect(progress.isComplete).toBe(false);
   });

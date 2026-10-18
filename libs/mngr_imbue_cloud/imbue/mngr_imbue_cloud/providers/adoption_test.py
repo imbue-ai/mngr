@@ -743,9 +743,7 @@ def test_full_verification_sweeps_bootstrap_pins_of_a_host_adopted_by_an_older_c
     assert {pin.port for pin in record.pins} == {_VM_PORT, _CONTAINER_PORT}
 
 
-# =============================================================================
 # rebind_host_key_pins_to_endpoints
-# =============================================================================
 
 
 def test_rebind_moves_both_pins_to_the_new_endpoints_and_records_them(tmp_path: Path) -> None:

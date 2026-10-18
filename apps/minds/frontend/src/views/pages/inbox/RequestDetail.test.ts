@@ -11,10 +11,15 @@ describe("requestDetailView", () => {
       kind: "unavailable",
       message: "It has already been processed.",
     });
-    expect(allText(unavailable)).toContain("This permission request is no longer available");
+    expect(allText(unavailable)).toContain(
+      "This permission request is no longer available",
+    );
     expect(allText(unavailable)).toContain("It has already been processed.");
 
-    const unsupported = requestDetailView(model, { kind: "unsupported", message: "no handler" });
+    const unsupported = requestDetailView(model, {
+      kind: "unsupported",
+      message: "no handler",
+    });
     expect(allText(unsupported)).toContain("no handler");
   });
 
@@ -23,7 +28,11 @@ describe("requestDetailView", () => {
     // leaving no action at all would strand the agent waiting on an answer.
     const model = new InboxModel();
 
-    const unknown = requestDetailView(model, { kind: "unknown_scope", request_id: "evt-a", scope: "zzz-api" });
+    const unknown = requestDetailView(model, {
+      kind: "unknown_scope",
+      request_id: "evt-a",
+      scope: "zzz-api",
+    });
 
     expect(allText(unknown)).toContain("zzz-api");
     expect(allText(unknown)).toContain("Deny this request");

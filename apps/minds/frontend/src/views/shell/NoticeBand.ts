@@ -28,10 +28,14 @@ export function NoticeBand(): m.Component<NoticeBandAttrs> {
       // The message wraps, so the height moves with the window width as well
       // as with the message.
       observer = new ResizeObserver(() => {
-        vnode.attrs.shell.setNoticeBandHeight(element.getBoundingClientRect().height);
+        vnode.attrs.shell.setNoticeBandHeight(
+          element.getBoundingClientRect().height,
+        );
       });
       observer.observe(element);
-      vnode.attrs.shell.setNoticeBandHeight(element.getBoundingClientRect().height);
+      vnode.attrs.shell.setNoticeBandHeight(
+        element.getBoundingClientRect().height,
+      );
     },
     onremove(vnode) {
       observer?.disconnect();
@@ -66,11 +70,19 @@ export function NoticeBand(): m.Component<NoticeBandAttrs> {
         },
         m(
           "div",
-          { class: "flex items-center gap-3 px-4 py-2 " + noticeVariantClass(payload.variant) },
+          {
+            class:
+              "flex items-center gap-3 px-4 py-2 " +
+              noticeVariantClass(payload.variant),
+          },
           [
             m("span", { class: "type-body flex-1 min-w-0" }, payload.message),
             payload.action !== null
-              ? m(Button, { variant: "secondary", size: "md", onclick: onAction }, payload.action.label)
+              ? m(
+                  Button,
+                  { variant: "secondary", size: "md", onclick: onAction },
+                  payload.action.label,
+                )
               : null,
           ],
         ),

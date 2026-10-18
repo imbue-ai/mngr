@@ -248,9 +248,7 @@ def editor_recovery_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path
     return recovery_dir
 
 
-# =============================================================================
-# Parametrized --help tests (replaces per-file test_*_help_exits_zero)
-# =============================================================================
+# Parametrized --help tests
 
 _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
     (archive, ["--help"], "archive"),
@@ -299,9 +297,7 @@ def test_help_exits_zero(
     assert result.exit_code == 0
 
 
-# =============================================================================
-# Parametrized nonexistent-agent tests (replaces per-file test_*_nonexistent_agent)
-# =============================================================================
+# Parametrized nonexistent-agent tests
 
 _NONEXISTENT_AGENT_CASES: list[tuple[click.Command, list[str], str]] = [
     (capture, ["nonexistent-agent-55123"], "capture"),

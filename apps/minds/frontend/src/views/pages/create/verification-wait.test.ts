@@ -19,12 +19,25 @@ interface Harness {
  * `verdicts` answers the checks in order (the last one repeats); an "unreachable" entry fails that
  * check, and an empty list makes every check fail.
  */
-function harness(verdicts: Verdict[], resendOutcome: ResendOutcome = "sent"): Harness {
-  const counters: Omit<Harness, "wait"> = { verdicts, resent: [], raises: 0, created: 0, unchecked: 0 };
+function harness(
+  verdicts: Verdict[],
+  resendOutcome: ResendOutcome = "sent",
+): Harness {
+  const counters: Omit<Harness, "wait"> = {
+    verdicts,
+    resent: [],
+    raises: 0,
+    created: 0,
+    unchecked: 0,
+  };
   const wait = new VerificationWait({
     isEmailVerified: () => {
-      const verdict = counters.verdicts.length > 1 ? counters.verdicts.shift() : counters.verdicts[0];
-      if (verdict === undefined || verdict === "unreachable") return Promise.reject(new Error("unreachable"));
+      const verdict =
+        counters.verdicts.length > 1
+          ? counters.verdicts.shift()
+          : counters.verdicts[0];
+      if (verdict === undefined || verdict === "unreachable")
+        return Promise.reject(new Error("unreachable"));
       return Promise.resolve(verdict);
     },
     resendVerificationEmail: (email) => {

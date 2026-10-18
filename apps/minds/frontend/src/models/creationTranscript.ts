@@ -63,7 +63,8 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
       "You can rename your workspace, change its color, and connect or disconnect accounts later in Settings.",
   },
 ];
-export const READY_LINE = "Your workspace is ready! What do you want to do first?";
+export const READY_LINE =
+  "Your workspace is ready! What do you want to do first?";
 
 /** One way to start: its title, and the line or two under it. */
 export interface StartOption {
@@ -89,7 +90,8 @@ export const START_OPTIONS: StartOption[] = [
   },
   {
     title: "Take a task off your plate.",
-    detail: "Give me a task. I can figure out how to do it, and can run it when specific triggers happen.",
+    detail:
+      "Give me a task. I can figure out how to do it, and can run it when specific triggers happen.",
   },
 ];
 
@@ -99,12 +101,18 @@ export const START_FALLBACK_LINE =
 
 /** The closing turn as markdown: the ready line as a heading one level above the numbered option headings. */
 export function readyTurnMarkdown(): string {
-  return [`## ${READY_LINE}`, ...startOptionsMarkdown(), START_FALLBACK_LINE].join("\n\n");
+  return [
+    `## ${READY_LINE}`,
+    ...startOptionsMarkdown(),
+    START_FALLBACK_LINE,
+  ].join("\n\n");
 }
 
 /** The closing turn's options as markdown: a numbered heading per option with its detail under it. */
 export function startOptionsMarkdown(): string[] {
-  return START_OPTIONS.map((option, index) => `### ${index + 1}. ${option.title}\n\n${option.detail}`);
+  return START_OPTIONS.map(
+    (option, index) => `### ${index + 1}. ${option.title}\n\n${option.detail}`,
+  );
 }
 /**
  * What an Imbue Cloud create restates instead of its settings. The cloud
@@ -124,7 +132,9 @@ export function failureLine(workspaceName: string, error: string): string {
 
 /** A repository the way people say it: the github.com prefix and .git suffix trimmed. */
 export function shortRepository(repository: string): string {
-  return repository.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "");
+  return repository
+    .replace(/^https:\/\/github\.com\//, "")
+    .replace(/\.git$/, "");
 }
 
 /**
@@ -138,20 +148,33 @@ export function shortRepository(repository: string): string {
  * the two submissions are identical on the wire -- so the caller passes what
  * the start flow remembers.
  */
-export function summaryLines(request: CreateAttemptRequestSummary, isCloudPreset: boolean): string[] {
+export function summaryLines(
+  request: CreateAttemptRequestSummary,
+  isCloudPreset: boolean,
+): string[] {
   if (isCloudPreset) return [IMBUE_CLOUD_SUMMARY_LINE];
-  const compute = request.cloud_account !== "" ? request.cloud_account : launchModeLabel(request.launch_mode);
+  const compute =
+    request.cloud_account !== ""
+      ? request.cloud_account
+      : launchModeLabel(request.launch_mode);
   const settings: Array<[string, string]> = [
     ["Name", request.display_name],
     ["Compute", compute],
     ["Backup", backupProviderLabel(request.backup_provider)],
     ["Region", request.region],
-    ["Machine size", request.instance_type !== "" ? request.instance_type : formatMachineSizeNumbers(request)],
+    [
+      "Machine size",
+      request.instance_type !== ""
+        ? request.instance_type
+        : formatMachineSizeNumbers(request),
+    ],
     ["Template repository", shortRepository(request.repository)],
     ["Branch", request.branch !== "" ? request.branch : "latest"],
   ];
   return [
     "Create a workspace with these settings:",
-    ...settings.filter(([, value]) => value !== "").map(([label, value]) => `${label} — ${value}`),
+    ...settings
+      .filter(([, value]) => value !== "")
+      .map(([label, value]) => `${label} — ${value}`),
   ];
 }

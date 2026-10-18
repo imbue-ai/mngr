@@ -15,36 +15,57 @@ import {
 
 describe("mindControlsFor", () => {
   it("offers only Start for a shutdown-capable stopped machine", () => {
-    expect(mindControlsFor({ supports_shutdown: true }, "STOPPED", "healthy")).toEqual({
+    expect(
+      mindControlsFor({ supports_shutdown: true }, "STOPPED", "healthy"),
+    ).toEqual({
       isStartShown: true,
       isStopShown: false,
     });
   });
 
   it("offers only Stop for a shutdown-capable running machine", () => {
-    expect(mindControlsFor({ supports_shutdown: true }, "RUNNING", "healthy")).toEqual({
+    expect(
+      mindControlsFor({ supports_shutdown: true }, "RUNNING", "healthy"),
+    ).toEqual({
       isStartShown: false,
       isStopShown: true,
     });
   });
 
   it("withholds Start from a machine an operator is holding, or whose stop kind this build does not know", () => {
-    for (const stopKind of ["maintenance", "suspension", "retired", "unknown"]) {
-      expect(mindControlsFor({ supports_shutdown: true, stop_kind: stopKind }, "STOPPED", "healthy")).toEqual({
+    for (const stopKind of [
+      "maintenance",
+      "suspension",
+      "retired",
+      "unknown",
+    ]) {
+      expect(
+        mindControlsFor(
+          { supports_shutdown: true, stop_kind: stopKind },
+          "STOPPED",
+          "healthy",
+        ),
+      ).toEqual({
         isStartShown: false,
         isStopShown: false,
       });
     }
     for (const stopKind of ["", "owner", "idle"]) {
-      expect(mindControlsFor({ supports_shutdown: true, stop_kind: stopKind }, "STOPPED", "healthy").isStartShown).toBe(
-        true,
-      );
+      expect(
+        mindControlsFor(
+          { supports_shutdown: true, stop_kind: stopKind },
+          "STOPPED",
+          "healthy",
+        ).isStartShown,
+      ).toBe(true);
     }
   });
 
   it("offers neither when the liveness is unknown or transitioning", () => {
     for (const liveness of ["UNKNOWN", "STARTING", "STOPPING"] as const) {
-      expect(mindControlsFor({ supports_shutdown: true }, liveness, "healthy")).toEqual({
+      expect(
+        mindControlsFor({ supports_shutdown: true }, liveness, "healthy"),
+      ).toEqual({
         isStartShown: false,
         isStopShown: false,
       });
@@ -53,7 +74,9 @@ describe("mindControlsFor", () => {
 
   it("offers neither when the machine does not support shutdown", () => {
     for (const liveness of ["STOPPED", "RUNNING", "UNKNOWN"] as const) {
-      expect(mindControlsFor({ supports_shutdown: false }, liveness, "healthy")).toEqual({
+      expect(
+        mindControlsFor({ supports_shutdown: false }, liveness, "healthy"),
+      ).toEqual({
         isStartShown: false,
         isStopShown: false,
       });
@@ -68,7 +91,9 @@ describe("mindControlsFor", () => {
     // The reading behind them is frozen; acting on it could stop a machine
     // the user is looking at a stale RUNNING badge for.
     for (const liveness of ["STOPPED", "RUNNING"] as const) {
-      expect(mindControlsFor({ supports_shutdown: true }, liveness, "blocked")).toEqual({
+      expect(
+        mindControlsFor({ supports_shutdown: true }, liveness, "blocked"),
+      ).toEqual({
         isStartShown: false,
         isStopShown: false,
       });
@@ -76,49 +101,124 @@ describe("mindControlsFor", () => {
   });
 
   it("keeps the controls through a reconnect, which is not a loss of state", () => {
-    expect(mindControlsFor({ supports_shutdown: true }, "RUNNING", "reconnecting").isStopShown).toBe(true);
+    expect(
+      mindControlsFor({ supports_shutdown: true }, "RUNNING", "reconnecting")
+        .isStopShown,
+    ).toBe(true);
   });
 });
 
 describe("rowClickActionFor", () => {
   it("blocks a cloud machine this device holds no key for, whatever its health or liveness", () => {
-    expect(rowClickActionFor({ supports_shutdown: true, key_state: "locked" }, "RUNNING", true)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, key_state: "syncing" }, "RUNNING", false)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, key_state: "unavailable" }, "STOPPED", true)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, key_state: "" }, "RUNNING", true)).toBe("enter");
+    expect(
+      rowClickActionFor(
+        { supports_shutdown: true, key_state: "locked" },
+        "RUNNING",
+        true,
+      ),
+    ).toBe("blocked");
+    expect(
+      rowClickActionFor(
+        { supports_shutdown: true, key_state: "syncing" },
+        "RUNNING",
+        false,
+      ),
+    ).toBe("blocked");
+    expect(
+      rowClickActionFor(
+        { supports_shutdown: true, key_state: "unavailable" },
+        "STOPPED",
+        true,
+      ),
+    ).toBe("blocked");
+    expect(
+      rowClickActionFor(
+        { supports_shutdown: true, key_state: "" },
+        "RUNNING",
+        true,
+      ),
+    ).toBe("enter");
   });
 
   it("routes an unhealthy machine to recovery regardless of liveness", () => {
-    expect(rowClickActionFor({ supports_shutdown: true }, "STOPPED", false)).toBe("recover");
-    expect(rowClickActionFor({ supports_shutdown: false }, "RUNNING", false)).toBe("recover");
+    expect(
+      rowClickActionFor({ supports_shutdown: true }, "STOPPED", false),
+    ).toBe("recover");
+    expect(
+      rowClickActionFor({ supports_shutdown: false }, "RUNNING", false),
+    ).toBe("recover");
   });
 
   it("auto-starts any stopped shutdown-capable machine through recovery", () => {
     // Cloud machines included: recovery's start step shares the Start/Stop
     // buttons' generous budget, so even a minutes-long restore is handled.
-    expect(rowClickActionFor({ supports_shutdown: true }, "STOPPED", true)).toBe("recover-start");
+    expect(
+      rowClickActionFor({ supports_shutdown: true }, "STOPPED", true),
+    ).toBe("recover-start");
   });
 
   it("enters a running or non-shutdown-capable machine directly", () => {
-    expect(rowClickActionFor({ supports_shutdown: true }, "RUNNING", true)).toBe("enter");
-    expect(rowClickActionFor({ supports_shutdown: false }, "STOPPED", true)).toBe("enter");
+    expect(
+      rowClickActionFor({ supports_shutdown: true }, "RUNNING", true),
+    ).toBe("enter");
+    expect(
+      rowClickActionFor({ supports_shutdown: false }, "STOPPED", true),
+    ).toBe("enter");
     expect(rowClickActionFor({}, "UNKNOWN", true)).toBe("enter");
   });
 
   it("blocks the row of a held machine and routes an idle-stopped one to the start", () => {
-    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "maintenance" }, "STOPPED", true)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "retired" }, "STOPPED", true)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "maintenance" }, "STOPPING", false)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "unknown" }, "STOPPED", true)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "idle" }, "STOPPED", true)).toBe("recover-start");
-    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "maintenance" }, "RUNNING", true)).toBe("enter");
+    expect(
+      rowClickActionFor(
+        { supports_shutdown: true, stop_kind: "maintenance" },
+        "STOPPED",
+        true,
+      ),
+    ).toBe("blocked");
+    expect(
+      rowClickActionFor(
+        { supports_shutdown: true, stop_kind: "retired" },
+        "STOPPED",
+        true,
+      ),
+    ).toBe("blocked");
+    expect(
+      rowClickActionFor(
+        { supports_shutdown: true, stop_kind: "maintenance" },
+        "STOPPING",
+        false,
+      ),
+    ).toBe("blocked");
+    expect(
+      rowClickActionFor(
+        { supports_shutdown: true, stop_kind: "unknown" },
+        "STOPPED",
+        true,
+      ),
+    ).toBe("blocked");
+    expect(
+      rowClickActionFor(
+        { supports_shutdown: true, stop_kind: "idle" },
+        "STOPPED",
+        true,
+      ),
+    ).toBe("recover-start");
+    expect(
+      rowClickActionFor(
+        { supports_shutdown: true, stop_kind: "maintenance" },
+        "RUNNING",
+        true,
+      ),
+    ).toBe("enter");
   });
 });
 
 describe("livenessBadgeLabelFor", () => {
   it("says Maintenance for a held machine that is stopped or stopping, and the lifecycle label otherwise", () => {
     expect(livenessBadgeLabelFor("STOPPED", "maintenance")).toBe("Maintenance");
-    expect(livenessBadgeLabelFor("STOPPING", "maintenance")).toBe("Maintenance");
+    expect(livenessBadgeLabelFor("STOPPING", "maintenance")).toBe(
+      "Maintenance",
+    );
     expect(livenessBadgeLabelFor("STARTING", "maintenance")).toBe("Starting…");
     expect(livenessBadgeLabelFor("STOPPED", "retired")).toBe("Retired");
     expect(livenessBadgeLabelFor("STOPPING", "retired")).toBe("Retired");
@@ -131,9 +231,13 @@ describe("livenessBadgeLabelFor", () => {
 
 describe("keyStateChipFor", () => {
   it("names the remedy for each state and nothing for a machine this device can open", () => {
-    expect(keyStateChipFor("locked")?.label).toBe("Enter your master password to open");
+    expect(keyStateChipFor("locked")?.label).toBe(
+      "Enter your master password to open",
+    );
     expect(keyStateChipFor("syncing")?.label).toBe("Syncing access…");
-    expect(keyStateChipFor("unavailable")?.label).toBe("No access from this device");
+    expect(keyStateChipFor("unavailable")?.label).toBe(
+      "No access from this device",
+    );
     expect(keyStateChipFor("")).toBeNull();
   });
 });
@@ -163,7 +267,9 @@ describe("lifecycleConfirmation", () => {
 
   it("asks before a restart only mid-apply", () => {
     expect(lifecycleConfirmation("restart", "Fox", false)).toBeNull();
-    expect(lifecycleConfirmation("restart", "Fox", true)).toContain("half-updated");
+    expect(lifecycleConfirmation("restart", "Fox", true)).toContain(
+      "half-updated",
+    );
   });
 });
 
@@ -176,31 +282,43 @@ describe("healthBadgeLabelFor", () => {
     // The start the app dispatches on its own is start-only and idempotent, so
     // against a machine whose host is up it does nothing. Calling that a
     // restart tells the user their work was interrupted when it was not.
-    expect(healthBadgeLabelFor("recovering", false, "start", false)).toBe("Reconnecting...");
+    expect(healthBadgeLabelFor("recovering", false, "start", false)).toBe(
+      "Reconnecting...",
+    );
   });
 
   it("calls the user's own full bounce a restart", () => {
     // A stop+start is only ever dispatched by a click, and it really does
     // interrupt the machine -- so here the stronger word is the honest one.
-    expect(healthBadgeLabelFor("recovering", false, "restart", false)).toBe("Restarting...");
+    expect(healthBadgeLabelFor("recovering", false, "restart", false)).toBe(
+      "Restarting...",
+    );
   });
 
   it("takes the weaker reading for a recovery the tracker cannot describe", () => {
     // No kind reported yet (or the episode ended under the frame): there is no
     // evidence for the claim that work was interrupted, so it is not made.
-    expect(healthBadgeLabelFor("recovering", false, null, false)).toBe("Reconnecting...");
+    expect(healthBadgeLabelFor("recovering", false, null, false)).toBe(
+      "Reconnecting...",
+    );
   });
 
   it("does not blame a restart that never ran", () => {
     // Same start, one step later: it reported that it booted nothing, so the
     // machine is unresponsive and no restart failed. Only a start that really
     // booted the host keeps the restart framing.
-    expect(healthBadgeLabelFor("recovery_failed", true, null, false)).toBe("Not responding");
-    expect(healthBadgeLabelFor("recovery_failed", false, null, false)).toBe("Restart failed");
+    expect(healthBadgeLabelFor("recovery_failed", true, null, false)).toBe(
+      "Not responding",
+    );
+    expect(healthBadgeLabelFor("recovery_failed", false, null, false)).toBe(
+      "Restart failed",
+    );
   });
 
   it("keeps the still-checking state distinct from both", () => {
-    expect(healthBadgeLabelFor("stuck", false, null, false)).toBe("Server not responding");
+    expect(healthBadgeLabelFor("stuck", false, null, false)).toBe(
+      "Server not responding",
+    );
   });
 
   it("names this device wherever the machine's own reading would blame the machine", () => {
@@ -208,10 +326,18 @@ describe("healthBadgeLabelFor", () => {
     // and the device verdict contradicts all of them at once: nothing was ever
     // sent to the machine, so a failed restart, an unresponsive server and a
     // reconnect in progress are all describing the wrong end of the connection.
-    expect(healthBadgeLabelFor("recovery_failed", false, null, true)).toBe("Can't connect from this device");
-    expect(healthBadgeLabelFor("recovery_failed", true, null, true)).toBe("Can't connect from this device");
-    expect(healthBadgeLabelFor("stuck", false, null, true)).toBe("Can't connect from this device");
-    expect(healthBadgeLabelFor("recovering", false, "restart", true)).toBe("Can't connect from this device");
+    expect(healthBadgeLabelFor("recovery_failed", false, null, true)).toBe(
+      "Can't connect from this device",
+    );
+    expect(healthBadgeLabelFor("recovery_failed", true, null, true)).toBe(
+      "Can't connect from this device",
+    );
+    expect(healthBadgeLabelFor("stuck", false, null, true)).toBe(
+      "Can't connect from this device",
+    );
+    expect(healthBadgeLabelFor("recovering", false, "restart", true)).toBe(
+      "Can't connect from this device",
+    );
   });
 
   it("says nothing about a machine that is answering, whatever failed earlier", () => {
@@ -316,15 +442,20 @@ describe("backupsControlFor", () => {
 
 describe("removeRecordFailureMessage", () => {
   it("relays the server's own explanation for a refused removal", () => {
-    const refusal = "This workspace's machine still holds its cloud lease, so its record cannot be removed; destroy the workspace instead.";
+    const refusal =
+      "This workspace's machine still holds its cloud lease, so its record cannot be removed; destroy the workspace instead.";
     expect(removeRecordFailureMessage(409, { error: refusal })).toBe(
       `Could not remove this workspace from the list: ${refusal}`,
     );
   });
 
   it("falls back to the status when the response carries no explanation", () => {
-    expect(removeRecordFailureMessage(502, null)).toBe("Could not remove this workspace from the list: HTTP 502");
-    expect(removeRecordFailureMessage(404, {})).toBe("Could not remove this workspace from the list: HTTP 404");
+    expect(removeRecordFailureMessage(502, null)).toBe(
+      "Could not remove this workspace from the list: HTTP 502",
+    );
+    expect(removeRecordFailureMessage(404, {})).toBe(
+      "Could not remove this workspace from the list: HTTP 404",
+    );
   });
 
   it("names a request that never got an answer", () => {

@@ -56,7 +56,13 @@ export interface SignInBrowserOption {
 }
 
 export type SettingsSection =
-  "notifications" | "display" | "browser-import" | "error-reporting" | "updates" | "sign-ins" | "backups";
+  | "notifications"
+  | "display"
+  | "browser-import"
+  | "error-reporting"
+  | "updates"
+  | "sign-ins"
+  | "backups";
 
 export const SETTINGS_SECTIONS: {
   name: SettingsSection;
@@ -74,7 +80,9 @@ export const SETTINGS_SECTIONS: {
 
 /** The zoom sizes the Display panel offers; mirrors ZOOM_PERCENTS in
  * electron/display-zoom.js, which is what the main process accepts. */
-export const DISPLAY_ZOOM_PERCENTS: number[] = [80, 90, 100, 110, 125, 150, 175, 200];
+export const DISPLAY_ZOOM_PERCENTS: number[] = [
+  80, 90, 100, 110, 125, 150, 175, 200,
+];
 
 export const DEFAULT_DISPLAY_ZOOM_PERCENT = 100;
 
@@ -281,12 +289,15 @@ export class SettingsModel {
     if (this.overview === null) return;
     this.signInBrowserError = "";
     try {
-      const response = await this.fetchImpl("/ui/api/settings/sign-in-browser", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ browser_id: browserId }),
-      });
+      const response = await this.fetchImpl(
+        "/ui/api/settings/sign-in-browser",
+        {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ browser_id: browserId }),
+        },
+      );
       if (response.ok) {
         const latest = this.overview;
         if (latest === null) return;
@@ -496,7 +507,8 @@ export class SettingsModel {
     try {
       this.displayZoomPercent = await electronBridge.getDisplayZoom();
     } catch (error) {
-      this.displayZoomError = error instanceof Error ? error.message : String(error);
+      this.displayZoomError =
+        error instanceof Error ? error.message : String(error);
     }
     this.redraw();
   }
@@ -510,7 +522,8 @@ export class SettingsModel {
       const applied = await electronBridge.setDisplayZoom(percent);
       if (applied !== null) this.displayZoomPercent = applied;
     } catch (error) {
-      this.displayZoomError = error instanceof Error ? error.message : String(error);
+      this.displayZoomError =
+        error instanceof Error ? error.message : String(error);
     }
     this.redraw();
   }

@@ -1,8 +1,6 @@
 'use strict';
 
 // Unit tests for the immersive-mode decisions (electron/immersive-policy.js).
-// What is NOT covered here (main.js wiring): installing the session handlers,
-// setIgnoreMenuShortcuts, and the before-input-event relay itself.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');

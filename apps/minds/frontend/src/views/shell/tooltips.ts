@@ -61,14 +61,23 @@ export function computeTooltipPosition(
     top = above;
     // Drop below only when there is no room above AND the bubble fits there;
     // otherwise keep it above and let the clamp handle it.
-    if (above < TOOLTIP_MARGIN && below + bubble.height <= viewport.height - TOOLTIP_MARGIN) top = below;
+    if (
+      above < TOOLTIP_MARGIN &&
+      below + bubble.height <= viewport.height - TOOLTIP_MARGIN
+    )
+      top = below;
   } else {
     top = below;
     // Flip above the trigger if the bubble would spill past the bottom edge and
     // there is room above; otherwise keep it below and let the clamp handle it.
-    if (below + bubble.height > viewport.height - TOOLTIP_MARGIN && above >= TOOLTIP_MARGIN) top = above;
+    if (
+      below + bubble.height > viewport.height - TOOLTIP_MARGIN &&
+      above >= TOOLTIP_MARGIN
+    )
+      top = above;
   }
-  if (left + bubble.width > viewport.width - TOOLTIP_MARGIN) left = viewport.width - TOOLTIP_MARGIN - bubble.width;
+  if (left + bubble.width > viewport.width - TOOLTIP_MARGIN)
+    left = viewport.width - TOOLTIP_MARGIN - bubble.width;
   if (left < TOOLTIP_MARGIN) left = TOOLTIP_MARGIN;
   if (top < TOOLTIP_MARGIN) top = TOOLTIP_MARGIN;
   return { left, top };
@@ -160,8 +169,12 @@ export function installTooltips(doc: Document = document): () => void {
     b.style.opacity = "0";
     b.style.transform = `translateY(-${TOOLTIP_SLIDE_PX}px)`;
     const measured = b.getBoundingClientRect();
-    const size: Size = { width: Math.ceil(measured.width), height: Math.ceil(measured.height) };
-    const placement: TooltipPlacement = el.getAttribute("data-tooltip-placement") === "above" ? "above" : "below";
+    const size: Size = {
+      width: Math.ceil(measured.width),
+      height: Math.ceil(measured.height),
+    };
+    const placement: TooltipPlacement =
+      el.getAttribute("data-tooltip-placement") === "above" ? "above" : "below";
     const pos = computeTooltipPosition(
       el.getBoundingClientRect(),
       size,

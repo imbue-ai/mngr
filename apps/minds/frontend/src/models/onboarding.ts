@@ -34,7 +34,8 @@ export class OnboardingProgress {
 /** One copy for the window: every page reads and flips the same value. */
 export const onboardingProgress = new OnboardingProgress();
 
-export const REPORTING_CONSENT_QUESTION = "Is it ok if we report data to help improve Studio?";
+export const REPORTING_CONSENT_QUESTION =
+  "Is it ok if we report data to help improve Studio?";
 
 /** POST the answer to the error-reporting question (whether error data may be reported); resolves true when
  *  it was recorded. */
@@ -65,7 +66,9 @@ export async function markOnboardingComplete(
 ): Promise<boolean> {
   progress.markComplete();
   try {
-    const response = await fetcher("/ui/api/onboarding/complete", { method: "POST" });
+    const response = await fetcher("/ui/api/onboarding/complete", {
+      method: "POST",
+    });
     return response.ok;
   } catch {
     return false;

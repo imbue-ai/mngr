@@ -137,7 +137,8 @@ function main(): void {
     },
     onBringAppToFront: (message) => {
       // Every window gets the frame; only the one showing the workspace that signed in comes forward.
-      if (shell.isWorkspaceFrameOn(message.agent_id)) electronBridge.bringAppToFront();
+      if (shell.isWorkspaceFrameOn(message.agent_id))
+        electronBridge.bringAppToFront();
     },
     onOpenHelp: (message) => {
       // An in-workspace agent escalated its diagnosis. In Electron, main
@@ -157,7 +158,9 @@ function main(): void {
       // unlike the pre-SPA content-view reload.
       shell.reloadWorkspaceFrame(
         message.agent_id,
-        message.loaded_before == null ? null : Date.parse(message.loaded_before),
+        message.loaded_before == null
+          ? null
+          : Date.parse(message.loaded_before),
       );
     },
   });
@@ -212,11 +215,14 @@ function main(): void {
   // page before the window is destroyed.
   electronBridge.onReattachPopoutWindow((ask) => {
     void shell.handleReattachPopoutWindow(ask).then((isReportedBack) => {
-      if (isReportedBack) electronBridge.popoutWindowReturned(ask.workspaceId, ask.windowId);
+      if (isReportedBack)
+        electronBridge.popoutWindowReturned(ask.workspaceId, ask.windowId);
     });
   });
   electronBridge.onPopoutReattachRequest(() => {
-    void shell.returnPopoutToDesktop(null).then(() => electronBridge.popoutReattached());
+    void shell
+      .returnPopoutToDesktop(null)
+      .then(() => electronBridge.popoutReattached());
   });
   electronBridge.onPopoutDropTarget((isOver) => {
     shell.setPopoutDropTarget(isOver);

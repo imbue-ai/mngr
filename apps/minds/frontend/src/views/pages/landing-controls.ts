@@ -10,7 +10,11 @@
 // is worse than no action offered.
 
 import type { UiWorkspaceEntry } from "../../channel/messages";
-import type { DiscoveryHealth, RecoveryKind, WorkspaceHealth } from "../../models/health";
+import type {
+  DiscoveryHealth,
+  RecoveryKind,
+  WorkspaceHealth,
+} from "../../models/health";
 import type { MindLiveness } from "../../models/create";
 import { MIND_LIVENESS_LABELS } from "../../models/create";
 
@@ -28,7 +32,8 @@ export function isOwnerStartableStopKind(stopKind: string): boolean {
 
 /** The sentence a held machine's surfaces show; the connector answers a
  * refused start with the same words, so the two never disagree. */
-export const MAINTENANCE_MESSAGE = "This workspace is undergoing maintenance and will be back shortly.";
+export const MAINTENANCE_MESSAGE =
+  "This workspace is undergoing maintenance and will be back shortly.";
 
 /** The sentence a retired machine's surfaces show: it never runs again, and
  * its data lives in its backups (or in an archive support hands out). The
@@ -40,7 +45,10 @@ export const RETIRED_MESSAGE =
 /** What the liveness badge says: the lifecycle label, except that a machine an
  * operator is holding says so instead of "Stopped" (the badge is the one
  * place the row explains why Start is missing). */
-export function livenessBadgeLabelFor(liveness: string, stopKind: string): string {
+export function livenessBadgeLabelFor(
+  liveness: string,
+  stopKind: string,
+): string {
   if (isMaintenanceHold(liveness, stopKind)) return "Maintenance";
   if (isRetiredHold(liveness, stopKind)) return "Retired";
   return MIND_LIVENESS_LABELS[liveness] ?? "Status unknown";
@@ -50,14 +58,20 @@ export function livenessBadgeLabelFor(liveness: string, stopKind: string): strin
  * maintenance hold: the badge and the notice band name it (the suspension
  * hold reads as a plain "Stopped"). */
 export function isMaintenanceHold(liveness: string, stopKind: string): boolean {
-  return stopKind === "maintenance" && (liveness === "STOPPED" || liveness === "STOPPING");
+  return (
+    stopKind === "maintenance" &&
+    (liveness === "STOPPED" || liveness === "STOPPING")
+  );
 }
 
 /** Whether a machine is stopped, or on its way there, as a retired one: the
  * badge and the notice band name it too, since the user's next step (the
  * backups) differs from waiting out a maintenance hold. */
 export function isRetiredHold(liveness: string, stopKind: string): boolean {
-  return stopKind === "retired" && (liveness === "STOPPED" || liveness === "STOPPING");
+  return (
+    stopKind === "retired" &&
+    (liveness === "STOPPED" || liveness === "STOPPING")
+  );
 }
 
 /** Whether the app has any current reading of a machine's state at all. */
@@ -70,9 +84,13 @@ export function mindControlsFor(
   liveness: MindLiveness,
   discoveryHealth: DiscoveryHealth,
 ): MindControls {
-  const isShutdownSupported = (entry.supports_shutdown ?? false) && isMachineStateKnown(discoveryHealth);
+  const isShutdownSupported =
+    (entry.supports_shutdown ?? false) && isMachineStateKnown(discoveryHealth);
   return {
-    isStartShown: isShutdownSupported && liveness === "STOPPED" && isOwnerStartableStopKind(entry.stop_kind ?? ""),
+    isStartShown:
+      isShutdownSupported &&
+      liveness === "STOPPED" &&
+      isOwnerStartableStopKind(entry.stop_kind ?? ""),
     isStopShown: isShutdownSupported && liveness === "RUNNING",
   };
 }
@@ -81,8 +99,12 @@ export function mindControlsFor(
  * null status is a request that never got an answer; otherwise the server's
  * own explanation is used when it gave one (a refused removal names the live
  * lease and points at destroy), else the status. */
-export function removeRecordFailureMessage(status: number | null, body: { error?: string } | null): string {
-  if (status === null) return "Could not remove this workspace from the list (the request failed).";
+export function removeRecordFailureMessage(
+  status: number | null,
+  body: { error?: string } | null,
+): string {
+  if (status === null)
+    return "Could not remove this workspace from the list (the request failed).";
   const detail = body?.error ?? `HTTP ${status}`;
   return `Could not remove this workspace from the list: ${detail}`;
 }
@@ -91,14 +113,19 @@ export function removeRecordFailureMessage(status: number | null, body: { error?
  * that is preparing leaves the live machine untouched, so it changes nothing
  * here; only the apply is rewriting the machine, and stopping under it is
  * what leaves one half-updated -- so that is the one case the question names. */
-export function lifecycleConfirmation(action: "stop" | "restart", name: string, isApplying: boolean): string | null {
+export function lifecycleConfirmation(
+  action: "stop" | "restart",
+  name: string,
+  isApplying: boolean,
+): string | null {
   if (action === "restart") {
     return isApplying
       ? `Restart "${name}"? An update is being applied to it right now, and restarting can leave it half-updated. ` +
           "Restart anyway?"
       : null;
   }
-  const consequence = "Its agents will stop and its services become inaccessible. Data is preserved and you can start it again.";
+  const consequence =
+    "Its agents will stop and its services become inaccessible. Data is preserved and you can start it again.";
   return isApplying
     ? `Stop "${name}"? An update is being applied to it right now, and stopping can leave it half-updated. ` +
         `${consequence} Stop anyway?`
@@ -116,7 +143,10 @@ export type RowClickAction = "enter" | "recover" | "recover-start" | "blocked";
 // matters) so callers without a MindLivenessTracker (e.g. CreateTemplatePage)
 // can pass the entry's raw liveness field directly.
 export function rowClickActionFor(
-  entry: Pick<UiWorkspaceEntry, "supports_shutdown" | "key_state" | "stop_kind">,
+  entry: Pick<
+    UiWorkspaceEntry,
+    "supports_shutdown" | "key_state" | "stop_kind"
+  >,
   liveness: string,
   isHealthy: boolean,
 ): RowClickAction {
@@ -128,7 +158,8 @@ export function rowClickActionFor(
   // nowhere useful to go: no Start is offered, and a maintenance hold is
   // named by the badge (the other holds read as plain "Stopped").
   const isStoppedOnPurposeByOthers =
-    (liveness === "STOPPED" || liveness === "STOPPING") && !isOwnerStartableStopKind(entry.stop_kind ?? "");
+    (liveness === "STOPPED" || liveness === "STOPPING") &&
+    !isOwnerStartableStopKind(entry.stop_kind ?? "");
   if (isStoppedOnPurposeByOthers) return "blocked";
   if (!isHealthy) return "recover";
   if ((entry.supports_shutdown ?? false) && liveness === "STOPPED") {
@@ -184,7 +215,8 @@ export function healthBadgeLabelFor(
   if (health === "healthy") return null;
   if (isDeviceCannotConnect) return "Can't connect from this device";
   if (health === "stuck") return "Server not responding";
-  if (health === "recovering") return recoveryKind === "restart" ? "Restarting..." : "Reconnecting...";
+  if (health === "recovering")
+    return recoveryKind === "restart" ? "Restarting..." : "Reconnecting...";
   return isRecoveryANoOp ? "Not responding" : "Restart failed";
 }
 
@@ -239,17 +271,20 @@ export function keyStateChipFor(keyState: string): KeyStateChip | null {
     case "locked":
       return {
         label: "Enter your master password to open",
-        tooltip: "This workspace's access key is synced to your account; unlock it above to open the workspace here",
+        tooltip:
+          "This workspace's access key is synced to your account; unlock it above to open the workspace here",
       };
     case "syncing":
       return {
         label: "Syncing access…",
-        tooltip: "This workspace's access key has not reached this device yet; it arrives with the next sync",
+        tooltip:
+          "This workspace's access key has not reached this device yet; it arrives with the next sync",
       };
     case "unavailable":
       return {
         label: "No access from this device",
-        tooltip: "This workspace's access key was never synced: set a master password on the device that created it",
+        tooltip:
+          "This workspace's access key was never synced: set a master password on the device that created it",
       };
     default:
       return null;

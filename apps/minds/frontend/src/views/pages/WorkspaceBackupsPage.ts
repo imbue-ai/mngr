@@ -26,13 +26,17 @@ interface WorkspaceBackupsState {
   onBecameObservable: () => void;
 }
 
-export const WorkspaceBackupsPage: m.Component<Record<string, never>, WorkspaceBackupsState> = {
+export const WorkspaceBackupsPage: m.Component<
+  Record<string, never>,
+  WorkspaceBackupsState
+> = {
   oninit(vnode) {
     const agentId = m.route.param("agentId");
     const deps = browserLifecycleDeps(() => m.redraw());
     vnode.state.history = new BackupHistoryModel(agentId, deps);
     vnode.state.controller = new BackupOperationController(agentId, deps);
-    vnode.state.controller.onSuccess = () => void vnode.state.history.loadPage();
+    vnode.state.controller.onSuccess = () =>
+      void vnode.state.history.loadPage();
     vnode.state.pendingRestoreSnapshot = null;
     // The server is the single source of truth; re-validate exactly when the
     // page becomes observable again (an operation may have been started from
@@ -40,14 +44,20 @@ export const WorkspaceBackupsPage: m.Component<Record<string, never>, WorkspaceB
     vnode.state.onBecameObservable = () => {
       if (!document.hidden) void vnode.state.controller.reattach();
     };
-    document.addEventListener("visibilitychange", vnode.state.onBecameObservable);
+    document.addEventListener(
+      "visibilitychange",
+      vnode.state.onBecameObservable,
+    );
     window.addEventListener("focus", vnode.state.onBecameObservable);
     void vnode.state.controller.reattach();
     void vnode.state.history.loadPage();
     void vnode.state.history.fetchCheckState();
   },
   onremove(vnode) {
-    document.removeEventListener("visibilitychange", vnode.state.onBecameObservable);
+    document.removeEventListener(
+      "visibilitychange",
+      vnode.state.onBecameObservable,
+    );
     window.removeEventListener("focus", vnode.state.onBecameObservable);
     vnode.state.controller.stop();
   },
@@ -62,7 +72,11 @@ export const WorkspaceBackupsPage: m.Component<Record<string, never>, WorkspaceB
         m("h1", { class: "type-heading-lg" }, "Backups"),
         m(OperationStrip, { controller }),
         history.statusMessage !== null
-          ? m("div", { class: "type-body text-secondary" }, history.statusMessage)
+          ? m(
+              "div",
+              { class: "type-body text-secondary" },
+              history.statusMessage,
+            )
           : m(Card, { padding: "tight" }, [
               m(SnapshotTable, {
                 agentId: history.agentId,
@@ -76,16 +90,28 @@ export const WorkspaceBackupsPage: m.Component<Record<string, never>, WorkspaceB
             ]),
         history.statusMessage === null && history.isPaginationShown
           ? m("div", { class: "flex items-center justify-between" }, [
-              m("span", { class: "type-helper text-tertiary" }, history.rangeText),
+              m(
+                "span",
+                { class: "type-helper text-tertiary" },
+                history.rangeText,
+              ),
               m("div", { class: "flex items-center gap-2" }, [
                 m(
                   Button,
-                  { variant: "secondary", disabled: !history.canGoNewer, onclick: () => history.goNewer() },
+                  {
+                    variant: "secondary",
+                    disabled: !history.canGoNewer,
+                    onclick: () => history.goNewer(),
+                  },
                   "Newer",
                 ),
                 m(
                   Button,
-                  { variant: "secondary", disabled: !history.canGoOlder, onclick: () => history.goOlder() },
+                  {
+                    variant: "secondary",
+                    disabled: !history.canGoOlder,
+                    onclick: () => history.goOlder(),
+                  },
                   "Older",
                 ),
               ]),
@@ -98,9 +124,13 @@ export const WorkspaceBackupsPage: m.Component<Record<string, never>, WorkspaceB
           },
           onConfirm: (snapshot, choices) => {
             vnode.state.pendingRestoreSnapshot = null;
-            controller.startRestore(snapshot, formatRelativeAgo(snapshot.time, Date.now()), {
-              updateAfter: choices.updateAfter,
-            });
+            controller.startRestore(
+              snapshot,
+              formatRelativeAgo(snapshot.time, Date.now()),
+              {
+                updateAfter: choices.updateAfter,
+              },
+            );
           },
         }),
       ]),

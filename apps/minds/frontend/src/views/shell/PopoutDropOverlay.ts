@@ -16,7 +16,10 @@ export const PopoutDropOverlay: m.Component = {
       },
       m(
         "div",
-        { class: "rounded-md bg-surface-primary px-4 py-2 shadow-raised type-label text-primary" },
+        {
+          class:
+            "rounded-md bg-surface-primary px-4 py-2 shadow-raised type-label text-primary",
+        },
         "Drop to return this window to the desktop",
       ),
     );

@@ -849,8 +849,6 @@ class CreateCliOptions(CommonCliOptions):
     def _normalize_publish(cls, value: object) -> object:
         # A template's TOML naturally writes a bare port as an integer (``publish = [59000]``);
         # the declaration parser reads strings, so each value is spelled out before validation.
-        # Anything but a list is left to the field's own validation (a bare string must not
-        # be split into its characters).
         if isinstance(value, (list, tuple)):
             return tuple(str(item) for item in value)
         return value

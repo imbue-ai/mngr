@@ -229,9 +229,7 @@ class LocalProviderInstance(BaseProviderInstance):
             mngr_ctx=self.mngr_ctx,
         )
 
-    # =========================================================================
     # Core Lifecycle Methods
-    # =========================================================================
 
     def create_host(
         self,
@@ -318,9 +316,7 @@ class LocalProviderInstance(BaseProviderInstance):
     def on_connection_error(self, host_id: HostId) -> None:
         pass
 
-    # =========================================================================
     # Discovery Methods
-    # =========================================================================
 
     def get_host(
         self,
@@ -365,9 +361,7 @@ class LocalProviderInstance(BaseProviderInstance):
         logger.trace("Discovered hosts for local provider {}", self.name)
         return [host_ref]
 
-    # =========================================================================
     # Snapshot Methods
-    # =========================================================================
 
     def create_snapshot(
         self,
@@ -404,9 +398,7 @@ class LocalProviderInstance(BaseProviderInstance):
         """
         raise SnapshotsNotSupportedError(self.name)
 
-    # =========================================================================
     # Volume Methods
-    # =========================================================================
 
     @staticmethod
     def _volume_id_for_dir(dir_name: str) -> VolumeId:
@@ -470,9 +462,7 @@ class LocalProviderInstance(BaseProviderInstance):
         self.host_dir.mkdir(parents=True, exist_ok=True)
         return HostVolume(volume=LocalVolume(root_path=self.host_dir))
 
-    # =========================================================================
     # Host Mutation Methods
-    # =========================================================================
 
     def get_host_tags(
         self,
@@ -524,9 +514,7 @@ class LocalProviderInstance(BaseProviderInstance):
         host_obj.set_certified_data(recorded.model_copy_update(to_update(recorded.field_ref().host_name, str(name))))
         return self._create_host(name)
 
-    # =========================================================================
     # Connector Method
-    # =========================================================================
 
     def get_connector(
         self,
@@ -535,9 +523,7 @@ class LocalProviderInstance(BaseProviderInstance):
         """Get the pyinfra connector for the local host."""
         return self._create_local_pyinfra_host()
 
-    # =========================================================================
     # Resource Methods (used by Host)
-    # =========================================================================
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         """Get resource information for the local host.

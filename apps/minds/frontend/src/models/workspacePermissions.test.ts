@@ -59,7 +59,12 @@ interface StubResponse {
   body: unknown;
 }
 
-function makeModel(responder: (url: string, init?: RequestInit) => StubResponse | Promise<StubResponse>): {
+function makeModel(
+  responder: (
+    url: string,
+    init?: RequestInit,
+  ) => StubResponse | Promise<StubResponse>,
+): {
   model: PermissionsModel;
   requests: RecordedRequest[];
   redrawCount: () => number;
@@ -71,7 +76,10 @@ function makeModel(responder: (url: string, init?: RequestInit) => StubResponse 
       requests.push({
         url,
         method: init?.method ?? "GET",
-        body: typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : null,
+        body:
+          typeof init?.body === "string"
+            ? (JSON.parse(init.body) as unknown)
+            : null,
       });
       return Promise.resolve(responder(url, init));
     },
@@ -94,17 +102,33 @@ describe("resolvePermissionsSection", () => {
   it("keeps Waiting on you selected while something is waiting", () => {
     const view = permissionsView({
       connections: [slackConnection()],
-      waiting_requests: [{ id: "evt-1", title: "Read messages", reason: "", service_name: "slack" }],
+      waiting_requests: [
+        {
+          id: "evt-1",
+          title: "Read messages",
+          reason: "",
+          service_name: "slack",
+        },
+      ],
     });
 
-    expect(resolvePermissionsSection(view, WAITING_SECTION)).toBe(WAITING_SECTION);
+    expect(resolvePermissionsSection(view, WAITING_SECTION)).toBe(
+      WAITING_SECTION,
+    );
   });
 
   it("leads with it when nothing else was asked for", () => {
     // A pending request is the one thing in the pane waiting on an answer.
     const view = permissionsView({
       connections: [slackConnection()],
-      waiting_requests: [{ id: "evt-1", title: "Read messages", reason: "", service_name: "slack" }],
+      waiting_requests: [
+        {
+          id: "evt-1",
+          title: "Read messages",
+          reason: "",
+          service_name: "slack",
+        },
+      ],
     });
 
     expect(resolvePermissionsSection(view, null)).toBe(WAITING_SECTION);
@@ -113,9 +137,14 @@ describe("resolvePermissionsSection", () => {
   it("gives it up once the last request has been answered", () => {
     // Answering the last one has to leave, not sit on an empty list -- which
     // is what a section that stayed valid with nothing in it would do.
-    const view = permissionsView({ connections: [slackConnection()], waiting_requests: [] });
+    const view = permissionsView({
+      connections: [slackConnection()],
+      waiting_requests: [],
+    });
 
-    expect(resolvePermissionsSection(view, WAITING_SECTION)).not.toBe(WAITING_SECTION);
+    expect(resolvePermissionsSection(view, WAITING_SECTION)).not.toBe(
+      WAITING_SECTION,
+    );
   });
 });
 
@@ -126,7 +155,9 @@ describe("PermissionsModel loading", () => {
 
     await model.load();
 
-    expect(requests).toEqual([{ url: PERMISSIONS_URL, method: "GET", body: null }]);
+    expect(requests).toEqual([
+      { url: PERMISSIONS_URL, method: "GET", body: null },
+    ]);
     expect(model.status).toBe("ready");
     expect(model.data).toEqual(view);
     expect(model.errorMessage).toBe("");
@@ -138,7 +169,11 @@ describe("PermissionsModel loading", () => {
     // starting a second one and watching "Loading permissions..." again.
     const view = permissionsView();
     const { model, requests } = makeModel(() => okWith(permissionsView()));
-    warmPermissionsOverview(AGENT_ID, async () => ({ ok: true, status: 200, body: view }));
+    warmPermissionsOverview(AGENT_ID, async () => ({
+      ok: true,
+      status: 200,
+      body: view,
+    }));
 
     await model.load();
 
@@ -152,16 +187,26 @@ describe("PermissionsModel loading", () => {
     // What the pane shows changes as grants are made and requests arrive, so a
     // warm answers the open it was started for and nothing after it.
     const { model, requests } = makeModel(() => okWith(permissionsView()));
-    warmPermissionsOverview(AGENT_ID, async () => ({ ok: true, status: 200, body: permissionsView() }));
+    warmPermissionsOverview(AGENT_ID, async () => ({
+      ok: true,
+      status: 200,
+      body: permissionsView(),
+    }));
     await model.load();
 
     await model.load();
 
-    expect(requests).toEqual([{ url: PERMISSIONS_URL, method: "GET", body: null }]);
+    expect(requests).toEqual([
+      { url: PERMISSIONS_URL, method: "GET", body: null },
+    ]);
   });
 
   it("surfaces the server's message and keeps no data when the read fails", async () => {
-    const { model } = makeModel(() => ({ ok: false, status: 503, body: { error: "gateway is down" } }));
+    const { model } = makeModel(() => ({
+      ok: false,
+      status: 503,
+      body: { error: "gateway is down" },
+    }));
 
     await model.load();
 
@@ -184,7 +229,13 @@ describe("PermissionsModel loading", () => {
 
   it("keeps the unavailable flag rather than degrading it to an empty tree", async () => {
     const { model } = makeModel(() =>
-      okWith(permissionsView({ connections: [], available_connections: [], permissions_unavailable: true })),
+      okWith(
+        permissionsView({
+          connections: [],
+          available_connections: [],
+          permissions_unavailable: true,
+        }),
+      ),
     );
 
     await model.load();
@@ -196,7 +247,9 @@ describe("PermissionsModel loading", () => {
 
 describe("PermissionsModel writes", () => {
   it("posts only the flipped connector permission and adopts the returned view", async () => {
-    const refreshed = permissionsView({ connections: [slackConnection({ granted_count: 2 })] });
+    const refreshed = permissionsView({
+      connections: [slackConnection({ granted_count: 2 })],
+    });
     const { model, requests } = makeModel((url) =>
       okWith(url.endsWith("/connector-toggle") ? refreshed : permissionsView()),
     );
@@ -207,7 +260,12 @@ describe("PermissionsModel writes", () => {
     expect(requests[1]).toEqual({
       url: `${PERMISSIONS_URL}/connector-toggle`,
       method: "POST",
-      body: { scope: "slack-api", account: "", permission: "slack-chat-read", enabled: true },
+      body: {
+        scope: "slack-api",
+        account: "",
+        permission: "slack-chat-read",
+        enabled: true,
+      },
     });
     expect(model.data).toEqual(refreshed);
     expect(model.errorMessage).toBe("");
@@ -217,24 +275,40 @@ describe("PermissionsModel writes", () => {
     // The warm holds the state the flip then changed. A close and reopen inside
     // its lifetime would otherwise adopt it -- and, because a live warm is
     // never re-read, keep adopting it -- putting the toggles back as they were.
-    const before = permissionsView({ connections: [slackConnection({ granted_count: 1 })] });
-    const flipped = permissionsView({ connections: [slackConnection({ granted_count: 2 })] });
+    const before = permissionsView({
+      connections: [slackConnection({ granted_count: 1 })],
+    });
+    const flipped = permissionsView({
+      connections: [slackConnection({ granted_count: 2 })],
+    });
     const { model } = makeModel(() => okWith(flipped));
-    warmPermissionsOverview(AGENT_ID, async () => ({ ok: true, status: 200, body: before }));
+    warmPermissionsOverview(AGENT_ID, async () => ({
+      ok: true,
+      status: 200,
+      body: before,
+    }));
 
     await model.toggleConnector("slack-api", "", "slack-chat-read", true);
 
     const reopened = makeModel(() => okWith(flipped));
     await reopened.model.load();
-    expect(reopened.requests).toEqual([{ url: PERMISSIONS_URL, method: "GET", body: null }]);
+    expect(reopened.requests).toEqual([
+      { url: PERMISSIONS_URL, method: "GET", body: null },
+    ]);
     expect(reopened.model.data).toEqual(flipped);
   });
 
   it("drops the warm as soon as a flip starts, not only when it lands", async () => {
     // A sign-in blocks for as long as the service takes, and the panel can be
     // closed and reopened meanwhile; the warm is stale from the click.
-    const { model } = makeModel(() => new Promise<StubResponse>(() => undefined));
-    warmPermissionsOverview(AGENT_ID, async () => ({ ok: true, status: 200, body: permissionsView() }));
+    const { model } = makeModel(
+      () => new Promise<StubResponse>(() => undefined),
+    );
+    warmPermissionsOverview(AGENT_ID, async () => ({
+      ok: true,
+      status: 200,
+      body: permissionsView(),
+    }));
 
     void model.toggleConnector("slack-api", "", "slack-chat-read", true);
 
@@ -251,9 +325,18 @@ describe("PermissionsModel writes", () => {
           respondToFlip = resolve;
         }),
     );
-    const flip = model.toggleConnector("slack-api", "", "slack-chat-read", true);
+    const flip = model.toggleConnector(
+      "slack-api",
+      "",
+      "slack-chat-read",
+      true,
+    );
     await settle();
-    warmPermissionsOverview(AGENT_ID, async () => ({ ok: true, status: 200, body: permissionsView() }));
+    warmPermissionsOverview(AGENT_ID, async () => ({
+      ok: true,
+      status: 200,
+      body: permissionsView(),
+    }));
 
     respondToFlip(okWith(permissionsView()));
     await flip;
@@ -275,16 +358,25 @@ describe("PermissionsModel writes", () => {
   });
 
   it("posts the service and its new desktop egress route and adopts the returned view", async () => {
-    const before = permissionsView({ connections: [slackConnection({ desktop_egress: desktopEgress() })] });
+    const before = permissionsView({
+      connections: [slackConnection({ desktop_egress: desktopEgress() })],
+    });
     const refreshed = permissionsView({
-      connections: [slackConnection({ desktop_egress: desktopEgress(["host-here", "self"]) })],
+      connections: [
+        slackConnection({
+          desktop_egress: desktopEgress(["host-here", "self"]),
+        }),
+      ],
     });
     const { model, requests } = makeModel((url) =>
       okWith(url.endsWith("/desktop-egress-route") ? refreshed : before),
     );
     await model.load();
 
-    const isSaved = await model.setDesktopEgressRoute("slack", ["host-here", "self"]);
+    const isSaved = await model.setDesktopEgressRoute("slack", [
+      "host-here",
+      "self",
+    ]);
 
     expect(isSaved).toBe(true);
     expect(requests[1]).toEqual({
@@ -297,10 +389,16 @@ describe("PermissionsModel writes", () => {
   });
 
   it("keeps the last view and says why when the machine refuses a desktop egress route", async () => {
-    const before = permissionsView({ connections: [slackConnection({ desktop_egress: desktopEgress() })] });
+    const before = permissionsView({
+      connections: [slackConnection({ desktop_egress: desktopEgress() })],
+    });
     const { model } = makeModel((url) =>
       url.endsWith("/desktop-egress-route")
-        ? Promise.resolve({ ok: false, status: 502, body: { error: "the machine did not take it" } })
+        ? Promise.resolve({
+            ok: false,
+            status: 502,
+            body: { error: "the machine did not take it" },
+          })
         : okWith(before),
     );
     await model.load();
@@ -309,7 +407,9 @@ describe("PermissionsModel writes", () => {
 
     expect(isSaved).toBe(false);
     expect(model.data).toEqual(before);
-    expect(model.errorMessage).toBe("Could not save the change: the machine did not take it");
+    expect(model.errorMessage).toBe(
+      "Could not save the change: the machine did not take it",
+    );
   });
 
   it("marks the desktop egress row busy while its write is in flight", async () => {
@@ -332,7 +432,9 @@ describe("PermissionsModel writes", () => {
   });
 
   it("posts the service and account on revoke all", async () => {
-    const { model, requests } = makeModel(() => okWith(permissionsView({ connections: [] })));
+    const { model, requests } = makeModel(() =>
+      okWith(permissionsView({ connections: [] })),
+    );
     await model.load();
 
     await model.revokeAll("slack", "work@example.com", "Slack");
@@ -350,11 +452,17 @@ describe("PermissionsModel writes", () => {
     // strips the account everywhere, so the connection leaves the view and the
     // pane has to be told where to go.
     const { model, requests } = makeModel((url) =>
-      okWith(url.endsWith("/connector-disconnect") ? permissionsView({ connections: [] }) : permissionsView()),
+      okWith(
+        url.endsWith("/connector-disconnect")
+          ? permissionsView({ connections: [] })
+          : permissionsView(),
+      ),
     );
     await model.load();
 
-    const section = await model.disconnect(slackConnection({ account: "work@example.com" }));
+    const section = await model.disconnect(
+      slackConnection({ account: "work@example.com" }),
+    );
 
     expect(requests[1]).toEqual({
       url: `${PERMISSIONS_URL}/connector-disconnect`,
@@ -366,7 +474,10 @@ describe("PermissionsModel writes", () => {
   });
 
   it("lands on the connection left standing when the service had another account", async () => {
-    const other = slackConnection({ service_name: "notion", display_name: "Notion" });
+    const other = slackConnection({
+      service_name: "notion",
+      display_name: "Notion",
+    });
     const { model } = makeModel((url) =>
       okWith(
         url.endsWith("/connector-disconnect")
@@ -388,17 +499,23 @@ describe("PermissionsModel writes", () => {
     );
     await model.load();
 
-    const section = await model.disconnect(slackConnection({ account_label: "work@example.com" }));
+    const section = await model.disconnect(
+      slackConnection({ account_label: "work@example.com" }),
+    );
 
     expect(section).toBeNull();
-    expect(model.errorMessage).toBe("Could not disconnect work@example.com from Slack: keychain is locked");
+    expect(model.errorMessage).toBe(
+      "Could not disconnect work@example.com from Slack: keychain is locked",
+    );
     expect(model.data).toEqual(loaded);
   });
 
   it("leaves the last good view on screen when a write is refused", async () => {
     const loaded = permissionsView();
     const { model } = makeModel((url) =>
-      url.endsWith("/self-toggle") ? { ok: false, status: 502, body: { error: "gateway refused" } } : okWith(loaded),
+      url.endsWith("/self-toggle")
+        ? { ok: false, status: 502, body: { error: "gateway refused" } }
+        : okWith(loaded),
     );
     await model.load();
 
@@ -406,12 +523,16 @@ describe("PermissionsModel writes", () => {
 
     expect(model.data).toEqual(loaded);
     expect(model.status).toBe("ready");
-    expect(model.errorMessage).toBe("Could not save the change: gateway refused");
+    expect(model.errorMessage).toBe(
+      "Could not save the change: gateway refused",
+    );
   });
 
   it("clears a stale error on request", async () => {
     const { model } = makeModel((url) =>
-      url.endsWith("/self-toggle") ? { ok: false, status: 502, body: { error: "nope" } } : okWith(permissionsView()),
+      url.endsWith("/self-toggle")
+        ? { ok: false, status: 502, body: { error: "nope" } }
+        : okWith(permissionsView()),
     );
     await model.load();
     await model.toggleSelf("shared-path-1", true);
@@ -429,10 +550,14 @@ describe("PermissionsModel write serialization", () => {
     const resolvers: (() => void)[] = [];
     const { model, requests } = makeModel((url, init) => {
       if (!url.endsWith("/self-toggle")) return okWith(permissionsView());
-      const permission = (JSON.parse(String(init?.body)) as { permission: string }).permission;
+      const permission = (
+        JSON.parse(String(init?.body)) as { permission: string }
+      ).permission;
       order.push(permission);
       return new Promise<StubResponse>((resolve) => {
-        resolvers.push(() => resolve(okWith(permissionsView({ host_id: permission }))));
+        resolvers.push(() =>
+          resolve(okWith(permissionsView({ host_id: permission }))),
+        );
       });
     });
     await model.load();
@@ -517,19 +642,30 @@ describe("PermissionsModel write serialization", () => {
 });
 
 describe("PermissionsModel.forgetWaitingRequest", () => {
-  const waiting = (id: string) => ({ id, title: `Request ${id}`, reason: "", service_name: "slack" });
+  const waiting = (id: string) => ({
+    id,
+    title: `Request ${id}`,
+    reason: "",
+    service_name: "slack",
+  });
 
   it("drops an answered request from the pane at once", async () => {
     // The answer was given in this pane; a row that outlives it reads as an
     // answer that did not take.
     const { model } = makeModel(() =>
-      okWith(permissionsView({ waiting_requests: [waiting("evt-1"), waiting("evt-2")] })),
+      okWith(
+        permissionsView({
+          waiting_requests: [waiting("evt-1"), waiting("evt-2")],
+        }),
+      ),
     );
     await model.load();
 
     model.forgetWaitingRequest("evt-1");
 
-    expect(model.data?.waiting_requests.map((entry) => entry.id)).toEqual(["evt-2"]);
+    expect(model.data?.waiting_requests.map((entry) => entry.id)).toEqual([
+      "evt-2",
+    ]);
   });
 
   it("leaves the pane alone for a request it is not showing", async () => {
@@ -541,13 +677,20 @@ describe("PermissionsModel.forgetWaitingRequest", () => {
 
     model.forgetWaitingRequest("evt-other");
 
-    expect(model.data?.waiting_requests.map((entry) => entry.id)).toEqual(["evt-1"]);
+    expect(model.data?.waiting_requests.map((entry) => entry.id)).toEqual([
+      "evt-1",
+    ]);
     expect(redrawCount()).toBe(before);
   });
 });
 
 describe("PermissionsModel pending-request reconciliation", () => {
-  const waiting = (id: string) => ({ id, title: "Slack", reason: "", service_name: "slack" });
+  const waiting = (id: string) => ({
+    id,
+    title: "Slack",
+    reason: "",
+    service_name: "slack",
+  });
 
   it("re-reads when a request is resolved, so the strip and the toggles follow", async () => {
     const resolved = permissionsView({
@@ -556,7 +699,11 @@ describe("PermissionsModel pending-request reconciliation", () => {
     });
     let isResolved = false;
     const { model, requests } = makeModel(() =>
-      okWith(isResolved ? resolved : permissionsView({ waiting_requests: [waiting("req-1")] })),
+      okWith(
+        isResolved
+          ? resolved
+          : permissionsView({ waiting_requests: [waiting("req-1")] }),
+      ),
     );
     await model.load();
     // The first reconciliation only records what the load already answered with.
@@ -566,7 +713,10 @@ describe("PermissionsModel pending-request reconciliation", () => {
     isResolved = true;
     await model.refreshIfPendingChanged([]);
 
-    expect(requests.map((request) => request.url)).toEqual([PERMISSIONS_URL, PERMISSIONS_URL]);
+    expect(requests.map((request) => request.url)).toEqual([
+      PERMISSIONS_URL,
+      PERMISSIONS_URL,
+    ]);
     expect(model.data?.waiting_requests).toEqual([]);
     expect(model.data?.connections[0].granted_count).toBe(2);
   });
@@ -587,7 +737,9 @@ describe("PermissionsModel pending-request reconciliation", () => {
     const { model } = makeModel((url, init) => {
       if (init === undefined && model.status === "ready")
         return new Promise<StubResponse>((resolve) => {
-          releases.push(() => resolve(okWith(permissionsView({ host_id: "refreshed" }))));
+          releases.push(() =>
+            resolve(okWith(permissionsView({ host_id: "refreshed" }))),
+          );
         });
       return okWith(permissionsView());
     });
@@ -609,7 +761,9 @@ describe("PermissionsModel pending-request reconciliation", () => {
     const { model, requests } = makeModel((url) => {
       if (url.endsWith("/self-toggle"))
         return new Promise<StubResponse>((resolve) => {
-          releases.push(() => resolve(okWith(permissionsView({ host_id: "flipped" }))));
+          releases.push(() =>
+            resolve(okWith(permissionsView({ host_id: "flipped" }))),
+          );
         });
       return okWith(permissionsView({ host_id: "refreshed" }));
     });
@@ -645,13 +799,20 @@ describe("PermissionsModel pending-request reconciliation", () => {
 
     expect(model.status).toBe("ready");
     expect(model.data?.host_id).toBe("good");
-    expect(model.errorMessage).toBe("Could not refresh permissions: gateway is down");
+    expect(model.errorMessage).toBe(
+      "Could not refresh permissions: gateway is down",
+    );
   });
 });
 
 describe("PermissionsModel connect", () => {
   it("runs the sign-in then re-reads the pane so the new connection arrives", async () => {
-    const withNotion = permissionsView({ connections: [slackConnection(), slackConnection({ service_name: "notion" })] });
+    const withNotion = permissionsView({
+      connections: [
+        slackConnection(),
+        slackConnection({ service_name: "notion" }),
+      ],
+    });
     let isSignedIn = false;
     const { model, requests } = makeModel((url) => {
       if (url === `${PERMISSIONS_URL}/connect-browser`) {
@@ -675,15 +836,25 @@ describe("PermissionsModel connect", () => {
   });
 
   it("resolves to the account the sign-in added, not one the service already had", async () => {
-    const first = slackConnection({ account: "first@example.com", show_account_label: true });
-    const second = slackConnection({ account: "second@example.com", show_account_label: true });
+    const first = slackConnection({
+      account: "first@example.com",
+      show_account_label: true,
+    });
+    const second = slackConnection({
+      account: "second@example.com",
+      show_account_label: true,
+    });
     let isSignedIn = false;
     const { model } = makeModel((url) => {
       if (url === `${PERMISSIONS_URL}/connect-browser`) {
         isSignedIn = true;
         return okWith({});
       }
-      return okWith(permissionsView({ connections: isSignedIn ? [first, second] : [first] }));
+      return okWith(
+        permissionsView({
+          connections: isSignedIn ? [first, second] : [first],
+        }),
+      );
     });
     await model.load();
 
@@ -701,7 +872,8 @@ describe("PermissionsModel connect", () => {
         return new Promise<StubResponse>((resolve) => {
           releases.push(() => resolve(okWith({})));
         });
-      if (url.endsWith("/self-toggle")) return okWith(permissionsView({ host_id: "flipped" }));
+      if (url.endsWith("/self-toggle"))
+        return okWith(permissionsView({ host_id: "flipped" }));
       return okWith(permissionsView({ host_id: "reloaded" }));
     });
     await model.load();
@@ -719,7 +891,9 @@ describe("PermissionsModel connect", () => {
 
   it("resolves to nothing when the reload carries no new connection for the service", async () => {
     const { model } = makeModel((url) =>
-      url === `${PERMISSIONS_URL}/connect-browser` ? okWith({}) : okWith(permissionsView()),
+      url === `${PERMISSIONS_URL}/connect-browser`
+        ? okWith({})
+        : okWith(permissionsView()),
     );
     await model.load();
 
@@ -746,7 +920,10 @@ describe("PermissionsModel connect", () => {
     // load and toggle failures use: what the service says is an errand the
     // user has to run somewhere else, so it has to be read.
     expect(model.alertMessage).toBe("Could not connect: sign-in was cancelled");
-    expect(model.errorMessage, "the inline banner is left for the other failures").toBe("");
+    expect(
+      model.errorMessage,
+      "the inline banner is left for the other failures",
+    ).toBe("");
   });
 
   it("keeps the connection failure up until the user dismisses it", () => {
@@ -770,18 +947,30 @@ describe("connect action", () => {
   });
 
   it("offers nothing for a service with no sign-in and no inputs to ask for", () => {
-    expect(connectActionFor(credentialsSignIn({ credential_parameters: [] }))).toBe("unconnectable");
+    expect(
+      connectActionFor(credentialsSignIn({ credential_parameters: [] })),
+    ).toBe("unconnectable");
   });
 
   it("holds the form back until every value, and any name it needs, is there", () => {
     const signIn = credentialsSignIn();
-    expect(isCredentialFormComplete(signIn, { "access-key-id": "AKIA" }, "")).toBe(false);
-    expect(isCredentialFormComplete(signIn, { "access-key-id": "AKIA", "secret-access-key": "   " }, "")).toBe(
-      false,
-    );
-    expect(isCredentialFormComplete(signIn, { "access-key-id": "AKIA", "secret-access-key": "s3cret" }, "")).toBe(
-      true,
-    );
+    expect(
+      isCredentialFormComplete(signIn, { "access-key-id": "AKIA" }, ""),
+    ).toBe(false);
+    expect(
+      isCredentialFormComplete(
+        signIn,
+        { "access-key-id": "AKIA", "secret-access-key": "   " },
+        "",
+      ),
+    ).toBe(false);
+    expect(
+      isCredentialFormComplete(
+        signIn,
+        { "access-key-id": "AKIA", "secret-access-key": "s3cret" },
+        "",
+      ),
+    ).toBe(true);
     const named = credentialsSignIn({ is_account_name_required: true });
     const values = { "access-key-id": "AKIA", "secret-access-key": "s3cret" };
     expect(isCredentialFormComplete(named, values, "")).toBe(false);
@@ -797,11 +986,16 @@ describe("PermissionsModel connect with credentials", () => {
 
   it("posts what the form carries and lands on the connection it created", async () => {
     const { model, requests } = makeModel((url) =>
-      url.endsWith("/connect-credentials") ? okWith(connected) : okWith(permissionsView()),
+      url.endsWith("/connect-credentials")
+        ? okWith(connected)
+        : okWith(permissionsView()),
     );
     await model.load();
     model.openCredentialForm("aws");
-    model.credentialValues = { "access-key-id": "AKIA", "secret-access-key": "s3cret" };
+    model.credentialValues = {
+      "access-key-id": "AKIA",
+      "secret-access-key": "s3cret",
+    };
     model.credentialAccountName = "work";
 
     const section = await model.connectWithCredentials("aws");
@@ -811,7 +1005,10 @@ describe("PermissionsModel connect with credentials", () => {
       method: "POST",
       body: {
         service_name: "aws",
-        value_by_parameter_name: { "access-key-id": "AKIA", "secret-access-key": "s3cret" },
+        value_by_parameter_name: {
+          "access-key-id": "AKIA",
+          "secret-access-key": "s3cret",
+        },
         account_name: "work",
       },
     });
@@ -827,19 +1024,31 @@ describe("PermissionsModel connect with credentials", () => {
     const loaded = permissionsView({ available_connections: [awsAvailable()] });
     const { model } = makeModel((url) =>
       url.endsWith("/connect-credentials")
-        ? { ok: false, status: 400, body: { error: "AWS rejected those credentials: bad key id" } }
+        ? {
+            ok: false,
+            status: 400,
+            body: { error: "AWS rejected those credentials: bad key id" },
+          }
         : okWith(loaded),
     );
     await model.load();
     model.openCredentialForm("aws");
-    model.credentialValues = { "access-key-id": "AKIA", "secret-access-key": "wrong" };
+    model.credentialValues = {
+      "access-key-id": "AKIA",
+      "secret-access-key": "wrong",
+    };
 
     const section = await model.connectWithCredentials("aws");
 
     expect(section).toBeNull();
-    expect(model.credentialErrorMessage).toBe("AWS rejected those credentials: bad key id");
+    expect(model.credentialErrorMessage).toBe(
+      "AWS rejected those credentials: bad key id",
+    );
     expect(model.credentialFormServiceName).toBe("aws");
-    expect(model.credentialValues).toEqual({ "access-key-id": "AKIA", "secret-access-key": "wrong" });
+    expect(model.credentialValues).toEqual({
+      "access-key-id": "AKIA",
+      "secret-access-key": "wrong",
+    });
     // The refusal belongs next to the fields, not to the pane at large.
     expect(model.errorMessage).toBe("");
     expect(model.data).toEqual(loaded);
@@ -875,15 +1084,17 @@ describe("PermissionsModel connect with credentials", () => {
 describe("permission section keys", () => {
   it("keys a connection by service and account, not by position", () => {
     expect(connectionSectionId(slackConnection())).toBe("conn:slack:");
-    expect(connectionSectionId(slackConnection({ account: "work@example.com" }))).toBe(
-      "conn:slack:work@example.com",
-    );
+    expect(
+      connectionSectionId(slackConnection({ account: "work@example.com" })),
+    ).toBe("conn:slack:work@example.com");
   });
 
   it("keeps a requested section only while it still exists", () => {
     const view = permissionsView();
     expect(resolvePermissionsSection(view, "conn:slack:")).toBe("conn:slack:");
-    expect(resolvePermissionsSection(view, LOCAL_FILES_SECTION)).toBe(LOCAL_FILES_SECTION);
+    expect(resolvePermissionsSection(view, LOCAL_FILES_SECTION)).toBe(
+      LOCAL_FILES_SECTION,
+    );
     // A connection that was revoked out from under the deep link.
     expect(resolvePermissionsSection(view, "conn:notion:")).toBe("conn:slack:");
     expect(resolvePermissionsSection(view, null)).toBe("conn:slack:");
@@ -905,7 +1116,9 @@ describe("permission section keys", () => {
     ];
     expect(new Set(keys).size).toBe(keys.length);
     // Parts are separated, so no run of names can collide with another key.
-    expect(connectorToggleRowKey("a", "b", "c")).not.toBe(connectorToggleRowKey("a b", "", "c"));
+    expect(connectorToggleRowKey("a", "b", "c")).not.toBe(
+      connectorToggleRowKey("a b", "", "c"),
+    );
   });
 });
 
@@ -958,19 +1171,34 @@ describe("keeping a shared path in sync", () => {
   it("offers every clash rule the wire contract has", () => {
     // Derived from the label map, so a value added upstream that nobody
     // labelled would show up here rather than silently missing from the row.
-    expect(FOLDER_SYNC_CONFLICTS).toEqual(["NEWER", "THIS_COMPUTER", "WORKSPACE"]);
-    for (const conflict of FOLDER_SYNC_CONFLICTS) expect(folderSyncConflictLabel(conflict)).not.toBe("");
+    expect(FOLDER_SYNC_CONFLICTS).toEqual([
+      "NEWER",
+      "THIS_COMPUTER",
+      "WORKSPACE",
+    ]);
+    for (const conflict of FOLDER_SYNC_CONFLICTS)
+      expect(folderSyncConflictLabel(conflict)).not.toBe("");
   });
 
   it("reads the switch as the destination the user chose, not how far it has got", () => {
-    expect(isPathSyncOn(sharedPath({ sync: pathSync({ state: "STARTING" }) }))).toBe(true);
-    expect(isPathSyncOn(sharedPath({ sync: pathSync({ state: "SYNCING" }) }))).toBe(true);
+    expect(
+      isPathSyncOn(sharedPath({ sync: pathSync({ state: "STARTING" }) })),
+    ).toBe(true);
+    expect(
+      isPathSyncOn(sharedPath({ sync: pathSync({ state: "SYNCING" }) })),
+    ).toBe(true);
     // Still wanted, so still on -- the reason sits beside it rather than
     // quietly moving the switch the user set.
-    expect(isPathSyncOn(sharedPath({ sync: pathSync({ state: "FAILED" }) }))).toBe(true);
+    expect(
+      isPathSyncOn(sharedPath({ sync: pathSync({ state: "FAILED" }) })),
+    ).toBe(true);
     // On its way out: the destination is already the other one.
     expect(
-      isPathSyncOn(sharedPath({ sync: pathSync({ activity: "INACTIVE", state: "DEACTIVATING" }) })),
+      isPathSyncOn(
+        sharedPath({
+          sync: pathSync({ activity: "INACTIVE", state: "DEACTIVATING" }),
+        }),
+      ),
     ).toBe(false);
     expect(isPathSyncOn(sharedPath({ sync: null }))).toBe(false);
   });
@@ -978,10 +1206,21 @@ describe("keeping a shared path in sync", () => {
   it("keeps the overlap warning current from the poll, not only from a full read", async () => {
     // The warning is about what *other* workspaces are doing, which this pane
     // learns no other way: a full read happens on open and after a write here.
-    const row = sharedPath({ sync: pathSync({ state: "SYNCING" }), sync_overlap_warning: "" });
+    const row = sharedPath({
+      sync: pathSync({ state: "SYNCING" }),
+      sync_overlap_warning: "",
+    });
     const { model, requests } = makeModel((url) =>
       url.endsWith("/folder-syncs")
-        ? okWith({ rows: [{ path: row.path, sync: pathSync({ state: "SYNCING" }), overlap_warning: "also synced" }] })
+        ? okWith({
+            rows: [
+              {
+                path: row.path,
+                sync: pathSync({ state: "SYNCING" }),
+                overlap_warning: "also synced",
+              },
+            ],
+          })
         : okWith(permissionsView({ shared_paths: [row] })),
     );
     await model.load();
@@ -990,7 +1229,9 @@ describe("keeping a shared path in sync", () => {
     await model.refreshLiveFolderSyncs();
 
     expect(requests[requests.length - 1]?.url).toBe(FOLDER_SYNCS_URL);
-    expect(model.data?.shared_paths?.[0]?.sync_overlap_warning).toBe("also synced");
+    expect(model.data?.shared_paths?.[0]?.sync_overlap_warning).toBe(
+      "also synced",
+    );
   });
 
   it("polls the folder-sync endpoint, not the whole pane", async () => {
@@ -1010,16 +1251,34 @@ describe("keeping a shared path in sync", () => {
   });
 
   it("keeps re-reading a folder that is still on its way, in either direction", () => {
-    expect(isPathSyncLive(sharedPath({ sync: pathSync({ state: "STARTING" }) }))).toBe(true);
     expect(
-      isPathSyncLive(sharedPath({ sync: pathSync({ activity: "INACTIVE", state: "DEACTIVATING" }) })),
+      isPathSyncLive(sharedPath({ sync: pathSync({ state: "STARTING" }) })),
     ).toBe(true);
     expect(
-      isPathSyncLive(sharedPath({ sync: pathSync({ activity: "DISCARDED", state: "DISCARDING" }) })),
+      isPathSyncLive(
+        sharedPath({
+          sync: pathSync({ activity: "INACTIVE", state: "DEACTIVATING" }),
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isPathSyncLive(
+        sharedPath({
+          sync: pathSync({ activity: "DISCARDED", state: "DISCARDING" }),
+        }),
+      ),
     ).toBe(true);
     // Nothing left to report, so polling it would cost a request for no news.
-    expect(isPathSyncLive(sharedPath({ sync: pathSync({ state: "FAILED" }) }))).toBe(false);
-    expect(isPathSyncLive(sharedPath({ sync: pathSync({ activity: "INACTIVE", state: "STOPPED" }) }))).toBe(false);
+    expect(
+      isPathSyncLive(sharedPath({ sync: pathSync({ state: "FAILED" }) })),
+    ).toBe(false);
+    expect(
+      isPathSyncLive(
+        sharedPath({
+          sync: pathSync({ activity: "INACTIVE", state: "STOPPED" }),
+        }),
+      ),
+    ).toBe(false);
   });
 
   it("posts the path and the clash rule when the switch goes on", async () => {
@@ -1027,7 +1286,9 @@ describe("keeping a shared path in sync", () => {
     // the server derives it there rather than trusting a pair that could
     // disagree with each other.
     const row = sharedPath();
-    const { model, requests } = makeModel(() => okWith(permissionsView({ shared_paths: [row] })));
+    const { model, requests } = makeModel(() =>
+      okWith(permissionsView({ shared_paths: [row] })),
+    );
     await model.load();
 
     await model.toggleSync(row, true);
@@ -1044,13 +1305,17 @@ describe("keeping a shared path in sync", () => {
     // adjustment to something already running. Turning it off first would
     // rename the machine's copy out of the way and straight back again.
     const row = sharedPath({ sync: pathSync() });
-    const { model, requests } = makeModel(() => okWith(permissionsView({ shared_paths: [row] })));
+    const { model, requests } = makeModel(() =>
+      okWith(permissionsView({ shared_paths: [row] })),
+    );
     await model.load();
     const before = requests.length;
 
     await model.setSyncConflict(row, "THIS_COMPUTER");
 
-    const posted = requests.slice(before).map((request) => request.body as UiFolderSyncToggleRequest);
+    const posted = requests
+      .slice(before)
+      .map((request) => request.body as UiFolderSyncToggleRequest);
     expect(posted.map((body) => body.enabled)).toEqual([true]);
   });
 
@@ -1058,7 +1323,9 @@ describe("keeping a shared path in sync", () => {
     // Each one records where the folder should end up; the server keeps the
     // last. Dropping one would leave it somewhere nobody chose.
     const row = sharedPath({ sync: pathSync() });
-    const { model, requests } = makeModel(() => okWith(permissionsView({ shared_paths: [row] })));
+    const { model, requests } = makeModel(() =>
+      okWith(permissionsView({ shared_paths: [row] })),
+    );
     await model.load();
     const before = requests.length;
 
@@ -1068,15 +1335,24 @@ describe("keeping a shared path in sync", () => {
       model.toggleSync(row, false),
     ]);
 
-    const posted = requests.slice(before).map((request) => request.body as UiFolderSyncToggleRequest);
+    const posted = requests
+      .slice(before)
+      .map((request) => request.body as UiFolderSyncToggleRequest);
     expect(posted.map((body) => body.enabled)).toEqual([false, true, false]);
   });
 
   it("keeps each row's pending choice to itself", async () => {
     const { model } = makeModel(() => okWith(permissionsView()));
-    await model.setSyncConflict(sharedPath({ path: "/home/me/a" }), "THIS_COMPUTER");
-    expect(model.syncConflictFor(sharedPath({ path: "/home/me/a" }))).toBe("THIS_COMPUTER");
-    expect(model.syncConflictFor(sharedPath({ path: "/home/me/b" }))).toBe("NEWER");
+    await model.setSyncConflict(
+      sharedPath({ path: "/home/me/a" }),
+      "THIS_COMPUTER",
+    );
+    expect(model.syncConflictFor(sharedPath({ path: "/home/me/a" }))).toBe(
+      "THIS_COMPUTER",
+    );
+    expect(model.syncConflictFor(sharedPath({ path: "/home/me/b" }))).toBe(
+      "NEWER",
+    );
   });
 
   it("keeps re-reading while a sync is alive, and stops once it is not", async () => {
@@ -1087,14 +1363,18 @@ describe("keeping a shared path in sync", () => {
     let reads = requests.length;
 
     for (const state of ["STARTING", "SYNCED", "SYNCING"] as const) {
-      model.data = permissionsView({ shared_paths: [sharedPath({ sync: pathSync({ state }) })] });
+      model.data = permissionsView({
+        shared_paths: [sharedPath({ sync: pathSync({ state }) })],
+      });
       await model.refreshLiveFolderSyncs();
       reads += 1;
       expect(requests.length).toBe(reads);
     }
 
     for (const state of ["STOPPED", "FAILED"] as const) {
-      model.data = permissionsView({ shared_paths: [sharedPath({ sync: pathSync({ state }) })] });
+      model.data = permissionsView({
+        shared_paths: [sharedPath({ sync: pathSync({ state }) })],
+      });
       await model.refreshLiveFolderSyncs();
       expect(requests.length).toBe(reads);
     }

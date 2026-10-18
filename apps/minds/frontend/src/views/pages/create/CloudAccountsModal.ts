@@ -7,7 +7,12 @@ import m from "mithril";
 import type { CloudAccountOption } from "../../../models/create";
 import { normalizeCreateApiError } from "./form-model";
 import { Button } from "../../components/Button";
-import { FormLabel, Select, TextInput, Textarea } from "../../components/FormControls";
+import {
+  FormLabel,
+  Select,
+  TextInput,
+  Textarea,
+} from "../../components/FormControls";
 import { Modal } from "../../components/Modal";
 
 type ModalView = "form" | "progress" | "result";
@@ -32,7 +37,10 @@ export class CloudAccountsModalState {
   isPrepareInFlight = false;
   progressStartedAtMs = 0;
 
-  openForBackend(backend: string, defaultRegionByBackend: Record<string, string>): void {
+  openForBackend(
+    backend: string,
+    defaultRegionByBackend: Record<string, string>,
+  ): void {
     this.backend = backend;
     this.region = defaultRegionByBackend[backend.toUpperCase()] ?? "";
     this.formError = "";
@@ -59,7 +67,11 @@ export class CloudAccountsModalState {
   buildRequestBody(): Record<string, string> | string {
     const alias = this.alias.trim();
     if (!alias) return "Give the account an alias.";
-    const body: Record<string, string> = { alias, backend: this.backend, region: this.region };
+    const body: Record<string, string> = {
+      alias,
+      backend: this.backend,
+      region: this.region,
+    };
     if (this.backend === "aws") {
       body.aws_access_key_id = this.awsAccessKeyId.trim();
       body.aws_secret_access_key = this.awsSecretAccessKey.trim();
@@ -68,13 +80,19 @@ export class CloudAccountsModalState {
       }
     } else if (this.backend === "gcp") {
       body.gcp_service_account_key_json = this.gcpKeyJson.trim();
-      if (!body.gcp_service_account_key_json) return "Paste the service-account key JSON.";
+      if (!body.gcp_service_account_key_json)
+        return "Paste the service-account key JSON.";
     } else {
       body.azure_subscription_id = this.azureSubscriptionId.trim();
       body.azure_tenant_id = this.azureTenantId.trim();
       body.azure_client_id = this.azureClientId.trim();
       body.azure_client_secret = this.azureClientSecret.trim();
-      if (!body.azure_subscription_id || !body.azure_tenant_id || !body.azure_client_id || !body.azure_client_secret) {
+      if (
+        !body.azure_subscription_id ||
+        !body.azure_tenant_id ||
+        !body.azure_client_id ||
+        !body.azure_client_secret
+      ) {
         return "Subscription, tenant, client id, and client secret are all required.";
       }
     }
@@ -88,7 +106,10 @@ interface CloudAccountsModalAttrs {
   onAccountAdded(account: CloudAccountOption): void;
 }
 
-function submitAccount(state: CloudAccountsModalState, onAccountAdded: (account: CloudAccountOption) => void): void {
+function submitAccount(
+  state: CloudAccountsModalState,
+  onAccountAdded: (account: CloudAccountOption) => void,
+): void {
   state.formError = "";
   const bodyOrError = state.buildRequestBody();
   if (typeof bodyOrError === "string") {
@@ -106,7 +127,10 @@ function submitAccount(state: CloudAccountsModalState, onAccountAdded: (account:
   })
     .then(async (response) => ({
       ok: response.ok,
-      data: (await response.json().catch(() => ({}))) as Record<string, unknown>,
+      data: (await response.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >,
     }))
     .then((result) => {
       state.isPrepareInFlight = false;
@@ -134,7 +158,8 @@ function submitAccount(state: CloudAccountsModalState, onAccountAdded: (account:
     .catch(() => {
       state.isPrepareInFlight = false;
       state.resultHeading = "Account setup failed";
-      state.resultMessage = "Network error talking to Imbue Studio. Nothing was saved; try again.";
+      state.resultMessage =
+        "Network error talking to Imbue Studio. Nothing was saved; try again.";
       state.isBackShownOnResult = true;
       state.view = "result";
       m.redraw();
@@ -142,24 +167,37 @@ function submitAccount(state: CloudAccountsModalState, onAccountAdded: (account:
 }
 
 /** The cloud accounts the user added, as options of a compute select whose value is `launchValue`. */
-export function cloudAccountOptions(accounts: readonly CloudAccountOption[], launchValue: string): m.Children[] {
+export function cloudAccountOptions(
+  accounts: readonly CloudAccountOption[],
+  launchValue: string,
+): m.Children[] {
   return accounts.map((account) =>
     m(
       "option",
-      { value: `BYOK:${account.name}`, selected: launchValue === `BYOK:${account.name}` },
+      {
+        value: `BYOK:${account.name}`,
+        selected: launchValue === `BYOK:${account.name}`,
+      },
       `${account.alias} (${account.backend.toUpperCase()} account)`,
     ),
   );
 }
 
-function labeledInput(id: string, label: string, value: string, onValue: (next: string) => void, attrs: m.Attributes = {}): m.Children {
+function labeledInput(
+  id: string,
+  label: string,
+  value: string,
+  onValue: (next: string) => void,
+  attrs: m.Attributes = {},
+): m.Children {
   return m("div", { class: "mt-3" }, [
     m(FormLabel, { target: id }, label),
     m(TextInput, {
       id,
       name: id,
       value,
-      oninput: (event: InputEvent) => onValue((event.target as HTMLInputElement).value),
+      oninput: (event: InputEvent) =>
+        onValue((event.target as HTMLInputElement).value),
       ...attrs,
     }),
   ]);
@@ -193,38 +231,69 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
     },
     view(vnode) {
       const { state, regionOptionsByBackend, onAccountAdded } = vnode.attrs;
-      const regionOptions = regionOptionsByBackend[state.backend.toUpperCase()] ?? [];
+      const regionOptions =
+        regionOptionsByBackend[state.backend.toUpperCase()] ?? [];
       const progressPercent = state.isPrepareInFlight
-        ? Math.min(90, 90 * (1 - Math.exp(-((Date.now() - state.progressStartedAtMs) / 1000) / 12)))
+        ? Math.min(
+            90,
+            90 *
+              (1 -
+                Math.exp(
+                  -((Date.now() - state.progressStartedAtMs) / 1000) / 12,
+                )),
+          )
         : 100;
       return m(
         Modal,
-        { id: "cloud-accounts-modal", isOpen: state.isOpen, onClose: () => state.close(), size: "xl", cardExtra: "text-left" },
+        {
+          id: "cloud-accounts-modal",
+          isOpen: state.isOpen,
+          onClose: () => state.close(),
+          size: "xl",
+          cardExtra: "text-left",
+        },
         [
           state.view === "form"
             ? m("div", { id: "ca-form-view" }, [
-                m("span", { class: "type-heading text-primary" }, "Add a cloud account"),
-                m("div", { class: "mt-3 flex items-center justify-between gap-3" }, [
-                  m(FormLabel, { target: "ca-backend", inline: true }, "Provider"),
-                  m(
-                    Select,
-                    {
-                      id: "ca-backend",
-                      name: "ca-backend",
-                      width: "w-48",
-                      value: state.backend,
-                      onchange: (event: Event) => {
-                        state.backend = (event.target as HTMLSelectElement).value;
-                        state.region = regionOptionsByBackend[state.backend.toUpperCase()]?.[0] ?? "";
+                m(
+                  "span",
+                  { class: "type-heading text-primary" },
+                  "Add a cloud account",
+                ),
+                m(
+                  "div",
+                  { class: "mt-3 flex items-center justify-between gap-3" },
+                  [
+                    m(
+                      FormLabel,
+                      { target: "ca-backend", inline: true },
+                      "Provider",
+                    ),
+                    m(
+                      Select,
+                      {
+                        id: "ca-backend",
+                        name: "ca-backend",
+                        width: "w-48",
+                        value: state.backend,
+                        onchange: (event: Event) => {
+                          state.backend = (
+                            event.target as HTMLSelectElement
+                          ).value;
+                          state.region =
+                            regionOptionsByBackend[
+                              state.backend.toUpperCase()
+                            ]?.[0] ?? "";
+                        },
                       },
-                    },
-                    [
-                      m("option", { value: "aws" }, "AWS"),
-                      m("option", { value: "gcp" }, "GCP"),
-                      m("option", { value: "azure" }, "Azure"),
-                    ],
-                  ),
-                ]),
+                      [
+                        m("option", { value: "aws" }, "AWS"),
+                        m("option", { value: "gcp" }, "GCP"),
+                        m("option", { value: "azure" }, "Azure"),
+                      ],
+                    ),
+                  ],
+                ),
                 state.backend === "aws"
                   ? m("p", { class: "mt-3 type-helper text-tertiary" }, [
                       "You need an ",
@@ -252,32 +321,61 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
                       "entry with the same keys for another region.",
                     ])
                   : null,
-                labeledInput("ca-alias", "Alias", state.alias, (next) => {
-                  state.alias = next;
-                }, { placeholder: "my cloud account" }),
+                labeledInput(
+                  "ca-alias",
+                  "Alias",
+                  state.alias,
+                  (next) => {
+                    state.alias = next;
+                  },
+                  { placeholder: "my cloud account" },
+                ),
                 state.backend === "aws"
                   ? m("div", { id: "ca-fields-aws" }, [
-                      labeledInput("ca-access-key-id", "Access key ID", state.awsAccessKeyId, (next) => {
-                        state.awsAccessKeyId = next;
-                      }, { placeholder: "AKIA..." }),
-                      labeledInput("ca-secret-key", "Secret access key", state.awsSecretAccessKey, (next) => {
-                        state.awsSecretAccessKey = next;
-                      }, { type: "password", placeholder: "paste the secret shown once at key create attempt" }),
+                      labeledInput(
+                        "ca-access-key-id",
+                        "Access key ID",
+                        state.awsAccessKeyId,
+                        (next) => {
+                          state.awsAccessKeyId = next;
+                        },
+                        { placeholder: "AKIA..." },
+                      ),
+                      labeledInput(
+                        "ca-secret-key",
+                        "Secret access key",
+                        state.awsSecretAccessKey,
+                        (next) => {
+                          state.awsSecretAccessKey = next;
+                        },
+                        {
+                          type: "password",
+                          placeholder:
+                            "paste the secret shown once at key create attempt",
+                        },
+                      ),
                     ])
                   : null,
                 state.backend === "gcp"
                   ? m("div", { id: "ca-fields-gcp" }, [
                       m("div", { class: "mt-3" }, [
-                        m(FormLabel, { target: "ca-gcp-key-json" }, "Service-account key JSON"),
+                        m(
+                          FormLabel,
+                          { target: "ca-gcp-key-json" },
+                          "Service-account key JSON",
+                        ),
                         m(Textarea, {
                           id: "ca-gcp-key-json",
                           name: "ca-gcp-key-json",
                           rows: 5,
                           extra: "font-mono",
-                          placeholder: '{"type": "service_account", "project_id": "...", ...}',
+                          placeholder:
+                            '{"type": "service_account", "project_id": "...", ...}',
                           value: state.gcpKeyJson,
                           oninput: (event: InputEvent) => {
-                            state.gcpKeyJson = (event.target as HTMLTextAreaElement).value;
+                            state.gcpKeyJson = (
+                              event.target as HTMLTextAreaElement
+                            ).value;
                           },
                         }),
                       ]),
@@ -285,42 +383,106 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
                   : null,
                 state.backend === "azure"
                   ? m("div", { id: "ca-fields-azure" }, [
-                      labeledInput("ca-azure-subscription-id", "Subscription ID", state.azureSubscriptionId, (next) => {
-                        state.azureSubscriptionId = next;
-                      }, { placeholder: "00000000-0000-0000-0000-000000000000" }),
-                      labeledInput("ca-azure-tenant-id", "Tenant ID", state.azureTenantId, (next) => {
-                        state.azureTenantId = next;
-                      }, { placeholder: "Entra directory (tenant) id" }),
-                      labeledInput("ca-azure-client-id", "Client ID", state.azureClientId, (next) => {
-                        state.azureClientId = next;
-                      }, { placeholder: "app registration (client) id" }),
-                      labeledInput("ca-azure-client-secret", "Client secret", state.azureClientSecret, (next) => {
-                        state.azureClientSecret = next;
-                      }, { type: "password", placeholder: "the secret's Value (shown once)" }),
+                      labeledInput(
+                        "ca-azure-subscription-id",
+                        "Subscription ID",
+                        state.azureSubscriptionId,
+                        (next) => {
+                          state.azureSubscriptionId = next;
+                        },
+                        { placeholder: "00000000-0000-0000-0000-000000000000" },
+                      ),
+                      labeledInput(
+                        "ca-azure-tenant-id",
+                        "Tenant ID",
+                        state.azureTenantId,
+                        (next) => {
+                          state.azureTenantId = next;
+                        },
+                        { placeholder: "Entra directory (tenant) id" },
+                      ),
+                      labeledInput(
+                        "ca-azure-client-id",
+                        "Client ID",
+                        state.azureClientId,
+                        (next) => {
+                          state.azureClientId = next;
+                        },
+                        { placeholder: "app registration (client) id" },
+                      ),
+                      labeledInput(
+                        "ca-azure-client-secret",
+                        "Client secret",
+                        state.azureClientSecret,
+                        (next) => {
+                          state.azureClientSecret = next;
+                        },
+                        {
+                          type: "password",
+                          placeholder: "the secret's Value (shown once)",
+                        },
+                      ),
                     ])
                   : null,
-                m("div", { class: "mt-3 flex items-center justify-between gap-3" }, [
-                  m(FormLabel, { target: "ca-region", inline: true }, "Default region / zone"),
-                  m(
-                    Select,
-                    {
-                      id: "ca-region",
-                      name: "ca-region",
-                      width: "w-48",
-                      value: state.region,
-                      onchange: (event: Event) => {
-                        state.region = (event.target as HTMLSelectElement).value;
+                m(
+                  "div",
+                  { class: "mt-3 flex items-center justify-between gap-3" },
+                  [
+                    m(
+                      FormLabel,
+                      { target: "ca-region", inline: true },
+                      "Default region / zone",
+                    ),
+                    m(
+                      Select,
+                      {
+                        id: "ca-region",
+                        name: "ca-region",
+                        width: "w-48",
+                        value: state.region,
+                        onchange: (event: Event) => {
+                          state.region = (
+                            event.target as HTMLSelectElement
+                          ).value;
+                        },
                       },
-                    },
-                    regionOptions.map((region) => m("option", { value: region, selected: region === state.region }, region)),
-                  ),
-                ]),
-                state.formError ? m("p", { id: "ca-form-error", class: "mt-3 type-helper text-important" }, state.formError) : null,
+                      regionOptions.map((region) =>
+                        m(
+                          "option",
+                          { value: region, selected: region === state.region },
+                          region,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                state.formError
+                  ? m(
+                      "p",
+                      {
+                        id: "ca-form-error",
+                        class: "mt-3 type-helper text-important",
+                      },
+                      state.formError,
+                    )
+                  : null,
                 m("div", { class: "flex justify-between mt-6" }, [
-                  m(Button, { variant: "secondary", id: "ca-form-back-btn", onclick: () => state.close() }, "Cancel"),
                   m(
                     Button,
-                    { variant: "primary", id: "ca-form-submit-btn", onclick: () => submitAccount(state, onAccountAdded) },
+                    {
+                      variant: "secondary",
+                      id: "ca-form-back-btn",
+                      onclick: () => state.close(),
+                    },
+                    "Cancel",
+                  ),
+                  m(
+                    Button,
+                    {
+                      variant: "primary",
+                      id: "ca-form-submit-btn",
+                      onclick: () => submitAccount(state, onAccountAdded),
+                    },
                     "Save & prepare account",
                   ),
                 ]),
@@ -328,7 +490,11 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
             : null,
           state.view === "progress"
             ? m("div", { id: "ca-progress-view" }, [
-                m("span", { class: "type-heading text-primary" }, "Setting up your account..."),
+                m(
+                  "span",
+                  { class: "type-heading text-primary" },
+                  "Setting up your account...",
+                ),
                 m("p", { class: "mt-2 type-helper text-tertiary" }, [
                   "Verifying the credentials and creating the network ingress + state storage. Usually under a ",
                   "minute, except a brand-new Azure subscription's first setup, which can take 10-15 minutes. ",
@@ -336,10 +502,14 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
                 ]),
                 m(
                   "div",
-                  { class: "mt-4 h-1.5 bg-fill-subtle rounded-full overflow-hidden" },
+                  {
+                    class:
+                      "mt-4 h-1.5 bg-fill-subtle rounded-full overflow-hidden",
+                  },
                   m("div", {
                     id: "ca-bar-fill",
-                    class: "h-full rounded-full bg-accent transition-[width] duration-300 ease-out",
+                    class:
+                      "h-full rounded-full bg-accent transition-[width] duration-300 ease-out",
                     style: `width: ${progressPercent.toFixed(0)}%`,
                   }),
                 ),
@@ -347,12 +517,20 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
             : null,
           state.view === "result"
             ? m("div", { id: "ca-result-view" }, [
-                m("span", { id: "ca-result-heading", class: "type-heading text-primary" }, state.resultHeading),
+                m(
+                  "span",
+                  {
+                    id: "ca-result-heading",
+                    class: "type-heading text-primary",
+                  },
+                  state.resultHeading,
+                ),
                 m(
                   "p",
                   {
                     id: "ca-result-message",
-                    class: "mt-2 type-helper text-secondary whitespace-pre-wrap break-words max-h-48 overflow-y-auto",
+                    class:
+                      "mt-2 type-helper text-secondary whitespace-pre-wrap break-words max-h-48 overflow-y-auto",
                   },
                   state.resultMessage,
                 ),
@@ -370,7 +548,15 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
                         "Back to form",
                       )
                     : null,
-                  m(Button, { variant: "primary", id: "ca-result-done-btn", onclick: () => state.close() }, "Done"),
+                  m(
+                    Button,
+                    {
+                      variant: "primary",
+                      id: "ca-result-done-btn",
+                      onclick: () => state.close(),
+                    },
+                    "Done",
+                  ),
                 ]),
               ])
             : null,

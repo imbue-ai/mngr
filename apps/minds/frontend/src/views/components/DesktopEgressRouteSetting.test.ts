@@ -34,9 +34,16 @@ function mountEditor(initialRoute: string[]): HTMLElement {
   return root;
 }
 
-function moveButton(root: HTMLElement, direction: "up" | "down", hop: string): HTMLButtonElement {
-  const button = root.querySelector<HTMLButtonElement>(`[data-desktop-egress-move-${direction}="${hop}"]`);
-  if (button === null) throw new Error(`no move-${direction} button for ${hop}`);
+function moveButton(
+  root: HTMLElement,
+  direction: "up" | "down",
+  hop: string,
+): HTMLButtonElement {
+  const button = root.querySelector<HTMLButtonElement>(
+    `[data-desktop-egress-move-${direction}="${hop}"]`,
+  );
+  if (button === null)
+    throw new Error(`no move-${direction} button for ${hop}`);
   return button;
 }
 
@@ -52,16 +59,31 @@ describe("desktop egress route editor focus", () => {
   });
 
   it("keeps focus on the button that moved a hop, so a second press moves the same hop again", () => {
-    const root = mountEditor(["host-here", "host-office", "host-studio", "self"]);
+    const root = mountEditor([
+      "host-here",
+      "host-office",
+      "host-studio",
+      "self",
+    ]);
     const pressed = moveButton(root, "up", "host-studio");
     pressed.focus();
     pressed.click();
 
-    expect(hops(root)).toEqual(["host-here", "host-studio", "host-office", "self"]);
+    expect(hops(root)).toEqual([
+      "host-here",
+      "host-studio",
+      "host-office",
+      "self",
+    ]);
     expect(document.activeElement).toBe(moveButton(root, "up", "host-studio"));
 
     (document.activeElement as HTMLButtonElement).click();
-    expect(hops(root)).toEqual(["host-studio", "host-here", "host-office", "self"]);
+    expect(hops(root)).toEqual([
+      "host-studio",
+      "host-here",
+      "host-office",
+      "self",
+    ]);
   });
 
   it("hands focus to the moved hop's other button when the pressed one can go no further", () => {
@@ -72,6 +94,8 @@ describe("desktop egress route editor focus", () => {
 
     expect(hops(root)).toEqual(["host-office", "host-here", "self"]);
     expect(moveButton(root, "up", "host-office").disabled).toBe(true);
-    expect(document.activeElement).toBe(moveButton(root, "down", "host-office"));
+    expect(document.activeElement).toBe(
+      moveButton(root, "down", "host-office"),
+    );
   });
 });

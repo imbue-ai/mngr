@@ -160,8 +160,7 @@ export class ImmersiveController {
       return;
     }
     if (this.deps.isFullscreen()) {
-      // The fullscreenchange this causes is what ends the mode; a refused
-      // exit (none in practice) must not leave the mode stuck on.
+      // The fullscreenchange this causes is what ends the mode.
       void this.deps.exitFullscreen().catch(() => this.ended());
       return;
     }

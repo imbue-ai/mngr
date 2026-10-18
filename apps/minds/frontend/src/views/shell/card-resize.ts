@@ -32,8 +32,12 @@ export interface CardBox {
  * nothing -- this is what makes the every-redraw check below cheap.
  */
 export function isResizeWorthAnimating(from: CardBox, to: CardBox): boolean {
-  if (from.width <= 0 || from.height <= 0 || to.width <= 0 || to.height <= 0) return false;
-  return Math.abs(from.width - to.width) >= 1 || Math.abs(from.height - to.height) >= 1;
+  if (from.width <= 0 || from.height <= 0 || to.width <= 0 || to.height <= 0)
+    return false;
+  return (
+    Math.abs(from.width - to.width) >= 1 ||
+    Math.abs(from.height - to.height) >= 1
+  );
 }
 
 /** The card's laid-out box, or null when it has none yet. */
@@ -68,7 +72,9 @@ export function releaseSize(card: HTMLElement): void {
 function isMotionUnwanted(): boolean {
   // Optional-chained: a non-browser host (unit tests stub a bare `window`) has
   // no matchMedia, and a missing preference is not a preference against motion.
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+  return (
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
+  );
 }
 
 /**
@@ -81,7 +87,11 @@ function isMotionUnwanted(): boolean {
  * sizing: nothing is written to `style`, so a cancel mid-flight reverts to the
  * content size rather than freezing at the interpolated one.
  */
-export function animateCardResize(element: HTMLElement, from: CardBox, to: CardBox): Animation | null {
+export function animateCardResize(
+  element: HTMLElement,
+  from: CardBox,
+  to: CardBox,
+): Animation | null {
   if (!isResizeWorthAnimating(from, to)) return null;
   if (typeof element.animate !== "function") return null;
   if (isMotionUnwanted()) return null;

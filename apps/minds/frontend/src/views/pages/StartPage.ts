@@ -14,9 +14,19 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults } from "../../models/create";
-import { fetchCreateFormDefaults, submitCreateRequest } from "../../models/create";
-import { VERIFICATION_POLL_MS, fetchIsEmailVerified, resendVerificationEmail } from "../../models/emailVerification";
-import { markOnboardingComplete, recordErrorReportingConsent } from "../../models/onboarding";
+import {
+  fetchCreateFormDefaults,
+  submitCreateRequest,
+} from "../../models/create";
+import {
+  VERIFICATION_POLL_MS,
+  fetchIsEmailVerified,
+  resendVerificationEmail,
+} from "../../models/emailVerification";
+import {
+  markOnboardingComplete,
+  recordErrorReportingConsent,
+} from "../../models/onboarding";
 import {
   CHAT_STREAM_STEP_MS,
   FLOW,
@@ -77,7 +87,10 @@ import {
 } from "./start/transcript";
 import type { AnswerButton } from "./start/transcript";
 
-const FORM_PRESET_BY_CHOICE: Record<FormChoiceId, PresetName> = { local: "local", "own-cloud": "own-cloud" };
+const FORM_PRESET_BY_CHOICE: Record<FormChoiceId, PresetName> = {
+  local: "local",
+  "own-cloud": "own-cloud",
+};
 
 /** How long "I verified it" keeps checking before the agent says it is not verified yet. */
 export const VERIFICATION_PRESS_WAIT_MS = 10000;
@@ -109,12 +122,29 @@ export function transcriptTurns(
   entries.forEach((entry, at) => {
     const key = `entry-${at}`;
     if (entry.kind === "said") {
-      const onUndoReporting = options.isPressable ? options.onUndoReporting : undefined;
-      turns.push(userTurn({ key, delayMs: 0, isInstant: options.isInstant, text: entry.text, onUndo: onUndoReporting }));
+      const onUndoReporting = options.isPressable
+        ? options.onUndoReporting
+        : undefined;
+      turns.push(
+        userTurn({
+          key,
+          delayMs: 0,
+          isInstant: options.isInstant,
+          text: entry.text,
+          onUndo: onUndoReporting,
+        }),
+      );
       return;
     }
     if (entry.kind === "note") {
-      turns.push(agentTurn({ key, text: entry.text, startAtMs: FLOW_THINK_MS, isInstant: options.isInstant }));
+      turns.push(
+        agentTurn({
+          key,
+          text: entry.text,
+          startAtMs: FLOW_THINK_MS,
+          isInstant: options.isInstant,
+        }),
+      );
       return;
     }
     const step = FLOW[entry.id];
@@ -129,9 +159,17 @@ export function transcriptTurns(
         isInstant: options.isInstant,
       }),
     );
-    let optionsAt = FLOW_THINK_MS + streamDurationMs(`${lead}${ask}`) + FLOW_OPTIONS_GAP_MS;
+    let optionsAt =
+      FLOW_THINK_MS + streamDurationMs(`${lead}${ask}`) + FLOW_OPTIONS_GAP_MS;
     if (step.table) {
-      turns.push(choiceTable({ key: `${key}-table`, delayMs: optionsAt, isInstant: options.isInstant, columns: step.table }));
+      turns.push(
+        choiceTable({
+          key: `${key}-table`,
+          delayMs: optionsAt,
+          isInstant: options.isInstant,
+          columns: step.table,
+        }),
+      );
       optionsAt += FLOW_OPTIONS_GAP_MS * 2;
     }
     if (entry.answer !== null) {
@@ -142,7 +180,9 @@ export function transcriptTurns(
           isInstant: options.isInstant,
           text: entry.said,
           onUndo:
-            options.isPressable && options.onUndo && step.isUndoable !== false ? () => options.onUndo?.(at) : undefined,
+            options.isPressable && options.onUndo && step.isUndoable !== false
+              ? () => options.onUndo?.(at)
+              : undefined,
         }),
       );
       return;
@@ -162,7 +202,9 @@ export function transcriptTurns(
         delayMs: buttonsAt,
         buttons: step.choices.map(toButton),
         minorButtons: (step.minorChoices ?? []).map(toButton),
-        aside: aside ? { label: aside.label, onPress: () => options.onAside?.(entry.id) } : undefined,
+        aside: aside
+          ? { label: aside.label, onPress: () => options.onAside?.(entry.id) }
+          : undefined,
       }),
     );
   });
@@ -175,12 +217,21 @@ export function transcriptTurns(
  * first run is before the user has an account; a payload that does not list
  * the account cannot name it for the create to run under.
  */
-export function areDefaultsStale(defaults: CreateFormDefaults | null, accountId: string): boolean {
-  return defaults === null || !defaults.accounts.some((account) => account.user_id === accountId);
+export function areDefaultsStale(
+  defaults: CreateFormDefaults | null,
+  accountId: string,
+): boolean {
+  return (
+    defaults === null ||
+    !defaults.accounts.some((account) => account.user_id === accountId)
+  );
 }
 
 /** The create form's remote preset under the flow's account, submitted without the form. */
-export function cloudCreateBody(defaults: CreateFormDefaults, accountId: string): Record<string, unknown> {
+export function cloudCreateBody(
+  defaults: CreateFormDefaults,
+  accountId: string,
+): Record<string, unknown> {
   const model = new CreateFormModel();
   model.applyDefaults(defaults);
   model.accountId = accountId;
@@ -189,17 +240,27 @@ export function cloudCreateBody(defaults: CreateFormDefaults, accountId: string)
 }
 
 /** The signed-in accounts as the flow names them, and the default one among them. */
-function signedInAccounts(): { all: FlowAccount[]; default: FlowAccount | null } {
+function signedInAccounts(): {
+  all: FlowAccount[];
+  default: FlowAccount | null;
+} {
   const entries = getAppContext().stores.accounts.accounts;
-  const toFlowAccount = (entry: (typeof entries)[number]): FlowAccount => ({ userId: entry.user_id, email: entry.email });
+  const toFlowAccount = (entry: (typeof entries)[number]): FlowAccount => ({
+    userId: entry.user_id,
+    email: entry.email,
+  });
   const defaultEntry = entries.find((entry) => entry.is_default);
-  return { all: entries.map(toFlowAccount), default: defaultEntry === undefined ? null : toFlowAccount(defaultEntry) };
+  return {
+    all: entries.map(toFlowAccount),
+    default: defaultEntry === undefined ? null : toFlowAccount(defaultEntry),
+  };
 }
 
 /** The account a cloud create is owed under; the flow only owes one once its account step has settled. */
 function flowAccount(flow: StartFlowModel): FlowAccount {
   const account = flow.state.account;
-  if (account === null) throw new Error("A cloud create is owed with no account settled");
+  if (account === null)
+    throw new Error("A cloud create is owed with no account settled");
   return account;
 }
 
@@ -276,7 +337,12 @@ export const StartPage: m.ClosureComponent = () => {
    * while the check runs takes the create back, and the verdict is dropped.
    */
   function startCloudCreate(): void {
-    if (isSubmittingCloud || isCheckingVerification || !flow.state.isCloudCreatePending) return;
+    if (
+      isSubmittingCloud ||
+      isCheckingVerification ||
+      !flow.state.isCloudCreatePending
+    )
+      return;
     const email = flowAccount(flow).email;
     isCheckingVerification = true;
     fetchIsEmailVerified(email).then(
@@ -297,7 +363,10 @@ export const StartPage: m.ClosureComponent = () => {
         // originating another one would only burn the cooldown that the
         // user's own resend needs.
         stopVerificationTimers();
-        verificationPollTimer = setInterval(() => void pollVerification(), VERIFICATION_POLL_MS);
+        verificationPollTimer = setInterval(
+          () => void pollVerification(),
+          VERIFICATION_POLL_MS,
+        );
         redraw();
       },
       () => {
@@ -315,7 +384,11 @@ export const StartPage: m.ClosureComponent = () => {
     const email = flow.state.verificationEmail;
     isCheckingVerification = true;
     try {
-      if ((await fetchIsEmailVerified(email)) && flow.state.verificationEmail === email) finishVerification();
+      if (
+        (await fetchIsEmailVerified(email)) &&
+        flow.state.verificationEmail === email
+      )
+        finishVerification();
     } catch {
       // Left for the next poll.
     } finally {
@@ -331,7 +404,11 @@ export const StartPage: m.ClosureComponent = () => {
    * ask again.
    */
   function pressVerified(): void {
-    if (verificationPressTimer !== null || flow.state.verificationEmail === null) return;
+    if (
+      verificationPressTimer !== null ||
+      flow.state.verificationEmail === null
+    )
+      return;
     const email = flow.state.verificationEmail;
     const deadline = Date.now() + VERIFICATION_PRESS_WAIT_MS;
     const attempt = (): void => {
@@ -344,7 +421,10 @@ export const StartPage: m.ClosureComponent = () => {
             return;
           }
           if (Date.now() < deadline) {
-            verificationPressTimer = setTimeout(attempt, VERIFICATION_PRESS_STEP_MS);
+            verificationPressTimer = setTimeout(
+              attempt,
+              VERIFICATION_PRESS_STEP_MS,
+            );
             return;
           }
           verificationPressTimer = null;
@@ -385,16 +465,26 @@ export const StartPage: m.ClosureComponent = () => {
     const accountId = flowAccount(flow).userId;
     // Async so that a body that fails to build rejects rather than throwing past the caller's catch.
     const submit = async (loaded: CreateFormDefaults): Promise<void> => {
-      const result = await submitCreateRequest(cloudCreateBody(loaded, accountId));
+      const result = await submitCreateRequest(
+        cloudCreateBody(loaded, accountId),
+      );
       isSubmittingCloud = false;
-      if (result.status === 202 && typeof result.data.operation_id === "string") {
+      if (
+        result.status === 202 &&
+        typeof result.data.operation_id === "string"
+      ) {
         flow.state = settleCloudCreate(flow.state, null);
         enterCreation(result.data.operation_id, true);
         return;
       }
       const message =
-        result.status === 0 ? "Could not reach the app backend." : normalizeCreateApiError(result.data).message;
-      flow.state = settleCloudCreate(flow.state, `That did not work: ${message}`);
+        result.status === 0
+          ? "Could not reach the app backend."
+          : normalizeCreateApiError(result.data).message;
+      flow.state = settleCloudCreate(
+        flow.state,
+        `That did not work: ${message}`,
+      );
       redraw();
     };
     const cached = defaults;
@@ -404,7 +494,10 @@ export const StartPage: m.ClosureComponent = () => {
         : fetchCreateFormDefaults(null);
     const fail = (message: string): void => {
       isSubmittingCloud = false;
-      flow.state = settleCloudCreate(flow.state, `That did not work: ${message}`);
+      flow.state = settleCloudCreate(
+        flow.state,
+        `That did not work: ${message}`,
+      );
       redraw();
     };
     // The rejection handler belongs to the read it names, not to the whole
@@ -412,7 +505,9 @@ export const StartPage: m.ClosureComponent = () => {
     void ready.then(
       (loaded) => {
         defaults = loaded;
-        return submit(loaded).catch(() => fail("could not send the create request."));
+        return submit(loaded).catch(() =>
+          fail("could not send the create request."),
+        );
       },
       () => fail("could not load the create settings."),
     );
@@ -422,9 +517,13 @@ export const StartPage: m.ClosureComponent = () => {
   function answerReporting(isAllowed: boolean): void {
     // A failed save is asked again on the consent screen at a later launch.
     void recordErrorReportingConsent(isAllowed).then((isRecorded) => {
-      if (!isRecorded) console.warn("The error-reporting answer could not be saved");
+      if (!isRecorded)
+        console.warn("The error-reporting answer could not be saved");
     });
-    flow.state = startQuestions(flow.state, isAllowed ? REPORTING_ACCEPT_LABEL : REPORTING_DECLINE_LABEL);
+    flow.state = startQuestions(
+      flow.state,
+      isAllowed ? REPORTING_ACCEPT_LABEL : REPORTING_DECLINE_LABEL,
+    );
   }
 
   function onAnswer(at: number, choiceId: ChoiceId): void {
@@ -439,7 +538,10 @@ export const StartPage: m.ClosureComponent = () => {
     });
     if (isFormChoice(flow.state.pending)) {
       formPreset = FORM_PRESET_BY_CHOICE[flow.state.pending];
-    } else if (flow.state.pending === "signup" || flow.state.pending === "signin") {
+    } else if (
+      flow.state.pending === "signup" ||
+      flow.state.pending === "signin"
+    ) {
       void webLogin.start(SIGN_IN_INTRO_BY_CHOICE[flow.state.pending]);
     }
     if (flow.state.isCloudCreatePending) startCloudCreate();
@@ -490,7 +592,10 @@ export const StartPage: m.ClosureComponent = () => {
     const accounts = getAppContext().stores.accounts;
     const pending = flow.state.pending;
     if (pending === "existing-login") {
-      if (webLogin.state === "done" || (accounts.hasAccounts && !webLogin.isOpen)) {
+      if (
+        webLogin.state === "done" ||
+        (accounts.hasAccounts && !webLogin.isOpen)
+      ) {
         flow.state = dismissPendingModal(flow.state);
         void markOnboardingComplete();
         webLogin.noteSignedIn();
@@ -539,7 +644,10 @@ export const StartPage: m.ClosureComponent = () => {
     },
     view() {
       const state = flow.state;
-      const pointsAt = schedule.answerAt + streamDurationMs(MANIFESTO_HEADING) + CHAT_STREAM_STEP_MS;
+      const pointsAt =
+        schedule.answerAt +
+        streamDurationMs(MANIFESTO_HEADING) +
+        CHAT_STREAM_STEP_MS;
       // Every child is keyed: Mithril rejects a fragment that mixes keyed
       // vnodes with holes, so optional pieces are appended rather than nulled.
       const children: m.Children[] = [
@@ -549,8 +657,16 @@ export const StartPage: m.ClosureComponent = () => {
           emphasis: MANIFESTO_OPENER_EMPHASIS,
           startAtMs: schedule.openerAt,
         }),
-        userTurn({ key: "manifesto-question", delayMs: schedule.questionAt, text: MANIFESTO_QUESTION }),
-        agentTurn({ key: "manifesto-answer", text: MANIFESTO_HEADING, startAtMs: schedule.answerAt }),
+        userTurn({
+          key: "manifesto-question",
+          delayMs: schedule.questionAt,
+          text: MANIFESTO_QUESTION,
+        }),
+        agentTurn({
+          key: "manifesto-answer",
+          text: MANIFESTO_HEADING,
+          startAtMs: schedule.answerAt,
+        }),
         disclosureList({
           key: "manifesto-points",
           startAtMs: pointsAt,
@@ -626,7 +742,11 @@ export const StartPage: m.ClosureComponent = () => {
           }),
         );
       }
-      return m("div", { id: "start-flow", class: TRANSCRIPT_COLUMN_CLASS }, children);
+      return m(
+        "div",
+        { id: "start-flow", class: TRANSCRIPT_COLUMN_CLASS },
+        children,
+      );
     },
   };
 };

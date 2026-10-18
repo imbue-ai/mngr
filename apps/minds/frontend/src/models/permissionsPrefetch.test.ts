@@ -14,7 +14,11 @@ afterEach(() => {
 const AGENT = "agent-ab12";
 
 function okFetch() {
-  return vi.fn(async (_url: string) => ({ ok: true, status: 200, body: { connections: [] } }));
+  return vi.fn(async (_url: string) => ({
+    ok: true,
+    status: 200,
+    body: { connections: [] },
+  }));
 }
 
 describe("warmPermissionsOverview", () => {

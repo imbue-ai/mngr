@@ -476,7 +476,9 @@ function windowButtonCluster(root: AnyVnode): AnyVnode {
   const cluster = collectVnodes(root).find(
     (vnode) =>
       Array.isArray(vnode.children) &&
-      (vnode.children as AnyVnode[]).some((child) => child !== null && attrsOf(child).id === "close-btn"),
+      (vnode.children as AnyVnode[]).some(
+        (child) => child !== null && attrsOf(child).id === "close-btn",
+      ),
   );
   expect(cluster, "no window button cluster").toBeDefined();
   return cluster as AnyVnode;
@@ -484,20 +486,40 @@ function windowButtonCluster(root: AnyVnode): AnyVnode {
 
 describe("Titlebar window controls", () => {
   it("draws its own traffic lights, and none of its buttons, when the platform has no native ones but asks for them", () => {
-    const root = renderTitlebar("", { isMac: false, isTrafficLightsDrawn: true });
-    const lights = collectVnodes(root).find((vnode) => vnode.tag === TrafficLights);
+    const root = renderTitlebar("", {
+      isMac: false,
+      isTrafficLightsDrawn: true,
+    });
+    const lights = collectVnodes(root).find(
+      (vnode) => vnode.tag === TrafficLights,
+    );
     expect(lights).toBeDefined();
-    const lightIds = collectVnodes(renderComponentVnode(lights as AnyVnode).children).map((vnode) => attrsOf(vnode).id);
-    expect(lightIds).toEqual(["traffic-light-close", "traffic-light-minimize", "traffic-light-maximize"]);
+    const lightIds = collectVnodes(
+      renderComponentVnode(lights as AnyVnode).children,
+    ).map((vnode) => attrsOf(vnode).id);
+    expect(lightIds).toEqual([
+      "traffic-light-close",
+      "traffic-light-minimize",
+      "traffic-light-maximize",
+    ]);
     const buttonCluster = windowButtonCluster(root);
     expect(classTokensOf(buttonCluster)).toContain("hidden");
     // No spacer either: the lights take that room themselves.
-    expect(collectVnodes(root).find((vnode) => classTokensOf(vnode).includes("w-[72px]") && vnode.tag === "div" && attrsOf(vnode).id === undefined)).toBeUndefined();
+    expect(
+      collectVnodes(root).find(
+        (vnode) =>
+          classTokensOf(vnode).includes("w-[72px]") &&
+          vnode.tag === "div" &&
+          attrsOf(vnode).id === undefined,
+      ),
+    ).toBeUndefined();
   });
 
   it("keeps its own buttons, and draws no lights, off macOS by default", () => {
     const root = renderTitlebar("", { isMac: false });
-    expect(collectVnodes(root).find((vnode) => vnode.tag === TrafficLights)).toBeUndefined();
+    expect(
+      collectVnodes(root).find((vnode) => vnode.tag === TrafficLights),
+    ).toBeUndefined();
     const buttonCluster = windowButtonCluster(root);
     expect(classTokensOf(buttonCluster)).not.toContain("hidden");
   });

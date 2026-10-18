@@ -9,7 +9,10 @@
 // so they survive the workspace changing machines; host_id remains only for
 // legacy-coordinate resolution.
 
-import type { UiWorkspaceEntry, UiWorkspacesMessage } from "../channel/messages";
+import type {
+  UiWorkspaceEntry,
+  UiWorkspacesMessage,
+} from "../channel/messages";
 
 export interface AccentCacheEntry {
   accent: string | null;
@@ -30,7 +33,10 @@ export class WorkspacesStore {
     this.workspaces = message.workspaces;
     this.destroyingAgentIds = message.destroying_agent_ids;
     this.restorableWorkspaceIds = message.restorable_workspace_ids;
-    this.remoteWorkspaceStates = message.remote_workspace_states as Record<string, string>;
+    this.remoteWorkspaceStates = message.remote_workspace_states as Record<
+      string,
+      string
+    >;
     for (const entry of message.workspaces) {
       const cached: AccentCacheEntry = {
         accent: entry.accent || null,
@@ -58,7 +64,11 @@ export class WorkspacesStore {
   }
 
   accentEntry(anyId: string): AccentCacheEntry | null {
-    return this.accentByAnyId.get(anyId) ?? this.accentByAnyId.get(this.toAgentScopedId(anyId)) ?? null;
+    return (
+      this.accentByAnyId.get(anyId) ??
+      this.accentByAnyId.get(this.toAgentScopedId(anyId)) ??
+      null
+    );
   }
 
   /** Translate either coordinate to the stable agent id (identity). */
@@ -66,7 +76,11 @@ export class WorkspacesStore {
     return this.agentIdByHostId.get(anyId) ?? anyId;
   }
 
-  workspaceFrameUrl(anyId: string, soloWindowId: string | null = null, isSoloReopened = false): string {
+  workspaceFrameUrl(
+    anyId: string,
+    soloWindowId: string | null = null,
+    isSoloReopened = false,
+  ): string {
     // Content URLs are keyed by the workspace id (the /goto/ bridge and the
     // origin family both route it); a host id from persisted state resolves
     // through the alias map. A popout asks the workspace shell for one window
@@ -76,8 +90,12 @@ export class WorkspacesStore {
     // restore), whose shell then trusts the stored layout at once.
     const workspaceScoped = this.toAgentScopedId(anyId);
     const gotoPath = "/goto/" + workspaceScoped + "/";
-    if (soloWindowId === null) return "/forward-bridge?next=" + encodeURIComponent(gotoPath);
-    const soloPath = "/?solo=" + encodeURIComponent(soloWindowId) + (isSoloReopened ? "&reopened=1" : "");
+    if (soloWindowId === null)
+      return "/forward-bridge?next=" + encodeURIComponent(gotoPath);
+    const soloPath =
+      "/?solo=" +
+      encodeURIComponent(soloWindowId) +
+      (isSoloReopened ? "&reopened=1" : "");
     const bridgeNext = gotoPath + "?next=" + encodeURIComponent(soloPath);
     return "/forward-bridge?next=" + encodeURIComponent(bridgeNext);
   }

@@ -466,9 +466,7 @@ export function DevStyleguide(): m.Component {
               toc: "Icons (12px)",
               title: "Icons -- 12x12 chrome glyphs (Icon12)",
               body: m("div", { class: "flex gap-6" }, [
-                ...(
-                  Object.keys(ICONS_12) as Icon12Name[]
-                ).map((name) =>
+                ...(Object.keys(ICONS_12) as Icon12Name[]).map((name) =>
                   m("div", { class: "flex items-center gap-2" }, [
                     m(Icon12, { name }),
                     m("code", { class: "type-helper text-secondary" }, name),
@@ -577,7 +575,8 @@ export function DevStyleguide(): m.Component {
                   version: "0.4.2",
                   installPolicy: "on-request",
                   needsPassword: true,
-                  error: "Installing the update failed: the password prompt was cancelled.",
+                  error:
+                    "Installing the update failed: the password prompt was cancelled.",
                   isInstalling: false,
                   onRestart: () => {},
                   onDismiss: () => {},

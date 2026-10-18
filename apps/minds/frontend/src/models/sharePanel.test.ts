@@ -2106,9 +2106,9 @@ describe("SharePanelModel invitations", () => {
     await model.load();
     await settle();
     expect(model.isPublished).toBe(false);
-    expect(model.canInvite(WHOLE, rowOf(model, WHOLE, "friend@example.com"))).toBe(
-      false,
-    );
+    expect(
+      model.canInvite(WHOLE, rowOf(model, WHOLE, "friend@example.com")),
+    ).toBe(false);
   });
 
   it("invites an address on the whole workspace and an account on an app, the row pending meanwhile", async () => {
@@ -2333,8 +2333,12 @@ describe("SharePanelModel invitations", () => {
         return okResult({ outcome: "invited", invited_at: INVITED_AT });
       }
       if (init?.method === "PUT" && url.endsWith("/grants"))
-        return okResult(sharingResponse({ grants: sentDocument(init), grants_synced: true }));
-      return okResult(sharingResponse({ grants: grantsDocument(), grants_synced: true }));
+        return okResult(
+          sharingResponse({ grants: sentDocument(init), grants_synced: true }),
+        );
+      return okResult(
+        sharingResponse({ grants: grantsDocument(), grants_synced: true }),
+      );
     });
     await model.load();
     await settle();
@@ -2344,8 +2348,15 @@ describe("SharePanelModel invitations", () => {
     await settle();
     await settle();
 
-    expect(invitePayloads).toEqual([{ email: "newcomer@example.com", app: null }]);
-    expect(model.invitationStatusIndicator(WHOLE, rowOf(model, WHOLE, "newcomer@example.com")).kind).toBe("invited");
+    expect(invitePayloads).toEqual([
+      { email: "newcomer@example.com", app: null },
+    ]);
+    expect(
+      model.invitationStatusIndicator(
+        WHOLE,
+        rowOf(model, WHOLE, "newcomer@example.com"),
+      ).kind,
+    ).toBe("invited");
 
     // A domain grant notifies nobody, so none is requested for it.
     model.addGrant(WHOLE, "email_domain", "acme.example");
@@ -2362,7 +2373,13 @@ describe("SharePanelModel invitations", () => {
 
   it("reduces each row to a single typed status indicator state", async () => {
     const { model } = invitablePanel(undefined, [
-      { kind: "email", value: "friend@example.com", app: WHOLE, outcome: "invited", invited_at: INVITED_AT },
+      {
+        kind: "email",
+        value: "friend@example.com",
+        app: WHOLE,
+        outcome: "invited",
+        invited_at: INVITED_AT,
+      },
       {
         kind: "user",
         value: "user-2",
@@ -2375,19 +2392,39 @@ describe("SharePanelModel invitations", () => {
     await model.load();
     await settle();
 
-    expect(model.invitationStatusIndicator(WHOLE, rowOf(model, WHOLE, "friend@example.com"))).toEqual({
+    expect(
+      model.invitationStatusIndicator(
+        WHOLE,
+        rowOf(model, WHOLE, "friend@example.com"),
+      ),
+    ).toEqual({
       kind: "invited",
       at: INVITED_AT,
       canReinvite: true,
     });
-    expect(model.invitationStatusIndicator(WHOLE, rowOf(model, WHOLE, "carol@example.com"))).toEqual({
+    expect(
+      model.invitationStatusIndicator(
+        WHOLE,
+        rowOf(model, WHOLE, "carol@example.com"),
+      ),
+    ).toEqual({
       kind: "joined",
       firstAt: "2026-09-28T00:00:00+00:00",
       lastAt: "2026-09-29T00:00:00+00:00",
     });
     // A domain row, and a person with nothing known yet, show nothing.
-    expect(model.invitationStatusIndicator(WHOLE, rowOf(model, WHOLE, "acme.example"))).toEqual({ kind: "none" });
-    expect(model.invitationStatusIndicator("web", rowOf(model, "web", "dev@example.com"))).toEqual({ kind: "none" });
+    expect(
+      model.invitationStatusIndicator(
+        WHOLE,
+        rowOf(model, WHOLE, "acme.example"),
+      ),
+    ).toEqual({ kind: "none" });
+    expect(
+      model.invitationStatusIndicator(
+        "web",
+        rowOf(model, "web", "dev@example.com"),
+      ),
+    ).toEqual({ kind: "none" });
   });
 
   it("shows the refusal as the status indicator state, with a re-invite still offered", async () => {

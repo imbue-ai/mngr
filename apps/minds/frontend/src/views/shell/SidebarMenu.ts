@@ -42,7 +42,8 @@ function statusIcon(liveness: string): m.Children {
   return m(
     "span",
     {
-      class: "sidebar-status-icon shrink-0 inline-flex w-4 justify-center text-secondary",
+      class:
+        "sidebar-status-icon shrink-0 inline-flex w-4 justify-center text-secondary",
       title,
     },
     m(
@@ -56,7 +57,11 @@ function statusIcon(liveness: string): m.Children {
         "stroke-linecap": "round",
         "stroke-linejoin": "round",
       },
-      path.split(" M").map((segment, idx) => m("path", { d: (idx === 0 ? "" : "M") + segment })),
+      path
+        .split(" M")
+        .map((segment, idx) =>
+          m("path", { d: (idx === 0 ? "" : "M") + segment }),
+        ),
     ),
   );
 }
@@ -77,7 +82,10 @@ function SidebarRow(): m.Component<SidebarRowAttrs> {
         "sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md type-body " +
         (isRemote
           ? "is-remote text-secondary opacity-60 cursor-default"
-          : "cursor-pointer text-primary" + (isCurrent ? " is-current bg-fill-active" : " hover:bg-fill-hover"));
+          : "cursor-pointer text-primary" +
+            (isCurrent
+              ? " is-current bg-fill-active"
+              : " hover:bg-fill-hover"));
       const onRowClick = () => {
         if (isRemote) return;
         shell.closeSidebar();
@@ -87,52 +95,68 @@ function SidebarRow(): m.Component<SidebarRowAttrs> {
         }
         shell.enterWorkspace(workspace.id);
       };
-      return m("div", { class: rowClass, "data-agent-id": workspace.id, onclick: onRowClick }, [
-        m("span", {
-          class: "sidebar-dot w-2.5 h-2.5 rounded-full shrink-0",
-          style: workspace.accent ? `background-color: ${workspace.accent};` : undefined,
-        }),
-        m(
-          "span",
-          { class: "flex-1 whitespace-nowrap overflow-hidden text-ellipsis" },
-          workspace.name || workspace.id,
-        ),
-        createAttemptState !== null
-          ? m(
-              "span",
-              {
-                class:
-                  "shrink-0 type-helper px-1.5 py-0.5 rounded " +
-                  (createAttemptState === "failed" ? "text-important" : "text-tertiary"),
-              },
-              CREATE_ATTEMPT_BADGE_LABELS[createAttemptState] ?? createAttemptState,
-            )
-          : statusIcon(workspace.liveness ?? ""),
-        createAttemptState === null && !isRemote && !isCurrent && electronBridge.isDesktop
-          ? m(
-              "button",
-              {
-                type: "button",
-                class:
-                  "sidebar-row-icon flex items-center justify-center w-6 h-6 bg-transparent border-none cursor-pointer text-secondary rounded-md hover:text-primary hover:bg-fill-hover",
-                title: "Open in new window",
-                tabindex: -1,
-                onclick: (event: MouseEvent) => {
-                  event.stopPropagation();
-                  shell.closeSidebar();
-                  electronBridge.openWorkspaceInNewWindow(workspace.id);
+      return m(
+        "div",
+        { class: rowClass, "data-agent-id": workspace.id, onclick: onRowClick },
+        [
+          m("span", {
+            class: "sidebar-dot w-2.5 h-2.5 rounded-full shrink-0",
+            style: workspace.accent
+              ? `background-color: ${workspace.accent};`
+              : undefined,
+          }),
+          m(
+            "span",
+            { class: "flex-1 whitespace-nowrap overflow-hidden text-ellipsis" },
+            workspace.name || workspace.id,
+          ),
+          createAttemptState !== null
+            ? m(
+                "span",
+                {
+                  class:
+                    "shrink-0 type-helper px-1.5 py-0.5 rounded " +
+                    (createAttemptState === "failed"
+                      ? "text-important"
+                      : "text-tertiary"),
                 },
-              },
-              m(
-                "svg",
-                { class: "w-4 h-4", viewBox: "0 0 16 16", fill: "currentColor" },
-                m("path", {
-                  d: "M12.9331 10.3336C12.9329 10.6648 12.6646 10.9331 12.3335 10.9333C12.0022 10.9333 11.7331 10.6649 11.7329 10.3336V5.1149L4.09033 12.7575C3.85606 12.9916 3.47695 12.9916 3.24268 12.7575C3.00836 12.5232 3.00836 12.1432 3.24268 11.9088L10.8853 4.26627H5.6665C5.33513 4.26627 5.06689 3.99803 5.06689 3.66666C5.06689 3.33529 5.33513 3.06705 5.6665 3.06705H12.3335C12.6647 3.06722 12.9331 3.33539 12.9331 3.66666V10.3336Z",
-                }),
-              ),
-            )
-          : null,
-      ]);
+                CREATE_ATTEMPT_BADGE_LABELS[createAttemptState] ??
+                  createAttemptState,
+              )
+            : statusIcon(workspace.liveness ?? ""),
+          createAttemptState === null &&
+          !isRemote &&
+          !isCurrent &&
+          electronBridge.isDesktop
+            ? m(
+                "button",
+                {
+                  type: "button",
+                  class:
+                    "sidebar-row-icon flex items-center justify-center w-6 h-6 bg-transparent border-none cursor-pointer text-secondary rounded-md hover:text-primary hover:bg-fill-hover",
+                  title: "Open in new window",
+                  tabindex: -1,
+                  onclick: (event: MouseEvent) => {
+                    event.stopPropagation();
+                    shell.closeSidebar();
+                    electronBridge.openWorkspaceInNewWindow(workspace.id);
+                  },
+                },
+                m(
+                  "svg",
+                  {
+                    class: "w-4 h-4",
+                    viewBox: "0 0 16 16",
+                    fill: "currentColor",
+                  },
+                  m("path", {
+                    d: "M12.9331 10.3336C12.9329 10.6648 12.6646 10.9331 12.3335 10.9333C12.0022 10.9333 11.7331 10.6649 11.7329 10.3336V5.1149L4.09033 12.7575C3.85606 12.9916 3.47695 12.9916 3.24268 12.7575C3.00836 12.5232 3.00836 12.1432 3.24268 11.9088L10.8853 4.26627H5.6665C5.33513 4.26627 5.06689 3.99803 5.06689 3.66666C5.06689 3.33529 5.33513 3.06705 5.6665 3.06705H12.3335C12.6647 3.06722 12.9331 3.33539 12.9331 3.66666V10.3336Z",
+                  }),
+                ),
+              )
+            : null,
+        ],
+      );
     },
   };
 }
@@ -166,7 +190,9 @@ export function SidebarMenu(): m.Component<SidebarMenuAttrs> {
       });
       const currentAnyId = shell.displayedWorkspaceAnyId;
       const currentAgentId =
-        currentAnyId === null ? null : shell.stores.workspaces.toAgentScopedId(currentAnyId);
+        currentAnyId === null
+          ? null
+          : shell.stores.workspaces.toAgentScopedId(currentAnyId);
 
       return m(
         "div#sidebar-backdrop",
@@ -186,13 +212,21 @@ export function SidebarMenu(): m.Component<SidebarMenuAttrs> {
               keys.flatMap((key, keyIdx) => {
                 const rows: m.Children[] = [];
                 if (keyIdx > 0 || keys.length > 1) {
-                  rows.push(m("div", { class: "px-2 pt-2 pb-1 type-section text-tertiary" }, key));
+                  rows.push(
+                    m(
+                      "div",
+                      { class: "px-2 pt-2 pb-1 type-section text-tertiary" },
+                      key,
+                    ),
+                  );
                 }
                 for (const workspace of groups.get(key) ?? []) {
                   rows.push(
                     m(SidebarRow, {
                       workspace,
-                      isCurrent: currentAgentId !== null && workspace.id === currentAgentId,
+                      isCurrent:
+                        currentAgentId !== null &&
+                        workspace.id === currentAgentId,
                       shell,
                     }),
                   );
@@ -211,7 +245,10 @@ export function SidebarMenu(): m.Component<SidebarMenuAttrs> {
                   m.route.set("/create");
                 },
               },
-              [m(Icon16, { name: "plus", extra: "shrink-0" }), m("span", "New workspace")],
+              [
+                m(Icon16, { name: "plus", extra: "shrink-0" }),
+                m("span", "New workspace"),
+              ],
             ),
           ],
         ),

@@ -34,7 +34,9 @@ export function pathSync(overrides: Partial<UiPathSync> = {}): UiPathSync {
 }
 
 /** One shared-path row: ~/notes, readable, not synced. */
-export function sharedPath(overrides: Partial<UiSharedPath> = {}): UiSharedPath {
+export function sharedPath(
+  overrides: Partial<UiSharedPath> = {},
+): UiSharedPath {
   return {
     path: "/home/me/notes",
     path_label: "~/notes",
@@ -50,7 +52,9 @@ export const BROWSER_SIGN_IN: UiServiceSignIn = {
   is_account_name_required: false,
 };
 
-export function credentialsSignIn(overrides: Partial<UiServiceSignIn> = {}): UiServiceSignIn {
+export function credentialsSignIn(
+  overrides: Partial<UiServiceSignIn> = {},
+): UiServiceSignIn {
   return {
     is_browser_supported: false,
     credential_parameters: [
@@ -80,11 +84,19 @@ export const DESKTOPS: UiWorkspaceDesktop[] = [
 /** The setting of a remote workspace: offered, and on the given route (off
  * unless one is given). The mode follows the route as seen from this
  * computer, as the server's does. */
-export function desktopEgress(route: string[] = ["self"]): UiDesktopEgressSetting {
-  return { is_supported: true, mode: desktopEgressMode(route, thisComputerDeviceId(DESKTOPS)), route };
+export function desktopEgress(
+  route: string[] = ["self"],
+): UiDesktopEgressSetting {
+  return {
+    is_supported: true,
+    mode: desktopEgressMode(route, thisComputerDeviceId(DESKTOPS)),
+    route,
+  };
 }
 
-export function slackConnection(overrides: Partial<UiPermissionConnection> = {}): UiPermissionConnection {
+export function slackConnection(
+  overrides: Partial<UiPermissionConnection> = {},
+): UiPermissionConnection {
   return {
     sign_in: BROWSER_SIGN_IN,
     desktop_egress: DESKTOP_EGRESS_UNSUPPORTED,
@@ -103,8 +115,18 @@ export function slackConnection(overrides: Partial<UiPermissionConnection> = {})
           {
             heading: "Chat",
             toggles: [
-              { permission: "slack-chat-read", label: "Read chat", description: "Read messages", is_granted: false },
-              { permission: "slack-chat-write", label: "Post messages", description: "", is_granted: true },
+              {
+                permission: "slack-chat-read",
+                label: "Read chat",
+                description: "Read messages",
+                is_granted: false,
+              },
+              {
+                permission: "slack-chat-write",
+                label: "Post messages",
+                description: "",
+                is_granted: true,
+              },
             ],
           },
         ],
@@ -114,7 +136,9 @@ export function slackConnection(overrides: Partial<UiPermissionConnection> = {})
   };
 }
 
-export function awsConnection(overrides: Partial<UiPermissionConnection> = {}): UiPermissionConnection {
+export function awsConnection(
+  overrides: Partial<UiPermissionConnection> = {},
+): UiPermissionConnection {
   return slackConnection({
     service_name: "aws",
     display_name: "AWS",
@@ -123,15 +147,29 @@ export function awsConnection(overrides: Partial<UiPermissionConnection> = {}): 
   });
 }
 
-export function awsAvailable(overrides: Partial<UiServiceSignIn> = {}): UiAvailableConnection {
-  return { service_name: "aws", display_name: "AWS", sign_in: credentialsSignIn(overrides) };
+export function awsAvailable(
+  overrides: Partial<UiServiceSignIn> = {},
+): UiAvailableConnection {
+  return {
+    service_name: "aws",
+    display_name: "AWS",
+    sign_in: credentialsSignIn(overrides),
+  };
 }
 
-export function permissionsView(overrides: Partial<UiWorkspacePermissions> = {}): UiWorkspacePermissions {
+export function permissionsView(
+  overrides: Partial<UiWorkspacePermissions> = {},
+): UiWorkspacePermissions {
   return {
     host_id: "host-" + "b".repeat(8),
     connections: [slackConnection()],
-    available_connections: [{ service_name: "notion", display_name: "Notion", sign_in: BROWSER_SIGN_IN }],
+    available_connections: [
+      {
+        service_name: "notion",
+        display_name: "Notion",
+        sign_in: BROWSER_SIGN_IN,
+      },
+    ],
     shared_paths: [],
     workspace_toggles: [],
     waiting_requests: [],

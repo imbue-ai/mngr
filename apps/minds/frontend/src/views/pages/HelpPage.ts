@@ -439,11 +439,10 @@ export function titleRow(): m.Children {
     {
       class: "flex h-[56px] shrink-0 items-center border-b border-subtle px-3",
     },
-    m(
-      "h1",
-      { class: "flex items-center gap-1.5 type-label text-primary" },
-      [m(Icon16, { name: "bug", size: "sm" }), "Ran into a bug?"],
-    ),
+    m("h1", { class: "flex items-center gap-1.5 type-label text-primary" }, [
+      m(Icon16, { name: "bug", size: "sm" }),
+      "Ran into a bug?",
+    ]),
   );
 }
 

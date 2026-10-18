@@ -57,21 +57,34 @@ describe("the update-ready card's state", () => {
       watchUpdateStatus(() => {});
       await settle();
 
-      expect(updateInstallTerms()).toEqual({ policy: "on-quit", needsPassword: false });
+      expect(updateInstallTerms()).toEqual({
+        policy: "on-quit",
+        needsPassword: false,
+      });
     });
 
     resetUpdateReadyForTest();
-    const deb = nativeStub({ ...DOWNLOADED, installPolicy: "on-request", needsPasswordToInstall: true });
+    const deb = nativeStub({
+      ...DOWNLOADED,
+      installPolicy: "on-request",
+      needsPasswordToInstall: true,
+    });
     await withMindsNative(deb.surface, async () => {
       watchUpdateStatus(() => {});
       await settle();
 
-      expect(updateInstallTerms()).toEqual({ policy: "on-request", needsPassword: true });
+      expect(updateInstallTerms()).toEqual({
+        policy: "on-request",
+        needsPassword: true,
+      });
     });
   });
 
   it("offers nothing when the running build is current", async () => {
-    const { surface } = nativeStub({ ...DOWNLOADED, status: { type: "up-to-date" } });
+    const { surface } = nativeStub({
+      ...DOWNLOADED,
+      status: { type: "up-to-date" },
+    });
     await withMindsNative(surface, async () => {
       watchUpdateStatus(() => {});
       await settle();
@@ -120,7 +133,11 @@ describe("the update-ready card's state", () => {
       watchUpdateStatus(() => {});
       await settle();
 
-      push({ type: "error", channel: "alpha", message: "getaddrinfo ENOTFOUND" });
+      push({
+        type: "error",
+        channel: "alpha",
+        message: "getaddrinfo ENOTFOUND",
+      });
 
       expect(updateReadyVersion()).toBe("0.3.14");
     });
@@ -164,7 +181,9 @@ describe("the update-ready card's state", () => {
     let isInstallable = false;
     const surface = {
       ...nativeStub(DOWNLOADED).surface,
-      installUpdate: async () => ({ error: isInstallable ? null : "Installing the update failed: pkexec" }),
+      installUpdate: async () => ({
+        error: isInstallable ? null : "Installing the update failed: pkexec",
+      }),
     };
     await withMindsNative(surface, async () => {
       let changeCount = 0;
@@ -187,18 +206,21 @@ describe("the update-ready card's state", () => {
     // and it settles only if the app stays up (here: the quit was cancelled
     // at the running-workspaces prompt), which hands the control back.
     const { installUpdate, resolveInstall } = pendingInstallUpdate();
-    await withMindsNative({ ...nativeStub(DOWNLOADED).surface, installUpdate }, async () => {
-      const seen: boolean[] = [];
-      const done = installUpdateReady(() => seen.push(isUpdateInstalling()));
-      expect(isUpdateInstalling()).toBe(true);
-      expect(seen).toEqual([true]);
+    await withMindsNative(
+      { ...nativeStub(DOWNLOADED).surface, installUpdate },
+      async () => {
+        const seen: boolean[] = [];
+        const done = installUpdateReady(() => seen.push(isUpdateInstalling()));
+        expect(isUpdateInstalling()).toBe(true);
+        expect(seen).toEqual([true]);
 
-      resolveInstall();
-      await done;
-      expect(isUpdateInstalling()).toBe(false);
-      expect(seen).toEqual([true, false]);
-      expect(updateInstallError()).toBeNull();
-    });
+        resolveInstall();
+        await done;
+        expect(isUpdateInstalling()).toBe(false);
+        expect(seen).toEqual([true, false]);
+        expect(updateInstallError()).toBeNull();
+      },
+    );
   });
 
   it("drops a failed install's account once a different version is offered", async () => {
@@ -206,7 +228,12 @@ describe("the update-ready card's state", () => {
     // shown under the next version's card it would report a click that never
     // happened on that download. The same offer re-published keeps it.
     const { surface, push } = nativeStub(DOWNLOADED);
-    const failing = { ...surface, installUpdate: async () => ({ error: "Installing the update failed: pkexec" }) };
+    const failing = {
+      ...surface,
+      installUpdate: async () => ({
+        error: "Installing the update failed: pkexec",
+      }),
+    };
     await withMindsNative(failing, async () => {
       watchUpdateStatus(() => {});
       await settle();

@@ -134,7 +134,9 @@ export async function fetchJson<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-export function fetchCreateFormDefaults(retryId: string | null): Promise<CreateFormDefaults> {
+export function fetchCreateFormDefaults(
+  retryId: string | null,
+): Promise<CreateFormDefaults> {
   const suffix = retryId ? `?retry=${encodeURIComponent(retryId)}` : "";
   return fetchJson<CreateFormDefaults>(`/ui/api/create/form-defaults${suffix}`);
 }
@@ -143,8 +145,12 @@ export function fetchLandingExtras(): Promise<LandingExtras> {
   return fetchJson<LandingExtras>("/ui/api/create/landing-extras");
 }
 
-export function fetchCreateAttemptDetail(createAttemptId: string): Promise<CreateAttemptDetail> {
-  return fetchJson<CreateAttemptDetail>(`/ui/api/create/attempts/${encodeURIComponent(createAttemptId)}`);
+export function fetchCreateAttemptDetail(
+  createAttemptId: string,
+): Promise<CreateAttemptDetail> {
+  return fetchJson<CreateAttemptDetail>(
+    `/ui/api/create/attempts/${encodeURIComponent(createAttemptId)}`,
+  );
 }
 
 /** What the create front door answered: the HTTP status and its JSON body (or {} when it sent none). */
@@ -165,7 +171,10 @@ export interface CreateSubmitResult {
  */
 export async function submitCreateRequest(
   body: Record<string, unknown>,
-  fetcher: (url: string, init?: RequestInit) => Promise<Response> = (url, init) => fetch(url, init),
+  fetcher: (url: string, init?: RequestInit) => Promise<Response> = (
+    url,
+    init,
+  ) => fetch(url, init),
   progress: OnboardingProgress = onboardingProgress,
 ): Promise<CreateSubmitResult> {
   try {
@@ -175,7 +184,10 @@ export async function submitCreateRequest(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    const data = (await response.json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >;
     if (response.status === 202) progress.markComplete();
     return { status: response.status, data };
   } catch {
@@ -189,7 +201,9 @@ export async function submitCreateRequest(
 
 /** A launch mode as the create form offers it. */
 export function launchModeLabel(launchMode: string): string {
-  return launchMode === "MODAL" ? "Modal (1-day ephemeral)" : launchMode.toLowerCase();
+  return launchMode === "MODAL"
+    ? "Modal (1-day ephemeral)"
+    : launchMode.toLowerCase();
 }
 
 /** A backup provider as the create form offers it. */
@@ -221,14 +235,21 @@ export function hostNameFormatError(value: string): string {
 export type RecoveryIntent = "start" | "restart" | null;
 
 /** The Recovery deep-link for a workspace. */
-export function recoveryRoute(agentId: string, returnTo: string, intent: RecoveryIntent): string {
+export function recoveryRoute(
+  agentId: string,
+  returnTo: string,
+  intent: RecoveryIntent,
+): string {
   const intentParam = intent === null ? "" : `&intent=${intent}`;
   return `/agents/${encodeURIComponent(agentId)}/recovery?return_to=${encodeURIComponent(returnTo)}${intentParam}`;
 }
 
 // ---- Creating-page progress (port of creating.js's time-eased bar).
 
-export function progressForElapsed(elapsedSeconds: number, expectedDurationSeconds: number): number {
+export function progressForElapsed(
+  elapsedSeconds: number,
+  expectedDurationSeconds: number,
+): number {
   const T = expectedDurationSeconds > 0 ? expectedDurationSeconds : 60;
   if (elapsedSeconds <= T) return 80 * (elapsedSeconds / T);
   return 80 + 20 * (1 - Math.exp(-(elapsedSeconds - T) / T));
@@ -241,7 +262,8 @@ export function progressForElapsed(elapsedSeconds: number, expectedDurationSecon
 // which pass straight through; while a local action is in flight the same
 // transient labels win until the target state arrives.
 
-export type MindLiveness = "RUNNING" | "STOPPED" | "UNKNOWN" | "STARTING" | "STOPPING";
+export type MindLiveness =
+  "RUNNING" | "STOPPED" | "UNKNOWN" | "STARTING" | "STOPPING";
 
 // Human labels for the non-RUNNING liveness states, shared by every surface
 // that renders a liveness badge or title (RUNNING deliberately has none:
@@ -283,19 +305,34 @@ export class MindLivenessTracker {
   }
 
   async start(agentId: string): Promise<boolean> {
-    return await this.runAction(agentId, "RUNNING", `/api/v1/workspaces/${encodeURIComponent(agentId)}/start`);
+    return await this.runAction(
+      agentId,
+      "RUNNING",
+      `/api/v1/workspaces/${encodeURIComponent(agentId)}/start`,
+    );
   }
 
   async stop(agentId: string): Promise<boolean> {
-    return await this.runAction(agentId, "STOPPED", `/api/v1/workspaces/${encodeURIComponent(agentId)}/stop`);
+    return await this.runAction(
+      agentId,
+      "STOPPED",
+      `/api/v1/workspaces/${encodeURIComponent(agentId)}/stop`,
+    );
   }
 
-  private async runAction(agentId: string, target: "RUNNING" | "STOPPED", url: string): Promise<boolean> {
+  private async runAction(
+    agentId: string,
+    target: "RUNNING" | "STOPPED",
+    url: string,
+  ): Promise<boolean> {
     this.pendingTargetByAgentId.set(agentId, target);
     this.redraw();
     let isOk: boolean;
     try {
-      const response = await fetch(url, { method: "POST", credentials: "same-origin" });
+      const response = await fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+      });
       isOk = response.ok;
     } catch {
       isOk = false;
@@ -346,7 +383,10 @@ export class CreateAttemptWatcher {
     this.source.onmessage = (event) => {
       let data: { done?: boolean; log?: string };
       try {
-        data = JSON.parse(event.data as string) as { done?: boolean; log?: string };
+        data = JSON.parse(event.data as string) as {
+          done?: boolean;
+          log?: string;
+        };
       } catch {
         return;
       }
@@ -387,10 +427,17 @@ export class CreateAttemptWatcher {
   }
 
   private pollOnce(): void {
-    fetch(`/api/v1/workspaces/operations/create/${encodeURIComponent(this.createAttemptId)}`, {
-      credentials: "same-origin",
-    })
-      .then((response) => (response.ok ? (response.json() as Promise<CreateOperationStatus>) : null))
+    fetch(
+      `/api/v1/workspaces/operations/create/${encodeURIComponent(this.createAttemptId)}`,
+      {
+        credentials: "same-origin",
+      },
+    )
+      .then((response) =>
+        response.ok
+          ? (response.json() as Promise<CreateOperationStatus>)
+          : null,
+      )
       .then((data) => {
         this.applyStatus(data);
         m.redraw();

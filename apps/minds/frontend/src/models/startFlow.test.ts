@@ -48,17 +48,32 @@ function started(): StartFlowState {
 
 /** Cloud with Alice already signed in, kept at the account step: the create is owed under her. */
 function owingCreate(): StartFlowState {
-  return answerStep(answerStep(started(), 1, "cloud", SIGNED_IN), 2, "continue", SIGNED_IN);
+  return answerStep(
+    answerStep(started(), 1, "cloud", SIGNED_IN),
+    2,
+    "continue",
+    SIGNED_IN,
+  );
 }
 
 describe("the manifesto schedule", () => {
   it("sequences opener, question, answer, the reporting question and its answers with the read gaps between", () => {
     const schedule = manifestoSchedule();
     expect(schedule.openerAt).toBe(CHAT_GAP_MS);
-    expect(schedule.questionAt).toBe(CHAT_GAP_MS + streamDurationMs(MANIFESTO_OPENER) + CHAT_REACT_MS);
-    expect(schedule.answerAt).toBe(schedule.questionAt + CHAT_BUBBLE_MS + CHAT_THINK_MS);
-    expect(schedule.reportingAt).toBe(schedule.answerAt + streamDurationMs(MANIFESTO_ANSWER) + CHAT_READ_MS);
-    expect(schedule.answersAt).toBe(schedule.reportingAt + streamDurationMs(REPORTING_ASK) + FLOW_OPTIONS_GAP_MS);
+    expect(schedule.questionAt).toBe(
+      CHAT_GAP_MS + streamDurationMs(MANIFESTO_OPENER) + CHAT_REACT_MS,
+    );
+    expect(schedule.answerAt).toBe(
+      schedule.questionAt + CHAT_BUBBLE_MS + CHAT_THINK_MS,
+    );
+    expect(schedule.reportingAt).toBe(
+      schedule.answerAt + streamDurationMs(MANIFESTO_ANSWER) + CHAT_READ_MS,
+    );
+    expect(schedule.answersAt).toBe(
+      schedule.reportingAt +
+        streamDurationMs(REPORTING_ASK) +
+        FLOW_OPTIONS_GAP_MS,
+    );
   });
 
   it("a one-character stream lands after just its fade", () => {
@@ -79,8 +94,14 @@ describe("starting the questions", () => {
   });
 
   it("records a refusal the same way, so the transcript carries which answer was given", () => {
-    const state = startQuestions(initialStartFlowState(), REPORTING_DECLINE_LABEL);
-    expect(state.entries[0]).toEqual({ kind: "said", text: REPORTING_DECLINE_LABEL });
+    const state = startQuestions(
+      initialStartFlowState(),
+      REPORTING_DECLINE_LABEL,
+    );
+    expect(state.entries[0]).toEqual({
+      kind: "said",
+      text: REPORTING_DECLINE_LABEL,
+    });
   });
 
   it("is idempotent", () => {
@@ -92,8 +113,19 @@ describe("starting the questions", () => {
 describe("answering where to run", () => {
   it("cloud, signed out: the answer lands and the account question follows with the ack", () => {
     const state = answerStep(started(), 1, "cloud", SIGNED_OUT);
-    expect(state.entries[1]).toMatchObject({ kind: "step", id: "run", answer: "cloud", said: "Use Imbue Cloud" });
-    expect(state.entries[2]).toEqual({ kind: "step", id: "auth", ack: "Imbue Cloud it is.", answer: null, said: "" });
+    expect(state.entries[1]).toMatchObject({
+      kind: "step",
+      id: "run",
+      answer: "cloud",
+      said: "Use Imbue Cloud",
+    });
+    expect(state.entries[2]).toEqual({
+      kind: "step",
+      id: "auth",
+      ack: "Imbue Cloud it is.",
+      answer: null,
+      said: "",
+    });
     expect(state.isCloudCreatePending).toBe(false);
     expect(openStepIndex(state)).toBe(2);
   });
@@ -114,7 +146,11 @@ describe("answering where to run", () => {
 
   it("continuing as the signed-in account answers the question and owes the create under it", () => {
     const state = owingCreate();
-    expect(state.entries[2]).toMatchObject({ id: "account", answer: "continue", said: continueAsSaid(ALICE.email) });
+    expect(state.entries[2]).toMatchObject({
+      id: "account",
+      answer: "continue",
+      said: continueAsSaid(ALICE.email),
+    });
     expect(state.entries[3]).toEqual({ kind: "note", text: "Welcome back." });
     expect(state.account).toEqual(ALICE);
     expect(state.isCloudCreatePending).toBe(true);
@@ -122,22 +158,41 @@ describe("answering where to run", () => {
 
   it("this computer: the answer lands, the agent acknowledges, and the form is pending on it", () => {
     const state = answerStep(started(), 1, "local", SIGNED_OUT);
-    expect(state.entries[1]).toMatchObject({ answer: "local", said: "Run it on this computer" });
-    expect(state.entries[2]).toEqual({ kind: "note", text: "This computer it is." });
+    expect(state.entries[1]).toMatchObject({
+      answer: "local",
+      said: "Run it on this computer",
+    });
+    expect(state.entries[2]).toEqual({
+      kind: "note",
+      text: "This computer it is.",
+    });
     expect(state.pending).toBe("local");
   });
 
   it("your own cloud: the answer lands, the agent acknowledges, and the form is pending on it", () => {
     const state = answerStep(started(), 1, "own-cloud", SIGNED_OUT);
-    expect(state.entries[1]).toMatchObject({ answer: "own-cloud", said: "Use your own cloud" });
-    expect(state.entries[2]).toEqual({ kind: "note", text: "Your own cloud it is." });
+    expect(state.entries[1]).toMatchObject({
+      answer: "own-cloud",
+      said: "Use your own cloud",
+    });
+    expect(state.entries[2]).toEqual({
+      kind: "note",
+      text: "Your own cloud it is.",
+    });
     expect(state.pending).toBe("own-cloud");
   });
 
   it("offers Imbue Cloud as its one button and the other two as minor answers", () => {
     expect(FLOW.run.choices.map((choice) => choice.id)).toEqual(["cloud"]);
-    expect(FLOW.run.minorChoices?.map((choice) => choice.id)).toEqual(["local", "own-cloud"]);
-    expect(stepChoices(FLOW.run).map((choice) => choice.id)).toEqual(["cloud", "local", "own-cloud"]);
+    expect(FLOW.run.minorChoices?.map((choice) => choice.id)).toEqual([
+      "local",
+      "own-cloud",
+    ]);
+    expect(stepChoices(FLOW.run).map((choice) => choice.id)).toEqual([
+      "cloud",
+      "local",
+      "own-cloud",
+    ]);
   });
 
   it("ignores a choice the question does not offer, and an index that is not a question", () => {
@@ -150,20 +205,39 @@ describe("answering where to run", () => {
 
 describe("the create form", () => {
   it("closing it without finishing asks the retry question, which offers the same three answers", () => {
-    const state = dismissPendingModal(answerStep(started(), 1, "own-cloud", SIGNED_OUT));
+    const state = dismissPendingModal(
+      answerStep(started(), 1, "own-cloud", SIGNED_OUT),
+    );
     expect(state.pending).toBeNull();
     const last = state.entries[state.entries.length - 1];
-    expect(last).toEqual({ kind: "step", id: "retry", ack: "", answer: null, said: "" });
+    expect(last).toEqual({
+      kind: "step",
+      id: "retry",
+      ack: "",
+      answer: null,
+      said: "",
+    });
     // The form answers are still offered: backing out is not a door closing on them.
     expect(stepChoices(FLOW.retry)).toEqual(stepChoices(FLOW.run));
-    const again = answerStep(state, state.entries.length - 1, "local", SIGNED_OUT);
+    const again = answerStep(
+      state,
+      state.entries.length - 1,
+      "local",
+      SIGNED_OUT,
+    );
     expect(again.pending).toBe("local");
   });
 
   it("finishing it clears the wait without a retry question", () => {
-    const state = finishPendingModal(answerStep(started(), 1, "local", SIGNED_OUT));
+    const state = finishPendingModal(
+      answerStep(started(), 1, "local", SIGNED_OUT),
+    );
     expect(state.pending).toBeNull();
-    expect(state.entries.some((entry) => entry.kind === "step" && entry.id === "retry")).toBe(false);
+    expect(
+      state.entries.some(
+        (entry) => entry.kind === "step" && entry.id === "retry",
+      ),
+    ).toBe(false);
   });
 
   it("dismissing with nothing pending changes nothing", () => {
@@ -184,23 +258,37 @@ describe("the account step", () => {
   });
 
   it("an account appearing turns the buttons into the receipt, acknowledges, and owes the create", () => {
-    const state = observeSignedIn(answerStep(atAccountStep(), 2, "signup", SIGNED_OUT), BOB);
+    const state = observeSignedIn(
+      answerStep(atAccountStep(), 2, "signup", SIGNED_OUT),
+      BOB,
+    );
     expect(state.pending).toBeNull();
     expect(state.account).toEqual(BOB);
-    expect(state.entries[2]).toMatchObject({ answer: "signup", said: signedInSaid("bob@example.com") });
+    expect(state.entries[2]).toMatchObject({
+      answer: "signup",
+      said: signedInSaid("bob@example.com"),
+    });
     expect(state.entries[3]).toEqual({ kind: "note", text: "You're in." });
     expect(state.isCloudCreatePending).toBe(true);
   });
 
   it("switching accounts from the signed-in question is acknowledged without guessing sign-in or sign-up", () => {
-    const switching = answerStep(answerStep(started(), 1, "cloud", SIGNED_IN), 2, "signin", SIGNED_IN);
+    const switching = answerStep(
+      answerStep(started(), 1, "cloud", SIGNED_IN),
+      2,
+      "signin",
+      SIGNED_IN,
+    );
     const state = observeSignedIn(switching, BOB);
     expect(state.entries[3]).toEqual({ kind: "note", text: "You're in." });
     expect(state.account).toEqual(BOB);
   });
 
   it("signing in through the other button is welcomed back instead", () => {
-    const state = observeSignedIn(answerStep(atAccountStep(), 2, "signin", SIGNED_OUT), BOB);
+    const state = observeSignedIn(
+      answerStep(atAccountStep(), 2, "signin", SIGNED_OUT),
+      BOB,
+    );
     expect(state.entries[3]).toEqual({ kind: "note", text: "Welcome back." });
   });
 
@@ -210,7 +298,9 @@ describe("the account step", () => {
   });
 
   it("dismissing the sign-in modal leaves the question standing", () => {
-    const state = dismissPendingModal(answerStep(atAccountStep(), 2, "signin", SIGNED_OUT));
+    const state = dismissPendingModal(
+      answerStep(atAccountStep(), 2, "signin", SIGNED_OUT),
+    );
     expect(state.pending).toBeNull();
     expect(openStepIndex(state)).toBe(2);
   });
@@ -218,13 +308,23 @@ describe("the account step", () => {
 
 describe("which account answers a sign-in", () => {
   it("is an account that was not signed in when the button was pressed", () => {
-    const waiting = answerStep(answerStep(started(), 1, "cloud", SIGNED_IN), 2, "signin", SIGNED_IN);
+    const waiting = answerStep(
+      answerStep(started(), 1, "cloud", SIGNED_IN),
+      2,
+      "signin",
+      SIGNED_IN,
+    );
     expect(landedAccount(waiting, [ALICE], "")).toBeNull();
     expect(landedAccount(waiting, [ALICE, BOB], "")).toEqual(BOB);
   });
 
   it("is the account the sign-in reports, even one that was already signed in", () => {
-    const waiting = answerStep(answerStep(started(), 1, "cloud", SIGNED_IN), 2, "signin", SIGNED_IN);
+    const waiting = answerStep(
+      answerStep(started(), 1, "cloud", SIGNED_IN),
+      2,
+      "signin",
+      SIGNED_IN,
+    );
     expect(landedAccount(waiting, [ALICE], ALICE.email)).toEqual(ALICE);
   });
 
@@ -235,7 +335,10 @@ describe("which account answers a sign-in", () => {
   it("an unverified first account does not answer a second sign-up after an undo", () => {
     // Sign up as Alice, who never verifies: the create waits on her email.
     const atAuth = answerStep(started(), 1, "cloud", SIGNED_OUT);
-    const asAlice = observeSignedIn(answerStep(atAuth, 2, "signup", SIGNED_OUT), ALICE);
+    const asAlice = observeSignedIn(
+      answerStep(atAuth, 2, "signup", SIGNED_OUT),
+      ALICE,
+    );
     const parked = requireEmailVerification(asAlice);
     expect(parked.verificationEmail).toBe(ALICE.email);
     // Take the account answer back and create another account.
@@ -255,15 +358,26 @@ describe("which account answers a sign-in", () => {
     const offered = answerStep(started(), 1, "cloud", SIGNED_IN);
     const bobOnly = { signedInAccount: BOB, knownAccountIds: [BOB.userId] };
     const reasked = answerStep(offered, 2, "continue", bobOnly);
-    expect(reasked.entries[2]).toMatchObject({ id: "account", answer: null, ack: "Imbue Cloud it is. You're signed in as bob@example.com." });
+    expect(reasked.entries[2]).toMatchObject({
+      id: "account",
+      answer: null,
+      ack: "Imbue Cloud it is. You're signed in as bob@example.com.",
+    });
     expect(reasked.isCloudCreatePending).toBe(false);
     expect(answerStep(reasked, 2, "continue", bobOnly).account).toEqual(BOB);
     // With nobody signed in any more, it asks for an account instead.
-    expect(answerStep(offered, 2, "continue", SIGNED_OUT).entries[2]).toMatchObject({ id: "auth", answer: null });
+    expect(
+      answerStep(offered, 2, "continue", SIGNED_OUT).entries[2],
+    ).toMatchObject({ id: "auth", answer: null });
   });
 
   it("continuing after a sign-in was started and closed replaces that sign-in", () => {
-    const abandoned = answerStep(answerStep(started(), 1, "cloud", SIGNED_IN), 2, "signin", SIGNED_IN);
+    const abandoned = answerStep(
+      answerStep(started(), 1, "cloud", SIGNED_IN),
+      2,
+      "signin",
+      SIGNED_IN,
+    );
     const continued = answerStep(abandoned, 2, "continue", SIGNED_IN);
     expect(continued.pending).toBeNull();
     // The abandoned sign-in landing later answers nothing, so no second create is owed.
@@ -272,7 +386,12 @@ describe("which account answers a sign-in", () => {
   });
 
   it("continuing as a signed-out account after a sign-in was started and closed replaces that sign-in", () => {
-    const abandoned = answerStep(answerStep(started(), 1, "cloud", SIGNED_IN), 2, "signin", SIGNED_IN);
+    const abandoned = answerStep(
+      answerStep(started(), 1, "cloud", SIGNED_IN),
+      2,
+      "signin",
+      SIGNED_IN,
+    );
     const reasked = answerStep(abandoned, 2, "continue", SIGNED_OUT);
     expect(reasked.pending).toBeNull();
     expect(observeSignedIn(reasked, BOB)).toBe(reasked);
@@ -290,7 +409,10 @@ describe("which account answers a sign-in", () => {
 
 describe("the cloud create", () => {
   it("a refusal is said as the ack of the where-to-run question, offered again", () => {
-    const state = settleCloudCreate(owingCreate(), "That did not work: no capacity.");
+    const state = settleCloudCreate(
+      owingCreate(),
+      "That did not work: no capacity.",
+    );
     expect(state.isCloudCreatePending).toBe(false);
     expect(state.entries[4]).toEqual({
       kind: "step",
@@ -301,7 +423,9 @@ describe("the cloud create", () => {
     });
     expect(openStepIndex(state)).toBe(4);
     // The form answers are offered as the way out of a cloud that refused.
-    expect(answerStep(state, 4, "own-cloud", SIGNED_IN).pending).toBe("own-cloud");
+    expect(answerStep(state, 4, "own-cloud", SIGNED_IN).pending).toBe(
+      "own-cloud",
+    );
   });
 
   it("an account signed out since the account step settled on it is refused before the create goes out", () => {
@@ -316,8 +440,16 @@ describe("the cloud create", () => {
     });
     // Asked again, the cloud answer offers the account signed in now.
     const bobOnly = { signedInAccount: BOB, knownAccountIds: [BOB.userId] };
-    const again = answerStep(refused, refused.entries.length - 1, "cloud", bobOnly);
-    expect(again.entries.at(-1)).toMatchObject({ id: "account", ack: "Imbue Cloud it is. You're signed in as bob@example.com." });
+    const again = answerStep(
+      refused,
+      refused.entries.length - 1,
+      "cloud",
+      bobOnly,
+    );
+    expect(again.entries.at(-1)).toMatchObject({
+      id: "account",
+      ack: "Imbue Cloud it is. You're signed in as bob@example.com.",
+    });
   });
 
   it("a success just clears the debt", () => {
@@ -352,7 +484,13 @@ describe("undo", () => {
     const answered = answerStep(started(), 1, "cloud", SIGNED_OUT);
     const state = undoAnswer(answered, 1);
     expect(state.entries).toHaveLength(2);
-    expect(state.entries[1]).toEqual({ kind: "step", id: "run", ack: "", answer: null, said: "" });
+    expect(state.entries[1]).toEqual({
+      kind: "step",
+      id: "run",
+      ack: "",
+      answer: null,
+      said: "",
+    });
     expect(state.pending).toBeNull();
     expect(state.isCloudCreatePending).toBe(false);
     expect(openStepIndex(state)).toBe(1);
@@ -385,12 +523,22 @@ describe("the email verification gate", () => {
     expect(state.verificationEmail).toBeNull();
     expect(state.isCloudCreatePending).toBe(true);
     const [answered, note] = state.entries.slice(-2);
-    expect(answered).toMatchObject({ kind: "step", id: "verify", answer: "verified", said: "I verified it" });
-    expect(note).toMatchObject({ kind: "note", text: "Your email is verified." });
+    expect(answered).toMatchObject({
+      kind: "step",
+      id: "verify",
+      answer: "verified",
+      said: "I verified it",
+    });
+    expect(note).toMatchObject({
+      kind: "note",
+      text: "Your email is verified.",
+    });
   });
 
   it("a press that finds the email still unverified re-asks, and a later verification answers the re-ask", () => {
-    const reasked = reaskEmailVerification(requireEmailVerification(owingCreate()));
+    const reasked = reaskEmailVerification(
+      requireEmailVerification(owingCreate()),
+    );
     expect(reasked.verificationEmail).toBe("alice@example.com");
     expect(reasked.isCloudCreatePending).toBe(false);
     expect(reasked.entries.slice(-2)).toMatchObject([
@@ -398,21 +546,30 @@ describe("the email verification gate", () => {
       { kind: "step", id: "verify-again", answer: null },
     ]);
     const verified = observeEmailVerified(reasked);
-    expect(verified.entries[verified.entries.length - 2]).toMatchObject({ id: "verify-again", answer: "verified" });
+    expect(verified.entries[verified.entries.length - 2]).toMatchObject({
+      id: "verify-again",
+      answer: "verified",
+    });
     expect(verified.isCloudCreatePending).toBe(true);
   });
 
   it("says what became of the resend, and only while the flow waits on one", () => {
     const waiting = requireEmailVerification(owingCreate());
-    expect(noteVerificationEmailSent(waiting, "sent").entries.at(-1)).toMatchObject({
+    expect(
+      noteVerificationEmailSent(waiting, "sent").entries.at(-1),
+    ).toMatchObject({
       kind: "note",
       text: "Sent another email to alice@example.com.",
     });
-    expect(noteVerificationEmailSent(waiting, "suppressed").entries.at(-1)).toMatchObject({
+    expect(
+      noteVerificationEmailSent(waiting, "suppressed").entries.at(-1),
+    ).toMatchObject({
       text: "An email went out to alice@example.com moments ago. Check your inbox and spam folder.",
     });
     // A failure must not point the user at an inbox holding nothing.
-    expect(noteVerificationEmailSent(waiting, "failed").entries.at(-1)).toMatchObject({
+    expect(
+      noteVerificationEmailSent(waiting, "failed").entries.at(-1),
+    ).toMatchObject({
       text: "Could not send the email to alice@example.com. Please try again.",
     });
     const notWaiting = started();
@@ -421,7 +578,9 @@ describe("the email verification gate", () => {
 
   it("the verified press is not itself an answer", () => {
     const waiting = requireEmailVerification(owingCreate());
-    expect(answerStep(waiting, waiting.entries.length - 1, "verified", SIGNED_IN)).toBe(waiting);
+    expect(
+      answerStep(waiting, waiting.entries.length - 1, "verified", SIGNED_IN),
+    ).toBe(waiting);
   });
 
   it("undo drops the wait along with the answer", () => {

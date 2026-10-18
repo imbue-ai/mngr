@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { CreateAttemptRequestSummary } from "./create";
-import { SETUP_LINE, SETUP_SECTIONS, readyTurnMarkdown } from "./creationTranscript";
+import {
+  SETUP_LINE,
+  SETUP_SECTIONS,
+  readyTurnMarkdown,
+} from "./creationTranscript";
 import {
   MANIFESTO_POINTS,
   MANIFESTO_QUESTION,
@@ -36,7 +40,13 @@ const REQUEST: CreateAttemptRequestSummary = {
 /** A cloud create by a returning user. */
 const ENTRIES: TranscriptEntry[] = [
   { kind: "said", text: REPORTING_ACCEPT_LABEL },
-  { kind: "step", id: "run", ack: "", answer: "cloud", said: "Use Imbue Cloud" },
+  {
+    kind: "step",
+    id: "run",
+    ack: "",
+    answer: "cloud",
+    said: "Use Imbue Cloud",
+  },
   {
     kind: "note",
     text: "Imbue Cloud it is. You've signed in as me@example.com.",
@@ -174,7 +184,10 @@ describe("postWelcomeChat", () => {
       postWelcomeChat("attempt-1", { title: "", turns: [] }, () =>
         Promise.resolve(
           jsonResponse(
-            { error: "Couldn't open the welcome chat in the workspace.", detail: "the chat app answered HTTP 400" },
+            {
+              error: "Couldn't open the welcome chat in the workspace.",
+              detail: "the chat app answered HTTP 400",
+            },
             502,
           ),
         ),

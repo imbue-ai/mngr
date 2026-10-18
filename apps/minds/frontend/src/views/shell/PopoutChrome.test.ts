@@ -7,12 +7,23 @@ import type { ShellState } from "./shell-state";
 import { PopoutChrome, isBarDragPress } from "./PopoutChrome";
 import { TrafficLights } from "./TrafficLights";
 import type { AnyVnode } from "../../testing";
-import { allText, attrsOf, classTokensOf, collectVnodes, renderRoot } from "../../testing";
+import {
+  allText,
+  attrsOf,
+  classTokensOf,
+  collectVnodes,
+  renderRoot,
+} from "../../testing";
 
 const WORKSPACE_ID = "agent-ab12";
 const WINDOW_ID = "win-0123";
 
-function renderBar(accent: string | null, title: string, isMac = false, isTrafficLightsDrawn = false): AnyVnode {
+function renderBar(
+  accent: string | null,
+  title: string,
+  isMac = false,
+  isTrafficLightsDrawn = false,
+): AnyVnode {
   const shell = {
     isMac,
     isTrafficLightsDrawn,
@@ -23,7 +34,11 @@ function renderBar(accent: string | null, title: string, isMac = false, isTraffi
     },
     popoutWindowTitle: () => title,
   } as unknown as ShellState;
-  return renderRoot(PopoutChrome, { shell, workspaceAnyId: WORKSPACE_ID, windowId: WINDOW_ID }) as AnyVnode;
+  return renderRoot(PopoutChrome, {
+    shell,
+    workspaceAnyId: WORKSPACE_ID,
+    windowId: WINDOW_ID,
+  }) as AnyVnode;
 }
 
 function buttonOf(bar: AnyVnode, id: string): AnyVnode {
@@ -45,7 +60,9 @@ describe("PopoutChrome", () => {
     expect(text).toContain("Research");
     expect(text).toContain("Notes");
     expect(text).not.toContain("Return to desktop");
-    expect(collectVnodes(bar).map((vnode) => attrsOf(vnode).id)).toContain("popout-close-btn");
+    expect(collectVnodes(bar).map((vnode) => attrsOf(vnode).id)).toContain(
+      "popout-close-btn",
+    );
   });
 
   it("closes the desktop window from its close control, which takes the window back on its way out", () => {
@@ -62,33 +79,48 @@ describe("PopoutChrome", () => {
     expect(closes.count).toBe(1);
     // Off the desktop app there is no window to close.
     delete window.mindsNative;
-    expect(attrsOf(buttonOf(renderBar("#aabbcc", "Notes"), "popout-close-btn")).hidden).toBe(true);
+    expect(
+      attrsOf(buttonOf(renderBar("#aabbcc", "Notes"), "popout-close-btn"))
+        .hidden,
+    ).toBe(true);
   });
 
   it("on macOS leaves room for the traffic lights and hides its own close control, which they carry", () => {
-    window.mindsNative = { platform: "darwin", close: () => undefined } as unknown as NonNullable<
-      Window["mindsNative"]
-    >;
+    window.mindsNative = {
+      platform: "darwin",
+      close: () => undefined,
+    } as unknown as NonNullable<Window["mindsNative"]>;
     const bar = renderBar("#aabbcc", "Notes", true);
     expect(attrsOf(buttonOf(bar, "popout-close-btn")).hidden).toBe(true);
-    const spacer = collectVnodes(bar).find((vnode) => classTokensOf(vnode).includes("w-[72px]"));
+    const spacer = collectVnodes(bar).find((vnode) =>
+      classTokensOf(vnode).includes("w-[72px]"),
+    );
     expect(spacer).toBeDefined();
     const elsewhere = collectVnodes(renderBar("#aabbcc", "Notes", false));
-    expect(elsewhere.find((vnode) => classTokensOf(vnode).includes("w-[72px]"))).toBeUndefined();
+    expect(
+      elsewhere.find((vnode) => classTokensOf(vnode).includes("w-[72px]")),
+    ).toBeUndefined();
   });
 
   it("draws its own traffic lights and hides its close control on a platform made to look like a Mac", () => {
-    window.mindsNative = { platform: "linux", close: () => undefined } as unknown as NonNullable<
-      Window["mindsNative"]
-    >;
+    window.mindsNative = {
+      platform: "linux",
+      close: () => undefined,
+    } as unknown as NonNullable<Window["mindsNative"]>;
     const bar = renderBar("#aabbcc", "Notes", false, true);
     expect(attrsOf(buttonOf(bar, "popout-close-btn")).hidden).toBe(true);
-    expect(collectVnodes(bar).find((vnode) => vnode.tag === TrafficLights)).toBeDefined();
+    expect(
+      collectVnodes(bar).find((vnode) => vnode.tag === TrafficLights),
+    ).toBeDefined();
   });
 
   it("wears the titlebar's self-theming recipe only once an accent is painted", () => {
-    expect(classTokensOf(renderBar("#aabbcc", "Notes"))).toContain("titlebar-surface");
-    expect(classTokensOf(renderBar(null, "Notes"))).not.toContain("titlebar-surface");
+    expect(classTokensOf(renderBar("#aabbcc", "Notes"))).toContain(
+      "titlebar-surface",
+    );
+    expect(classTokensOf(renderBar(null, "Notes"))).not.toContain(
+      "titlebar-surface",
+    );
   });
 
   it("starts a drag from the bar itself, never from its controls, and only in the desktop app", () => {

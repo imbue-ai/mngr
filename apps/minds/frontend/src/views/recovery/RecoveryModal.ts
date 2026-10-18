@@ -31,7 +31,10 @@ export function RecoveryModal(): m.Component<RecoveryModalAttrs> {
 
   function bindModel(workspaceAnyId: string): void {
     model?.stop();
-    model = new RecoveryModel(workspaceAnyId, browserLifecycleDeps(() => m.redraw()));
+    model = new RecoveryModel(
+      workspaceAnyId,
+      browserLifecycleDeps(() => m.redraw()),
+    );
     void model.load();
   }
 
@@ -47,7 +50,10 @@ export function RecoveryModal(): m.Component<RecoveryModalAttrs> {
     // and without a rebind it would keep showing, and restarting, the machine
     // the user just left.
     onbeforeupdate(vnode) {
-      if (model !== null && vnode.attrs.workspaceAnyId !== model.workspaceAnyId) {
+      if (
+        model !== null &&
+        vnode.attrs.workspaceAnyId !== model.workspaceAnyId
+      ) {
         bindModel(vnode.attrs.workspaceAnyId);
       }
       return true;
@@ -87,10 +93,11 @@ export function RecoveryModal(): m.Component<RecoveryModalAttrs> {
               ],
             )
           : model.info === null
-            ? m("div", { class: "flex items-center gap-2 type-body text-primary" }, [
-                m(Spinner, { size: "sm" }),
-                "Loading...",
-              ])
+            ? m(
+                "div",
+                { class: "flex items-center gap-2 type-body text-primary" },
+                [m(Spinner, { size: "sm" }), "Loading..."],
+              )
             : m(RecoveryPanel, {
                 panelId: "recovery-modal-panel",
                 model,

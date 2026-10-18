@@ -15,13 +15,21 @@
 // answer a question nobody had asked yet. The list they picked from is where
 // closing takes them (see returnToPanelAfterRequest).
 
-import type { FolderSyncConflict, UiPermissionGrantGroup, UiWorkspaceDesktop } from "../generated/ui";
+import type {
+  FolderSyncConflict,
+  UiPermissionGrantGroup,
+  UiWorkspaceDesktop,
+} from "../generated/ui";
 import {
   BrowserImportModel,
   isBrowserImportOfferDue,
   markBrowserImportOffered,
 } from "./browserImport";
-import { forgetWarmedRequestDetails, readWarmedRequestDetail, requestDetailUrl } from "./requestDetailPrefetch";
+import {
+  forgetWarmedRequestDetails,
+  readWarmedRequestDetail,
+  requestDetailUrl,
+} from "./requestDetailPrefetch";
 
 export interface InboxCard {
   id: string;
@@ -155,7 +163,8 @@ export interface CustomServicePermissionDetail {
   is_already_registered: boolean;
   /** Why the domain deserves a second look, or null for an ordinary public
    * name. Advisory: the dialog adds a line, and nothing is blocked. */
-  domain_warning: "unreachable" | "local_name" | "ip_address" | "lookalike" | null;
+  domain_warning:
+    "unreachable" | "local_name" | "ip_address" | "lookalike" | null;
   /** The origin the connection covers, scheme included: what the dialog shows,
    * since the scheme decides whether credentials travel encrypted. */
   base_api_url: string;
@@ -296,8 +305,12 @@ export interface InboxModelOptions {
 /** Whether nothing is signed in to the service yet: every choice the dialog
  * offers is the "Add account" sentinel (the server always appends that one,
  * so the raw choice list is never empty and its length says nothing). */
-export function hasNoStoredAccount(detail: PredefinedPermissionDetail): boolean {
-  return detail.account_choices.every((choice) => choice.value === detail.new_account_value);
+export function hasNoStoredAccount(
+  detail: PredefinedPermissionDetail,
+): boolean {
+  return detail.account_choices.every(
+    (choice) => choice.value === detail.new_account_value,
+  );
 }
 
 export class InboxModel {
@@ -317,7 +330,10 @@ export class InboxModel {
    * whether that attempt carried credentials: a custom service's form first
    * arrives the same way, in answer to an Approve that had nothing to send,
    * and that is no failure. */
-  manualCredentialsFeedback: { prompt: ManualCredentialsPrompt; isRejection: boolean } | null = null;
+  manualCredentialsFeedback: {
+    prompt: ManualCredentialsPrompt;
+    isRejection: boolean;
+  } | null = null;
   /** Set when an approval comes back unresolved, so the view scrolls the notice
    * the user has to read into view -- it can be a scroll away from the buttons
    * they just clicked. Consumed once, by whichever notice rendered. */
@@ -373,7 +389,9 @@ export class InboxModel {
 
   constructor(options: InboxModelOptions = {}) {
     this.options = options;
-    this.browserImport = new BrowserImportModel(this.fetcher(), () => this.redraw());
+    this.browserImport = new BrowserImportModel(this.fetcher(), () =>
+      this.redraw(),
+    );
   }
 
   private fetcher(): FetchLike {
@@ -550,7 +568,9 @@ export class InboxModel {
       // synced at all -- a switch that is on and greyed out would promise a
       // copy Approve then refuses to make.
       this.isSharePathSynced =
-        detail.is_sync_supported && detail.is_sync_requested && detail.sync_unavailable_reason === "";
+        detail.is_sync_supported &&
+        detail.is_sync_requested &&
+        detail.sync_unavailable_reason === "";
       this.sharePathSyncConflict = detail.sync_conflict;
     } else if (detail.kind === "accounts") {
       this.checkedPermissions = new Set(["accounts"]);
@@ -563,7 +583,11 @@ export class InboxModel {
   selectedAccountChoice(): PermissionAccountChoice | null {
     const detail = this.detail;
     if (detail === null || detail.kind !== "predefined") return null;
-    return detail.account_choices.find((choice) => choice.value === this.selectedAccount) ?? null;
+    return (
+      detail.account_choices.find(
+        (choice) => choice.value === this.selectedAccount,
+      ) ?? null
+    );
   }
 
   /** The credential form to render, if the selected account needs one. It is
@@ -579,7 +603,8 @@ export class InboxModel {
       // arrives as feedback.
       return this.manualCredentialsFeedback?.prompt ?? null;
     }
-    if (detail.kind !== "predefined" || detail.manual_credentials === null) return null;
+    if (detail.kind !== "predefined" || detail.manual_credentials === null)
+      return null;
     const choice = this.selectedAccountChoice();
     if (choice === null || !choice.is_credential_setup_needed) return null;
     return this.manualCredentialsFeedback?.prompt ?? detail.manual_credentials;
@@ -590,7 +615,10 @@ export class InboxModel {
   isManualCredentialsFailureShown(): boolean {
     const prompt = this.manualCredentialsPrompt();
     if (prompt === null) return false;
-    return (this.manualCredentialsFeedback?.isRejection ?? false) || prompt.parameters.length === 0;
+    return (
+      (this.manualCredentialsFeedback?.isRejection ?? false) ||
+      prompt.parameters.length === 0
+    );
   }
 
   /** Whether the view should scroll its failure notice into view now. True at
@@ -603,7 +631,10 @@ export class InboxModel {
 
   /** Whether the visible credential form also asks the user to name the account. */
   isManualAccountNameNeeded(): boolean {
-    return this.manualCredentialsPrompt() !== null && (this.selectedAccountChoice()?.is_account_name_needed ?? false);
+    return (
+      this.manualCredentialsPrompt() !== null &&
+      (this.selectedAccountChoice()?.is_account_name_needed ?? false)
+    );
   }
 
   /** Whether a credential form is open whose inputs are not all filled in yet.
@@ -612,8 +643,15 @@ export class InboxModel {
     const prompt = this.manualCredentialsPrompt();
     if (prompt === null) return false;
     if (prompt.parameters.length === 0) return true;
-    if (this.isManualAccountNameNeeded() && this.manualAccountName.trim() === "") return true;
-    return prompt.parameters.some((parameter) => (this.manualCredentialValues[parameter.name] ?? "").trim() === "");
+    if (
+      this.isManualAccountNameNeeded() &&
+      this.manualAccountName.trim() === ""
+    )
+      return true;
+    return prompt.parameters.some(
+      (parameter) =>
+        (this.manualCredentialValues[parameter.name] ?? "").trim() === "",
+    );
   }
 
   /** Whether the Approve button is enabled for the current detail + edits. */
@@ -721,7 +759,8 @@ export class InboxModel {
     if (prompt === null || prompt.parameters.length === 0) return;
     const values: Record<string, string> = {};
     for (const parameter of prompt.parameters) {
-      values[parameter.name] = this.manualCredentialValues[parameter.name] ?? "";
+      values[parameter.name] =
+        this.manualCredentialValues[parameter.name] ?? "";
     }
     form.append("manual_credentials", JSON.stringify(values));
     form.append("account_name", this.manualAccountName);
@@ -747,7 +786,11 @@ export class InboxModel {
     if (detail === null) return false;
     if (detail.kind === "predefined") {
       if (detail.manual_credentials !== null) return false;
-      if (hasNoStoredAccount(detail) || this.selectedAccount === detail.new_account_value) return true;
+      if (
+        hasNoStoredAccount(detail) ||
+        this.selectedAccount === detail.new_account_value
+      )
+        return true;
       return this.selectedAccountChoice()?.is_credential_setup_needed ?? false;
     }
     if (detail.kind === "custom_service") return detail.login_url !== null;
@@ -779,7 +822,8 @@ export class InboxModel {
   }
 
   private async shouldOfferBrowserImport(): Promise<boolean> {
-    if (this.isBrowserImportOfferSettled || !this.isBrowserSignInPending()) return false;
+    if (this.isBrowserImportOfferSettled || !this.isBrowserSignInPending())
+      return false;
     this.isBrowserImportOfferSettled = true;
     return isBrowserImportOfferDue(this.fetcher());
   }
@@ -836,10 +880,13 @@ export class InboxModel {
     this.manualCredentialsFeedback = null;
     this.redraw();
     try {
-      const response = await this.fetcher()(`/requests/${encodeURIComponent(resolvedId)}/grant`, {
-        method: "POST",
-        body,
-      });
+      const response = await this.fetcher()(
+        `/requests/${encodeURIComponent(resolvedId)}/grant`,
+        {
+          method: "POST",
+          body,
+        },
+      );
       if (!response.ok) {
         const text = await response.text();
         throw new Error(text || `HTTP ${response.status}`);
@@ -858,7 +905,10 @@ export class InboxModel {
         // Keep whatever the user already typed: a rejected credential is
         // usually one field away from being right.
         this.manualCredentialsFeedback = {
-          prompt: data.manual_credentials ?? { parameters: [], message: data.message ?? "" },
+          prompt: data.manual_credentials ?? {
+            parameters: [],
+            message: data.message ?? "",
+          },
           isRejection: isSendingCredentials,
         };
         this.isFailureScrollPending = this.isManualCredentialsFailureShown();
@@ -872,7 +922,8 @@ export class InboxModel {
     } catch (error) {
       this.isProgressShown = false;
       this.isFailureScrollPending = true;
-      this.errorMessage = error instanceof Error ? error.message : String(error);
+      this.errorMessage =
+        error instanceof Error ? error.message : String(error);
     } finally {
       this.isApproveBusy = false;
       this.redraw();
@@ -908,7 +959,8 @@ export class InboxModel {
     // A failed attempt has its own retry running; asking again before it is due
     // is the loop this paces. The key is left unconsumed, so the retry that
     // does land still reconciles this set.
-    if (this.listErrorMessage !== null && this.nowMs() < this.nextListRetryAtMs) return;
+    if (this.listErrorMessage !== null && this.nowMs() < this.nextListRetryAtMs)
+      return;
     const key = requestIds.join(",");
     if (key === this.lastPendingKey) return;
     this.lastPendingKey = key;
