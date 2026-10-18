@@ -293,9 +293,9 @@ def load_forward_owner(data_dir: Path) -> LatchkeyForwardOwner | None:
 
 
 def forward_log_path(data_dir: Path) -> Path:
-    """Return the raw stdout/stderr capture-log path for the detached ``mngr latchkey forward`` subprocess.
+    """Return the raw stdout/stderr capture-log path for the ``mngr latchkey forward`` subprocess.
 
-    This file holds whatever the detached process writes to its real
+    This file holds whatever the process writes to its real
     stdout/stderr file descriptors (human-format console log lines, plus any
     pre-logging tracebacks or Click error messages). Its fd is handed straight
     to the subprocess, so it cannot be rotated mid-write; it is instead rotated
@@ -308,10 +308,10 @@ def forward_log_path(data_dir: Path) -> Path:
 
 
 def forward_events_log_path(data_dir: Path) -> Path:
-    """Return the structured JSONL log path for the detached ``mngr latchkey forward`` process.
+    """Return the structured JSONL log path for the ``mngr latchkey forward`` process.
 
     Companion to :func:`forward_log_path`: where that file captures the raw
-    stdout/stderr of the detached process, this one receives the process's own
+    stdout/stderr of that process, this one receives the process's own
     structured loguru events (nanosecond timestamps, level, message, ...) -- and
     the shared ``latchkey gateway`` subprocess's output, which the supervisor
     routes through loguru. It is the standard mngr JSONL log, size-rotated by

@@ -102,6 +102,9 @@ interface MindsNativeSurface {
   /** Bounce the backend and re-prepare every window. Named `retry` on the
    * preload, where it started as the error takeover's button. */
   retry(): void;
+  /** Optional: a preload from before the tray lacks it. Quits the whole app
+   * through the same sequence the tray's Quit runs. */
+  quitApp?(): void;
   showFilePicker(options: FilePickerOptions): Promise<string | null>;
   /** Open the OS's own notification-settings pane -- no app can force a
    * re-prompt once permission is declined, so this is the escape hatch.
@@ -281,6 +284,14 @@ export const electronBridge = {
    * consumer. The machines themselves keep running. */
   restartApp(): void {
     native()?.retry();
+  },
+  /** Whether the page can quit the whole app: the desktop app, on a preload
+   * that knows how. The one way to quit on a Linux desktop with no tray. */
+  get canQuitApp(): boolean {
+    return native()?.quitApp !== undefined;
+  },
+  quitApp(): void {
+    native()?.quitApp?.();
   },
   async showFilePicker(options: FilePickerOptions): Promise<string | null> {
     const surface = native();

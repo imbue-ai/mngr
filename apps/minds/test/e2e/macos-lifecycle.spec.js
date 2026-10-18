@@ -32,9 +32,10 @@ const {
   captureAppOutput,
 } = require('./fixtures');
 
-// Every behavior here is macOS-only by construction: elsewhere closing the
-// last window quits the app, so "windowless" never happens.
-test.skip(() => process.platform !== 'darwin', 'windowless app state is macOS-only');
+// The windowless state exists on every platform now (closing the last window
+// leaves the app behind its tray icon), but every entry point exercised here
+// is a macOS one: the dock-icon activate and the open-url delivery.
+test.skip(() => process.platform !== 'darwin', 'the dock activate and open-url entry points are macOS-only');
 
 const BACKEND_READY_RE = /\[startup\] Backend ready at (http:\/\/localhost:\d+)/;
 // Logged each time main computes the first-window route (computeStartupRouting).

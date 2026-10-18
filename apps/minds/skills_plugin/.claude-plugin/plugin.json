@@ -1,0 +1,9 @@
+{
+  "name": "imbue-studio-skills",
+  "description": "Skills that teach Claude how to drive Imbue Studio: workspaces, the studio API, accounts.",
+  "author": {
+    "name": "Imbue"
+  },
+  "repository": "https://github.com/imbue-ai/imbue-skills",
+  "keywords": ["mngr", "imbue-studio"]
+}

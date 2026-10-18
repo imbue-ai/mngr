@@ -242,7 +242,9 @@ class DesktopClientState(MutableModel):
         default=None, frozen=True, description="Central Imbue Studio API key for /api/v1 + WebDAV"
     )
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = Field(
-        default=None, frozen=True, description="Detached mngr latchkey forward supervisor handle"
+        default=None,
+        frozen=True,
+        description="Handle on the mngr latchkey forward child started at launch and stopped by the shutdown teardown",
     )
     machine_operator: MachineOperator | None = Field(
         default=None,

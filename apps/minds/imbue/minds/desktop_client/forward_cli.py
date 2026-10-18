@@ -20,7 +20,7 @@ spawning code; this file replaces them with a thin consumer that:
   dead, so the discovery pipeline is down) to the discovery-health watchdog
   via registered ``on_unexpected_exit`` callbacks.
 
-Provider-set changes are picked up by bouncing the detached ``mngr latchkey
+Provider-set changes are picked up by bouncing the ``mngr latchkey
 forward`` supervisor (the single discovery observer); the tailer here then sees
 the fresh snapshot automatically, so this consumer no longer sends ``SIGHUP``.
 """
@@ -876,7 +876,7 @@ class EnvelopeStreamConsumer(MutableModel):
                 # logs a recovery line if its error was previously logged).
                 self._error_log_suppressor.record_provider_snapshot(event)
                 # A pre-start snapshot is events-file replay, and its error describes
-                # the gap while Imbue Studio was closed, not the present: the detached
+                # the gap while Imbue Studio was closed, not the present: the
                 # discovery producer keeps polling after the quit flow stops the
                 # docker state container, so the backlog's last docker snapshot
                 # reliably carries "state container is stopped" -- already outdated,

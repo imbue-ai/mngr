@@ -435,8 +435,8 @@ def test_extras_claude_plugin_yes_flag(cli_runner: CliRunner, tmp_path: Path, mo
     exercises the real auto-install plumbing (marketplace add + install per
     plugin) without a network round-trip or a dependency on whether the real
     marketplace is reachable. The stub reports imbue-code-guardian as already
-    installed via ``claude plugin list``, so only imbue-mngr-skills should be
-    installed -- letting us assert that the already-installed plugin is left
+    installed via ``claude plugin list``, so only the two skills plugins should
+    be installed -- letting us assert that the already-installed plugin is left
     untouched.
     """
     bin_dir = tmp_path / "stub-claude-bin"
@@ -445,8 +445,9 @@ def test_extras_claude_plugin_yes_flag(cli_runner: CliRunner, tmp_path: Path, mo
 
     result = cli_runner.invoke(extras, ["claude-plugin", "-y"])
     assert result.exit_code == 0
-    # Only the not-yet-installed plugin is installed; code-guardian is untouched.
+    # Only the not-yet-installed plugins are installed; code-guardian is untouched.
     assert "Installed imbue-mngr-skills." in result.output
+    assert "Installed imbue-studio-skills." in result.output
     assert "imbue-code-guardian" not in result.output
 
 

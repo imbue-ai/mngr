@@ -193,7 +193,7 @@ def setup_forward_sentry(log_folder: Path) -> None:
 
     Sentry always initializes when configured; what it actually *sends* is gated live by the consent
     file the embedder maintains, exactly mirroring how the minds backend gates its own Sentry on the
-    live user setting. So a grant/revoke by the user reaches this detached daemon on the next event,
+    live user setting. So a grant/revoke by the user reaches this process on the next event,
     without respawning it. With no consent file (or an unreadable one), the gate defaults to off.
     """
     config = resolve_forward_sentry_config()

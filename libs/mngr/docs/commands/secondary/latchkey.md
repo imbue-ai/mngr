@@ -221,8 +221,8 @@ Run the shared Latchkey gateway and wire a gateway into every discovered agent.
 
 Long-running foreground process that:
 
-1. Initializes the configured ``Latchkey`` (version-checks the binary,
-   adopts or discards any pre-existing detached gateway record).
+1. Initializes the configured ``Latchkey`` (version-checks the binary and
+   writes the bundled service registrations into latchkey's ``config.json``).
 2. Eagerly spawns the shared ``latchkey gateway`` subprocess and
    supervises it: a background health check respawns it (reusing its
    original port) if the subprocess dies mid-session, so a crashed
@@ -280,6 +280,7 @@ mngr latchkey forward [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--mngr-binary` | text | Path to the mngr binary used to spawn the underlying ``mngr observe`` subprocess. | `mngr` |
 | `--device-id` | text | The id this computer announces itself to remote hosts' machines under, so an agent can tell the user's desktops apart. Falls back to $MNGR_LATCHKEY_DEVICE_ID, then to the mngr local host id. | None |
+| `--parent-pid` | integer | Exit when this process is gone. An embedder that spawns the forward as a child passes its own pid, so a forward never outlives the app that started it. Without it the forward runs until signalled. | None |
 | `--latchkey-binary` | text | Path to the upstream ``latchkey`` CLI. Falls back to $MNGR_LATCHKEY_BINARY, then ``[plugins.latchkey].latchkey_binary`` in settings.toml, then 'latchkey' on PATH. | None |
 | `--latchkey-directory` | path | Root directory for ``LATCHKEY_DIRECTORY`` and the plugin's ``mngr_latchkey/`` metadata subtree. Falls back to $MNGR_LATCHKEY_DIRECTORY, then ``[plugins.latchkey].directory`` in settings.toml, then '~/.mngr/latchkey'. | None |
 

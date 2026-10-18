@@ -10,6 +10,9 @@ from imbue.minds.desktop_client.api_schema import _ROUTE_MODELS
 from imbue.minds.desktop_client.api_schema import _flask_path_to_openapi
 from imbue.minds.desktop_client.api_schema import _is_gateway_reachable_path
 from imbue.minds.desktop_client.api_schema import build_openapi_document
+from imbue.minds.desktop_client.api_schema import is_reachable_path
+from imbue.minds.desktop_client.api_transport import ApiTransport
+from imbue.minds.desktop_client.api_transport import LOCAL_TRUSTED_ENVIRON_KEY
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
@@ -71,7 +74,7 @@ def test_build_openapi_document_is_valid_and_filters_unreachable_routes() -> Non
         ("/static/<path:filename>", frozenset({"GET"}), ("filename",), "static"),
     ]
 
-    document = build_openapi_document(rules, {})
+    document = build_openapi_document(rules, {}, ApiTransport.GATEWAY)
 
     # Valid OpenAPI 3.1 per the official validator.
     validate(document)
@@ -86,6 +89,56 @@ def test_build_openapi_document_is_valid_and_filters_unreachable_routes() -> Non
     assert "/api/v1/files/x" not in paths
     assert "/auth/login" not in paths
     assert "/static/{filename}" not in paths
+    # The gateway caller must present one of the two credentials.
+    assert document["security"] == [{"bearerAuth": []}, {"cookieAuth": []}]
+
+
+def test_build_openapi_document_over_the_local_socket_includes_the_desktop_and_files_routes() -> None:
+    rules = [
+        ("/api/v1/workspaces", frozenset({"GET"}), (), "api_v1.list"),
+        ("/api/v1/desktop/running-workspaces", frozenset({"GET"}), (), "api_v1.desktop"),
+        ("/api/v1/files/x", frozenset({"GET"}), (), "api_v1.files"),
+        ("/auth/login", frozenset({"POST"}), (), "supertokens.login"),
+    ]
+
+    document = build_openapi_document(rules, {}, ApiTransport.LOCAL_SOCKET)
+    validate(document)
+
+    paths = document["paths"]
+    assert "/api/v1/workspaces" in paths
+    # The local caller is the user, so the cookie-only surfaces are theirs too.
+    assert "/api/v1/desktop/running-workspaces" in paths
+    assert "/api/v1/files/x" in paths
+    assert "/auth/login" not in paths
+    assert "Unix domain socket" in document["info"]["description"]
+    # The listener already identified the caller as the user, so no credential is required.
+    assert document["security"] == [{}]
+
+
+@pytest.mark.parametrize(
+    "path,transport,expected",
+    [
+        ("/api/v1/desktop/running-workspaces", ApiTransport.GATEWAY, False),
+        ("/api/v1/desktop/running-workspaces", ApiTransport.LOCAL_SOCKET, True),
+        ("/api/v1/files/foo", ApiTransport.LOCAL_SOCKET, True),
+        ("/api/v1/workspaces", ApiTransport.GATEWAY, True),
+        ("/ui/api/inbox", ApiTransport.LOCAL_SOCKET, False),
+    ],
+)
+def test_is_reachable_path_depends_on_transport(path: str, transport: ApiTransport, expected: bool) -> None:
+    assert is_reachable_path(path, transport) is expected
+
+
+def test_schema_endpoint_describes_more_over_the_local_socket_than_through_the_gateway(tmp_path: Path) -> None:
+    client = _schema_client(tmp_path)
+
+    gateway_document = client.get("/api/schema", headers=_auth_header()).get_json()
+    socket_document = client.get("/api/schema", environ_base={LOCAL_TRUSTED_ENVIRON_KEY: True}).get_json()
+
+    gateway_paths = set(gateway_document["paths"])
+    socket_paths = set(socket_document["paths"])
+    assert gateway_paths < socket_paths
+    assert all(path.startswith("/api/v1/desktop/") for path in socket_paths - gateway_paths)
 
 
 def test_build_openapi_document_includes_request_and_response_schemas() -> None:
@@ -94,7 +147,7 @@ def test_build_openapi_document_includes_request_and_response_schemas() -> None:
         ("/api/v1/workspaces", frozenset({"GET"}), (), "api_v1.list"),
     ]
 
-    document = build_openapi_document(rules, {})
+    document = build_openapi_document(rules, {}, ApiTransport.GATEWAY)
     validate(document)
 
     ssh_post = document["paths"]["/api/v1/workspaces/{agent_id}/ssh"]["post"]

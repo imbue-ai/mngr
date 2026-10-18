@@ -3,8 +3,8 @@
 The ``Latchkey`` class consolidates four responsibilities that all
 ultimately shell out to the same upstream binary:
 
-1. Spawning, adopting, and tracking the single shared
-   ``latchkey gateway`` subprocess (one for all minds-managed agents).
+1. Spawning and tracking the single shared ``latchkey gateway``
+   subprocess (one for all minds-managed agents).
 2. Deriving the gateway's shared password and minting per-agent
    permissions-override JWTs via ``latchkey gateway create-jwt``.
 3. Probing credential status for a service via ``latchkey services info``.
@@ -56,7 +56,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.utils.file_utils import atomic_write
-from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
+from imbue.mngr_latchkey._spawn import spawn_latchkey_ensure_browser
 from imbue.mngr_latchkey.additional_services import AdditionalServicesCatalogError
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.app_name_prefix import inject_app_name_prefix_into_env
@@ -712,13 +712,11 @@ def _build_gateway_env(
 ) -> dict[str, str]:
     """Build the env dict for the ``latchkey gateway`` subprocess.
 
-    Mirrors the env shape that ``_spawn.spawn_detached_latchkey_gateway``
-    used to set up. The gateway reads its listen host/port + permissions
-    config path + listen password from these env vars (the upstream
-    ``latchkey`` CLI exposes them as the documented gateway-config
-    surface). ``extension_permissions_root`` is consumed by the bundled
-    ``permissions.mjs`` extension to clamp the set of files it will
-    read or write.
+    The gateway reads its listen host/port + permissions config path + listen
+    password from these env vars (the upstream ``latchkey`` CLI exposes them
+    as the documented gateway-config surface). ``extension_permissions_root``
+    is consumed by the bundled ``permissions.mjs`` extension to clamp the set
+    of files it will read or write.
     """
     latchkey_directory.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -1026,15 +1024,16 @@ class _RunningGateway(FrozenModel):
 class Latchkey(MutableModel):
     """Wraps every interaction with the upstream ``latchkey`` CLI.
 
-    Spawns, adopts, and tracks the single shared ``latchkey gateway``
-    subprocess; derives the gateway's shared password and mints
-    per-agent permissions-override JWTs via ``latchkey gateway create-jwt``;
+    Spawns and tracks the single shared ``latchkey gateway`` subprocess;
+    derives the gateway's shared password and mints per-agent
+    permissions-override JWTs via ``latchkey gateway create-jwt``;
     exposes ``services_info`` to query credential state and supported auth
     options; and ``auth_browser`` to launch the interactive sign-in flow.
-    The gateway is spawned detached (``start_new_session=True`` inside
-    :func:`spawn_detached_latchkey_gateway`) so it survives desktop-client
-    restarts; its lifecycle is reconciled against the persisted record on
-    ``initialize()``.
+    The gateway is a child of whichever process calls ``start_gateway`` (it
+    runs in the concurrency group passed in; in practice the ``mngr latchkey
+    forward`` that owns the directory), so it ends with that process. Nothing
+    adopts a gateway an earlier process left behind: ``initialize()`` does no
+    cross-process gateway-record reconciliation (see its docstring).
     """
 
     latchkey_binary: str = Field(default=LATCHKEY_BINARY, frozen=True, description="Path to Latchkey binary")
@@ -2138,8 +2137,8 @@ class Latchkey(MutableModel):
             raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
 
         # Fire off ``latchkey ensure-browser`` in parallel the first time we
-        # actually spawn the gateway in this minds session. It runs
-        # detached alongside the gateway spawn below and we don't wait for
+        # actually spawn the gateway in this minds session. It runs in the
+        # background alongside the gateway spawn below and we don't wait for
         # it.
         self._ensure_browser_once(plugin_dir)
 
@@ -2147,10 +2146,8 @@ class Latchkey(MutableModel):
         # we always materialize an empty-rules default file before
         # spawning the gateway. This guarantees that any request that
         # fails to attach a valid permissions-override JWT is denied for
-        # every service rather than implicitly granted. Pre-existing
-        # files are left untouched; minds always rewrites them with
-        # empty rules anyway, but on adoption we leave the existing one
-        # alone in case the user inspected it.
+        # every service rather than implicitly granted. A pre-existing
+        # file is left alone in case the user inspected it.
         default_perms = default_permissions_path(plugin_dir)
         if not default_perms.is_file():
             save_permissions(default_perms, LatchkeyPermissionsConfig())
@@ -2244,7 +2241,7 @@ class Latchkey(MutableModel):
             self._has_ensured_browser = True
         log_path = ensure_browser_log_path(plugin_dir)
         try:
-            pid = spawn_detached_latchkey_ensure_browser(
+            pid = spawn_latchkey_ensure_browser(
                 latchkey_binary=self.latchkey_binary,
                 log_path=log_path,
                 latchkey_directory=self.latchkey_directory,

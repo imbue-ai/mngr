@@ -1,7 +1,7 @@
 """App-global health watchdog for the Imbue Studio discovery pipeline.
 
 The discovery pipeline is two processes: a *producer* (``mngr observe
---discovery-only``, a grandchild of the detached ``mngr latchkey forward``
+--discovery-only``, a grandchild of the ``mngr latchkey forward``
 supervisor, which writes the shared discovery-events file on each poll cycle) and a
 *consumer* (the single ``mngr forward --observe-via-file`` subprocess Imbue Studio
 spawns, which tails that file and folds snapshots into
@@ -146,7 +146,7 @@ class SupervisorProducerRemediator(ProducerRemediator):
     fall through to its backoff.
     """
 
-    supervisor: LatchkeyForwardSupervisor = Field(description="The detached latchkey forward supervisor to re-kick.")
+    supervisor: LatchkeyForwardSupervisor = Field(description="The latchkey forward supervisor to re-kick.")
 
     def bounce(self) -> None:
         try:

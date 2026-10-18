@@ -4,7 +4,7 @@
 //
 // These use node's built-in test runner (zero extra deps). The decisions are
 // pure helpers deliberately split out of main.js (which can't be required
-// outside Electron) so the platform-gated branching is testable here. The
+// outside Electron) so the lifecycle branching is testable here. The
 // end-to-end behavior these drive -- closing every window, then reopening from
 // the dock in each app state -- is covered by test/e2e/macos-lifecycle.spec.js,
 // which emits the lifecycle events into a real bundle's main process.
@@ -12,112 +12,34 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  shouldQuitOnWindowAllClosed,
-  shouldInterceptLastWindowClose,
+  BACKGROUND_SWITCH,
   shouldOpenWindowOnActivate,
   decideNewWindowTarget,
+  isBackgroundLaunch,
+  decideSecondInstanceAction,
+  shouldShowDockIcon,
 } = require('../../electron/lifecycle-policy');
 
-test('window-all-closed: macOS never quits (app stays running with no windows)', () => {
-  assert.equal(
-    shouldQuitOnWindowAllClosed({ isMac: true, isShuttingDown: false, isQuitSequenceRunning: false }),
-    false,
-  );
+test('background switch: recognized anywhere in an argv, and only as the whole argument', () => {
+  assert.equal(BACKGROUND_SWITCH, '--background');
+  assert.equal(isBackgroundLaunch(['/app/Imbue Studio', '--background']), true);
+  assert.equal(isBackgroundLaunch(['/app/Imbue Studio', '--no-sandbox', '--background', 'x']), true);
+  assert.equal(isBackgroundLaunch(['/app/Imbue Studio']), false);
+  assert.equal(isBackgroundLaunch(['/app/Imbue Studio', '--background=1']), false);
+  assert.equal(isBackgroundLaunch(undefined), false);
 });
 
-test('window-all-closed: non-macOS quits when the last window closes', () => {
-  assert.equal(
-    shouldQuitOnWindowAllClosed({ isMac: false, isShuttingDown: false, isQuitSequenceRunning: false }),
-    true,
-  );
+test('second instance: a deeplink is handled, a background start is ignored, anything else reopens', () => {
+  assert.equal(decideSecondInstanceAction({ hasDeeplinkUrl: true, isBackgroundLaunch: false }), 'deeplink');
+  assert.equal(decideSecondInstanceAction({ hasDeeplinkUrl: true, isBackgroundLaunch: true }), 'deeplink');
+  assert.equal(decideSecondInstanceAction({ hasDeeplinkUrl: false, isBackgroundLaunch: true }), 'ignore');
+  assert.equal(decideSecondInstanceAction({ hasDeeplinkUrl: false, isBackgroundLaunch: false }), 'reopen');
 });
 
-test('window-all-closed: an in-flight quit / shutdown short-circuits on every platform', () => {
-  for (const isMac of [true, false]) {
-    assert.equal(
-      shouldQuitOnWindowAllClosed({ isMac, isShuttingDown: true, isQuitSequenceRunning: false }),
-      false,
-    );
-    assert.equal(
-      shouldQuitOnWindowAllClosed({ isMac, isShuttingDown: false, isQuitSequenceRunning: true }),
-      false,
-    );
-  }
-});
-
-test('close interception: macOS never intercepts, so the last close leaves the app running', () => {
-  assert.equal(
-    shouldInterceptLastWindowClose({
-      isMac: true,
-      isShuttingDown: false,
-      isQuitSequenceRunning: false,
-      hasBackend: true,
-      isLastLiveWindow: true,
-    }),
-    false,
-  );
-});
-
-test('close interception: non-macOS intercepts the last live window to run the quit sequence', () => {
-  assert.equal(
-    shouldInterceptLastWindowClose({
-      isMac: false,
-      isShuttingDown: false,
-      isQuitSequenceRunning: false,
-      hasBackend: true,
-      isLastLiveWindow: true,
-    }),
-    true,
-  );
-});
-
-test('close interception: non-macOS does NOT intercept a non-last window', () => {
-  assert.equal(
-    shouldInterceptLastWindowClose({
-      isMac: false,
-      isShuttingDown: false,
-      isQuitSequenceRunning: false,
-      hasBackend: true,
-      isLastLiveWindow: false,
-    }),
-    false,
-  );
-});
-
-test('close interception: non-macOS does NOT intercept when there is no backend to tear down', () => {
-  assert.equal(
-    shouldInterceptLastWindowClose({
-      isMac: false,
-      isShuttingDown: false,
-      isQuitSequenceRunning: false,
-      hasBackend: false,
-      isLastLiveWindow: true,
-    }),
-    false,
-  );
-});
-
-test('close interception: an in-flight quit / shutdown short-circuits (non-macOS)', () => {
-  assert.equal(
-    shouldInterceptLastWindowClose({
-      isMac: false,
-      isShuttingDown: true,
-      isQuitSequenceRunning: false,
-      hasBackend: true,
-      isLastLiveWindow: true,
-    }),
-    false,
-  );
-  assert.equal(
-    shouldInterceptLastWindowClose({
-      isMac: false,
-      isShuttingDown: false,
-      isQuitSequenceRunning: true,
-      hasBackend: true,
-      isLastLiveWindow: true,
-    }),
-    false,
-  );
+test('dock icon: shown on macOS only while a window is open, never elsewhere', () => {
+  assert.equal(shouldShowDockIcon({ isMac: true, hasLiveWindow: true }), true);
+  assert.equal(shouldShowDockIcon({ isMac: true, hasLiveWindow: false }), false);
+  assert.equal(shouldShowDockIcon({ isMac: false, hasLiveWindow: true }), false);
 });
 
 test('activate: opens a window only when none remain and no quit is in flight', () => {

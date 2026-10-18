@@ -196,7 +196,7 @@ def resolve_anonymous_user_id(data_dir: Path) -> str:
     The id is a random, opaque value (no PII) stored in ``<data_dir>/anonymous_user_id``. It is
     attached to every Sentry event so Sentry can count the distinct installs affected by each issue,
     letting us tell a rare bug hitting many users apart from a noisy one hitting a single user. The
-    same value is shared with the detached ``mngr latchkey forward`` daemon and the JS frontends so an
+    same value is shared with the ``mngr latchkey forward`` child and the JS frontends so an
     install is counted once regardless of which process reported the event. The read-or-create is
     atomic, so the Python backend and the Electron main process racing on first launch converge on one
     id (see ``get_or_create_anonymous_user_id``).
@@ -205,7 +205,7 @@ def resolve_anonymous_user_id(data_dir: Path) -> str:
 
 
 def latchkey_forward_sentry_consent_path(data_dir: Path) -> Path:
-    """Path of the JSON consent file Imbue Studio maintains for the detached ``mngr latchkey forward`` daemon.
+    """Path of the JSON consent file Imbue Studio maintains for the ``mngr latchkey forward`` child.
 
     The daemon reads this file live (per event) to gate what it sends, so Imbue Studio rewrites it whenever
     the user changes their error-reporting consent -- letting a grant/revoke reach the running daemon
@@ -220,7 +220,7 @@ def write_latchkey_forward_sentry_consent(
 ) -> None:
     """Atomically write the daemon's live consent file from Imbue Studio's current consent setting.
 
-    Called at startup and on every consent change so the detached daemon's live gate reflects the
+    Called at startup and on every consent change so the child's live gate reflects the
     user's ``report_unexpected_errors`` choice promptly.
     """
     consent = ForwardSentryConsent(
@@ -233,7 +233,7 @@ def write_latchkey_forward_sentry_consent(
 
 
 def resolve_latchkey_forward_sentry_env(consent_file_path: Path, anonymous_user_id: str) -> dict[str, str]:
-    """Env vars to publish into the detached ``mngr latchkey forward`` supervisor.
+    """Env vars to publish into the ``mngr latchkey forward`` supervisor.
 
     The daemon receives concrete Sentry *infrastructure* config (the DSN, environment name, and S3
     bucket) that Imbue Studio resolves from its own environment model, plus the path of the
@@ -263,7 +263,7 @@ def _external_log_attachment_groups(
 ) -> tuple[LogAttachmentGroup, ...]:
     """Attachment groups for logs that live outside ``~/.minds/logs``.
 
-    The detached ``mngr latchkey forward`` daemon (which runs discovery and the
+    The ``mngr latchkey forward`` child (which runs discovery and the
     reverse tunnels) logs into the latchkey plugin data dir, the shared
     discovery event stream persists under the mngr host dir, and every ``mngr``
     subprocess Imbue Studio spawns (recovery restarts included) file-logs its

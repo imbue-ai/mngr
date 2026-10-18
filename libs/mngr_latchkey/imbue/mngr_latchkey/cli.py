@@ -54,6 +54,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.providers.local.instance import get_or_create_local_host_id
+from imbue.mngr.utils.parent_process import start_pid_death_watcher
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
@@ -154,6 +155,7 @@ class _ForwardCliOptions(_LatchkeyCommonCliOptions):
 
     mngr_binary: str = "mngr"
     device_id: str | None = None
+    parent_pid: int | None = None
 
 
 def _add_common_latchkey_options(command: click.Command) -> click.Command:
@@ -592,6 +594,16 @@ add_pager_help_option(_register_agent_command)
         f"user's desktops apart. Falls back to ${ENV_DEVICE_ID}, then to the mngr local host id."
     ),
 )
+@click.option(
+    "--parent-pid",
+    "parent_pid",
+    type=int,
+    default=None,
+    help=(
+        "Exit when this process is gone. An embedder that spawns the forward as a child passes its own pid, "
+        "so a forward never outlives the app that started it. Without it the forward runs until signalled."
+    ),
+)
 @add_common_options
 @click.pass_context
 def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
@@ -610,14 +622,16 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # pid, and the default disposition would terminate us mid-startup.
     _ignore_sighup_until_handlers_installed()
 
-    # No parent-death watcher: ``LatchkeyForwardSupervisor`` spawns us
-    # detached via ``start_new_session=True`` so we survive embedder
-    # restarts (the whole point of the supervisor pattern). Polling
-    # ``getppid()`` and SIGTERM'ing ourselves on reparent-to-init would
-    # actively defeat that. SIGINT/SIGTERM trigger shutdown; SIGHUP instead
-    # bounces only the ``mngr observe`` child (see the signal handlers below)
-    # so an embedder can refresh our provider set mid-session without
-    # dropping the gateway or any reverse tunnels.
+    # An embedder names itself by pid rather than this process watching
+    # ``getppid()``: wrapper processes (``uv run``, a shell shim) can sit
+    # between the two, and the embedder's own pid is the one whose death
+    # should end this forward. The watcher SIGTERMs this process, which is
+    # the same shutdown SIGINT/SIGTERM trigger; SIGHUP instead bounces only
+    # the ``mngr observe`` child (see the signal handlers below) so an embedder
+    # can refresh our provider set mid-session without dropping the gateway or
+    # any reverse tunnels.
+    if opts.parent_pid is not None:
+        start_pid_death_watcher(opts.parent_pid, "Embedder process", mngr_ctx.concurrency_group)
     device = _resolve_device_identity(mngr_ctx, opts.device_id)
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary, device=device)
 
@@ -1021,8 +1035,8 @@ CommandHelpMetadata(
     synopsis="mngr latchkey forward [OPTIONS]",
     description="""Long-running foreground process that:
 
-1. Initializes the configured ``Latchkey`` (version-checks the binary,
-   adopts or discards any pre-existing detached gateway record).
+1. Initializes the configured ``Latchkey`` (version-checks the binary and
+   writes the bundled service registrations into latchkey's ``config.json``).
 2. Eagerly spawns the shared ``latchkey gateway`` subprocess and
    supervises it: a background health check respawns it (reusing its
    original port) if the subprocess dies mid-session, so a crashed

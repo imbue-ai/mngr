@@ -53,6 +53,7 @@ from wsgidav.wsgidav_app import WsgiDAVApp
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.api_key_auth import is_request_authenticated
+from imbue.minds.desktop_client.api_transport import is_local_trusted_environ
 
 # Callable that resolves the current central Imbue Studio API key. Wrapped so
 # the WebDAV gate can look it up fresh on every request via
@@ -73,6 +74,8 @@ def _build_bearer_auth_gate(inner: WSGIApplication, expected_key_provider: Expec
     """
 
     def app(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
+        if is_local_trusted_environ(environ):
+            return inner(environ, start_response)
         authorization = environ.get("HTTP_AUTHORIZATION")
         expected_key = expected_key_provider()
         if expected_key is None or not is_request_authenticated(authorization, expected_key):

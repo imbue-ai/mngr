@@ -16,13 +16,19 @@ DELETEs it), so that stays with each handler.
 
 from pathlib import Path
 
+from flask import has_request_context
+from flask import request
+
 from imbue.minds.desktop_client.agent_address import build_agent_address
+from imbue.minds.desktop_client.api_transport import agent_label_from_environ
+from imbue.minds.desktop_client.api_transport import is_local_trusted_environ
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.messaging import format_resolution_notice
 from imbue.minds.desktop_client.latchkey.response_events import RequestResponseEvent
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
+from imbue.minds.desktop_client.latchkey.response_events import UNLABELED_LOCAL_AGENT_DECIDER
 from imbue.minds.desktop_client.latchkey.response_events import append_response_event
 from imbue.minds.desktop_client.latchkey.response_events import create_request_response_event
 from imbue.minds.desktop_client.state import get_state
@@ -48,6 +54,7 @@ def resolve_request(
         request_event_id=request_event_id,
         status=status,
         agent_id=str(agent_id),
+        decided_by=_deciding_agent_label(),
     )
     append_response_event(data_dir, response_event)
     pending = get_state().pending_requests
@@ -70,3 +77,14 @@ def resolve_request(
     if isinstance(backend_resolver, MngrCliBackendResolver):
         backend_resolver.notify_change()
     return response_event
+
+
+def _deciding_agent_label() -> str | None:
+    """The label of the same-machine agent giving this verdict, when one is; None for the user in the UI.
+
+    A verdict arriving over the local socket is an agent acting for the user, so the record names it
+    (its self-declared label, or a fixed marker when it sent none) and the inbox can say who decided.
+    """
+    if not has_request_context() or not is_local_trusted_environ(request.environ):
+        return None
+    return agent_label_from_environ(request.environ) or UNLABELED_LOCAL_AGENT_DECIDER

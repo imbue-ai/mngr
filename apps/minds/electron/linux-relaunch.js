@@ -22,6 +22,10 @@ const { spawn } = require('child_process');
 
 const RELAUNCH_SHELL = '/bin/sh';
 const RELAUNCH_SCRIPT = 'while kill -0 "$1" 2>/dev/null; do sleep 0.1; done; shift; exec "$@"';
+// nohup rather than setsid: POSIX, so present on every Linux the app runs on,
+// and the hangup immunity plus the /dev/null stdio is what lets the started
+// process outlive the terminal the command was typed into.
+const DETACHED_START_SCRIPT = 'nohup "$@" </dev/null >/dev/null 2>&1 &';
 
 /**
  * The command that starts `executablePath` with `args` once the process `pid`
@@ -31,6 +35,20 @@ function relaunchAfterExitCommand({ pid, executablePath, args }) {
   return {
     command: RELAUNCH_SHELL,
     args: ['-c', RELAUNCH_SCRIPT, 'minds-relaunch', String(pid), executablePath, ...args],
+  };
+}
+
+/**
+ * The command that starts `executablePath` with `args` detached from the
+ * caller's session and returns at once. This is what an agent runs to bring
+ * the app up in the background (the `launch.argv` the backend records in
+ * `app.json`): a plain exec of the executable would tie the app to the
+ * agent's shell, and a closed terminal would take it down.
+ */
+function detachedStartCommand({ executablePath, args }) {
+  return {
+    command: RELAUNCH_SHELL,
+    args: ['-c', DETACHED_START_SCRIPT, 'imbue-studio-launch', executablePath, ...args],
   };
 }
 
@@ -52,4 +70,4 @@ function startRelaunchAfterExit({ pid, executablePath, args }) {
   return replacement;
 }
 
-module.exports = { relaunchAfterExitCommand, startRelaunchAfterExit };
+module.exports = { relaunchAfterExitCommand, startRelaunchAfterExit, detachedStartCommand };

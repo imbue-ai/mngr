@@ -41,6 +41,8 @@ from imbue.minds.desktop_client.ai_keys import AiKeyMintError
 from imbue.minds.desktop_client.ai_keys import mint_workspace_credential_blob
 from imbue.minds.desktop_client.ai_keys import resolve_workspace_account
 from imbue.minds.desktop_client.api_schema import create_api_schema_blueprint
+from imbue.minds.desktop_client.api_transport import agent_label_from_environ
+from imbue.minds.desktop_client.api_transport import is_local_trusted_environ
 from imbue.minds.desktop_client.api_v1 import create_api_v1_blueprint
 from imbue.minds.desktop_client.assist_chat import ASSIST_SKILL_NAME
 from imbue.minds.desktop_client.assist_chat import build_assist_chat_message
@@ -253,8 +255,10 @@ def _required_one_time_code() -> OneTimeCode:
 
 
 def _is_request_authenticated() -> bool:
-    """Check whether the current request carries a valid global session cookie."""
+    """Check whether the current request carries a valid global session cookie, or came over the local socket."""
     if os.getenv("SKIP_AUTH", "0") == "1":
+        return True
+    if is_local_trusted_environ(request.environ):
         return True
     signing_key = get_state().auth_store.get_signing_key()
     cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
@@ -647,7 +651,7 @@ def _handle_remove_workspace_record() -> Response:
 
 
 def _sync_latchkey_forward_sentry_consent(minds_config: MindsConfig) -> None:
-    """Rewrite the detached ``mngr latchkey forward`` daemon's live consent file after a consent change.
+    """Rewrite the ``mngr latchkey forward`` child's live consent file after a consent change.
 
     The daemon reads this file live (per event) to gate what it sends, so rewriting it here is what
     makes a grant/revoke take effect on the running daemon without respawning it.
@@ -1987,6 +1991,15 @@ def _dispatch_request_action(
         return make_json_error_response(
             f"No handler registered for request type '{permission_request.request_type}'",
             status_code=400,
+        )
+    # A verdict given over the local socket is an agent acting for the user, so
+    # say which one in the log; the verdict record carries the same label.
+    if is_local_trusted_environ(request.environ):
+        logger.info(
+            "Local agent {} is applying '{}' to permission request {}",
+            agent_label_from_environ(request.environ) or "(unlabeled)",
+            action,
+            request_id,
         )
     if action == "grant":
         return handler.apply_grant_request(request, permission_request)

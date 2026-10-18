@@ -1,14 +1,17 @@
-"""Private helpers: spawn detached ``latchkey`` / ``mngr latchkey forward`` subprocesses.
+"""Private helpers: spawn the ``latchkey`` / ``mngr latchkey forward`` child processes.
 
 Why this file uses raw ``subprocess.Popen`` (triggering a narrow exclusion
-from ``check_direct_subprocess``): we need the spawned processes to *outlive*
-the caller. ``latchkey ensure-browser`` may download Chromium via
-Playwright, which can take a while; detaching means we do not block
-desktop-client shutdown on it and the next minds session will simply
-re-check. ``mngr latchkey forward`` is the long-running supervisor that
-owns the shared gateway and per-agent reverse tunnels; detaching means a
-minds restart adopts the existing instance rather than tearing down and
-re-establishing every tunnel.
+from ``check_direct_subprocess``): the children's stdout/stderr file
+descriptors are handed straight to an append-only capture file, and their
+lifetime is not bounded by any one call into this package. ``mngr latchkey
+forward`` runs for as long as the embedder that spawned it: the embedder
+stops it through :class:`~imbue.mngr_latchkey.forward_supervisor.LatchkeyForwardSupervisor`
+on its own teardown, and the forward watches the embedder's pid
+(``--parent-pid``) so it also exits when the embedder dies without one.
+``latchkey ensure-browser`` may download Chromium via Playwright, which can
+take a while; spawning it without waiting means the desktop client does not
+block on it, and a run cut short by the embedder exiting is simply redone on
+the next start.
 
 Confining the remaining ``Popen`` calls to this tiny helper keeps the
 ratchet exception obvious and well-scoped. The rest of the latchkey
@@ -39,8 +42,8 @@ from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
 # ``--quiet``, so all real logging goes to the structured JSONL), but a capture
 # written by an older build -- or a child that dies in a crash loop before its
 # logging is configured -- can leave a large file behind. It is append-only and
-# its fd is handed to a detached child, so nothing else ever truncates it; left
-# alone it is also gzipped and re-uploaded with every bug report.
+# its fd is handed to the child, so nothing else ever truncates it; left alone
+# it is also gzipped and re-uploaded with every bug report.
 _MAX_RAW_CAPTURE_BYTES: Final[int] = 10 * 1024 * 1024
 # One rotation, not a history: with the children spawned ``--quiet`` these files
 # do not grow in steady state, so this fires at most once on a given install --
@@ -53,7 +56,7 @@ def _rotate_raw_capture_if_too_large(log_path: Path) -> None:
     """Rotate an oversized raw capture file before its fd is handed to a child.
 
     Spawn time is the only safe moment to rotate: the file's descriptor is
-    passed straight to a detached child, so once that child is running a rename
+    passed straight to the child, so once that child is running a rename
     would leave it writing to the old inode. Here no child holds the fd yet.
 
     Oldest rotations beyond :data:`_MAX_RAW_CAPTURE_ROTATIONS` are removed.
@@ -77,11 +80,12 @@ def _write_spawn_marker(log_file: IO[bytes], command_description: str) -> None:
     """Append a timestamped spawn marker to a raw capture file.
 
     The child's own output cannot be stamped from here: its stdout/stderr fd is
-    handed over directly (a pipe would break the detachment this spawn exists to
-    provide), so the parent never sees the individual lines. The marker instead
-    dates the boundary, which is what makes the file readable -- anything below
-    it was emitted by the run that started at this time, so a crash traceback
-    can be placed against the other (timestamped) logs.
+    handed over directly (a pipe would make this process the child's log
+    relay, which nothing is around to drain), so the parent never sees the
+    individual lines. The marker instead dates the boundary, which is what
+    makes the file readable -- anything below it was emitted by the run that
+    started at this time, so a crash traceback can be placed against the other
+    (timestamped) logs.
 
     As with rotation, a failure here is deliberately not fatal -- a full disk
     makes the marker unwritable (``open`` succeeds; the buffered write only
@@ -96,31 +100,33 @@ def _write_spawn_marker(log_file: IO[bytes], command_description: str) -> None:
         logger.warning("Could not write the spawn marker to the raw capture log at {}: {}", log_file.name, e)
 
 
-def spawn_detached_latchkey_ensure_browser(
+def spawn_latchkey_ensure_browser(
     latchkey_binary: str,
     log_path: Path,
     latchkey_directory: Path | None = None,
     encryption_key: SecretStr | None = None,
 ) -> int:
-    """Start a detached ``latchkey ensure-browser`` and return its PID.
+    """Start ``latchkey ensure-browser`` without waiting for it and return its PID.
 
     The command discovers and configures a browser for Latchkey to use,
     downloading Chromium via Playwright if no system browser is found.
-    This can take a while on first run, so we fire it off detached and let
-    it complete (or not) in the background; if minds exits first, the next
-    session will re-check.
+    This can take a while on first run, so we fire it off and let it complete
+    in the background. It is not detached into a session of its own, so a
+    signal sent to this process's group (a Ctrl-C in the terminal running the
+    embedder) reaches it too; it is not ended merely because this process
+    exits, and a run cut short by such a signal is redone on the next start,
+    since the command is idempotent.
 
-    Child is placed in its own session via ``start_new_session=True`` so it
-    survives the caller's death. Stdout/stderr are appended to ``log_path``
-    (the parent directory is created if needed), below a timestamped marker
-    naming this run; since the child holds the fd directly, spawn time is also
-    when an oversized capture is rotated. When ``latchkey_directory``
-    is supplied, ``LATCHKEY_DIRECTORY`` is set in the child's environment so
-    the browser configuration lands in the shared minds-managed directory
-    instead of falling back to ``~/.latchkey``.
+    Stdout/stderr are appended to ``log_path`` (the parent directory is
+    created if needed), below a timestamped marker naming this run; since the
+    child holds the fd directly, spawn time is also when an oversized capture
+    is rotated. When ``latchkey_directory`` is supplied, ``LATCHKEY_DIRECTORY``
+    is set in the child's environment so the browser configuration lands in
+    the shared minds-managed directory instead of falling back to
+    ``~/.latchkey``.
 
     ``encryption_key`` is injected as ``LATCHKEY_ENCRYPTION_KEY`` so the
-    detached child never falls through to Latchkey's startup key-resolution
+    child never falls through to Latchkey's startup key-resolution
     against the system keychain. Latchkey resolves (and migrates) its
     encryption key on every non-gateway CLI invocation -- including
     ``ensure-browser``, which does not otherwise touch credentials -- so
@@ -145,7 +151,6 @@ def spawn_detached_latchkey_ensure_browser(
             stdout=log_file,
             stderr=log_file,
             env=env,
-            start_new_session=True,
             close_fds=True,
         )
     finally:
@@ -153,7 +158,7 @@ def spawn_detached_latchkey_ensure_browser(
     return process.pid
 
 
-def spawn_detached_mngr_latchkey_forward(
+def spawn_mngr_latchkey_forward(
     mngr_binary: str,
     latchkey_binary: str,
     latchkey_directory: Path,
@@ -163,16 +168,23 @@ def spawn_detached_mngr_latchkey_forward(
     # The id the forward announces this computer under to remote hosts'
     # machines (``--device-id``); ``None`` lets the forward pick its own.
     device_id: str | None = None,
+    # The pid whose death ends the forward (``--parent-pid``); ``None`` leaves
+    # the forward running until something stops it explicitly.
+    parent_pid: int | None = None,
 ) -> int:
-    """Start a detached ``mngr latchkey forward`` and return its PID.
+    """Start ``mngr latchkey forward`` as a child of this process and return its PID.
 
-    The child is placed in its own session (``setsid`` via
-    ``start_new_session=True``) so it survives the caller's death. Its
-    stdout/stderr are appended to ``log_path`` (the parent directory is
-    created if needed). ``--latchkey-directory`` and ``--latchkey-binary``
-    are passed explicitly so the subprocess uses the exact same latchkey
-    state the caller knows about, regardless of any env / settings.toml
-    state the inherited environment carries.
+    The child shares this process's session, so a SIGINT delivered to the
+    process group reaches it too. Its stdout/stderr are appended to
+    ``log_path`` (the parent directory is created if needed).
+    ``--latchkey-directory`` and ``--latchkey-binary`` are passed explicitly so
+    the subprocess uses the exact same latchkey state the caller knows about,
+    regardless of any env / settings.toml state the inherited environment
+    carries.
+
+    ``parent_pid`` is passed as ``--parent-pid`` so the forward exits on its
+    own when that process is gone, which is what keeps it from outliving an
+    embedder that crashed instead of tearing it down.
 
     ``cwd`` sets the spawned process's working directory. Callers that want
     the supervisor to behave like a laptop-side ``mngr`` invocation (the minds
@@ -187,13 +199,14 @@ def spawn_detached_mngr_latchkey_forward(
     (which inherits ``os.environ``) and from there into any gateway
     extension's ``process.env``. Used by the minds desktop client to
     publish the current ``LATCHKEY_EXTENSION_MINDS_API_URL`` to the
-    bundled ``minds-api-proxy`` extension on every supervisor restart.
+    bundled ``minds-api-proxy`` extension on every supervisor start.
 
     The returned ``Popen`` object is intentionally allowed to go out of
     scope. Python's ``subprocess`` module parks finished children on an
     internal ``_active`` list for zombie reaping, but never kills a
     still-running child during garbage collection, so the forward
-    supervisor keeps running until something explicitly terminates it.
+    supervisor keeps running until something explicitly terminates it or
+    its ``--parent-pid`` is gone.
 
     Two logs are produced. The process is pointed via ``--log-file`` at a
     co-located structured JSONL log (:func:`forward_events_log_path`), which
@@ -217,6 +230,7 @@ def spawn_detached_mngr_latchkey_forward(
     if extra_env is not None:
         env.update(extra_env)
     device_id_args = ["--device-id", device_id] if device_id is not None else []
+    parent_pid_args = ["--parent-pid", str(parent_pid)] if parent_pid is not None else []
 
     _rotate_raw_capture_if_too_large(log_path)
     log_file = log_path.open("ab")
@@ -234,11 +248,12 @@ def spawn_detached_mngr_latchkey_forward(
                 "--mngr-binary",
                 mngr_binary,
                 *device_id_args,
+                *parent_pid_args,
                 "--log-file",
                 str(events_log_path),
-                # Suppress the detached child's loguru console handler so its
-                # raw stdout/stderr capture file stays empty in steady state;
-                # all logging still lands in the structured ``--log-file``.
+                # Suppress the child's loguru console handler so its raw
+                # stdout/stderr capture file stays empty in steady state; all
+                # logging still lands in the structured ``--log-file``.
                 "--quiet",
             ],
             stdin=subprocess.DEVNULL,
@@ -246,7 +261,6 @@ def spawn_detached_mngr_latchkey_forward(
             stderr=log_file,
             env=env,
             cwd=str(cwd) if cwd is not None else None,
-            start_new_session=True,
             close_fds=True,
         )
     finally:

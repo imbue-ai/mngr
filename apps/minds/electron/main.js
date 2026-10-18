@@ -1,4 +1,4 @@
-const { BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
+const { BrowserWindow, Menu, Notification, Tray, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn, execFile } = require('child_process');
@@ -76,10 +76,11 @@ const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 // Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const {
-  shouldQuitOnWindowAllClosed,
-  shouldInterceptLastWindowClose,
   shouldOpenWindowOnActivate,
   decideNewWindowTarget,
+  isBackgroundLaunch,
+  decideSecondInstanceAction,
+  shouldShowDockIcon,
 } = require('./lifecycle-policy');
 // Right-click (context) menu logic lives in ./context-menu so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
@@ -134,6 +135,9 @@ try {
 // A Linux launch with a --no-sandbox the sandbox did not need (see
 // linux-sandbox.js) is corrected here, before anything else starts.
 const launchArgs = process.argv.slice(1);
+// An agent starting the app for its API: the backend and the tray come up, no
+// window does (specs/imbue-studio-agent-access/spec.md).
+const isBackgroundStart = isBackgroundLaunch(launchArgs);
 const sandboxRelaunch = decideSandboxRelaunch({
   platform: process.platform,
   isPackaged: app.isPackaged,
@@ -460,14 +464,6 @@ function getMostRecentWindow({ includePopouts = false } = {}) {
   return null;
 }
 
-function isLastLiveWindow(bundle) {
-  let liveCount = 0;
-  for (const b of bundles) {
-    if (!b.window.isDestroyed()) liveCount += 1;
-  }
-  return liveCount <= 1 && !bundle.window.isDestroyed();
-}
-
 function focusBundle(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (bundle.window.isMinimized()) bundle.window.restore();
@@ -658,6 +654,9 @@ function buildBundleWindowOptions(kind, bounds) {
 // workspace surface) or 'popout' (one pulled-out workspace window, see the
 // pull-out-window spec); a popout names its workspace and window up front.
 function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
+  // The dock icon comes back before the window, so the window opens into a
+  // regular, activatable app rather than an agent-style one with no dock entry.
+  syncDockIcon({ isWindowAboutToOpen: true });
   const win = new BrowserWindow(buildBundleWindowOptions(kind, bounds));
 
   const bundle = {
@@ -776,24 +775,9 @@ function wireBundleWindowEvents(bundle) {
   win.on('move', () => scheduleSessionSave());
 
   win.on('close', (event) => {
-    // Off macOS, closing the LAST window quits the app; route that close
-    // through the quit sequence so the workspace shutdown prompt appears
-    // BEFORE the window disappears. If the user cancels, the window stays open.
-    // On macOS the app keeps running with no windows, so the last close is an
-    // ordinary window close and the prompt fires only on an explicit Quit.
-    if (
-      shouldInterceptLastWindowClose({
-        isMac,
-        isShuttingDown,
-        isQuitSequenceRunning,
-        hasBackend: !!getBackendProcess(),
-        isLastLiveWindow: isLastLiveWindow(bundle),
-      })
-    ) {
-      event.preventDefault();
-      runQuitSequence();
-      return;
-    }
+    // Closing a window, the last one included, is only ever a window close:
+    // the app keeps running behind its tray icon on every platform, so the
+    // running-workspaces prompt fires only on an explicit Quit.
     // A popout's OS close returns its window to the desktop first: the page
     // is asked to reattach and the close is retried once it answers (or
     // after a short wait). Not during a quit, when the popout is restored
@@ -834,6 +818,8 @@ function wireBundleWindowEvents(bundle) {
     const mruIdx = mruWindows.indexOf(bundle);
     if (mruIdx >= 0) mruWindows.splice(mruIdx, 1);
     if (initialBundle === bundle) initialBundle = null;
+    // With the last window gone the tray is the app's only presence.
+    syncDockIcon();
     // A window closed mid-intro can never report the film over; the startup
     // route waiting on it must not wait forever.
     bundle.resolveIntroFinished();
@@ -2066,8 +2052,19 @@ if (!gotLock) {
 } else {
   app.on('second-instance', (_event, argv) => {
     const url = extractDeeplinkUrlFromArgv(argv || []);
-    if (url) {
+    const action = decideSecondInstanceAction({
+      hasDeeplinkUrl: url !== null,
+      isBackgroundLaunch: isBackgroundLaunch(argv || []),
+    });
+    if (action === 'deeplink') {
       handleDeeplink(url);
+      return;
+    }
+    if (action === 'ignore') {
+      // An agent ran the recorded background launch while the app was already
+      // up: it wanted the API, which it has, and must not get a window popped
+      // over the user's work.
+      console.log('[lifecycle] second launch with --background while running; nothing to do');
       return;
     }
     // Launching the app again brings the app forward, so focus the window it
@@ -2140,6 +2137,13 @@ async function onReady() {
   installApplicationMenu();
   installDockMenu();
   installDevDockIcon();
+  installTray();
+  if (isBackgroundStart) {
+    console.log('[lifecycle] background start: running the backend and the tray with no window');
+    // Hidden before any window could exist, so an agent-started app never
+    // flashes a dock icon the user did not ask for.
+    syncDockIcon();
+  }
   powerMonitor.on('resume', () => repaintAllWindowsAfterWake('resume'));
   powerMonitor.on('unlock-screen', () => {
     repaintAllWindowsAfterWake('unlock-screen');
@@ -2149,8 +2153,11 @@ async function onReady() {
   // gate stops trusting focus, and watched chats, while the screen is locked.
   powerMonitor.on('lock-screen', () => relayScreenLockToAllWindows(true));
 
-  initialBundle = createBundle();
-  sizeFromSavedSession(initialBundle);
+  // A background start opens no window: the startup sequence runs without
+  // one, the one-time code is still consumed, and the first-window route is
+  // held for whichever window is asked for first (see startBackendWithRetry).
+  initialBundle = isBackgroundStart ? null : createBundle();
+  if (initialBundle !== null) sizeFromSavedSession(initialBundle);
   updater.init({ onStatus: broadcastUpdateStatus });
   // CLEANUP: remove alongside electron/legacy-name-cleanup.js once the Imbue
   // Studio build has been on stable long enough for installs to have launched
@@ -2276,25 +2283,118 @@ function installDevDockIcon() {
   if (!devIcon.isEmpty()) app.dock.setIcon(devIcon);
 }
 
-async function runStartupSequence(bundle) {
-  console.log('[startup] Loading shell.html...');
-  bundle.isLoadingState = true;
-  // Every launch plays it: the app has to start either way, and the film is
-  // what the wait looks like. What a later launch skips is the lockup's travel
-  // to the titlebar, which only means anything when the start flow is about to
-  // hold the mark there -- see the park flag on startup-ready.
-  bundle.introFinished = new Promise((resolve) => {
-    bundle.resolveIntroFinished = resolve;
-  });
-  const loaded = bundle.window.webContents.loadFile(path.join(__dirname, 'shell.html'), { hash: 'intro' });
-  bundle.loadingDocumentLoaded = loaded.catch(() => {});
+// Whether this tier shows as the product or as a development variant: every
+// tier but production gets the dev icon and its name in the tray, so a
+// production app and a dev app side by side read as two things.
+function isProductionTier() {
   try {
-    await loaded;
-    console.log('[startup] shell.html loaded');
+    return paths.getTier() === 'production';
   } catch (err) {
-    // Closing the window mid-load rejects the load. This sequence owns the
-    // backend start and the one-time code, so it runs on without a window.
-    console.warn('[startup] shell.html load did not finish:', err.message);
+    console.warn('[tray] could not resolve the tier:', err.message);
+    return true;
+  }
+}
+
+// The macOS dock icon follows the windows (see shouldShowDockIcon): shown when
+// a window is about to open or is open, hidden once none is. Hiding leaves the
+// app running behind the tray; showing again before a window opens is what
+// makes that window a regular, focusable one. Re-applied after each show, since
+// a dock icon set on a hidden dock entry does not survive the round trip.
+function syncDockIcon({ isWindowAboutToOpen = false } = {}) {
+  if (!isMac || !app.dock) return;
+  const hasLiveWindow = isWindowAboutToOpen || getMostRecentWindow({ includePopouts: true }) != null;
+  const shouldShow = shouldShowDockIcon({ isMac, hasLiveWindow });
+  if (shouldShow === app.dock.isVisible()) return;
+  if (shouldShow) {
+    app.dock.show().then(() => installDevDockIcon()).catch((err) => {
+      console.warn('[lifecycle] could not show the dock icon:', err.message);
+    });
+  } else {
+    app.dock.hide();
+  }
+}
+
+// Held for the app's lifetime: a Tray with no reference is collected, and its
+// icon disappears.
+let tray = null;
+
+// The tray icon the platform draws legibly: a small bitmap, the product icon
+// on production and the dev icon on every other tier (the colored icon is kept
+// as-is rather than made a template, so the two tiers stay tellable apart).
+function trayIconImage() {
+  const fileName = isProductionTier() ? (process.platform === 'linux' ? 'icon-linux.png' : 'icon.png') : 'icon-dev.png';
+  const image = nativeImage.createFromPath(path.join(__dirname, 'assets', fileName));
+  if (image.isEmpty()) throw new Error(`could not read the tray icon at ${fileName}`);
+  // The menu bar wants about 18 points; the dock and launcher icons are 512px.
+  const size = isMac ? 18 : 22;
+  return image.resize({ width: size, height: size });
+}
+
+function trayTooltip() {
+  return isProductionTier() ? PRODUCT_DISPLAY_NAME : `${PRODUCT_DISPLAY_NAME} (${paths.getTier()})`;
+}
+
+// The tray is the app's one persistent presence on every platform: it is where
+// a user with no window open reopens one and where Quit lives. Best effort: a
+// Linux desktop without an appindicator cannot show it, and the app runs on
+// behind the single-instance lock (a relaunch of the shortcut activates it)
+// with Ctrl+Q and the settings page's Quit still available from any window.
+function installTray() {
+  try {
+    tray = new Tray(trayIconImage());
+  } catch (err) {
+    console.warn(`[tray] could not create the tray icon; the app runs without one: ${err.message}`);
+    tray = null;
+    return;
+  }
+  const versionLabel = isProductionTier()
+    ? `${PRODUCT_DISPLAY_NAME} ${app.getVersion()}`
+    : `${PRODUCT_DISPLAY_NAME} ${app.getVersion()} (${paths.getTier()})`;
+  tray.setToolTip(trayTooltip());
+  tray.setContextMenu(Menu.buildFromTemplate([
+    {
+      label: `Open ${PRODUCT_DISPLAY_NAME}`,
+      click: () => openOrFocusWindow({ isReopen: true }),
+    },
+    { label: versionLabel, enabled: false },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => runQuitSequence(),
+    },
+  ]));
+  // Off macOS a click opens the app where the desktop delivers it as an
+  // activation (KDE on a single click, GNOME's AppIndicator extension only on
+  // a double click, a single one opening the menu); macOS opens the menu on
+  // any click.
+  if (!isMac) {
+    tray.on('click', () => openOrFocusWindow({ isReopen: true }));
+  }
+}
+
+// ``bundle`` is null on a background start, which has no window to show the
+// loading document in; everything after the document is window-independent.
+async function runStartupSequence(bundle) {
+  if (bundle !== null) {
+    console.log('[startup] Loading shell.html...');
+    bundle.isLoadingState = true;
+    // Every launch plays it: the app has to start either way, and the film is
+    // what the wait looks like. What a later launch skips is the lockup's travel
+    // to the titlebar, which only means anything when the start flow is about to
+    // hold the mark there -- see the park flag on startup-ready.
+    bundle.introFinished = new Promise((resolve) => {
+      bundle.resolveIntroFinished = resolve;
+    });
+    const loaded = bundle.window.webContents.loadFile(path.join(__dirname, 'shell.html'), { hash: 'intro' });
+    bundle.loadingDocumentLoaded = loaded.catch(() => {});
+    try {
+      await loaded;
+      console.log('[startup] shell.html loaded');
+    } catch (err) {
+      // Closing the window mid-load rejects the load. This sequence owns the
+      // backend start and the one-time code, so it runs on without a window.
+      console.warn('[startup] shell.html load did not finish:', err.message);
+    }
   }
 
   const envSetupStartedAt = Date.now();
@@ -3469,6 +3569,12 @@ ipcMain.on('window-close', (event) => {
   if (bundle && !bundle.window.isDestroyed()) bundle.window.close();
 });
 
+// The page's own Quit (the settings page): the same explicit quit the tray and
+// Cmd+Q / Ctrl+Q run, prompt included, for a desktop with no tray to offer it.
+ipcMain.on('quit-app', () => {
+  runQuitSequence();
+});
+
 function initiateFullQuit() {
   app.quit();
 }
@@ -3562,11 +3668,10 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   console.log('[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);
-  // On macOS the app stays alive with no windows (the dock icon remains); the
-  // user re-opens a window from the dock (see 'activate' below) and quits with
-  // Cmd+Q. Other platforms quit when the last window closes.
-  if (!shouldQuitOnWindowAllClosed({ isMac, isShuttingDown, isQuitSequenceRunning })) return;
-  runQuitSequence();
+  // The app stays alive with no windows on every platform, behind its tray
+  // icon; the user re-opens a window from the tray, the dock (see 'activate'
+  // below) or a relaunch, and quits explicitly. The listener itself is what
+  // keeps it alive: with none registered, Electron quits here.
 });
 
 // macOS: activating the app (clicking the dock icon) with no open windows

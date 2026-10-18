@@ -954,6 +954,35 @@ function internalChannelDisclosure(
   );
 }
 
+// Closing the last window leaves the app running behind its tray icon, so quitting
+// is explicit. The tray and Cmd+Q / Ctrl+Q offer it; this row is for a desktop
+// that shows no tray (a Linux session without an appindicator), where the page
+// is the only place left to put it.
+function quitAppRow(): m.Children {
+  if (!electronBridge.canQuitApp) return null;
+  return m(
+    "div",
+    { class: "flex items-center justify-between gap-4 py-3 border-b border-subtle" },
+    [
+      m(
+        "p",
+        { class: "type-body text-secondary" },
+        "Closing a window leaves Imbue Studio running in the background, so your workspaces stay reachable.",
+      ),
+      m(
+        Button,
+        {
+          variant: "secondary",
+          size: "md",
+          id: "quit-app",
+          onclick: () => electronBridge.quitApp(),
+        },
+        "Quit Imbue Studio",
+      ),
+    ],
+  );
+}
+
 function updatesPanel(model: SettingsModel): m.Children {
   const state = model.updateState;
   if (!electronBridge.isDesktop) {
@@ -997,6 +1026,7 @@ function updatesPanel(model: SettingsModel): m.Children {
       { class: "type-body text-secondary" },
       `You're on Imbue Studio ${state.currentVersion}.`,
     ),
+    quitAppRow(),
     updateStandingLine(model),
     updateStatusLine(model),
     ...listed.map((channel) => channelRow(model, state, channel)),

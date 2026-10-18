@@ -7,6 +7,7 @@ const { getBuildMetadata } = require('./build-metadata');
 const { createRotatingLogStream } = require('./log-rotation');
 const { formatTimestampedLine, createLineSplitter } = require('./log-timestamp');
 const { PRODUCT_DISPLAY_NAME } = require('./product-name');
+const { backgroundLaunchEnv } = require('./background-launch');
 
 // Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
 // launches go through a pipe (e.g. `just minds-start | head -30`), the
@@ -28,7 +29,7 @@ let backendProcess = null;
 /**
  * Env var that points the latchkey gateway at the bundled curl router.
  * Set on the Imbue Studio backend process so it flows -- via ``dict(os.environ)``
- * inheritance -- to that process's own latchkey calls, the detached
+ * inheritance -- to that process's own latchkey calls, the
  * ``mngr latchkey forward`` supervisor, and the gateway subprocess it
  * spawns.
  *
@@ -442,6 +443,14 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
           ...latchkeyCurlEnv(),
+          // How an agent brings this install up in the background when it
+          // finds it stopped; the backend records it in the tier's app.json.
+          ...backgroundLaunchEnv({
+            platform: process.platform,
+            isPackaged: true,
+            execPath: process.execPath,
+            appImagePath: process.env.APPIMAGE,
+          }),
         };
       }
 

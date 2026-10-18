@@ -1,12 +1,16 @@
-"""Serve a self-describing OpenAPI document for the gateway-reachable Imbue Studio API.
+"""Serve a self-describing OpenAPI document for the agent-reachable Imbue Studio API.
 
 ``GET /api/schema`` returns an OpenAPI 3.1 document describing every Imbue Studio API
-route an agent can reach through the latchkey ``minds-api-proxy`` gateway -- i.e.
+route its caller can reach, which depends on how the call arrived
+(``api_transport``). Through the latchkey ``minds-api-proxy`` gateway that is
 everything under ``/api/v*`` *except* the cookie-only ``/desktop`` namespace and
-the WebDAV ``/files`` mount, which agents cannot reach (so listing them would
-only confuse a caller discovering the API). The document is generated at request
-time from the live Flask ``url_map``, so the path/method inventory can never
-drift from the routes that are actually registered.
+the WebDAV ``/files`` mount, which the gateway never forwards (so listing them
+would only confuse a caller discovering the API); over the same-machine Unix
+socket, where the caller is the user, it is everything under ``/api/``. The
+document is generated at request time from the live Flask ``url_map``, so the
+path/method inventory can never drift from the routes that are actually
+registered. The WebDAV mount is a WSGI app dispatched outside the ``url_map``,
+so it appears in neither document even where it is reachable.
 
 Request/response *body* schemas are layered on top: a small registry
 (:data:`_ROUTE_MODELS`) maps a route to the pydantic models describing its body
@@ -35,10 +39,12 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
 from typing import Final
+from typing import assert_never
 
 from flask import Blueprint
 from flask import Response
 from flask import current_app
+from flask import request
 from pydantic import BaseModel
 from pydantic import Field
 
@@ -84,6 +90,8 @@ from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
 from imbue.minds.desktop_client.api_models import WorkspaceSummary
 from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
+from imbue.minds.desktop_client.api_transport import ApiTransport
+from imbue.minds.desktop_client.api_transport import transport_for_environ
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.responses import make_response
 
@@ -101,11 +109,34 @@ _API_VERSION: Final[str] = "1.0"
 _IMPLICIT_METHODS: Final[frozenset[str]] = frozenset({"HEAD", "OPTIONS"})
 
 # Path prefixes that are NOT reachable by an agent through the gateway proxy and
-# so are excluded from the published schema: the cookie-only desktop namespace
+# so are excluded from the schema it is served: the cookie-only desktop namespace
 # and the WebDAV file mount. Everything else under ``/api/`` is proxy-reachable
 # (grantable via a ``minds-workspaces`` verb, or baseline-allowed), matching the
-# contract documented in ``api_v1``.
+# contract documented in ``api_v1``. Over the local socket nothing is excluded.
 _GATEWAY_UNREACHABLE_PREFIXES: Final[tuple[str, ...]] = ("/api/v1/desktop/", "/api/v1/files")
+
+_DESCRIPTION_BY_TRANSPORT: Final[Mapping[ApiTransport, str]] = {
+    ApiTransport.GATEWAY: (
+        "The Imbue Studio desktop client REST API reachable by in-workspace agents through the "
+        "latchkey minds-api-proxy gateway. Every route accepts either the gateway-injected "
+        "bearer key or the desktop session cookie."
+    ),
+    ApiTransport.LOCAL_SOCKET: (
+        "The Imbue Studio desktop client REST API as reachable over the same-machine Unix domain "
+        "socket, where the caller is the signed-in user and needs no credential. The desktop "
+        "namespace, which the gateway never forwards, is included. The WebDAV files mount under "
+        "/api/v1/files is reachable over the socket too, but it is not an HTTP route of this document."
+    ),
+}
+
+# The top-level security requirement per transport. The gateway caller must
+# present the bearer key or the session cookie; over the local socket the
+# listener has already identified the caller as the user, which OpenAPI spells
+# as the empty requirement object.
+_SECURITY_BY_TRANSPORT: Final[Mapping[ApiTransport, tuple[Mapping[str, Sequence[str]], ...]]] = {
+    ApiTransport.GATEWAY: ({"bearerAuth": ()}, {"cookieAuth": ()}),
+    ApiTransport.LOCAL_SOCKET: ({},),
+}
 
 
 # -- Route -> model registry (models live in ``api_models``) --
@@ -257,6 +288,17 @@ def _is_gateway_reachable_path(openapi_path: str) -> bool:
     return not any(openapi_path.startswith(prefix) for prefix in _GATEWAY_UNREACHABLE_PREFIXES)
 
 
+def is_reachable_path(openapi_path: str, transport: ApiTransport) -> bool:
+    """Whether a path is reachable by a caller arriving over ``transport``."""
+    match transport:
+        case ApiTransport.GATEWAY:
+            return _is_gateway_reachable_path(openapi_path)
+        case ApiTransport.LOCAL_SOCKET:
+            return openapi_path.startswith("/api/")
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _component_schemas_from_models(models: Sequence[type[BaseModel]]) -> dict[str, object]:
     """Build the ``components/schemas`` map from pydantic models, hoisting nested ``$defs``."""
     components: dict[str, object] = {}
@@ -343,10 +385,11 @@ def _build_operation(
 def build_openapi_document(
     url_rules: Sequence[tuple[str, frozenset[str], Sequence[str], str]],
     view_func_by_endpoint: Mapping[str, Callable[..., object]],
+    transport: ApiTransport,
     # An OpenAPI 3.1 document: deeply-nested, loosely-typed JSON, so the value type
     # is ``Any`` rather than a giant TypedDict.
 ) -> dict[str, Any]:
-    """Build the OpenAPI 3.1 document for the gateway-reachable API.
+    """Build the OpenAPI 3.1 document for the API as reachable over ``transport``.
 
     ``url_rules`` is a sequence of ``(flask_rule, methods, argument_names,
     endpoint)`` extracted from the Flask ``url_map`` -- passed in (rather than
@@ -360,7 +403,7 @@ def build_openapi_document(
         if endpoint == "static":
             continue
         openapi_path = _flask_path_to_openapi(flask_rule)
-        if not _is_gateway_reachable_path(openapi_path):
+        if not is_reachable_path(openapi_path, transport):
             continue
         view_func = view_func_by_endpoint.get(endpoint)
         for method in sorted(methods - _IMPLICIT_METHODS):
@@ -383,13 +426,12 @@ def build_openapi_document(
         "info": {
             "title": _API_TITLE,
             "version": _API_VERSION,
-            "description": (
-                "The Imbue Studio desktop client REST API reachable by in-workspace agents through the "
-                "latchkey minds-api-proxy gateway. Every route accepts either the gateway-injected "
-                "bearer key or the desktop session cookie."
-            ),
+            "description": _DESCRIPTION_BY_TRANSPORT[transport],
         },
-        "security": [{"bearerAuth": []}, {"cookieAuth": []}],
+        "security": [
+            {scheme: list(scopes) for scheme, scopes in requirement.items()}
+            for requirement in _SECURITY_BY_TRANSPORT[transport]
+        ],
         "components": {
             "securitySchemes": dict(_SECURITY_SCHEMES),
             "schemas": _component_schemas_from_models(referenced_models),
@@ -409,8 +451,10 @@ def _extract_url_rules() -> list[tuple[str, frozenset[str], Sequence[str], str]]
 
 @require_api_or_cookie_auth
 def _handle_api_schema() -> Response:
-    """Return the OpenAPI 3.1 document for the gateway-reachable Imbue Studio API."""
-    document = build_openapi_document(_extract_url_rules(), dict(current_app.view_functions))
+    """Return the OpenAPI 3.1 document for the Imbue Studio API as reachable by this caller."""
+    document = build_openapi_document(
+        _extract_url_rules(), dict(current_app.view_functions), transport_for_environ(request.environ)
+    )
     return make_response(content=json.dumps(document), media_type="application/json")
 
 

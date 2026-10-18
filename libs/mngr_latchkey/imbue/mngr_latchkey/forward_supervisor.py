@@ -1,20 +1,21 @@
-"""Detached supervisor for the ``mngr latchkey forward`` subprocess.
+"""Supervisor for the ``mngr latchkey forward`` child process.
 
-Holds the adoption logic for a single, long-running
+Holds the ownership logic for a single, long-running
 ``mngr latchkey forward`` process. The supervisor itself is *not* the
 forward subprocess -- it's a tiny in-process helper that callers (the
 minds desktop client, future GUI clients) use to make sure exactly one
-detached ``mngr latchkey forward`` is running for a given latchkey
-directory.
+``mngr latchkey forward`` is running for a given latchkey directory, and
+to stop it when they shut down.
 
 Why this exists: ``mngr latchkey forward`` is the canonical owner of the
 shared gateway + per-agent reverse-tunnel lifecycle. Embedders that want
 the same behaviour without re-implementing :class:`LatchkeyDiscoveryHandler`
 / :class:`LatchkeyDestructionHandler` / :class:`SSHTunnelManager` wiring
-can simply spawn ``mngr latchkey forward`` detached and reuse it across
-embedder restarts. The detachment + adoption mechanics mirror what
-:class:`Latchkey` already does for the gateway itself, so reading both
-side-by-side is intentional.
+spawn ``mngr latchkey forward`` as a child whose lifetime is coupled to
+their own: they stop it on their teardown, and it watches their pid
+(``parent_pid``) so it also exits when they die without one. The ownership
+mechanics mirror what :class:`Latchkey` already does for the gateway itself,
+so reading both side-by-side is intentional.
 """
 
 import signal
@@ -31,7 +32,7 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.utils.polling import poll_for_value
-from imbue.mngr_latchkey._spawn import spawn_detached_mngr_latchkey_forward
+from imbue.mngr_latchkey._spawn import spawn_mngr_latchkey_forward
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
@@ -200,14 +201,14 @@ def _kill_and_wait(process: psutil.Process) -> None:
 def _terminate_process_and_descendants(forward_process: psutil.Process) -> None:
     """Terminate a forward supervisor and every descendant it owns.
 
-    The descendants (the ``mngr observe`` discovery child, the detached
-    ``latchkey gateway``, reverse ``ssh`` tunnels) are meant to die in the
-    supervisor's own SIGTERM teardown -- but a wedged supervisor that has to be
-    SIGKILLed after the grace period never runs it, and the gateway (spawned
-    with ``start_new_session=True``) then outlives every session. The descendant
-    handles are captured before signalling and terminated after, so the PID-reuse
-    guard in :func:`_terminate_process` keeps a descendant the supervisor already
-    tore down from being confused with a recycled PID.
+    The descendants (the ``mngr observe`` discovery child, the ``latchkey
+    gateway``, reverse ``ssh`` tunnels) are meant to die in the supervisor's
+    own SIGTERM teardown -- but a wedged supervisor that has to be SIGKILLed
+    after the grace period never runs it, and its children would then outlive
+    it. The descendant handles are captured before signalling and terminated
+    after, so the PID-reuse guard in :func:`_terminate_process` keeps a
+    descendant the supervisor already tore down from being confused with a
+    recycled PID.
     """
     descendant_processes = _descendant_processes(forward_process)
     _terminate_process(forward_process)
@@ -216,7 +217,7 @@ def _terminate_process_and_descendants(forward_process: psutil.Process) -> None:
 
 
 class LatchkeyForwardSupervisor(MutableModel):
-    """Ensure exactly one detached ``mngr latchkey forward`` is running.
+    """Ensure exactly one ``mngr latchkey forward`` is running for a latchkey directory.
 
     The supervisor itself is stateless across restarts of the embedder
     -- everything it needs to reconcile is the ownership lock under
@@ -284,6 +285,14 @@ class LatchkeyForwardSupervisor(MutableModel):
             "mngr local host id."
         ),
     )
+    parent_pid: int | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "The pid whose death ends the forward, passed as ``--parent-pid``. An embedder passes its own pid "
+            "so a forward it spawned cannot outlive it; ``None`` leaves the forward running until stopped."
+        ),
+    )
 
     spawn_ownership_timeout_seconds: float = Field(
         default=_SPAWN_OWNERSHIP_TIMEOUT_SECONDS,
@@ -306,7 +315,7 @@ class LatchkeyForwardSupervisor(MutableModel):
         return load_forward_owner(self.plugin_data_dir)
 
     def ensure_running(self) -> LatchkeyForwardOwner:
-        """Spawn (or adopt) a detached ``mngr latchkey forward`` and return its owner record.
+        """Spawn (or adopt) a ``mngr latchkey forward`` and return its owner record.
 
         Behaviour:
 
@@ -345,11 +354,11 @@ class LatchkeyForwardSupervisor(MutableModel):
 
             log_path = forward_log_path(plugin_dir)
             with log_span(
-                "Starting detached mngr latchkey forward (log={})",
+                "Starting mngr latchkey forward (log={})",
                 log_path,
             ):
                 try:
-                    pid = spawn_detached_mngr_latchkey_forward(
+                    pid = spawn_mngr_latchkey_forward(
                         mngr_binary=self.mngr_binary,
                         latchkey_binary=self.latchkey_binary,
                         latchkey_directory=self.latchkey_directory,
@@ -357,6 +366,7 @@ class LatchkeyForwardSupervisor(MutableModel):
                         extra_env=self.extra_env,
                         cwd=self.cwd,
                         device_id=self.device_id,
+                        parent_pid=self.parent_pid,
                     )
                 except OSError as e:
                     raise LatchkeyError(f"Failed to spawn 'mngr latchkey forward': {e}") from e
@@ -403,8 +413,8 @@ class LatchkeyForwardSupervisor(MutableModel):
 
         SIGTERM-ing it cascades into its own coupled-lifetime shutdown path: it
         stops the shared ``latchkey gateway`` subprocess, cancels every reverse
-        tunnel, and exits. Embedders that want the gateway to *survive* their
-        own shutdown should simply not call this method.
+        tunnel, and exits. An embedder calls this on its own teardown, so
+        nothing it started outlives it.
 
         The signalled process comes from the ownership lock, so it is the one
         holding this directory at the moment it is read -- never one that merely
@@ -420,7 +430,7 @@ class LatchkeyForwardSupervisor(MutableModel):
             if forward_process is None:
                 logger.debug("No mngr latchkey forward owns {}; nothing to stop", self.latchkey_directory)
                 return
-            logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", forward_process.pid)
+            logger.info("Stopping mngr latchkey forward supervisor (pid={})", forward_process.pid)
             _terminate_process_and_descendants(forward_process)
 
     def bounce(self) -> None:
@@ -471,8 +481,9 @@ class LatchkeyForwardSupervisor(MutableModel):
     def restart(self) -> LatchkeyForwardOwner:
         """Terminate any existing live supervisor and spawn a fresh one.
 
-        Use this on embedder startup to replace a supervisor left running by an
-        earlier build. The forward it stops is the one owning the directory, and
+        Use this on embedder startup to replace a supervisor an earlier run left
+        behind (one whose embedder died before its parent-pid watch fired, or
+        one spawned by an older build). The forward it stops is the one owning the directory, and
         the spawn that follows adopts whichever forward claims it first, so
         another embedder racing for the same directory can still win it. The verified
         termination in :meth:`stop` makes this safe to call

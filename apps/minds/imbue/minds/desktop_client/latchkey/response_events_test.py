@@ -67,3 +67,14 @@ def test_append_writes_the_legacy_envelope_keys_for_older_readers(tmp_path: Path
     assert line["event_id"].startswith("evt-")
     assert line["request_type"] == "LATCHKEY_PERMISSION"
     assert line["status"] == "DENIED"
+
+
+def test_decided_by_round_trips_and_defaults_to_none(tmp_path: Path) -> None:
+    by_agent = create_request_response_event("req-1", RequestStatus.GRANTED, "agent-1", decided_by="deploy-bot")
+    by_user = create_request_response_event("req-2", RequestStatus.DENIED, "agent-1")
+    append_response_event(tmp_path, by_agent)
+    append_response_event(tmp_path, by_user)
+
+    loaded = load_response_events(tmp_path)
+
+    assert [event.decided_by for event in loaded] == ["deploy-bot", None]

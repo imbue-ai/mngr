@@ -133,7 +133,7 @@ def _get_connector_url() -> str:
 
 
 def bounce_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor | None) -> None:
-    """Bounce the detached ``mngr latchkey forward`` supervisor's observe child.
+    """Bounce the ``mngr latchkey forward`` supervisor's observe child.
 
     No-op when no supervisor handle is available (e.g. tests). ``bounce()``
     starts the supervisor if none is currently running.
@@ -310,7 +310,7 @@ def _run_web_login_subprocess(
     and writes the session to its own state directory. We then mirror the
     resulting account identity into ``MultiAccountSessionStore`` so the
     desktop UI can render it and materialize the provider set (which writes
-    the account instance and bounces the detached ``mngr latchkey forward``
+    the account instance and bounces the ``mngr latchkey forward``
     supervisor, the single discovery observer, so the new provider config is
     picked up immediately).
     """

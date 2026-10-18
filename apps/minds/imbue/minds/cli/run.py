@@ -27,6 +27,8 @@ import threading
 import webbrowser
 from collections.abc import Callable
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import AbstractSet
 from typing import Final
@@ -52,12 +54,20 @@ from imbue.minds.config.loader import resolve_client_config_path
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clones
 from imbue.minds.desktop_client.api_key_store import generate_api_key
+from imbue.minds.desktop_client.api_socket import ApiSocketError
+from imbue.minds.desktop_client.api_socket import prepare_socket_path
+from imbue.minds.desktop_client.api_socket import resolve_api_socket_location
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.app import start_discovery_health_watchdog_loop
 from imbue.minds.desktop_client.app import start_folder_syncs
 from imbue.minds.desktop_client.app import start_sleep_heartbeat_loop
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.app import start_workspace_update_loops
+from imbue.minds.desktop_client.app_record import app_record_path
+from imbue.minds.desktop_client.app_record import build_app_record
+from imbue.minds.desktop_client.app_record import parse_launch_command_from_environ
+from imbue.minds.desktop_client.app_record import remove_app_record
+from imbue.minds.desktop_client.app_record import write_app_record
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
@@ -161,7 +171,7 @@ _MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 120.0
 
 # Env var read by the bundled ``minds-api-proxy`` gateway extension to
 # decide where to forward inbound proxy requests. Published to the
-# detached ``mngr latchkey forward`` supervisor (and from there to the
+# ``mngr latchkey forward`` supervisor (and from there to the
 # gateway, and from there to the extension) on every Imbue Studio startup so
 # the proxy always points at the current bare-origin port, even when
 # Imbue Studio re-binds to a different port across restarts.
@@ -253,13 +263,13 @@ def run(
     # package.json / "unknown" for bare source runs (see imbue.minds.build_info).
     # The anonymous user id (no PII) is persisted per install and attached to every event so Sentry
     # can count the distinct installs affected by each issue. The same value is shared with the
-    # detached ``mngr latchkey forward`` daemon (below) so both processes count as one install.
+    # ``mngr latchkey forward`` child (below) so both processes count as one install.
     anonymous_user_id = resolve_anonymous_user_id(data_directory)
     # Resolved up front (and reused below for the state container + the ``mngr forward``
     # consumer): the Sentry attachment sweep needs the discovery events dir under it.
     mngr_host_dir = resolve_effective_mngr_host_dir()
     # Built before Sentry setup so the attachment sweep knows the latchkey plugin
-    # data dir (the detached ``mngr latchkey forward`` daemon's logs live there).
+    # data dir (the ``mngr latchkey forward`` child's logs live there).
     latchkey = _build_latchkey(data_directory=data_directory)
     setup_sentry(
         environment=resolve_sentry_environment(),
@@ -292,6 +302,20 @@ def run(
     )
     latchkey.initialize()
 
+    # The same-machine API socket doubles as this tier's single-instance guard:
+    # a second Imbue Studio for the tier is refused here, before anything below
+    # (the latchkey forward restart, ``mngr forward``, the consumer threads)
+    # could disturb the one already running. The socket itself is bound once
+    # the app is ready to serve.
+    tier = MindsRoot(root_name).tier
+    socket_location = resolve_api_socket_location(state_dir=data_directory, tier=tier)
+    try:
+        prepare_socket_path(socket_location.path)
+    except ApiSocketError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if socket_location.is_fallback:
+        logger.info("The canonical API socket path is too long for this platform; using {}", socket_location.path)
+
     # Mint a fresh central Imbue Studio API key for this process. The same
     # value is handed to the latchkey gateway's ``minds-api-proxy``
     # extension (via the supervisor restart below, so it can inject
@@ -321,14 +345,14 @@ def run(
     except DockerCleanupError as exc:
         logger.warning("Could not start the Docker state container at launch: {}", exc)
 
-    # Spawn a detached ``mngr latchkey forward`` supervisor. It owns the
-    # shared latchkey gateway + per-agent reverse tunnels. On every Imbue Studio
-    # start it is terminated and respawned (see
-    # ``_restart_mngr_latchkey_forward_supervisor``) so it always runs the
-    # current code with the current env; the reverse tunnels are
-    # re-established as discovery re-fires. We do *not* terminate it on
-    # Imbue Studio shutdown -- it keeps running detached so agents in
-    # containers/VMs keep working across desktop-client restarts.
+    # Spawn the ``mngr latchkey forward`` supervisor as a child of this process.
+    # It owns the shared latchkey gateway + per-agent reverse tunnels, and its
+    # lifetime is coupled to ours: the shutdown teardown stops it, and it
+    # watches our pid so it also exits if we die without one. On every Imbue
+    # Studio start a stale owner is replaced (see
+    # ``_restart_mngr_latchkey_forward_supervisor``) so the forward always runs
+    # the current code with the current env; the reverse tunnels are
+    # re-established as discovery re-fires.
     gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
 
     # Read-or-create eagerly so this install always has a real identity from
@@ -343,7 +367,7 @@ def run(
         mngr_binary=MNGR_BINARY,
         latchkey_binary=latchkey.latchkey_binary,
         latchkey_directory=latchkey.latchkey_directory,
-        # Spawn the detached supervisor (and its `mngr observe` discovery
+        # Spawn the supervisor (and its `mngr observe` discovery
         # producer grandchild) from $HOME, like every other laptop-side mngr
         # invocation -- notably the `mngr forward` consumer below. Without this
         # it inherits Imbue Studio's cwd, which in a dev checkout is the monorepo root:
@@ -355,6 +379,9 @@ def run(
         # What this computer announces itself as to each remote workspace's
         # machine, so a workspace can tell the user's desktops apart.
         device_id=str(device_id),
+        # The forward exits on its own when this process is gone, so a crash
+        # here never leaves a gateway and its tunnels running headless.
+        parent_pid=os.getpid(),
         extra_env={
             MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{port}",
             MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
@@ -997,14 +1024,36 @@ def run(
         thread = threading.Thread(target=_sleep_then_open, args=(minds_login_url,), daemon=True)
         thread.start()
 
+    # The ``app.json`` record beside the API socket. A second Imbue Studio for
+    # this tier was refused at the socket probe above, so a running instance's
+    # record is never overwritten by a start that then fails. The record is
+    # advisory (a crash leaves it behind), so it is written before the socket
+    # binds and removed on the way out.
+    record_path = app_record_path(data_directory)
+    write_app_record(
+        record_path,
+        build_app_record(
+            tier=tier,
+            root_name=root_name,
+            version=resolve_release_id(),
+            socket_path=socket_location.path,
+            http_url=f"http://127.0.0.1:{port}",
+            launch=parse_launch_command_from_environ(os.environ),
+            started_at=datetime.now(timezone.utc),
+        ),
+    )
+
     # ``desktop_client_runtime`` owns the shared HTTP client + geo-detection
     # startup and the ordered shutdown teardown (close client, terminate
     # consumers, stop the mngr caller, drain the root concurrency group).
     # ``serve_desktop_client`` runs the graceful cheroot server until
     # SIGINT/SIGTERM, flipping ``shutdown_event`` + waking the SSE handlers
     # before the server drains so streams end cleanly with no tracebacks.
-    with desktop_client_runtime(get_state(app), is_externally_managed_client=False):
-        serve_desktop_client(app, get_state(app), host=host, port=port)
+    try:
+        with desktop_client_runtime(get_state(app), is_externally_managed_client=False):
+            serve_desktop_client(app, get_state(app), host=host, port=port, api_socket_path=socket_location.path)
+    finally:
+        remove_app_record(record_path)
 
 
 def _resolve_backup_quota_evictor(
@@ -1103,20 +1152,18 @@ def _restart_supervisor_then_prewarm_gateway_client(
 
 
 def _restart_mngr_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor) -> None:
-    """Restart the detached ``mngr latchkey forward`` supervisor on Imbue Studio startup.
+    """Start the ``mngr latchkey forward`` supervisor on Imbue Studio startup, replacing any stale owner.
 
     Uses :meth:`LatchkeyForwardSupervisor.restart` rather than
-    ``ensure_running`` so that Imbue Studio upgrades run with a freshly-spawned
-    supervisor: an older supervisor running stale code from a previous
-    Imbue Studio version is terminated and replaced on every Imbue Studio start, unless
-    another Imbue Studio claims the directory first in the gap between the two. A running supervisor that Imbue Studio is happy
-    to adopt does not exist in practice -- the supervisor's lifetime
-    is tied to the gateway it owns, and the gateway has only Imbue Studio as a
-    consumer today. Restarting on every Imbue Studio start is also what
-    keeps ``LATCHKEY_EXTENSION_MINDS_API_URL`` in sync with the
-    current bare-origin port -- Imbue Studio re-binds its server on every
-    start, and the supervisor restart re-publishes the env var (baked
-    into the supervisor's ``extra_env`` at construction time in ``run``).
+    ``ensure_running``: the forward is a child of this process and is stopped on
+    shutdown, so a live owner at startup is one an earlier run left behind (a
+    crash that beat its parent-pid watch, or an older build), and it is
+    terminated and replaced rather than adopted, unless another Imbue Studio
+    claims the directory first in the gap between the two. Spawning fresh on
+    every start is also what keeps ``LATCHKEY_EXTENSION_MINDS_API_URL`` in sync
+    with the current bare-origin port -- Imbue Studio re-binds its server on
+    every start, and the spawn re-publishes the env var (baked into the
+    supervisor's ``extra_env`` at construction time in ``run``).
 
     Failures are logged as warnings rather than raised: a broken
     supervisor degrades latchkey to "unreachable from inside agents"
@@ -1125,7 +1172,7 @@ def _restart_mngr_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervi
     try:
         info = supervisor.restart()
     except LatchkeyError as e:
-        logger.warning("Could not start detached mngr latchkey forward supervisor: {}", e)
+        logger.warning("Could not start the mngr latchkey forward supervisor: {}", e)
         return
     logger.info("mngr latchkey forward supervisor running (pid={})", info.pid)
 

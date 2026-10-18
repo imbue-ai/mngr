@@ -165,7 +165,7 @@ def test_ensure_running_spawns_when_no_record_exists(tmp_path: Path) -> None:
 
 
 def test_ensure_running_spawns_forward_in_configured_cwd(tmp_path: Path) -> None:
-    """The ``cwd`` field is threaded through to the detached forward process.
+    """The ``cwd`` field is threaded through to the forward process.
 
     minds passes ``$HOME`` so the supervisor (a laptop-side mngr invocation)
     does not resolve project config from a transient cwd. Here we point it at a
@@ -444,7 +444,7 @@ def test_extra_env_defaults_to_empty_mapping(tmp_path: Path) -> None:
     Pins the default so callers that do not need extra env vars are
     not forced to spell out an explicit empty dict, and so the
     ``Mapping`` field type does not accidentally become ``None`` at
-    runtime (which would crash :func:`spawn_detached_mngr_latchkey_forward`).
+    runtime (which would crash :func:`spawn_mngr_latchkey_forward`).
     """
     supervisor = LatchkeyForwardSupervisor(
         mngr_binary="/nonexistent-binary",
