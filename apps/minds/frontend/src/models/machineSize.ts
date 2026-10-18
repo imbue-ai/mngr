@@ -12,11 +12,7 @@ export interface MachineSizeNumbers {
 /** One dimension of a machine size given in numbers. */
 export type MachineSizeDimension = keyof MachineSizeNumbers;
 
-export const MACHINE_SIZE_DIMENSIONS: MachineSizeDimension[] = [
-  "cpu_count",
-  "memory_gb",
-  "disk_gb",
-];
+export const MACHINE_SIZE_DIMENSIONS: MachineSizeDimension[] = ["cpu_count", "memory_gb", "disk_gb"];
 
 /** Size fields as typed, so a half-typed value survives a redraw; "" is a dimension left alone. */
 export interface MachineSizeDraft {
@@ -33,8 +29,7 @@ export interface MachineSizeDraft {
 export function formatMachineSizeNumbers(size: MachineSizeNumbers): string {
   const gb = (value: number): string => String(Math.round(value * 10) / 10);
   const parts: string[] = [];
-  if (size.cpu_count !== null)
-    parts.push(`${size.cpu_count} ${size.cpu_count === 1 ? "CPU" : "CPUs"}`);
+  if (size.cpu_count !== null) parts.push(`${size.cpu_count} ${size.cpu_count === 1 ? "CPU" : "CPUs"}`);
   if (size.memory_gb !== null) parts.push(`${gb(size.memory_gb)} GB RAM`);
   if (size.disk_gb !== null) parts.push(`${gb(size.disk_gb)} GB disk`);
   return parts.join(" · ");
@@ -49,14 +44,7 @@ export function parseMachineSizeNumber(text: string): number | null {
 }
 
 /** The size fields pre-filled from a size in numbers, as whole numbers; an unknown dimension is left blank. */
-export function machineSizeDraftFor(
-  size: MachineSizeNumbers,
-): MachineSizeDraft {
-  const whole = (value: number | null): string =>
-    value === null ? "" : String(Math.round(value));
-  return {
-    cpu_count: whole(size.cpu_count),
-    memory_gb: whole(size.memory_gb),
-    disk_gb: whole(size.disk_gb),
-  };
+export function machineSizeDraftFor(size: MachineSizeNumbers): MachineSizeDraft {
+  const whole = (value: number | null): string => (value === null ? "" : String(Math.round(value)));
+  return { cpu_count: whole(size.cpu_count), memory_gb: whole(size.memory_gb), disk_gb: whole(size.disk_gb) };
 }

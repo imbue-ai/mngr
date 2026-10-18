@@ -163,18 +163,13 @@ describe("the update modal's Update now", () => {
       {
         ...OUT_OF_DATE,
         dispatch_failure: "Couldn't reach this workspace to start the update.",
-        dispatch_failure_detail:
-          "Error: Could not reach host host-1234: connection refused",
+        dispatch_failure_detail: "Error: Could not reach host host-1234: connection refused",
       },
     );
 
     const text = allText(draw());
-    expect(text).toContain(
-      "Couldn't reach this workspace to start the update.",
-    );
-    expect(text).toContain(
-      "Error: Could not reach host host-1234: connection refused",
-    );
+    expect(text).toContain("Couldn't reach this workspace to start the update.");
+    expect(text).toContain("Error: Could not reach host host-1234: connection refused");
 
     press(draw(), "Dismiss");
     await settleDispatch();
@@ -188,15 +183,11 @@ describe("the update modal's Update now", () => {
       ...OUT_OF_DATE,
       dispatch_failure: "Couldn't reach this workspace to start the update.",
     });
-    expect(allText(draw())).toContain(
-      "Couldn't reach this workspace to start the update.",
-    );
+    expect(allText(draw())).toContain("Couldn't reach this workspace to start the update.");
 
     press(draw(), "Update now");
 
-    expect(allText(draw())).not.toContain(
-      "Couldn't reach this workspace to start the update.",
-    );
+    expect(allText(draw())).not.toContain("Couldn't reach this workspace to start the update.");
   });
 
   it("offers scheduling as the primary action", () => {
@@ -221,7 +212,9 @@ describe("the update modal's verdict line", () => {
       success_note_version: "minds-v0.4.1",
     });
 
-    expect(allText(draw())).toContain("This workspace was updated to v0.4.1.");
+    expect(allText(draw())).toContain(
+      "This workspace was updated to v0.4.1.",
+    );
   });
 
   it("points a run that ended short at its own chat rather than offering machinery of its own", () => {

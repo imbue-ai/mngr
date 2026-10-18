@@ -4,11 +4,10 @@ import { OverlayBackdrop } from "./OverlayBackdrop";
 
 describe("OverlayBackdrop alignment", () => {
   it("hangs a full-window (app-level) modal from the top, not centered", () => {
-    const root = renderRoot(OverlayBackdrop, {
-      backdropId: "b",
-      onDismiss: () => undefined,
-      fullWindow: true,
-    });
+    const root = renderRoot(
+      OverlayBackdrop,
+      { backdropId: "b", onDismiss: () => undefined, fullWindow: true },
+    );
     const className = String(attrsOf(root).className);
     expect(className).toContain("items-start");
     expect(className).not.toContain("items-center");

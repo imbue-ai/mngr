@@ -216,11 +216,7 @@ describe("ShareTab publish widget", () => {
     );
     // The pane waits too, as a skeleton: there is no add row to disable and
     // no grant list to call empty until the document says so.
-    expect(addControls(renderTab(share))).toEqual([
-      undefined,
-      undefined,
-      undefined,
-    ]);
+    expect(addControls(renderTab(share))).toEqual([undefined, undefined, undefined]);
   });
 
   it("greys the switch out, rather than drawing it off, when the first read failed", async () => {
@@ -684,9 +680,9 @@ describe("ShareTab loading skeleton", () => {
           (vnode) => attrsOf(vnode)["data-share-count"] !== undefined,
         ),
       ).toBe(false);
-      expect(collectVnodes(entry).some((vnode) => vnode.tag === Skeleton)).toBe(
-        true,
-      );
+      expect(
+        collectVnodes(entry).some((vnode) => vnode.tag === Skeleton),
+      ).toBe(true);
     }
   });
 
@@ -1053,9 +1049,7 @@ describe("ShareTab grant list", () => {
       );
       expect(name).toBeDefined();
       expect(classTokensOf(name as AnyVnode)).toContain("truncate");
-      expect(classTokensOf(name as AnyVnode)).not.toContain(
-        "whitespace-nowrap",
-      );
+      expect(classTokensOf(name as AnyVnode)).not.toContain("whitespace-nowrap");
     }
   });
 
@@ -1068,9 +1062,7 @@ describe("ShareTab grant list", () => {
       const slots = collectVnodes(row).filter(
         (vnode) => attrsOf(vnode)["data-slot"] !== undefined,
       );
-      expect(slots.map((slot) => attrsOf(slot)["data-slot"])).toEqual([
-        "invitation",
-      ]);
+      expect(slots.map((slot) => attrsOf(slot)["data-slot"])).toEqual(["invitation"]);
       expect(allText(slots[0])).toBe("");
     }
   });
@@ -2001,9 +1993,7 @@ describe("ShareTab invitations", () => {
     ).toBe(true);
     // A joined person is in: no re-invite is offered.
     expect(inviteControl(rowByText(root, "Carol Reyes"))).toBeUndefined();
-    expect(
-      allText(slotOf(rowByText(root, "Anyone at acme.example"), "invitation")),
-    ).toBe("");
+    expect(allText(slotOf(rowByText(root, "Anyone at acme.example"), "invitation"))).toBe("");
   });
 
   it("says could not invite, and no more than that, plus a re-invite", async () => {
@@ -2043,9 +2033,7 @@ describe("ShareTab invitations", () => {
     expect(attrsOf(friend as AnyVnode)["aria-label"]).toBe("Invite again");
     // The first invitation is automatic, so a person with no outcome shows no button.
     expect(inviteControl(rowByText(root, "Carol Reyes"))).toBeUndefined();
-    expect(
-      inviteControl(rowByText(root, "Anyone at acme.example")),
-    ).toBeUndefined();
+    expect(inviteControl(rowByText(root, "Anyone at acme.example"))).toBeUndefined();
 
     (attrsOf(friend as AnyVnode).onclick as () => void)();
     await settle();

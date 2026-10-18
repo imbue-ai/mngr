@@ -49,9 +49,7 @@ export function PrerequisiteNotice(): m.Component<PrerequisiteNoticeAttrs> {
                   onclick: () => {
                     const clipboard = navigator.clipboard;
                     if (!clipboard) {
-                      console.error(
-                        "Could not copy the install command: the clipboard is unavailable here",
-                      );
+                      console.error("Could not copy the install command: the clipboard is unavailable here");
                       return;
                     }
                     // The label follows the write, so a refused write never
@@ -62,10 +60,7 @@ export function PrerequisiteNotice(): m.Component<PrerequisiteNoticeAttrs> {
                         m.redraw();
                       },
                       (error: unknown) => {
-                        console.error(
-                          "Could not copy the install command to the clipboard:",
-                          error,
-                        );
+                        console.error("Could not copy the install command to the clipboard:", error);
                       },
                     );
                   },
@@ -75,18 +70,13 @@ export function PrerequisiteNotice(): m.Component<PrerequisiteNoticeAttrs> {
             ])
           : null,
         m("p", { class: "mt-2 type-helper text-tertiary" }, [
-          m(
-            Link,
-            { href: prerequisite.docs_url, target: "_blank", rel: "noopener" },
-            "Installation guide",
-          ),
+          m(Link, { href: prerequisite.docs_url, target: "_blank", rel: "noopener" }, "Installation guide"),
           " · ",
           m(
             "button",
             {
               type: "button",
-              class:
-                "type-helper text-tertiary hover:text-primary hover:underline cursor-pointer",
+              class: "type-helper text-tertiary hover:text-primary hover:underline cursor-pointer",
               onclick: onCheckAgain,
             },
             "Check again",

@@ -16,15 +16,9 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import type { SharePanelModel } from "../../models/sharePanel";
 import type { OptionsTab, SettingsGroup } from "../../models/workspaceOptions";
-import {
-  WorkspaceOptionsModel,
-  toOptionsTab,
-} from "../../models/workspaceOptions";
+import { WorkspaceOptionsModel, toOptionsTab } from "../../models/workspaceOptions";
 import { PermissionsModel } from "../../models/workspacePermissions";
-import {
-  isWorkspaceOverlayPath,
-  workspaceSurfaceIdFromPath,
-} from "../shell/classify";
+import { isWorkspaceOverlayPath, workspaceSurfaceIdFromPath } from "../shell/classify";
 import { WorkspaceOptionsOverlay } from "./workspace/WorkspaceOptionsOverlay";
 
 /** Whether the panel is the live route, rather than sitting frozen underneath
@@ -57,9 +51,7 @@ function requestedTab(): OptionsTab {
 
 function requestedGroup(): SettingsGroup {
   const group = panelParam("group");
-  return group === "account" || group === "backup" || group === "updates"
-    ? group
-    : "general";
+  return group === "account" || group === "backup" || group === "updates" ? group : "general";
 }
 
 /** The permissions left-nav entry the URL asks for. Any name is accepted here;
@@ -116,16 +108,14 @@ export function rememberInUrl(changes: Record<string, string | null>): void {
   m.route.set(next, undefined, { replace: true });
 }
 
+
 export const WorkspaceOptionsPage: m.ClosureComponent = () => {
   let model: WorkspaceOptionsModel | null = null;
   let permissions: PermissionsModel | null = null;
   // The ?target value applyRequestedTarget last consumed (null until the
   // share model exists to consume one).
   let appliedTarget: string | null = null;
-  function ensureModelsForRouteAgent(): {
-    model: WorkspaceOptionsModel;
-    permissions: PermissionsModel;
-  } {
+  function ensureModelsForRouteAgent(): { model: WorkspaceOptionsModel; permissions: PermissionsModel } {
     const agentId = requestedAgentId();
     // Route param changes preserve this component instance, so a navigation
     // to another workspace's options must swap the models by hand.
@@ -153,24 +143,20 @@ export const WorkspaceOptionsPage: m.ClosureComponent = () => {
 
   return {
     onremove() {
-      if (permissions !== null)
-        getAppContext().shell.unregisterWaitingRequestList(permissions);
+      if (permissions !== null) getAppContext().shell.unregisterWaitingRequestList(permissions);
       model?.dispose();
       model = null;
       permissions = null;
     },
     view() {
-      const { model: currentModel, permissions: currentPermissions } =
-        ensureModelsForRouteAgent();
+      const { model: currentModel, permissions: currentPermissions } = ensureModelsForRouteAgent();
       appliedTarget = applyRequestedTarget(currentModel.share, appliedTarget);
       // Every channel `requests` frame redraws mithril, so reconciling here
       // keeps the Permissions pane live without its own subscription -- and it
       // has to be here rather than in the tab, because the panel stays mounted
       // under the request popup and the tab is never re-created on the way back.
       if (currentPermissions.status === "ready")
-        void currentPermissions.refreshIfPendingChanged(
-          getAppContext().stores.requests.requestIds,
-        );
+        void currentPermissions.refreshIfPendingChanged(getAppContext().stores.requests.requestIds);
       return m(WorkspaceOptionsOverlay, {
         shell: getAppContext().shell,
         agentId: requestedAgentId(),
@@ -180,14 +166,11 @@ export const WorkspaceOptionsPage: m.ClosureComponent = () => {
         group: requestedGroup(),
         section: requestedSection(),
         onSelectTab: (nextTab: OptionsTab) => rememberInUrl({ tab: nextTab }),
-        onSelectGroup: (nextGroup: SettingsGroup) =>
-          rememberInUrl({ group: nextGroup }),
-        onSelectSection: (nextSection: string) =>
-          rememberInUrl({ section: nextSection }),
+        onSelectGroup: (nextGroup: SettingsGroup) => rememberInUrl({ group: nextGroup }),
+        onSelectSection: (nextSection: string) => rememberInUrl({ section: nextSection }),
         // The request opens as its own page over this panel, which stays
         // mounted underneath (openInbox remembers this route).
-        onReviewRequest: (requestId: string) =>
-          getAppContext().shell.openInbox({ selected: requestId }),
+        onReviewRequest: (requestId: string) => getAppContext().shell.openInbox({ selected: requestId }),
       });
     },
   };

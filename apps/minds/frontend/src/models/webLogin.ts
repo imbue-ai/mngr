@@ -14,8 +14,7 @@
 import m from "mithril";
 import { electronBridge } from "../electron-bridge";
 
-export type WebLoginState =
-  "idle" | "starting" | "waiting" | "finishing" | "done" | "error";
+export type WebLoginState = "idle" | "starting" | "waiting" | "finishing" | "done" | "error";
 
 interface FlowStatusBody {
   state?: string;
@@ -63,8 +62,7 @@ export class WebLoginModel {
     redraw: () => void = m.redraw,
     bringAppToFront: () => void = () => electronBridge.bringAppToFront(),
     // The Electron shell routes a new-window request for an external URL to the system browser.
-    openInBrowser: (url: string) => void = (url) =>
-      void window.open(url, "_blank", "noopener"),
+    openInBrowser: (url: string) => void = (url) => void window.open(url, "_blank", "noopener"),
   ) {
     this.fetchImpl = fetchImpl;
     this.redraw = redraw;
@@ -79,11 +77,7 @@ export class WebLoginModel {
   /** Start (or surface the already-running) browser sign-in flow. */
   async start(message = "", options: WebLoginStartOptions = {}): Promise<void> {
     this.message = message;
-    if (
-      this.state === "starting" ||
-      this.state === "waiting" ||
-      this.state === "finishing"
-    ) {
+    if (this.state === "starting" || this.state === "waiting" || this.state === "finishing") {
       // Already in flight: just make sure the modal is visible.
       this.redraw();
       return;
@@ -97,10 +91,7 @@ export class WebLoginModel {
     const generation = ++this.generation;
     this.redraw();
     try {
-      const response = await this.fetchImpl("/auth/api/web-login/start", {
-        method: "POST",
-        credentials: "same-origin",
-      });
+      const response = await this.fetchImpl("/auth/api/web-login/start", { method: "POST", credentials: "same-origin" });
       const body = (await response.json()) as {
         flow_id?: string;
         error?: string;
@@ -195,12 +186,9 @@ export class WebLoginModel {
     if (!flowId) return;
     let body: FlowStatusBody;
     try {
-      const response = await this.fetchImpl(
-        `/auth/api/web-login/status/${encodeURIComponent(flowId)}`,
-        {
-          credentials: "same-origin",
-        },
-      );
+      const response = await this.fetchImpl(`/auth/api/web-login/status/${encodeURIComponent(flowId)}`, {
+        credentials: "same-origin",
+      });
       // A response for a dismissed or restarted flow must not touch the
       // model (e.g. a stale flow's 404 would flip the current modal into the
       // error state).

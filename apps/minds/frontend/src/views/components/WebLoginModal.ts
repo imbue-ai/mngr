@@ -22,8 +22,7 @@ function copyLoginLink(local: WebLoginModalLocalState): void {
   if (!webLogin.loginUrl) return;
   void navigator.clipboard?.writeText(webLogin.loginUrl).then(() => {
     local.isCopyConfirmed = true;
-    if (local.copyFlashTimer !== null)
-      window.clearTimeout(local.copyFlashTimer);
+    if (local.copyFlashTimer !== null) window.clearTimeout(local.copyFlashTimer);
     local.copyFlashTimer = window.setTimeout(() => {
       local.isCopyConfirmed = false;
       local.copyFlashTimer = null;
@@ -84,16 +83,10 @@ function waitingBody(local: WebLoginModalLocalState): m.Children {
               onclick: () => copyLoginLink(local),
             },
             [
-              m(
-                "span",
-                { id: "web-login-url", class: "truncate select-text" },
-                webLogin.loginUrl,
-              ),
+              m("span", { id: "web-login-url", class: "truncate select-text" }, webLogin.loginUrl),
               m(Icon16, {
                 name: local.isCopyConfirmed ? "check" : "copy",
-                extra:
-                  "shrink-0 " +
-                  (local.isCopyConfirmed ? "text-primary" : "text-tertiary"),
+                extra: "shrink-0 " + (local.isCopyConfirmed ? "text-primary" : "text-tertiary"),
               }),
             ],
           ),
@@ -105,23 +98,16 @@ function waitingBody(local: WebLoginModalLocalState): m.Children {
 function errorBody(): m.Children {
   return m(
     "div",
-    {
-      class:
-        "rounded-md border border-important/40 bg-important/10 text-important type-body px-3 py-2 mb-4",
-    },
+    { class: "rounded-md border border-important/40 bg-important/10 text-important type-body px-3 py-2 mb-4" },
     webLogin.error,
   );
 }
 
 export function WebLoginModal(): m.Component {
-  const local: WebLoginModalLocalState = {
-    isCopyConfirmed: false,
-    copyFlashTimer: null,
-  };
+  const local: WebLoginModalLocalState = { isCopyConfirmed: false, copyFlashTimer: null };
   return {
     onremove() {
-      if (local.copyFlashTimer !== null)
-        window.clearTimeout(local.copyFlashTimer);
+      if (local.copyFlashTimer !== null) window.clearTimeout(local.copyFlashTimer);
     },
     view() {
       if (!webLogin.isOpen) return null;
@@ -130,11 +116,7 @@ export function WebLoginModal(): m.Component {
         Modal,
         // lg, not the default sm: the sign-in URL is long.
         { isOpen: true, size: "lg", onClose: () => webLogin.dismiss() },
-        m(
-          "h2",
-          { class: "type-heading mb-2" },
-          isDone ? "You're signed in" : "Sign in to Imbue",
-        ),
+        m("h2", { class: "type-heading mb-2" }, isDone ? "You're signed in" : "Sign in to Imbue"),
         webLogin.message && !isDone
           ? m("p", { class: "type-body text-secondary mb-4" }, webLogin.message)
           : null,
@@ -149,32 +131,16 @@ export function WebLoginModal(): m.Component {
             : waitingBody(local),
         m("div", { class: "flex justify-end gap-2" }, [
           isDone
-            ? m(
-                Button,
-                {
-                  variant: "primary",
-                  id: "web-login-done-btn",
-                  onclick: () => webLogin.dismiss(),
-                },
-                "Done",
-              )
+            ? m(Button, { variant: "primary", id: "web-login-done-btn", onclick: () => webLogin.dismiss() }, "Done")
             : m(
                 Button,
-                {
-                  variant: "secondary",
-                  id: "web-login-cancel-btn",
-                  onclick: () => webLogin.dismiss(),
-                },
+                { variant: "secondary", id: "web-login-cancel-btn", onclick: () => webLogin.dismiss() },
                 webLogin.state === "error" ? "Close" : "Cancel",
               ),
           webLogin.state === "error"
             ? m(
                 Button,
-                {
-                  variant: "primary",
-                  id: "web-login-retry-btn",
-                  onclick: () => void webLogin.retry(),
-                },
+                { variant: "primary", id: "web-login-retry-btn", onclick: () => void webLogin.retry() },
                 "Try again",
               )
             : null,

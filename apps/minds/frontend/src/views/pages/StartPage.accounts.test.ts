@@ -37,12 +37,7 @@ const VERIFIED_EMAILS = new Set([BOB.email]);
 const CREATE_URL = "/api/v1/workspaces";
 
 function formDefaults(accounts: UiAccountEntry[]): CreateFormDefaults {
-  return createFormDefaults({
-    accounts: accounts.map((account) => ({
-      user_id: account.user_id,
-      email: account.email,
-    })),
-  });
+  return createFormDefaults({ accounts: accounts.map((account) => ({ user_id: account.user_id, email: account.email })) });
 }
 
 /** The address a verification check asks about. */
@@ -79,12 +74,9 @@ describe("the account step on the live page", () => {
         return jsonResponse({ verified: VERIFIED_EMAILS.has(email) });
       }
       if (url.startsWith("/ui/api/create/form-defaults")) {
-        return jsonResponse(
-          formDefaults(shell.stores.accounts.accounts.slice()),
-        );
+        return jsonResponse(formDefaults(shell.stores.accounts.accounts.slice()));
       }
-      if (url === CREATE_URL)
-        return jsonResponse({ error: "stopped here" }, 400);
+      if (url === CREATE_URL) return jsonResponse({ error: "stopped here" }, 400);
       return jsonResponse({});
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -105,9 +97,7 @@ describe("the account step on the live page", () => {
     pressLast(page.view(), "data-answer", "signup");
     signIn([ALICE]);
     page.update();
-    await vi.waitFor(() =>
-      expect(allText(page.view())).toContain("I verified it"),
-    );
+    await vi.waitFor(() => expect(allText(page.view())).toContain("I verified it"));
     expect(verificationChecks()).toEqual([ALICE.email]);
 
     // Take the account answer back and create Bob instead.
@@ -123,9 +113,7 @@ describe("the account step on the live page", () => {
     await vi.waitFor(() => expect(createCalls()).toHaveLength(1));
     expect(verificationChecks()).toEqual([ALICE.email, BOB.email]);
     const createInit = createCalls()[0]?.[1] as RequestInit;
-    expect(JSON.parse(String(createInit.body))).toMatchObject({
-      account_id: BOB.user_id,
-    });
+    expect(JSON.parse(String(createInit.body))).toMatchObject({ account_id: BOB.user_id });
   });
 
   it("a verification verdict that lands after switching accounts is not applied to the new account", async () => {
@@ -134,9 +122,7 @@ describe("the account step on the live page", () => {
     const aliceCheck = new Promise<void>((resolve) => {
       releaseAliceCheck = resolve;
     });
-    const defaultFetch = fetchMock.getMockImplementation() as (
-      url: string,
-    ) => Promise<Response>;
+    const defaultFetch = fetchMock.getMockImplementation() as (url: string) => Promise<Response>;
     fetchMock.mockImplementation(async (url: string) => {
       if (url.startsWith("/accounts/verification")) {
         const email = emailOf(url);
@@ -158,9 +144,7 @@ describe("the account step on the live page", () => {
     page.update();
     releaseAliceCheck();
 
-    await vi.waitFor(() =>
-      expect(allText(page.view())).toContain("I verified it"),
-    );
+    await vi.waitFor(() => expect(allText(page.view())).toContain("I verified it"));
     expect(verificationChecks()).toEqual([ALICE.email, BOB.email]);
     expect(startFlow.state.verificationEmail).toBe(BOB.email);
     expect(createCalls()).toHaveLength(0);
@@ -173,9 +157,7 @@ describe("the account step on the live page", () => {
       releaseAlicePress = resolve;
     });
     let aliceChecks = 0;
-    const defaultFetch = fetchMock.getMockImplementation() as (
-      url: string,
-    ) => Promise<Response>;
+    const defaultFetch = fetchMock.getMockImplementation() as (url: string) => Promise<Response>;
     fetchMock.mockImplementation(async (url: string) => {
       if (url.startsWith("/accounts/verification")) {
         const email = emailOf(url);
@@ -192,9 +174,7 @@ describe("the account step on the live page", () => {
     pressLast(page.view(), "data-answer", "reporting-yes");
     pressLast(page.view(), "data-answer", "cloud");
     pressLast(page.view(), "data-answer", "continue");
-    await vi.waitFor(() =>
-      expect(startFlow.state.verificationEmail).toBe(ALICE.email),
-    );
+    await vi.waitFor(() => expect(startFlow.state.verificationEmail).toBe(ALICE.email));
     pressLast(page.view(), "data-answer", "verified");
     await vi.waitFor(() => expect(aliceChecks).toBe(2));
 
@@ -202,18 +182,13 @@ describe("the account step on the live page", () => {
     pressLast(page.view(), "data-answer", "signin");
     signIn([ALICE, BOB]);
     page.update();
-    await vi.waitFor(() =>
-      expect(startFlow.state.verificationEmail).toBe(BOB.email),
-    );
+    await vi.waitFor(() => expect(startFlow.state.verificationEmail).toBe(BOB.email));
     releaseAlicePress();
     await alicePress;
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(startFlow.state.verificationEmail).toBe(BOB.email);
-    expect(startFlow.state.entries.at(-1)).toMatchObject({
-      id: "verify",
-      answer: null,
-    });
+    expect(startFlow.state.entries.at(-1)).toMatchObject({ id: "verify", answer: null });
     expect(createCalls()).toHaveLength(0);
   });
 
@@ -221,10 +196,8 @@ describe("the account step on the live page", () => {
     // Without a prefill field the create form model cannot apply the defaults, so the body cannot be built.
     const { prefill: _prefill, ...malformed } = formDefaults([BOB]);
     fetchMock.mockImplementation(async (url: string) => {
-      if (url.startsWith("/accounts/verification"))
-        return jsonResponse({ verified: true });
-      if (url.startsWith("/ui/api/create/form-defaults"))
-        return jsonResponse(malformed);
+      if (url.startsWith("/accounts/verification")) return jsonResponse({ verified: true });
+      if (url.startsWith("/ui/api/create/form-defaults")) return jsonResponse(malformed);
       return jsonResponse({});
     });
     signIn([{ ...BOB, is_default: true }]);
@@ -240,9 +213,7 @@ describe("the account step on the live page", () => {
       }),
     );
     expect(createCalls()).toHaveLength(0);
-    const undos = collectVnodes(page.view()).filter(
-      (node) => attrsOf(node)["aria-label"] === "Change answer",
-    );
+    const undos = collectVnodes(page.view()).filter((node) => attrsOf(node)["aria-label"] === "Change answer");
     expect(undos.length).toBeGreaterThan(0);
   });
 

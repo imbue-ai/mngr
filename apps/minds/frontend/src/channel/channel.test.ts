@@ -189,14 +189,10 @@ describe("UiChannelClient", () => {
     client.start();
     sockets[0].open();
     type Frame = { window_kind: string; is_screen_locked: boolean };
-    const lastFrame = (): Frame =>
-      JSON.parse(sockets[0].sent.at(-1) ?? "{}") as Frame;
+    const lastFrame = (): Frame => JSON.parse(sockets[0].sent.at(-1) ?? "{}") as Frame;
 
     client.setClientState("/workspace/agent-1", "agent-1");
-    expect(lastFrame()).toMatchObject({
-      window_kind: "main",
-      is_screen_locked: false,
-    });
+    expect(lastFrame()).toMatchObject({ window_kind: "main", is_screen_locked: false });
 
     client.setClientState("/popout/agent-1/win-1", "agent-1");
     expect(lastFrame().window_kind).toBe("popout");

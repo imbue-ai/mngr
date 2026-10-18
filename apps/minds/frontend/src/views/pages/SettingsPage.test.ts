@@ -4,12 +4,7 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SettingsModel } from "../../models/settings";
-import {
-  settingsOverview,
-  settle,
-  withMindsNative,
-  withReceiverGuardedGlobalFetch,
-} from "../../testing";
+import { settingsOverview, settle, withMindsNative, withReceiverGuardedGlobalFetch } from "../../testing";
 import { SettingsPage } from "./SettingsPage";
 import { SettingsSections } from "./settings/SettingsSections";
 
@@ -27,12 +22,9 @@ function openPage(): Page {
 /** Run `run` with a global fetch that rejects, which is what a backend that is
  * not answering looks like to SettingsModel.load(). Local to this file: it is
  * the only place that needs the failure, and the shared helper serves a payload. */
-async function withUnreachableGlobalFetch(
-  run: () => Promise<void>,
-): Promise<void> {
+async function withUnreachableGlobalFetch(run: () => Promise<void>): Promise<void> {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (() =>
-    Promise.reject(new Error("backend unreachable"))) as typeof fetch;
+  globalThis.fetch = (() => Promise.reject(new Error("backend unreachable"))) as typeof fetch;
   try {
     await run();
   } finally {
@@ -44,12 +36,9 @@ async function withUnreachableGlobalFetch(
 function shownModel(page: Page): SettingsModel {
   const rendered = page.view() as m.Vnode[];
   const sections = rendered.find(
-    (vnode) =>
-      vnode !== null &&
-      (vnode.tag as unknown) === (SettingsSections as unknown),
+    (vnode) => vnode !== null && (vnode.tag as unknown) === (SettingsSections as unknown),
   );
-  if (sections === undefined)
-    throw new Error("the page is not showing its sections");
+  if (sections === undefined) throw new Error("the page is not showing its sections");
   return (sections.attrs as { model: SettingsModel }).model;
 }
 
@@ -61,9 +50,7 @@ describe("SettingsPage", () => {
     // be showing Settings. The router returns the same component for
     // `/settings`, so oninit does not run again and the ask would be dropped.
     vi.spyOn(m, "redraw").mockImplementation(() => undefined);
-    const section = vi
-      .spyOn(m.route, "param")
-      .mockReturnValue(undefined as unknown as string);
+    const section = vi.spyOn(m.route, "param").mockReturnValue(undefined as unknown as string);
     await withReceiverGuardedGlobalFetch(settingsOverview(), async () => {
       await withMindsNative({}, async () => {
         const page = openPage();

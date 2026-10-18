@@ -23,25 +23,14 @@ function classOf(vnode: AnyVnode): string {
  * or with no titlebar at all (a cold-start deep link's first paint). The three
  * machine tabs sit inside the strip and the right-hand pair at the window's
  * edge, as the real titlebar lays them out -- the panel raises all five. */
-function render(
-  stripX: number | null,
-  tab: OptionsTab = "permissions",
-): AnyVnode {
-  const rects: Record<
-    string,
-    { left: number; top: number; width: number; height: number }
-  > =
+function render(stripX: number | null, tab: OptionsTab = "permissions"): AnyVnode {
+  const rects: Record<string, { left: number; top: number; width: number; height: number }> =
     stripX === null
       ? {}
       : {
           "ws-tab-strip": { left: stripX, top: 6, width: 90, height: 26 },
           "ws-tab-permissions": { left: stripX, top: 6, width: 26, height: 26 },
-          "ws-tab-settings": {
-            left: stripX + 32,
-            top: 6,
-            width: 26,
-            height: 26,
-          },
+          "ws-tab-settings": { left: stripX + 32, top: 6, width: 26, height: 26 },
           "ws-tab-share": { left: stripX + 64, top: 6, width: 26, height: 26 },
           "notifications-toggle": { left: 900, top: 6, width: 26, height: 26 },
           "help-toggle": { left: 940, top: 6, width: 26, height: 26 },
@@ -67,14 +56,8 @@ function render(
       displayedWorkspaceAgentId: () => AGENT_ID,
     },
     agentId: AGENT_ID,
-    model: new WorkspaceOptionsModel(AGENT_ID, {
-      fetchJson,
-      redraw: () => undefined,
-    }),
-    permissions: new PermissionsModel(AGENT_ID, {
-      fetchJson,
-      redraw: () => undefined,
-    }),
+    model: new WorkspaceOptionsModel(AGENT_ID, { fetchJson, redraw: () => undefined }),
+    permissions: new PermissionsModel(AGENT_ID, { fetchJson, redraw: () => undefined }),
     tab,
     group: "general",
     section: null,
@@ -97,35 +80,26 @@ function render(
 }
 
 function card(root: AnyVnode): AnyVnode {
-  const found = collectVnodes(root).find(
-    (vnode) => attrsOf(vnode).id === "ws-options-panel",
-  );
+  const found = collectVnodes(root).find((vnode) => attrsOf(vnode).id === "ws-options-panel");
   expect(found, "no #ws-options-panel").toBeDefined();
   return found as AnyVnode;
 }
 
 function region(root: AnyVnode): AnyVnode {
-  const found = collectVnodes(root).find((vnode) =>
-    classOf(vnode).includes("pointer-events-none"),
-  );
+  const found = collectVnodes(root).find((vnode) => classOf(vnode).includes("pointer-events-none"));
   expect(found, "no positioning region").toBeDefined();
   return found as AnyVnode;
 }
 
 /** What the panel's close X says, as the shared control renders it. */
 function closeLabel(root: AnyVnode): unknown {
-  const found = collectVnodes(root).find(
-    (vnode) => attrsOf(vnode).id === "ws-options-close",
-  );
+  const found = collectVnodes(root).find((vnode) => attrsOf(vnode).id === "ws-options-close");
   expect(found, "no close control").toBeDefined();
   const control = ((found as AnyVnode).tag as unknown as () => m.Component)();
-  const button = (control.view as unknown as (v: unknown) => AnyVnode).call(
-    control,
-    {
-      attrs: (found as AnyVnode).attrs,
-      children: (found as AnyVnode).children,
-    },
-  );
+  const button = (control.view as unknown as (v: unknown) => AnyVnode).call(control, {
+    attrs: (found as AnyVnode).attrs,
+    children: (found as AnyVnode).children,
+  });
   return attrsOf(button)["aria-label"];
 }
 
@@ -140,39 +114,32 @@ describe("the docked options panel's geometry", () => {
   it("hangs from the tab strip, capped at 880px", () => {
     const root = render(300);
     // Its left edge overhangs the strip's, and the card stops widening at 880.
-    expect(String(attrsOf(region(root)).style)).toContain(
-      "padding-left: 280px",
-    );
+    expect(String(attrsOf(region(root)).style)).toContain("padding-left: 280px");
     expect(classOf(card(root))).toContain("max-w-[880px]");
     expect(classOf(card(root))).toContain("w-full");
     // The raised strip sits exactly on the titlebar icons it stands in for.
     // It is a component vnode, so render it to reach its buttons.
     const stripVnode = collectVnodes(root).find(
-      (vnode) =>
-        typeof vnode.tag === "function" &&
-        (vnode.tag as { name?: string }).name === "RaisedTitlebarIcons",
+      (vnode) => typeof vnode.tag === "function" && (vnode.tag as { name?: string }).name === "RaisedTitlebarIcons",
     );
     expect(stripVnode, "no raised titlebar icons").toBeDefined();
-    const instance = (
-      (stripVnode as AnyVnode).tag as unknown as () => m.Component
-    )();
-    const strip = (instance.view as unknown as (v: unknown) => AnyVnode).call(
-      instance,
-      {
-        attrs: (stripVnode as AnyVnode).attrs,
-        children: (stripVnode as AnyVnode).children,
-      },
-    );
-    const raised = collectVnodes(strip).filter(
-      (vnode) => attrsOf(vnode)["data-titlebar-popup"] !== undefined,
-    );
+    const instance = ((stripVnode as AnyVnode).tag as unknown as () => m.Component)();
+    const strip = (instance.view as unknown as (v: unknown) => AnyVnode).call(instance, {
+      attrs: (stripVnode as AnyVnode).attrs,
+      children: (stripVnode as AnyVnode).children,
+    });
+    const raised = collectVnodes(strip).filter((vnode) => attrsOf(vnode)["data-titlebar-popup"] !== undefined);
 
     // All five, not just this panel's three: the panel covers the whole
     // titlebar, so leaving the bell and the bug button off would take them
     // away for as long as it is open.
-    expect(
-      raised.map((vnode) => attrsOf(vnode)["data-titlebar-popup"]),
-    ).toEqual(["permissions", "settings", "share", "notifications", "help"]);
+    expect(raised.map((vnode) => attrsOf(vnode)["data-titlebar-popup"])).toEqual([
+      "permissions",
+      "settings",
+      "share",
+      "notifications",
+      "help",
+    ]);
     expect(String(attrsOf(raised[0]).style)).toContain("left: 300px");
     // The open tab is filled with the card's surface and square-bottomed, so
     // it reads as joined to the panel below it.

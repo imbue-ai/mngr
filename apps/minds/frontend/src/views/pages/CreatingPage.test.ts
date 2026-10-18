@@ -3,15 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { AppContext } from "../../app-context";
 import type { CreateAttemptDetail } from "../../models/create";
-import {
-  START_FALLBACK_LINE,
-  readyTurnMarkdown,
-} from "../../models/creationTranscript";
-import {
-  MANIFESTO_OPENER,
-  MANIFESTO_QUESTION,
-  REPORTING_ASK,
-} from "../../models/startFlow";
+import { START_FALLBACK_LINE, readyTurnMarkdown } from "../../models/creationTranscript";
+import { MANIFESTO_OPENER, MANIFESTO_QUESTION, REPORTING_ASK } from "../../models/startFlow";
 import { manifestoOpenerMarkdown } from "../../models/welcomeChat";
 import type { WelcomeChatBody } from "../../models/welcomeChat";
 import { allText, attrsOf, collectVnodes, jsonResponse } from "../../testing";
@@ -19,12 +12,8 @@ import { CreatingPage, failureGuidance, failureTurn } from "./CreatingPage";
 
 describe("failureGuidance", () => {
   it("explains the two recognized authentication failures and nothing else", () => {
-    expect(allText(failureGuidance("GITHUB_AUTH_REQUIRED"))).toContain(
-      "Install the GitHub app",
-    );
-    expect(allText(failureGuidance("GIT_AUTH_REQUIRED"))).toContain(
-      "rejected anonymous access",
-    );
+    expect(allText(failureGuidance("GITHUB_AUTH_REQUIRED"))).toContain("Install the GitHub app");
+    expect(allText(failureGuidance("GIT_AUTH_REQUIRED"))).toContain("rejected anonymous access");
     expect(failureGuidance("")).toBeNull();
     expect(failureGuidance("SOMETHING_ELSE")).toBeNull();
   });
@@ -45,13 +34,9 @@ describe("failureTurn", () => {
     // An error can run to pages, and streamed a character at a time it reads
     // as the app hanging while the cause is still spelling itself out.
     const turn = failureTurn("alpha", "clone blew up");
-    const streamed = collectVnodes(turn).filter((node) =>
-      String(attrsOf(node).class ?? "").includes("start-char"),
-    );
+    const streamed = collectVnodes(turn).filter((node) => String(attrsOf(node).class ?? "").includes("start-char"));
     expect(streamed).toHaveLength(0);
-    const message = collectVnodes(turn).find(
-      (node) => attrsOf(node).id === "error-message",
-    );
+    const message = collectVnodes(turn).find((node) => attrsOf(node).id === "error-message");
     expect(allText(message)).toBe("Could not create alpha: clone blew up");
   });
 });
@@ -121,42 +106,24 @@ describe("CreatingPage across a route change", () => {
   // The router hands the page its route params as attrs; the page's own type
   // declares none, so the vnode is built the way mithril would at runtime.
   function vnodeFor(createAttemptId: string): m.VnodeDOM {
-    return m(CreatingPage, {
-      agentId: createAttemptId,
-    } as m.Attributes) as m.VnodeDOM;
+    return m(CreatingPage, { agentId: createAttemptId } as m.Attributes) as m.VnodeDOM;
   }
 
   it("opens with the manifesto exchange even for an attempt the start flow did not submit", async () => {
     vi.stubGlobal("fetch", (url: string) =>
-      Promise.resolve(
-        jsonResponse(failedRecord(url.slice(url.lastIndexOf("/") + 1))),
-      ),
+      Promise.resolve(jsonResponse(failedRecord(url.slice(url.lastIndexOf("/") + 1)))),
     );
     vi.spyOn(m, "redraw").mockImplementation(() => undefined);
     const page = CreatingPage(vnodeFor("create-attempt-c"));
-    const render = (vnode: m.Vnode): m.Vnode =>
-      (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
-    (page.oninit as (v: m.VnodeDOM) => void).call(
-      page,
-      vnodeFor("create-attempt-c"),
-    );
+    const render = (vnode: m.Vnode): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
+    (page.oninit as (v: m.VnodeDOM) => void).call(page, vnodeFor("create-attempt-c"));
 
-    await vi.waitFor(() =>
-      expect(allText(render(vnodeFor("create-attempt-c")))).toContain(
-        "workspace-create-attempt-c",
-      ),
-    );
+    await vi.waitFor(() => expect(allText(render(vnodeFor("create-attempt-c")))).toContain("workspace-create-attempt-c"));
 
     const text = allText(render(vnodeFor("create-attempt-c")));
-    expect(text.indexOf(MANIFESTO_OPENER)).toBeLessThan(
-      text.indexOf(MANIFESTO_QUESTION),
-    );
-    expect(text.indexOf(MANIFESTO_QUESTION)).toBeLessThan(
-      text.indexOf("Honest Software:"),
-    );
-    expect(text.indexOf("Honest Software:")).toBeLessThan(
-      text.indexOf("Create a workspace with these settings:"),
-    );
+    expect(text.indexOf(MANIFESTO_OPENER)).toBeLessThan(text.indexOf(MANIFESTO_QUESTION));
+    expect(text.indexOf(MANIFESTO_QUESTION)).toBeLessThan(text.indexOf("Honest Software:"));
+    expect(text.indexOf("Honest Software:")).toBeLessThan(text.indexOf("Create a workspace with these settings:"));
   });
 
   /**
@@ -176,11 +143,7 @@ describe("CreatingPage across a route change", () => {
       stores: { workspaces: { accentEntry: () => undefined } },
       shell: { enterWorkspace: (id: string) => entered.push(id) },
     } as unknown as AppContext);
-    vi.stubGlobal("window", {
-      matchMedia: () => ({ matches: true }),
-      innerWidth: 800,
-      innerHeight: 600,
-    });
+    vi.stubGlobal("window", { matchMedia: () => ({ matches: true }), innerWidth: 800, innerHeight: 600 });
     vi.stubGlobal(
       "EventSource",
       class {
@@ -198,54 +161,30 @@ describe("CreatingPage across a route change", () => {
           resolveSeed = resolve;
         });
       }
-      if (url.startsWith("/ui/api/create/attempts/"))
-        return Promise.resolve(jsonResponse(liveDetail(createAttemptId)));
-      return Promise.resolve(
-        jsonResponse({ status: "DONE", redirect_url: "/goto/agent-0123abcd/" }),
-      );
+      if (url.startsWith("/ui/api/create/attempts/")) return Promise.resolve(jsonResponse(liveDetail(createAttemptId)));
+      return Promise.resolve(jsonResponse({ status: "DONE", redirect_url: "/goto/agent-0123abcd/" }));
     });
     vi.spyOn(m, "redraw").mockImplementation(() => undefined);
     const page = CreatingPage(vnodeFor(createAttemptId));
-    (page.oninit as (v: m.VnodeDOM) => void).call(
-      page,
-      vnodeFor(createAttemptId),
-    );
-    return {
-      page,
-      entered,
-      seedBodies,
-      settleSeed: () => resolveSeed(jsonResponse({ chat_id: "agent-seeded" })),
-    };
+    (page.oninit as (v: m.VnodeDOM) => void).call(page, vnodeFor(createAttemptId));
+    return { page, entered, seedBodies, settleSeed: () => resolveSeed(jsonResponse({ chat_id: "agent-seeded" })) };
   }
 
   it("hands the conversation to the finished attempt's workspace and enters it once the hand-off settles", async () => {
-    const { page, entered, seedBodies, settleSeed } =
-      mountDoneAttempt("create-attempt-d");
-    const render = (vnode: m.Vnode): m.Vnode =>
-      (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
+    const { page, entered, seedBodies, settleSeed } = mountDoneAttempt("create-attempt-d");
+    const render = (vnode: m.Vnode): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
 
     await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
     const turns = seedBodies[0].turns;
-    expect(turns[0]).toEqual({
-      role: "assistant",
-      text: manifestoOpenerMarkdown(),
-    });
+    expect(turns[0]).toEqual({ role: "assistant", text: manifestoOpenerMarkdown() });
     expect(turns[1]).toEqual({ role: "user", text: MANIFESTO_QUESTION });
     expect(turns[3].text).toContain(REPORTING_ASK);
     expect(turns[4].text).toContain("Name — workspace-create-attempt-d");
     expect(turns[turns.length - 1].text).toBe(readyTurnMarkdown());
     const nodes = collectVnodes(render(vnodeFor("create-attempt-d")));
-    expect(nodes.some((node) => attrsOf(node).key === "creation-ready")).toBe(
-      true,
-    );
-    expect(
-      allText(nodes.find((node) => attrsOf(node).id === "start-options")),
-    ).toContain("Make something.");
-    expect(
-      allText(
-        nodes.find((node) => attrsOf(node).key === "creation-start-fallback"),
-      ),
-    ).toBe(START_FALLBACK_LINE);
+    expect(nodes.some((node) => attrsOf(node).key === "creation-ready")).toBe(true);
+    expect(allText(nodes.find((node) => attrsOf(node).id === "start-options"))).toContain("Make something.");
+    expect(allText(nodes.find((node) => attrsOf(node).key === "creation-start-fallback"))).toBe(START_FALLBACK_LINE);
 
     // The ready hold passes, but the workspace is not entered while the hand-off is still in flight.
     await vi.advanceTimersByTimeAsync(30_000);
@@ -257,8 +196,7 @@ describe("CreatingPage across a route change", () => {
   });
 
   it("does not enter the workspace when the page was left while the hand-off was in flight", async () => {
-    const { page, entered, seedBodies, settleSeed } =
-      mountDoneAttempt("create-attempt-e");
+    const { page, entered, seedBodies, settleSeed } = mountDoneAttempt("create-attempt-e");
 
     await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
     await vi.advanceTimersByTimeAsync(30_000);
@@ -279,35 +217,18 @@ describe("CreatingPage across a route change", () => {
     });
     vi.spyOn(m, "redraw").mockImplementation(() => undefined);
     const page = CreatingPage(vnodeFor("create-attempt-a"));
-    const render = (vnode: m.Vnode): m.Vnode =>
-      (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
+    const render = (vnode: m.Vnode): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
 
-    (page.oninit as (v: m.VnodeDOM) => void).call(
-      page,
-      vnodeFor("create-attempt-a"),
-    );
-    await vi.waitFor(() =>
-      expect(allText(render(vnodeFor("create-attempt-a")))).toContain(
-        "workspace-create-attempt-a",
-      ),
-    );
+    (page.oninit as (v: m.VnodeDOM) => void).call(page, vnodeFor("create-attempt-a"));
+    await vi.waitFor(() => expect(allText(render(vnodeFor("create-attempt-a")))).toContain("workspace-create-attempt-a"));
 
     const later = vnodeFor("create-attempt-b");
-    (page.onbeforeupdate as (v: m.VnodeDOM, old: m.VnodeDOM) => void).call(
-      page,
-      later,
-      later,
-    );
+    (page.onbeforeupdate as (v: m.VnodeDOM, old: m.VnodeDOM) => void).call(page, later, later);
     // The same render already shows the new attempt loading, not a's failure.
     const loading = render(later);
     expect(attrsOf(loading)["data-agent-id"]).toBe("create-attempt-b");
     expect(allText(loading)).not.toContain("workspace-create-attempt-a");
-    await vi.waitFor(() =>
-      expect(allText(render(later))).toContain("workspace-create-attempt-b"),
-    );
-    expect(fetched).toEqual([
-      "/ui/api/create/attempts/create-attempt-a",
-      "/ui/api/create/attempts/create-attempt-b",
-    ]);
+    await vi.waitFor(() => expect(allText(render(later))).toContain("workspace-create-attempt-b"));
+    expect(fetched).toEqual(["/ui/api/create/attempts/create-attempt-a", "/ui/api/create/attempts/create-attempt-b"]);
   });
 });

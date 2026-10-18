@@ -213,10 +213,7 @@ describe("AccountsDetailModel", () => {
 });
 
 describe("the cached plan", () => {
-  const UPDATED_VIEW: AccountPlanView = {
-    ...PLAN_VIEW,
-    plan_display_name: "Explorer (updated)",
-  };
+  const UPDATED_VIEW: AccountPlanView = { ...PLAN_VIEW, plan_display_name: "Explorer (updated)" };
 
   /** A model whose plan reads wait until the test answers them. The notification
    * preferences a sync also reads are answered at once, so the held read is
@@ -230,9 +227,7 @@ describe("the cached plan", () => {
       (input) => {
         if (String(input).endsWith("/notification-preferences")) {
           return Promise.resolve(
-            jsonResponse({
-              preferences: { email_enabled: true, in_app_enabled: true },
-            }),
+            jsonResponse({ preferences: { email_enabled: true, in_app_enabled: true } }),
           );
         }
         return new Promise<Response>((resolve) => {
@@ -244,8 +239,7 @@ describe("the cached plan", () => {
     );
     return {
       model,
-      answer: (planView) =>
-        release(jsonResponse({ plan_view: planView, trim_status: null })),
+      answer: (planView) => release(jsonResponse({ plan_view: planView, trim_status: null })),
     };
   }
 

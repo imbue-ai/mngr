@@ -1,12 +1,7 @@
 import m from "mithril";
 import { describe, expect, it } from "vitest";
 import type { AnyVnode } from "../../../testing";
-import {
-  attrsOf,
-  classesOf,
-  collectText,
-  collectVnodes,
-} from "../../../testing";
+import { attrsOf, classesOf, collectText, collectVnodes } from "../../../testing";
 import type { ScrollTarget } from "./transcript";
 import { TranscriptScroller, agentTurn, choiceTable } from "./transcript";
 
@@ -74,12 +69,9 @@ describe("choiceTable", () => {
   /** The badge pill inside a header cell, whose other child is the bare title. */
   function badgeClassOf(cell: m.Vnode): string {
     const badge = (cell.children as (m.Vnode | string | null)[]).find(
-      (child) =>
-        child !== null && typeof child === "object" && child.tag === "span",
+      (child) => child !== null && typeof child === "object" && child.tag === "span",
     ) as m.Vnode | undefined;
-    return String(
-      (badge?.attrs as Record<string, unknown> | undefined)?.className ?? "",
-    );
+    return String((badge?.attrs as Record<string, unknown> | undefined)?.className ?? "");
   }
 
   it("paints the emphasized column's badge in the accent and the rest in grayscale", () => {
@@ -89,18 +81,8 @@ describe("choiceTable", () => {
       key: "t",
       delayMs: 0,
       columns: [
-        {
-          title: "Imbue Cloud",
-          badge: "Recommended",
-          isEmphasized: true,
-          points: ["a"],
-        },
-        {
-          title: "Custom setup",
-          badge: "Advanced",
-          isEmphasized: false,
-          points: ["b"],
-        },
+        { title: "Imbue Cloud", badge: "Recommended", isEmphasized: true, points: ["a"] },
+        { title: "Custom setup", badge: "Advanced", isEmphasized: false, points: ["b"] },
       ],
     }) as m.Vnode;
     const [cloud, custom] = headerCells(table);
@@ -123,13 +105,7 @@ describe("agentTurn", () => {
   function delays(turn: unknown): number[] {
     return collectVnodes(turn)
       .filter((vnode) => classesOf(vnode).includes("start-char"))
-      .map((vnode) =>
-        Number(
-          /--start-char-delay: ([\d.]+)ms/.exec(
-            String(attrsOf(vnode).style ?? ""),
-          )?.[1],
-        ),
-      );
+      .map((vnode) => Number(/--start-char-delay: ([\d.]+)ms/.exec(String(attrsOf(vnode).style ?? ""))?.[1]));
   }
 
   function emOf(turn: unknown): AnyVnode | undefined {
@@ -137,12 +113,7 @@ describe("agentTurn", () => {
   }
 
   it("draws the emphasised run in italics and leaves the rest of the sentence alone", () => {
-    const turn = agentTurn({
-      key: "opener",
-      text: OPENER,
-      emphasis: "honest software",
-      startAtMs: 0,
-    });
+    const turn = agentTurn({ key: "opener", text: OPENER, emphasis: "honest software", startAtMs: 0 });
 
     expect(textOf(emOf(turn))).toBe("honest software");
     expect(textOf(turn)).toBe(OPENER);
@@ -152,23 +123,13 @@ describe("agentTurn", () => {
     // The emphasis is how the turn is drawn, not when any of it arrives, so a
     // phrase picked out mid-sentence must not shift the characters after it.
     const plain = agentTurn({ key: "opener", text: OPENER, startAtMs: 150 });
-    const emphasised = agentTurn({
-      key: "opener",
-      text: OPENER,
-      emphasis: "honest software",
-      startAtMs: 150,
-    });
+    const emphasised = agentTurn({ key: "opener", text: OPENER, emphasis: "honest software", startAtMs: 150 });
 
     expect(delays(emphasised)).toEqual(delays(plain));
   });
 
   it("falls back to the plain stream when the phrase is not in the text", () => {
-    const turn = agentTurn({
-      key: "opener",
-      text: OPENER,
-      emphasis: "not in there",
-      startAtMs: 0,
-    });
+    const turn = agentTurn({ key: "opener", text: OPENER, emphasis: "not in there", startAtMs: 0 });
 
     expect(emOf(turn)).toBeUndefined();
     expect(textOf(turn)).toBe(OPENER);

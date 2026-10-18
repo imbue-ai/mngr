@@ -8,9 +8,7 @@ import { StartPage } from "./StartPage";
 
 /** A fresh start page: `view` renders it, `update` runs its onupdate hook. */
 export function renderStartPage(): { view: () => unknown; update: () => void } {
-  const component = (StartPage as unknown as (vnode: unknown) => m.Component)(
-    {},
-  );
+  const component = (StartPage as unknown as (vnode: unknown) => m.Component)({});
   return {
     view: (): unknown => (component.view as () => unknown)(),
     update: (): void => (component.onupdate as () => void)(),
@@ -19,9 +17,7 @@ export function renderStartPage(): { view: () => unknown; update: () => void } {
 
 /** Press the last element whose `name` attribute is `value`: the open question's, when answered ones match too. */
 export function pressLast(tree: unknown, name: string, value: string): void {
-  const matches = collectVnodes(tree).filter(
-    (candidate) => attrsOf(candidate)[name] === value,
-  );
+  const matches = collectVnodes(tree).filter((candidate) => attrsOf(candidate)[name] === value);
   const vnode = matches[matches.length - 1];
   if (vnode === undefined) throw new Error(`nothing with ${name}=${value}`);
   (attrsOf(vnode).onclick as () => void)();

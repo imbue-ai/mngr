@@ -21,9 +21,7 @@ export function registerAppContext(context: AppContext): void {
 
 export function getAppContext(): AppContext {
   if (registered === null) {
-    throw new Error(
-      "App context read before boot registered it (index.ts must call registerAppContext first)",
-    );
+    throw new Error("App context read before boot registered it (index.ts must call registerAppContext first)");
   }
   return registered;
 }

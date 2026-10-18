@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { jsonResponse } from "../testing";
-import {
-  OnboardingProgress,
-  markOnboardingComplete,
-  recordErrorReportingConsent,
-} from "./onboarding";
+import { OnboardingProgress, markOnboardingComplete, recordErrorReportingConsent } from "./onboarding";
 
 describe("onboarding transitions", () => {
   it("posts the consent answer and reports success", async () => {
@@ -15,25 +11,17 @@ describe("onboarding transitions", () => {
     });
     expect(ok).toBe(true);
     expect(calls).toEqual([
-      {
-        url: "/ui/api/onboarding/consent",
-        method: "POST",
-        body: JSON.stringify({ report_unexpected_errors: false }),
-      },
+      { url: "/ui/api/onboarding/consent", method: "POST", body: JSON.stringify({ report_unexpected_errors: false }) },
     ]);
   });
 
   it("reports failure (without throwing) when the consent post fails", async () => {
-    const ok = await recordErrorReportingConsent(true, () =>
-      Promise.reject(new Error("offline")),
-    );
+    const ok = await recordErrorReportingConsent(true, () => Promise.reject(new Error("offline")));
     expect(ok).toBe(false);
   });
 
   it("reports a non-ok consent response as unsuccessful", async () => {
-    const ok = await recordErrorReportingConsent(true, () =>
-      Promise.resolve(new Response("", { status: 403 })),
-    );
+    const ok = await recordErrorReportingConsent(true, () => Promise.resolve(new Response("", { status: 403 })));
     expect(ok).toBe(false);
   });
 
@@ -46,9 +34,7 @@ describe("onboarding transitions", () => {
       return Promise.resolve(jsonResponse({}));
     }, progress);
     expect(ok).toBe(true);
-    expect(calls).toEqual([
-      { url: "/ui/api/onboarding/complete", method: "POST" },
-    ]);
+    expect(calls).toEqual([{ url: "/ui/api/onboarding/complete", method: "POST" }]);
     expect(progress.isComplete).toBe(true);
   });
 
@@ -57,10 +43,7 @@ describe("onboarding transitions", () => {
     // may ask again. The window itself must not bounce back to /start.
     const progress = new OnboardingProgress();
     progress.seed(false);
-    const ok = await markOnboardingComplete(
-      () => Promise.reject(new Error("offline")),
-      progress,
-    );
+    const ok = await markOnboardingComplete(() => Promise.reject(new Error("offline")), progress);
     expect(ok).toBe(false);
     expect(progress.isComplete).toBe(true);
   });

@@ -14,11 +14,7 @@ import { Notice } from "../../components/Notice";
 import { Button } from "../../components/Button";
 import { Icon16 } from "../../components/Icon";
 import type { IconName } from "../../components/icons";
-import type {
-  OptionsTab,
-  SettingsGroup,
-  WorkspaceOptionsModel,
-} from "../../../models/workspaceOptions";
+import type { OptionsTab, SettingsGroup, WorkspaceOptionsModel } from "../../../models/workspaceOptions";
 import type { PermissionsModel } from "../../../models/workspacePermissions";
 import { PermissionsTab } from "./PermissionsTab";
 import { SettingsGroups } from "./SettingsGroups";
@@ -45,33 +41,18 @@ export interface OptionsPanelAttrs {
 export function paneTitle(tab: OptionsTab, name: string): m.Child {
   const icon: IconName = tab === "share" ? "user-plus" : "settings";
   const label = tab === "share" ? "Share" : "Workspace settings:";
-  return m(
-    "h1",
-    {
-      class:
-        "type-heading-lg text-primary flex items-center gap-2 min-w-0 shrink-0",
-    },
-    [
-      m(Icon16, { name: icon, size: "lg", extra: "shrink-0" }),
-      m("span", { class: "shrink-0" }, label),
-      m("span", { class: "truncate max-w-[280px]" }, name),
-    ],
-  );
+  return m("h1", { class: "type-heading-lg text-primary flex items-center gap-2 min-w-0 shrink-0" }, [
+    m(Icon16, { name: icon, size: "lg", extra: "shrink-0" }),
+    m("span", { class: "shrink-0" }, label),
+    m("span", { class: "truncate max-w-[280px]" }, name),
+  ]);
 }
 
 export function OptionsPanel(): m.Component<OptionsPanelAttrs> {
   return {
     view(vnode) {
-      const {
-        model,
-        permissions,
-        tab,
-        group,
-        section,
-        onSelectGroup,
-        onSelectSection,
-        onReviewRequest,
-      } = vnode.attrs;
+      const { model, permissions, tab, group, section, onSelectGroup, onSelectSection, onReviewRequest } =
+        vnode.attrs;
 
       if (tab === "permissions") {
         return m(PermissionsTab, {
@@ -84,28 +65,15 @@ export function OptionsPanel(): m.Component<OptionsPanelAttrs> {
       }
 
       if (model.status === "loading") {
-        return m(
-          "p",
-          { class: "type-body text-secondary flex items-center gap-2 pt-10" },
-          [m(Spinner, { size: "sm" }), "Loading workspace options..."],
-        );
+        return m("p", { class: "type-body text-secondary flex items-center gap-2 pt-10" }, [
+          m(Spinner, { size: "sm" }),
+          "Loading workspace options...",
+        ]);
       }
-      if (
-        model.status === "load_failed" ||
-        model.data === null ||
-        model.share === null
-      ) {
+      if (model.status === "load_failed" || model.data === null || model.share === null) {
         return m("div", { class: "pt-10 flex flex-col gap-3 items-start" }, [
-          m(
-            Notice,
-            { variant: "warn" },
-            `Could not load this workspace's options: ${model.loadErrorMessage}`,
-          ),
-          m(
-            Button,
-            { variant: "secondary", onclick: () => void model.load() },
-            "Try again",
-          ),
+          m(Notice, { variant: "warn" }, `Could not load this workspace's options: ${model.loadErrorMessage}`),
+          m(Button, { variant: "secondary", onclick: () => void model.load() }, "Try again"),
         ]);
       }
 

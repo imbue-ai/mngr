@@ -41,79 +41,42 @@ export function OperationStrip(): m.Component<OperationStripAttrs, StripState> {
       if (!isAnythingShown) return null;
       return m("div", { class: "flex flex-col gap-2 my-2" }, [
         isStripSpinnerShown
-          ? m(
-              "div",
-              { class: "flex items-center gap-2 type-body text-secondary" },
-              [
-                m(Spinner, { size: "sm" }),
-                m("span", controller.runningLabel || "Working..."),
-              ],
-            )
+          ? m("div", { class: "flex items-center gap-2 type-body text-secondary" }, [
+              m(Spinner, { size: "sm" }),
+              m("span", controller.runningLabel || "Working..."),
+            ])
           : null,
         isStripSpinnerShown && controller.progressLine !== null
-          ? m(
-              "div",
-              { class: "type-helper text-tertiary truncate" },
-              controller.progressLine,
-            )
+          ? m("div", { class: "type-helper text-tertiary truncate" }, controller.progressLine)
           : null,
-        controller.errorMessage !== null
-          ? m(Notice, { variant: "error" }, controller.errorMessage)
-          : null,
-        controller.successMessage !== null
-          ? m(Notice, { variant: "success" }, controller.successMessage)
-          : null,
-        controller.warningMessage !== null
-          ? m(Notice, { variant: "warn" }, controller.warningMessage)
-          : null,
-        controller.cancelledMessage !== null
-          ? m(Notice, { variant: "info" }, controller.cancelledMessage)
-          : null,
+        controller.errorMessage !== null ? m(Notice, { variant: "error" }, controller.errorMessage) : null,
+        controller.successMessage !== null ? m(Notice, { variant: "success" }, controller.successMessage) : null,
+        controller.warningMessage !== null ? m(Notice, { variant: "warn" }, controller.warningMessage) : null,
+        controller.cancelledMessage !== null ? m(Notice, { variant: "info" }, controller.cancelledMessage) : null,
         m("div", { class: "flex items-center gap-2 flex-wrap" }, [
           controller.isStopChatsRetryOffered
             ? m(
                 Button,
-                {
-                  variant: "secondary",
-                  disabled: controller.isRunning,
-                  onclick: () => controller.runStopChatsRetry(),
-                },
+                { variant: "secondary", disabled: controller.isRunning, onclick: () => controller.runStopChatsRetry() },
                 "Stop chats and try again",
               )
             : null,
           controller.isSkipSafetyRetryOffered
             ? m(
                 Button,
-                {
-                  variant: "secondary",
-                  disabled: controller.isRunning,
-                  onclick: () => controller.runSkipSafetyRetry(),
-                },
+                { variant: "secondary", disabled: controller.isRunning, onclick: () => controller.runSkipSafetyRetry() },
                 "Restore without backing up first",
               )
             : null,
           controller.isForceRetryOffered
             ? m(
                 Button,
-                {
-                  variant: "danger",
-                  disabled: controller.isRunning,
-                  onclick: () => controller.runForceRetry(),
-                },
+                { variant: "danger", disabled: controller.isRunning, onclick: () => controller.runForceRetry() },
                 "Force restore",
               )
             : null,
-          controller.isRunning &&
-          controller.isCancellable &&
-          !controller.isRestore
-            ? m(
-                Button,
-                {
-                  variant: "secondary",
-                  onclick: () => void controller.requestCancel(),
-                },
-                "Cancel",
-              )
+          controller.isRunning && controller.isCancellable && !controller.isRestore
+            ? m(Button, { variant: "secondary", onclick: () => void controller.requestCancel() }, "Cancel")
             : null,
           hasLog
             ? m(

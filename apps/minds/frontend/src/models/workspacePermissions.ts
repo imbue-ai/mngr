@@ -173,9 +173,7 @@ export function formatByteSize(byteCount: number): string {
   let size = byteCount;
   for (const unit of BYTE_UNITS) {
     if (Math.abs(size) < 1024 || unit === BYTE_UNITS[BYTE_UNITS.length - 1]) {
-      return unit === "B"
-        ? `${Math.round(size)} ${unit}`
-        : `${size.toFixed(1)} ${unit}`;
+      return unit === "B" ? `${Math.round(size)} ${unit}` : `${size.toFixed(1)} ${unit}`;
     }
     size /= 1024;
   }
@@ -215,9 +213,7 @@ export function fileSharingAccessLabel(access: FileSharingAccess): string {
   return FILE_SHARING_ACCESS_LABELS[access];
 }
 
-export const FILE_SHARING_ACCESSES = Object.keys(
-  FILE_SHARING_ACCESS_LABELS,
-) as FileSharingAccess[];
+export const FILE_SHARING_ACCESSES = Object.keys(FILE_SHARING_ACCESS_LABELS) as FileSharingAccess[];
 
 const FOLDER_SYNC_CONFLICT_LABELS: Record<FolderSyncConflict, string> = {
   NEWER: "Whichever was changed more recently",
@@ -719,9 +715,7 @@ export class PermissionsModel {
       conflict: this.syncConflictFor(row),
     };
     try {
-      this.data = await this.enqueueWrite(() =>
-        this.post("toggle", body, this.folderSyncBase()),
-      );
+      this.data = await this.enqueueWrite(() => this.post("toggle", body, this.folderSyncBase()));
       this.status = "ready";
       this.errorMessage = "";
     } catch (error) {
@@ -731,6 +725,7 @@ export class PermissionsModel {
     }
     this.redrawImpl();
   }
+
 
   /** Bring a failed sync up again.
    *
@@ -843,11 +838,7 @@ export class PermissionsModel {
         // read only happens on open and after a write here, so a pane sitting
         // on a poll would keep a warning that stopped being true, or miss one
         // that started.
-        return {
-          ...row,
-          sync: fresh.sync ?? null,
-          sync_overlap_warning: fresh.overlap_warning ?? "",
-        };
+        return { ...row, sync: fresh.sync ?? null, sync_overlap_warning: fresh.overlap_warning ?? "" };
       }),
     };
     this.redrawImpl();
@@ -926,10 +917,7 @@ export class PermissionsModel {
       const pending = makeRequest();
       // Settled on a side branch rather than awaited, so dropping the warm adds
       // no hop to the chain the responses come back through.
-      void pending.then(
-        forgetWarmedPermissionsOverview,
-        forgetWarmedPermissionsOverview,
-      );
+      void pending.then(forgetWarmedPermissionsOverview, forgetWarmedPermissionsOverview);
       return pending;
     };
     const result = this.writeChain.then(request, request);

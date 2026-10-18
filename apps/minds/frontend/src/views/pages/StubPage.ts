@@ -12,11 +12,7 @@ export function makeStubPage(title: string): m.ComponentTypes {
         PageContainer,
         m("div", { class: "flex flex-col gap-4 pt-10" }, [
           m("h1", { class: "type-heading-lg" }, title),
-          m(
-            Notice,
-            { variant: "info" },
-            "This page is being rebuilt and is not available yet.",
-          ),
+          m(Notice, { variant: "info" }, "This page is being rebuilt and is not available yet."),
         ]),
       );
     },

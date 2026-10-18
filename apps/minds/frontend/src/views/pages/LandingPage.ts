@@ -9,11 +9,7 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { electronBridge } from "../../electron-bridge";
 import type { LandingExtras, MindLiveness } from "../../models/create";
-import {
-  MindLivenessTracker,
-  fetchLandingExtras,
-  recoveryRoute,
-} from "../../models/create";
+import { MindLivenessTracker, fetchLandingExtras, recoveryRoute } from "../../models/create";
 import { onboardingProgress } from "../../models/onboarding";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import type { UiProviderEntry } from "../../generated/ui";
@@ -41,8 +37,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import type { UpdateBadgeTone } from "../../models/updates";
 import { displayVersion, updateBadgeFor } from "../../models/updates";
 
-const BADGE_CLASS =
-  "inline-flex items-center px-2 py-0.5 rounded-md type-label";
+const BADGE_CLASS = "inline-flex items-center px-2 py-0.5 rounded-md type-label";
 
 // The update badge is the only pill in a row that does something, so it is a
 // real <button> with a border, hover fill, press scale, focus ring and chevron.
@@ -143,8 +138,7 @@ export const LandingPage: m.ClosureComponent = () => {
           state.unlockPassword = "";
           loadExtras(state);
         } else {
-          state.unlockError =
-            result.data.error ?? "That password did not unlock any account.";
+          state.unlockError = result.data.error ?? "That password did not unlock any account.";
         }
         m.redraw();
       })
@@ -171,9 +165,7 @@ export const LandingPage: m.ClosureComponent = () => {
           return;
         }
         state.removedHostIds.delete(hostId);
-        const body = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
+        const body = (await response.json().catch(() => null)) as { error?: string } | null;
         window.alert(removeRecordFailureMessage(response.status, body));
         m.redraw();
       })
@@ -195,26 +187,18 @@ export const LandingPage: m.ClosureComponent = () => {
       .then(async (response) => {
         if (response.ok) return;
         state.pendingProviderToggleAtByName.delete(name);
-        const body = (await response.json().catch(() => null)) as {
-          error?: string;
-          detail?: string;
-        } | null;
-        const message =
-          body?.error ?? body?.detail ?? `HTTP ${response.status}`;
+        const body = (await response.json().catch(() => null)) as { error?: string; detail?: string } | null;
+        const message = body?.error ?? body?.detail ?? `HTTP ${response.status}`;
         if (response.status === 409) {
           window.alert(`Cannot disable ${name}: ${message}`);
         } else {
-          window.alert(
-            `Could not ${isEnabled ? "enable" : "disable"} ${name}: ${message}`,
-          );
+          window.alert(`Could not ${isEnabled ? "enable" : "disable"} ${name}: ${message}`);
         }
         m.redraw();
       })
       .catch(() => {
         state.pendingProviderToggleAtByName.delete(name);
-        window.alert(
-          `Could not ${isEnabled ? "enable" : "disable"} ${name}: the request failed (network error).`,
-        );
+        window.alert(`Could not ${isEnabled ? "enable" : "disable"} ${name}: the request failed (network error).`);
         m.redraw();
       });
   }
@@ -231,9 +215,7 @@ export const LandingPage: m.ClosureComponent = () => {
     })
       .then(async (response) => {
         if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as {
-            error?: string;
-          } | null;
+          const body = (await response.json().catch(() => null)) as { error?: string } | null;
           window.alert(body?.error ?? "Could not delete the account.");
         }
         m.redraw();
@@ -243,10 +225,7 @@ export const LandingPage: m.ClosureComponent = () => {
 
   function rowClick(entry: UiWorkspaceEntry): void {
     const { shell } = getAppContext();
-    const liveness = state.tracker.displayedLiveness(
-      entry.id,
-      entry.liveness ?? "",
-    );
+    const liveness = state.tracker.displayedLiveness(entry.id, entry.liveness ?? "");
     shell.enterWorkspaceOrRecover(entry, liveness);
   }
 
@@ -255,10 +234,7 @@ export const LandingPage: m.ClosureComponent = () => {
     const question = lifecycleConfirmation("stop", entry.name, isApplying);
     if (question !== null && !window.confirm(question)) return;
     void state.tracker.stop(entry.id).then((isOk) => {
-      if (!isOk)
-        window.alert(
-          `Could not stop "${entry.name}". Check the workspace's provider and try again.`,
-        );
+      if (!isOk) window.alert(`Could not stop "${entry.name}". Check the workspace's provider and try again.`);
     });
   }
 
@@ -269,20 +245,13 @@ export const LandingPage: m.ClosureComponent = () => {
       liveness === "STOPPING" || liveness === "STARTING"
         ? "bg-warning/15 text-warning"
         : "bg-fill-subtle text-primary";
-    return m(
-      "span",
-      { class: `${BADGE_CLASS} ${tone} landing-mind-state-badge` },
-      label,
-    );
+    return m("span", { class: `${BADGE_CLASS} ${tone} landing-mind-state-badge` }, label);
   }
 
   // The backups page runs restic from this device, so it is reachable for a
   // stopped or remote machine whose own settings pane is not. Kept subtle
   // (muted ghost icon): it is a fallback route in, not the primary action.
-  function backupsButton(
-    entry: UiWorkspaceEntry,
-    liveness: string,
-  ): m.Children {
+  function backupsButton(entry: UiWorkspaceEntry, liveness: string): m.Children {
     const control = backupsControlFor(entry, liveness);
     if (!control.isShown) return null;
     return m(
@@ -303,23 +272,14 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
-  function healthBadge(
-    entry: UiWorkspaceEntry,
-    liveness: MindLiveness,
-  ): m.Children {
+  function healthBadge(entry: UiWorkspaceEntry, liveness: MindLiveness): m.Children {
     // A stopped/transitioning container is expectedly unreachable; the state
     // badge already explains it, so suppress the health badge there.
-    if (
-      liveness === "STOPPED" ||
-      liveness === "STOPPING" ||
-      liveness === "STARTING"
-    )
-      return null;
+    if (liveness === "STOPPED" || liveness === "STOPPING" || liveness === "STARTING") return null;
     // While the consumer is dead every machine reads unhealthy, and the cause
     // is the app's, not theirs. The page's notice names it once instead of
     // every row repeating a symptom.
-    if (!isMachineStateKnown(getAppContext().stores.health.discoveryHealth))
-      return null;
+    if (!isMachineStateKnown(getAppContext().stores.health.discoveryHealth)) return null;
     const healthStore = getAppContext().stores.health;
     const label = healthBadgeLabelFor(
       healthStore.statusFor(entry.id),
@@ -328,22 +288,13 @@ export const LandingPage: m.ClosureComponent = () => {
       entry.is_device_cannot_connect ?? false,
     );
     if (label === null) return null;
-    return m(
-      "span",
-      {
-        class: `${BADGE_CLASS} bg-warning/15 text-warning landing-health-badge`,
-      },
-      label,
-    );
+    return m("span", { class: `${BADGE_CLASS} bg-warning/15 text-warning landing-health-badge` }, label);
   }
 
   /** The row's update badge, or null when the machine has nothing to say. */
   function updateBadge(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
-    const badge = updateBadgeFor(
-      updates.publishedFor(entry.id),
-      updates.isUpdating(entry.id),
-    );
+    const badge = updateBadgeFor(updates.publishedFor(entry.id), updates.isUpdating(entry.id));
     if (badge === null) return null;
     return m(
       "button",
@@ -376,60 +327,47 @@ export const LandingPage: m.ClosureComponent = () => {
     const version = update.success_note_version ?? "";
     const noteKey = `${entry.id}:${version}`;
     if (!version || state.dismissedNoteKeys.has(noteKey)) return null;
-    return m(
-      "div",
-      { class: "flex items-center gap-2 pl-3 type-helper text-secondary" },
-      [
-        m(
-          "span",
-          update.verdict === "UPDATED_WITH_REBUILD_ITEMS"
-            ? `Updated to ${displayVersion(version)}, with a note for you.`
-            : `Updated to ${displayVersion(version)}.`,
-        ),
-        m(
-          Button,
-          {
-            variant: "ghost",
-            "aria-label": "Dismiss",
-            onclick: () => {
-              state.dismissedNoteKeys.add(noteKey);
-              void updates.dismissNote(entry.id).then((result) => {
-                // Put it back on a refusal rather than have the note vanish this
-                // session and return next launch with nothing said.
-                if (!result.isOk) {
-                  state.dismissedNoteKeys.delete(noteKey);
-                  m.redraw();
-                }
-              });
-            },
+    return m("div", { class: "flex items-center gap-2 pl-3 type-helper text-secondary" }, [
+      m(
+        "span",
+        update.verdict === "UPDATED_WITH_REBUILD_ITEMS"
+          ? `Updated to ${displayVersion(version)}, with a note for you.`
+          : `Updated to ${displayVersion(version)}.`,
+      ),
+      m(
+        Button,
+        {
+          variant: "ghost",
+          "aria-label": "Dismiss",
+          onclick: () => {
+            state.dismissedNoteKeys.add(noteKey);
+            void updates.dismissNote(entry.id).then((result) => {
+              // Put it back on a refusal rather than have the note vanish this
+              // session and return next launch with nothing said.
+              if (!result.isOk) {
+                state.dismissedNoteKeys.delete(noteKey);
+                m.redraw();
+              }
+            });
           },
-          "Dismiss",
-        ),
-      ],
-    );
+        },
+        "Dismiss",
+      ),
+    ]);
   }
 
-  function runBulkAction(
-    kind: "now" | "schedule",
-    isNoBackupConfirmed: boolean,
-  ): void {
+  function runBulkAction(kind: "now" | "schedule", isNoBackupConfirmed: boolean): void {
     const updates = getAppContext().stores.updates;
     const agentIds = updates.updatableAgentIds();
     if (agentIds.length === 0) return;
     // Cleared on every press: a prompt left standing from the other bulk
     // action would offer to proceed with the wrong one.
     state.bulkNoBackupConfirm = null;
-    if (
-      !isNoBackupConfirmed &&
-      agentIds.some((agentId) => updates.needsNoBackupConfirmation(agentId))
-    ) {
+    if (!isNoBackupConfirmed && agentIds.some((agentId) => updates.needsNoBackupConfirmation(agentId))) {
       state.bulkNoBackupConfirm = kind;
       return;
     }
-    const call =
-      kind === "now"
-        ? updates.updateAllNow(agentIds)
-        : updates.scheduleAllUpdates(agentIds);
+    const call = kind === "now" ? updates.updateAllNow(agentIds) : updates.scheduleAllUpdates(agentIds);
     void call.then((result) => {
       if (!result.isOk) {
         window.alert(result.error);
@@ -448,69 +386,43 @@ export const LandingPage: m.ClosureComponent = () => {
       m("div", { class: "flex items-center justify-between gap-3 flex-wrap" }, [
         m("span", `${agentIds.length} workspaces have an update available.`),
         m("div", { class: "flex items-center gap-2" }, [
-          m(
-            Button,
-            {
-              variant: "primary",
-              onclick: () => runBulkAction("schedule", false),
-            },
-            "Schedule all updates",
-          ),
-          m(
-            Button,
-            {
-              variant: "secondary",
-              onclick: () => runBulkAction("now", false),
-            },
-            "Update all now",
-          ),
+          m(Button, { variant: "primary", onclick: () => runBulkAction("schedule", false) }, "Schedule all updates"),
+          m(Button, { variant: "secondary", onclick: () => runBulkAction("now", false) }, "Update all now"),
         ]),
       ]),
       state.bulkNoBackupConfirm !== null
-        ? m(
-            "div",
-            { class: "flex items-center justify-between gap-3 pt-2 flex-wrap" },
-            [
+        ? m("div", { class: "flex items-center justify-between gap-3 pt-2 flex-wrap" }, [
+            m(
+              "span",
+              { class: "type-helper" },
+              "Some of these workspaces have no backups: their updates keep every version in git " +
+                "and offer a rollback, but there's no full workspace restore to fall back on.",
+            ),
+            m("div", { class: "flex items-center gap-2" }, [
               m(
-                "span",
-                { class: "type-helper" },
-                "Some of these workspaces have no backups: their updates keep every version in git " +
-                  "and offer a rollback, but there's no full workspace restore to fall back on.",
+                Button,
+                {
+                  variant: "primary",
+                  onclick: () => {
+                    const kind = state.bulkNoBackupConfirm;
+                    state.bulkNoBackupConfirm = null;
+                    if (kind !== null) runBulkAction(kind, true);
+                  },
+                },
+                "Go ahead without backups",
               ),
-              m("div", { class: "flex items-center gap-2" }, [
-                m(
-                  Button,
-                  {
-                    variant: "primary",
-                    onclick: () => {
-                      const kind = state.bulkNoBackupConfirm;
-                      state.bulkNoBackupConfirm = null;
-                      if (kind !== null) runBulkAction(kind, true);
-                    },
-                  },
-                  "Go ahead without backups",
-                ),
-                m(
-                  Button,
-                  {
-                    variant: "secondary",
-                    onclick: () => (state.bulkNoBackupConfirm = null),
-                  },
-                  "Cancel",
-                ),
-              ]),
-            ],
-          )
+              m(
+                Button,
+                { variant: "secondary", onclick: () => (state.bulkNoBackupConfirm = null) },
+                "Cancel",
+              ),
+            ]),
+          ])
         : null,
     ]);
   }
 
-  function destroyRow(
-    agentId: string,
-    name: string,
-    accent: string,
-    destroyStatus: string,
-  ): m.Children {
+  function destroyRow(agentId: string, name: string, accent: string, destroyStatus: string): m.Children {
     return m(
       Card,
       {
@@ -521,18 +433,9 @@ export const LandingPage: m.ClosureComponent = () => {
         onclick: () => m.route.set(`/destroying/${agentId}`),
       },
       [
-        m(
-          "span",
-          {
-            class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1",
-          },
-          name,
-        ),
+        m("span", { class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1" }, name),
         destroyStatus === "running"
-          ? m(StatusBadge, { extra: "gap-2" }, [
-              m(Spinner, { size: "sm" }),
-              "Destroying...",
-            ])
+          ? m(StatusBadge, { extra: "gap-2" }, [m(Spinner, { size: "sm" }), "Destroying..."])
           : m(StatusBadge, { variant: "error" }, "Destroy failed"),
       ],
     );
@@ -561,11 +464,8 @@ export const LandingPage: m.ClosureComponent = () => {
     const keyChip = keyStateChipFor(entry.key_state ?? "");
     const isHealthy = stores.health.statusFor(entry.id) === "healthy";
     const isOpenable =
-      rowClickActionFor(
-        entry,
-        state.tracker.displayedLiveness(entry.id, entry.liveness ?? ""),
-        isHealthy,
-      ) !== "blocked";
+      rowClickActionFor(entry, state.tracker.displayedLiveness(entry.id, entry.liveness ?? ""), isHealthy) !==
+      "blocked";
     const row = m(
       Card,
       {
@@ -577,18 +477,8 @@ export const LandingPage: m.ClosureComponent = () => {
         onclick: isOpenable ? () => rowClick(entry) : undefined,
       },
       [
-        m(
-          "span",
-          { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" },
-          entry.name,
-        ),
-        providerLabel
-          ? m(
-              "span",
-              { class: `${BADGE_CLASS} bg-fill-subtle text-secondary` },
-              providerLabel,
-            )
-          : null,
+        m("span", { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" }, entry.name),
+        providerLabel ? m("span", { class: `${BADGE_CLASS} bg-fill-subtle text-secondary` }, providerLabel) : null,
         keyChip === null
           ? null
           : m(
@@ -601,9 +491,7 @@ export const LandingPage: m.ClosureComponent = () => {
             ),
         // Slot for the backup badge (T4 wires the backup-status data source).
         m("span", { class: "landing-backup-badge hidden" }),
-        (entry.supports_shutdown ?? false)
-          ? livenessBadge(liveness, entry.stop_kind ?? "")
-          : null,
+        (entry.supports_shutdown ?? false) ? livenessBadge(liveness, entry.stop_kind ?? "") : null,
         healthBadge(entry, liveness),
         updateBadge(entry),
         backupsButton(entry, liveness),
@@ -619,9 +507,7 @@ export const LandingPage: m.ClosureComponent = () => {
                   event.stopPropagation();
                   void state.tracker.start(entry.id).then((isOk) => {
                     if (!isOk) {
-                      window.alert(
-                        `Could not start "${entry.name}". Check the workspace's provider and try again.`,
-                      );
+                      window.alert(`Could not start "${entry.name}". Check the workspace's provider and try again.`);
                     }
                   });
                 },
@@ -655,11 +541,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 "data-tooltip": "Restart workspace",
                 onclick: (event: MouseEvent) => {
                   event.stopPropagation();
-                  const question = lifecycleConfirmation(
-                    "restart",
-                    entry.name,
-                    stores.updates.isApplying(entry.id),
-                  );
+                  const question = lifecycleConfirmation("restart", entry.name, stores.updates.isApplying(entry.id));
                   if (question !== null && !window.confirm(question)) return;
                   const returnTo = `/goto/${entry.id}/`;
                   m.route.set(recoveryRoute(entry.id, returnTo, "restart"));
@@ -682,13 +564,8 @@ export const LandingPage: m.ClosureComponent = () => {
                   if (electronBridge.isDesktop) {
                     electronBridge.openWorkspaceInNewWindow(entry.id);
                   } else {
-                    const forwardOrigin =
-                      getAppContext().shell.mngrForwardOrigin;
-                    window.open(
-                      `${forwardOrigin}/goto/${entry.id}/`,
-                      "_blank",
-                      "noopener",
-                    );
+                    const forwardOrigin = getAppContext().shell.mngrForwardOrigin;
+                    window.open(`${forwardOrigin}/goto/${entry.id}/`, "_blank", "noopener");
                   }
                 },
               },
@@ -703,9 +580,7 @@ export const LandingPage: m.ClosureComponent = () => {
             "data-tooltip": "Settings",
             onclick: (event: MouseEvent) => {
               event.stopPropagation();
-              getAppContext().shell.routeTo(
-                `/workspace/${entry.id}/options?tab=settings`,
-              );
+              getAppContext().shell.routeTo(`/workspace/${entry.id}/options?tab=settings`);
             },
           },
           m(Icon16, { name: "settings" }),
@@ -713,9 +588,7 @@ export const LandingPage: m.ClosureComponent = () => {
       ],
     );
     const note = updatedNote(entry);
-    return note === null
-      ? row
-      : m("div", { class: "flex flex-col gap-1" }, [row, note]);
+    return note === null ? row : m("div", { class: "flex flex-col gap-1" }, [row, note]);
   }
 
   function createAttemptRow(entry: UiWorkspaceEntry): m.Children {
@@ -729,18 +602,9 @@ export const LandingPage: m.ClosureComponent = () => {
         onclick: () => m.route.set(`/creating/${entry.id}`),
       },
       [
-        m(
-          "span",
-          {
-            class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1",
-          },
-          entry.name,
-        ),
+        m("span", { class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1" }, entry.name),
         entry.create_attempt_state === "creating"
-          ? m(StatusBadge, { extra: "gap-2" }, [
-              m(Spinner, { size: "sm" }),
-              "Creating…",
-            ])
+          ? m(StatusBadge, { extra: "gap-2" }, [m(Spinner, { size: "sm" }), "Creating…"])
           : entry.create_attempt_state === "interrupted"
             ? m(StatusBadge, { variant: "warn" }, "Interrupted")
             : m(StatusBadge, { variant: "error" }, "Create failed"),
@@ -750,8 +614,7 @@ export const LandingPage: m.ClosureComponent = () => {
 
   function remoteRow(entry: UiWorkspaceEntry): m.Children {
     if (state.removedHostIds.has(entry.host_id ?? "")) return null;
-    const remoteState =
-      getAppContext().stores.workspaces.remoteWorkspaceStates[entry.id] ?? "";
+    const remoteState = getAppContext().stores.workspaces.remoteWorkspaceStates[entry.id] ?? "";
     const chip = remoteStateChipFor(remoteState);
     return m(
       Card,
@@ -762,18 +625,8 @@ export const LandingPage: m.ClosureComponent = () => {
         "data-agent-id": entry.id,
       },
       [
-        m(
-          "span",
-          {
-            class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1",
-          },
-          entry.name,
-        ),
-        m(
-          "span",
-          { class: `${BADGE_CLASS} bg-fill-subtle text-secondary` },
-          remoteLocationBadgeFor(entry),
-        ),
+        m("span", { class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1" }, entry.name),
+        m("span", { class: `${BADGE_CLASS} bg-fill-subtle text-secondary` }, remoteLocationBadgeFor(entry)),
         chip === null
           ? null
           : chip.isAccountsLink
@@ -782,17 +635,14 @@ export const LandingPage: m.ClosureComponent = () => {
                 {
                   type: "button",
                   class: `${BADGE_CLASS} bg-fill-subtle text-important cursor-pointer border-0`,
-                  "data-tooltip":
-                    "Sign in again from the Accounts page to see this workspace here",
+                  "data-tooltip": "Sign in again from the Accounts page to see this workspace here",
                   onclick: () => m.route.set("/accounts"),
                 },
                 chip.label,
               )
             : m(
                 "span",
-                {
-                  class: `${BADGE_CLASS} bg-fill-subtle ${chip.isImportant ? "text-important" : "text-secondary"}`,
-                },
+                { class: `${BADGE_CLASS} bg-fill-subtle ${chip.isImportant ? "text-important" : "text-secondary"}` },
                 chip.label,
               ),
         backupsButton(entry, ""),
@@ -814,81 +664,59 @@ export const LandingPage: m.ClosureComponent = () => {
   function providerRow(entry: UiProviderEntry): m.Children {
     const providers = getAppContext().stores.providers;
     const pendingAt = state.pendingProviderToggleAtByName.get(entry.name);
-    const snapshotAt = providers.lastFullSnapshotAt
-      ? Date.parse(providers.lastFullSnapshotAt)
-      : 0;
-    const isPending =
-      pendingAt !== undefined && (snapshotAt === 0 || pendingAt > snapshotAt);
-    return m(
-      Card,
-      {
-        layout: "row",
-        extra: "px-4 py-2 gap-1.5",
-        "data-provider-name": entry.name,
-      },
-      [
-        m("span", { class: "font-semibold text-primary" }, entry.name),
-        entry.backend
-          ? m("span", { class: "type-helper text-secondary" }, entry.backend)
-          : null,
-        m(
-          "span",
-          {
-            class:
-              `${BADGE_CLASS} ` +
-              (entry.status === "OK"
-                ? "bg-success/15 text-success"
-                : entry.status === "ERROR"
-                  ? "bg-important/15 text-important"
-                  : "bg-fill-subtle text-primary"),
-          },
-          entry.status === "OK"
-            ? "OK"
-            : entry.status === "ERROR"
-              ? "Error"
-              : "Disabled",
-        ),
-        entry.status === "ERROR" && entry.error_message
-          ? m(
-              "span",
-              {
-                class: "flex-1 type-helper text-primary truncate",
-                title: `${entry.error_type ?? ""}: ${entry.error_message}`,
-              },
-              `${entry.error_type ?? ""}: ${entry.error_message}`,
-            )
-          : m("span", { class: "flex-1" }),
-        m(
-          Button,
-          {
-            variant: "secondary",
-            disabled: isPending,
-            onclick: () =>
-              toggleProvider(entry.name, entry.status === "DISABLED"),
-          },
-          isPending
-            ? "Waiting…"
-            : entry.status === "DISABLED"
-              ? "Enable"
-              : "Disable",
-        ),
-        entry.is_cloud_account
-          ? m(
-              Button,
-              {
-                variant: "secondary",
-                disabled: (entry.workspace_count ?? 0) > 0,
-                title:
-                  (entry.workspace_count ?? 0) > 0
-                    ? `In use by ${entry.workspace_count} workspace${entry.workspace_count === 1 ? "" : "s"} — destroy them first.`
-                    : undefined,
-                onclick: () => deleteCloudAccount(entry.name),
-              },
-              "Delete",
-            )
-          : null,
-      ],
-    );
+    const snapshotAt = providers.lastFullSnapshotAt ? Date.parse(providers.lastFullSnapshotAt) : 0;
+    const isPending = pendingAt !== undefined && (snapshotAt === 0 || pendingAt > snapshotAt);
+    return m(Card, { layout: "row", extra: "px-4 py-2 gap-1.5", "data-provider-name": entry.name }, [
+      m("span", { class: "font-semibold text-primary" }, entry.name),
+      entry.backend ? m("span", { class: "type-helper text-secondary" }, entry.backend) : null,
+      m(
+        "span",
+        {
+          class:
+            `${BADGE_CLASS} ` +
+            (entry.status === "OK"
+              ? "bg-success/15 text-success"
+              : entry.status === "ERROR"
+                ? "bg-important/15 text-important"
+                : "bg-fill-subtle text-primary"),
+        },
+        entry.status === "OK" ? "OK" : entry.status === "ERROR" ? "Error" : "Disabled",
+      ),
+      entry.status === "ERROR" && entry.error_message
+        ? m(
+            "span",
+            {
+              class: "flex-1 type-helper text-primary truncate",
+              title: `${entry.error_type ?? ""}: ${entry.error_message}`,
+            },
+            `${entry.error_type ?? ""}: ${entry.error_message}`,
+          )
+        : m("span", { class: "flex-1" }),
+      m(
+        Button,
+        {
+          variant: "secondary",
+          disabled: isPending,
+          onclick: () => toggleProvider(entry.name, entry.status === "DISABLED"),
+        },
+        isPending ? "Waiting…" : entry.status === "DISABLED" ? "Enable" : "Disable",
+      ),
+      entry.is_cloud_account
+        ? m(
+            Button,
+            {
+              variant: "secondary",
+              disabled: (entry.workspace_count ?? 0) > 0,
+              title:
+                (entry.workspace_count ?? 0) > 0
+                  ? `In use by ${entry.workspace_count} workspace${entry.workspace_count === 1 ? "" : "s"} — destroy them first.`
+                  : undefined,
+              onclick: () => deleteCloudAccount(entry.name),
+            },
+            "Delete",
+          )
+        : null,
+    ]);
   }
 
   // Every input (the extras landing, the workspace list, the onboarding copy)
@@ -896,13 +724,7 @@ export const LandingPage: m.ClosureComponent = () => {
   // navigation.
   function redirectToStartFlowIfDue(): void {
     const hasRows = getAppContext().stores.workspaces.workspaces.length > 0;
-    if (
-      shouldRedirectToStartFlow(
-        onboardingProgress.isComplete,
-        hasRows,
-        state.extras,
-      )
-    ) {
+    if (shouldRedirectToStartFlow(onboardingProgress.isComplete, hasRows, state.extras)) {
       m.route.set("/start");
     }
   }
@@ -910,9 +732,7 @@ export const LandingPage: m.ClosureComponent = () => {
   return {
     oninit() {
       loadExtras(state);
-      state.unsubscribe = getAppContext().stores.workspaces.onChanged(() =>
-        loadExtras(state),
-      );
+      state.unsubscribe = getAppContext().stores.workspaces.onChanged(() => loadExtras(state));
     },
     onupdate() {
       redirectToStartFlowIfDue();
@@ -923,41 +743,24 @@ export const LandingPage: m.ClosureComponent = () => {
     view() {
       const { stores } = getAppContext();
       const entries = stores.workspaces.workspaces;
-      const liveEntries = entries.filter(
-        (entry) =>
-          !(entry.is_remote ?? false) &&
-          (entry.create_attempt_state ?? "") === "",
-      );
-      const createEntries = entries.filter(
-        (entry) => (entry.create_attempt_state ?? "") !== "",
-      );
+      const liveEntries = entries.filter((entry) => !(entry.is_remote ?? false) && (entry.create_attempt_state ?? "") === "");
+      const createEntries = entries.filter((entry) => (entry.create_attempt_state ?? "") !== "");
       const extras = state.extras;
       // A destroy that failed after its host went away has no live entry to badge.
-      const orphanedFailedDestroys = (
-        extras?.orphaned_failed_destroys ?? []
-      ).filter(
+      const orphanedFailedDestroys = (extras?.orphaned_failed_destroys ?? []).filter(
         (orphan) => !liveEntries.some((entry) => entry.id === orphan.agent_id),
       );
       // Until discovery re-lists the destroyed host, its still-active record also reads as a remote tile.
       const remoteEntries = entries.filter(
         (entry) =>
-          (entry.is_remote ?? false) &&
-          !orphanedFailedDestroys.some(
-            (orphan) => orphan.agent_id === entry.id,
-          ),
+          (entry.is_remote ?? false) && !orphanedFailedDestroys.some((orphan) => orphan.agent_id === entry.id),
       );
       const hasRows =
-        liveEntries.length +
-          orphanedFailedDestroys.length +
-          createEntries.length +
-          remoteEntries.length >
-        0;
+        liveEntries.length + orphanedFailedDestroys.length + createEntries.length + remoteEntries.length > 0;
       const isDiscovering =
         !hasRows &&
         !state.isExtrasFailed &&
-        (extras === null ||
-          !extras.is_discovery_complete ||
-          extras.has_restorable_workspaces);
+        (extras === null || !extras.is_discovery_complete || extras.has_restorable_workspaces);
       const providerEntries = stores.providers.providers;
 
       return m(PageContainer, [
@@ -966,15 +769,8 @@ export const LandingPage: m.ClosureComponent = () => {
               Notice,
               { variant: "error", extra: "mb-4", id: "landing-extras-error" },
               m("div", { class: "flex items-center justify-between gap-3" }, [
-                m(
-                  "span",
-                  "Could not load workspace details. Some rows may be missing or incomplete.",
-                ),
-                m(
-                  Button,
-                  { variant: "secondary", onclick: () => loadExtras(state) },
-                  "Retry",
-                ),
+                m("span", "Could not load workspace details. Some rows may be missing or incomplete."),
+                m(Button, { variant: "secondary", onclick: () => loadExtras(state) }, "Retry"),
               ]),
             )
           : null,
@@ -982,11 +778,7 @@ export const LandingPage: m.ClosureComponent = () => {
           ? m("div", [
               m("div", { class: "flex items-center justify-between mb-4" }, [
                 m("h1", { class: "type-heading text-primary" }, "Workspaces"),
-                m(
-                  ButtonLink,
-                  { variant: "primary", ...routeLinkAttrs("/create") },
-                  "Create",
-                ),
+                m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/create") }, "Create"),
               ]),
               bulkUpdateActions(),
               extras !== null && extras.locked_account_emails.length > 0
@@ -1003,13 +795,10 @@ export const LandingPage: m.ClosureComponent = () => {
                           id: "sync-unlock-password",
                           autocomplete: "current-password",
                           placeholder: "master password",
-                          class:
-                            "h-[34px] px-3 rounded-full type-body bg-fill-subtle text-primary",
+                          class: "h-[34px] px-3 rounded-full type-body bg-fill-subtle text-primary",
                           value: state.unlockPassword,
                           oninput: (event: InputEvent) => {
-                            state.unlockPassword = (
-                              event.target as HTMLInputElement
-                            ).value;
+                            state.unlockPassword = (event.target as HTMLInputElement).value;
                           },
                         }),
                         m(
@@ -1024,59 +813,26 @@ export const LandingPage: m.ClosureComponent = () => {
                         ),
                       ]),
                       state.unlockError
-                        ? m(
-                            "p",
-                            {
-                              class: "type-helper text-important",
-                              role: "alert",
-                            },
-                            state.unlockError,
-                          )
+                        ? m("p", { class: "type-helper text-important", role: "alert" }, state.unlockError)
                         : null,
                     ]),
                   ])
                 : null,
               m("div", { class: "flex flex-col gap-1.5" }, [
                 liveEntries.map((entry) => liveRow(entry)),
-                orphanedFailedDestroys.map((orphan) =>
-                  destroyRow(
-                    orphan.agent_id,
-                    orphan.name,
-                    orphan.accent,
-                    "failed",
-                  ),
-                ),
+                orphanedFailedDestroys.map((orphan) => destroyRow(orphan.agent_id, orphan.name, orphan.accent, "failed")),
                 createEntries.map((entry) => createAttemptRow(entry)),
                 remoteEntries.map((entry) => remoteRow(entry)),
               ]),
             ])
           : isDiscovering
-            ? m(
-                "div",
-                {
-                  class:
-                    "flex flex-col items-center justify-center min-h-[80vh] gap-6",
-                },
-                [
-                  m(
-                    "p",
-                    { class: "text-tertiary text-center" },
-                    "Discovering workspaces...",
-                  ),
-                  m(
-                    ButtonLink,
-                    { variant: "primary", ...routeLinkAttrs("/create") },
-                    "Create",
-                  ),
-                ],
-              )
+            ? m("div", { class: "flex flex-col items-center justify-center min-h-[80vh] gap-6" }, [
+                m("p", { class: "text-tertiary text-center" }, "Discovering workspaces..."),
+                m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/create") }, "Create"),
+              ])
             : m("div", { class: "text-center py-12" }, [
                 m("p", { class: "text-tertiary mb-6" }, "No workspaces yet"),
-                m(
-                  ButtonLink,
-                  { variant: "primary", ...routeLinkAttrs("/create") },
-                  "Create",
-                ),
+                m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/create") }, "Create"),
               ]),
         m(
           "div",
@@ -1085,8 +841,7 @@ export const LandingPage: m.ClosureComponent = () => {
             "a",
             {
               id: "landing-destroyed",
-              class:
-                "inline-flex items-center gap-2 type-helper text-tertiary hover:text-primary no-underline",
+              class: "inline-flex items-center gap-2 type-helper text-tertiary hover:text-primary no-underline",
               ...routeLinkAttrs("/workspaces/destroyed"),
             },
             m("span", "Recently destroyed workspaces"),
@@ -1108,82 +863,58 @@ export const LandingPage: m.ClosureComponent = () => {
                   m(
                     "span",
                     (() => {
-                      const enabledCount = providerEntries.filter(
-                        (entry) => entry.status !== "DISABLED",
-                      ).length;
-                      const errorCount = providerEntries.filter(
-                        (entry) => entry.status === "ERROR",
-                      ).length;
-                      const providerWord =
-                        enabledCount === 1 ? "provider" : "providers";
+                      const enabledCount = providerEntries.filter((entry) => entry.status !== "DISABLED").length;
+                      const errorCount = providerEntries.filter((entry) => entry.status === "ERROR").length;
+                      const providerWord = enabledCount === 1 ? "provider" : "providers";
                       const errorSuffix =
-                        errorCount > 0
-                          ? ` (${errorCount} ${errorCount === 1 ? "error" : "errors"})`
-                          : "";
+                        errorCount > 0 ? ` (${errorCount} ${errorCount === 1 ? "error" : "errors"})` : "";
                       return `${enabledCount} ${providerWord} enabled${errorSuffix}`;
                     })(),
                   ),
-                  m(
-                    "span",
-                    { class: "text-tertiary ml-2" },
-                    state.isProvidersOpen ? "▾" : "▸",
-                  ),
+                  m("span", { class: "text-tertiary ml-2" }, state.isProvidersOpen ? "▾" : "▸"),
                 ],
               ),
               state.isProvidersOpen
-                ? m(
-                    "div",
-                    { class: "mt-3 flex flex-col gap-1.5" },
-                    providerEntries.map((entry) => providerRow(entry)),
-                  )
+                ? m("div", { class: "mt-3 flex flex-col gap-1.5" }, providerEntries.map((entry) => providerRow(entry)))
                 : null,
             ])
           : null,
         m("div", { class: "h-20", "aria-hidden": "true" }),
-        m(
-          "div",
-          { class: "fixed bottom-3 left-3 flex flex-col items-start gap-0.5" },
-          [
-            m(
-              "button",
-              {
-                type: "button",
-                id: "landing-minds-settings",
-                class:
-                  "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
-                onclick: () => m.route.set("/settings"),
-              },
-              [
-                m(Icon16, { name: "settings", extra: "shrink-0" }),
-                m("span", "Imbue Studio Settings"),
-              ],
-            ),
-            m(
-              "button",
-              {
-                type: "button",
-                id: "landing-account",
-                "data-signed-in": stores.accounts.accountEmail
-                  ? "true"
-                  : "false",
-                class:
-                  "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
-                onclick: () => m.route.set("/accounts"),
-              },
-              [
-                m(Icon16, { name: "user", extra: "shrink-0" }),
-                m(
-                  "span",
-                  stores.accounts.accountEmail
-                    ? stores.accounts.extraAccountCount > 0
-                      ? `${stores.accounts.accountEmail} (+${stores.accounts.extraAccountCount})`
-                      : stores.accounts.accountEmail
-                    : "Log in",
-                ),
-              ],
-            ),
-          ],
-        ),
+        m("div", { class: "fixed bottom-3 left-3 flex flex-col items-start gap-0.5" }, [
+          m(
+            "button",
+            {
+              type: "button",
+              id: "landing-minds-settings",
+              class:
+                "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
+              onclick: () => m.route.set("/settings"),
+            },
+            [m(Icon16, { name: "settings", extra: "shrink-0" }), m("span", "Imbue Studio Settings")],
+          ),
+          m(
+            "button",
+            {
+              type: "button",
+              id: "landing-account",
+              "data-signed-in": stores.accounts.accountEmail ? "true" : "false",
+              class:
+                "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
+              onclick: () => m.route.set("/accounts"),
+            },
+            [
+              m(Icon16, { name: "user", extra: "shrink-0" }),
+              m(
+                "span",
+                stores.accounts.accountEmail
+                  ? stores.accounts.extraAccountCount > 0
+                    ? `${stores.accounts.accountEmail} (+${stores.accounts.extraAccountCount})`
+                    : stores.accounts.accountEmail
+                  : "Log in",
+              ),
+            ],
+          ),
+        ]),
       ]);
     },
   };

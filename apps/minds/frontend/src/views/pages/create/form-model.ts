@@ -2,17 +2,9 @@
 // script). Pure state + injected fetchers so vitest can drive every branch;
 // the CreatePage view renders from it and forwards DOM events.
 
-import type {
-  CloudAccountOption,
-  CreateFormDefaults,
-  LocalBackendPrerequisite,
-} from "../../../models/create";
+import type { CloudAccountOption, CreateFormDefaults, LocalBackendPrerequisite } from "../../../models/create";
 import { hostNameFormatError } from "../../../models/create";
-import type {
-  MachineSizeDimension,
-  MachineSizeDraft,
-  MachineSizeNumbers,
-} from "../../../models/machineSize";
+import type { MachineSizeDimension, MachineSizeDraft, MachineSizeNumbers } from "../../../models/machineSize";
 import {
   MACHINE_SIZE_DIMENSIONS,
   machineSizeDraftFor,
@@ -26,9 +18,7 @@ export type PresetName = "remote" | "local" | "own-cloud";
  * The container runtime's own requirement (runsc) is annotated separately,
  * under the runtime selector.
  */
-function localPrerequisiteKeyFor(
-  launchMode: string,
-): LocalBackendPrerequisite["key"] | null {
+function localPrerequisiteKeyFor(launchMode: string): LocalBackendPrerequisite["key"] | null {
   if (launchMode === "LIMA") return "LIMA";
   if (launchMode === "DOCKER") return "DOCKER";
   return null;
@@ -171,18 +161,10 @@ export class CreateFormModel {
       this.backupApiKeyEnv = prefill.backup_api_key_env;
       this.accountId = prefill.account_id || defaults.default_account_id;
       this.runtime = prefill.docker_runtime;
-      this.launchValue =
-        prefill.cloud_account !== ""
-          ? `BYOK:${prefill.cloud_account}`
-          : prefill.launch_mode;
-      if (prefill.region !== "")
-        this.regionByLaunchValue.set(this.launchValue, prefill.region);
+      this.launchValue = prefill.cloud_account !== "" ? `BYOK:${prefill.cloud_account}` : prefill.launch_mode;
+      if (prefill.region !== "") this.regionByLaunchValue.set(this.launchValue, prefill.region);
       this.instanceTypePreselect = prefill.instance_type;
-      if (
-        prefill.cpu_count !== null ||
-        prefill.memory_gb !== null ||
-        prefill.disk_gb !== null
-      ) {
+      if (prefill.cpu_count !== null || prefill.memory_gb !== null || prefill.disk_gb !== null) {
         this.machineSizePreselect = machineSizeDraftFor(prefill);
       }
       this.isAdvancedOpen = true;
@@ -196,21 +178,14 @@ export class CreateFormModel {
   }
 
   launchSelection(): LaunchSelection {
-    if (!this.launchValue.startsWith("BYOK:"))
-      return { mode: this.launchValue, cloudAccount: "" };
+    if (!this.launchValue.startsWith("BYOK:")) return { mode: this.launchValue, cloudAccount: "" };
     const name = this.launchValue.slice("BYOK:".length);
     const account = this.cloudAccount(name);
-    return {
-      mode: (account?.backend ?? "aws").toUpperCase(),
-      cloudAccount: name,
-    };
+    return { mode: (account?.backend ?? "aws").toUpperCase(), cloudAccount: name };
   }
 
   cloudAccount(name: string): CloudAccountOption | null {
-    return (
-      this.defaults?.cloud_accounts.find((account) => account.name === name) ??
-      null
-    );
+    return this.defaults?.cloud_accounts.find((account) => account.name === name) ?? null;
   }
 
   /** The compute mode the local preset selects: whichever local backend this machine can run. */
@@ -219,48 +194,33 @@ export class CreateFormModel {
   }
 
   /** What the machine reports about one local backend, or null before the defaults land. */
-  prerequisiteFor(
-    key: LocalBackendPrerequisite["key"],
-  ): LocalBackendPrerequisite | null {
-    return (
-      this.defaults?.local_prerequisites.find((entry) => entry.key === key) ??
-      null
-    );
+  prerequisiteFor(key: LocalBackendPrerequisite["key"]): LocalBackendPrerequisite | null {
+    return this.defaults?.local_prerequisites.find((entry) => entry.key === key) ?? null;
   }
 
   /**
    * What the machine is missing for one local backend, or null when the key
    * is a cloud mode's (none), the defaults have not landed, or it can run it.
    */
-  unmetPrerequisite(
-    key: LocalBackendPrerequisite["key"] | null,
-  ): LocalBackendPrerequisite | null {
+  unmetPrerequisite(key: LocalBackendPrerequisite["key"] | null): LocalBackendPrerequisite | null {
     if (key === null) return null;
     const prerequisite = this.prerequisiteFor(key);
-    return prerequisite !== null && !prerequisite.is_available
-      ? prerequisite
-      : null;
+    return prerequisite !== null && !prerequisite.is_available ? prerequisite : null;
   }
 
   /** What the selected compute mode itself needs from this machine and is not getting. */
   unmetPrerequisiteForLaunchMode(): LocalBackendPrerequisite | null {
-    return this.unmetPrerequisite(
-      localPrerequisiteKeyFor(this.launchSelection().mode),
-    );
+    return this.unmetPrerequisite(localPrerequisiteKeyFor(this.launchSelection().mode));
   }
 
   /** What the selected container runtime (runsc) needs and is not getting, while the runtime selector is shown. */
   unmetPrerequisiteForRuntime(): LocalBackendPrerequisite | null {
-    return this.isRuntimeShown() && this.runtime === "RUNSC"
-      ? this.unmetPrerequisite("RUNSC")
-      : null;
+    return this.isRuntimeShown() && this.runtime === "RUNSC" ? this.unmetPrerequisite("RUNSC") : null;
   }
 
   /** What the local preset's compute mode needs and is not getting. */
   unmetPrerequisiteForLocalPreset(): LocalBackendPrerequisite | null {
-    return this.unmetPrerequisite(
-      localPrerequisiteKeyFor(this.localLaunchMode()),
-    );
+    return this.unmetPrerequisite(localPrerequisiteKeyFor(this.localLaunchMode()));
   }
 
   /**
@@ -271,10 +231,7 @@ export class CreateFormModel {
    * create would only fail, slowly, where the notice already says what to do.
    */
   unmetPrerequisiteForSubmit(): LocalBackendPrerequisite | null {
-    return (
-      this.unmetPrerequisiteForLaunchMode() ??
-      this.unmetPrerequisiteForRuntime()
-    );
+    return this.unmetPrerequisiteForLaunchMode() ?? this.unmetPrerequisiteForRuntime();
   }
 
   /**
@@ -288,8 +245,7 @@ export class CreateFormModel {
       local_prerequisites: defaults.local_prerequisites,
       local_launch_mode: defaults.local_launch_mode,
     };
-    if (this.selectedPreset === "local")
-      this.launchValue = defaults.local_launch_mode;
+    if (this.selectedPreset === "local") this.launchValue = defaults.local_launch_mode;
   }
 
   /**
@@ -305,9 +261,7 @@ export class CreateFormModel {
       case "local":
         return this.localLaunchMode();
       case "own-cloud": {
-        const account = this.defaults?.byok_clouds_enabled
-          ? this.defaults.cloud_accounts[0]
-          : undefined;
+        const account = this.defaults?.byok_clouds_enabled ? this.defaults.cloud_accounts[0] : undefined;
         return account === undefined ? "VULTR" : `BYOK:${account.name}`;
       }
     }
@@ -317,11 +271,7 @@ export class CreateFormModel {
     this.selectedPreset = name;
     this.launchValue = this.presetLaunchValue(name);
     this.backupProvider = PRESET_BACKUP_PROVIDERS[name];
-    if (
-      name === "remote" &&
-      this.accountId === "" &&
-      (this.defaults?.accounts.length ?? 0) > 0
-    ) {
+    if (name === "remote" && this.accountId === "" && (this.defaults?.accounts.length ?? 0) > 0) {
       this.accountId = this.defaults?.accounts[0]?.user_id ?? "";
     }
     if (!this.imbueCloudNeedsAccount()) this.isAccountErrorShown = false;
@@ -334,33 +284,19 @@ export class CreateFormModel {
    */
   adoptAccounts(defaults: CreateFormDefaults): void {
     if (this.defaults === null) return;
-    this.defaults = {
-      ...this.defaults,
-      accounts: defaults.accounts,
-      default_account_id: defaults.default_account_id,
-    };
-    if (
-      !defaults.accounts.some((account) => account.user_id === this.accountId)
-    ) {
+    this.defaults = { ...this.defaults, accounts: defaults.accounts, default_account_id: defaults.default_account_id };
+    if (!defaults.accounts.some((account) => account.user_id === this.accountId)) {
       this.accountId = defaults.default_account_id;
     }
   }
 
   /** The email of the picked account, or "" when none (or an unknown one) is picked. */
   selectedAccountEmail(): string {
-    return (
-      this.defaults?.accounts.find(
-        (account) => account.user_id === this.accountId,
-      )?.email ?? ""
-    );
+    return this.defaults?.accounts.find((account) => account.user_id === this.accountId)?.email ?? "";
   }
 
   imbueCloudNeedsAccount(): boolean {
-    return (
-      this.accountId === "" &&
-      (this.launchValue === "IMBUE_CLOUD" ||
-        this.backupProvider === "IMBUE_CLOUD")
-    );
+    return this.accountId === "" && (this.launchValue === "IMBUE_CLOUD" || this.backupProvider === "IMBUE_CLOUD");
   }
 
   /** Region options for the current selection; empty means hide the picker. */
@@ -374,11 +310,7 @@ export class CreateFormModel {
     const remembered = this.regionByLaunchValue.get(this.launchValue);
     if (remembered !== undefined) return remembered;
     const selection = this.launchSelection();
-    return (
-      this.defaults?.region_selected_by_launch_mode[selection.mode] ??
-      this.regionOptions()[0] ??
-      ""
-    );
+    return this.defaults?.region_selected_by_launch_mode[selection.mode] ?? this.regionOptions()[0] ?? "";
   }
 
   setRegion(region: string): void {
@@ -402,19 +334,14 @@ export class CreateFormModel {
     if (options.length === 0) return "";
     const remembered = this.instanceTypeByLaunchValue.get(this.launchValue);
     if (remembered !== undefined) return remembered;
-    if (
-      this.instanceTypePreselect !== "" &&
-      options.some(([value]) => value === this.instanceTypePreselect)
-    ) {
+    if (this.instanceTypePreselect !== "" && options.some(([value]) => value === this.instanceTypePreselect)) {
       const preselect = this.instanceTypePreselect;
       this.instanceTypePreselect = "";
       this.instanceTypeByLaunchValue.set(this.launchValue, preselect);
       return preselect;
     }
     const backend = this.launchSelection().mode;
-    return (
-      this.defaults?.default_instance_type_by_backend[backend] ?? options[0][0]
-    );
+    return this.defaults?.default_instance_type_by_backend[backend] ?? options[0][0];
   }
 
   setInstanceType(instanceType: string): void {
@@ -423,11 +350,7 @@ export class CreateFormModel {
 
   /** The numeric size the selected mode takes (its defaults, as offered), or null for a mode sized another way. */
   machineSizeDefaults(): MachineSizeNumbers | null {
-    return (
-      this.defaults?.machine_size_defaults_by_launch_mode[
-        this.launchSelection().mode
-      ] ?? null
-    );
+    return this.defaults?.machine_size_defaults_by_launch_mode[this.launchSelection().mode] ?? null;
   }
 
   /** The size fields as currently shown for the selected mode; null when the mode has none. */
@@ -439,16 +362,9 @@ export class CreateFormModel {
     if (this.machineSizePreselect !== null) {
       // A retry pre-fill names the dimensions its mode took; the mode keeps only those.
       const preselect: MachineSizeDraft = {
-        cpu_count:
-          defaults.cpu_count === null
-            ? ""
-            : this.machineSizePreselect.cpu_count,
-        memory_gb:
-          defaults.memory_gb === null
-            ? ""
-            : this.machineSizePreselect.memory_gb,
-        disk_gb:
-          defaults.disk_gb === null ? "" : this.machineSizePreselect.disk_gb,
+        cpu_count: defaults.cpu_count === null ? "" : this.machineSizePreselect.cpu_count,
+        memory_gb: defaults.memory_gb === null ? "" : this.machineSizePreselect.memory_gb,
+        disk_gb: defaults.disk_gb === null ? "" : this.machineSizePreselect.disk_gb,
       };
       this.machineSizePreselect = null;
       this.machineSizeByLaunchValue.set(this.launchValue, preselect);
@@ -460,10 +376,7 @@ export class CreateFormModel {
   setMachineSizeField(dimension: MachineSizeDimension, text: string): void {
     const current = this.machineSizeDraft();
     if (current === null) return;
-    this.machineSizeByLaunchValue.set(this.launchValue, {
-      ...current,
-      [dimension]: text,
-    });
+    this.machineSizeByLaunchValue.set(this.launchValue, { ...current, [dimension]: text });
   }
 
   /**
@@ -475,9 +388,7 @@ export class CreateFormModel {
     const draft = this.machineSizeDraft();
     if (defaults === null || draft === null) return [];
     return MACHINE_SIZE_DIMENSIONS.filter(
-      (dimension) =>
-        defaults[dimension] !== null &&
-        parseMachineSizeNumber(draft[dimension]) === null,
+      (dimension) => defaults[dimension] !== null && parseMachineSizeNumber(draft[dimension]) === null,
     );
   }
 
@@ -512,9 +423,7 @@ export class CreateFormModel {
     }
     // A 'taken' verdict only blocks the exact name/scope it was computed for;
     // anything else is stale and falls through to the server's own check.
-    const isStillTaken =
-      this.hostNameState === "taken" &&
-      this.hostNameTakenKey === this.hostNameAvailabilityUrl();
+    const isStillTaken = this.hostNameState === "taken" && this.hostNameTakenKey === this.hostNameAvailabilityUrl();
     return !isStillTaken;
   }
 
@@ -556,13 +465,9 @@ export class CreateFormModel {
       cloud_account: selection.cloudAccount,
       account_id: this.accountId,
       backup_provider: this.backupProvider,
-      backup_api_key_env:
-        this.backupProvider === "API_KEY" ? this.backupApiKeyEnv : "",
+      backup_api_key_env: this.backupProvider === "API_KEY" ? this.backupApiKeyEnv : "",
       region: this.regionOptions().length > 0 ? this.selectedRegion() : "",
-      instance_type:
-        this.instanceTypeOptions().length > 0
-          ? this.selectedInstanceType()
-          : "",
+      instance_type: this.instanceTypeOptions().length > 0 ? this.selectedInstanceType() : "",
       enable_web_access: this.enableWebAccess,
     };
     if (this.isRuntimeShown()) body.runtime = this.runtime;

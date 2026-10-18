@@ -1,14 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { CreateFormDefaults } from "../../../models/create";
-import {
-  CreateFormModel,
-  DEFAULT_RESTIC_ENV,
-  normalizeCreateApiError,
-} from "./form-model";
+import { CreateFormModel, DEFAULT_RESTIC_ENV, normalizeCreateApiError } from "./form-model";
 
-function buildDefaults(
-  overrides: Partial<CreateFormDefaults> = {},
-): CreateFormDefaults {
+function buildDefaults(overrides: Partial<CreateFormDefaults> = {}): CreateFormDefaults {
   return {
     accounts: [{ user_id: "user-1", email: "alice@example.com" }],
     default_account_id: "user-1",
@@ -23,11 +17,7 @@ function buildDefaults(
       VULTR: ["ewr"],
       AWS: ["us-west-2", "us-east-1"],
     },
-    region_selected_by_launch_mode: {
-      IMBUE_CLOUD: "us-west",
-      VULTR: "ewr",
-      AWS: "us-west-2",
-    },
+    region_selected_by_launch_mode: { IMBUE_CLOUD: "us-west", VULTR: "ewr", AWS: "us-west-2" },
     instance_types_by_backend: {
       AWS: [
         ["t3.large", "t3.large (8 GB)"],
@@ -40,41 +30,16 @@ function buildDefaults(
       LIMA: { cpu_count: 2, memory_gb: 4, disk_gb: 100 },
       MODAL: { cpu_count: 2, memory_gb: 4, disk_gb: null },
     },
-    cloud_accounts: [
-      {
-        name: "aws_acct",
-        alias: "team aws",
-        backend: "aws",
-        region: "us-west-2",
-      },
-    ],
+    cloud_accounts: [{ name: "aws_acct", alias: "team aws", backend: "aws", region: "us-west-2" }],
     byok_clouds_enabled: true,
     git_url: "https://github.com/imbue-ai/default-workspace-template.git",
     branch: "minds-v9.9.9",
     color: "#0b292b",
     prefill: null,
     local_prerequisites: [
-      {
-        key: "DOCKER",
-        is_available: false,
-        summary: "Docker is not installed.",
-        install_command: "",
-        docs_url: "https://d",
-      },
-      {
-        key: "RUNSC",
-        is_available: false,
-        summary: "No runsc on macOS.",
-        install_command: "",
-        docs_url: "https://g",
-      },
-      {
-        key: "LIMA",
-        is_available: true,
-        summary: "Lima is built in.",
-        install_command: "",
-        docs_url: "https://q",
-      },
+      { key: "DOCKER", is_available: false, summary: "Docker is not installed.", install_command: "", docs_url: "https://d" },
+      { key: "RUNSC", is_available: false, summary: "No runsc on macOS.", install_command: "", docs_url: "https://g" },
+      { key: "LIMA", is_available: true, summary: "Lima is built in.", install_command: "", docs_url: "https://q" },
     ],
     local_launch_mode: "LIMA",
     ...overrides,
@@ -85,13 +50,7 @@ function buildDefaults(
 const LINUX_WITH_DOCKER: Partial<CreateFormDefaults> = {
   selected_docker_runtime: "RUNC",
   local_prerequisites: [
-    {
-      key: "DOCKER",
-      is_available: true,
-      summary: "Docker is running.",
-      install_command: "",
-      docs_url: "https://d",
-    },
+    { key: "DOCKER", is_available: true, summary: "Docker is running.", install_command: "", docs_url: "https://d" },
     {
       key: "RUNSC",
       is_available: false,
@@ -114,27 +73,9 @@ const LINUX_WITH_DOCKER: Partial<CreateFormDefaults> = {
 const LINUX_WITH_NOTHING: Partial<CreateFormDefaults> = {
   selected_docker_runtime: "RUNC",
   local_prerequisites: [
-    {
-      key: "DOCKER",
-      is_available: false,
-      summary: "Docker is not installed.",
-      install_command: "",
-      docs_url: "https://d",
-    },
-    {
-      key: "RUNSC",
-      is_available: false,
-      summary: "No runsc.",
-      install_command: "",
-      docs_url: "https://g",
-    },
-    {
-      key: "LIMA",
-      is_available: false,
-      summary: "QEMU is not installed.",
-      install_command: "",
-      docs_url: "https://q",
-    },
+    { key: "DOCKER", is_available: false, summary: "Docker is not installed.", install_command: "", docs_url: "https://d" },
+    { key: "RUNSC", is_available: false, summary: "No runsc.", install_command: "", docs_url: "https://g" },
+    { key: "LIMA", is_available: false, summary: "QEMU is not installed.", install_command: "", docs_url: "https://q" },
   ],
   local_launch_mode: "DOCKER",
 };
@@ -158,10 +99,7 @@ describe("CreateFormModel", () => {
     model.applyDefaults(buildDefaults());
     model.applyPreset("own-cloud");
     expect(model.launchValue).toBe("BYOK:aws_acct");
-    expect(model.launchSelection()).toEqual({
-      mode: "AWS",
-      cloudAccount: "aws_acct",
-    });
+    expect(model.launchSelection()).toEqual({ mode: "AWS", cloudAccount: "aws_acct" });
     expect(model.backupProvider).toBe("CONFIGURE_LATER");
 
     model.applyDefaults(buildDefaults({ cloud_accounts: [] }));
@@ -187,9 +125,7 @@ describe("CreateFormModel", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults(LINUX_WITH_DOCKER));
     model.launchValue = "LIMA";
-    expect(model.unmetPrerequisiteForSubmit()?.summary).toBe(
-      "QEMU is not installed.",
-    );
+    expect(model.unmetPrerequisiteForSubmit()?.summary).toBe("QEMU is not installed.");
     model.launchValue = "DOCKER";
     model.runtime = "RUNSC";
     expect(model.unmetPrerequisiteForSubmit()?.key).toBe("RUNSC");
@@ -210,9 +146,7 @@ describe("CreateFormModel", () => {
 
     model.applyDefaults(buildDefaults(LINUX_WITH_NOTHING));
     model.applyPreset("local");
-    expect(model.unmetPrerequisiteForSubmit()?.summary).toBe(
-      "Docker is not installed.",
-    );
+    expect(model.unmetPrerequisiteForSubmit()?.summary).toBe("Docker is not installed.");
     // Check again found Docker up: the same selection submits.
     model.refreshPrerequisites(buildDefaults(LINUX_WITH_DOCKER));
     expect(model.unmetPrerequisiteForSubmit()).toBeNull();
@@ -234,9 +168,7 @@ describe("CreateFormModel", () => {
     model.applyDefaults(buildDefaults(LINUX_WITH_NOTHING));
     model.launchValue = "IMBUE_CLOUD";
     expect(model.unmetPrerequisiteForLaunchMode()).toBeNull();
-    expect(model.unmetPrerequisiteForLocalPreset()?.summary).toBe(
-      "Docker is not installed.",
-    );
+    expect(model.unmetPrerequisiteForLocalPreset()?.summary).toBe("Docker is not installed.");
   });
 
   it("re-reads the prerequisites without disturbing the rest of the form", () => {
@@ -244,18 +176,8 @@ describe("CreateFormModel", () => {
     model.applyDefaults(buildDefaults(LINUX_WITH_DOCKER));
     model.applyPreset("local");
     model.hostName = "my-box";
-    const lima = {
-      key: "LIMA" as const,
-      is_available: true,
-      summary: "Ready.",
-      install_command: "",
-      docs_url: "https://q",
-    };
-    const limaReady = buildDefaults({
-      ...LINUX_WITH_DOCKER,
-      local_prerequisites: [lima],
-      local_launch_mode: "LIMA",
-    });
+    const lima = { key: "LIMA" as const, is_available: true, summary: "Ready.", install_command: "", docs_url: "https://q" };
+    const limaReady = buildDefaults({ ...LINUX_WITH_DOCKER, local_prerequisites: [lima], local_launch_mode: "LIMA" });
     model.refreshPrerequisites(limaReady);
     expect(model.hostName).toBe("my-box");
     // The local preset follows the refreshed choice.
@@ -282,18 +204,13 @@ describe("CreateFormModel", () => {
 
   it("takes up a mid-form sign-in's account without disturbing the rest of the form", () => {
     const model = new CreateFormModel();
-    model.applyDefaults(
-      buildDefaults({ accounts: [], default_account_id: "" }),
-    );
+    model.applyDefaults(buildDefaults({ accounts: [], default_account_id: "" }));
     model.hostName = "my-machine";
     expect(model.imbueCloudNeedsAccount()).toBe(true);
     expect(model.selectedAccountEmail()).toBe("");
 
     model.adoptAccounts(
-      buildDefaults({
-        accounts: [{ user_id: "user-new", email: "new@example.com" }],
-        default_account_id: "user-new",
-      }),
+      buildDefaults({ accounts: [{ user_id: "user-new", email: "new@example.com" }], default_account_id: "user-new" }),
     );
 
     expect(model.accountId).toBe("user-new");
@@ -322,10 +239,7 @@ describe("CreateFormModel", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults());
     model.adoptAccounts(
-      buildDefaults({
-        accounts: [{ user_id: "user-2", email: "bob@example.com" }],
-        default_account_id: "user-2",
-      }),
+      buildDefaults({ accounts: [{ user_id: "user-2", email: "bob@example.com" }], default_account_id: "user-2" }),
     );
     expect(model.accountId).toBe("user-2");
     expect(model.selectedAccountEmail()).toBe("bob@example.com");
@@ -335,18 +249,12 @@ describe("CreateFormModel", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults());
     model.launchValue = "BYOK:aws_acct";
-    expect(model.launchSelection()).toEqual({
-      mode: "AWS",
-      cloudAccount: "aws_acct",
-    });
+    expect(model.launchSelection()).toEqual({ mode: "AWS", cloudAccount: "aws_acct" });
     // BYOK entries pin their region: no picker, a note instead.
     expect(model.regionOptions()).toEqual([]);
     expect(model.byokPinnedRegion()).toBe("us-west-2");
     // The machine-size options come from the backend.
-    expect(model.instanceTypeOptions().map(([value]) => value)).toEqual([
-      "t3.large",
-      "t3.xlarge",
-    ]);
+    expect(model.instanceTypeOptions().map(([value]) => value)).toEqual(["t3.large", "t3.xlarge"]);
     expect(model.selectedInstanceType()).toBe("t3.large");
   });
 
@@ -401,9 +309,7 @@ describe("CreateFormModel", () => {
   it("seeds the repository and branch from the server defaults", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults());
-    expect(model.gitUrl).toBe(
-      "https://github.com/imbue-ai/default-workspace-template.git",
-    );
+    expect(model.gitUrl).toBe("https://github.com/imbue-ai/default-workspace-template.git");
     expect(model.branch).toBe("minds-v9.9.9");
   });
 
@@ -488,17 +394,9 @@ describe("CreateFormModel machine size", () => {
     expect(model.machineSizeDraft()).toBeNull();
     expect(model.submitBody().cpu_count).toBeUndefined();
     model.launchValue = "DOCKER";
-    expect(model.machineSizeDraft()).toEqual({
-      cpu_count: "4",
-      memory_gb: "8",
-      disk_gb: "",
-    });
+    expect(model.machineSizeDraft()).toEqual({ cpu_count: "4", memory_gb: "8", disk_gb: "" });
     model.launchValue = "LIMA";
-    expect(model.machineSizeDraft()).toEqual({
-      cpu_count: "2",
-      memory_gb: "4",
-      disk_gb: "100",
-    });
+    expect(model.machineSizeDraft()).toEqual({ cpu_count: "2", memory_gb: "4", disk_gb: "100" });
   });
 
   it("sends the typed size as whole numbers, keeping a pick per mode", () => {
@@ -527,10 +425,7 @@ describe("CreateFormModel machine size", () => {
     expect(model.invalidMachineSizeDimensions()).toEqual([]);
     model.setMachineSizeField("cpu_count", "0");
     model.setMachineSizeField("memory_gb", "1.5");
-    expect(model.invalidMachineSizeDimensions()).toEqual([
-      "cpu_count",
-      "memory_gb",
-    ]);
+    expect(model.invalidMachineSizeDimensions()).toEqual(["cpu_count", "memory_gb"]);
     model.setMachineSizeField("cpu_count", " 2 ");
     model.setMachineSizeField("memory_gb", "");
     expect(model.invalidMachineSizeDimensions()).toEqual(["memory_gb"]);
@@ -560,35 +455,22 @@ describe("CreateFormModel machine size", () => {
       }),
     );
     expect(model.launchValue).toBe("LIMA");
-    expect(model.machineSizeDraft()).toEqual({
-      cpu_count: "6",
-      memory_gb: "12",
-      disk_gb: "250",
-    });
+    expect(model.machineSizeDraft()).toEqual({ cpu_count: "6", memory_gb: "12", disk_gb: "250" });
     const body = model.submitBody();
-    expect([body.cpu_count, body.memory_gb, body.disk_gb]).toEqual([
-      6, 12, 250,
-    ]);
+    expect([body.cpu_count, body.memory_gb, body.disk_gb]).toEqual([6, 12, 250]);
   });
 });
 
 describe("normalizeCreateApiError", () => {
   it("normalizes the three error shapes into one", () => {
-    expect(
-      normalizeCreateApiError({ error: "bad url", field: "git_url" }),
-    ).toEqual({
+    expect(normalizeCreateApiError({ error: "bad url", field: "git_url" })).toEqual({
       message: "bad url",
       field: "git_url",
       redirectUrl: "",
     });
-    expect(
-      normalizeCreateApiError({
-        error: "no account",
-        redirect_url: "/auth/signup",
-      }).redirectUrl,
-    ).toBe("/auth/signup");
-    expect(normalizeCreateApiError(null).message).toBe(
-      "Could not create the workspace.",
+    expect(normalizeCreateApiError({ error: "no account", redirect_url: "/auth/signup" }).redirectUrl).toBe(
+      "/auth/signup",
     );
+    expect(normalizeCreateApiError(null).message).toBe("Could not create the workspace.");
   });
 });

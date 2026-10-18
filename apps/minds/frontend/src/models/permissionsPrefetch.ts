@@ -30,27 +30,15 @@ export type FetchJsonLike = (url: string) => Promise<FetchJsonResult>;
 const WARM_TTL_MS = 15_000;
 
 /** One machine's warm: a window shows one panel, so a second warm replaces it. */
-let warmed: {
-  agentId: string;
-  startedAt: number;
-  pending: Promise<FetchJsonResult>;
-} | null = null;
+let warmed: { agentId: string; startedAt: number; pending: Promise<FetchJsonResult> } | null = null;
 
 export function permissionsOverviewUrl(agentId: string): string {
   return `/ui/api/workspaces/${encodeURIComponent(agentId)}/permissions`;
 }
 
 /** Start reading `agentId`'s overview unless a live warm already covers it. */
-export function warmPermissionsOverview(
-  agentId: string,
-  fetchJson: FetchJsonLike,
-): void {
-  if (
-    warmed !== null &&
-    warmed.agentId === agentId &&
-    !isExpired(warmed.startedAt)
-  )
-    return;
+export function warmPermissionsOverview(agentId: string, fetchJson: FetchJsonLike): void {
+  if (warmed !== null && warmed.agentId === agentId && !isExpired(warmed.startedAt)) return;
   warmed = {
     agentId,
     startedAt: Date.now(),
@@ -61,15 +49,8 @@ export function warmPermissionsOverview(
 }
 
 /** The warm for `agentId`, or null when there is none live for it. */
-export function readWarmedPermissionsOverview(
-  agentId: string,
-): Promise<FetchJsonResult> | null {
-  if (
-    warmed === null ||
-    warmed.agentId !== agentId ||
-    isExpired(warmed.startedAt)
-  )
-    return null;
+export function readWarmedPermissionsOverview(agentId: string): Promise<FetchJsonResult> | null {
+  if (warmed === null || warmed.agentId !== agentId || isExpired(warmed.startedAt)) return null;
   return warmed.pending;
 }
 

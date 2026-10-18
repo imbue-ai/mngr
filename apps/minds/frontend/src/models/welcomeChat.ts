@@ -66,10 +66,7 @@ export function tableColumnMarkdown(column: TableColumn): string {
 
 /** The opener with the phrase it is about emphasised, as the start flow draws it. */
 export function manifestoOpenerMarkdown(): string {
-  return MANIFESTO_OPENER.replace(
-    MANIFESTO_OPENER_EMPHASIS,
-    `*${MANIFESTO_OPENER_EMPHASIS}*`,
-  );
+  return MANIFESTO_OPENER.replace(MANIFESTO_OPENER_EMPHASIS, `*${MANIFESTO_OPENER_EMPHASIS}*`);
 }
 
 /** The manifesto exchange every workspace's conversation opens with, whichever page it started on. */
@@ -110,10 +107,7 @@ export function flowTurns(entries: TranscriptEntry[]): WelcomeChatTurn[] {
     }
     const step = FLOW[entry.id];
     const { lead, body: plainBody } = stepText(step, entry.ack);
-    const body =
-      entry.email === undefined
-        ? plainBody
-        : plainBody.replace(entry.email, `**${entry.email}**`);
+    const body = entry.email === undefined ? plainBody : plainBody.replace(entry.email, `**${entry.email}**`);
     const parts: string[] = [];
     if (lead !== "") parts.push(`**${lead}**`);
     if (body !== "") parts.push(body);

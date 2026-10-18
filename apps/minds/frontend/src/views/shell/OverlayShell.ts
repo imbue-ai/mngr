@@ -252,7 +252,8 @@ export function OverlayShell(): m.Component<OverlayShellAttrs> {
             anchors,
             selected,
             onDismiss: attrs.onDismiss,
-            onSelect: onSelectIcon ?? ((id) => openTitlebarPopup(shell, id)),
+            onSelect:
+              onSelectIcon ?? ((id) => openTitlebarPopup(shell, id)),
             unresolvedCount: shell.stores.notifications.unresolvedCount,
             hasWorkspaceRequestDot:
               shell.stores.requests.hasPendingForWorkspace(
@@ -263,10 +264,7 @@ export function OverlayShell(): m.Component<OverlayShellAttrs> {
     ];
   }
 
-  function centered(
-    attrs: OverlayShellAttrs,
-    children: m.Children,
-  ): m.Children {
+  function centered(attrs: OverlayShellAttrs, children: m.Children): m.Children {
     return m(
       "div",
       {

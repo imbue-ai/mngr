@@ -15,30 +15,19 @@ import { allText, attrsOf, collectVnodes } from "../../testing";
 import { ShellState } from "../shell/shell-state";
 import { renderStartPage } from "./StartPage.testing";
 
-vi.mock("../../models/webLogin", () => ({
-  webLogin: { start: vi.fn(async () => {}), email: "" },
-}));
+vi.mock("../../models/webLogin", () => ({ webLogin: { start: vi.fn(async () => {}), email: "" } }));
 
 const CONSENT_URL = "/ui/api/onboarding/consent";
 
-function attrsWith(
-  tree: unknown,
-  name: string,
-  value: string,
-): Record<string, unknown> {
-  const vnode = collectVnodes(tree).find(
-    (candidate) => attrsOf(candidate)[name] === value,
-  );
+function attrsWith(tree: unknown, name: string, value: string): Record<string, unknown> {
+  const vnode = collectVnodes(tree).find((candidate) => attrsOf(candidate)[name] === value);
   if (vnode === undefined) throw new Error(`nothing with ${name}=${value}`);
   return attrsOf(vnode);
 }
 
 /** The live page streams its agent turns one character per span, so its text reads back spaced out. */
 function unspaced(value: unknown): string {
-  return (typeof value === "string" ? value : allText(value)).replace(
-    /\s+/g,
-    "",
-  );
+  return (typeof value === "string" ? value : allText(value)).replace(/\s+/g, "");
 }
 
 describe("the manifesto's reporting question", () => {
@@ -47,10 +36,7 @@ describe("the manifesto's reporting question", () => {
   beforeEach(() => {
     const shell = new ShellState(createEmptyStores());
     registerAppContext({ stores: shell.stores, shell });
-    fetchMock = vi.fn(
-      async (_url: string, _init?: RequestInit) =>
-        new Response("{}", { status: 200 }),
-    );
+    fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response("{}", { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
   });
 
@@ -61,8 +47,7 @@ describe("the manifesto's reporting question", () => {
   });
 
   async function postedConsentBody(): Promise<unknown> {
-    const consentCalls = (): unknown[][] =>
-      fetchMock.mock.calls.filter(([url]) => url === CONSENT_URL);
+    const consentCalls = (): unknown[][] => fetchMock.mock.calls.filter(([url]) => url === CONSENT_URL);
     await vi.waitFor(() => expect(consentCalls()).toHaveLength(1));
     const init = consentCalls()[0]?.[1] as RequestInit | undefined;
     return JSON.parse(String(init?.body));
@@ -93,13 +78,9 @@ describe("the manifesto's reporting question", () => {
 
     (attrsWith(view(), "data-answer", "reporting-yes").onclick as () => void)();
 
-    expect(await postedConsentBody()).toEqual({
-      report_unexpected_errors: true,
-    });
+    expect(await postedConsentBody()).toEqual({ report_unexpected_errors: true });
     expect(allText(view())).toContain(REPORTING_ACCEPT_LABEL);
-    expect(unspaced(view())).toContain(
-      unspaced("We recommend running it on Imbue Cloud."),
-    );
+    expect(unspaced(view())).toContain(unspaced("We recommend running it on Imbue Cloud."));
   });
 
   it("saves the no, and says the no rather than a press nobody made", async () => {
@@ -107,13 +88,9 @@ describe("the manifesto's reporting question", () => {
 
     (attrsWith(view(), "data-answer", "reporting-no").onclick as () => void)();
 
-    expect(await postedConsentBody()).toEqual({
-      report_unexpected_errors: false,
-    });
+    expect(await postedConsentBody()).toEqual({ report_unexpected_errors: false });
     expect(allText(view())).toContain(REPORTING_DECLINE_LABEL);
-    expect(unspaced(view())).toContain(
-      unspaced("We recommend running it on Imbue Cloud."),
-    );
+    expect(unspaced(view())).toContain(unspaced("We recommend running it on Imbue Cloud."));
   });
 
   it("can be taken back and answered the other way, which saves the new answer", async () => {
@@ -122,18 +99,13 @@ describe("the manifesto's reporting question", () => {
     await postedConsentBody();
 
     (attrsWith(view(), "aria-label", "Change answer").onclick as () => void)();
-    expect(unspaced(view())).not.toContain(
-      unspaced("We recommend running it on Imbue Cloud."),
-    );
+    expect(unspaced(view())).not.toContain(unspaced("We recommend running it on Imbue Cloud."));
     (attrsWith(view(), "data-answer", "reporting-no").onclick as () => void)();
 
-    const consentCalls = (): unknown[][] =>
-      fetchMock.mock.calls.filter(([url]) => url === CONSENT_URL);
+    const consentCalls = (): unknown[][] => fetchMock.mock.calls.filter(([url]) => url === CONSENT_URL);
     await vi.waitFor(() => expect(consentCalls()).toHaveLength(2));
     const init = consentCalls()[1]?.[1] as RequestInit | undefined;
-    expect(JSON.parse(String(init?.body))).toEqual({
-      report_unexpected_errors: false,
-    });
+    expect(JSON.parse(String(init?.body))).toEqual({ report_unexpected_errors: false });
     expect(allText(view())).toContain(REPORTING_DECLINE_LABEL);
   });
 
@@ -142,19 +114,13 @@ describe("the manifesto's reporting question", () => {
     const runButtonsDelay = (): string =>
       String(
         collectVnodes(view())
-          .filter((node) =>
-            collectVnodes(node).some(
-              (inner) => attrsOf(inner)["data-answer"] === "cloud",
-            ),
-          )
+          .filter((node) => collectVnodes(node).some((inner) => attrsOf(inner)["data-answer"] === "cloud"))
           .map((node) => attrsOf(node).style)
           .find((style) => typeof style === "string"),
       );
     (attrsWith(view(), "data-answer", "reporting-yes").onclick as () => void)();
     (attrsWith(view(), "data-answer", "cloud").onclick as () => void)();
-    const undos = collectVnodes(view()).filter(
-      (node) => attrsOf(node)["aria-label"] === "Change answer",
-    );
+    const undos = collectVnodes(view()).filter((node) => attrsOf(node)["aria-label"] === "Change answer");
     (attrsOf(undos[1]).onclick as () => void)();
     expect(runButtonsDelay()).toContain("--start-chat-delay: 0ms");
 
@@ -171,8 +137,6 @@ describe("the manifesto's reporting question", () => {
 
     (attrsWith(view(), "data-answer", "local").onclick as () => void)();
 
-    expect(
-      fetchMock.mock.calls.filter(([url]) => url === CONSENT_URL),
-    ).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === CONSENT_URL)).toHaveLength(1);
   });
 });

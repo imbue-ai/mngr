@@ -52,11 +52,7 @@ function markUrl(fileName: string): string {
 
 /** `onMissing` is passed only for the mark a surface cannot do without: a
  * missing dark variant must not retire a base logo that loads perfectly well. */
-function markImg(
-  url: string,
-  imgClass: string,
-  onMissing: (() => void) | null,
-): m.Children {
+function markImg(url: string, imgClass: string, onMissing: (() => void) | null): m.Children {
   return m("img", {
     src: url,
     alt: "",
@@ -90,8 +86,7 @@ export function serviceMark(
     markFailedServiceNames.add(serviceName);
   };
   const wrapperClass =
-    (tone === "muted" ? "service-mark service-mark-muted " : "service-mark ") +
-    sizeClass;
+    (tone === "muted" ? "service-mark service-mark-muted " : "service-mark ") + sizeClass;
   if (!DARK_SURFACE_VARIANT_SERVICE_NAMES.has(serviceName)) {
     return m(
       "span",

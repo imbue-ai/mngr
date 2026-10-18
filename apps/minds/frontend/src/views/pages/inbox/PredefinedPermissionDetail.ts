@@ -38,8 +38,7 @@ export interface PredefinedPermissionDetailAttrs {
 
 /** A bare text link. Not a Button: the mockup's Adjust and Back sit in the
  * text column at helper size, which every Button size overrides. */
-const TEXT_LINK_CLASS =
-  "type-helper text-accent hover:underline cursor-pointer";
+const TEXT_LINK_CLASS = "type-helper text-accent hover:underline cursor-pointer";
 
 /** The rows the summary lists: exactly what Approve would submit right now,
  * so a wildcard selection never reads as "and these specific ones too". */
@@ -68,34 +67,30 @@ function summaryRows(
  * account beats several arrangements the user has to tell apart. */
 function accountPicker(model: InboxModel, detail: Detail): m.Children {
   if (hasNoStoredAccount(detail)) return null;
-  return m(
-    "div",
-    { id: "permissions-account", class: "flex flex-col gap-1.5" },
-    [
-      m("h3", { class: "type-section text-tertiary" }, "Account"),
-      m(
-        Select,
-        {
-          name: "account",
-          "aria-label": "Account",
-          width: "w-[280px] max-w-full",
-          value: model.selectedAccount,
-          onchange: (event: Event) => {
-            model.selectedAccount = (event.target as HTMLSelectElement).value;
-          },
+  return m("div", { id: "permissions-account", class: "flex flex-col gap-1.5" }, [
+    m("h3", { class: "type-section text-tertiary" }, "Account"),
+    m(
+      Select,
+      {
+        name: "account",
+        "aria-label": "Account",
+        width: "w-[280px] max-w-full",
+        value: model.selectedAccount,
+        onchange: (event: Event) => {
+          model.selectedAccount = (event.target as HTMLSelectElement).value;
         },
-        // Server order, so the new-account sentinel is naturally last. An
-        // <option> carries one text style, so a hint rides in parentheses.
-        detail.account_choices.map((choice) =>
-          m(
-            "option",
-            { value: choice.value },
-            choice.hint ? `${choice.label} (${choice.hint})` : choice.label,
-          ),
+      },
+      // Server order, so the new-account sentinel is naturally last. An
+      // <option> carries one text style, so a hint rides in parentheses.
+      detail.account_choices.map((choice) =>
+        m(
+          "option",
+          { value: choice.value },
+          choice.hint ? `${choice.label} (${choice.hint})` : choice.label,
         ),
       ),
-    ],
-  );
+    ),
+  ]);
 }
 
 function summaryView(model: InboxModel, detail: Detail): m.Children {
@@ -118,18 +113,11 @@ function summaryView(model: InboxModel, detail: Detail): m.Children {
       "Approving will let the agent",
     ),
     rows.length === 0
-      ? m(
-          "p",
-          {
-            id: "permissions-empty-summary",
-            class: "mt-2 type-body text-secondary",
-          },
-          [
-            "Nothing yet — use ",
-            m("span", { class: "font-semibold" }, "Adjust"),
-            " to choose what to grant.",
-          ],
-        )
+      ? m("p", { id: "permissions-empty-summary", class: "mt-2 type-body text-secondary" }, [
+          "Nothing yet — use ",
+          m("span", { class: "font-semibold" }, "Adjust"),
+          " to choose what to grant.",
+        ])
       : m(
           "ul",
           { class: "mt-2 flex flex-col gap-2" },
@@ -236,28 +224,22 @@ function editorGroup(
 }
 
 function editorView(model: InboxModel, detail: Detail): m.Children {
-  return m(
-    "div",
-    { id: "permissions-editor-view", class: "flex flex-col gap-4" },
-    [
-      m(
-        "button",
-        {
-          type: "button",
-          id: "permissions-adjust-back-link",
-          class: "self-start inline-flex items-center gap-1 " + TEXT_LINK_CLASS,
-          onclick: () => model.hidePermissionEditor(),
-        },
-        [
-          m(Icon16, { name: "chevron-left", size: "sm", extra: "shrink-0" }),
-          "Back to agent's picks",
-        ],
-      ),
-      ...detail.permission_groups.map((group) =>
-        editorGroup(model, detail, group),
-      ),
-    ],
-  );
+  return m("div", { id: "permissions-editor-view", class: "flex flex-col gap-4" }, [
+    m(
+      "button",
+      {
+        type: "button",
+        id: "permissions-adjust-back-link",
+        class: "self-start inline-flex items-center gap-1 " + TEXT_LINK_CLASS,
+        onclick: () => model.hidePermissionEditor(),
+      },
+      [
+        m(Icon16, { name: "chevron-left", size: "sm", extra: "shrink-0" }),
+        "Back to agent's picks",
+      ],
+    ),
+    ...detail.permission_groups.map((group) => editorGroup(model, detail, group)),
+  ]);
 }
 
 const PROXY_SUMMARY_ID = "permissions-proxy-summary";
@@ -269,11 +251,7 @@ function proxySection(model: InboxModel, detail: Detail): m.Children {
   const requested = detail.proxy;
   if (requested === null) return null;
   return m("div", { id: "permissions-proxy", class: "flex flex-col gap-1.5" }, [
-    m(
-      "h3",
-      { class: "type-section text-tertiary" },
-      "Where requests leave from",
-    ),
+    m("h3", { class: "type-section text-tertiary" }, "Where requests leave from"),
     m(
       "p",
       { class: "type-body text-secondary" },
@@ -281,22 +259,14 @@ function proxySection(model: InboxModel, detail: Detail): m.Children {
     ),
     m("div", { class: "flex items-center justify-between gap-4" }, [
       m("div", { class: "min-w-0" }, [
-        m(
-          "p",
-          { class: "type-body text-primary truncate" },
-          DESKTOP_EGRESS_LABEL,
-        ),
+        m("p", { class: "type-body text-primary truncate" }, DESKTOP_EGRESS_LABEL),
         m(
           "p",
           { id: PROXY_SUMMARY_ID, class: "type-helper text-tertiary mt-0.5" },
           model.isProxyOn
             ? [
                 "Requests will leave from ",
-                renderDesktopEgressHops(
-                  requested.resulting_route,
-                  requested.desktops,
-                  true,
-                ),
+                renderDesktopEgressHops(requested.resulting_route, requested.desktops, true),
                 ".",
               ]
             : "Requests will keep leaving from where they do now.",
@@ -336,16 +306,12 @@ export function PredefinedPermissionDetailView(): m.Component<PredefinedPermissi
         // Says what approving will do, so the browser hop is not a surprise
         // (and for AWS and the like never contradicts the credential form
         // right below the button).
-        approveLabel: model.isBrowserSignInPending()
-          ? "Sign in & approve"
-          : "Approve",
+        approveLabel: model.isBrowserSignInPending() ? "Sign in & approve" : "Approve",
         progressLabel: detail.will_open_browser
           ? `Opening a browser window for you to sign in to ${detail.display_name}…`
           : "Granting permission...",
         body: [
-          model.isPermissionEditorShown
-            ? editorView(model, detail)
-            : summaryView(model, detail),
+          model.isPermissionEditorShown ? editorView(model, detail) : summaryView(model, detail),
           proxySection(model, detail),
         ],
       });

@@ -16,10 +16,7 @@ import { PredefinedPermissionDetailView } from "./PredefinedPermissionDetail";
 import { WorkspacePermissionDetailView } from "./WorkspacePermissionDetail";
 
 /** The grant dialog for one request, by kind. */
-export function requestDetailView(
-  model: InboxModel,
-  detail: InboxDetail,
-): m.Children {
+export function requestDetailView(model: InboxModel, detail: InboxDetail): m.Children {
   switch (detail.kind) {
     case "predefined":
       return m(PredefinedPermissionDetailView, { model, detail });
@@ -41,8 +38,7 @@ export function requestDetailView(
         m(
           "button",
           {
-            class:
-              "self-start type-body text-secondary underline cursor-pointer",
+            class: "self-start type-body text-secondary underline cursor-pointer",
             onclick: () => model.deny(),
           },
           "Deny this request",
@@ -51,23 +47,10 @@ export function requestDetailView(
     case "unsupported":
       return m(Notice, { variant: "error" }, detail.message);
     case "unavailable":
-      return m(
-        "div",
-        {
-          class:
-            "flex flex-col items-center justify-center gap-2 py-8 text-center",
-        },
-        [
-          m(
-            "p",
-            { class: "type-heading text-primary" },
-            "This permission request is no longer available",
-          ),
-          detail.message
-            ? m("p", { class: "type-body text-tertiary" }, detail.message)
-            : null,
-        ],
-      );
+      return m("div", { class: "flex flex-col items-center justify-center gap-2 py-8 text-center" }, [
+        m("p", { class: "type-heading text-primary" }, "This permission request is no longer available"),
+        detail.message ? m("p", { class: "type-body text-tertiary" }, detail.message) : null,
+      ]);
     default: {
       const unreachable: never = detail;
       void unreachable;

@@ -231,9 +231,7 @@ export function Shell(): m.Component<ShellAttrs> {
               shell,
               workspaceAnyId: surfaceWorkspaceId,
               soloWindowId: popout?.windowId ?? null,
-              isSoloReopened:
-                popout !== null &&
-                new URLSearchParams(routeSearch).get("reopened") === "1",
+              isSoloReopened: popout !== null && new URLSearchParams(routeSearch).get("reopened") === "1",
             })
           : m(
               "div#local-page-scroll",
@@ -445,17 +443,11 @@ export function Shell(): m.Component<ShellAttrs> {
       return m("div", { style: "display: contents" }, [
         popout === null
           ? m(Titlebar, { shell, routePath })
-          : m(PopoutChrome, {
-              shell,
-              workspaceAnyId: popout.workspaceAnyId,
-              windowId: popout.windowId,
-            }),
+          : m(PopoutChrome, { shell, workspaceAnyId: popout.workspaceAnyId, windowId: popout.windowId }),
         popout === null ? m(SidebarMenu, { shell }) : null,
         // A popout dragged over this window offers to return its window to the
         // desktop here; the overlay names the drop.
-        shell.isPopoutDropTarget &&
-        surfaceWorkspaceId !== null &&
-        popout === null
+        shell.isPopoutDropTarget && surfaceWorkspaceId !== null && popout === null
           ? m(PopoutDropOverlay)
           : null,
         band !== null

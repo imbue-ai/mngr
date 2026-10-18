@@ -65,11 +65,7 @@ import {
   selfToggleRowKey,
 } from "../../../models/workspacePermissions";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
-import {
-  SETTING_SELECT_CLASS,
-  renderFolderSyncSetting,
-  renderSettingRow,
-} from "../../components/FolderSyncSetting";
+import { SETTING_SELECT_CLASS, renderFolderSyncSetting, renderSettingRow } from "../../components/FolderSyncSetting";
 import { renderDesktopEgressRouteSetting } from "../../components/DesktopEgressRouteSetting";
 import { areRoutesEqual } from "../../../models/desktopEgressRoute";
 import { warmRequestDetail } from "../../../models/requestDetailPrefetch";
@@ -83,8 +79,7 @@ const ADD_CONNECTION_CLASS =
   "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left type-body cursor-pointer " +
   "transition-colors text-secondary hover:text-primary hover:bg-fill-hover";
 
-const TOGGLE_ROW_CLASS =
-  "perm-row flex items-center justify-between gap-4 py-2";
+const TOGGLE_ROW_CLASS = "perm-row flex items-center justify-between gap-4 py-2";
 
 const CATALOG_HEADING_CLASS = "type-section text-tertiary mt-6 mb-1";
 
@@ -97,15 +92,12 @@ const CATALOG_HEADING_CLASS = "type-section text-tertiary mt-6 mb-1";
  * A shipped service whose mark 404s lands here too, and a globe suits it no
  * worse.
  * Built per call -- one vnode cannot appear twice in a tree. */
-const navFallbackMark = (): m.Children =>
-  m(Icon16, { name: "globe", extra: "shrink-0" });
-const catalogFallbackMark = (): m.Children =>
-  m(Icon16, { name: "globe", extra: "shrink-0 text-tertiary" });
+const navFallbackMark = (): m.Children => m(Icon16, { name: "globe", extra: "shrink-0" });
+const catalogFallbackMark = (): m.Children => m(Icon16, { name: "globe", extra: "shrink-0 text-tertiary" });
 
 const SELF_TOGGLE_BLOCKED_TITLE =
   "This grant can't be re-enabled; ask the agent to request it again.";
-const CONNECTOR_TOGGLE_BLOCKED_TITLE =
-  "Connect this account before granting permissions.";
+const CONNECTOR_TOGGLE_BLOCKED_TITLE = "Connect this account before granting permissions.";
 /** Why every other control is inert while one change is being applied. */
 const PANE_BUSY_TITLE = "Waiting for the last change to reach this workspace.";
 
@@ -114,10 +106,7 @@ const PANE_BUSY_TITLE = "Waiting for the last change to reach this workspace.";
  * A write is not finished until the workspace's own machine has taken it, and
  * its response replaces the whole pane, so exactly one may be in flight. The
  * acting control shows its own spinner instead (see `renderSwitch`). */
-function isLockedByAnotherWrite(
-  model: PermissionsModel,
-  rowKey: string,
-): boolean {
+function isLockedByAnotherWrite(model: PermissionsModel, rowKey: string): boolean {
   return model.isWriting() && !model.isRowBusy(rowKey);
 }
 
@@ -157,11 +146,7 @@ interface PermissionsTabLocalState {
    * It names the model it was opened on because this state outlives a
    * navigation to another workspace's pane, where the same service must not
    * pick the draft up. */
-  desktopEgressDraft: {
-    model: PermissionsModel;
-    serviceName: string;
-    route: string[];
-  } | null;
+  desktopEgressDraft: { model: PermissionsModel; serviceName: string; route: string[] } | null;
 }
 
 /** How often the pane re-reads while a sync is alive.
@@ -203,34 +188,15 @@ export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
       }
     },
     view(vnode) {
-      const {
-        model,
-        workspaceName,
-        requestedSection,
-        onSelectSection,
-        onReviewRequest,
-      } = vnode.attrs;
+      const { model, workspaceName, requestedSection, onSelectSection, onReviewRequest } = vnode.attrs;
       const machineName = workspaceName.trim();
 
       return m("div", { class: "flex flex-col flex-1 min-h-0" }, [
-        m(
-          "h1",
-          {
-            class:
-              "type-heading-lg text-primary flex items-center gap-2 min-w-0 shrink-0",
-          },
-          [
-            m(Icon16, { name: "key", size: "lg", extra: "shrink-0" }),
-            m(
-              "span",
-              { class: "shrink-0" },
-              machineName ? "Permissions:" : "Permissions",
-            ),
-            machineName
-              ? m("span", { class: "truncate max-w-[280px]" }, machineName)
-              : null,
-          ],
-        ),
+        m("h1", { class: "type-heading-lg text-primary flex items-center gap-2 min-w-0 shrink-0" }, [
+          m(Icon16, { name: "key", size: "lg", extra: "shrink-0" }),
+          m("span", { class: "shrink-0" }, machineName ? "Permissions:" : "Permissions"),
+          machineName ? m("span", { class: "truncate max-w-[280px]" }, machineName) : null,
+        ]),
         m(
           "p",
           { class: "mt-2 max-w-[760px] type-body text-primary shrink-0" },
@@ -242,14 +208,7 @@ export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
               ]
             : "What agents in this workspace can access. They can never reach beyond the permissions you grant them.",
         ),
-        renderBody(
-          model,
-          local,
-          machineName,
-          requestedSection,
-          onSelectSection,
-          onReviewRequest,
-        ),
+        renderBody(model, local, machineName, requestedSection, onSelectSection, onReviewRequest),
       ]);
     },
   };
@@ -271,31 +230,16 @@ function renderBody(
   onReviewRequest: (requestId: string) => void,
 ): m.Children {
   if (model.status === "idle" || model.status === "loading") {
-    return m(
-      "p",
-      {
-        class: "mt-6 type-body text-secondary flex items-center gap-2 shrink-0",
-      },
-      [m(Spinner, { size: "sm" }), "Loading permissions..."],
-    );
+    return m("p", { class: "mt-6 type-body text-secondary flex items-center gap-2 shrink-0" }, [
+      m(Spinner, { size: "sm" }),
+      "Loading permissions...",
+    ]);
   }
   if (model.status === "load_failed") {
-    return m(
-      "div",
-      { class: "mt-6 shrink-0 flex flex-col gap-3 items-start" },
-      [
-        m(
-          Notice,
-          { variant: "warn" },
-          `Permissions can't be loaded right now: ${model.errorMessage}`,
-        ),
-        m(
-          Button,
-          { variant: "secondary", onclick: () => void model.load() },
-          "Try again",
-        ),
-      ],
-    );
+    return m("div", { class: "mt-6 shrink-0 flex flex-col gap-3 items-start" }, [
+      m(Notice, { variant: "warn" }, `Permissions can't be loaded right now: ${model.errorMessage}`),
+      m(Button, { variant: "secondary", onclick: () => void model.load() }, "Try again"),
+    ]);
   }
   const data = model.data;
   if (data === null || data.permissions_unavailable) {
@@ -304,11 +248,7 @@ function renderBody(
     return m(
       "div",
       { class: "mt-6 shrink-0" },
-      m(
-        Notice,
-        { variant: "warn" },
-        "Permissions can't be loaded right now. Try again in a moment.",
-      ),
+      m(Notice, { variant: "warn" }, "Permissions can't be loaded right now. Try again in a moment."),
     );
   }
 
@@ -326,33 +266,16 @@ function renderBody(
   return [
     splitPane({
       navLabel: "Permission sections",
-      nav: renderNav(
-        data.connections,
-        data.waiting_requests,
-        selected,
-        selectSection,
-      ),
+      nav: renderNav(data.connections, data.waiting_requests, selected, selectSection),
       content: [
         model.errorMessage
           ? m(
               "p",
-              {
-                id: "ws-perm-error",
-                class: "type-body text-important mb-3 shrink-0",
-                role: "alert",
-              },
+              { id: "ws-perm-error", class: "type-body text-important mb-3 shrink-0", role: "alert" },
               model.errorMessage,
             )
           : null,
-        renderSelectedPanel(
-          model,
-          local,
-          data,
-          machineName,
-          selected,
-          selectSection,
-          onReviewRequest,
-        ),
+        renderSelectedPanel(model, local, data, machineName, selected, selectSection, onReviewRequest),
       ],
       extra: "mt-8",
       // pb-8 keeps the panel foot (the Disconnect button) off the pane's
@@ -380,11 +303,10 @@ function renderWaitingPanel(
   onReviewRequest: (requestId: string) => void,
 ): m.Children {
   return m("section", { "data-perm-panel": WAITING_SECTION }, [
-    m(
-      "h2",
-      { class: "type-heading text-primary flex items-center gap-2 mb-1" },
-      ["Waiting on you", m(Badge, { count: waitingRequests.length })],
-    ),
+    m("h2", { class: "type-heading text-primary flex items-center gap-2 mb-1" }, [
+      "Waiting on you",
+      m(Badge, { count: waitingRequests.length }),
+    ]),
     m(
       "p",
       { class: "type-body text-secondary mb-4" },
@@ -395,9 +317,7 @@ function renderWaitingPanel(
     m(
       "div",
       { class: "flex flex-col gap-0.5" },
-      waitingRequests.map((waiting) =>
-        renderWaitingRow(waiting, onReviewRequest),
-      ),
+      waitingRequests.map((waiting) => renderWaitingRow(waiting, onReviewRequest)),
     ),
   ]);
 }
@@ -408,11 +328,7 @@ function renderNav(
   selected: string,
   selectSection: (section: string) => void,
 ): m.Children {
-  const navEntry = (
-    section: string,
-    icon: m.Children,
-    label: m.Children,
-  ): m.Children =>
+  const navEntry = (section: string, icon: m.Children, label: m.Children): m.Children =>
     m(
       "button",
       {
@@ -458,14 +374,7 @@ function renderNav(
           m("span", { class: "truncate min-w-0" }, [
             connection.display_name,
             connection.show_account_label
-              ? m(
-                  "span",
-                  {
-                    class:
-                      "block type-helper text-tertiary truncate font-normal",
-                  },
-                  connection.account_label,
-                )
+              ? m("span", { class: "block type-helper text-tertiary truncate font-normal" }, connection.account_label)
               : null,
           ]),
         ),
@@ -475,18 +384,12 @@ function renderNav(
         {
           type: "button",
           "data-perm-nav": ADD_CONNECTION_SECTION,
-          "aria-pressed":
-            selected === ADD_CONNECTION_SECTION ? "true" : "false",
+          "aria-pressed": selected === ADD_CONNECTION_SECTION ? "true" : "false",
           class:
-            selected === ADD_CONNECTION_SECTION
-              ? navEntryClass(true)
-              : ADD_CONNECTION_CLASS,
+            selected === ADD_CONNECTION_SECTION ? navEntryClass(true) : ADD_CONNECTION_CLASS,
           onclick: () => selectSection(ADD_CONNECTION_SECTION),
         },
-        [
-          m(Icon16, { name: "plus", extra: "shrink-0" }),
-          m("span", { class: "truncate" }, "Add connection"),
-        ],
+        [m(Icon16, { name: "plus", extra: "shrink-0" }), m("span", { class: "truncate" }, "Add connection")],
       ),
     ]),
     m("div", { class: "my-1.5 h-px bg-subtle" }),
@@ -515,25 +418,13 @@ function renderSelectedPanel(
   onReviewRequest: (requestId: string) => void,
 ): m.Children {
   const connections: UiPermissionConnection[] = data.connections;
-  if (selected === WAITING_SECTION)
-    return renderWaitingPanel(data.waiting_requests, onReviewRequest);
+  if (selected === WAITING_SECTION) return renderWaitingPanel(data.waiting_requests, onReviewRequest);
   if (selected === LOCAL_FILES_SECTION) return renderLocalFilesPanel(model);
-  if (selected === OTHER_MACHINES_SECTION)
-    return renderOtherMachinesPanel(model);
-  if (selected === ADD_CONNECTION_SECTION)
-    return renderAddConnectionPanel(model, selectSection);
-  const connection = connections.find(
-    (entry) => connectionSectionId(entry) === selected,
-  );
+  if (selected === OTHER_MACHINES_SECTION) return renderOtherMachinesPanel(model);
+  if (selected === ADD_CONNECTION_SECTION) return renderAddConnectionPanel(model, selectSection);
+  const connection = connections.find((entry) => connectionSectionId(entry) === selected);
   if (connection === undefined) return null;
-  return renderConnectionPanel(
-    model,
-    local,
-    connection,
-    machineName,
-    data.is_credential_store_shared,
-    selectSection,
-  );
+  return renderConnectionPanel(model, local, connection, machineName, data.is_credential_store_shared, selectSection);
 }
 
 function renderConnectionPanel(
@@ -545,43 +436,26 @@ function renderConnectionPanel(
   selectSection: (section: string) => void,
 ): m.Children {
   const machineLabel = machineLabelFor(machineName);
-  const disconnectKey = disconnectRowKey(
-    connection.service_name,
-    connection.account,
-  );
+  const disconnectKey = disconnectRowKey(connection.service_name, connection.account);
   const isDisconnectBusy = model.isRowBusy(disconnectKey);
   const isDisconnectLocked = isLockedByAnotherWrite(model, disconnectKey);
   return m("section", { "data-perm-panel": connectionSectionId(connection) }, [
     m("div", { class: "flex items-center justify-between gap-3 mb-1" }, [
-      m(
-        "h2",
-        { class: "type-heading text-primary flex items-center gap-2 min-w-0" },
-        [
-          serviceMark(
-            connection.service_name,
-            "w-5 h-5 shrink-0",
-            connection.is_connected ? "brand" : "muted",
-            null,
-          ),
-          m("span", { class: "truncate" }, connection.display_name),
-          // Same size and tone as the service name: the account is half of the
-          // connection's identity, not an aside.
-          m(
-            "span",
-            { class: "type-heading text-primary truncate" },
-            `· ${connection.account_label}`,
-          ),
-        ],
-      ),
-      connection.granted_count > 0
-        ? renderRevokeAllButton(model, local, connection)
-        : null,
+      m("h2", { class: "type-heading text-primary flex items-center gap-2 min-w-0" }, [
+        serviceMark(
+          connection.service_name,
+          "w-5 h-5 shrink-0",
+          connection.is_connected ? "brand" : "muted",
+          null,
+        ),
+        m("span", { class: "truncate" }, connection.display_name),
+        // Same size and tone as the service name: the account is half of the
+        // connection's identity, not an aside.
+        m("span", { class: "type-heading text-primary truncate" }, `· ${connection.account_label}`),
+      ]),
+      connection.granted_count > 0 ? renderRevokeAllButton(model, local, connection) : null,
     ]),
-    m(
-      "p",
-      { class: "type-body text-secondary mb-4" },
-      "Choose what agents in this workspace can do.",
-    ),
+    m("p", { class: "type-body text-secondary mb-4" }, "Choose what agents in this workspace can do."),
     connection.is_connected
       ? null
       : m(
@@ -590,45 +464,23 @@ function renderConnectionPanel(
           "This account isn't connected, so agents can't use these grants right now. Reconnect it " +
             "from Add connection, or turn the leftover grants off here.",
         ),
-    connection.desktop_egress.is_supported
-      ? renderDesktopEgressRow(model, local, connection)
-      : null,
+    connection.desktop_egress.is_supported ? renderDesktopEgressRow(model, local, connection) : null,
     connection.scopes.map((scopePanel) => [
       connection.scopes.length > 1
-        ? m(
-            "h3",
-            { class: "type-heading text-primary mt-6 mb-1" },
-            scopePanel.heading,
-          )
+        ? m("h3", { class: "type-heading text-primary mt-6 mb-1" }, scopePanel.heading)
         : null,
       scopePanel.groups.map((group) => [
-        m(
-          "p",
-          { class: "type-section text-tertiary mt-6 mb-1" },
-          group.heading,
-        ),
+        m("p", { class: "type-section text-tertiary mt-6 mb-1" }, group.heading),
         m(
           "div",
           { class: "flex flex-col pr-4" },
           group.toggles.map((toggle) => {
-            const rowKey = connectorToggleRowKey(
-              scopePanel.scope,
-              connection.account,
-              toggle.permission,
-            );
+            const rowKey = connectorToggleRowKey(scopePanel.scope, connection.account, toggle.permission);
             return m("div", { class: TOGGLE_ROW_CLASS }, [
               m("div", { class: "min-w-0" }, [
-                m(
-                  "p",
-                  { class: "type-body text-primary truncate" },
-                  toggle.label,
-                ),
+                m("p", { class: "type-body text-primary truncate" }, toggle.label),
                 toggle.description
-                  ? m(
-                      "p",
-                      { class: "type-helper text-tertiary mt-0.5" },
-                      toggle.description,
-                    )
+                  ? m("p", { class: "type-helper text-tertiary mt-0.5" }, toggle.description)
                   : null,
               ]),
               renderSwitch({
@@ -642,12 +494,7 @@ function renderConnectionPanel(
                 label: toggle.label,
                 permission: toggle.permission,
                 onFlip: (enabled) =>
-                  void model.toggleConnector(
-                    scopePanel.scope,
-                    connection.account,
-                    toggle.permission,
-                    enabled,
-                  ),
+                  void model.toggleConnector(scopePanel.scope, connection.account, toggle.permission, enabled),
               }),
             ]);
           }),
@@ -663,11 +510,7 @@ function renderConnectionPanel(
           m(SectionHeader, { divider: true }, "Disconnect"),
           m("p", { class: "type-body text-secondary mb-3" }, [
             "Disconnect from ",
-            m(
-              "span",
-              { class: "font-semibold" },
-              `${connection.display_name} · ${connection.account_label}`,
-            ),
+            m("span", { class: "font-semibold" }, `${connection.display_name} · ${connection.account_label}`),
             isCredentialStoreShared
               ? `. ${machineLabel} shares one sign-in with every other workspace on this computer, so all ` +
                 `of them lose this access. `
@@ -689,14 +532,7 @@ function renderConnectionPanel(
             },
             isDisconnectBusy ? "Disconnecting..." : "Disconnect",
           ),
-          renderDisconnectDialog(
-            model,
-            local,
-            connection,
-            machineLabel,
-            isCredentialStoreShared,
-            selectSection,
-          ),
+          renderDisconnectDialog(model, local, connection, machineLabel, isCredentialStoreShared, selectSection),
         ]
       : null,
   ]);
@@ -724,12 +560,7 @@ function renderDisconnectDialog(
   };
   return m(
     Modal,
-    {
-      isOpen,
-      onClose: close,
-      id: "ws-perm-disconnect",
-      cardExtra: "text-left",
-    },
+    { isOpen, onClose: close, id: "ws-perm-disconnect", cardExtra: "text-left" },
     // Guarded rather than left to Modal: a component vnode carries the children
     // it was handed whether or not they are rendered, so a closed dialog has to
     // contribute no buttons and no copy to the tree at all.
@@ -744,19 +575,14 @@ function renderDisconnectDialog(
           ),
           m("p", { class: "type-body text-primary mb-4" }, [
             "This will disconnect ",
-            m(
-              "strong",
-              `${connection.display_name} · ${connection.account_label}`,
-            ),
+            m("strong", `${connection.display_name} · ${connection.account_label}`),
             isCredentialStoreShared
               ? ` from every workspace on this computer, including ${machineLabel}. Their agents won't be able ` +
                 "to use it until you connect it again."
               : ` from ${machineLabel}, whose agents won't be able to use it until you connect it again. ` +
                 "Every other workspace keeps its own sign-in.",
           ]),
-          model.errorMessage
-            ? m(Notice, { variant: "error", role: "alert" }, model.errorMessage)
-            : null,
+          model.errorMessage ? m(Notice, { variant: "error", role: "alert" }, model.errorMessage) : null,
           m("div", { class: "flex justify-end gap-3" }, [
             m(
               Button,
@@ -815,11 +641,7 @@ function renderRevokeAllButton(
           return;
         }
         disarmRevoke(local);
-        void model.revokeAll(
-          connection.service_name,
-          connection.account,
-          connection.display_name,
-        );
+        void model.revokeAll(connection.service_name, connection.account, connection.display_name);
       },
     },
     isBusy ? "Revoking..." : isArmed ? "Really revoke all?" : "Revoke all",
@@ -860,25 +682,13 @@ function renderAddConnectionPanel(
       ? null
       : [
           m("h3", { class: CATALOG_HEADING_CLASS }, "Add another account"),
-          renderCatalogList(
-            model,
-            connected,
-            "Add account",
-            selectSection,
-            "brand",
-          ),
+          renderCatalogList(model, connected, "Add account", selectSection, "brand"),
         ],
     // The second heading exists to set the lists apart, so it appears only
     // when the first list is there to be set apart from.
-    connected.length === 0
-      ? null
-      : m("h3", { class: CATALOG_HEADING_CLASS }, "Connect a new service"),
+    connected.length === 0 ? null : m("h3", { class: CATALOG_HEADING_CLASS }, "Connect a new service"),
     available.length === 0
-      ? m(
-          Notice,
-          { variant: "info" },
-          "Every available service already has an account connected.",
-        )
+      ? m(Notice, { variant: "info" }, "Every available service already has an account connected.")
       : renderCatalogList(model, available, "Connect", selectSection, "muted"),
   ]);
 }
@@ -887,9 +697,7 @@ function renderAddConnectionPanel(
  * several accounts but offers a single row for adding the next one. Every
  * account of a service carries the same sign-in, so the first one speaks for
  * the service. */
-function connectedServices(
-  connections: UiPermissionConnection[],
-): UiAvailableConnection[] {
+function connectedServices(connections: UiPermissionConnection[]): UiAvailableConnection[] {
   const services = new Map<string, UiAvailableConnection>();
   for (const connection of connections) {
     if (services.has(connection.service_name)) continue;
@@ -928,17 +736,8 @@ function renderCatalogList(
       m("div", { class: "border-b border-subtle" }, [
         m("div", { class: "flex items-center justify-between gap-3 py-2" }, [
           m("div", { class: "flex items-center gap-2 min-w-0" }, [
-            serviceMark(
-              service.service_name,
-              "w-4 h-4 shrink-0",
-              tone,
-              catalogFallbackMark(),
-            ),
-            m(
-              "span",
-              { class: "type-body text-primary truncate" },
-              service.display_name,
-            ),
+            serviceMark(service.service_name, "w-4 h-4 shrink-0", tone, catalogFallbackMark()),
+            m("span", { class: "type-body text-primary truncate" }, service.display_name),
           ]),
           renderCatalogAction(model, service, actionLabel, selectSection),
         ]),
@@ -970,20 +769,13 @@ function renderConnectFailurePopup(model: PermissionsModel): m.Children {
       m("h2", { class: "type-heading-lg text-primary" }, "Couldn't connect"),
       m(
         "p",
-        {
-          class: "mt-2 type-body text-secondary whitespace-pre-line",
-          role: "alert",
-        },
+        { class: "mt-2 type-body text-secondary whitespace-pre-line", role: "alert" },
         model.alertMessage,
       ),
       m(
         "div",
         { class: "mt-5 flex justify-end" },
-        m(
-          Button,
-          { variant: "secondary", onclick: () => model.dismissAlert() },
-          "Close",
-        ),
+        m(Button, { variant: "secondary", onclick: () => model.dismissAlert() }, "Close"),
       ),
     ],
   );
@@ -1003,13 +795,8 @@ function renderCatalogAction(
     size: "md" as const,
     extra: "shrink-0",
     "data-perm-connect": service.service_name,
-    disabled:
-      isBusy ||
-      isLockedByAnotherWrite(model, rowKey) ||
-      action === "unconnectable",
-    ...(action === "unconnectable"
-      ? { title: unconnectableTitle(service.display_name) }
-      : {}),
+    disabled: isBusy || isLockedByAnotherWrite(model, rowKey) || action === "unconnectable",
+    ...(action === "unconnectable" ? { title: unconnectableTitle(service.display_name) } : {}),
   };
   if (action === "credential_form") {
     // Opening is a toggle: a second click closes the form rather than emptying
@@ -1059,17 +846,12 @@ function renderCredentialForm(
   const rowKey = connectServiceRowKey(service.service_name);
   const isBusy = model.isRowBusy(rowKey);
   const isLocked = isLockedByAnotherWrite(model, rowKey);
-  const isComplete = isCredentialFormComplete(
-    signIn,
-    model.credentialValues,
-    model.credentialAccountName,
-  );
+  const isComplete = isCredentialFormComplete(signIn, model.credentialValues, model.credentialAccountName);
   return m(
     "div",
     {
       "data-perm-credential-form": service.service_name,
-      class:
-        "mb-3 rounded-md border border-default bg-fill-subtle p-3 flex flex-col gap-2",
+      class: "mb-3 rounded-md border border-default bg-fill-subtle p-3 flex flex-col gap-2",
     },
     [
       m(
@@ -1087,9 +869,7 @@ function renderCredentialForm(
             spellcheck: "false",
             value: model.credentialValues[parameter.name] ?? "",
             oninput: (event: Event) => {
-              model.credentialValues[parameter.name] = (
-                event.target as HTMLInputElement
-              ).value;
+              model.credentialValues[parameter.name] = (event.target as HTMLInputElement).value;
             },
           }),
         ]),
@@ -1103,24 +883,14 @@ function renderCredentialForm(
               spellcheck: "false",
               value: model.credentialAccountName,
               oninput: (event: Event) => {
-                model.credentialAccountName = (
-                  event.target as HTMLInputElement
-                ).value;
+                model.credentialAccountName = (event.target as HTMLInputElement).value;
               },
             }),
-            m(
-              "span",
-              { class: "type-helper text-tertiary" },
-              "How this account is labelled in Imbue Studio.",
-            ),
+            m("span", { class: "type-helper text-tertiary" }, "How this account is labelled in Imbue Studio."),
           ])
         : null,
       model.credentialErrorMessage
-        ? m(
-            Notice,
-            { variant: "error", role: "alert" },
-            model.credentialErrorMessage,
-          )
+        ? m(Notice, { variant: "error", role: "alert" }, model.credentialErrorMessage)
         : null,
       m("div", { class: "flex items-center gap-2" }, [
         m(
@@ -1131,23 +901,16 @@ function renderCredentialForm(
             "data-perm-credential-submit": service.service_name,
             disabled: isBusy || isLocked || !isComplete,
             onclick: () => {
-              void model
-                .connectWithCredentials(service.service_name)
-                .then((section) => {
-                  if (section !== null) selectSection(section);
-                });
+              void model.connectWithCredentials(service.service_name).then((section) => {
+                if (section !== null) selectSection(section);
+              });
             },
           },
           isBusy ? "Connecting..." : actionLabel,
         ),
         m(
           Button,
-          {
-            variant: "ghost",
-            size: "md",
-            disabled: isBusy,
-            onclick: () => model.closeCredentialForm(),
-          },
+          { variant: "ghost", size: "md", disabled: isBusy, onclick: () => model.closeCredentialForm() },
           "Cancel",
         ),
       ]),
@@ -1166,11 +929,7 @@ function renderLocalFilesPanel(model: PermissionsModel): m.Children {
       "Files and folders on this computer that agents in this workspace can reach.",
     ),
     rows.length === 0
-      ? m(
-          Notice,
-          { variant: "info" },
-          "No files are being shared with agents in this workspace yet.",
-        )
+      ? m(Notice, { variant: "info" }, "No files are being shared with agents in this workspace yet.")
       : m(
           "div",
           { class: "flex flex-col gap-3" },
@@ -1191,45 +950,27 @@ const SETTING_BAND_CLASS = "px-4 py-3 border-t border-subtle";
  * it, and a hairline that reaches both edges is what keeps that from reading
  * as a second, unrelated section of the card.
  */
-function renderSharedPathRow(
-  model: PermissionsModel,
-  row: UiSharedPath,
-  isSyncSupported: boolean,
-): m.Children {
+function renderSharedPathRow(model: PermissionsModel, row: UiSharedPath, isSyncSupported: boolean): m.Children {
   const isRemoving = model.isRowBusy(pathRemoveRowKey(row.path));
   const isSynced = isPathSyncOn(row);
-  return m(
-    "div",
-    { class: "minds-card overflow-hidden", "data-shared-path": row.path },
-    [
-      m("div", { class: "flex items-center justify-between gap-4 px-4 py-3" }, [
-        m(
-          "code",
-          { class: "code-pill truncate min-w-0", title: row.path },
-          row.path_label,
-        ),
-        m(
-          Button,
-          {
-            variant: "danger",
-            size: "md",
-            disabled: isRemoving,
-            "data-remove-path": row.path,
-            onclick: () => void model.removeSharedPath(row.path),
-          },
-          removeButtonLabel(row, isRemoving),
-        ),
-      ]),
-      m("div", { class: SETTING_BAND_CLASS }, renderAccessChoice(model, row)),
-      isSyncSupported
-        ? m(
-            "div",
-            { class: SETTING_BAND_CLASS },
-            renderSyncChoice(model, row, isSynced),
-          )
-        : null,
-    ],
-  );
+  return m("div", { class: "minds-card overflow-hidden", "data-shared-path": row.path }, [
+    m("div", { class: "flex items-center justify-between gap-4 px-4 py-3" }, [
+      m("code", { class: "code-pill truncate min-w-0", title: row.path }, row.path_label),
+      m(
+        Button,
+        {
+          variant: "danger",
+          size: "md",
+          disabled: isRemoving,
+          "data-remove-path": row.path,
+          onclick: () => void model.removeSharedPath(row.path),
+        },
+        removeButtonLabel(row, isRemoving),
+      ),
+    ]),
+    m("div", { class: SETTING_BAND_CLASS }, renderAccessChoice(model, row)),
+    isSyncSupported ? m("div", { class: SETTING_BAND_CLASS }, renderSyncChoice(model, row, isSynced)) : null,
+  ]);
 }
 
 /** What Remove takes away, said on the button rather than in a warning.
@@ -1240,10 +981,7 @@ function renderSharedPathRow(
  * draws no notice under the checkbox to carry it. The same distinction holds
  * while the removal runs, so the two halves are never one label apart. */
 function removeButtonLabel(row: UiSharedPath, isRemoving: boolean): string {
-  if (hasCopyOnMachine(row))
-    return isRemoving
-      ? "Revoking and removing..."
-      : "Revoke access and remove copy";
+  if (hasCopyOnMachine(row)) return isRemoving ? "Revoking and removing..." : "Revoke access and remove copy";
   return isRemoving ? "Revoking..." : "Revoke access";
 }
 
@@ -1253,10 +991,7 @@ function removeButtonLabel(row: UiSharedPath, isRemoving: boolean): string {
  * not made until that machine has taken it -- so the dropdown showing the new
  * value before the write lands would be showing something that is not true
  * yet. Disabled and spinning says the same thing honestly. */
-function renderAccessChoice(
-  model: PermissionsModel,
-  row: UiSharedPath,
-): m.Children {
+function renderAccessChoice(model: PermissionsModel, row: UiSharedPath): m.Children {
   const rowKey = pathAccessRowKey(row.path);
   const isBusy = model.isRowBusy(rowKey);
   const isLocked = isLockedByAnotherWrite(model, rowKey);
@@ -1273,17 +1008,10 @@ function renderAccessChoice(
           disabled: isBusy || isLocked,
           ...(isLocked ? { title: PANE_BUSY_TITLE } : {}),
           onchange: (event: Event) =>
-            void model.setSharedPath(
-              row.path,
-              (event.target as HTMLSelectElement).value as FileSharingAccess,
-            ),
+            void model.setSharedPath(row.path, (event.target as HTMLSelectElement).value as FileSharingAccess),
         },
         FILE_SHARING_ACCESSES.map((access) =>
-          m(
-            "option",
-            { value: access, selected: access === row.access },
-            fileSharingAccessLabel(access),
-          ),
+          m("option", { value: access, selected: access === row.access }, fileSharingAccessLabel(access)),
         ),
       ),
     ]),
@@ -1293,11 +1021,7 @@ function renderAccessChoice(
 /** The card's sync band: the shared setting, wired to the model's writes and
  * carrying what only the card has to say -- the live status, the set-aside
  * copy, and a failed sync's reason and retry. */
-function renderSyncChoice(
-  model: PermissionsModel,
-  row: UiSharedPath,
-  isSynced: boolean,
-): m.Children {
+function renderSyncChoice(model: PermissionsModel, row: UiSharedPath, isSynced: boolean): m.Children {
   const sync = row.sync ?? null;
   const rowKey = folderSyncToggleRowKey(row.path);
   return renderFolderSyncSetting({
@@ -1310,21 +1034,14 @@ function renderSyncChoice(
     conflict: model.syncConflictFor(row),
     onToggle: (enabled) => void model.toggleSync(row, enabled),
     onConflictChange: (conflict) => void model.setSyncConflict(row, conflict),
-    status:
-      sync === null
-        ? null
-        : renderSyncStatus(sync.state, syncProgressLabel(sync)),
+    status: sync === null ? null : renderSyncStatus(sync.state, syncProgressLabel(sync)),
     overlapWarning: row.sync_overlap_warning,
     trailing: [
       isSynced ? null : renderInactiveCopy(model, row),
       sync === null || sync.message === ""
         ? null
         : m("div", { class: "flex items-start justify-between gap-3" }, [
-            m(
-              "p",
-              { class: "type-helper text-important m-0 min-w-0" },
-              sync.message,
-            ),
+            m("p", { class: "type-helper text-important m-0 min-w-0" }, sync.message),
             sync.state !== "FAILED"
               ? null
               : m(
@@ -1335,9 +1052,7 @@ function renderSyncChoice(
                     "data-sync-retry-path": row.path,
                     onclick: () => void model.retrySync(row),
                   },
-                  model.isRowBusy(folderSyncRetryRowKey(row.path))
-                    ? "Trying..."
-                    : "Try again",
+                  model.isRowBusy(folderSyncRetryRowKey(row.path)) ? "Trying..." : "Try again",
                 ),
           ]),
     ],
@@ -1373,24 +1088,13 @@ function syncStateVariant(state: FolderSyncState): StatusBadgeVariant {
  * the whole shared path would do to the copy is left to that button to say,
  * since it has to say it in the case where this row is not drawn at all.
  */
-function renderInactiveCopy(
-  model: PermissionsModel,
-  row: UiSharedPath,
-): m.Children {
+function renderInactiveCopy(model: PermissionsModel, row: UiSharedPath): m.Children {
   if (!hasInactiveCopy(row)) return null;
   const isDiscarding = model.isRowBusy(folderSyncDiscardCopyRowKey(row.path));
   return m("div", { class: "flex items-start justify-between gap-4" }, [
     m("div", { class: "min-w-0 flex flex-col gap-0.5" }, [
-      m(
-        "span",
-        { class: "type-body text-secondary" },
-        "A copy is still in the workspace",
-      ),
-      m(
-        "span",
-        { class: "type-helper text-tertiary" },
-        "Turning syncing back on picks up where it left off.",
-      ),
+      m("span", { class: "type-body text-secondary" }, "A copy is still in the workspace"),
+      m("span", { class: "type-helper text-tertiary" }, "Turning syncing back on picks up where it left off."),
     ]),
     m(
       Button,
@@ -1427,36 +1131,22 @@ function renderSyncStatus(state: FolderSyncState, progress = ""): m.Children {
     // yet the state the user is waiting to see. The count beside it is
     // unison's own, so a big folder says how far through it is rather than
     // just that it is busy.
-    return m(
-      "span",
-      { class: "flex items-center gap-1.5 type-helper text-info" },
-      [
-        m(Icon16, { name: "arrows-sync", size: "sm", extra: "sync-spin" }),
-        progress === "" ? label : `${label} · ${progress}`,
-      ],
-    );
+    return m("span", { class: "flex items-center gap-1.5 type-helper text-info" }, [
+      m(Icon16, { name: "arrows-sync", size: "sm", extra: "sync-spin" }),
+      progress === "" ? label : `${label} · ${progress}`,
+    ]);
   }
   if (state === "SYNCED") {
-    return m(
-      "span",
-      { class: "flex items-center gap-1.5 type-helper text-success" },
-      [m(Icon16, { name: "badge-check", size: "sm" }), label],
-    );
+    return m("span", { class: "flex items-center gap-1.5 type-helper text-success" }, [
+      m(Icon16, { name: "badge-check", size: "sm" }),
+      label,
+    ]);
   }
-  return m(
-    StatusBadge,
-    { variant: syncStateVariant(state), size: "xs" },
-    label,
-  );
+  return m(StatusBadge, { variant: syncStateVariant(state), size: "xs" }, label);
 }
 
-async function addSharedPath(
-  model: PermissionsModel,
-  mode: "file" | "directory",
-): Promise<void> {
-  const selected = await electronBridge
-    .showFilePicker({ mode })
-    .catch(() => null);
+async function addSharedPath(model: PermissionsModel, mode: "file" | "directory"): Promise<void> {
+  const selected = await electronBridge.showFilePicker({ mode }).catch(() => null);
   if (typeof selected !== "string" || selected.length === 0) return;
   await model.addSharedPath(selected);
 }
@@ -1523,50 +1213,23 @@ function renderOtherMachinesPanel(model: PermissionsModel): m.Children {
         "destroying, SSH, and more). To grant more, ask an agent to perform the operation.",
     ),
     toggles.length === 0
-      ? m(
-          Notice,
-          { variant: "info" },
-          "Agents in this workspace can't manage your other workspaces yet.",
-        )
+      ? m(Notice, { variant: "info" }, "Agents in this workspace can't manage your other workspaces yet.")
       : m(
           "div",
           { class: "flex flex-col pr-4" },
           toggles.map((toggle) =>
             m("div", { class: TOGGLE_ROW_CLASS }, [
               m("div", { class: "min-w-0" }, [
-                m(
-                  "p",
-                  {
-                    class:
-                      "type-body text-primary flex items-center gap-2 min-w-0",
-                  },
-                  [
-                    m("span", { class: "truncate" }, toggle.label),
-                    m(
-                      "span",
-                      { class: "type-helper text-tertiary shrink-0" },
-                      "on:",
-                    ),
-                    m(
-                      "span",
-                      { class: "type-body text-secondary truncate" },
-                      toggle.detail,
-                    ),
-                  ],
-                ),
+                m("p", { class: "type-body text-primary flex items-center gap-2 min-w-0" }, [
+                  m("span", { class: "truncate" }, toggle.label),
+                  m("span", { class: "type-helper text-tertiary shrink-0" }, "on:"),
+                  m("span", { class: "type-body text-secondary truncate" }, toggle.detail),
+                ]),
                 toggle.description
-                  ? m(
-                      "p",
-                      { class: "type-helper text-tertiary mt-0.5" },
-                      toggle.description,
-                    )
+                  ? m("p", { class: "type-helper text-tertiary mt-0.5" }, toggle.description)
                   : null,
               ]),
-              renderSelfSwitch(
-                model,
-                toggle,
-                `${toggle.label} on ${toggle.detail}`,
-              ),
+              renderSelfSwitch(model, toggle, `${toggle.label} on ${toggle.detail}`),
             ]),
           ),
         ),
@@ -1589,10 +1252,7 @@ function renderDesktopEgressRow(
   const savedRoute = connection.desktop_egress.route;
   const isBusy = model.isRowBusy(rowKey);
   const held = local.desktopEgressDraft;
-  const draft =
-    held !== null && held.model === model && held.serviceName === serviceName
-      ? held
-      : null;
+  const draft = held !== null && held.model === model && held.serviceName === serviceName ? held : null;
   return m(
     "div",
     { class: "perm-row pr-4 py-2", "data-perm-desktop-egress": serviceName },
@@ -1601,23 +1261,16 @@ function renderDesktopEgressRow(
       route: savedRoute,
       desktops: model.data?.desktops ?? [],
       isBusy,
-      lockedTitle: isLockedByAnotherWrite(model, rowKey)
-        ? PANE_BUSY_TITLE
-        : null,
+      lockedTitle: isLockedByAnotherWrite(model, rowKey) ? PANE_BUSY_TITLE : null,
       onSwitch: (route) => {
         void model.setDesktopEgressRoute(serviceName, route).then((isSaved) => {
           // A flip that lands replaces the route the draft started from; a
           // refused one leaves the route, and so the draft, as they were.
-          if (isSaved && draft !== null && local.desktopEgressDraft === draft)
-            local.desktopEgressDraft = null;
+          if (isSaved && draft !== null && local.desktopEgressDraft === draft) local.desktopEgressDraft = null;
         });
       },
       onAdjust: () => {
-        local.desktopEgressDraft = {
-          model,
-          serviceName,
-          route: [...savedRoute],
-        };
+        local.desktopEgressDraft = { model, serviceName, route: [...savedRoute] };
       },
       editor:
         draft === null
@@ -1632,13 +1285,10 @@ function renderDesktopEgressRow(
               },
               isSaveDisabled: areRoutesEqual(draft.route, savedRoute),
               onSave: () => {
-                void model
-                  .setDesktopEgressRoute(serviceName, draft.route)
-                  .then((isSaved) => {
-                    // Refused: the editor stays open on the draft, beside the reason.
-                    if (isSaved && local.desktopEgressDraft === draft)
-                      local.desktopEgressDraft = null;
-                  });
+                void model.setDesktopEgressRoute(serviceName, draft.route).then((isSaved) => {
+                  // Refused: the editor stays open on the draft, beside the reason.
+                  if (isSaved && local.desktopEgressDraft === draft) local.desktopEgressDraft = null;
+                });
               },
             },
     }),
@@ -1692,6 +1342,7 @@ function renderSwitch(options: SwitchOptions): m.Children {
   });
 }
 
+
 /** One waiting request: a row that opens it. */
 function renderWaitingRow(
   waiting: UiWaitingPermissionRequest,
@@ -1702,8 +1353,7 @@ function renderWaitingRow(
     {
       type: "button",
       "data-perm-waiting-id": waiting.id,
-      class:
-        "flex w-full items-center gap-2 rounded-md px-1 py-2 text-left cursor-pointer hover:bg-fill-hover",
+      class: "flex w-full items-center gap-2 rounded-md px-1 py-2 text-left cursor-pointer hover:bg-fill-hover",
       // Pointing at the row starts fetching what opening it will show. The
       // detail costs a latchkey probe server-side, so starting it on the way in
       // is the difference between opening onto the request and onto a spinner.
@@ -1715,32 +1365,15 @@ function renderWaitingRow(
       m(
         "span",
         { class: "flex h-5 w-5 shrink-0 items-center justify-center" },
-        serviceMark(
-          waiting.service_name,
-          "w-4 h-4",
-          "brand",
-          m(Icon16, { name: "key", extra: "text-primary" }),
-        ),
+        serviceMark(waiting.service_name, "w-4 h-4", "brand", m(Icon16, { name: "key", extra: "text-primary" })),
       ),
       m("span", { class: "min-w-0 flex-1" }, [
-        m(
-          "span",
-          { class: "block truncate type-label text-primary" },
-          waiting.title,
-        ),
+        m("span", { class: "block truncate type-label text-primary" }, waiting.title),
         waiting.reason
-          ? m(
-              "span",
-              { class: "mt-0.5 block truncate type-helper text-secondary" },
-              waiting.reason,
-            )
+          ? m("span", { class: "mt-0.5 block truncate type-helper text-secondary" }, waiting.reason)
           : null,
       ]),
-      m(Icon16, {
-        name: "chevron-right",
-        size: "sm",
-        extra: "shrink-0 text-tertiary",
-      }),
+      m(Icon16, { name: "chevron-right", size: "sm", extra: "shrink-0 text-tertiary" }),
     ],
   );
 }

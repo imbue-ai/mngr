@@ -5,11 +5,7 @@
 // row before the round trip.
 
 import m from "mithril";
-import type {
-  UiWorkspaceUpdate,
-  UiWorkspaceUpdatesMessage,
-  UpdateVerdict,
-} from "../channel/messages";
+import type { UiWorkspaceUpdate, UiWorkspaceUpdatesMessage, UpdateVerdict } from "../channel/messages";
 
 /** The state for a machine the backend has said nothing about. Never "up to
  * date": silence is not a positive read. */
@@ -54,10 +50,7 @@ export type StandingUpdateNotice = "none" | "out-of-date" | "needs-recreation";
  * silences the out-of-date line (the run is already being reported);
  * `isUpdating` rather than the pushed activity, so it does not reappear between
  * the press and the first frame. Recreation has no run to be silenced by. */
-export function standingUpdateNotice(
-  update: UiWorkspaceUpdate,
-  isUpdating: boolean,
-): StandingUpdateNotice {
+export function standingUpdateNotice(update: UiWorkspaceUpdate, isUpdating: boolean): StandingUpdateNotice {
   if (isRecreationRequired(update)) return "needs-recreation";
   if (isUpdateOffered(update) && !isUpdating) return "out-of-date";
   return "none";
@@ -76,14 +69,8 @@ export function isUpdateDispatchable(update: UiWorkspaceUpdate): boolean {
 }
 
 /** Whether the last run ended in a way the user has to be told about. */
-export function isFailureVerdict(
-  verdict: UpdateVerdict | null | undefined,
-): boolean {
-  return (
-    verdict === "STUCK" ||
-    verdict === "REFUSED" ||
-    verdict === "NEEDS_RECREATION"
-  );
+export function isFailureVerdict(verdict: UpdateVerdict | null | undefined): boolean {
+  return verdict === "STUCK" || verdict === "REFUSED" || verdict === "NEEDS_RECREATION";
 }
 
 /** What to say about a version read from the machine's create-time label, or
@@ -112,10 +99,7 @@ export function devOverridePrefill(supportedVersion: string): string {
 export type UpdateRunPhase = "none" | "preparing" | "applying" | "waiting";
 
 /** One producer for the row badge and the shell's band. */
-export function updateRunPhase(
-  update: UiWorkspaceUpdate | null,
-  isUpdating: boolean,
-): UpdateRunPhase {
+export function updateRunPhase(update: UiWorkspaceUpdate | null, isUpdating: boolean): UpdateRunPhase {
   if (!isUpdating) return "none";
   if (update?.activity === "WAITING") return "waiting";
   if (update?.activity === "APPLYING") return "applying";
@@ -126,20 +110,16 @@ export function updateRunPhase(
 
 /** What a machine's last run left behind for the user, once it is over, or
  * that the last one asked for never went out. */
-export type UpdateRunOutcome =
-  "none" | "not-started" | "failed" | "needs-attention";
+export type UpdateRunOutcome = "none" | "not-started" | "failed" | "needs-attention";
 
 /** How the last run ended, for the surfaces that report it. Every failure is
  * one outcome: whatever the agent found, the next step is to check in with it.
  * An update that never went out is newer than any run's outcome: it is the
  * answer to the last press. */
-export function updateRunOutcome(
-  update: UiWorkspaceUpdate | null,
-): UpdateRunOutcome {
+export function updateRunOutcome(update: UiWorkspaceUpdate | null): UpdateRunOutcome {
   if (update === null) return "none";
   if (update.dispatch_failure) return "not-started";
-  if (update.activity === "STALLED" || isFailureVerdict(update.verdict))
-    return "failed";
+  if (update.activity === "STALLED" || isFailureVerdict(update.verdict)) return "failed";
   // Not a failure, but detection resets the machine to UP_TO_DATE on its next
   // sweep, so this is the only account of the leftover work.
   if (update.verdict === "UPDATED_WITH_REBUILD_ITEMS") return "needs-attention";
@@ -155,10 +135,7 @@ export function recordedDispatchFailure(
   isUpdating: boolean,
 ): { message: string; detail: string } {
   if (isUpdating) return { message: "", detail: "" };
-  return {
-    message: update.dispatch_failure ?? "",
-    detail: update.dispatch_failure_detail ?? "",
-  };
+  return { message: update.dispatch_failure ?? "", detail: update.dispatch_failure_detail ?? "" };
 }
 
 /** The modal's line about a run in flight, and whether it is still waiting. */
@@ -177,17 +154,12 @@ const STARTING_NOTICE: UpdateActivityNotice = {
  * `isWaiting` spins through STARTING, which for a stopped machine is a cold
  * boot and during which the chat tab does not exist yet. `isDispatching` covers
  * the beat before the first frame, when the modal has already dropped its buttons. */
-export function updateActivityNotice(
-  update: UiWorkspaceUpdate,
-  isDispatching = false,
-): UpdateActivityNotice {
+export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = false): UpdateActivityNotice {
   if (isDispatching && !isRunInFlight(update)) return STARTING_NOTICE;
   // A run with a named target says so: the phase alone would be a different
   // fact from the one the reader asked for.
   const target = update.target_override ?? "";
-  const preparing = target
-    ? `Preparing the update to ${target}`
-    : "Preparing the update";
+  const preparing = target ? `Preparing the update to ${target}` : "Preparing the update";
   switch (update.activity) {
     case "APPLYING":
       return {
@@ -256,10 +228,7 @@ export interface UpdateBadge {
  * schedule. Every one opens the modal (hence buttons); only "out of date" is an
  * offer. A null `update` (nothing published yet) earns no badge, except for a
  * dispatch this window just made. */
-export function updateBadgeFor(
-  update: UiWorkspaceUpdate | null,
-  isUpdating: boolean,
-): UpdateBadge | null {
+export function updateBadgeFor(update: UiWorkspaceUpdate | null, isUpdating: boolean): UpdateBadge | null {
   const phase = updateRunPhase(update, isUpdating);
   // Waiting is the reader's move; a running-looking badge would have them
   // waiting on something that is waiting on them.
@@ -324,8 +293,7 @@ export function updateBadgeFor(
       state: "needs-recreation",
       tone: "warn",
       label: "Recreate to update",
-      tooltip:
-        "This workspace is too old to update in place — see how to move your work to a new one",
+      tooltip: "This workspace is too old to update in place — see how to move your work to a new one",
       isSpinnerShown: false,
     };
   }
@@ -335,9 +303,7 @@ export function updateBadgeFor(
       state: isScheduled ? "scheduled" : "out-of-date",
       tone: "warn",
       label: isScheduled ? "Update scheduled" : "Update available",
-      tooltip: isScheduled
-        ? "See the update scheduled for this workspace"
-        : "See the update available for this workspace",
+      tooltip: isScheduled ? "See the update scheduled for this workspace" : "See the update available for this workspace",
       isSpinnerShown: false,
     };
   }
@@ -385,8 +351,7 @@ export class UpdatesStore {
     this.updateWindow = message.update_window ?? "";
     for (const agentId of [...this.pendingAgentIds]) {
       const pushed = this.updateByAgentId.get(agentId);
-      if (pushed !== undefined && isRunInFlight(pushed))
-        this.pendingAgentIds.delete(agentId);
+      if (pushed !== undefined && isRunInFlight(pushed)) this.pendingAgentIds.delete(agentId);
     }
   }
 
@@ -410,9 +375,7 @@ export class UpdatesStore {
 
   /** Whether the row should read as updating, optimistic dispatch included. */
   isUpdating(agentId: string): boolean {
-    return (
-      this.pendingAgentIds.has(agentId) || isRunInFlight(this.forAgent(agentId))
-    );
+    return this.pendingAgentIds.has(agentId) || isRunInFlight(this.forAgent(agentId));
   }
 
   /** Whether this machine is mid-apply, so health-driven recovery surfaces defer. */
@@ -424,27 +387,18 @@ export class UpdatesStore {
    * bulk actions cover. */
   updatableAgentIds(): string[] {
     return [...this.updateByAgentId.entries()]
-      .filter(
-        ([agentId, update]) =>
-          isUpdateOffered(update) && !this.isUpdating(agentId),
-      )
+      .filter(([agentId, update]) => isUpdateOffered(update) && !this.isUpdating(agentId))
       .map(([agentId]) => agentId);
   }
 
   /** Dispatch a run now. `targetRef` names an exact version/branch/ref instead
    * of the newest supported release; the run's own agent validates it. */
-  async updateNow(
-    agentId: string,
-    targetRef = "",
-  ): Promise<UpdateActionResult> {
+  async updateNow(agentId: string, targetRef = ""): Promise<UpdateActionResult> {
     this.pendingAgentIds.add(agentId);
     m.redraw();
-    const result = await postUpdateAction(
-      `/ui/api/updates/${encodeURIComponent(agentId)}/now`,
-      {
-        target_ref: targetRef,
-      },
-    );
+    const result = await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/now`, {
+      target_ref: targetRef,
+    });
     // Dropped whatever the answer: the backend publishes the in-flight row
     // before this request returns, and holding the lock past it can leave the
     // row locked on a run that already finished.
@@ -454,39 +408,24 @@ export class UpdatesStore {
   }
 
   /** Arm a run for the next update window; `targetRef` as for `updateNow`. */
-  async scheduleUpdate(
-    agentId: string,
-    targetRef = "",
-  ): Promise<UpdateActionResult> {
-    return await postUpdateAction(
-      `/ui/api/updates/${encodeURIComponent(agentId)}/schedule`,
-      {
-        target_ref: targetRef,
-      },
-    );
+  async scheduleUpdate(agentId: string, targetRef = ""): Promise<UpdateActionResult> {
+    return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/schedule`, {
+      target_ref: targetRef,
+    });
   }
 
   async cancelSchedule(agentId: string): Promise<UpdateActionResult> {
-    return await postUpdateAction(
-      `/ui/api/updates/${encodeURIComponent(agentId)}/schedule/cancel`,
-      {},
-    );
+    return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/schedule/cancel`, {});
   }
 
   /** Clear how the last run ended -- its verdict, or a stall -- or why the last one never went out. */
   async dismissRunOutcome(agentId: string): Promise<UpdateActionResult> {
-    return await postUpdateAction(
-      `/ui/api/updates/${encodeURIComponent(agentId)}/dismiss`,
-      {},
-    );
+    return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/dismiss`, {});
   }
 
   /** Clear the "Updated to X" note (the row's own dismiss). */
   async dismissNote(agentId: string): Promise<UpdateActionResult> {
-    return await postUpdateAction(
-      `/ui/api/updates/${encodeURIComponent(agentId)}/note/dismiss`,
-      {},
-    );
+    return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/note/dismiss`, {});
   }
 
   /** Dispatch every listed machine with no optimistic lock: a 200 means only
@@ -494,15 +433,11 @@ export class UpdatesStore {
    * never reaches an in-flight activity, so a lock here would never release.
    * Each row locks when the backend publishes STARTING for it. */
   async updateAllNow(agentIds: string[]): Promise<UpdateActionResult> {
-    return await postUpdateAction("/ui/api/updates/bulk/now", {
-      agent_ids: agentIds,
-    });
+    return await postUpdateAction("/ui/api/updates/bulk/now", { agent_ids: agentIds });
   }
 
   async scheduleAllUpdates(agentIds: string[]): Promise<UpdateActionResult> {
-    return await postUpdateAction("/ui/api/updates/bulk/schedule", {
-      agent_ids: agentIds,
-    });
+    return await postUpdateAction("/ui/api/updates/bulk/schedule", { agent_ids: agentIds });
   }
 
   /** Whether an update on this machine needs the go-ahead-without-backups
@@ -523,10 +458,7 @@ export interface UpdateActionResult {
   detail: string;
 }
 
-async function postUpdateAction(
-  url: string,
-  body: Record<string, unknown>,
-): Promise<UpdateActionResult> {
+async function postUpdateAction(url: string, body: Record<string, unknown>): Promise<UpdateActionResult> {
   let response: Response;
   try {
     response = await fetch(url, {
@@ -536,17 +468,10 @@ async function postUpdateAction(
       body: JSON.stringify(body),
     });
   } catch {
-    return {
-      isOk: false,
-      error: "The request failed (network error).",
-      detail: "",
-    };
+    return { isOk: false, error: "The request failed (network error).", detail: "" };
   }
   if (response.ok) return { isOk: true, error: "", detail: "" };
-  const payload = (await response.json().catch(() => null)) as {
-    error?: string;
-    detail?: string;
-  } | null;
+  const payload = (await response.json().catch(() => null)) as { error?: string; detail?: string } | null;
   return {
     isOk: false,
     error: payload?.error ?? `HTTP ${response.status}`,

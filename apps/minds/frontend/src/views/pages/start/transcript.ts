@@ -121,9 +121,7 @@ export function userTurn(
     "div",
     {
       key: attrs.key,
-      class:
-        "mt-10 flex items-center justify-end gap-2 first:mt-0" +
-        arrivalClass(attrs),
+      class: "mt-10 flex items-center justify-end gap-2 first:mt-0" + arrivalClass(attrs),
       style: arrivalStyle(attrs),
     },
     [
@@ -361,28 +359,15 @@ export function answerRow(
   // its right: one line, the two sides of the conversation.
   const row = m(
     "div",
-    {
-      class:
-        "flex items-center " +
-        (attrs.aside ? "justify-between gap-6" : "justify-end"),
-    },
+    { class: "flex items-center " + (attrs.aside ? "justify-between gap-6" : "justify-end") },
     attrs.aside
-      ? [
-          linkButton(attrs.aside.label, attrs.aside.onPress, {
-            "data-aside": "",
-          }),
-          buttons,
-        ]
+      ? [linkButton(attrs.aside.label, attrs.aside.onPress, { "data-aside": "" }), buttons]
       : buttons,
   );
   const minorButtons = attrs.minorButtons ?? [];
   return m(
     "div",
-    {
-      key: attrs.key,
-      class: "mt-10" + arrivalClass(attrs),
-      style: arrivalStyle(attrs),
-    },
+    { key: attrs.key, class: "mt-10" + arrivalClass(attrs), style: arrivalStyle(attrs) },
     [
       row,
       minorButtons.length === 0
@@ -391,21 +376,14 @@ export function answerRow(
             "div",
             { class: "mt-4 flex flex-wrap justify-end gap-x-6 gap-y-2" },
             minorButtons.map((button) =>
-              linkButton(button.label, button.onPress, {
-                key: button.id,
-                "data-answer": button.id,
-              }),
+              linkButton(button.label, button.onPress, { key: button.id, "data-answer": button.id }),
             ),
           ),
     ],
   );
 }
 
-function linkButton(
-  label: string,
-  onPress: () => void,
-  extraAttrs: m.Attributes,
-): m.Children {
+function linkButton(label: string, onPress: () => void, extraAttrs: m.Attributes): m.Children {
   return m(
     "button",
     {

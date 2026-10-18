@@ -3,11 +3,7 @@
 // (port of LatchkeyWorkspacePermission.jinja).
 
 import m from "mithril";
-import type {
-  InboxModel,
-  WorkspacePermissionDetail as Detail,
-  WorkspaceVerbChoice,
-} from "../../../models/inbox";
+import type { InboxModel, WorkspacePermissionDetail as Detail, WorkspaceVerbChoice } from "../../../models/inbox";
 import { Icon16 } from "../../components/Icon";
 import { Notice } from "../../components/Notice";
 import { PermissionsShell } from "./PermissionsShell";
@@ -17,10 +13,7 @@ export interface WorkspacePermissionDetailAttrs {
   detail: Detail;
 }
 
-function verbCheckbox(
-  model: InboxModel,
-  verb: WorkspaceVerbChoice,
-): m.Children {
+function verbCheckbox(model: InboxModel, verb: WorkspaceVerbChoice): m.Children {
   const checked = model.checkedPermissions;
   return m("label", { class: "flex items-start gap-2 cursor-pointer" }, [
     m("input", {
@@ -56,25 +49,13 @@ export function WorkspacePermissionDetailView(): m.Component<WorkspacePermission
         progressLabel: "Granting permission...",
         body: m("div", { class: "flex flex-col gap-4" }, [
           m("div", { class: "flex flex-col gap-1.5" }, [
-            m(
-              "p",
-              { class: "type-label text-secondary" },
-              "General permissions",
-            ),
+            m("p", { class: "type-label text-secondary" }, "General permissions"),
             ...generalVerbs.map((verb) => verbCheckbox(model, verb)),
           ]),
           m("div", { class: "flex flex-col gap-1.5" }, [
-            m(
-              "p",
-              { class: "type-label text-secondary" },
-              "Workspace-specific permissions",
-            ),
+            m("p", { class: "type-label text-secondary" }, "Workspace-specific permissions"),
             detail.show_target_choice
-              ? m(
-                  "p",
-                  { class: "type-helper text-tertiary" },
-                  "These act on individual workspaces.",
-                )
+              ? m("p", { class: "type-helper text-tertiary" }, "These act on individual workspaces.")
               : m(
                   Notice,
                   { variant: "warn" },
@@ -83,49 +64,33 @@ export function WorkspacePermissionDetailView(): m.Component<WorkspacePermission
             ...targetedVerbs.map((verb) => verbCheckbox(model, verb)),
             detail.show_target_choice
               ? m("div", { class: "flex flex-col gap-1.5 mt-1" }, [
-                  m(
-                    "label",
-                    { class: "flex items-center gap-2 cursor-pointer" },
-                    [
-                      m("input", {
-                        type: "radio",
-                        name: "target_scope",
-                        value: "selected",
-                        checked: model.targetScope === "selected",
-                        onchange: () => {
-                          model.targetScope = "selected";
-                        },
-                      }),
-                      m("span", { class: "type-body text-primary" }, [
-                        "Only ",
-                        m(
-                          "b",
-                          detail.target_workspace_name ??
-                            "the selected workspace",
-                        ),
-                      ]),
-                    ],
-                  ),
-                  m(
-                    "label",
-                    { class: "flex items-center gap-2 cursor-pointer" },
-                    [
-                      m("input", {
-                        type: "radio",
-                        name: "target_scope",
-                        value: "all",
-                        checked: model.targetScope === "all",
-                        onchange: () => {
-                          model.targetScope = "all";
-                        },
-                      }),
-                      m(
-                        "span",
-                        { class: "type-body text-primary" },
-                        "All workspaces",
-                      ),
-                    ],
-                  ),
+                  m("label", { class: "flex items-center gap-2 cursor-pointer" }, [
+                    m("input", {
+                      type: "radio",
+                      name: "target_scope",
+                      value: "selected",
+                      checked: model.targetScope === "selected",
+                      onchange: () => {
+                        model.targetScope = "selected";
+                      },
+                    }),
+                    m("span", { class: "type-body text-primary" }, [
+                      "Only ",
+                      m("b", detail.target_workspace_name ?? "the selected workspace"),
+                    ]),
+                  ]),
+                  m("label", { class: "flex items-center gap-2 cursor-pointer" }, [
+                    m("input", {
+                      type: "radio",
+                      name: "target_scope",
+                      value: "all",
+                      checked: model.targetScope === "all",
+                      onchange: () => {
+                        model.targetScope = "all";
+                      },
+                    }),
+                    m("span", { class: "type-body text-primary" }, "All workspaces"),
+                  ]),
                 ])
               : null,
           ]),

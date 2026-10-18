@@ -21,25 +21,13 @@ export const PRESET_TITLES: Record<PresetName, string> = {
 };
 
 const MINOR_PRESETS: { name: PresetName; detail: string }[] = [
-  {
-    name: "local",
-    detail:
-      "5-10 minute setup. Runs only while this computer is on, and uses its memory.",
-  },
-  {
-    name: "own-cloud",
-    detail:
-      "Runs on a cloud provider account of your own. You manage uptime, backups and cost.",
-  },
+  { name: "local", detail: "5-10 minute setup. Runs only while this computer is on, and uses its memory." },
+  { name: "own-cloud", detail: "Runs on a cloud provider account of your own. You manage uptime, backups and cost." },
 ];
 
 function featureItem(text: string): m.Children {
   return m("li", { class: "flex items-start gap-2 type-body text-primary" }, [
-    m(
-      "span",
-      { class: "text-accent shrink-0 mt-0.5" },
-      m(Icon16, { name: "badge-check-filled" }),
-    ),
+    m("span", { class: "text-accent shrink-0 mt-0.5" }, m(Icon16, { name: "badge-check-filled" })),
     text,
   ]);
 }
@@ -59,11 +47,7 @@ export function PresetCards(): m.Component<PresetCardsAttrs> {
           },
           [
             m("div", { class: "flex items-center gap-2" }, [
-              m(
-                "span",
-                { class: "type-heading text-primary" },
-                PRESET_TITLES.remote,
-              ),
+              m("span", { class: "type-heading text-primary" }, PRESET_TITLES.remote),
               m(
                 "span",
                 {
@@ -91,16 +75,11 @@ export function PresetCards(): m.Component<PresetCardsAttrs> {
                 key: name,
                 preset: name,
                 selected: selectedPreset === name,
-                extra:
-                  "flex-1 !gap-1 !p-3 !outline-solid not-aria-checked:outline-primary",
+                extra: "flex-1 !gap-1 !p-3 !outline-solid not-aria-checked:outline-primary",
                 onclick: () => onSelect(name),
               },
               [
-                m(
-                  "span",
-                  { class: "type-body font-semibold text-primary" },
-                  PRESET_TITLES[name],
-                ),
+                m("span", { class: "type-body font-semibold text-primary" }, PRESET_TITLES[name]),
                 m("span", { class: "type-helper text-secondary" }, detail),
               ],
             ),

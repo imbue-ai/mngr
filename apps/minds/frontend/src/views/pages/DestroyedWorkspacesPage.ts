@@ -23,8 +23,7 @@ interface DestroyedWorkspacesState {
 
 function _rowMetaLine(row: DestroyedWorkspaceRow): string {
   const parts = [row.account_label];
-  if (row.destroyed_at_display)
-    parts.push(`destroyed ${row.destroyed_at_display}`);
+  if (row.destroyed_at_display) parts.push(`destroyed ${row.destroyed_at_display}`);
   if (row.days_left_display) parts.push(row.days_left_display);
   return parts.join(" · ");
 }
@@ -46,26 +45,12 @@ function DestroyedRow(): m.Component<{
           m("div", { class: "font-semibold break-words" }, row.display_name),
           m("div", { class: "type-helper text-tertiary" }, _rowMetaLine(row)),
           row.is_locked
-            ? m(
-                "div",
-                { class: "type-helper text-tertiary mt-1" },
-                "Unlock this account's sync password to download.",
-              )
+            ? m("div", { class: "type-helper text-tertiary mt-1" }, "Unlock this account's sync password to download.")
             : null,
           !row.is_locked && !row.has_backup
-            ? m(
-                "div",
-                { class: "type-helper text-tertiary mt-1" },
-                "No backup was configured for this workspace.",
-              )
+            ? m("div", { class: "type-helper text-tertiary mt-1" }, "No backup was configured for this workspace.")
             : null,
-          row.delete_hint
-            ? m(
-                "div",
-                { class: "type-helper text-tertiary mt-1" },
-                row.delete_hint,
-              )
-            : null,
+          row.delete_hint ? m("div", { class: "type-helper text-tertiary mt-1" }, row.delete_hint) : null,
         ]),
         m("div", { class: "flex items-center justify-end gap-2 shrink-0" }, [
           row.can_download
@@ -80,20 +65,14 @@ function DestroyedRow(): m.Component<{
                     m.redraw();
                     // The export route restores the latest snapshot server-side
                     // and streams a zip; "latest" is the shared alias.
-                    void downloadSnapshotExport(row.agent_id, "latest").then(
-                      (isOk) => {
-                        model.downloadingAgentIds.delete(row.agent_id);
-                        if (!isOk) failedDownloadAgentIds.add(row.agent_id);
-                        m.redraw();
-                      },
-                    );
+                    void downloadSnapshotExport(row.agent_id, "latest").then((isOk) => {
+                      model.downloadingAgentIds.delete(row.agent_id);
+                      if (!isOk) failedDownloadAgentIds.add(row.agent_id);
+                      m.redraw();
+                    });
                   },
                 },
-                isDownloading
-                  ? "Downloading..."
-                  : isDownloadFailed
-                    ? "Download failed"
-                    : "Download",
+                isDownloading ? "Downloading..." : isDownloadFailed ? "Download failed" : "Download",
               )
             : null,
           row.can_delete && !isArmed
@@ -117,14 +96,7 @@ function DestroyedRow(): m.Component<{
                   "Remove this workspace? This can't be undone.",
                 ),
                 m("span", { class: "flex items-center gap-2" }, [
-                  m(
-                    Button,
-                    {
-                      variant: "danger",
-                      onclick: () => void model.deleteBackup(row.agent_id),
-                    },
-                    "Delete forever",
-                  ),
+                  m(Button, { variant: "danger", onclick: () => void model.deleteBackup(row.agent_id) }, "Delete forever"),
                   m(
                     Button,
                     {
@@ -144,14 +116,9 @@ function DestroyedRow(): m.Component<{
   };
 }
 
-export const DestroyedWorkspacesPage: m.Component<
-  Record<string, never>,
-  DestroyedWorkspacesState
-> = {
+export const DestroyedWorkspacesPage: m.Component<Record<string, never>, DestroyedWorkspacesState> = {
   oninit(vnode) {
-    vnode.state.model = new DestroyedWorkspacesModel(
-      browserLifecycleDeps(() => m.redraw()),
-    );
+    vnode.state.model = new DestroyedWorkspacesModel(browserLifecycleDeps(() => m.redraw()));
     vnode.state.failedDownloadAgentIds = new Set();
     void vnode.state.model.load();
   },
@@ -168,17 +135,11 @@ export const DestroyedWorkspacesPage: m.Component<
               `Backups of destroyed workspaces are kept for ${model.retentionDays} days, then deleted automatically.`,
             )
           : null,
-        model.errorMessage !== null
-          ? m(Notice, { variant: "error" }, model.errorMessage)
-          : null,
+        model.errorMessage !== null ? m(Notice, { variant: "error" }, model.errorMessage) : null,
         !model.isLoaded
           ? m("div", { class: "type-body text-secondary" }, "Loading...")
           : model.rows.length === 0
-            ? m(
-                "div",
-                { class: "type-body text-secondary" },
-                "No recently destroyed workspaces.",
-              )
+            ? m("div", { class: "type-body text-secondary" }, "No recently destroyed workspaces.")
             : m(
                 "div",
                 { class: "flex flex-col gap-2" },

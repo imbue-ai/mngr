@@ -11,24 +11,11 @@ import {
   startQuestions,
   undoAnswer,
 } from "../../models/startFlow";
-import {
-  allText,
-  attrsOf,
-  collectVnodes,
-  createFormDefaults,
-  withAttr,
-} from "../../testing";
-import {
-  areDefaultsStale,
-  cloudCreateBody,
-  transcriptTurns,
-} from "./StartPage";
+import { allText, attrsOf, collectVnodes, createFormDefaults, withAttr } from "../../testing";
+import { areDefaultsStale, cloudCreateBody, transcriptTurns } from "./StartPage";
 
 const SIGNED_OUT = { signedInAccount: null, knownAccountIds: [] };
-const SIGNED_IN = {
-  signedInAccount: { userId: "user-1", email: "a@b.com" },
-  knownAccountIds: ["user-1"],
-};
+const SIGNED_IN = { signedInAccount: { userId: "user-1", email: "a@b.com" }, knownAccountIds: ["user-1"] };
 
 describe("cloudCreateBody", () => {
   it("is the create form's remote preset with the default account and its region", () => {
@@ -52,9 +39,7 @@ describe("cloudCreateBody", () => {
         { user_id: "user-2", email: "bob@example.com" },
       ],
     });
-    expect(cloudCreateBody(withBob, "user-2")).toMatchObject({
-      account_id: "user-2",
-    });
+    expect(cloudCreateBody(withBob, "user-2")).toMatchObject({ account_id: "user-2" });
   });
 });
 
@@ -63,12 +48,7 @@ describe("areDefaultsStale", () => {
     // The route reads the defaults when it mounts, which on a first run is
     // before the account step; a create built from those could not name the
     // account that signed in since.
-    expect(
-      areDefaultsStale(
-        createFormDefaults({ accounts: [], default_account_id: "" }),
-        "user-1",
-      ),
-    ).toBe(true);
+    expect(areDefaultsStale(createFormDefaults({ accounts: [], default_account_id: "" }), "user-1")).toBe(true);
     expect(areDefaultsStale(createFormDefaults(), "user-2")).toBe(true);
   });
 
@@ -82,62 +62,34 @@ describe("areDefaultsStale", () => {
 });
 
 describe("transcriptTurns", () => {
-  const started = startQuestions(
-    initialStartFlowState(),
-    REPORTING_ACCEPT_LABEL,
-  );
+  const started = startQuestions(initialStartFlowState(), REPORTING_ACCEPT_LABEL);
 
   it("renders the open question with Imbue Cloud's points, its button, the two minor answers, and the existing-account way out", () => {
-    const turns = transcriptTurns(started.entries, {
-      isInstant: true,
-      isPressable: true,
-    });
+    const turns = transcriptTurns(started.entries, { isInstant: true, isPressable: true });
     const text = allText(turns);
     expect(text).toContain(REPORTING_ACCEPT_LABEL);
     expect(text).toContain("Let's create your first workspace.");
     expect(text).toContain("Recommended");
     expect(text).toContain("30 second setup");
     const answers = withAttr(turns, "data-answer");
-    expect(answers.map((node) => node.attrs?.["data-answer"])).toEqual([
-      "cloud",
-      "local",
-      "own-cloud",
-    ]);
+    expect(answers.map((node) => node.attrs?.["data-answer"])).toEqual(["cloud", "local", "own-cloud"]);
     // Only Imbue Cloud is a button; the other two are links.
-    expect(answers.map((node) => typeof node.tag === "string")).toEqual([
-      false,
-      true,
-      true,
-    ]);
-    expect(allText(withAttr(turns, "data-aside"))).toContain(
-      EXISTING_LOGIN_LABEL,
-    );
+    expect(answers.map((node) => typeof node.tag === "string")).toEqual([false, true, true]);
+    expect(allText(withAttr(turns, "data-aside"))).toContain(EXISTING_LOGIN_LABEL);
   });
 
   it("renders an answered question as the user's words with an undo, and no buttons", () => {
     const answered = answerStep(started, 1, "cloud", SIGNED_OUT);
-    const turns = transcriptTurns(answered.entries, {
-      isInstant: true,
-      isPressable: true,
-      onUndo: () => undefined,
-    });
+    const turns = transcriptTurns(answered.entries, { isInstant: true, isPressable: true, onUndo: () => undefined });
     const text = allText(turns);
     expect(text).toContain("Use Imbue Cloud");
-    expect(text).toContain(
-      "Imbue Cloud it is. A cloud workspace runs on our machines",
-    );
+    expect(text).toContain("Imbue Cloud it is. A cloud workspace runs on our machines");
     // The where-to-run buttons are gone; the account question's are up, with
     // sign-in as the emphasized answer at the row's right end.
-    const answers = withAttr(turns, "data-answer").map(
-      (node) => node.attrs?.["data-answer"],
-    );
+    const answers = withAttr(turns, "data-answer").map((node) => node.attrs?.["data-answer"]);
     expect(answers).toEqual(["signup", "signin"]);
-    expect(text).toContain(
-      "Sign in with the account you downloaded Imbue Studio with.",
-    );
-    const undo = collectVnodes(turns).find(
-      (node) => node.attrs?.["aria-label"] === "Change answer",
-    );
+    expect(text).toContain("Sign in with the account you downloaded Imbue Studio with.");
+    const undo = collectVnodes(turns).find((node) => node.attrs?.["aria-label"] === "Change answer");
     expect(undo).toBeDefined();
   });
 
@@ -150,24 +102,14 @@ describe("transcriptTurns", () => {
           .map((node) => attrsOf(node).style)
           .find((style) => typeof style === "string"),
       );
-    const fresh = transcriptTurns(reopened.entries, {
-      isInstant: true,
-      isPressable: true,
-    });
-    const undone = transcriptTurns(reopened.entries, {
-      isInstant: true,
-      isPressable: true,
-      reopenedStepIndex: 1,
-    });
+    const fresh = transcriptTurns(reopened.entries, { isInstant: true, isPressable: true });
+    const undone = transcriptTurns(reopened.entries, { isInstant: true, isPressable: true, reopenedStepIndex: 1 });
     expect(delayOf(fresh)).toMatch(/--start-chat-delay: [1-9]\d+ms/);
     expect(delayOf(undone)).toContain("--start-chat-delay: 0ms");
   });
 
   it("renders nothing pressable when asked for a read-only transcript", () => {
-    const turns = transcriptTurns(started.entries, {
-      isInstant: true,
-      isPressable: false,
-    });
+    const turns = transcriptTurns(started.entries, { isInstant: true, isPressable: false });
     expect(withAttr(turns, "data-answer")).toHaveLength(0);
     expect(withAttr(turns, "data-aside")).toHaveLength(0);
     expect(allText(turns)).toContain("We recommend running it on Imbue Cloud.");
@@ -175,18 +117,10 @@ describe("transcriptTurns", () => {
 });
 
 describe("transcriptTurns on the account question with an account signed in", () => {
-  const asked = answerStep(
-    startQuestions(initialStartFlowState(), REPORTING_ACCEPT_LABEL),
-    1,
-    "cloud",
-    SIGNED_IN,
-  );
+  const asked = answerStep(startQuestions(initialStartFlowState(), REPORTING_ACCEPT_LABEL), 1, "cloud", SIGNED_IN);
 
   it("bolds the signed-in email and offers to continue with it or use a different account", () => {
-    const turns = transcriptTurns(asked.entries, {
-      isInstant: true,
-      isPressable: true,
-    });
+    const turns = transcriptTurns(asked.entries, { isInstant: true, isPressable: true });
     const strongTexts = collectVnodes(turns)
       .filter((node) => node.tag === "strong")
       .map((node) => allText(node));
@@ -199,12 +133,7 @@ describe("transcriptTurns on the account question with an account signed in", ()
 describe("transcriptTurns on the verification question", () => {
   const waiting = requireEmailVerification(
     answerStep(
-      answerStep(
-        startQuestions(initialStartFlowState(), REPORTING_ACCEPT_LABEL),
-        1,
-        "cloud",
-        SIGNED_IN,
-      ),
+      answerStep(startQuestions(initialStartFlowState(), REPORTING_ACCEPT_LABEL), 1, "cloud", SIGNED_IN),
       2,
       "continue",
       SIGNED_IN,
@@ -212,35 +141,19 @@ describe("transcriptTurns on the verification question", () => {
   );
 
   it("leads with the requirement in bold, names the address, and offers only the verified button plus a resend", () => {
-    const turns = transcriptTurns(waiting.entries, {
-      isInstant: true,
-      isPressable: true,
-    });
+    const turns = transcriptTurns(waiting.entries, { isInstant: true, isPressable: true });
     const strongTexts = collectVnodes(turns)
       .filter((node) => node.tag === "strong")
       .map((node) => allText(node));
     expect(strongTexts).toContain("You must verify your email");
-    expect(allText(turns)).toContain(
-      "(click the link emailed to a@b.com when you created your account)",
-    );
-    expect(
-      withAttr(turns, "data-answer").map((node) => node.attrs?.["data-answer"]),
-    ).toEqual(["verified"]);
-    expect(allText(withAttr(turns, "data-aside"))).toContain(
-      RESEND_EMAIL_LABEL,
-    );
+    expect(allText(turns)).toContain("(click the link emailed to a@b.com when you created your account)");
+    expect(withAttr(turns, "data-answer").map((node) => node.attrs?.["data-answer"])).toEqual(["verified"]);
+    expect(allText(withAttr(turns, "data-aside"))).toContain(RESEND_EMAIL_LABEL);
   });
 
   it("puts the resend on the same row as the button", () => {
-    const turns = transcriptTurns(waiting.entries, {
-      isInstant: true,
-      isPressable: true,
-    });
-    const row = collectVnodes(turns).find(
-      (node) =>
-        withAttr(node, "data-aside").length > 0 &&
-        withAttr(node, "data-answer").length > 0,
-    );
+    const turns = transcriptTurns(waiting.entries, { isInstant: true, isPressable: true });
+    const row = collectVnodes(turns).find((node) => withAttr(node, "data-aside").length > 0 && withAttr(node, "data-answer").length > 0);
     expect(row).toBeDefined();
   });
 
@@ -251,9 +164,7 @@ describe("transcriptTurns on the verification question", () => {
       onUndo: () => undefined,
     });
     expect(allText(turns)).toContain("I verified it");
-    const undos = collectVnodes(turns).filter(
-      (node) => node.attrs?.["aria-label"] === "Change answer",
-    );
+    const undos = collectVnodes(turns).filter((node) => node.attrs?.["aria-label"] === "Change answer");
     // The where-to-run and account answers keep their undo; the verified one has none.
     expect(undos).toHaveLength(2);
   });

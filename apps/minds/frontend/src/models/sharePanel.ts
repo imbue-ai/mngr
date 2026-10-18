@@ -224,22 +224,10 @@ export type InviteState =
 export type InvitationStatusIndicator =
   | { readonly kind: "none" }
   | { readonly kind: "inviting" }
-  | {
-      readonly kind: "invited";
-      readonly at: string | null;
-      readonly canReinvite: boolean;
-    }
+  | { readonly kind: "invited"; readonly at: string | null; readonly canReinvite: boolean }
   | { readonly kind: "could_not_invite"; readonly canReinvite: boolean }
-  | {
-      readonly kind: "refused";
-      readonly message: string;
-      readonly canReinvite: boolean;
-    }
-  | {
-      readonly kind: "joined";
-      readonly firstAt: string | null;
-      readonly lastAt: string | null;
-    };
+  | { readonly kind: "refused"; readonly message: string; readonly canReinvite: boolean }
+  | { readonly kind: "joined"; readonly firstAt: string | null; readonly lastAt: string | null };
 
 /** One entry the grants route refused, as the 400 body names it. */
 interface GrantRefusal {
@@ -578,10 +566,7 @@ export class SharePanelModel {
    * in-flight request, the last refusal, and the granter-visible outcome, in that order, so the
    * view only ever renders one of them. A domain row, and a row with nothing known yet, show
    * nothing. */
-  invitationStatusIndicator(
-    target: string,
-    grant: Grant,
-  ): InvitationStatusIndicator {
+  invitationStatusIndicator(target: string, grant: Grant): InvitationStatusIndicator {
     if (grant.grantee.kind === "email_domain") return { kind: "none" };
     const invite = this.inviteStateFor(grant.key);
     if (invite.state === "inviting") return { kind: "inviting" };
@@ -591,11 +576,7 @@ export class SharePanelModel {
     const outcome = this.outcomeFor(target, grant);
     if (outcome === null) return { kind: "none" };
     if (outcome.kind === "joined")
-      return {
-        kind: "joined",
-        firstAt: outcome.joinedAt,
-        lastAt: outcome.lastVisitedAt,
-      };
+      return { kind: "joined", firstAt: outcome.joinedAt, lastAt: outcome.lastVisitedAt };
     if (outcome.kind === "invited")
       return { kind: "invited", at: outcome.invitedAt, canReinvite };
     return { kind: "could_not_invite", canReinvite };

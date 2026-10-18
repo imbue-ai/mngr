@@ -2,10 +2,7 @@
 // device's signed-in account list (port of LatchkeyAccountsPermission.jinja).
 
 import m from "mithril";
-import type {
-  AccountsPermissionDetail as Detail,
-  InboxModel,
-} from "../../../models/inbox";
+import type { AccountsPermissionDetail as Detail, InboxModel } from "../../../models/inbox";
 import { Icon16 } from "../../components/Icon";
 import { PermissionsShell } from "./PermissionsShell";
 

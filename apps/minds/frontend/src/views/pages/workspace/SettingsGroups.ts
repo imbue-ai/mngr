@@ -26,14 +26,8 @@ import {
   formatPendingMachineSize,
   normalizeWorkspaceColorHex,
 } from "../../../models/workspaceOptions";
-import type {
-  MachineSizeDimension,
-  MachineSizeDraft,
-} from "../../../models/machineSize";
-import {
-  formatMachineSizeNumbers,
-  machineSizeDraftFor,
-} from "../../../models/machineSize";
+import type { MachineSizeDimension, MachineSizeDraft } from "../../../models/machineSize";
+import { formatMachineSizeNumbers, machineSizeDraftFor } from "../../../models/machineSize";
 import { MachineSizeInput } from "../../components/MachineSizeInput";
 import {
   devOverridePrefill,
@@ -738,10 +732,7 @@ function currentSizeDraft(
   local: SettingsGroupsLocalState,
   size: WorkspaceMachineSizeData,
 ): MachineSizeDraft {
-  return (
-    forMachine(local.sizeDraft, model.agentId)?.draft ??
-    machineSizeDraftFor(size)
-  );
+  return forMachine(local.sizeDraft, model.agentId)?.draft ?? machineSizeDraftFor(size);
 }
 
 /** One resize field, keyed to the machine it is typed for. */
@@ -759,10 +750,7 @@ function machineResizeField(
     value: draft[dimension],
     disabled: model.isResizeBusy,
     oninput: (text: string) => {
-      local.sizeDraft = {
-        agentId: model.agentId,
-        draft: { ...draft, [dimension]: text },
-      };
+      local.sizeDraft = { agentId: model.agentId, draft: { ...draft, [dimension]: text } };
     },
   });
 }
@@ -785,9 +773,7 @@ function renderMachineResize(
     m("div", { class: "flex flex-wrap items-center gap-3" }, [
       machineResizeField(model, local, size, "cpu_count", "CPUs"),
       machineResizeField(model, local, size, "memory_gb", "GB RAM"),
-      size.is_disk_resizable
-        ? machineResizeField(model, local, size, "disk_gb", "GB disk")
-        : null,
+      size.is_disk_resizable ? machineResizeField(model, local, size, "disk_gb", "GB disk") : null,
       m(
         Button,
         {
@@ -806,20 +792,12 @@ function renderMachineResize(
     model.resizeErrorMessage
       ? m(
           "p",
-          {
-            id: "machine-resize-error",
-            class: "type-helper text-important mt-2",
-            role: "alert",
-          },
+          { id: "machine-resize-error", class: "type-helper text-important mt-2", role: "alert" },
           model.resizeErrorMessage,
         )
       : null,
     model.resizeNotice
-      ? m(
-          Notice,
-          { variant: "info", extra: "mt-2", id: "machine-resize-notice" },
-          model.resizeNotice,
-        )
+      ? m(Notice, { variant: "info", extra: "mt-2", id: "machine-resize-notice" }, model.resizeNotice)
       : null,
   ]);
 }

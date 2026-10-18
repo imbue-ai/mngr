@@ -1,10 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { jsonResponse } from "../testing";
-import {
-  POLL_INTERVAL_MS,
-  WebLoginModel,
-  consumeWebLoginParams,
-} from "./webLogin";
+import { POLL_INTERVAL_MS, WebLoginModel, consumeWebLoginParams } from "./webLogin";
 
 /** A model whose start request stays pending until the test settles it, so
  * dismiss() can be interleaved with the in-flight request. */
@@ -25,11 +21,7 @@ function makeModelWithDeferredStart(): {
       }),
     () => {},
   );
-  return {
-    model,
-    resolve: (r) => settlers.resolve(r),
-    reject: (e) => settlers.reject(e),
-  };
+  return { model, resolve: (r) => settlers.resolve(r), reject: (e) => settlers.reject(e) };
 }
 
 /** A model whose status polls answer from a scripted sequence of flow states,
@@ -101,12 +93,7 @@ describe("WebLoginModel", () => {
   it("brings the app to the front once the sign-in lands, and only once", async () => {
     vi.useFakeTimers();
     try {
-      const { model, raiseCount } = makeModelWithStatusScript([
-        "running",
-        "finishing",
-        "finishing",
-        "done",
-      ]);
+      const { model, raiseCount } = makeModelWithStatusScript(["running", "finishing", "finishing", "done"]);
       await model.start();
       // Signing in happens in the browser; nothing to come back to yet.
       expect(raiseCount()).toBe(0);
@@ -270,17 +257,12 @@ describe("WebLoginModel", () => {
 });
 
 describe("WebLoginModel.start joining a waiting sign-in", () => {
-  function makeModel(startBody: object): {
-    model: WebLoginModel;
-    openedUrls: string[];
-  } {
+  function makeModel(startBody: object): { model: WebLoginModel; openedUrls: string[] } {
     const openedUrls: string[] = [];
     const model = new WebLoginModel(
       (input) =>
         Promise.resolve(
-          String(input).includes("/web-login/start")
-            ? jsonResponse(startBody)
-            : jsonResponse({ state: "waiting" }),
+          String(input).includes("/web-login/start") ? jsonResponse(startBody) : jsonResponse({ state: "waiting" }),
         ),
       () => {},
       () => {},
@@ -313,9 +295,7 @@ describe("WebLoginModel.start joining a waiting sign-in", () => {
 
 describe("consumeWebLoginParams", () => {
   it("returns the message and strips both params when the sign-in is requested", () => {
-    const params = new URLSearchParams(
-      "web-login=1&web-login-message=please%20sign%20in&keep=me",
-    );
+    const params = new URLSearchParams("web-login=1&web-login-message=please%20sign%20in&keep=me");
 
     const message = consumeWebLoginParams(params);
 
@@ -339,8 +319,6 @@ describe("consumeWebLoginParams", () => {
   });
 
   it("treats other web-login values as no request", () => {
-    expect(
-      consumeWebLoginParams(new URLSearchParams("web-login=0")),
-    ).toBeNull();
+    expect(consumeWebLoginParams(new URLSearchParams("web-login=0"))).toBeNull();
   });
 });

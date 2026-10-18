@@ -13,11 +13,7 @@ export const WorkspaceSettingsRedirect: m.ClosureComponent = () => ({
     const group = m.route.param("group");
     const params = new URLSearchParams({ tab: "settings" });
     if (group) params.set("group", group);
-    m.route.set(
-      `/workspace/${agentId}/options?${params.toString()}`,
-      undefined,
-      { replace: true },
-    );
+    m.route.set(`/workspace/${agentId}/options?${params.toString()}`, undefined, { replace: true });
   },
   view() {
     return null;

@@ -10,11 +10,7 @@
 // takes.
 
 import m from "mithril";
-import type {
-  OptionsTab,
-  SettingsGroup,
-  WorkspaceOptionsModel,
-} from "../../../models/workspaceOptions";
+import type { OptionsTab, SettingsGroup, WorkspaceOptionsModel } from "../../../models/workspaceOptions";
 import type { PermissionsModel } from "../../../models/workspacePermissions";
 import type { ShellState } from "../../shell/shell-state";
 import { OverlayShell } from "../../shell/OverlayShell";

@@ -52,89 +52,53 @@ describe("CreatePage", () => {
     const { page, vnode } = await loadedPage();
 
     const simple = page.view.call(page, vnode);
-    expect(classTokensOf(byId(simple, "advanced-view") as AnyVnode)).toContain(
-      "hidden",
-    );
-    const cards = collectVnodes(simple).find(
-      (node) => node.tag === PresetCards,
-    ) as AnyVnode;
+    expect(classTokensOf(byId(simple, "advanced-view") as AnyVnode)).toContain("hidden");
+    const cards = collectVnodes(simple).find((node) => node.tag === PresetCards) as AnyVnode;
     expect(attrsOf(cards).selectedPreset).toBe("remote");
 
     (attrsOf(cards).onSelect as (name: PresetName) => void)("own-cloud");
     const advanced = page.view.call(page, vnode);
 
-    expect(
-      classTokensOf(byId(advanced, "advanced-view") as AnyVnode),
-    ).not.toContain("hidden");
-    expect(attrsOf(byId(advanced, "launch_mode") as AnyVnode).value).toBe(
-      "VULTR",
-    );
+    expect(classTokensOf(byId(advanced, "advanced-view") as AnyVnode)).not.toContain("hidden");
+    expect(attrsOf(byId(advanced, "launch_mode") as AnyVnode).value).toBe("VULTR");
   });
 
   it("opens embedded on the caller's preset, with your own cloud's provider settings showing", async () => {
-    const opened = async (
-      initialPreset: PresetName,
-      defaults?: CreateFormDefaults,
-    ): Promise<AnyVnode[]> => {
-      const { page, vnode } = await loadedPage(
-        { mode: "embedded", initialPreset },
-        defaults,
-      );
+    const opened = async (initialPreset: PresetName, defaults?: CreateFormDefaults): Promise<AnyVnode[]> => {
+      const { page, vnode } = await loadedPage({ mode: "embedded", initialPreset }, defaults);
       return collectVnodes(page.view.call(page, vnode));
     };
     const selectedPreset = (nodes: AnyVnode[]): unknown =>
-      attrsOf(nodes.find((node) => node.tag === PresetCards) as AnyVnode)
-        .selectedPreset;
+      attrsOf(nodes.find((node) => node.tag === PresetCards) as AnyVnode).selectedPreset;
 
     const local = await opened("local");
     expect(selectedPreset(local)).toBe("local");
-    expect(classTokensOf(byId(local, "advanced-view") as AnyVnode)).toContain(
-      "hidden",
-    );
-    expect(attrsOf(byId(local, "launch_mode") as AnyVnode).value).toBe(
-      createFormDefaults().local_launch_mode,
-    );
+    expect(classTokensOf(byId(local, "advanced-view") as AnyVnode)).toContain("hidden");
+    expect(attrsOf(byId(local, "launch_mode") as AnyVnode).value).toBe(createFormDefaults().local_launch_mode);
 
     const ownCloud = await opened("own-cloud");
     expect(selectedPreset(ownCloud)).toBe("own-cloud");
-    expect(
-      classTokensOf(byId(ownCloud, "advanced-view") as AnyVnode),
-    ).not.toContain("hidden");
-    expect(attrsOf(byId(ownCloud, "launch_mode") as AnyVnode).value).toBe(
-      "VULTR",
-    );
+    expect(classTokensOf(byId(ownCloud, "advanced-view") as AnyVnode)).not.toContain("hidden");
+    expect(attrsOf(byId(ownCloud, "launch_mode") as AnyVnode).value).toBe("VULTR");
 
     const withAccount = await opened(
       "own-cloud",
       createFormDefaults({
         byok_clouds_enabled: true,
-        cloud_accounts: [
-          {
-            name: "aws_acct",
-            alias: "team aws",
-            backend: "aws",
-            region: "us-west-2",
-          },
-        ],
+        cloud_accounts: [{ name: "aws_acct", alias: "team aws", backend: "aws", region: "us-west-2" }],
       }),
     );
-    expect(attrsOf(byId(withAccount, "launch_mode") as AnyVnode).value).toBe(
-      "BYOK:aws_acct",
-    );
+    expect(attrsOf(byId(withAccount, "launch_mode") as AnyVnode).value).toBe("BYOK:aws_acct");
   });
 
   it("offers the share panel's own switch in the advanced view, in the panel's own words", async () => {
     const { page, vnode } = await loadedPage();
 
     const simple = page.view.call(page, vnode);
-    (
-      attrsOf(byId(simple, "toggle-advanced") as AnyVnode).onclick as () => void
-    )();
+    (attrsOf(byId(simple, "toggle-advanced") as AnyVnode).onclick as () => void)();
     const advanced = page.view.call(page, vnode);
 
-    expect(
-      classTokensOf(byId(advanced, "advanced-view") as AnyVnode),
-    ).not.toContain("hidden");
+    expect(classTokensOf(byId(advanced, "advanced-view") as AnyVnode)).not.toContain("hidden");
     const row = byId(advanced, "web-access-row");
     expect(row).toBeDefined();
     expect(allText(row)).toContain(ENABLE_SHARING_LABEL);
@@ -150,9 +114,7 @@ describe("CreatePage", () => {
     (attrsOf(control).onclick as () => void)();
     const thrown = byId(page.view.call(page, vnode), "web-access-row");
 
-    expect(
-      attrsOf(byId(thrown, "enable_web_access") as AnyVnode)["aria-checked"],
-    ).toBe("true");
+    expect(attrsOf(byId(thrown, "enable_web_access") as AnyVnode)["aria-checked"]).toBe("true");
     expect(allText(byId(thrown, "web-access-word"))).toBe("Yes");
   });
 });
@@ -167,9 +129,7 @@ describe("createFormModal", () => {
         closes += 1;
       },
     });
-    const closeButton = collectVnodes(modal).find(
-      (vnode) => vnode.tag === DialogCloseButton,
-    );
+    const closeButton = collectVnodes(modal).find((vnode) => vnode.tag === DialogCloseButton);
     expect(closeButton).toBeDefined();
     if (closeButton === undefined) return;
     (attrsOf(closeButton).onClose as () => void)();
@@ -188,12 +148,7 @@ describe("signInOutcome", () => {
   });
 
   it("keeps waiting while the modal is up, including on an error it offers a retry for", () => {
-    for (const state of [
-      "starting",
-      "waiting",
-      "finishing",
-      "error",
-    ] as const) {
+    for (const state of ["starting", "waiting", "finishing", "error"] as const) {
       expect(signInOutcome(state, false)).toBe("pending");
     }
   });

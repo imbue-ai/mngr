@@ -147,9 +147,7 @@ export function secondAccountEntry(): UiAccountEntry {
 }
 
 /** A create-form defaults payload with accountEntry's account as the default and Imbue Cloud selected. */
-export function createFormDefaults(
-  overrides: Partial<CreateFormDefaults> = {},
-): CreateFormDefaults {
+export function createFormDefaults(overrides: Partial<CreateFormDefaults> = {}): CreateFormDefaults {
   return {
     accounts: [{ user_id: "user-1", email: "alice@example.com" }],
     default_account_id: "user-1",
@@ -159,9 +157,7 @@ export function createFormDefaults(
     selected_docker_runtime: "RUNSC",
     backup_providers: ["IMBUE_CLOUD", "API_KEY", "CONFIGURE_LATER"],
     selected_backup_provider: "IMBUE_CLOUD",
-    region_options_by_launch_mode: {
-      IMBUE_CLOUD: ["US-EAST-VA", "US-WEST-OR"],
-    },
+    region_options_by_launch_mode: { IMBUE_CLOUD: ["US-EAST-VA", "US-WEST-OR"] },
     region_selected_by_launch_mode: { IMBUE_CLOUD: "US-WEST-OR" },
     instance_types_by_backend: {},
     default_instance_type_by_backend: {},

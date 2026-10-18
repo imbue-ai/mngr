@@ -26,18 +26,10 @@ import {
   undoAnswer,
   undoReporting,
 } from "./startFlow";
-import type {
-  AnswerContext,
-  ChoiceId,
-  FlowAccount,
-  StartFlowState,
-} from "./startFlow";
+import type { AnswerContext, ChoiceId, FlowAccount, StartFlowState } from "./startFlow";
 
 /** How the walk ended, once it has: a create went out, or the user left for the home page. */
-type Outcome =
-  | { kind: "cloud"; accountId: string; isSignedIn: boolean }
-  | { kind: "form" }
-  | { kind: "home" };
+type Outcome = { kind: "cloud"; accountId: string; isSignedIn: boolean } | { kind: "form" } | { kind: "home" };
 
 interface World {
   flow: StartFlowState;
@@ -62,12 +54,7 @@ type Action =
   | { kind: "undo-reporting" }
   | { kind: "aside" }
   | { kind: "dismiss" }
-  | {
-      kind: "sign-in";
-      isNewAccount: boolean;
-      isVerified: boolean;
-      pick: number;
-    }
+  | { kind: "sign-in"; isNewAccount: boolean; isVerified: boolean; pick: number }
   | { kind: "verify"; pick: number }
   | { kind: "sign-out"; pick: number }
   | { kind: "submit-form" }
@@ -97,10 +84,7 @@ function knownAccountIds(world: World): string[] {
 }
 
 function answerContext(world: World): AnswerContext {
-  return {
-    signedInAccount: world.accounts[0] ?? null,
-    knownAccountIds: knownAccountIds(world),
-  };
+  return { signedInAccount: world.accounts[0] ?? null, knownAccountIds: knownAccountIds(world) };
 }
 
 /**
@@ -108,24 +92,14 @@ function answerContext(world: World): AnswerContext {
  * accepted, which ends the walk.
  */
 function submitCloudCreate(world: World): World {
-  const flow = refuseCreateForSignedOutAccount(
-    world.flow,
-    knownAccountIds(world),
-  );
+  const flow = refuseCreateForSignedOutAccount(world.flow, knownAccountIds(world));
   if (!flow.isCloudCreatePending) return { ...world, flow };
   const account = world.flow.account;
-  if (account === null)
-    throw new Error("A cloud create went out with no account settled");
+  if (account === null) throw new Error("A cloud create went out with no account settled");
   if (world.willRefuseNextCreate) {
-    return {
-      ...world,
-      willRefuseNextCreate: false,
-      flow: settleCloudCreate(world.flow, "That did not work: refused."),
-    };
+    return { ...world, willRefuseNextCreate: false, flow: settleCloudCreate(world.flow, "That did not work: refused.") };
   }
-  const isSignedIn = world.accounts.some(
-    (existing) => existing.userId === account.userId,
-  );
+  const isSignedIn = world.accounts.some((existing) => existing.userId === account.userId);
   return {
     ...world,
     flow: settleCloudCreate(world.flow, null),
@@ -137,8 +111,7 @@ function submitCloudCreate(world: World): World {
 function startCloudCreate(world: World): World {
   if (!world.flow.isCloudCreatePending) return world;
   const account = world.flow.account;
-  if (account === null)
-    throw new Error("A cloud create is owed with no account settled");
+  if (account === null) throw new Error("A cloud create is owed with no account settled");
   if (world.verifiedEmails.has(account.email)) return submitCloudCreate(world);
   return { ...world, flow: requireEmailVerification(world.flow) };
 }
@@ -147,39 +120,23 @@ function startCloudCreate(world: World): World {
 function syncAccounts(world: World): World {
   const pending = world.flow.pending;
   if (pending === "existing-login") {
-    return world.completedSignInEmail === ""
-      ? world
-      : { ...world, outcome: { kind: "home" } };
+    return world.completedSignInEmail === "" ? world : { ...world, outcome: { kind: "home" } };
   }
-  const settled = settleAwaitedSignIn(
-    world.flow,
-    world.accounts,
-    world.completedSignInEmail,
-  );
+  const settled = settleAwaitedSignIn(world.flow, world.accounts, world.completedSignInEmail);
   if (settled === world.flow) return world;
-  return startCloudCreate({
-    ...world,
-    completedSignInEmail: "",
-    flow: settled,
-  });
+  return startCloudCreate({ ...world, completedSignInEmail: "", flow: settled });
 }
 
 function openChoices(world: World): ChoiceId[] {
   const at = openStepIndex(world.flow);
   if (at === null) return [];
   const entry = world.flow.entries[at];
-  return entry.kind === "step"
-    ? stepChoices(FLOW[entry.id]).map((choice) => choice.id)
-    : [];
+  return entry.kind === "step" ? stepChoices(FLOW[entry.id]).map((choice) => choice.id) : [];
 }
 
 function undoableIndexes(world: World): number[] {
   return world.flow.entries.flatMap((entry, index) =>
-    entry.kind === "step" &&
-    entry.answer !== null &&
-    FLOW[entry.id].isUndoable !== false
-      ? [index]
-      : [],
+    entry.kind === "step" && entry.answer !== null && FLOW[entry.id].isUndoable !== false ? [index] : [],
   );
 }
 
@@ -189,65 +146,43 @@ function press(world: World, choiceId: ChoiceId): World {
   if (choiceId === "verified") {
     const email = world.flow.verificationEmail;
     if (email === null) return world;
-    if (!world.verifiedEmails.has(email))
-      return { ...world, flow: reaskEmailVerification(world.flow) };
-    return startCloudCreate({
-      ...world,
-      flow: observeEmailVerified(world.flow),
-    });
+    if (!world.verifiedEmails.has(email)) return { ...world, flow: reaskEmailVerification(world.flow) };
+    return startCloudCreate({ ...world, flow: observeEmailVerified(world.flow) });
   }
   const flow = answerStep(world.flow, at, choiceId, answerContext(world));
   let next: World = { ...world, flow };
-  if (choiceId === "cloud")
-    next = { ...next, offeredAccount: world.accounts[0] ?? null };
+  if (choiceId === "cloud") next = { ...next, offeredAccount: world.accounts[0] ?? null };
   if (choiceId === "continue") {
     // Continuing as an account that has since signed out is not a choice: the question is asked again about the
     // account signed in now.
     const offered = world.offeredAccount;
-    const isOfferedSignedIn =
-      offered !== null && knownAccountIds(world).includes(offered.userId);
+    const isOfferedSignedIn = offered !== null && knownAccountIds(world).includes(offered.userId);
     next = isOfferedSignedIn
       ? { ...next, chosenAccount: offered }
       : { ...next, offeredAccount: world.accounts[0] ?? null };
   }
   // Starting a browser sign-in forgets what the last one reported.
-  if (choiceId === "signup" || choiceId === "signin")
-    next = { ...next, completedSignInEmail: "" };
+  if (choiceId === "signup" || choiceId === "signin") next = { ...next, completedSignInEmail: "" };
   return startCloudCreate(next);
 }
 
-function signIn(
-  world: World,
-  account: FlowAccount,
-  isVerified: boolean,
-): World {
-  const isNew = !world.accounts.some(
-    (existing) => existing.userId === account.userId,
-  );
-  const isAwaited =
-    world.flow.pending === "signup" || world.flow.pending === "signin";
+function signIn(world: World, account: FlowAccount, isVerified: boolean): World {
+  const isNew = !world.accounts.some((existing) => existing.userId === account.userId);
+  const isAwaited = world.flow.pending === "signup" || world.flow.pending === "signin";
   return {
     ...world,
     accounts: isNew ? [...world.accounts, account] : world.accounts,
-    verifiedEmails: isVerified
-      ? new Set([...world.verifiedEmails, account.email])
-      : world.verifiedEmails,
+    verifiedEmails: isVerified ? new Set([...world.verifiedEmails, account.email]) : world.verifiedEmails,
     completedSignInEmail: account.email,
     chosenAccount: isAwaited ? account : world.chosenAccount,
   };
 }
 
 function verifyEmail(world: World, email: string): World {
-  const verified: World = {
-    ...world,
-    verifiedEmails: new Set([...world.verifiedEmails, email]),
-  };
+  const verified: World = { ...world, verifiedEmails: new Set([...world.verifiedEmails, email]) };
   // The page polls while it waits on the link, so a verification of the awaited address answers the question.
   if (world.flow.verificationEmail !== email) return verified;
-  return startCloudCreate({
-    ...verified,
-    flow: observeEmailVerified(verified.flow),
-  });
+  return startCloudCreate({ ...verified, flow: observeEmailVerified(verified.flow) });
 }
 
 function newAccount(world: World): { world: World; account: FlowAccount } {
@@ -263,13 +198,7 @@ function act(world: World, action: Action): World {
   switch (action.kind) {
     case "report": {
       if (world.flow.isStarted) return world;
-      return {
-        ...world,
-        flow: startQuestions(
-          world.flow,
-          action.isAllowed ? REPORTING_ACCEPT_LABEL : "No",
-        ),
-      };
+      return { ...world, flow: startQuestions(world.flow, action.isAllowed ? REPORTING_ACCEPT_LABEL : "No") };
     }
     case "press": {
       const choiceId = pickFrom(openChoices(world), action.pick);
@@ -278,11 +207,7 @@ function act(world: World, action: Action): World {
     case "undo": {
       const at = pickFrom(undoableIndexes(world), action.pick);
       if (at === undefined) return world;
-      return {
-        ...world,
-        flow: undoAnswer(world.flow, at),
-        chosenAccount: null,
-      };
+      return { ...world, flow: undoAnswer(world.flow, at), chosenAccount: null };
     }
     case "undo-reporting":
       return { ...world, flow: undoReporting(world.flow), chosenAccount: null };
@@ -290,25 +215,16 @@ function act(world: World, action: Action): World {
       const at = openStepIndex(world.flow);
       const entry = at === null ? undefined : world.flow.entries[at];
       if (entry?.kind !== "step") return world;
-      if (entry.id === "run")
-        return {
-          ...world,
-          completedSignInEmail: "",
-          flow: chooseExistingLogin(world.flow),
-        };
+      if (entry.id === "run") return { ...world, completedSignInEmail: "", flow: chooseExistingLogin(world.flow) };
       if (entry.id === "verify" || entry.id === "verify-again") {
-        return {
-          ...world,
-          flow: noteVerificationEmailSent(world.flow, "sent"),
-        };
+        return { ...world, flow: noteVerificationEmailSent(world.flow, "sent") };
       }
       return world;
     }
     case "dismiss": {
       // Closing a sign-in modal leaves the flow waiting; closing the create form or the existing-login one ends the wait.
       const pending = world.flow.pending;
-      if (isFormChoice(pending) || pending === "existing-login")
-        return { ...world, flow: dismissPendingModal(world.flow) };
+      if (isFormChoice(pending) || pending === "existing-login") return { ...world, flow: dismissPendingModal(world.flow) };
       return world;
     }
     case "sign-in": {
@@ -317,9 +233,7 @@ function act(world: World, action: Action): World {
         return signIn(created.world, created.account, action.isVerified);
       }
       const existing = pickFrom(world.accounts, action.pick);
-      return existing === undefined
-        ? world
-        : signIn(world, existing, action.isVerified);
+      return existing === undefined ? world : signIn(world, existing, action.isVerified);
     }
     case "verify": {
       const account = pickFrom(world.accounts, action.pick);
@@ -329,32 +243,17 @@ function act(world: World, action: Action): World {
       // Signed out from elsewhere: the oldest remaining account becomes the default.
       const account = pickFrom(world.accounts, action.pick);
       if (account === undefined) return world;
-      return {
-        ...world,
-        accounts: world.accounts.filter(
-          (existing) => existing.userId !== account.userId,
-        ),
-      };
+      return { ...world, accounts: world.accounts.filter((existing) => existing.userId !== account.userId) };
     }
     case "submit-form": {
       if (!isFormChoice(world.flow.pending)) return world;
-      return {
-        ...world,
-        flow: finishPendingModal(world.flow),
-        outcome: { kind: "form" },
-      };
+      return { ...world, flow: finishPendingModal(world.flow), outcome: { kind: "form" } };
     }
     case "refuse-next-create":
       return { ...world, willRefuseNextCreate: true };
     case "relaunch":
       // Nothing of the conversation survives a relaunch; the signed-in accounts do.
-      return {
-        ...world,
-        flow: initialStartFlowState(),
-        completedSignInEmail: "",
-        chosenAccount: null,
-        offeredAccount: null,
-      };
+      return { ...world, flow: initialStartFlowState(), completedSignInEmail: "", chosenAccount: null, offeredAccount: null };
   }
 }
 
@@ -367,33 +266,18 @@ function step(world: World, action: Action): World {
  * as a brand-new, verified account or verify the awaited email.
  */
 function rescueMoves(world: World): Action[] {
-  const moves: Action[] = [
-    { kind: "report", isAllowed: true },
-    { kind: "dismiss" },
-    { kind: "submit-form" },
-  ];
+  const moves: Action[] = [{ kind: "report", isAllowed: true }, { kind: "dismiss" }, { kind: "submit-form" }];
   openChoices(world).forEach((_, pick) => moves.push({ kind: "press", pick }));
-  undoableIndexes(world).forEach((_, pick) =>
-    moves.push({ kind: "undo", pick }),
-  );
-  moves.push({
-    kind: "sign-in",
-    isNewAccount: true,
-    isVerified: true,
-    pick: 0,
-  });
+  undoableIndexes(world).forEach((_, pick) => moves.push({ kind: "undo", pick }));
+  moves.push({ kind: "sign-in", isNewAccount: true, isVerified: true, pick: 0 });
   world.accounts.forEach((account, pick) => {
-    if (account.email === world.flow.verificationEmail)
-      moves.push({ kind: "verify", pick });
+    if (account.email === world.flow.verificationEmail) moves.push({ kind: "verify", pick });
   });
   return moves;
 }
 
 /** Whether some short sequence of rescue moves gets a cloud workspace created under a brand-new account. */
-function canReachCloudCreateUnderNewAccount(
-  world: World,
-  depth: number,
-): boolean {
+function canReachCloudCreateUnderNewAccount(world: World, depth: number): boolean {
   const known = new Set(knownAccountIds(world));
   const search = (current: World, remaining: number): boolean => {
     const outcome = current.outcome;
@@ -410,27 +294,9 @@ function canReachCloudCreateUnderNewAccount(
 
 // Weighted toward the moves that carry a walk forward, so a fair share of walks get as far as a create.
 const actionArbitrary: fc.Arbitrary<Action> = fc.oneof(
-  {
-    weight: 2,
-    arbitrary: fc.record({
-      kind: fc.constant("report" as const),
-      isAllowed: fc.boolean(),
-    }),
-  },
-  {
-    weight: 8,
-    arbitrary: fc.record({
-      kind: fc.constant("press" as const),
-      pick: fc.nat(5),
-    }),
-  },
-  {
-    weight: 2,
-    arbitrary: fc.record({
-      kind: fc.constant("undo" as const),
-      pick: fc.nat(5),
-    }),
-  },
+  { weight: 2, arbitrary: fc.record({ kind: fc.constant("report" as const), isAllowed: fc.boolean() }) },
+  { weight: 8, arbitrary: fc.record({ kind: fc.constant("press" as const), pick: fc.nat(5) }) },
+  { weight: 2, arbitrary: fc.record({ kind: fc.constant("undo" as const), pick: fc.nat(5) }) },
   { weight: 1, arbitrary: fc.constant({ kind: "undo-reporting" as const }) },
   { weight: 1, arbitrary: fc.constant({ kind: "aside" as const }) },
   { weight: 1, arbitrary: fc.constant({ kind: "dismiss" as const }) },
@@ -443,33 +309,14 @@ const actionArbitrary: fc.Arbitrary<Action> = fc.oneof(
       pick: fc.nat(5),
     }),
   },
-  {
-    weight: 3,
-    arbitrary: fc.record({
-      kind: fc.constant("verify" as const),
-      pick: fc.nat(5),
-    }),
-  },
-  {
-    weight: 1,
-    arbitrary: fc.record({
-      kind: fc.constant("sign-out" as const),
-      pick: fc.nat(5),
-    }),
-  },
+  { weight: 3, arbitrary: fc.record({ kind: fc.constant("verify" as const), pick: fc.nat(5) }) },
+  { weight: 1, arbitrary: fc.record({ kind: fc.constant("sign-out" as const), pick: fc.nat(5) }) },
   { weight: 1, arbitrary: fc.constant({ kind: "submit-form" as const }) },
-  {
-    weight: 1,
-    arbitrary: fc.constant({ kind: "refuse-next-create" as const }),
-  },
+  { weight: 1, arbitrary: fc.constant({ kind: "refuse-next-create" as const }) },
   { weight: 1, arbitrary: fc.constant({ kind: "relaunch" as const }) },
 );
 
-const walkArbitrary = fc.array(actionArbitrary, {
-  minLength: 10,
-  maxLength: 60,
-  size: "max",
-});
+const walkArbitrary = fc.array(actionArbitrary, { minLength: 10, maxLength: 60, size: "max" });
 
 /** Every state a walk passes through, starting from an empty world, until its outcome. */
 function statesOf(actions: Action[]): World[] {
@@ -484,21 +331,17 @@ function statesOf(actions: Action[]): World[] {
 
 describe("randomized walks through the start flow", () => {
   // A bounded search from every state of every walk: CPU-bound, so it slows many times over under the full parallel suite.
-  it(
-    "never strand the user: a cloud workspace under a fresh account is always a few moves away",
-    { timeout: 30_000 },
-    () => {
-      fc.assert(
-        fc.property(walkArbitrary, (actions) => {
-          for (const world of statesOf(actions)) {
-            if (world.outcome !== null) continue;
-            expect(canReachCloudCreateUnderNewAccount(world, 6)).toBe(true);
-          }
-        }),
-        { numRuns: 300 },
-      );
-    },
-  );
+  it("never strand the user: a cloud workspace under a fresh account is always a few moves away", { timeout: 30_000 }, () => {
+    fc.assert(
+      fc.property(walkArbitrary, (actions) => {
+        for (const world of statesOf(actions)) {
+          if (world.outcome !== null) continue;
+          expect(canReachCloudCreateUnderNewAccount(world, 6)).toBe(true);
+        }
+      }),
+      { numRuns: 300 },
+    );
+  });
 
   it("only create in the cloud under the account the user last chose, while it is signed in", () => {
     fc.assert(
@@ -525,11 +368,7 @@ describe("randomized walks through the start flow", () => {
   });
 
   it("finds a cloud create at all in a fair share of walks, so the properties above are not vacuous", () => {
-    const outcomes = fc
-      .sample(walkArbitrary, { numRuns: 500, seed: 1 })
-      .map((actions) => statesOf(actions).at(-1)?.outcome);
-    expect(
-      outcomes.filter((outcome) => outcome?.kind === "cloud").length,
-    ).toBeGreaterThan(50);
+    const outcomes = fc.sample(walkArbitrary, { numRuns: 500, seed: 1 }).map((actions) => statesOf(actions).at(-1)?.outcome);
+    expect(outcomes.filter((outcome) => outcome?.kind === "cloud").length).toBeGreaterThan(50);
   });
 });

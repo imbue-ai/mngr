@@ -19,21 +19,10 @@ export interface MachineSizeInputAttrs {
 export function MachineSizeInput(): m.Component<MachineSizeInputAttrs> {
   return {
     view(vnode) {
-      const {
-        dimension,
-        label,
-        value,
-        isInvalid = false,
-        disabled = false,
-        oninput,
-      } = vnode.attrs;
+      const { dimension, label, value, isInvalid = false, disabled = false, oninput } = vnode.attrs;
       const id = `machine-size-${dimension}`;
       return m("div", { class: "flex items-center gap-2" }, [
-        m(
-          FormLabel,
-          { target: id, inline: true, extra: "type-helper text-secondary" },
-          label,
-        ),
+        m(FormLabel, { target: id, inline: true, extra: "type-helper text-secondary" }, label),
         m(TextInput, {
           id,
           name: dimension,

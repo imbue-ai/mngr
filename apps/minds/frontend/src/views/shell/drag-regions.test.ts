@@ -27,7 +27,9 @@ describe("Electron drag regions", () => {
     const backdropIds = new Set<string>();
     for (const file of sourceFiles(SRC_DIR)) {
       const source = readFileSync(file, "utf8");
-      for (const match of source.matchAll(/backdropId\s*:\s*"([a-z0-9-]+)"/g))
+      for (const match of source.matchAll(
+        /backdropId\s*:\s*"([a-z0-9-]+)"/g,
+      ))
         backdropIds.add(match[1]);
     }
     // A refactor that renames the attr must not quietly empty this test.
@@ -37,10 +39,8 @@ describe("Electron drag regions", () => {
     const noDragRule = css.match(
       /((?:#[a-z0-9-]+,\s*)*#[a-z0-9-]+)\s*\{\s*-webkit-app-region:\s*no-drag;/g,
     );
-    expect(
-      noDragRule,
-      "no -webkit-app-region: no-drag rule in style.css",
-    ).not.toBeNull();
+    expect(noDragRule, "no -webkit-app-region: no-drag rule in style.css").not
+      .toBeNull();
     const declared = (noDragRule ?? []).join(" ");
 
     const missing = [...backdropIds].filter(

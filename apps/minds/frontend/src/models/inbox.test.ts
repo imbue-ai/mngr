@@ -1,10 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { jsonResponse, settle } from "../testing";
 import type { InboxModelOptions } from "./inbox";
-import {
-  forgetWarmedRequestDetails,
-  warmRequestDetail,
-} from "./requestDetailPrefetch";
+import { forgetWarmedRequestDetails, warmRequestDetail } from "./requestDetailPrefetch";
 import {
   InboxModel,
   expandSharePathHome,
@@ -38,6 +35,7 @@ const CARD_B = {
   accent: "#654321",
   workspace_agent_id: "agent-beta",
 };
+
 
 const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   kind: "predefined",
@@ -76,13 +74,7 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   ],
   checked_permissions: ["slack-read-all"],
   account_choices: [
-    {
-      value: "",
-      label: "Default account",
-      hint: "",
-      is_credential_setup_needed: false,
-      is_account_name_needed: false,
-    },
+    { value: "", label: "Default account", hint: "", is_credential_setup_needed: false, is_account_name_needed: false },
   ],
   selected_account_value: "",
   new_account_value: ":new-account",
@@ -252,9 +244,7 @@ describe("InboxModel", () => {
     const model = makeModel({
       "GET /ui/api/inbox": () => jsonResponse({ cards: [CARD_A] }),
     });
-    warmRequestDetail("evt-a", async () =>
-      jsonResponse({ detail: PREDEFINED_DETAIL }),
-    );
+    warmRequestDetail("evt-a", async () => jsonResponse({ detail: PREDEFINED_DETAIL }));
 
     await model.select("evt-a");
 
@@ -269,25 +259,20 @@ describe("InboxModel", () => {
     // A warm that failed says nothing about why, so the open asks for real and
     // reports whatever it finds rather than showing the warm's silence.
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
     });
-    warmRequestDetail(
-      "evt-a",
-      async () => ({ ok: false }) as unknown as Response,
-    );
+    warmRequestDetail("evt-a", async () => ({ ok: false }) as unknown as Response);
 
     await model.select("evt-a");
 
     expect(model.detail?.kind).toBe("predefined");
-    expect(calls.map((call) => call.url)).toEqual([
-      "/ui/api/inbox/evt-a/detail",
-    ]);
+    expect(calls.map((call) => call.url)).toEqual(["/ui/api/inbox/evt-a/detail"]);
   });
 
   it("loads the card list and seeds detail state on selection", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox": () => jsonResponse({ cards: [CARD_A, CARD_B] }),
+      "GET /ui/api/inbox": () =>
+        jsonResponse({ cards: [CARD_A, CARD_B] }),
       "GET /ui/api/inbox/evt-a/detail": () =>
         jsonResponse({ detail: PREDEFINED_DETAIL }),
     });
@@ -408,13 +393,7 @@ describe("InboxModel", () => {
     let grantBody: FormData | null = null;
     const model = makeModel({
       "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({
-          detail: {
-            ...FILE_DETAIL,
-            is_sync_requested: true,
-            sync_conflict: "WORKSPACE",
-          },
-        }),
+        jsonResponse({ detail: { ...FILE_DETAIL, is_sync_requested: true, sync_conflict: "WORKSPACE" } }),
       "POST /requests/evt-a/grant": () => {
         grantBody = calls[calls.length - 1].init?.body as FormData;
         return jsonResponse({ outcome: "GRANTED", message: "done" });
@@ -436,8 +415,7 @@ describe("InboxModel", () => {
 
   it("leaves the sync switch off when the agent did not ask, or the folder cannot be synced", async () => {
     const notAsked = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: FILE_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: FILE_DETAIL }),
     });
     await notAsked.select("evt-a");
     expect(notAsked.isSharePathSynced).toBe(false);
@@ -447,11 +425,7 @@ describe("InboxModel", () => {
     const unsyncable = makeModel({
       "GET /ui/api/inbox/evt-a/detail": () =>
         jsonResponse({
-          detail: {
-            ...FILE_DETAIL,
-            is_sync_requested: true,
-            sync_unavailable_reason: "Only folders can be synced.",
-          },
+          detail: { ...FILE_DETAIL, is_sync_requested: true, sync_unavailable_reason: "Only folders can be synced." },
         }),
     });
     await unsyncable.select("evt-a");
@@ -460,18 +434,13 @@ describe("InboxModel", () => {
 
   const PROXY_DETAIL: PredefinedPermissionDetail = {
     ...PREDEFINED_DETAIL,
-    proxy: {
-      resulting_route: ["host-a", "self"],
-      desktops: [{ device_id: "host-a", is_this_computer: true }],
-    },
+    proxy: { resulting_route: ["host-a", "self"], desktops: [{ device_id: "host-a", is_this_computer: true }] },
   };
 
   it("starts a request that asks for the proxy with it on, and submits it with the grant", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: PROXY_DETAIL }),
-      "POST /requests/evt-a/grant": () =>
-        jsonResponse({ outcome: "GRANTED", message: "done" }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PROXY_DETAIL }),
+      "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED", message: "done" }),
     });
     model.cards = [CARD_A];
     model.isListLoaded = true;
@@ -480,17 +449,14 @@ describe("InboxModel", () => {
 
     await model.approve();
 
-    const form = calls.find((call) => call.url.includes("/grant"))?.init
-      ?.body as FormData;
+    const form = calls.find((call) => call.url.includes("/grant"))?.init?.body as FormData;
     expect(form.getAll("proxy")).toEqual(["true"]);
   });
 
   it("submits the proxy as off once it was switched off", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: PROXY_DETAIL }),
-      "POST /requests/evt-a/grant": () =>
-        jsonResponse({ outcome: "GRANTED", message: "done" }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PROXY_DETAIL }),
+      "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED", message: "done" }),
     });
     model.cards = [CARD_A];
     model.isListLoaded = true;
@@ -499,17 +465,14 @@ describe("InboxModel", () => {
     model.isProxyOn = false;
     await model.approve();
 
-    const form = calls.find((call) => call.url.includes("/grant"))?.init
-      ?.body as FormData;
+    const form = calls.find((call) => call.url.includes("/grant"))?.init?.body as FormData;
     expect(form.getAll("proxy")).toEqual(["false"]);
   });
 
   it("sends no proxy field for a request that did not ask for one", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: PREDEFINED_DETAIL }),
-      "POST /requests/evt-a/grant": () =>
-        jsonResponse({ outcome: "GRANTED", message: "done" }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED", message: "done" }),
     });
     model.cards = [CARD_A];
     model.isListLoaded = true;
@@ -518,15 +481,13 @@ describe("InboxModel", () => {
 
     await model.approve();
 
-    const form = calls.find((call) => call.url.includes("/grant"))?.init
-      ?.body as FormData;
+    const form = calls.find((call) => call.url.includes("/grant"))?.init?.body as FormData;
     expect(form.has("proxy")).toBe(false);
   });
 
   it("starts each next request's proxy from that request's default", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: PROXY_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PROXY_DETAIL }),
       "GET /ui/api/inbox/evt-b/detail": () =>
         jsonResponse({ detail: { ...PROXY_DETAIL, request_id: "evt-b" } }),
       "GET /ui/api/inbox/evt-c/detail": () =>
@@ -601,10 +562,10 @@ describe("InboxModel", () => {
     expect(form.getAll("permissions")).toEqual(["any"]);
   });
 
+
   it("shows the credential form as soon as an account that needs credentials is selected", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: MANUAL_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
     });
 
     await model.select("evt-a");
@@ -619,8 +580,7 @@ describe("InboxModel", () => {
 
   it("hides the credential form when a connected account is selected instead", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: MANUAL_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
     });
     await model.select("evt-a");
 
@@ -632,8 +592,7 @@ describe("InboxModel", () => {
 
   it("never shows a credential form for a service that signs in through a browser", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
     });
 
     await model.select("evt-a");
@@ -643,8 +602,7 @@ describe("InboxModel", () => {
 
   it("enables Approve once every credential input is filled in", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: MANUAL_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
     });
     await model.select("evt-a");
 
@@ -658,8 +616,7 @@ describe("InboxModel", () => {
 
   it("submits the typed credential values with the approve", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: MANUAL_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
       "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED" }),
       "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
     });
@@ -672,10 +629,7 @@ describe("InboxModel", () => {
     const grantCall = calls.find((call) => call.url.includes("/grant"));
     const form = grantCall?.init?.body as FormData;
     expect(form.get("manual_credentials")).toBe(
-      JSON.stringify({
-        "access-key-id": "AKIA-4471",
-        "secret-access-key": "shh-9013",
-      }),
+      JSON.stringify({ "access-key-id": "AKIA-4471", "secret-access-key": "shh-9013" }),
     );
     expect(form.get("account")).toBe("bob@x");
     expect(form.get("account_name")).toBe("");
@@ -684,8 +638,7 @@ describe("InboxModel", () => {
 
   it("requires a name for the new account when the selected choice needs one", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: MANUAL_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
     });
     await model.select("evt-a");
     model.selectedAccount = ":new-account";
@@ -700,16 +653,12 @@ describe("InboxModel", () => {
 
   it("replaces the form's instruction with the reason a rejected attempt gives", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: MANUAL_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
       "POST /requests/evt-a/grant": () =>
         jsonResponse({
           outcome: "NEEDS_MANUAL_CREDENTIALS",
           message: "AWS did not accept those credentials.",
-          manual_credentials: {
-            ...AWS_PROMPT,
-            message: "AWS did not accept those credentials.",
-          },
+          manual_credentials: { ...AWS_PROMPT, message: "AWS did not accept those credentials." },
         }),
     });
     await model.select("evt-a");
@@ -718,9 +667,7 @@ describe("InboxModel", () => {
 
     await model.approve();
 
-    expect(model.manualCredentialsPrompt()?.message).toBe(
-      "AWS did not accept those credentials.",
-    );
+    expect(model.manualCredentialsPrompt()?.message).toBe("AWS did not accept those credentials.");
     // The typed values survive so one field can be corrected and retried.
     expect(model.manualCredentialValues["access-key-id"]).toBe("AKIA-4471");
     expect(model.isApproveBusy).toBe(false);
@@ -734,11 +681,7 @@ describe("InboxModel", () => {
         jsonResponse({
           detail: {
             ...MANUAL_DETAIL,
-            manual_credentials: {
-              parameters: [],
-              message:
-                "Imbue Studio cannot work out which credentials to ask for",
-            },
+            manual_credentials: { parameters: [], message: "Imbue Studio cannot work out which credentials to ask for" },
           },
         }),
     });
@@ -751,8 +694,7 @@ describe("InboxModel", () => {
 
   it("drops typed credentials when a request is re-selected", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: MANUAL_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
     });
     await model.select("evt-a");
     model.manualCredentialValues["access-key-id"] = "AKIA-4471";
@@ -767,16 +709,12 @@ describe("InboxModel", () => {
 
   it("asks the view to scroll the reason into view once per failed approval", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: MANUAL_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
       "POST /requests/evt-a/grant": () =>
         jsonResponse({
           outcome: "NEEDS_MANUAL_CREDENTIALS",
           message: "AWS did not accept those credentials.",
-          manual_credentials: {
-            ...AWS_PROMPT,
-            message: "AWS did not accept those credentials.",
-          },
+          manual_credentials: { ...AWS_PROMPT, message: "AWS did not accept those credentials." },
         }),
     });
     await model.select("evt-a");
@@ -794,16 +732,12 @@ describe("InboxModel", () => {
 
   it("marks the form as showing a failure only after an attempt comes back", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: MANUAL_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
       "POST /requests/evt-a/grant": () =>
         jsonResponse({
           outcome: "NEEDS_MANUAL_CREDENTIALS",
           message: "AWS did not accept those credentials.",
-          manual_credentials: {
-            ...AWS_PROMPT,
-            message: "AWS did not accept those credentials.",
-          },
+          manual_credentials: { ...AWS_PROMPT, message: "AWS did not accept those credentials." },
         }),
     });
     await model.select("evt-a");
@@ -822,10 +756,8 @@ describe("InboxModel", () => {
 
   it("also asks for a scroll when the approval fails outright", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: PREDEFINED_DETAIL }),
-      "POST /requests/evt-a/grant": () =>
-        jsonResponse({ outcome: "FAILED", message: "sign-in failed" }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "FAILED", message: "sign-in failed" }),
     });
     await model.select("evt-a");
 
@@ -942,9 +874,7 @@ describe("InboxModel", () => {
     // Taken from the request's own card, not from whatever detail happens to
     // be on screen when the verdict lands: PREDEFINED_DETAIL names the filing
     // sibling ("agent-1"), which is never the workspace the user is looking at.
-    expect(resolved).toEqual([
-      { requestId: "evt-a", agentId: "agent-alpha", verdict: "granted" },
-    ]);
+    expect(resolved).toEqual([{ requestId: "evt-a", agentId: "agent-alpha", verdict: "granted" }]);
   });
 
   it("announces a deny against its own card too", async () => {
@@ -962,9 +892,7 @@ describe("InboxModel", () => {
 
     model.deny();
 
-    expect(resolved).toEqual([
-      { requestId: "evt-b", agentId: "agent-beta", verdict: "denied" },
-    ]);
+    expect(resolved).toEqual([{ requestId: "evt-b", agentId: "agent-beta", verdict: "denied" }]);
   });
 
   it("says nothing about a request the server left pending", async () => {
@@ -1039,8 +967,7 @@ describe("InboxModel", () => {
     // Approve/Deny form the user never asked to review.
     const model = makeModel({
       "GET /ui/api/inbox": () => jsonResponse({ cards: [CARD_B] }),
-      "GET /ui/api/inbox/evt-stale/detail": () =>
-        new Response("", { status: 404 }),
+      "GET /ui/api/inbox/evt-stale/detail": () => new Response("", { status: 404 }),
     });
     model.isListLoaded = true;
     await model.select("evt-stale");
@@ -1154,8 +1081,7 @@ describe("InboxModel custom-service requests", () => {
   ): Promise<InboxModel> {
     forgetWarmedRequestDetails();
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: CUSTOM_SERVICE_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: CUSTOM_SERVICE_DETAIL }),
       ...responses,
     });
     await model.select("evt-a");
@@ -1181,16 +1107,11 @@ describe("InboxModel custom-service requests", () => {
   it("renders the credential form the server asks for, and blocks Approve until it is filled", async () => {
     const prompt: ManualCredentialsPrompt = {
       parameters: [{ name: "token", label: "Token" }],
-      message:
-        "api.example.com has no browser sign-in, so Imbue Studio needs its credentials.",
+      message: "api.example.com has no browser sign-in, so Imbue Studio needs its credentials.",
     };
     const model = await openCustomService({
       "POST /requests/evt-a/grant": () =>
-        jsonResponse({
-          outcome: "NEEDS_MANUAL_CREDENTIALS",
-          message: prompt.message,
-          manual_credentials: prompt,
-        }),
+        jsonResponse({ outcome: "NEEDS_MANUAL_CREDENTIALS", message: prompt.message, manual_credentials: prompt }),
     });
 
     await model.approve();
@@ -1215,10 +1136,7 @@ describe("InboxModel custom-service requests", () => {
       "POST /requests/evt-a/grant": () => {
         if (isFirstGrant) {
           isFirstGrant = false;
-          return jsonResponse({
-            outcome: "NEEDS_MANUAL_CREDENTIALS",
-            manual_credentials: prompt,
-          });
+          return jsonResponse({ outcome: "NEEDS_MANUAL_CREDENTIALS", manual_credentials: prompt });
         }
         return jsonResponse({ outcome: "GRANTED", message: "granted" });
       },
@@ -1229,9 +1147,7 @@ describe("InboxModel custom-service requests", () => {
     await model.approve();
 
     const body = calls[calls.length - 1].init?.body as FormData;
-    expect(JSON.parse(String(body.get("manual_credentials")))).toEqual({
-      token: "secret-token",
-    });
+    expect(JSON.parse(String(body.get("manual_credentials")))).toEqual({ token: "secret-token" });
   });
 
   it("reports a rejected token as a failure, unlike the form's first appearance", async () => {
@@ -1244,16 +1160,10 @@ describe("InboxModel custom-service requests", () => {
       "POST /requests/evt-a/grant": () => {
         if (isFirstGrant) {
           isFirstGrant = false;
-          return jsonResponse({
-            outcome: "NEEDS_MANUAL_CREDENTIALS",
-            manual_credentials: prompt,
-          });
+          return jsonResponse({ outcome: "NEEDS_MANUAL_CREDENTIALS", manual_credentials: prompt });
         }
         const rejected = { ...prompt, message: "The token was rejected." };
-        return jsonResponse({
-          outcome: "NEEDS_MANUAL_CREDENTIALS",
-          manual_credentials: rejected,
-        });
+        return jsonResponse({ outcome: "NEEDS_MANUAL_CREDENTIALS", manual_credentials: rejected });
       },
     });
 
@@ -1263,9 +1173,7 @@ describe("InboxModel custom-service requests", () => {
     model.manualCredentialValues.token = "wrong-token";
     await model.approve();
 
-    expect(model.manualCredentialsPrompt()?.message).toBe(
-      "The token was rejected.",
-    );
+    expect(model.manualCredentialsPrompt()?.message).toBe("The token was rejected.");
     expect(model.isManualCredentialsFailureShown()).toBe(true);
     expect(model.takePendingFailureScroll()).toBe(true);
   });
@@ -1312,26 +1220,14 @@ describe("the Chrome sign-in import offer", () => {
     return model;
   }
 
-  const OFFER_DUE = {
-    "GET /ui/api/settings/browser-import": () =>
-      jsonResponse({ is_offered: false, is_available: true }),
-  };
-  const GRANTED = {
-    "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED" }),
-  };
-  const MARKED = {
-    "POST /ui/api/settings/browser-import/offered": () =>
-      jsonResponse({ is_offered: true, is_available: true }),
-  };
+  const OFFER_DUE = { "GET /ui/api/settings/browser-import": () => jsonResponse({ is_offered: false, is_available: true }) };
+  const GRANTED = { "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED" }) };
+  const MARKED = { "POST /ui/api/settings/browser-import/offered": () => jsonResponse({ is_offered: true, is_available: true }) };
 
   it("knows when Approve is about to sign in", () => {
-    expect(makeOfferModel({}, SIGN_IN_DETAIL).isBrowserSignInPending()).toBe(
-      true,
-    );
+    expect(makeOfferModel({}, SIGN_IN_DETAIL).isBrowserSignInPending()).toBe(true);
     // A stored account rides without a browser...
-    expect(makeOfferModel({}, PREDEFINED_DETAIL).isBrowserSignInPending()).toBe(
-      false,
-    );
+    expect(makeOfferModel({}, PREDEFINED_DETAIL).isBrowserSignInPending()).toBe(false);
     // ...until the picker is moved to "Add account".
     const staged = makeOfferModel({}, PREDEFINED_DETAIL);
     staged.selectedAccount = PREDEFINED_DETAIL.new_account_value;
@@ -1339,30 +1235,19 @@ describe("the Chrome sign-in import offer", () => {
     // An account with no usable credentials -- one the agent asked for that is
     // not connected here, or a stored one gone stale -- signs in just like
     // "Add account" does.
-    const unconnected = makeOfferModel(
-      {},
-      {
-        ...PREDEFINED_DETAIL,
-        account_choices: [
-          ...PREDEFINED_DETAIL.account_choices,
-          {
-            value: "personal",
-            label: "personal",
-            hint: "needs sign-in",
-            is_credential_setup_needed: true,
-            is_account_name_needed: false,
-          },
-        ],
-      },
-    );
+    const unconnected = makeOfferModel({}, {
+      ...PREDEFINED_DETAIL,
+      account_choices: [
+        ...PREDEFINED_DETAIL.account_choices,
+        { value: "personal", label: "personal", hint: "needs sign-in", is_credential_setup_needed: true, is_account_name_needed: false },
+      ],
+    });
     unconnected.selectedAccount = "personal";
     expect(unconnected.isBrowserSignInPending()).toBe(true);
     unconnected.selectedAccount = "";
     expect(unconnected.isBrowserSignInPending()).toBe(false);
     // A service with no browser flow connects by typed credentials instead.
-    expect(makeOfferModel({}, MANUAL_DETAIL).isBrowserSignInPending()).toBe(
-      false,
-    );
+    expect(makeOfferModel({}, MANUAL_DETAIL).isBrowserSignInPending()).toBe(false);
   });
 
   it("holds the first sign-in Approve behind the offer, and marks it as made", async () => {
@@ -1381,8 +1266,7 @@ describe("the Chrome sign-in import offer", () => {
 
   it("goes straight to the approval when the offer was already made, or cannot be checked", async () => {
     const made = makeOfferModel({
-      "GET /ui/api/settings/browser-import": () =>
-        jsonResponse({ is_offered: true, is_available: true }),
+      "GET /ui/api/settings/browser-import": () => jsonResponse({ is_offered: true, is_available: true }),
       ...GRANTED,
       "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
     });
@@ -1391,8 +1275,7 @@ describe("the Chrome sign-in import offer", () => {
     expect(calls).toContain("POST /requests/evt-a/grant");
 
     const unknowable = makeOfferModel({
-      "GET /ui/api/settings/browser-import": () =>
-        new Response("", { status: 500 }),
+      "GET /ui/api/settings/browser-import": () => new Response("", { status: 500 }),
       ...GRANTED,
       "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
     });
@@ -1410,12 +1293,7 @@ describe("the Chrome sign-in import offer", () => {
   });
 
   it("declining goes on to the approval, and the offer is not made again on this page", async () => {
-    const model = makeOfferModel({
-      ...OFFER_DUE,
-      ...MARKED,
-      ...GRANTED,
-      "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
-    });
+    const model = makeOfferModel({ ...OFFER_DUE, ...MARKED, ...GRANTED, "GET /ui/api/inbox": () => jsonResponse({ cards: [] }) });
     await model.approve();
     await settle();
 
@@ -1423,14 +1301,10 @@ describe("the Chrome sign-in import offer", () => {
     await settle();
 
     expect(model.isBrowserImportOfferOpen).toBe(false);
-    expect(
-      calls.filter((call) => call === "POST /requests/evt-a/grant"),
-    ).toHaveLength(1);
+    expect(calls.filter((call) => call === "POST /requests/evt-a/grant")).toHaveLength(1);
     // A failed approval leaves the request pending; the next Approve must not
     // ask again.
-    expect(
-      calls.filter((call) => call === "GET /ui/api/settings/browser-import"),
-    ).toHaveLength(1);
+    expect(calls.filter((call) => call === "GET /ui/api/settings/browser-import")).toHaveLength(1);
   });
 
   it("accepting runs the import and then the approval", async () => {
@@ -1438,8 +1312,7 @@ describe("the Chrome sign-in import offer", () => {
       ...OFFER_DUE,
       ...MARKED,
       ...GRANTED,
-      "POST /ui/api/settings/browser-import": () =>
-        jsonResponse({ is_success: true, detail: "" }),
+      "POST /ui/api/settings/browser-import": () => jsonResponse({ is_success: true, detail: "" }),
       "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
     });
     await model.approve();
@@ -1449,9 +1322,7 @@ describe("the Chrome sign-in import offer", () => {
 
     expect(model.isBrowserImportOfferOpen).toBe(false);
     const order = calls.filter((call) => call.startsWith("POST"));
-    expect(order.indexOf("POST /ui/api/settings/browser-import")).toBeLessThan(
-      order.indexOf("POST /requests/evt-a/grant"),
-    );
+    expect(order.indexOf("POST /ui/api/settings/browser-import")).toBeLessThan(order.indexOf("POST /requests/evt-a/grant"));
   });
 
   it("a failed import keeps the offer up with the reason, and approves nothing yet", async () => {
@@ -1460,10 +1331,7 @@ describe("the Chrome sign-in import offer", () => {
       ...MARKED,
       ...GRANTED,
       "POST /ui/api/settings/browser-import": () =>
-        jsonResponse({
-          is_success: false,
-          detail: "Google Chrome is not installed.",
-        }),
+        jsonResponse({ is_success: false, detail: "Google Chrome is not installed." }),
     });
     await model.approve();
     await settle();
@@ -1471,9 +1339,7 @@ describe("the Chrome sign-in import offer", () => {
     await model.acceptBrowserImport();
 
     expect(model.isBrowserImportOfferOpen).toBe(true);
-    expect(model.browserImport.outcome?.detail).toBe(
-      "Google Chrome is not installed.",
-    );
+    expect(model.browserImport.outcome?.detail).toBe("Google Chrome is not installed.");
     expect(calls).not.toContain("POST /requests/evt-a/grant");
   });
 
@@ -1481,8 +1347,7 @@ describe("the Chrome sign-in import offer", () => {
     const model = makeOfferModel({
       ...OFFER_DUE,
       ...MARKED,
-      "POST /ui/api/settings/browser-import": () =>
-        new Promise<Response>(() => undefined),
+      "POST /ui/api/settings/browser-import": () => new Promise<Response>(() => undefined),
     });
     await model.approve();
     await settle();
@@ -1507,16 +1372,13 @@ describe("the Chrome sign-in import offer", () => {
     await settle();
 
     expect(declined.isBrowserImportOfferOpen).toBe(false);
-    expect(calls.filter((call) => call.startsWith("POST /requests/"))).toEqual(
-      [],
-    );
+    expect(calls.filter((call) => call.startsWith("POST /requests/"))).toEqual([]);
 
     const imported = makeOfferModel({
       ...OFFER_DUE,
       ...MARKED,
       ...GRANTED,
-      "POST /ui/api/settings/browser-import": () =>
-        jsonResponse({ is_success: true, detail: "" }),
+      "POST /ui/api/settings/browser-import": () => jsonResponse({ is_success: true, detail: "" }),
     });
     await imported.approve();
     await settle();
@@ -1525,8 +1387,6 @@ describe("the Chrome sign-in import offer", () => {
     await imported.acceptBrowserImport();
 
     expect(imported.isBrowserImportOfferOpen).toBe(false);
-    expect(calls.filter((call) => call.startsWith("POST /requests/"))).toEqual(
-      [],
-    );
+    expect(calls.filter((call) => call.startsWith("POST /requests/"))).toEqual([]);
   });
 });

@@ -1,10 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type {
-  PeekedChannel,
-  UpdateChannel,
-  UpdateState,
-  UpdateStatus,
-} from "../electron-bridge";
+import type { PeekedChannel, UpdateChannel, UpdateState, UpdateStatus } from "../electron-bridge";
 import {
   jsonResponse,
   pendingInstallUpdate,
@@ -104,9 +99,7 @@ describe("SettingsModel", () => {
         const url = String(input);
         if (url.endsWith("/sign-in-browser")) {
           bodies.push(JSON.parse(String(init?.body)));
-          return isRefusing
-            ? jsonResponse({ error: "That browser is not installed" }, 400)
-            : jsonResponse({});
+          return isRefusing ? jsonResponse({ error: "That browser is not installed" }, 400) : jsonResponse({});
         }
         return jsonResponse(settingsOverview());
       },
@@ -115,20 +108,13 @@ describe("SettingsModel", () => {
     await model.load();
 
     await model.setSignInBrowser("/Applications/Firefox.app");
-    expect(model.overview?.sign_in_browser_id).toBe(
-      "/Applications/Firefox.app",
-    );
+    expect(model.overview?.sign_in_browser_id).toBe("/Applications/Firefox.app");
 
     isRefusing = true;
     await model.setSignInBrowser("/Applications/Gone.app");
-    expect(model.overview?.sign_in_browser_id).toBe(
-      "/Applications/Firefox.app",
-    );
+    expect(model.overview?.sign_in_browser_id).toBe("/Applications/Firefox.app");
     expect(model.signInBrowserError).toBe("That browser is not installed");
-    expect(bodies).toEqual([
-      { browser_id: "/Applications/Firefox.app" },
-      { browser_id: "/Applications/Gone.app" },
-    ]);
+    expect(bodies).toEqual([{ browser_id: "/Applications/Firefox.app" }, { browser_id: "/Applications/Gone.app" }]);
   });
 
   it("surfaces a refused error-reporting write with the server's reason", async () => {
@@ -759,9 +745,7 @@ describe("SettingsModel release channels", () => {
     const { surface } = nativeStub(RUNNING, PEEKED);
     const failing = {
       ...surface,
-      installUpdate: async () => ({
-        error: "Installing the update failed: Command failed: pkexec",
-      }),
+      installUpdate: async () => ({ error: "Installing the update failed: Command failed: pkexec" }),
     };
     await withMindsNative(failing, async () => {
       const model = new SettingsModel(undefined, () => {});

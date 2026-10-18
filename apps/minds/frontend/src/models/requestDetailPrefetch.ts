@@ -14,10 +14,7 @@
 
 import type { InboxDetail } from "./inbox";
 
-export type FetchLike = (
-  input: string,
-  init?: RequestInit,
-) => Promise<Response>;
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 /** In-flight and settled warms, by request id. Module-level because the
  * warming surface (the Permissions tab) and the surface that spends it (the
@@ -28,8 +25,7 @@ const warmed = new Map<string, Promise<InboxDetail | null>>();
  * under node). A warm is an optimization, so having nowhere to fetch from is a
  * reason to skip it, not to fail. */
 function defaultFetcher(): FetchLike | null {
-  if (typeof window === "undefined" || typeof window.fetch !== "function")
-    return null;
+  if (typeof window === "undefined" || typeof window.fetch !== "function") return null;
   return (input, init) => window.fetch(input, init);
 }
 
@@ -37,10 +33,7 @@ export function requestDetailUrl(id: string): string {
   return `/ui/api/inbox/${encodeURIComponent(id)}/detail`;
 }
 
-async function fetchDetail(
-  id: string,
-  fetcher: FetchLike,
-): Promise<InboxDetail | null> {
+async function fetchDetail(id: string, fetcher: FetchLike): Promise<InboxDetail | null> {
   try {
     const response = await fetcher(requestDetailUrl(id));
     if (!response.ok) return null;
@@ -76,9 +69,7 @@ export function warmRequestDetail(id: string, fetcher?: FetchLike): void {
  * ends a warm's life -- the request being resolved, or dropping out of the
  * pending set.
  */
-export function readWarmedRequestDetail(
-  id: string,
-): Promise<InboxDetail | null> | null {
+export function readWarmedRequestDetail(id: string): Promise<InboxDetail | null> | null {
   return warmed.get(id) ?? null;
 }
 
@@ -91,9 +82,7 @@ export function forgetWarmedRequestDetails(): void {
 
 /** Drop the warms for requests that are no longer pending, keeping the rest.
  * A request that has left the set cannot be opened, and its answer is stale. */
-export function retainWarmedRequestDetails(
-  pendingIds: readonly string[],
-): void {
+export function retainWarmedRequestDetails(pendingIds: readonly string[]): void {
   const keep = new Set(pendingIds);
   for (const id of [...warmed.keys()]) {
     if (!keep.has(id)) warmed.delete(id);

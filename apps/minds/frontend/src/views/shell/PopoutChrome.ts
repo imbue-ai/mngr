@@ -13,12 +13,7 @@
 import m from "mithril";
 import { Icon12 } from "../components/Icon";
 import { TitlebarButton } from "../components/TitlebarButton";
-import {
-  CHROME_BAR_CLASS,
-  CHROME_BAR_STYLE,
-  isMacLayout,
-  leftWindowControls,
-} from "./Titlebar";
+import { CHROME_BAR_CLASS, CHROME_BAR_STYLE, isMacLayout, leftWindowControls } from "./Titlebar";
 import { electronBridge } from "../../electron-bridge";
 import type { ShellState } from "./shell-state";
 
@@ -33,10 +28,7 @@ const DRAG_THRESHOLD_PX = 4;
 
 /** Whether a press on the bar starts a drag: not on a control, and only in
  * the desktop app (a plain browser has no OS window to move). */
-export function isBarDragPress(
-  target: EventTarget | null,
-  isDesktop: boolean,
-): boolean {
+export function isBarDragPress(target: EventTarget | null, isDesktop: boolean): boolean {
   if (!isDesktop) return false;
   return !(target instanceof Element && target.closest("button") !== null);
 }
@@ -71,25 +63,17 @@ export function PopoutChrome(): m.Component<PopoutChromeAttrs> {
             if (event.button !== 0) return;
             if (!isBarDragPress(event.target, electronBridge.isDesktop)) return;
             pressPoint = { x: event.clientX, y: event.clientY };
-            (event.currentTarget as HTMLElement).setPointerCapture(
-              event.pointerId,
-            );
+            (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
           },
           onpointermove: (event: PointerEvent) => {
             if (pressPoint === null || isDragging) return;
-            const travelled = Math.hypot(
-              event.clientX - pressPoint.x,
-              event.clientY - pressPoint.y,
-            );
+            const travelled = Math.hypot(event.clientX - pressPoint.x, event.clientY - pressPoint.y);
             if (travelled < DRAG_THRESHOLD_PX) return;
             isDragging = true;
             // The page's origin is the window's on every platform (frameless
             // off macOS, hiddenInset on it), so the press point is where
             // inside the window the bar is held.
-            electronBridge.beginPopoutDrag({
-              grabX: pressPoint.x,
-              grabY: pressPoint.y,
-            });
+            electronBridge.beginPopoutDrag({ grabX: pressPoint.x, grabY: pressPoint.y });
           },
           onpointerup: endDrag,
           onpointercancel: endDrag,
@@ -99,18 +83,12 @@ export function PopoutChrome(): m.Component<PopoutChromeAttrs> {
             leftWindowControls(shell),
             m(
               "span#popout-workspace-name",
-              {
-                class:
-                  "type-label text-secondary truncate max-w-[180px] shrink-0",
-              },
+              { class: "type-label text-secondary truncate max-w-[180px] shrink-0" },
               workspaceName,
             ),
             m(
               "span",
-              {
-                class: "type-label text-tertiary px-0.5",
-                "aria-hidden": "true",
-              },
+              { class: "type-label text-tertiary px-0.5", "aria-hidden": "true" },
               "/",
             ),
             m(
@@ -119,28 +97,24 @@ export function PopoutChrome(): m.Component<PopoutChromeAttrs> {
               windowTitle,
             ),
           ]),
-          m(
-            "div",
-            { class: "flex items-center justify-end shrink-0 gap-1 pr-1" },
-            [
-              // The close is the way back: main returns the window to the
-              // desktop through a desktop window showing the workspace before
-              // this window goes. On macOS the traffic lights carry it.
-              m(
-                TitlebarButton,
-                {
-                  variant: "control",
-                  tone: "danger",
-                  id: "popout-close-btn",
-                  "aria-label": "Close",
-                  "data-tooltip": "Close (returns the window to the desktop)",
-                  hidden: !electronBridge.isDesktop || isMacLayout(shell),
-                  onclick: () => electronBridge.close(),
-                },
-                m(Icon12, { name: "close" }),
-              ),
-            ],
-          ),
+          m("div", { class: "flex items-center justify-end shrink-0 gap-1 pr-1" }, [
+            // The close is the way back: main returns the window to the
+            // desktop through a desktop window showing the workspace before
+            // this window goes. On macOS the traffic lights carry it.
+            m(
+              TitlebarButton,
+              {
+                variant: "control",
+                tone: "danger",
+                id: "popout-close-btn",
+                "aria-label": "Close",
+                "data-tooltip": "Close (returns the window to the desktop)",
+                hidden: !electronBridge.isDesktop || isMacLayout(shell),
+                onclick: () => electronBridge.close(),
+              },
+              m(Icon12, { name: "close" }),
+            ),
+          ]),
         ],
       );
     },

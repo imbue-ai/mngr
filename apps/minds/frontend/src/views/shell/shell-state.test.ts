@@ -401,18 +401,14 @@ describe("ShellState.routeTo (one main window per workspace)", () => {
     const shell = makeShell();
     land(shell, `/workspace/${WORKSPACE_ID}`);
     const claims = stubClaim(true);
-    const routeSet = vi
-      .spyOn(m.route, "set")
-      .mockImplementation(() => undefined);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
     shell.enterWorkspace(OTHER_ID, { chat: "agent-ee55" });
     await vi.waitFor(() => expect(claims).toHaveLength(1));
     await Promise.resolve();
 
     // Main raised the other window and handed it the route, chat included.
-    expect(claims).toEqual([
-      [OTHER_ID, `/workspace/${OTHER_ID}?chat=agent-ee55`],
-    ]);
+    expect(claims).toEqual([[OTHER_ID, `/workspace/${OTHER_ID}?chat=agent-ee55`]]);
     expect(routeSet).not.toHaveBeenCalled();
   });
 
@@ -420,16 +416,12 @@ describe("ShellState.routeTo (one main window per workspace)", () => {
     const shell = makeShell();
     land(shell, "/");
     stubClaim(false);
-    const routeSet = vi
-      .spyOn(m.route, "set")
-      .mockImplementation(() => undefined);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
     shell.routeTo(`/workspace/${OTHER_ID}/options?tab=settings`);
 
     await vi.waitFor(() =>
-      expect(routeSet).toHaveBeenCalledWith(
-        `/workspace/${OTHER_ID}/options?tab=settings`,
-      ),
+      expect(routeSet).toHaveBeenCalledWith(`/workspace/${OTHER_ID}/options?tab=settings`),
     );
   });
 
@@ -437,18 +429,13 @@ describe("ShellState.routeTo (one main window per workspace)", () => {
     const shell = makeShell();
     land(shell, `/workspace/${WORKSPACE_ID}`);
     const claims = stubClaim(true);
-    const routeSet = vi
-      .spyOn(m.route, "set")
-      .mockImplementation(() => undefined);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
     shell.routeTo(`/workspace/${WORKSPACE_ID}/options?tab=share`);
     shell.routeTo("/accounts");
 
     expect(claims).toEqual([]);
-    expect(routeSet.mock.calls).toEqual([
-      [`/workspace/${WORKSPACE_ID}/options?tab=share`],
-      ["/accounts"],
-    ]);
+    expect(routeSet.mock.calls).toEqual([[`/workspace/${WORKSPACE_ID}/options?tab=share`], ["/accounts"]]);
   });
 });
 
@@ -1158,10 +1145,7 @@ describe("ShellState.reloadWorkspaceFrame", () => {
   const RUN_ENDED_AT_MS = Date.parse("2026-09-28T20:14:49.432Z");
 
   it("reloads a page that last loaded before the update ended", () => {
-    const { shell, reloadCount } = shellWithFrameOn(
-      "agent-aa11",
-      RUN_ENDED_AT_MS - 3_600_000,
-    );
+    const { shell, reloadCount } = shellWithFrameOn("agent-aa11", RUN_ENDED_AT_MS - 3_600_000);
 
     shell.reloadWorkspaceFrame("agent-aa11", RUN_ENDED_AT_MS);
 
@@ -1170,10 +1154,7 @@ describe("ShellState.reloadWorkspaceFrame", () => {
 
   it("leaves a page loaded since the update ended alone", () => {
     // The user reloaded it, or the window was opened after the update.
-    const { shell, reloadCount } = shellWithFrameOn(
-      "agent-aa11",
-      RUN_ENDED_AT_MS + 17_000,
-    );
+    const { shell, reloadCount } = shellWithFrameOn("agent-aa11", RUN_ENDED_AT_MS + 17_000);
 
     shell.reloadWorkspaceFrame("agent-aa11", RUN_ENDED_AT_MS);
 
@@ -1190,10 +1171,7 @@ describe("ShellState.reloadWorkspaceFrame", () => {
   });
 
   it("reloads a freshly loaded page when the refresh names no cutoff", () => {
-    const { shell, reloadCount } = shellWithFrameOn(
-      "agent-aa11",
-      RUN_ENDED_AT_MS + 17_000,
-    );
+    const { shell, reloadCount } = shellWithFrameOn("agent-aa11", RUN_ENDED_AT_MS + 17_000);
 
     shell.reloadWorkspaceFrame("agent-aa11", null);
 
@@ -1655,16 +1633,11 @@ describe("pulled-out windows (the popout route)", () => {
 
   /** A shell on the popout route, its frame's reattach sender recording what
    * it is asked to send. */
-  function popoutShell(): {
-    shell: ShellState;
-    sends: { windowId: string; frame: unknown }[];
-  } {
+  function popoutShell(): { shell: ShellState; sends: { windowId: string; frame: unknown }[] } {
     stubAccentPainting();
     const shell = new ShellState(createEmptyStores());
     const sends: { windowId: string; frame: unknown }[] = [];
-    shell.registerReattachWindowSender((windowId, frame) =>
-      sends.push({ windowId, frame }),
-    );
+    shell.registerReattachWindowSender((windowId, frame) => sends.push({ windowId, frame }));
     vi.spyOn(m.route, "get").mockImplementation(() => POPOUT_PATH);
     shell.handleRouteChanged(POPOUT_PATH);
     return { shell, sends };
@@ -1698,10 +1671,7 @@ describe("pulled-out windows (the popout route)", () => {
   it("displays the popout's workspace, so its accent and its channel state follow the machine", () => {
     const { shell } = popoutShell();
     expect(shell.displayedWorkspaceAnyId).toBe(AGENT);
-    expect(shell.popoutRoute()).toEqual({
-      workspaceAnyId: AGENT,
-      windowId: "win-0123",
-    });
+    expect(shell.popoutRoute()).toEqual({ workspaceAnyId: AGENT, windowId: "win-0123" });
   });
 
   it("takes the window's title from the shell's detached set, and closes when the set lacks it", () => {
@@ -1730,17 +1700,10 @@ describe("pulled-out windows (the popout route)", () => {
       const gone = { count: 0 };
       report(shell, [{ windowId: "win-0123", title: "Notes" }], titles, gone);
       let isSettled = false;
-      const settled = shell
-        .returnPopoutToDesktop({ x: 0.1, y: 0.2, width: 0.5, height: 0.5 })
-        .then(() => {
-          isSettled = true;
-        });
-      expect(sends).toEqual([
-        {
-          windowId: "win-0123",
-          frame: { x: 0.1, y: 0.2, width: 0.5, height: 0.5 },
-        },
-      ]);
+      const settled = shell.returnPopoutToDesktop({ x: 0.1, y: 0.2, width: 0.5, height: 0.5 }).then(() => {
+        isSettled = true;
+      });
+      expect(sends).toEqual([{ windowId: "win-0123", frame: { x: 0.1, y: 0.2, width: 0.5, height: 0.5 } }]);
       await Promise.resolve();
       expect(isSettled).toBe(false);
       report(shell, [], titles, gone);
@@ -1790,14 +1753,8 @@ describe("pulled-out windows (the popout route)", () => {
     stubAccentPainting();
     const shell = new ShellState(createEmptyStores());
     const sends: unknown[] = [];
-    shell.registerReattachWindowSender((windowId, frame) =>
-      sends.push({ windowId, frame }),
-    );
-    const ask = {
-      workspaceId: AGENT,
-      windowId: "win-0123",
-      frame: { x: 0.1, y: 0.2, width: 0.5, height: 0.5 },
-    };
+    shell.registerReattachWindowSender((windowId, frame) => sends.push({ windowId, frame }));
+    const ask = { workspaceId: AGENT, windowId: "win-0123", frame: { x: 0.1, y: 0.2, width: 0.5, height: 0.5 } };
     // A hub page shows no workspace; another workspace's surface is not this one's desktop.
     vi.spyOn(m.route, "get").mockImplementation(() => "/");
     shell.handleRouteChanged("/");
@@ -1812,10 +1769,7 @@ describe("pulled-out windows (the popout route)", () => {
     shell.handleReattachPopoutWindow(ask);
     shell.handleReattachPopoutWindow({ ...ask, frame: null });
     expect(sends).toEqual([
-      {
-        windowId: "win-0123",
-        frame: { x: 0.1, y: 0.2, width: 0.5, height: 0.5 },
-      },
+      { windowId: "win-0123", frame: { x: 0.1, y: 0.2, width: 0.5, height: 0.5 } },
       { windowId: "win-0123", frame: null },
     ]);
     // A popout of the workspace is a view of one window, never the desktop that takes one back.
@@ -1833,28 +1787,14 @@ describe("pulled-out windows (the popout route)", () => {
     const shell = new ShellState(createEmptyStores());
     shell.stores.workspaces.applyWorkspacesMessage(workspacesMessage());
     const sends: unknown[] = [];
-    shell.registerReattachWindowSender((windowId, frame) =>
-      sends.push({ windowId, frame }),
-    );
+    shell.registerReattachWindowSender((windowId, frame) => sends.push({ windowId, frame }));
     vi.spyOn(m.route, "get").mockImplementation(() => "/workspace/agent-aa11");
     shell.handleRouteChanged("/workspace/agent-aa11");
-    shell.handleReattachPopoutWindow({
-      workspaceId: "host-bb22",
-      windowId: "win-0123",
-      frame: null,
-    });
+    shell.handleReattachPopoutWindow({ workspaceId: "host-bb22", windowId: "win-0123", frame: null });
     vi.spyOn(m.route, "get").mockImplementation(() => "/workspace/host-bb22");
     shell.handleRouteChanged("/workspace/host-bb22");
-    shell.handleReattachPopoutWindow({
-      workspaceId: "agent-aa11",
-      windowId: "win-4567",
-      frame: null,
-    });
-    shell.handleReattachPopoutWindow({
-      workspaceId: "host-0000",
-      windowId: "win-8888",
-      frame: null,
-    });
+    shell.handleReattachPopoutWindow({ workspaceId: "agent-aa11", windowId: "win-4567", frame: null });
+    shell.handleReattachPopoutWindow({ workspaceId: "host-0000", windowId: "win-8888", frame: null });
     expect(sends).toEqual([
       { windowId: "win-0123", frame: null },
       { windowId: "win-4567", frame: null },
@@ -1869,24 +1809,12 @@ describe("pulled-out windows (the popout route)", () => {
       report(shell, [{ windowId: "win-0123", title: "PRs" }], [], ignored);
       let answer: boolean | null = null;
       const answered = shell
-        .handleReattachPopoutWindow({
-          workspaceId: AGENT,
-          windowId: "win-0123",
-          frame: null,
-        })
+        .handleReattachPopoutWindow({ workspaceId: AGENT, windowId: "win-0123", frame: null })
         .then((isReportedBack) => {
           answer = isReportedBack;
         });
       // Another window's change is not this window's return.
-      report(
-        shell,
-        [
-          { windowId: "win-0123", title: "PRs" },
-          { windowId: "win-4567", title: "Chat" },
-        ],
-        [],
-        ignored,
-      );
+      report(shell, [{ windowId: "win-0123", title: "PRs" }, { windowId: "win-4567", title: "Chat" }], [], ignored);
       await Promise.resolve();
       expect(answer).toBeNull();
       report(shell, [{ windowId: "win-4567", title: "Chat" }], [], ignored);
@@ -1919,11 +1847,7 @@ describe("pulled-out windows (the popout route)", () => {
   it("forwards main's report of a watched title-bar drag to the mounted frame, and nothing without one", () => {
     stubAccentPainting();
     const shell = new ShellState(createEmptyStores());
-    const report = {
-      workspaceId: AGENT,
-      windowId: "win-0123",
-      phase: "out" as const,
-    };
+    const report = { workspaceId: AGENT, windowId: "win-0123", phase: "out" as const };
     shell.handleTearOut(report);
     const forwarded: unknown[] = [];
     const sender = (received: unknown): number => forwarded.push(received);
