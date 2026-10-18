@@ -281,6 +281,13 @@ def test_certified_host_data_backward_compatible_without_prefix() -> None:
     assert data.tmux_session_prefix is None
 
 
+def test_certified_host_data_drops_the_retired_repicked_on_start_key() -> None:
+    data = CertifiedHostData.model_validate(
+        {"host_id": "host-123", "host_name": "test-host", "is_published_endpoints_repicked_on_start": True}
+    )
+    assert data.published_endpoints == ()
+
+
 # =============================================================================
 # IdleMode derivation consistency tests
 # =============================================================================

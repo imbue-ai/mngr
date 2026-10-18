@@ -1368,6 +1368,30 @@ def test_get_host_and_agent_details_populates_boot_time_and_uptime_from_one_prob
     online_host.read_boot_info.assert_called_once()
 
 
+def test_get_host_and_agent_details_reports_the_host_objects_published_endpoints(
+    host_id: HostId, provider: MockProviderInstance
+) -> None:
+    """HostDetails.published_endpoints is the host's get_published_endpoints answer, not the certified record's,
+    so a provider whose host answers from a live source (Imbue Cloud's lease) lists the same endpoints everywhere.
+    """
+    online_host = _make_mock_online_host(host_id)
+    online_host.get_agents.return_value = []
+    endpoint = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="203.0.113.5", host_port=22012)
+    online_host.get_published_endpoints.return_value = [endpoint]
+    provider.mock_hosts = [online_host]
+    host_ref = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("test-host"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+
+    host_details, _agent_details_list = provider.get_host_and_agent_details(host_ref, [])
+
+    assert online_host.get_certified_data.return_value.published_endpoints == ()
+    assert host_details.published_endpoints == [endpoint]
+
+
 def test_discover_within_timeouts_adopts_a_young_in_flight_read_instead_of_skipping_it(
     temp_host_dir: Path, temp_mngr_ctx: MngrContext
 ) -> None:

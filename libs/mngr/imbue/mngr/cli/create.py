@@ -1558,7 +1558,7 @@ def _apply_published_ports_to_existing_host(
     if not host.is_local:
         _refuse_published_ports_on_existing_remote_host(declarations)
     endpoints = merge_published_endpoints(host.get_published_endpoints(), identity_published_endpoints(declarations))
-    record_published_endpoints_on_host(host, endpoints, is_repicked_on_start=False)
+    record_published_endpoints_on_host(host, endpoints)
 
 
 @pure

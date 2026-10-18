@@ -355,6 +355,9 @@ class CertifiedHostData(FrozenModel):
         """
         if isinstance(data, dict):
             data.pop("idle_mode", None)
+            # CLEANUP: remove once no host created by a mngr/vnc-frame build of 2026-10-17 remains;
+            # those builds wrote this key into data.json.
+            data.pop("is_published_endpoints_repicked_on_start", None)
             now = datetime.now(timezone.utc)
             if "created_at" not in data:
                 data["created_at"] = now - timedelta(weeks=1)
@@ -421,15 +424,6 @@ class CertifiedHostData(FrozenModel):
         description=(
             "Where each port the host was created with --publish is reachable from the mngr client that "
             "created it; kept beside the SSH info so a stopped host still reports what it publishes once started"
-        ),
-    )
-    is_published_endpoints_repicked_on_start: bool = Field(
-        default=False,
-        description=(
-            "Whether the provider picks fresh host-side endpoints for the published ports on every start (Modal, "
-            "whose tunnels belong to the sandbox a start creates; Imbue Cloud, which re-picks box ports on a "
-            "restore; Docker, whose dynamic host ports change on each start) rather than keeping them for the "
-            "host's life (Lima, the VPS providers)"
         ),
     )
 

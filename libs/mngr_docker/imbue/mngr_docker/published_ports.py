@@ -68,22 +68,6 @@ def choose_host_ports_for_shared_guest_ports(
 
 
 @pure
-def has_dynamic_host_port(config: DockerProviderConfig, declarations: Sequence[PublishedPortDeclaration]) -> bool:
-    """Whether any declaration leaves its host port to Docker, which picks a fresh one on every start.
-
-    Only a guest port declared for more than one protocol on a local daemon is pinned
-    (``choose_host_ports_for_shared_guest_ports``); every other declaration's host port
-    is dynamic and so re-picked by ``docker start``.
-    """
-    if not is_docker_daemon_local(config.host):
-        return bool(declarations)
-    return any(
-        len(protocols_declared_for_guest_port(declarations, guest_port)) == 1
-        for guest_port in guest_ports_in_declaration_order(declarations)
-    )
-
-
-@pure
 def read_published_endpoints_from_port_bindings(
     port_bindings: Mapping[str, Any],
     declarations: Sequence[PublishedPortDeclaration],

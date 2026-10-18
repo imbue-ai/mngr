@@ -2960,7 +2960,7 @@ def test_build_host_details_reports_published_endpoints_from_certified_data(
 ) -> None:
     endpoint = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.TCP, host="127.0.0.1", host_port=32768)
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    record_published_endpoints_on_host(host, [endpoint], is_repicked_on_start=False)
+    record_published_endpoints_on_host(host, [endpoint])
     host_ref = DiscoveredHost(
         host_id=host.id,
         host_name=HostName(LOCAL_HOST_NAME),

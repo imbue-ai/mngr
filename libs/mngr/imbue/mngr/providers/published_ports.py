@@ -78,16 +78,11 @@ def reject_sshd_port_declarations(
             )
 
 
-def record_published_endpoints_on_host(
-    host: HostInterface,
-    endpoints: Sequence[PublishedEndpoint],
-    is_repicked_on_start: bool,
-) -> None:
+def record_published_endpoints_on_host(host: HostInterface, endpoints: Sequence[PublishedEndpoint]) -> None:
     """Write the host's published endpoints into its certified data, replacing those recorded before."""
     certified_data = host.get_certified_data()
     updated_data = certified_data.model_copy_update(
         to_update(certified_data.field_ref().published_endpoints, tuple(endpoints)),
-        to_update(certified_data.field_ref().is_published_endpoints_repicked_on_start, is_repicked_on_start),
     )
     host.set_certified_data(updated_data)
 

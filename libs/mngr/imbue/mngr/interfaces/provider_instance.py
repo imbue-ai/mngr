@@ -181,7 +181,9 @@ def _build_host_details_from_host(
         uptime_seconds=uptime_seconds,
         resource=resource,
         ssh=ssh_info,
-        published_endpoints=list(certified_data.published_endpoints),
+        # Through the host's own read path, so a provider whose host answers from a live
+        # source (Imbue Cloud's lease) lists the same endpoints here as everywhere else.
+        published_endpoints=host.get_published_endpoints(),
         snapshots=host.get_snapshots(),
         is_locked=is_locked,
         locked_time=locked_time,

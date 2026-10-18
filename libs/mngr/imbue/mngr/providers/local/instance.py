@@ -270,7 +270,7 @@ class LocalProviderInstance(BaseProviderInstance):
                 endpoints = merge_published_endpoints(
                     host.get_published_endpoints(), identity_published_endpoints(published_ports)
                 )
-                record_published_endpoints_on_host(host, endpoints, is_repicked_on_start=False)
+                record_published_endpoints_on_host(host, endpoints)
 
         return host
 
