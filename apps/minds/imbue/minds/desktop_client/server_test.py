@@ -11,12 +11,16 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextlib import nullcontext
 from pathlib import Path
 from uuid import uuid4
 
 import httpx
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.config.data_types import InstallationPaths
+from imbue.minds.desktop_client.api_socket import create_local_socket_server
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -30,9 +34,11 @@ from imbue.minds.desktop_client.server import _shutdown_desktop_client
 from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.testing import serve_wsgi_server_in_thread
 from imbue.minds.desktop_client.ws_gateway import create_websocket_aware_wsgi_server
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.testing import find_free_port
+from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 
 def test_runtime_creates_http_client_on_entry_and_closes_it_with_shutdown_flag(tmp_path: Path) -> None:
@@ -121,6 +127,61 @@ def test_shutdown_gives_up_every_armed_sign_in_relays_port(tmp_path: Path) -> No
     assert relay.is_stopped()
 
 
+class _RecordingForwardSupervisor(LatchkeyForwardSupervisor):
+    """A supervisor whose ``stop`` only records that it ran, instead of reaping a forward."""
+
+    _stop_called: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    def stop(self) -> None:
+        self._stop_called.set()
+
+    @property
+    def stop_called(self) -> threading.Event:
+        return self._stop_called
+
+
+class _HangingForwardSupervisor(LatchkeyForwardSupervisor):
+    """A supervisor whose ``stop`` blocks until released, like a forward slow to exit."""
+
+    _release: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    def stop(self) -> None:
+        self._release.wait(timeout=30.0)
+
+    @property
+    def release(self) -> threading.Event:
+        return self._release
+
+
+def test_shutdown_stops_the_latchkey_forward_supervisor(tmp_path: Path) -> None:
+    supervisor = _RecordingForwardSupervisor(latchkey_directory=tmp_path / "latchkey")
+    state = DesktopClientState(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=MngrCliBackendResolver(),
+        latchkey_forward_supervisor=supervisor,
+    )
+
+    _shutdown_desktop_client(state, is_externally_managed_client=True)
+
+    assert supervisor.stop_called.is_set()
+
+
+def test_shutdown_does_not_wait_out_a_slow_latchkey_forward_stop(tmp_path: Path) -> None:
+    """The forward's stop can outlast the shell's SIGKILL grace, so the teardown must not block on it."""
+    supervisor = _HangingForwardSupervisor(latchkey_directory=tmp_path / "latchkey")
+    state = DesktopClientState(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=MngrCliBackendResolver(),
+        latchkey_forward_supervisor=supervisor,
+    )
+    try:
+        _shutdown_desktop_client(state, is_externally_managed_client=True)
+        # The teardown returned while the stop was still in progress.
+        assert not supervisor.release.is_set()
+    finally:
+        supervisor.release.set()
+
+
 def test_runtime_leaves_externally_managed_http_client_untouched(tmp_path: Path) -> None:
     """An injected HTTP client (e.g. from a test) is neither replaced nor closed by the runtime."""
     injected = httpx.Client()
@@ -137,28 +198,39 @@ def test_runtime_leaves_externally_managed_http_client_untouched(tmp_path: Path)
 
 
 @contextmanager
-def _serve_in_background(tmp_path: Path) -> Iterator[tuple[int, FileAuthStore, DesktopClientState]]:
-    """Run the real cheroot WSGI server on an ephemeral port for the duration of the block."""
+def _serve_in_background(
+    tmp_path: Path, api_socket_path: Path | None = None
+) -> Iterator[tuple[int, FileAuthStore, DesktopClientState]]:
+    """Run the real cheroot WSGI server on an ephemeral port (and on ``api_socket_path``) for the block."""
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     resolver = MngrCliBackendResolver()
-    app = create_desktop_client(auth_store=auth_store, backend_resolver=resolver, http_client=None)
-    # The production server class (WebSocket-aware gateway subclass), so this
-    # socket-level test exercises what serve_desktop_client actually runs.
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
+        minds_api_key=uuid4().hex,
+    )
+    # The production server classes (WebSocket-aware gateway subclass, and the
+    # peer-checked local-socket listener), so these socket-level tests exercise
+    # what serve_desktop_client actually runs.
     server = create_websocket_aware_wsgi_server(("127.0.0.1", 0), app, numthreads=10)
-    server.prepare()
-    port = server.bind_addr[1]
-    thread = threading.Thread(target=server.serve, name="server-test-wsgi", daemon=True)
-    thread.start()
-    try:
-        yield port, auth_store, get_state(app)
-    finally:
-        # Mirror the real shutdown: flip the flag AND fire the resolver change
-        # event the SSE generators block on, so they return promptly instead of
-        # making ``server.stop()`` wait out a worker wedged in its poll wait.
-        get_state(app).shutdown_event.set()
-        resolver.notify_change()
-        server.stop()
-        thread.join(timeout=5)
+    socket_listener = (
+        serve_wsgi_server_in_thread(
+            create_local_socket_server(api_socket_path, app, numthreads=4), "server-test-socket"
+        )
+        if api_socket_path is not None
+        else nullcontext()
+    )
+    with serve_wsgi_server_in_thread(server, "server-test-wsgi"), socket_listener:
+        try:
+            yield server.bind_addr[1], auth_store, get_state(app)
+        finally:
+            # Mirror the real shutdown: flip the flag AND fire the resolver change
+            # event the SSE generators block on, so they return promptly instead of
+            # making ``server.stop()`` wait out a worker wedged in its poll wait.
+            get_state(app).shutdown_event.set()
+            resolver.notify_change()
 
 
 def test_server_keeps_connections_alive(tmp_path: Path) -> None:
@@ -189,3 +261,17 @@ def test_server_keeps_connections_alive(tmp_path: Path) -> None:
             second = client.get(f"http://127.0.0.1:{port}/login")
             assert second.status_code == 200
             assert second.headers.get("connection", "").lower() != "close"
+
+
+def test_the_same_request_is_served_over_the_socket_and_refused_over_tcp_without_a_credential(
+    tmp_path: Path, short_tmp_path: Path
+) -> None:
+    """The two listeners serve one app: the socket admits the user, TCP still demands a credential."""
+    socket_path = short_tmp_path / "api.sock"
+    with _serve_in_background(tmp_path, api_socket_path=socket_path) as (port, _auth_store, _state):
+        with httpx.Client(timeout=10.0) as tcp_client:
+            assert tcp_client.get(f"http://127.0.0.1:{port}/api/v1/app/version").status_code == 401
+        with httpx.Client(transport=httpx.HTTPTransport(uds=str(socket_path)), timeout=10.0) as socket_client:
+            response = socket_client.get("http://localhost/api/v1/app/version")
+        assert response.status_code == 200
+        assert "workspace_template_ref" in response.json()

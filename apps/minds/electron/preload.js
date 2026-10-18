@@ -44,6 +44,10 @@ contextBridge.exposeInMainWorld('mindsNative', {
   },
   retry: () => ipcRenderer.send('retry'),
   openLogFile: () => ipcRenderer.send('open-log-file'),
+  // Quit the whole app (the backend and every window), through the same quit
+  // sequence the tray's Quit runs. The page offers it where a desktop has no
+  // tray to offer it from.
+  quitApp: () => ipcRenderer.send('quit-app'),
   // The app is up and the first route decided. The loading document's intro
   // holds on a settled mark until this arrives, and takes it as its cue to
   // leave -- so the lockup's travel to the titlebar always means the same

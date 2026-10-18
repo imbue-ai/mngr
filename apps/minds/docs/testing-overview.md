@@ -229,14 +229,15 @@ copy of the first root's `client.toml`, driven by its own `minds run`. Two
 rules keep that from corrupting the workspaces under test:
 
 - **One instance per env root, and never two roots signed in to the same
-  account against the same workspaces at once.** Each root's detached
-  `mngr latchkey forward` supervisor provisions the same remote machines,
-  and the last pass overwrites the desktop-owned latchkey secrets on them
-  while only one supervisor holds the tunnel they are checked against, so
-  the agents there lose their permission channel with "Unauthorized". Run the
-  second device only for the step that needs it.
-- **Stop a root completely when its step is done.** `just minds-stop` and
-  killing `minds run` deliberately leave the supervisor running, so use
+  account against the same workspaces at once.** Each root's `mngr latchkey
+  forward` supervisor provisions the same remote machines, and the last pass
+  overwrites the desktop-owned latchkey secrets on them while only one
+  supervisor holds the tunnel they are checked against, so the agents there
+  lose their permission channel with "Unauthorized". Run the second device
+  only for the step that needs it.
+- **Stop a root completely when its step is done.** `just minds-stop` stops
+  the backend and, with it, the supervisor it owns; a supervisor an older
+  build or a crash left holding the root is stopped by
   `uv run minds-admin env stop-local dev-<you>-b` (backend plus supervisor);
   `--list-only` reports what still holds a root without stopping it.
 

@@ -12,8 +12,10 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.utils.parent_process import _PARENT_POLL_INTERVAL_SECONDS
 from imbue.mngr.utils.parent_process import _read_grandparent_pid
 from imbue.mngr.utils.parent_process import _read_ppid_via_ps
+from imbue.mngr.utils.parent_process import is_pid_alive
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
+from imbue.mngr.utils.parent_process import start_pid_death_watcher
 from imbue.mngr.utils.polling import wait_for
 
 
@@ -140,3 +142,77 @@ def test_parent_death_watcher_exits_at_arm_time_when_parent_is_already_gone(tmp_
     finally:
         if not is_orphan_gone():
             os.kill(orphan_pid, 9)
+
+
+def test_is_pid_alive_distinguishes_a_live_process_from_an_exited_one() -> None:
+    assert is_pid_alive(os.getpid())
+    exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    exited.wait(timeout=10)
+    assert not is_pid_alive(exited.pid)
+
+
+def test_start_pid_death_watcher_starts_thread_and_stays_alive_while_watched_pid_lives() -> None:
+    sleeper = subprocess.Popen([sys.executable, "-c", "import signal; signal.pause()"])
+    try:
+        with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+            start_pid_death_watcher(sleeper.pid, "Test embedder", cg)
+            threads = [t for t in cg._threads if t.thread.name == "pid-death-watcher"]
+            assert len(threads) == 1
+            assert threads[0].thread.is_alive()
+    finally:
+        sleeper.kill()
+        sleeper.wait(timeout=10)
+
+
+# A process that arms a pid death watcher on {watched_pid}, reports that it did
+# through {armed_file}, and then idles far longer than any test waits.
+_PID_WATCHER_SCRIPT = """
+import threading
+from pathlib import Path
+
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.utils.parent_process import start_pid_death_watcher
+
+with ConcurrencyGroup(name="pid-watcher-probe") as concurrency_group:
+    start_pid_death_watcher({watched_pid}, "Test embedder", concurrency_group)
+    Path({armed_file!r}).write_text("armed")
+    threading.Event().wait(timeout=60.0)
+"""
+
+
+def _start_pid_watcher_probe(watched_pid: int, armed_file: Path) -> subprocess.Popen[bytes]:
+    script = _PID_WATCHER_SCRIPT.format(watched_pid=watched_pid, armed_file=str(armed_file))
+    return subprocess.Popen([sys.executable, "-c", script])
+
+
+def test_pid_death_watcher_exits_at_arm_time_when_watched_pid_is_already_gone(tmp_path: Path) -> None:
+    exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    exited.wait(timeout=10)
+
+    probe = _start_pid_watcher_probe(exited.pid, tmp_path / "armed")
+    try:
+        probe.wait(timeout=30.0)
+    finally:
+        if probe.poll() is None:
+            probe.kill()
+            probe.wait(timeout=10)
+
+
+def test_pid_death_watcher_exits_when_watched_pid_dies(tmp_path: Path) -> None:
+    watched = subprocess.Popen([sys.executable, "-c", "import signal; signal.pause()"])
+    armed_file = tmp_path / "armed"
+    probe = _start_pid_watcher_probe(watched.pid, armed_file)
+    try:
+        wait_for(armed_file.exists, timeout=30.0, poll_interval=0.05)
+        assert probe.poll() is None, "the watcher fired while the watched process was alive"
+
+        watched.kill()
+        watched.wait(timeout=10)
+        probe.wait(timeout=_PARENT_POLL_INTERVAL_SECONDS + 15.0)
+    finally:
+        if watched.poll() is None:
+            watched.kill()
+            watched.wait(timeout=10)
+        if probe.poll() is None:
+            probe.kill()
+            probe.wait(timeout=10)

@@ -30,7 +30,7 @@ This desktop client is a separate component from any individual workspace's web 
 
 ## Authentication
 
-Authentication is global (one session grants access to all agents). The desktop client uses `itsdangerous` for cookie signing. Auth works as follows:
+Authentication is global (one session grants access to all agents). The desktop client uses `itsdangerous` for cookie signing. Three credentials are accepted, by three kinds of caller: the signed session cookie (the browser UI), the gateway-injected bearer key on `/api/v1` (in-workspace agents, through the latchkey `minds-api-proxy`), and arrival over the same-machine Unix domain socket (agents running as the user; the listener in `api_socket.py` verifies the peer's uid before any request is read and marks the WSGI environ, which `api_transport.py` reads and every auth check accepts). The cookie flow works as follows:
 
 Note this is the *local* session with the desktop client itself. *Imbue account* sign-up/sign-in happens on the connector's hosted accounts pages in the system browser: the SPA drives `POST /auth/api/web-login/start` (which runs `mngr imbue_cloud auth login` -- browser + loopback + PKCE code exchange) and polls `GET /auth/api/web-login/status/<flow_id>` to render the waiting/copy-link modal. There are no in-app account sign-in pages anymore; the retired `/auth/login` and `/auth/signup` URLs 302 into the SPA with `?web-login=1`, which starts the browser flow on load.
 

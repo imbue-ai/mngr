@@ -345,7 +345,7 @@ def _apply_error_reporting_write(
     )
     if new_version is None:
         return None
-    # Mirror the change into the detached ``mngr latchkey forward`` daemon's
+    # Mirror the change into the ``mngr latchkey forward`` child's
     # live consent file (read per event) so the opt-out takes effect without
     # an app restart, exactly as the legacy /_chrome/error-reporting write did.
     write_latchkey_forward_sentry_consent(

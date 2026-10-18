@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { relaunchAfterExitCommand, startRelaunchAfterExit } = require('../../electron/linux-relaunch');
+const { relaunchAfterExitCommand, startRelaunchAfterExit, detachedStartCommand } = require('../../electron/linux-relaunch');
 
 // A stand-in for the exiting app: a process that lives a little longer than
 // the relaunch command takes to start. It is an orphaned grandchild rather
@@ -75,4 +75,20 @@ test('the spawner starts the executable detached, with its arguments, after the 
   const deadline = Date.now() + 10000;
   while (!fs.existsSync(reportPath) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(fs.readFileSync(reportPath, 'utf8'), 'gone\nminds://create?git_url=x --some-switch\n');
+});
+
+test('the detached start command returns at once and leaves the executable running with its arguments', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'detached-start-'));
+  const marker = path.join(dir, 'ran');
+  const { command, args } = detachedStartCommand({
+    executablePath: '/bin/sh',
+    args: ['-c', `sleep 0.2; echo "$@" > "${marker}"`, 'started', 'one', 'two words'],
+  });
+  const result = spawnSync(command, args, { encoding: 'utf8' });
+  assert.equal(result.status, 0);
+  assert.equal(fs.existsSync(marker), false, 'the command did not wait for the started process');
+  const deadline = Date.now() + 3000;
+  while (!fs.existsSync(marker) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'one two words');
+  fs.rmSync(dir, { recursive: true, force: true });
 });

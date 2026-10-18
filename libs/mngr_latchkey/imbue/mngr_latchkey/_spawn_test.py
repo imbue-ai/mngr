@@ -1,14 +1,14 @@
-"""Tests for the remaining detached-spawn helpers in :mod:`_spawn`.
+"""Tests for the spawn helpers in :mod:`_spawn`.
 
-Only ``spawn_detached_latchkey_ensure_browser`` lives here now: the
-shared ``latchkey gateway`` subprocess moved to ``ConcurrencyGroup``-based
-spawning in ``core.py`` (env wiring + binary-missing handling are
-exercised by the integration tests in ``core_test.py``), and
-``spawn_detached_mngr_latchkey_forward`` is exercised through
-``forward_supervisor_test.py``.
+The shared ``latchkey gateway`` subprocess moved to ``ConcurrencyGroup``-based
+spawning in ``core.py`` (env wiring + binary-missing handling are exercised by
+the integration tests in ``core_test.py``); ``spawn_mngr_latchkey_forward``'s
+ownership behaviour is exercised through ``forward_supervisor_test.py``, and
+only its argv and capture-file contract is checked here.
 """
 
 import json
+import os
 import threading
 import time
 from datetime import datetime
@@ -20,8 +20,8 @@ from pydantic import SecretStr
 
 from imbue.mngr_latchkey._spawn import _MAX_RAW_CAPTURE_BYTES
 from imbue.mngr_latchkey._spawn import _MAX_RAW_CAPTURE_ROTATIONS
-from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
-from imbue.mngr_latchkey._spawn import spawn_detached_mngr_latchkey_forward
+from imbue.mngr_latchkey._spawn import spawn_latchkey_ensure_browser
+from imbue.mngr_latchkey._spawn import spawn_mngr_latchkey_forward
 from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import forward_log_path
 from imbue.mngr_latchkey.store import plugin_data_dir
@@ -85,7 +85,7 @@ def _make_ensure_browser_reporter_binary(tmp_path: Path) -> Path:
     return script
 
 
-def test_spawn_detached_latchkey_ensure_browser_invokes_subcommand_and_logs(
+def test_spawn_latchkey_ensure_browser_invokes_subcommand_and_logs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_binary = _make_ensure_browser_reporter_binary(tmp_path)
@@ -94,7 +94,7 @@ def test_spawn_detached_latchkey_ensure_browser_invokes_subcommand_and_logs(
     monkeypatch.delenv("LATCHKEY_DIRECTORY", raising=False)
     log_path = tmp_path / "logs" / "ensure_browser.log"
 
-    pid = spawn_detached_latchkey_ensure_browser(
+    pid = spawn_latchkey_ensure_browser(
         latchkey_binary=str(fake_binary),
         log_path=log_path,
     )
@@ -106,7 +106,7 @@ def test_spawn_detached_latchkey_ensure_browser_invokes_subcommand_and_logs(
     assert wait_for_process_exit(pid)
 
 
-def test_spawn_detached_latchkey_ensure_browser_sets_latchkey_directory(
+def test_spawn_latchkey_ensure_browser_sets_latchkey_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_binary = _make_ensure_browser_reporter_binary(tmp_path)
@@ -115,7 +115,7 @@ def test_spawn_detached_latchkey_ensure_browser_sets_latchkey_directory(
     latchkey_directory = tmp_path / "shared_latchkey"
     assert not latchkey_directory.exists()
 
-    pid = spawn_detached_latchkey_ensure_browser(
+    pid = spawn_latchkey_ensure_browser(
         latchkey_binary=str(fake_binary),
         log_path=tmp_path / "log",
         latchkey_directory=latchkey_directory,
@@ -142,15 +142,13 @@ def _make_encryption_key_reporter_binary(tmp_path: Path) -> Path:
     return script
 
 
-def test_spawn_detached_latchkey_ensure_browser_injects_encryption_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_spawn_latchkey_ensure_browser_injects_encryption_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake_binary = _make_encryption_key_reporter_binary(tmp_path)
     report_path = tmp_path / "report"
     monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(report_path))
     monkeypatch.delenv("LATCHKEY_ENCRYPTION_KEY", raising=False)
 
-    pid = spawn_detached_latchkey_ensure_browser(
+    pid = spawn_latchkey_ensure_browser(
         latchkey_binary=str(fake_binary),
         log_path=tmp_path / "log",
         encryption_key=SecretStr("per-directory-key"),
@@ -163,9 +161,7 @@ def test_spawn_detached_latchkey_ensure_browser_injects_encryption_key(
     assert wait_for_process_exit(pid)
 
 
-def test_spawn_detached_latchkey_ensure_browser_operator_key_wins(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_spawn_latchkey_ensure_browser_operator_key_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake_binary = _make_encryption_key_reporter_binary(tmp_path)
     report_path = tmp_path / "report"
     monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(report_path))
@@ -173,7 +169,7 @@ def test_spawn_detached_latchkey_ensure_browser_operator_key_wins(
     # per-directory key passed by the caller.
     monkeypatch.setenv("LATCHKEY_ENCRYPTION_KEY", "operator-key")
 
-    pid = spawn_detached_latchkey_ensure_browser(
+    pid = spawn_latchkey_ensure_browser(
         latchkey_binary=str(fake_binary),
         log_path=tmp_path / "log",
         encryption_key=SecretStr("per-directory-key"),
@@ -184,10 +180,10 @@ def test_spawn_detached_latchkey_ensure_browser_operator_key_wins(
     assert wait_for_process_exit(pid)
 
 
-def test_spawn_detached_latchkey_ensure_browser_raises_when_binary_missing(tmp_path: Path) -> None:
+def test_spawn_latchkey_ensure_browser_raises_when_binary_missing(tmp_path: Path) -> None:
     missing = tmp_path / "definitely-not-here"
     with pytest.raises(FileNotFoundError):
-        spawn_detached_latchkey_ensure_browser(
+        spawn_latchkey_ensure_browser(
             latchkey_binary=str(missing),
             log_path=tmp_path / "log",
         )
@@ -199,7 +195,7 @@ def _make_argv_reporter_mngr_binary(tmp_path: Path) -> Path:
     Writes the report atomically (temp file + ``os.replace``) so a reader that
     polls only for the file's *existence* can never observe it truncated-but-empty
     between ``open(..., "w")`` and ``write`` -- the race that made
-    :func:`test_spawn_detached_mngr_latchkey_forward_points_at_structured_log_file`
+    :func:`test_spawn_mngr_latchkey_forward_points_at_structured_log_file`
     intermittently raise ``JSONDecodeError`` under parallel load.
     """
     script = tmp_path / "mngr"
@@ -215,7 +211,22 @@ def _make_argv_reporter_mngr_binary(tmp_path: Path) -> Path:
     return script
 
 
-def test_spawn_detached_mngr_latchkey_forward_points_at_structured_log_file(
+def _make_session_reporter_mngr_binary(tmp_path: Path) -> Path:
+    """Build a fake ``mngr`` that records its session id to ``$FAKE_MNGR_REPORT`` and exits."""
+    script = tmp_path / "mngr"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "path = os.environ['FAKE_MNGR_REPORT']\n"
+        "tmp = path + '.tmp'\n"
+        "open(tmp, 'w').write(str(os.getsid(0)))\n"
+        "os.replace(tmp, path)\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_spawn_mngr_latchkey_forward_points_at_structured_log_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_binary = _make_argv_reporter_mngr_binary(tmp_path)
@@ -224,7 +235,7 @@ def test_spawn_detached_mngr_latchkey_forward_points_at_structured_log_file(
     latchkey_directory = tmp_path / "latchkey"
     plugin_dir = plugin_data_dir(latchkey_directory)
 
-    pid = spawn_detached_mngr_latchkey_forward(
+    pid = spawn_mngr_latchkey_forward(
         mngr_binary=str(fake_binary),
         latchkey_binary="latchkey",
         latchkey_directory=latchkey_directory,
@@ -243,7 +254,7 @@ def test_spawn_detached_mngr_latchkey_forward_points_at_structured_log_file(
     assert wait_for_process_exit(pid)
 
 
-def test_spawn_detached_mngr_latchkey_forward_passes_the_device_id_only_when_given(
+def test_spawn_mngr_latchkey_forward_passes_the_device_id_only_when_given(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_binary = _make_argv_reporter_mngr_binary(tmp_path)
@@ -252,7 +263,7 @@ def test_spawn_detached_mngr_latchkey_forward_passes_the_device_id_only_when_giv
     latchkey_directory = tmp_path / "latchkey"
     plugin_dir = plugin_data_dir(latchkey_directory)
 
-    pid = spawn_detached_mngr_latchkey_forward(
+    pid = spawn_mngr_latchkey_forward(
         mngr_binary=str(fake_binary),
         latchkey_binary="latchkey",
         latchkey_directory=latchkey_directory,
@@ -265,7 +276,7 @@ def test_spawn_detached_mngr_latchkey_forward_passes_the_device_id_only_when_giv
     assert wait_for_process_exit(pid)
 
     report_path.unlink()
-    pid_without = spawn_detached_mngr_latchkey_forward(
+    pid_without = spawn_mngr_latchkey_forward(
         mngr_binary=str(fake_binary),
         latchkey_binary="latchkey",
         latchkey_directory=latchkey_directory,
@@ -274,6 +285,60 @@ def test_spawn_detached_mngr_latchkey_forward_passes_the_device_id_only_when_giv
     assert _wait_for_file_content(report_path)
     assert "--device-id" not in json.loads(report_path.read_text())
     assert wait_for_process_exit(pid_without)
+
+
+def test_spawn_mngr_latchkey_forward_passes_the_parent_pid_only_when_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_binary = _make_argv_reporter_mngr_binary(tmp_path)
+    report_path = tmp_path / "report.json"
+    monkeypatch.setenv("FAKE_MNGR_REPORT", str(report_path))
+    latchkey_directory = tmp_path / "latchkey"
+    plugin_dir = plugin_data_dir(latchkey_directory)
+
+    pid = spawn_mngr_latchkey_forward(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="latchkey",
+        latchkey_directory=latchkey_directory,
+        log_path=forward_log_path(plugin_dir),
+        parent_pid=48213,
+    )
+    assert _wait_for_file_content(report_path)
+    argv = json.loads(report_path.read_text())
+    assert argv[argv.index("--parent-pid") + 1] == "48213"
+    assert wait_for_process_exit(pid)
+
+    report_path.unlink()
+    pid_without = spawn_mngr_latchkey_forward(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="latchkey",
+        latchkey_directory=latchkey_directory,
+        log_path=forward_log_path(plugin_dir),
+    )
+    assert _wait_for_file_content(report_path)
+    assert "--parent-pid" not in json.loads(report_path.read_text())
+    assert wait_for_process_exit(pid_without)
+
+
+def test_spawn_mngr_latchkey_forward_keeps_the_child_in_the_callers_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The forward is a coupled child: it shares our session rather than detaching into its own."""
+    fake_binary = _make_session_reporter_mngr_binary(tmp_path)
+    report_path = tmp_path / "session.txt"
+    monkeypatch.setenv("FAKE_MNGR_REPORT", str(report_path))
+    latchkey_directory = tmp_path / "latchkey"
+    plugin_dir = plugin_data_dir(latchkey_directory)
+
+    pid = spawn_mngr_latchkey_forward(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="latchkey",
+        latchkey_directory=latchkey_directory,
+        log_path=forward_log_path(plugin_dir),
+    )
+    assert _wait_for_file_content(report_path)
+    assert int(report_path.read_text()) == os.getsid(0)
+    assert wait_for_process_exit(pid)
 
 
 def test_spawn_writes_timestamped_marker_above_child_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -290,7 +355,7 @@ def test_spawn_writes_timestamped_marker_above_child_output(tmp_path: Path, monk
     monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(tmp_path / "report"))
     log_path = tmp_path / "logs" / "ensure_browser.log"
 
-    pid = spawn_detached_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
+    pid = spawn_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
 
     assert _wait_for_text_in_file(log_path, _CHILD_STDOUT_SENTINEL)
     lines = log_path.read_text().splitlines()
@@ -322,7 +387,7 @@ def test_spawn_rotates_an_oversized_raw_capture_and_prunes_old_rotations(
     for suffix in ("20260101000000000000", "20260102000000000000"):
         log_path.with_name(f"{log_path.name}.{suffix}").write_text("old")
 
-    pid = spawn_detached_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
+    pid = spawn_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
 
     rotation_names = sorted(path.name for path in log_path.parent.glob(f"{log_path.name}.*"))
     assert len(rotation_names) == _MAX_RAW_CAPTURE_ROTATIONS
@@ -343,7 +408,7 @@ def test_spawn_leaves_a_small_raw_capture_in_place(tmp_path: Path, monkeypatch: 
     log_path.parent.mkdir(parents=True)
     log_path.write_text("previous run output\n")
 
-    pid = spawn_detached_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
+    pid = spawn_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
 
     assert list(log_path.parent.glob(f"{log_path.name}.*")) == []
     assert "previous run output" in log_path.read_text()

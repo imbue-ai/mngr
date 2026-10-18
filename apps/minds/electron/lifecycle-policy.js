@@ -3,58 +3,69 @@
 // Pure decision logic for the desktop client's window / quit lifecycle.
 // Kept free of any `electron` imports so it can be unit-tested under plain
 // node (see ../test/unit/lifecycle-policy.test.js). main.js supplies the
-// runtime flags (platform, in-flight quit state, backend presence, live
-// window counts) and acts on the boolean each helper returns.
+// runtime flags (platform, in-flight quit state, live window counts, the
+// launch argv) and acts on what each helper returns.
 //
-// The macOS convention these encode: closing every window leaves the app
-// running (the dock icon stays); the user re-opens a window from the dock
-// (see the 'activate' handler) and quits explicitly with Cmd+Q. Windows and
-// Linux keep the historical behavior of quitting when the last window closes.
+// The convention these encode, on every platform: closing every window leaves
+// the app running behind its tray icon; the user re-opens a window from the
+// tray, the dock, or by launching the app again (see the 'activate' and
+// 'second-instance' handlers) and quits explicitly, from the tray's Quit or
+// Cmd+Q / Ctrl+Q. An agent that needs the app's API starts it with
+// `--background`, which runs the backend and the tray and opens no window.
+
+// The switch an agent starts the app with to get the backend and the tray and
+// no window (see specs/imbue-studio-agent-access/spec.md).
+const BACKGROUND_SWITCH = '--background';
 
 /**
- * Whether the app should begin quitting when the last window closes (the
- * `window-all-closed` event fires).
+ * Whether an argv (a cold start's `process.argv`, or the one `second-instance`
+ * forwards) asks for a background start.
  *
- * On macOS the app stays alive with no windows, so this is always false.
- * Elsewhere the app quits, unless a quit / shutdown is already in flight.
- *
- * @param {object} state
- * @param {boolean} state.isMac                Running on macOS (darwin).
- * @param {boolean} state.isShuttingDown       A shutdown has already committed.
- * @param {boolean} state.isQuitSequenceRunning The quit sequence is already running.
+ * @param {string[]} argv
  * @returns {boolean}
  */
-function shouldQuitOnWindowAllClosed({ isMac, isShuttingDown, isQuitSequenceRunning }) {
-  if (isShuttingDown || isQuitSequenceRunning) return false;
-  return !isMac;
+function isBackgroundLaunch(argv) {
+  if (!Array.isArray(argv)) return false;
+  return argv.includes(BACKGROUND_SWITCH);
 }
 
 /**
- * Whether a window's `close` event should be intercepted to run the quit
- * sequence *before* the window disappears (so the local-machine shutdown prompt
- * can appear while a window is still visible).
+ * What a second launch of the app (delivered to the running instance by the
+ * single-instance lock) should do with its argv.
  *
- * Only the last live window triggers a quit, and only off macOS: on macOS
- * closing the last window is an ordinary close that leaves the app running,
- * so the prompt fires only on an explicit Quit instead.
+ *   'deeplink'  the argv carries a deeplink URL: handle it.
+ *   'ignore'    the argv asks for a background start: an agent making sure the
+ *               app is up, which must not pop a window over the user's work.
+ *   'reopen'    a plain second launch: bring the app forward, reopening a
+ *               window when none is open.
+ *
+ * The deeplink wins over the background switch because a URL arriving is an
+ * explicit ask to show something, and nothing launches with both.
  *
  * @param {object} state
- * @param {boolean} state.isMac                 Running on macOS (darwin).
- * @param {boolean} state.isShuttingDown        A shutdown has already committed.
- * @param {boolean} state.isQuitSequenceRunning The quit sequence is already running.
- * @param {boolean} state.hasBackend            The backend process is alive.
- * @param {boolean} state.isLastLiveWindow      This is the only non-destroyed window.
+ * @param {boolean} state.hasDeeplinkUrl     The argv carries an imbue-studio:// URL.
+ * @param {boolean} state.isBackgroundLaunch The argv carries the background switch.
+ * @returns {'deeplink'|'ignore'|'reopen'}
+ */
+function decideSecondInstanceAction({ hasDeeplinkUrl, isBackgroundLaunch: isBackground }) {
+  if (hasDeeplinkUrl) return 'deeplink';
+  if (isBackground) return 'ignore';
+  return 'reopen';
+}
+
+/**
+ * Whether the macOS dock icon should be showing: only while a window is open.
+ * The tray icon is the app's one persistent presence, so the dock reflects
+ * open windows the way it does for menu-bar apps that also have windows.
+ *
+ * @param {object} state
+ * @param {boolean} state.isMac          Running on macOS (darwin).
+ * @param {boolean} state.hasLiveWindow  At least one non-destroyed window exists.
  * @returns {boolean}
  */
-function shouldInterceptLastWindowClose({
-  isMac,
-  isShuttingDown,
-  isQuitSequenceRunning,
-  hasBackend,
-  isLastLiveWindow,
-}) {
-  if (isMac) return false;
-  return !isShuttingDown && !isQuitSequenceRunning && hasBackend && isLastLiveWindow;
+function shouldShowDockIcon({ isMac, hasLiveWindow }) {
+  if (!isMac) return false;
+  return hasLiveWindow;
 }
 
 /**
@@ -141,8 +152,10 @@ function decideNewWindowTarget({
 }
 
 module.exports = {
-  shouldQuitOnWindowAllClosed,
-  shouldInterceptLastWindowClose,
+  BACKGROUND_SWITCH,
   shouldOpenWindowOnActivate,
   decideNewWindowTarget,
+  isBackgroundLaunch,
+  decideSecondInstanceAction,
+  shouldShowDockIcon,
 };

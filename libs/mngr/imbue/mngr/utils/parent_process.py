@@ -141,32 +141,69 @@ def _read_grandparent_pid(concurrency_group: ConcurrencyGroup) -> int | None:
     return grandparent_pid
 
 
-def _poll_grandparent_until_dead(
-    grandparent_pid: int,
+def is_pid_alive(pid: int) -> bool:
+    """Whether a process with this pid exists, as far as a signal-0 probe can tell.
+
+    A pid we are not allowed to signal (one reused by another user) counts as
+    alive: treating it as dead would shut the caller down spuriously on a pid
+    reuse boundary.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _poll_pid_until_dead(
+    watched_pid: int,
+    watched_description: str,
     stop_event: threading.Event,
     concurrency_group: ConcurrencyGroup,
 ) -> None:
-    """Poll the grandparent's PID and SIGTERM ourselves when it stops existing."""
+    """Poll a PID and SIGTERM ourselves when it stops existing."""
     while not stop_event.is_set():
         stop_event.wait(timeout=_PARENT_POLL_INTERVAL_SECONDS)
         if stop_event.is_set():
             break
         if concurrency_group.state != ConcurrencyGroupState.ACTIVE:
             break
-        try:
-            os.kill(grandparent_pid, 0)
-        except ProcessLookupError:
+        if not is_pid_alive(watched_pid):
             logger.info(
-                "Grandparent process (PID {}) no longer exists, sending SIGTERM",
-                grandparent_pid,
+                "{} (PID {}) no longer exists, sending SIGTERM",
+                watched_description,
+                watched_pid,
             )
             os.kill(os.getpid(), signal.SIGTERM)
             break
-        except PermissionError:
-            # PID belongs to a process we can't signal (e.g. reused by another
-            # user). Treat as still alive; bailing on PermissionError would
-            # cause spurious early shutdowns on PID reuse boundaries.
-            continue
+
+
+def start_pid_death_watcher(watched_pid: int, watched_description: str, concurrency_group: ConcurrencyGroup) -> None:
+    """Start a daemon thread that exits the process when ``watched_pid`` stops existing.
+
+    For a child whose parent names itself explicitly (``mngr latchkey forward
+    --parent-pid``), which is what makes the coupling hold across whatever
+    wrapper processes sit between the two. A pid that is already gone when the
+    watcher arms is treated as the death it would otherwise wait for.
+    """
+    if not is_pid_alive(watched_pid):
+        logger.info(
+            "{} (PID {}) was already gone when the watcher armed, sending SIGTERM", watched_description, watched_pid
+        )
+        os.kill(os.getpid(), signal.SIGTERM)
+        return
+    logger.debug("{} death watcher started (PID={})", watched_description, watched_pid)
+    stop_event = threading.Event()
+    start_mngr_thread(
+        concurrency_group=concurrency_group,
+        target=_poll_pid_until_dead,
+        args=(watched_pid, watched_description, stop_event, concurrency_group),
+        daemon=True,
+        name="pid-death-watcher",
+        is_checked=False,
+    )
 
 
 def start_grandparent_death_watcher(concurrency_group: ConcurrencyGroup) -> None:
@@ -194,8 +231,8 @@ def start_grandparent_death_watcher(concurrency_group: ConcurrencyGroup) -> None
 
     start_mngr_thread(
         concurrency_group=concurrency_group,
-        target=_poll_grandparent_until_dead,
-        args=(grandparent_pid, stop_event, concurrency_group),
+        target=_poll_pid_until_dead,
+        args=(grandparent_pid, "Grandparent process", stop_event, concurrency_group),
         daemon=True,
         name="grandparent-death-watcher",
         is_checked=False,

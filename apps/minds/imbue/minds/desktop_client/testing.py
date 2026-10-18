@@ -25,6 +25,7 @@ from typing import Any
 from typing import Final
 
 import pytest
+from cheroot import wsgi
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from flask import Flask
@@ -389,6 +390,26 @@ def tamper_session_cookie_signed_content(cookie_value: str) -> str:
     assert separator, f"not a signed token: {cookie_value!r}"
     flipped_head = ("A" if signed_content[0] != "A" else "B") + signed_content[1:]
     return flipped_head + separator + signature
+
+
+_WSGI_SERVER_STOP_TIMEOUT_SECONDS: Final[float] = 5.0
+
+
+@contextmanager
+def serve_wsgi_server_in_thread(server: wsgi.Server, thread_name: str) -> Iterator[None]:
+    """Bind a cheroot server and serve it on a daemon thread for the duration of the block.
+
+    The server is prepared (bound and listening) before the block runs, so a
+    client can connect at once, and stopped and joined on the way out.
+    """
+    server.prepare()
+    thread = threading.Thread(target=server.serve, name=thread_name, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        server.stop()
+        thread.join(timeout=_WSGI_SERVER_STOP_TIMEOUT_SECONDS)
 
 
 @contextmanager

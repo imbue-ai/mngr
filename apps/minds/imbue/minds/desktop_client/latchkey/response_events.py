@@ -25,6 +25,10 @@ from imbue.imbue_common.frozen_model import FrozenModel
 _RESPONSE_EVENTS_DIR: Final[str] = "events/requests"
 _RESPONSE_EVENTS_FILENAME: Final[str] = "events.jsonl"
 
+# What ``decided_by`` records for a same-machine agent that gave a verdict
+# without declaring a label of its own.
+UNLABELED_LOCAL_AGENT_DECIDER: Final[str] = "local agent"
+
 
 class RequestStatus(UpperCaseStrEnum):
     """Resolution status for a request."""
@@ -51,12 +55,20 @@ class RequestResponseEvent(FrozenModel):
     request_event_id: str = Field(description="Request id of the request this answers")
     status: str = Field(description="Resolution status: 'GRANTED' or 'DENIED'")
     agent_id: str = Field(description="Agent ID the request was for")
+    decided_by: str | None = Field(
+        default=None,
+        description=(
+            "Who gave this verdict over the local socket: the agent's self-declared label, or "
+            f"{UNLABELED_LOCAL_AGENT_DECIDER!r} when it sent none; None when the user gave it in the UI"
+        ),
+    )
 
 
 def create_request_response_event(
     request_event_id: str,
     status: RequestStatus,
     agent_id: str,
+    decided_by: str | None = None,
 ) -> RequestResponseEvent:
     """Create a new request response event."""
     return RequestResponseEvent(
@@ -64,6 +76,7 @@ def create_request_response_event(
         request_event_id=request_event_id,
         status=str(status),
         agent_id=agent_id,
+        decided_by=decided_by,
     )
 
 

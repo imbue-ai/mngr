@@ -34,10 +34,13 @@ and stops it on `SIGINT`/`SIGTERM` (coupled lifetime). It announces this
 computer to every remote host's machine under a device id (`--device-id`, or
 `MNGR_LATCHKEY_DEVICE_ID`, falling back to the mngr local host id; an embedder
 such as the desktop app passes its own device id), which is how a workspace
-tells the user's desktops apart (see [Desktops](#desktops)). Any in-flight
-agents lose their gateway endpoint until the next `mngr latchkey
-forward` is started; the per-host permissions files survive across
-restarts.
+tells the user's desktops apart (see [Desktops](#desktops)). With
+`--parent-pid <pid>` it also exits on its own once that process is gone: an
+embedder that runs the forward as a child passes its own pid, so a forward
+never outlives the app that started it, even when the app crashes instead of
+stopping it. Any in-flight agents lose their gateway endpoint until the next
+`mngr latchkey forward` is started; the per-host permissions files survive
+across restarts.
 
 While running, the supervisor also health-checks the shared gateway
 subprocess: if it dies mid-session it is respawned on its original
@@ -111,7 +114,7 @@ CLI flag > env var > settings.toml > built-in default.
   timestamped and rotated too rather than living in a separate unrotated
   file.
 
-- `latchkey_forward.log` -- the raw stdout/stderr capture of the detached
+- `latchkey_forward.log` -- the raw stdout/stderr capture of the
   supervisor process. Its file descriptor is handed straight to the
   process, so it cannot be rotated mid-write; instead the supervisor is
   spawned with `--quiet`, so in steady state it logs nothing here (all
@@ -150,6 +153,13 @@ kill <stray-pid>
 `SIGTERM` runs the supervisor's teardown, which stops its `mngr observe` child,
 its reverse tunnels and the shared gateway subprocess, so killing the
 supervisor leaves nothing behind to clean up by hand.
+
+A forward an embedder started (the Imbue Studio desktop client's, say) ends
+with the embedder: it is stopped on the embedder's teardown, exits on its own
+once the pid it was given with `--parent-pid` is gone, and is replaced by the
+embedder's next start either way. One still running after its embedder has
+quit is therefore from an older build or a crash that beat its watch, and is
+safe to kill as above; the next start of the embedder would do the same.
 
 ### A remote host's gateway keeps failing to wire
 
@@ -1328,26 +1338,30 @@ curl -X DELETE "${auth[@]}" "$GATEWAY_URL/permission-requests/$REQUEST_ID"
 
 ## Embedding
 
-Embedders (such as the Imbue Studio desktop client) typically want a single
-detached ``mngr latchkey forward`` supervisor that survives embedder
-restarts and adopts the existing one instead of double-spawning. The
-:class:`LatchkeyForwardSupervisor` does exactly that:
+Embedders (such as the Imbue Studio desktop client) want exactly one
+``mngr latchkey forward`` per latchkey directory, running only while they
+do. The :class:`LatchkeyForwardSupervisor` does exactly that:
 
 ```python
+import os
+
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 supervisor = LatchkeyForwardSupervisor(
     mngr_binary="/path/to/mngr",          # default: ``mngr`` on PATH
     latchkey_binary="/path/to/latchkey",  # default: ``latchkey`` on PATH
     latchkey_directory=root_dir,
+    parent_pid=os.getpid(),               # the forward exits when we are gone
 )
-supervisor.ensure_running()  # idempotent; spawns or adopts as needed
+supervisor.restart()  # replaces a stale owner an earlier run left behind
 # ... do whatever the embedder does ...
-# Optional: ``supervisor.stop()`` to terminate the detached process and
-# tear down the gateway. Omitting this leaves the supervisor running
-# detached, which is what Imbue Studio does so the gateway survives a
-# desktop-client restart.
+supervisor.stop()  # tears down the forward, the gateway, and every tunnel
 ```
+
+The forward is a child of the embedder, not a detached daemon: ``stop()`` on
+the embedder's teardown is the clean path, ``parent_pid`` covers the embedder
+dying without one, and ``restart()`` on the next start replaces whatever both
+missed.
 
 ## Python API
 
