@@ -39,6 +39,7 @@ from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -58,6 +59,7 @@ from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
+from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
@@ -300,6 +302,58 @@ def test_ensure_lease_publishes_declared_ports_refuses_a_lease_lacking_a_declare
 
     provider._ensure_lease_publishes_declared_ports(lease_result, declarations[:1])
     provider._ensure_lease_publishes_declared_ports(_make_lease_result(published_ports=[]), ())
+
+
+class _RefusableLeaseClient(_RecordingReleaseClient):
+    """Stub connector client that leases a fixed host and records its release."""
+
+    def __init__(self, lease_result: LeaseResult) -> None:
+        super().__init__()
+        self.lease_result = lease_result
+
+    def lease_host(
+        self,
+        access_token: SecretStr,
+        attributes: LeaseAttributes,
+        ssh_public_key: str,
+        host_name: str,
+        region: str | None = None,
+        published_ports: Sequence[PublishedPortDeclaration] = (),
+    ) -> LeaseResult:
+        return self.lease_result
+
+
+class _OnDiskLeaseProvider(_NoWorkspacesMixin, ImbueCloudProvider):
+    """Provider stub that keeps its real on-disk lease state but holds no host cache to reset."""
+
+    def reset_caches(self) -> None:
+        pass
+
+    def _evict_cached_host(self, host_id: HostId, replacement: HostInterface | None = None) -> None:
+        pass
+
+
+def test_fast_path_refusing_a_lease_releases_it_and_removes_its_keypair(temp_mngr_ctx: MngrContext) -> None:
+    """A lease refused for a missing declared port goes back to the pool and leaves no key material behind."""
+    lease_result = _make_lease_result(published_ports=[])
+    client = _RefusableLeaseClient(lease_result)
+    provider = _OnDiskLeaseProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"), mngr_ctx=temp_mngr_ctx, client=client
+    )
+
+    with pytest.raises(PublishedPortUnsupportedError, match="59000/udp"):
+        provider._create_host_fast_path(
+            name=HostName("fresh-host"),
+            attributes=LeaseAttributes(),
+            token=SecretStr("tok"),
+            region=None,
+            published_ports=parse_published_port_declarations(["59000/udp"]),
+        )
+
+    assert client.release_calls == ["lease-db-id"]
+    data_dir = get_provider_data_dir(temp_mngr_ctx.profile_dir, "imbue-cloud-test")
+    assert list((data_dir / "leases").iterdir()) == []
+    assert not (data_dir / "hosts" / lease_result.host_id).exists()
 
 
 def test_release_lease_on_failure_releases_once_and_propagates() -> None:
