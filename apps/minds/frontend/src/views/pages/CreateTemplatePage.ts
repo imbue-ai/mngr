@@ -28,11 +28,11 @@ import { PageNarrowContainer } from "../components/Layout";
 import { Icon16 } from "../components/Icon";
 import { StatusBadge } from "../components/StatusBadge";
 import { keyStateChipFor, livenessBadgeLabelFor, rowClickActionFor } from "./landing-controls";
+import { slowStartNotice } from "./create/ComputeNotices";
 import { PRESET_TITLES, PresetCards } from "./create/PresetCards";
-import { cloudAccountOptions } from "./create/CloudAccountsModal";
 import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
 import type { PresetName } from "./create/form-model";
-import { CreateFormModel, normalizeCreateApiError, presetOpensAdvanced } from "./create/form-model";
+import { CreateFormModel, normalizeCreateApiError, presetOpensAdvanced, regionChoiceLabel } from "./create/form-model";
 
 // The chat command the add flow tells the user to paste.
 //
@@ -410,12 +410,13 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
               model.launchValue = (event.target as HTMLSelectElement).value;
             },
           },
-          [
-            defaults.launch_modes.map((mode) =>
-              m("option", { value: mode, selected: model.launchValue === mode }, mode.toLowerCase()),
+          model.launchOptions().map((option) =>
+            m(
+              "option",
+              { value: option.value, selected: model.launchValue === option.value, disabled: option.isDisabled },
+              option.label,
             ),
-            defaults.byok_clouds_enabled ? cloudAccountOptions(defaults.cloud_accounts, model.launchValue) : null,
-          ],
+          ),
         ),
       ]),
       m("div", { class: "flex items-center justify-between gap-4" }, [
@@ -428,7 +429,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
             width: "w-48",
             value: model.backupProvider,
             onchange: (event: Event) => {
-              model.backupProvider = (event.target as HTMLSelectElement).value;
+              model.setBackupProvider((event.target as HTMLSelectElement).value);
             },
           },
           defaults.backup_providers.map((provider) =>
@@ -453,7 +454,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
                 onchange: (event: Event) => model.setRegion((event.target as HTMLSelectElement).value),
               },
               regionOptions.map((region) =>
-                m("option", { value: region, selected: region === model.selectedRegion() }, region),
+                m("option", { value: region, selected: region === model.selectedRegion() }, regionChoiceLabel(region)),
               ),
             ),
           ])
@@ -485,6 +486,8 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
               value: model.accountId,
               onchange: (event: Event) => {
                 model.accountId = (event.target as HTMLSelectElement).value;
+                // The account picks the connections on offer; a selection it does not own falls back.
+                model.syncLaunchValueToSelectedAccount();
                 if (!model.imbueCloudNeedsAccount()) isAccountErrorShown = false;
               },
             },
@@ -593,6 +596,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       // runtime (runsc) has no selector on this page, so its need can only be
       // explained here.
       prerequisiteNotice(model.unmetPrerequisiteForSubmit(), "insp-submit-prerequisite"),
+      slowStartNotice("insp-slow-start-notice", model.isSlowStartCompute()),
       m(
         "div",
         { class: "mt-6" },

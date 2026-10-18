@@ -6,7 +6,6 @@ import m from "mithril";
 import type { UiAccountEntry } from "../../../channel/messages";
 import type { AccountsDetailModel } from "../../../models/accountsDetail";
 import { Button } from "../../components/Button";
-import { webLogin } from "../../../models/webLogin";
 import { Card } from "../../components/Card";
 import { Link } from "../../components/Link";
 import { Notice } from "../../components/Notice";
@@ -14,7 +13,6 @@ import { routeLinkAttrs } from "../../components/route-link";
 import { Select } from "../../components/FormControls";
 import { Spinner } from "../../components/Spinner";
 import { renderSwitch, renderSwitchWord } from "../../components/Switch";
-import { StatusBadge } from "../../components/StatusBadge";
 
 interface AccountCardAttrs {
   model: AccountsDetailModel;
@@ -359,22 +357,7 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
       return m(Card, [
         m("div", { class: "flex items-center justify-between" }, [
           m("div", [
-            m("div", { class: "font-semibold" }, [
-              account.email,
-              !account.is_enabled
-                ? m(
-                    StatusBadge,
-                    {
-                      variant: "warn",
-                      size: "xs",
-                      extra: "ml-2",
-                      title:
-                        "Session was rejected by the server. Sign in again to re-enable.",
-                    },
-                    "Signed out",
-                  )
-                : null,
-            ]),
+            m("div", { class: "font-semibold" }, account.email),
             m(
               "div",
               { class: "type-helper text-tertiary" },
@@ -382,17 +365,6 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
             ),
           ]),
           m("div", { class: "flex gap-2" }, [
-            !account.is_enabled
-              ? m(
-                  Button,
-                  {
-                    variant: "primary",
-                    onclick: () =>
-                      void webLogin.start("", { isClosedOnSignIn: true }),
-                  },
-                  "Sign in again",
-                )
-              : null,
             account.is_default
               ? m(
                   "span",

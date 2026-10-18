@@ -6,9 +6,6 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.secret_wrapping import decrypt_secrets
@@ -22,16 +19,21 @@ from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import seed_provider_snapshots
 from imbue.minds.desktop_client.dek_store import ensure_dek
 from imbue.minds.desktop_client.dek_store import load_dek
+from imbue.minds.desktop_client.host_access_material import HostAccessMaterial
+from imbue.minds.desktop_client.host_access_material import derive_openssh_public_key_line
 from imbue.minds.desktop_client.testing import device_id_for_test
+from imbue.minds.desktop_client.testing import generate_test_ssh_private_key
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
+from imbue.minds.desktop_client.workspace_record_store import SUPPORTED_PAYLOAD_FORMAT
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceSecretsPayload
 from imbue.minds.desktop_client.workspace_record_store import collect_ssh_key_material
-from imbue.minds.desktop_client.workspace_record_store import derive_openssh_public_key_line
 from imbue.minds.desktop_client.workspace_record_store import encode_encrypted_secrets
+from imbue.minds.desktop_client.workspace_record_store import host_access_material_from_payload
 from imbue.minds.desktop_client.workspace_record_store import replica_record_from_wire
+from imbue.minds.desktop_client.workspace_record_store import secrets_payload_content_hash
 from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -693,6 +695,37 @@ def test_reconcile_does_not_tombstone_other_device_rows(paths: InstallationPaths
     assert records[0].state == RECORD_STATE_ACTIVE
 
 
+def test_reconcile_never_rewrites_a_row_another_device_hosts_even_when_discovery_still_lists_it(
+    paths: InstallationPaths,
+) -> None:
+    """A stale discovery view of a machine hosted elsewhere must not make this device stamp itself as its host.
+
+    Two devices doing that to one row flip its hosting device back and forth,
+    one revision per sync pass, forever.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    agent_id = AgentId.generate()
+    remote = ReplicaRecord(
+        host_id="host-remote",
+        agent_id=str(agent_id),
+        display_name="elsewhere",
+        provider_kind="aws_" + "0" * 32,
+        hosting_device_id="some-other-device",
+        device_label="desktop",
+    )
+    cli.sync_records_by_email[_EMAIL] = {remote.agent_id: remote.to_wire(1)}
+    resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id, host_name="elsewhere"))
+
+    store.reconcile({user_id: _EMAIL}, resolver)
+
+    (record,) = store.list_records(user_id)
+    assert record.hosting_device_id == "some-other-device"
+    assert record.is_dirty is False
+    assert record.revision == 1
+
+
 def _make_mngr_profile_dir(tmp_path: Path) -> tuple[Path, Path]:
     """A minimal mngr host dir with one active profile; returns (mngr_host_dir, profile_dir)."""
     mngr_dir = tmp_path / "mngr"
@@ -766,45 +799,28 @@ def test_workspace_secrets_payload_tolerates_unknown_fields() -> None:
     assert payload.ssh_private_key is None
 
 
-def test_derive_openssh_public_key_line_roundtrips_an_openssh_format_key() -> None:
-    private_key = ed25519.Ed25519PrivateKey.generate()
-    private_text = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.OpenSSH,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode("utf-8")
-    expected_public = (
-        private_key.public_key()
-        .public_bytes(encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH)
-        .decode("utf-8")
+def test_host_access_material_from_payload_falls_back_to_the_key_fields_under_an_unknown_layout() -> None:
+    """A newer client keeps writing the imbue_cloud key fields beside a host_access this app cannot read;
+    those fields (not the unknown material) are what get materialized here."""
+    private_key = generate_test_ssh_private_key()
+    known_hosts = f"[198.51.100.7]:22001 ssh-ed25519 AAAATESTPIN{uuid4().hex}\n"
+    payload = WorkspaceSecretsPayload(
+        payload_format=SUPPORTED_PAYLOAD_FORMAT + 1,
+        ssh_private_key=private_key,
+        ssh_known_hosts=known_hosts,
+        host_access=HostAccessMaterial(layout="from_the_future", files={"future_key": "x"}, pins={}),
     )
 
-    assert derive_openssh_public_key_line(private_text) == expected_public
+    material = host_access_material_from_payload(payload)
 
-
-def test_derive_openssh_public_key_line_roundtrips_mngrs_traditional_pem_rsa_key() -> None:
-    # The legacy flavor older mngr installs wrote for client keys (mngr now
-    # generates Ed25519): RSA in traditional PEM ("-----BEGIN RSA PRIVATE
-    # KEY-----"), which needs the PEM loader, not the OpenSSH one. Records
-    # synced from those installs still carry these keys.
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    private_text = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode("utf-8")
-    expected_public = (
-        private_key.public_key()
-        .public_bytes(encoding=serialization.Encoding.OpenSSH, format=serialization.PublicFormat.OpenSSH)
-        .decode("utf-8")
-    )
-
-    assert private_text.startswith("-----BEGIN RSA PRIVATE KEY-----")
-    assert derive_openssh_public_key_line(private_text) == expected_public
-
-
-def test_derive_openssh_public_key_line_returns_none_for_garbage() -> None:
-    assert derive_openssh_public_key_line("not a key at all") is None
+    assert material is not None
+    assert material.layout == "imbue_cloud"
+    assert material.files["ssh_key"] == private_key
+    assert material.files["ssh_key.pub"] == derive_openssh_public_key_line(private_key)
+    assert material.pins == {"known_hosts": known_hosts}
+    # Without the key fields there is nothing this app can apply.
+    without_key_fields = payload.model_copy_update(to_update(payload.field_ref().ssh_private_key, None))
+    assert host_access_material_from_payload(without_key_fields) is None
 
 
 def test_reconcile_resurrects_a_locally_hosted_tombstone_whose_workspace_is_live(paths: InstallationPaths) -> None:
@@ -1009,10 +1025,10 @@ def test_build_encrypted_secrets_refuses_a_newer_payload_format(paths: Installat
     dek = load_dek(paths, user_id)
     assert dek is not None
     newer_blob = encode_encrypted_secrets(
-        dek, json.dumps({"payload_format": 2, "from_the_future": "keep"}).encode("utf-8")
+        dek, json.dumps({"payload_format": SUPPORTED_PAYLOAD_FORMAT + 1, "from_the_future": "keep"}).encode("utf-8")
     )
 
-    built = store.build_encrypted_secrets(user_id, str(agent_id), "host-1", newer_blob)
+    built = store.build_encrypted_secrets(user_id, str(agent_id), "host-1", "docker", newer_blob)
 
     assert built is None
 
@@ -1030,7 +1046,7 @@ def test_build_encrypted_secrets_round_trips_unknown_payload_keys(paths: Install
     existing_payload = {"payload_format": 1, "restic_env": "old", "added_by_a_newer_client": "must-survive"}
     existing_blob = encode_encrypted_secrets(dek, json.dumps(existing_payload).encode("utf-8"))
 
-    built = store.build_encrypted_secrets(user_id, str(agent_id), "host-1", existing_blob)
+    built = store.build_encrypted_secrets(user_id, str(agent_id), "host-1", "docker", existing_blob)
 
     assert built is not None
     rewritten = json.loads(decrypt_secrets(dek, b64decode(built.encrypted)))
@@ -1039,3 +1055,43 @@ def test_build_encrypted_secrets_round_trips_unknown_payload_keys(paths: Install
     # ...while a field a newer client added rides through verbatim.
     assert rewritten["added_by_a_newer_client"] == "must-survive"
     assert rewritten["payload_format"] == 1
+
+
+def test_build_encrypted_secrets_keeps_the_format_of_host_access_it_carries_over(paths: InstallationPaths) -> None:
+    """A device that collects no host access material of its own (here: no mngr profile) must not re-stamp a
+    blob as format 1 while another device's format-2 host_access still rides in it."""
+    store = _make_store(paths)
+    user_id = _user_id()
+    agent_id = AgentId.generate()
+    ensure_dek(paths, user_id)
+    write_canonical_env(paths, agent_id, "RESTIC_REPOSITORY=x\nRESTIC_PASSWORD=y\n")
+    dek = load_dek(paths, user_id)
+    assert dek is not None
+    host_access = {"layout": "modal", "files": {"modal_ssh_key": "KEY"}, "pins": {}}
+    existing_payload = {"payload_format": SUPPORTED_PAYLOAD_FORMAT, "host_access": host_access}
+    existing_blob = encode_encrypted_secrets(dek, json.dumps(existing_payload).encode("utf-8"))
+
+    built = store.build_encrypted_secrets(user_id, str(agent_id), str(HostId.generate()), "docker", existing_blob)
+
+    assert built is not None
+    rewritten = json.loads(decrypt_secrets(dek, b64decode(built.encrypted)))
+    assert rewritten["host_access"] == host_access
+    assert rewritten["payload_format"] == SUPPORTED_PAYLOAD_FORMAT
+
+
+def test_secrets_payload_content_hash_survives_the_blobs_key_sorting() -> None:
+    """The collected payload lists per-host files in layout order; the decrypted one carries them sorted."""
+    collected = WorkspaceSecretsPayload(
+        payload_format=SUPPORTED_PAYLOAD_FORMAT,
+        host_access=HostAccessMaterial(
+            layout="modal",
+            files={"modal_ssh_key": "private", "modal_ssh_key.pub": "public", "host_key": "host"},
+            pins={"vps_known_hosts": "pin-a", "container_known_hosts": "pin-b"},
+        ),
+    )
+    blob = json.dumps(json.loads(collected.model_dump_json()), sort_keys=True, separators=(",", ":"))
+    decrypted = WorkspaceSecretsPayload.model_validate_json(blob)
+    assert decrypted.host_access is not None and collected.host_access is not None
+    assert list(decrypted.host_access.files) != list(collected.host_access.files)
+
+    assert secrets_payload_content_hash(decrypted) == secrets_payload_content_hash(collected)

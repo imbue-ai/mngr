@@ -11,6 +11,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr_ovh._tag_keys import MNGR_HOST_ID_TAG_KEY as MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh._tag_keys import MNGR_PROVIDER_TAG_KEY as MNGR_PROVIDER_TAG_KEY
 from imbue.mngr_ovh._tag_keys import MNGR_RECYCLING_LOCK_TAG_KEY as MNGR_RECYCLING_LOCK_TAG_KEY
+from imbue.mngr_ovh._tag_keys import ORPHAN_HOST_ID_PLACEHOLDER_PREFIX as ORPHAN_HOST_ID_PLACEHOLDER_PREFIX
 from imbue.mngr_ovh.client import OvhVpsClient
 
 _VPS_RESOURCE_TYPE: Final[str] = "vps"

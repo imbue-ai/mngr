@@ -107,6 +107,43 @@ describe("Modal", () => {
     expect(tokensOf(overlay)).toContain("inset-0");
   });
 
+  it("closes on a backdrop click but not on a press that crossed the card's edge", () => {
+    // A press and release on different elements end with a `click` whose
+    // target is their common ancestor, the backdrop: dragging a text selection
+    // out of the card used to dismiss the dialog the user was copying an error
+    // from. The sequences below are the ones a browser fires.
+    const onClose = vi.fn();
+    const overlay = renderRoot(Modal, { isOpen: true, onClose }, m("p", "body"));
+    const backdrop = {} as EventTarget;
+    const card = {} as EventTarget;
+    const handlers = attrsOf(overlay) as Record<string, (event: MouseEvent) => void>;
+    const press = (pressTarget: EventTarget, releaseTarget: EventTarget): void => {
+      handlers.onmousedown({ target: pressTarget, currentTarget: backdrop } as MouseEvent);
+      handlers.onmouseup({ target: releaseTarget, currentTarget: backdrop } as MouseEvent);
+      const clickTarget = pressTarget === releaseTarget ? pressTarget : backdrop;
+      handlers.onclick({ target: clickTarget, currentTarget: backdrop } as MouseEvent);
+    };
+
+    press(card, backdrop);
+    expect(onClose).not.toHaveBeenCalled();
+
+    press(backdrop, card);
+    expect(onClose).not.toHaveBeenCalled();
+
+    press(card, card);
+    expect(onClose).not.toHaveBeenCalled();
+
+    // A right-click on the dim fires no click, so its press and release are still
+    // on record when a keyboard click on a control in the card bubbles up.
+    handlers.onmousedown({ target: backdrop, currentTarget: backdrop } as MouseEvent);
+    handlers.onmouseup({ target: backdrop, currentTarget: backdrop } as MouseEvent);
+    handlers.onclick({ target: card, currentTarget: backdrop } as MouseEvent);
+    expect(onClose).not.toHaveBeenCalled();
+
+    press(backdrop, backdrop);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("gives the card exactly the caller's width, and only one", () => {
     // Two max-w-* utilities on one card are decided by their order in the
     // generated stylesheet, not by the caller: .max-w-sm follows .max-w-md

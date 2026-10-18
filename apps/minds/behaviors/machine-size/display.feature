@@ -12,7 +12,7 @@ Feature: Showing a machine's size
       | docker       | no disk        | 4 CPUs · 8 GB RAM                |
       | lima         | a 100 GB disk  | 4 CPUs · 8 GB RAM · 100 GB disk  |
       | modal        | no disk        | 4 CPUs · 8 GB RAM                |
-      | byok-aws     | a 30 GB disk   | 4 CPUs · 8 GB RAM · 30 GB disk   |
+      | aws_<hex>    | a 30 GB disk   | 4 CPUs · 8 GB RAM · 30 GB disk   |
 
   @unknown-size-hidden
   Scenario: A machine whose provider reports no size has no Machine size section

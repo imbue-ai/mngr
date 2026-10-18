@@ -1,0 +1,3 @@
+Part of the account-owned remote providers program (`specs/account-owned-providers/spec.md`).
+
+- The per-host key layout (`keys/host_keys/<host uuid hex>/` holding `docker_ssh_key` and `host_key` with their public halves, pins in `keys/known_hosts`) is published as `DOCKER_HOST_ACCESS_MANIFEST` (`constants.py`, with the key-file names as constants), which the provider's own key dir and key paths resolve through, so the minds workspace record carries a container's access material without restating the layout; the deploy-time list of profile files kept out of images is built from the same names.

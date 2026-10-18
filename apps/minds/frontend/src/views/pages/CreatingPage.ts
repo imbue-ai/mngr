@@ -391,8 +391,12 @@ export const CreatingPage: m.ClosureComponent = () => {
     });
   }
 
-  /** Retry / Dismiss (a failed attempt) or Retry / Discard (an interrupted one). */
-  function recoveryButtons(secondLabel: string, onSecond: () => void): m.Children {
+  /**
+   * Retry / Dismiss (a failed attempt) or Retry / Discard (an interrupted one).
+   * A non-empty `retryUnavailableReason` holds Retry and says why; the other
+   * way out stays open.
+   */
+  function recoveryButtons(secondLabel: string, onSecond: () => void, retryUnavailableReason = ""): m.Children {
     return answerRow({
       key: "creation-recovery",
       delayMs: FLOW_THINK_MS,
@@ -409,8 +413,10 @@ export const CreatingPage: m.ClosureComponent = () => {
           id: "retry",
           label: "Retry",
           isEmphasized: true,
+          isDisabled: retryUnavailableReason !== "",
+          title: retryUnavailableReason === "" ? undefined : retryUnavailableReason,
           onPress: () => {
-            state.isRetryFormOpen = true;
+            if (retryUnavailableReason === "") state.isRetryFormOpen = true;
           },
         },
       ],
@@ -436,12 +442,12 @@ export const CreatingPage: m.ClosureComponent = () => {
           ),
         );
       }
-      turns.push(recoveryButtons("Dismiss", dismissAttempt));
+      turns.push(recoveryButtons("Dismiss", dismissAttempt, record.retry_unavailable_reason));
       return turns;
     }
     return [
       agentTurn({ key: "creation-interrupted", text: INTERRUPTED_LINE, startAtMs: FLOW_THINK_MS, isInstant: true }),
-      recoveryButtons("Discard", discardAttempt),
+      recoveryButtons("Discard", discardAttempt, record.retry_unavailable_reason),
     ];
   }
 

@@ -12,6 +12,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from imbue.mngr.primitives import HostId
+from imbue.mngr.providers.host_key_store import load_host_key_record
 from imbue.mngr_ovh.bootstrap import _load_private_key
 from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
@@ -49,6 +51,7 @@ def _make_paramiko_ed25519_pkey() -> paramiko.PKey:
 def test_pin_host_key_via_tofu_writes_known_hosts(tmp_path: Path) -> None:
     private_key_path = _make_private_key(tmp_path)
     known_hosts_path = tmp_path / "known_hosts"
+    host_id = HostId.generate()
     fake_server_key = _make_paramiko_ed25519_pkey()
 
     fake_transport = MagicMock()
@@ -64,12 +67,18 @@ def test_pin_host_key_via_tofu_writes_known_hosts(tmp_path: Path) -> None:
             ssh_user="root",
             private_key_path=private_key_path,
             known_hosts_path=known_hosts_path,
+            host_id=host_id,
             timeout_seconds=5.0,
         )
 
     assert pinned.startswith("ssh-ed25519 ")
     assert "vps-x.vps.ovh.us" in known_hosts_path.read_text()
     assert pinned in known_hosts_path.read_text()
+    # The pin is attributed to the host's own store record, so per-host reads
+    # find it and destroy removes it with the host.
+    record = load_host_key_record(known_hosts_path, host_id)
+    assert record is not None
+    assert [(pin.address, pin.port) for pin in record.pins] == [("vps-x.vps.ovh.us", 22)]
 
 
 def test_pin_host_key_times_out_when_connect_keeps_failing(tmp_path: Path) -> None:
@@ -88,6 +97,7 @@ def test_pin_host_key_times_out_when_connect_keeps_failing(tmp_path: Path) -> No
                     ssh_user="root",
                     private_key_path=private_key_path,
                     known_hosts_path=known_hosts_path,
+                    host_id=HostId.generate(),
                     timeout_seconds=0.05,
                 )
 

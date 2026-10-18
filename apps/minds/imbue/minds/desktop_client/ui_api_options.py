@@ -30,6 +30,9 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
+from imbue.minds.desktop_client.connections.primitives import IMBUE_CLOUD_PROVIDER_NAME_PREFIX
+from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
 from imbue.minds.desktop_client.machine_size import is_machine_disk_resizable_provider
 from imbue.minds.desktop_client.machine_size import is_machine_resizable_provider
 from imbue.minds.desktop_client.responses import make_response
@@ -46,7 +49,7 @@ from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
-from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
+from imbue.minds.desktop_client.workspace_record_store import is_account_synced_provider
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 
@@ -77,11 +80,6 @@ def accepted_service_icon(raw_icon: str) -> str:
     return icon
 
 
-# Hosts leased from Imbue Cloud surface under per-account provider instances
-# with this prefix; their account link is fixed.
-_IMBUE_CLOUD_PROVIDER_PREFIX: Final[str] = "imbue_cloud_"
-
-
 class WorkspaceOptionsAccount(FrozenModel):
     """One signed-in account as the options surfaces show it."""
 
@@ -99,9 +97,13 @@ class WorkspaceOptionsData(FrozenModel):
     color: str = Field(description="Stored color hex, or the default for label-less workspaces")
     palette: dict[str, str] = Field(description="Pickable palette swatches, name -> hex")
     is_stale: bool = Field(description="Whether the owning provider's last discovery poll errored")
-    is_leased_imbue_cloud: bool = Field(description="Whether the host lease fixes the account link")
+    is_account_owned_provider: bool = Field(
+        description="Whether the workspace runs on an account-owned provider (the account's imbue_cloud instance or "
+        "one of its connections), which fixes the account link"
+    )
     leased_owner_email: str = Field(
-        default="", description="The account a leased machine belongs to, '' when not leased or not known"
+        default="",
+        description="The account an account-owned provider's workspace belongs to, '' when not account-owned or not known",
     )
     has_account: bool = Field(description="Whether the workspace is associated with an account")
     account_email: str = Field(description="The associated account's email, '' when unassociated")
@@ -216,14 +218,27 @@ def _json_error_response(status_code: int, message: str) -> Response:
 
 
 def _leased_owner_email(
-    current_account: AccountSession | None, provider_name: str | None, accounts: Sequence[AccountSession]
+    current_account: AccountSession | None,
+    provider_name: str | None,
+    accounts: Sequence[AccountSession],
+    connection_store: ConnectionStore | None,
 ) -> str:
-    """The email of the account a leased machine belongs to: its linked account, else the signed-in
-    account whose Imbue Cloud provider instance hosts it. '' when neither names one."""
+    """The email of the account a workspace on an account-owned provider belongs to: its linked account, else the
+    signed-in account whose Imbue Cloud instance or connection hosts it. '' when none names one."""
     if current_account is not None:
         return str(current_account.email)
+    if provider_name is None:
+        return ""
+    found = (
+        connection_store.find_active_connection_by_instance_name(provider_name)
+        if connection_store is not None
+        else None
+    )
+    owner_user_id = found[0] if found is not None else None
     for account in accounts:
-        if imbue_cloud_provider_name_for_account(str(account.email)) == provider_name:
+        if imbue_cloud_provider_name_for_user(str(account.user_id)) == provider_name:
+            return str(account.email)
+        if owner_user_id is not None and str(account.user_id) == owner_user_id:
             return str(account.email)
     return ""
 
@@ -250,7 +265,9 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
 
     errored_provider_names = {str(provider) for provider in backend_resolver.get_provider_errors()}
     is_stale = info is not None and info.provider_name is not None and info.provider_name in errored_provider_names
-    is_leased = info is not None and (info.provider_name or "").startswith(_IMBUE_CLOUD_PROVIDER_PREFIX)
+    is_account_owned_provider = info is not None and is_account_synced_provider(
+        str(info.provider_name or ""), get_state().connection_store
+    )
     stored_color = backend_resolver.get_workspace_color(parsed_agent_id)
 
     icons = {
@@ -270,9 +287,11 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         color=stored_color if stored_color is not None else DEFAULT_WORKSPACE_COLOR,
         palette=dict(WORKSPACE_PALETTE),
         is_stale=is_stale,
-        is_leased_imbue_cloud=is_leased,
-        leased_owner_email=_leased_owner_email(current_account, info.provider_name, accounts)
-        if is_leased and info is not None
+        is_account_owned_provider=is_account_owned_provider,
+        leased_owner_email=_leased_owner_email(
+            current_account, info.provider_name, accounts, get_state().connection_store
+        )
+        if is_account_owned_provider and info is not None
         else "",
         has_account=current_account is not None,
         account_email=current_account.email if current_account else "",
@@ -317,7 +336,7 @@ def _handle_workspace_machine_size(agent_id: str) -> Response:
     if info is None or not host_id:
         return make_response(content=unavailable.model_dump_json(), status_code=200, media_type="application/json")
     provider_name = info.provider_name or ""
-    if provider_name.startswith(_IMBUE_CLOUD_PROVIDER_PREFIX):
+    if provider_name.startswith(IMBUE_CLOUD_PROVIDER_NAME_PREFIX):
         data = _imbue_cloud_machine_size(state, agent_id, host_id)
     else:
         data = _recorded_machine_size(backend_resolver, HostId(host_id), provider_name)

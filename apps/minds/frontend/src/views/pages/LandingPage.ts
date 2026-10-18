@@ -8,11 +8,40 @@
 import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { electronBridge } from "../../electron-bridge";
-import type { LandingExtras, MindLiveness } from "../../models/create";
-import { MindLivenessTracker, fetchLandingExtras, recoveryRoute } from "../../models/create";
+import type {
+  CreateFormDefaults,
+  LandingExtras,
+  MindLiveness,
+} from "../../models/create";
+import {
+  MindLivenessTracker,
+  connectionBackendOptionFor,
+  fetchCreateFormDefaults,
+  fetchLandingExtras,
+  recoveryRoute,
+} from "../../models/create";
 import { onboardingProgress } from "../../models/onboarding";
 import type { UiWorkspaceEntry } from "../../channel/messages";
-import type { UiProviderEntry } from "../../generated/ui";
+import type {
+  UiAccountProvidersEntry,
+  UiConnectionEntry,
+  UiProviderEntry,
+} from "../../generated/ui";
+import type {
+  ConnectionOwnerOption,
+  StatusChip,
+} from "../../models/providers";
+import {
+  accountSectionTitleFor,
+  connectionStatusChipFor,
+  editControlFor,
+  providerStatusChipFor,
+  removeControlFor,
+} from "../../models/providers";
+import {
+  CloudAccountsModal,
+  CloudAccountsModalState,
+} from "./create/CloudAccountsModal";
 import { Button, ButtonLink } from "../components/Button";
 import { Card } from "../components/Card";
 import { Icon16 } from "../components/Icon";
@@ -37,7 +66,8 @@ import { StatusBadge } from "../components/StatusBadge";
 import type { UpdateBadgeTone } from "../../models/updates";
 import { displayVersion, updateBadgeFor } from "../../models/updates";
 
-const BADGE_CLASS = "inline-flex items-center px-2 py-0.5 rounded-md type-label";
+const BADGE_CLASS =
+  "inline-flex items-center px-2 py-0.5 rounded-md type-label";
 
 // The update badge is the only pill in a row that does something, so it is a
 // real <button> with a border, hover fill, press scale, focus ring and chevron.
@@ -61,8 +91,9 @@ interface LandingState {
   unlockError: string;
   unlockPassword: string;
   removedHostIds: Set<string>;
+  /** Connection instances whose removal is in flight or done, so Remove cannot be pressed twice. */
+  removingConnectionInstances: Set<string>;
   isProvidersOpen: boolean;
-  pendingProviderToggleAtByName: Map<string, number>;
   isExtrasFailed: boolean;
   /** `<agent id>:<version>` of each "Updated to X" note dismissed this
    * session, so a later success on the same machine is news again; hides the
@@ -70,6 +101,9 @@ interface LandingState {
   dismissedNoteKeys: Set<string>;
   /** Which bulk press is held for the go-ahead-without-backups confirmation. */
   bulkNoBackupConfirm: "now" | "schedule" | null;
+  /** The add-connection modal, and the create-form defaults it reads its region tables from (fetched on first open). */
+  connectionModal: CloudAccountsModalState;
+  formDefaults: CreateFormDefaults | null;
 }
 
 /**
@@ -112,12 +146,71 @@ export const LandingPage: m.ClosureComponent = () => {
     unlockError: "",
     unlockPassword: "",
     removedHostIds: new Set(),
+    removingConnectionInstances: new Set(),
     isProvidersOpen: false,
-    pendingProviderToggleAtByName: new Map(),
     isExtrasFailed: false,
     dismissedNoteKeys: new Set(),
     bulkNoBackupConfirm: null,
+    connectionModal: new CloudAccountsModalState(),
+    formDefaults: null,
   };
+
+  /** Run `open` with the create-form defaults the connection modal reads its backend and region tables from (fetched on first use). */
+  function withFormDefaults(open: (defaults: CreateFormDefaults) => void): void {
+    if (state.formDefaults !== null) {
+      open(state.formDefaults);
+      return;
+    }
+    fetchCreateFormDefaults(null)
+      .then((defaults) => {
+        state.formDefaults = defaults;
+        open(defaults);
+      })
+      .catch((error: unknown) => {
+        console.error("Failed to load the connection form defaults", error);
+        window.alert("Could not load the connection form. Please try again.");
+      });
+  }
+
+  function openAddConnection(owner: ConnectionOwnerOption): void {
+    const ownerOptions =
+      getAppContext().stores.providers.connectionOwnerOptions();
+    withFormDefaults((defaults) => {
+      // The server lists the backends in its own order; the first is the modal's opening pick.
+      const backend = defaults.connection_backends[0];
+      if (backend === undefined) {
+        window.alert("No cloud backend is available to add a connection for.");
+        return;
+      }
+      state.connectionModal.openForBackend(
+        backend,
+        owner,
+        defaults.region_selected_by_launch_mode,
+        ownerOptions,
+      );
+      m.redraw();
+    });
+  }
+
+  function openEditConnection(
+    entry: UiConnectionEntry,
+    owner: ConnectionOwnerOption,
+  ): void {
+    withFormDefaults((defaults) => {
+      const backend = connectionBackendOptionFor(
+        defaults.connection_backends,
+        entry.backend,
+      );
+      if (backend === null) {
+        window.alert(
+          "This connection's provider is not known to this version of the app.",
+        );
+        return;
+      }
+      state.connectionModal.openForEdit(entry, backend, owner);
+      m.redraw();
+    });
+  }
 
   function submitSyncUnlock(): void {
     state.isUnlockPending = true;
@@ -138,7 +231,8 @@ export const LandingPage: m.ClosureComponent = () => {
           state.unlockPassword = "";
           loadExtras(state);
         } else {
-          state.unlockError = result.data.error ?? "That password did not unlock any account.";
+          state.unlockError =
+            result.data.error ?? "That password did not unlock any account.";
         }
         m.redraw();
       })
@@ -165,7 +259,9 @@ export const LandingPage: m.ClosureComponent = () => {
           return;
         }
         state.removedHostIds.delete(hostId);
-        const body = (await response.json().catch(() => null)) as { error?: string } | null;
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
         window.alert(removeRecordFailureMessage(response.status, body));
         m.redraw();
       })
@@ -176,56 +272,48 @@ export const LandingPage: m.ClosureComponent = () => {
       });
   }
 
-  function toggleProvider(name: string, isEnabled: boolean): void {
-    state.pendingProviderToggleAtByName.set(name, Date.now());
-    fetch(`/api/v1/desktop/providers/${encodeURIComponent(name)}`, {
-      method: "PATCH",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: isEnabled }),
-    })
+  function removeConnection(entry: UiConnectionEntry): void {
+    const isConfirmed = window.confirm(
+      `Remove "${entry.alias}" (${entry.backend_label}) from Imbue Studio? The stored keys are forgotten on ` +
+        "every device that syncs this account. Your cloud resources (and anything created outside Imbue Studio) are " +
+        "untouched; a workspace created on this connection by an older version of the app, or never linked to " +
+        "the account, would disappear from the list for good (adding the connection again makes a new one, " +
+        "which does not bring such a workspace back).",
+    );
+    if (!isConfirmed || state.removingConnectionInstances.has(entry.instance))
+      return;
+    state.removingConnectionInstances.add(entry.instance);
+    fetch(
+      `/api/v1/desktop/cloud-accounts/${encodeURIComponent(entry.instance)}`,
+      {
+        method: "DELETE",
+        credentials: "same-origin",
+      },
+    )
       .then(async (response) => {
-        if (response.ok) return;
-        state.pendingProviderToggleAtByName.delete(name);
-        const body = (await response.json().catch(() => null)) as { error?: string; detail?: string } | null;
-        const message = body?.error ?? body?.detail ?? `HTTP ${response.status}`;
-        if (response.status === 409) {
-          window.alert(`Cannot disable ${name}: ${message}`);
-        } else {
-          window.alert(`Could not ${isEnabled ? "enable" : "disable"} ${name}: ${message}`);
+        if (!response.ok) {
+          state.removingConnectionInstances.delete(entry.instance);
+          const body = (await response.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          window.alert(body?.error ?? "Could not remove the connection.");
         }
         m.redraw();
       })
-      .catch(() => {
-        state.pendingProviderToggleAtByName.delete(name);
-        window.alert(`Could not ${isEnabled ? "enable" : "disable"} ${name}: the request failed (network error).`);
+      .catch((error: unknown) => {
+        console.error("Failed to remove connection", entry.instance, error);
+        state.removingConnectionInstances.delete(entry.instance);
+        window.alert("Could not remove the connection.");
         m.redraw();
       });
   }
 
-  function deleteCloudAccount(name: string): void {
-    const isConfirmed = window.confirm(
-      `Delete "${name}" from Imbue Studio? The stored keys are forgotten. ` +
-        "Your cloud resources (and anything created outside Imbue Studio) are untouched.",
-    );
-    if (!isConfirmed) return;
-    fetch(`/api/v1/desktop/cloud-accounts/${encodeURIComponent(name)}`, {
-      method: "DELETE",
-      credentials: "same-origin",
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as { error?: string } | null;
-          window.alert(body?.error ?? "Could not delete the account.");
-        }
-        m.redraw();
-      })
-      .catch(() => window.alert("Could not delete the account."));
-  }
-
   function rowClick(entry: UiWorkspaceEntry): void {
     const { shell } = getAppContext();
-    const liveness = state.tracker.displayedLiveness(entry.id, entry.liveness ?? "");
+    const liveness = state.tracker.displayedLiveness(
+      entry.id,
+      entry.liveness ?? "",
+    );
     shell.enterWorkspaceOrRecover(entry, liveness);
   }
 
@@ -234,7 +322,10 @@ export const LandingPage: m.ClosureComponent = () => {
     const question = lifecycleConfirmation("stop", entry.name, isApplying);
     if (question !== null && !window.confirm(question)) return;
     void state.tracker.stop(entry.id).then((isOk) => {
-      if (!isOk) window.alert(`Could not stop "${entry.name}". Check the workspace's provider and try again.`);
+      if (!isOk)
+        window.alert(
+          `Could not stop "${entry.name}". Check the workspace's provider and try again.`,
+        );
     });
   }
 
@@ -245,13 +336,20 @@ export const LandingPage: m.ClosureComponent = () => {
       liveness === "STOPPING" || liveness === "STARTING"
         ? "bg-warning/15 text-warning"
         : "bg-fill-subtle text-primary";
-    return m("span", { class: `${BADGE_CLASS} ${tone} landing-mind-state-badge` }, label);
+    return m(
+      "span",
+      { class: `${BADGE_CLASS} ${tone} landing-mind-state-badge` },
+      label,
+    );
   }
 
   // The backups page runs restic from this device, so it is reachable for a
   // stopped or remote machine whose own settings pane is not. Kept subtle
   // (muted ghost icon): it is a fallback route in, not the primary action.
-  function backupsButton(entry: UiWorkspaceEntry, liveness: string): m.Children {
+  function backupsButton(
+    entry: UiWorkspaceEntry,
+    liveness: string,
+  ): m.Children {
     const control = backupsControlFor(entry, liveness);
     if (!control.isShown) return null;
     return m(
@@ -272,14 +370,23 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
-  function healthBadge(entry: UiWorkspaceEntry, liveness: MindLiveness): m.Children {
+  function healthBadge(
+    entry: UiWorkspaceEntry,
+    liveness: MindLiveness,
+  ): m.Children {
     // A stopped/transitioning container is expectedly unreachable; the state
     // badge already explains it, so suppress the health badge there.
-    if (liveness === "STOPPED" || liveness === "STOPPING" || liveness === "STARTING") return null;
+    if (
+      liveness === "STOPPED" ||
+      liveness === "STOPPING" ||
+      liveness === "STARTING"
+    )
+      return null;
     // While the consumer is dead every machine reads unhealthy, and the cause
     // is the app's, not theirs. The page's notice names it once instead of
     // every row repeating a symptom.
-    if (!isMachineStateKnown(getAppContext().stores.health.discoveryHealth)) return null;
+    if (!isMachineStateKnown(getAppContext().stores.health.discoveryHealth))
+      return null;
     const healthStore = getAppContext().stores.health;
     const label = healthBadgeLabelFor(
       healthStore.statusFor(entry.id),
@@ -288,13 +395,22 @@ export const LandingPage: m.ClosureComponent = () => {
       entry.is_device_cannot_connect ?? false,
     );
     if (label === null) return null;
-    return m("span", { class: `${BADGE_CLASS} bg-warning/15 text-warning landing-health-badge` }, label);
+    return m(
+      "span",
+      {
+        class: `${BADGE_CLASS} bg-warning/15 text-warning landing-health-badge`,
+      },
+      label,
+    );
   }
 
   /** The row's update badge, or null when the machine has nothing to say. */
   function updateBadge(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
-    const badge = updateBadgeFor(updates.publishedFor(entry.id), updates.isUpdating(entry.id));
+    const badge = updateBadgeFor(
+      updates.publishedFor(entry.id),
+      updates.isUpdating(entry.id),
+    );
     if (badge === null) return null;
     return m(
       "button",
@@ -327,47 +443,60 @@ export const LandingPage: m.ClosureComponent = () => {
     const version = update.success_note_version ?? "";
     const noteKey = `${entry.id}:${version}`;
     if (!version || state.dismissedNoteKeys.has(noteKey)) return null;
-    return m("div", { class: "flex items-center gap-2 pl-3 type-helper text-secondary" }, [
-      m(
-        "span",
-        update.verdict === "UPDATED_WITH_REBUILD_ITEMS"
-          ? `Updated to ${displayVersion(version)}, with a note for you.`
-          : `Updated to ${displayVersion(version)}.`,
-      ),
-      m(
-        Button,
-        {
-          variant: "ghost",
-          "aria-label": "Dismiss",
-          onclick: () => {
-            state.dismissedNoteKeys.add(noteKey);
-            void updates.dismissNote(entry.id).then((result) => {
-              // Put it back on a refusal rather than have the note vanish this
-              // session and return next launch with nothing said.
-              if (!result.isOk) {
-                state.dismissedNoteKeys.delete(noteKey);
-                m.redraw();
-              }
-            });
+    return m(
+      "div",
+      { class: "flex items-center gap-2 pl-3 type-helper text-secondary" },
+      [
+        m(
+          "span",
+          update.verdict === "UPDATED_WITH_REBUILD_ITEMS"
+            ? `Updated to ${displayVersion(version)}, with a note for you.`
+            : `Updated to ${displayVersion(version)}.`,
+        ),
+        m(
+          Button,
+          {
+            variant: "ghost",
+            "aria-label": "Dismiss",
+            onclick: () => {
+              state.dismissedNoteKeys.add(noteKey);
+              void updates.dismissNote(entry.id).then((result) => {
+                // Put it back on a refusal rather than have the note vanish this
+                // session and return next launch with nothing said.
+                if (!result.isOk) {
+                  state.dismissedNoteKeys.delete(noteKey);
+                  m.redraw();
+                }
+              });
+            },
           },
-        },
-        "Dismiss",
-      ),
-    ]);
+          "Dismiss",
+        ),
+      ],
+    );
   }
 
-  function runBulkAction(kind: "now" | "schedule", isNoBackupConfirmed: boolean): void {
+  function runBulkAction(
+    kind: "now" | "schedule",
+    isNoBackupConfirmed: boolean,
+  ): void {
     const updates = getAppContext().stores.updates;
     const agentIds = updates.updatableAgentIds();
     if (agentIds.length === 0) return;
     // Cleared on every press: a prompt left standing from the other bulk
     // action would offer to proceed with the wrong one.
     state.bulkNoBackupConfirm = null;
-    if (!isNoBackupConfirmed && agentIds.some((agentId) => updates.needsNoBackupConfirmation(agentId))) {
+    if (
+      !isNoBackupConfirmed &&
+      agentIds.some((agentId) => updates.needsNoBackupConfirmation(agentId))
+    ) {
       state.bulkNoBackupConfirm = kind;
       return;
     }
-    const call = kind === "now" ? updates.updateAllNow(agentIds) : updates.scheduleAllUpdates(agentIds);
+    const call =
+      kind === "now"
+        ? updates.updateAllNow(agentIds)
+        : updates.scheduleAllUpdates(agentIds);
     void call.then((result) => {
       if (!result.isOk) {
         window.alert(result.error);
@@ -386,43 +515,69 @@ export const LandingPage: m.ClosureComponent = () => {
       m("div", { class: "flex items-center justify-between gap-3 flex-wrap" }, [
         m("span", `${agentIds.length} workspaces have an update available.`),
         m("div", { class: "flex items-center gap-2" }, [
-          m(Button, { variant: "primary", onclick: () => runBulkAction("schedule", false) }, "Schedule all updates"),
-          m(Button, { variant: "secondary", onclick: () => runBulkAction("now", false) }, "Update all now"),
+          m(
+            Button,
+            {
+              variant: "primary",
+              onclick: () => runBulkAction("schedule", false),
+            },
+            "Schedule all updates",
+          ),
+          m(
+            Button,
+            {
+              variant: "secondary",
+              onclick: () => runBulkAction("now", false),
+            },
+            "Update all now",
+          ),
         ]),
       ]),
       state.bulkNoBackupConfirm !== null
-        ? m("div", { class: "flex items-center justify-between gap-3 pt-2 flex-wrap" }, [
-            m(
-              "span",
-              { class: "type-helper" },
-              "Some of these workspaces have no backups: their updates keep every version in git " +
-                "and offer a rollback, but there's no full workspace restore to fall back on.",
-            ),
-            m("div", { class: "flex items-center gap-2" }, [
+        ? m(
+            "div",
+            { class: "flex items-center justify-between gap-3 pt-2 flex-wrap" },
+            [
               m(
-                Button,
-                {
-                  variant: "primary",
-                  onclick: () => {
-                    const kind = state.bulkNoBackupConfirm;
-                    state.bulkNoBackupConfirm = null;
-                    if (kind !== null) runBulkAction(kind, true);
+                "span",
+                { class: "type-helper" },
+                "Some of these workspaces have no backups: their updates keep every version in git " +
+                  "and offer a rollback, but there's no full workspace restore to fall back on.",
+              ),
+              m("div", { class: "flex items-center gap-2" }, [
+                m(
+                  Button,
+                  {
+                    variant: "primary",
+                    onclick: () => {
+                      const kind = state.bulkNoBackupConfirm;
+                      state.bulkNoBackupConfirm = null;
+                      if (kind !== null) runBulkAction(kind, true);
+                    },
                   },
-                },
-                "Go ahead without backups",
-              ),
-              m(
-                Button,
-                { variant: "secondary", onclick: () => (state.bulkNoBackupConfirm = null) },
-                "Cancel",
-              ),
-            ]),
-          ])
+                  "Go ahead without backups",
+                ),
+                m(
+                  Button,
+                  {
+                    variant: "secondary",
+                    onclick: () => (state.bulkNoBackupConfirm = null),
+                  },
+                  "Cancel",
+                ),
+              ]),
+            ],
+          )
         : null,
     ]);
   }
 
-  function destroyRow(agentId: string, name: string, accent: string, destroyStatus: string): m.Children {
+  function destroyRow(
+    agentId: string,
+    name: string,
+    accent: string,
+    destroyStatus: string,
+  ): m.Children {
     return m(
       Card,
       {
@@ -433,9 +588,18 @@ export const LandingPage: m.ClosureComponent = () => {
         onclick: () => m.route.set(`/destroying/${agentId}`),
       },
       [
-        m("span", { class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1" }, name),
+        m(
+          "span",
+          {
+            class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1",
+          },
+          name,
+        ),
         destroyStatus === "running"
-          ? m(StatusBadge, { extra: "gap-2" }, [m(Spinner, { size: "sm" }), "Destroying..."])
+          ? m(StatusBadge, { extra: "gap-2" }, [
+              m(Spinner, { size: "sm" }),
+              "Destroying...",
+            ])
           : m(StatusBadge, { variant: "error" }, "Destroy failed"),
       ],
     );
@@ -464,8 +628,11 @@ export const LandingPage: m.ClosureComponent = () => {
     const keyChip = keyStateChipFor(entry.key_state ?? "");
     const isHealthy = stores.health.statusFor(entry.id) === "healthy";
     const isOpenable =
-      rowClickActionFor(entry, state.tracker.displayedLiveness(entry.id, entry.liveness ?? ""), isHealthy) !==
-      "blocked";
+      rowClickActionFor(
+        entry,
+        state.tracker.displayedLiveness(entry.id, entry.liveness ?? ""),
+        isHealthy,
+      ) !== "blocked";
     const row = m(
       Card,
       {
@@ -477,8 +644,18 @@ export const LandingPage: m.ClosureComponent = () => {
         onclick: isOpenable ? () => rowClick(entry) : undefined,
       },
       [
-        m("span", { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" }, entry.name),
-        providerLabel ? m("span", { class: `${BADGE_CLASS} bg-fill-subtle text-secondary` }, providerLabel) : null,
+        m(
+          "span",
+          { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" },
+          entry.name,
+        ),
+        providerLabel
+          ? m(
+              "span",
+              { class: `${BADGE_CLASS} bg-fill-subtle text-secondary` },
+              providerLabel,
+            )
+          : null,
         keyChip === null
           ? null
           : m(
@@ -491,7 +668,9 @@ export const LandingPage: m.ClosureComponent = () => {
             ),
         // Slot for the backup badge (T4 wires the backup-status data source).
         m("span", { class: "landing-backup-badge hidden" }),
-        (entry.supports_shutdown ?? false) ? livenessBadge(liveness, entry.stop_kind ?? "") : null,
+        (entry.supports_shutdown ?? false)
+          ? livenessBadge(liveness, entry.stop_kind ?? "")
+          : null,
         healthBadge(entry, liveness),
         updateBadge(entry),
         backupsButton(entry, liveness),
@@ -507,7 +686,9 @@ export const LandingPage: m.ClosureComponent = () => {
                   event.stopPropagation();
                   void state.tracker.start(entry.id).then((isOk) => {
                     if (!isOk) {
-                      window.alert(`Could not start "${entry.name}". Check the workspace's provider and try again.`);
+                      window.alert(
+                        `Could not start "${entry.name}". Check the workspace's provider and try again.`,
+                      );
                     }
                   });
                 },
@@ -541,7 +722,11 @@ export const LandingPage: m.ClosureComponent = () => {
                 "data-tooltip": "Restart workspace",
                 onclick: (event: MouseEvent) => {
                   event.stopPropagation();
-                  const question = lifecycleConfirmation("restart", entry.name, stores.updates.isApplying(entry.id));
+                  const question = lifecycleConfirmation(
+                    "restart",
+                    entry.name,
+                    stores.updates.isApplying(entry.id),
+                  );
                   if (question !== null && !window.confirm(question)) return;
                   const returnTo = `/goto/${entry.id}/`;
                   m.route.set(recoveryRoute(entry.id, returnTo, "restart"));
@@ -564,8 +749,13 @@ export const LandingPage: m.ClosureComponent = () => {
                   if (electronBridge.isDesktop) {
                     electronBridge.openWorkspaceInNewWindow(entry.id);
                   } else {
-                    const forwardOrigin = getAppContext().shell.mngrForwardOrigin;
-                    window.open(`${forwardOrigin}/goto/${entry.id}/`, "_blank", "noopener");
+                    const forwardOrigin =
+                      getAppContext().shell.mngrForwardOrigin;
+                    window.open(
+                      `${forwardOrigin}/goto/${entry.id}/`,
+                      "_blank",
+                      "noopener",
+                    );
                   }
                 },
               },
@@ -580,7 +770,9 @@ export const LandingPage: m.ClosureComponent = () => {
             "data-tooltip": "Settings",
             onclick: (event: MouseEvent) => {
               event.stopPropagation();
-              getAppContext().shell.routeTo(`/workspace/${entry.id}/options?tab=settings`);
+              getAppContext().shell.routeTo(
+                `/workspace/${entry.id}/options?tab=settings`,
+              );
             },
           },
           m(Icon16, { name: "settings" }),
@@ -588,7 +780,9 @@ export const LandingPage: m.ClosureComponent = () => {
       ],
     );
     const note = updatedNote(entry);
-    return note === null ? row : m("div", { class: "flex flex-col gap-1" }, [row, note]);
+    return note === null
+      ? row
+      : m("div", { class: "flex flex-col gap-1" }, [row, note]);
   }
 
   function createAttemptRow(entry: UiWorkspaceEntry): m.Children {
@@ -602,9 +796,18 @@ export const LandingPage: m.ClosureComponent = () => {
         onclick: () => m.route.set(`/creating/${entry.id}`),
       },
       [
-        m("span", { class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1" }, entry.name),
+        m(
+          "span",
+          {
+            class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1",
+          },
+          entry.name,
+        ),
         entry.create_attempt_state === "creating"
-          ? m(StatusBadge, { extra: "gap-2" }, [m(Spinner, { size: "sm" }), "Creating…"])
+          ? m(StatusBadge, { extra: "gap-2" }, [
+              m(Spinner, { size: "sm" }),
+              "Creating…",
+            ])
           : entry.create_attempt_state === "interrupted"
             ? m(StatusBadge, { variant: "warn" }, "Interrupted")
             : m(StatusBadge, { variant: "error" }, "Create failed"),
@@ -614,8 +817,10 @@ export const LandingPage: m.ClosureComponent = () => {
 
   function remoteRow(entry: UiWorkspaceEntry): m.Children {
     if (state.removedHostIds.has(entry.host_id ?? "")) return null;
-    const remoteState = getAppContext().stores.workspaces.remoteWorkspaceStates[entry.id] ?? "";
-    const chip = remoteStateChipFor(remoteState);
+    const tile = getAppContext().stores.workspaces.remoteWorkspaceStates[
+      entry.id
+    ] ?? { state: "" };
+    const chip = remoteStateChipFor(tile);
     return m(
       Card,
       {
@@ -625,26 +830,28 @@ export const LandingPage: m.ClosureComponent = () => {
         "data-agent-id": entry.id,
       },
       [
-        m("span", { class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1" }, entry.name),
-        m("span", { class: `${BADGE_CLASS} bg-fill-subtle text-secondary` }, remoteLocationBadgeFor(entry)),
+        m(
+          "span",
+          {
+            class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1",
+          },
+          entry.name,
+        ),
+        m(
+          "span",
+          { class: `${BADGE_CLASS} bg-fill-subtle text-secondary` },
+          remoteLocationBadgeFor(entry),
+        ),
         chip === null
           ? null
-          : chip.isAccountsLink
-            ? m(
-                "button",
-                {
-                  type: "button",
-                  class: `${BADGE_CLASS} bg-fill-subtle text-important cursor-pointer border-0`,
-                  "data-tooltip": "Sign in again from the Accounts page to see this workspace here",
-                  onclick: () => m.route.set("/accounts"),
-                },
-                chip.label,
-              )
-            : m(
-                "span",
-                { class: `${BADGE_CLASS} bg-fill-subtle ${chip.isImportant ? "text-important" : "text-secondary"}` },
-                chip.label,
-              ),
+          : m(
+              "span",
+              {
+                class: `${BADGE_CLASS} bg-fill-subtle ${chip.isImportant ? "text-important" : "text-secondary"}`,
+                title: chip.title,
+              },
+              chip.label,
+            ),
         backupsButton(entry, ""),
         m(
           Button,
@@ -661,61 +868,165 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
+  function badgeClassForTone(tone: StatusChip["tone"]): string {
+    switch (tone) {
+      case "ok":
+        return "bg-success/15 text-success";
+      case "error":
+        return "bg-important/15 text-important";
+      case "warn":
+        return "bg-warning/15 text-warning";
+      case "muted":
+        return "bg-fill-subtle text-secondary";
+    }
+  }
+
+  function statusChipBadge(chip: StatusChip): m.Children {
+    return m(
+      "span",
+      { class: `${BADGE_CLASS} ${badgeClassForTone(chip.tone)}` },
+      chip.label,
+    );
+  }
+
+  function errorDetail(
+    entry: Pick<UiProviderEntry, "error_type" | "error_message">,
+  ): m.Children {
+    if (!entry.error_message) return m("span", { class: "flex-1" });
+    const text = `${entry.error_type ?? ""}: ${entry.error_message}`;
+    return m(
+      "span",
+      { class: "flex-1 type-helper text-primary truncate", title: text },
+      text,
+    );
+  }
+
   function providerRow(entry: UiProviderEntry): m.Children {
-    const providers = getAppContext().stores.providers;
-    const pendingAt = state.pendingProviderToggleAtByName.get(entry.name);
-    const snapshotAt = providers.lastFullSnapshotAt ? Date.parse(providers.lastFullSnapshotAt) : 0;
-    const isPending = pendingAt !== undefined && (snapshotAt === 0 || pendingAt > snapshotAt);
-    return m(Card, { layout: "row", extra: "px-4 py-2 gap-1.5", "data-provider-name": entry.name }, [
-      m("span", { class: "font-semibold text-primary" }, entry.name),
-      entry.backend ? m("span", { class: "type-helper text-secondary" }, entry.backend) : null,
+    return m(
+      Card,
+      {
+        layout: "row",
+        extra: "px-4 py-2 gap-1.5",
+        "data-provider-name": entry.name,
+      },
+      [
+        m("span", { class: "font-semibold text-primary" }, entry.name),
+        entry.backend
+          ? m("span", { class: "type-helper text-secondary" }, entry.backend)
+          : null,
+        statusChipBadge(providerStatusChipFor(entry.status)),
+        errorDetail(entry),
+      ],
+    );
+  }
+
+  function connectionRow(
+    entry: UiConnectionEntry,
+    owner: ConnectionOwnerOption,
+  ): m.Children {
+    const remove = removeControlFor(entry);
+    const edit = editControlFor(entry);
+    const isRemoving = state.removingConnectionInstances.has(entry.instance);
+    const placement =
+      entry.placement.default_region ?? entry.placement.default_zone ?? "";
+    return m(
+      Card,
+      {
+        layout: "row",
+        extra: "px-4 py-2 gap-1.5",
+        "data-connection-instance": entry.instance,
+      },
+      [
+        m("span", { class: "font-semibold text-primary" }, entry.alias),
+        m(
+          "span",
+          { class: "type-helper text-secondary" },
+          entry.backend_label,
+        ),
+        placement
+          ? m("span", { class: "type-helper text-tertiary" }, placement)
+          : null,
+        m(
+          "span",
+          { class: "type-helper text-tertiary", title: entry.instance },
+          entry.identifier,
+        ),
+        statusChipBadge(connectionStatusChipFor(entry.status)),
+        errorDetail(entry),
+        m(
+          Button,
+          {
+            variant: "secondary",
+            disabled: !edit.isEnabled || isRemoving,
+            title: isRemoving ? "Removing this connection" : edit.tooltip,
+            onclick: () => openEditConnection(entry, owner),
+          },
+          "Edit",
+        ),
+        m(
+          Button,
+          {
+            variant: "secondary",
+            disabled: !remove.isEnabled || isRemoving,
+            title: isRemoving ? "Removing this connection" : remove.tooltip,
+            onclick: () => removeConnection(entry),
+          },
+          "Remove",
+        ),
+      ],
+    );
+  }
+
+  function accountSection(entry: UiAccountProvidersEntry): m.Children {
+    const owner: ConnectionOwnerOption = {
+      userId: entry.user_id,
+      label: accountSectionTitleFor(entry),
+    };
+    const rows: m.Children[] = [];
+    if (entry.imbue_cloud !== null) rows.push(providerRow(entry.imbue_cloud));
+    for (const connection of entry.connections)
+      rows.push(connectionRow(connection, owner));
+    return m("div", { class: "mt-3", "data-account-section": entry.user_id }, [
+      m("div", { class: "flex items-center justify-between gap-3 mb-1.5" }, [
+        m(
+          "span",
+          { class: "type-label uppercase tracking-wide text-secondary" },
+          accountSectionTitleFor(entry),
+        ),
+        // Only an owner the modal would keep: a locked or signed-out account
+        // would silently fall back to this device.
+        entry.is_connection_owner_eligible
+          ? m(
+              Button,
+              {
+                variant: "ghost",
+                onclick: () => openAddConnection(owner),
+              },
+              "Add connection",
+            )
+          : null,
+      ]),
+      rows.length > 0
+        ? m("div", { class: "flex flex-col gap-1.5" }, rows)
+        : m("p", { class: "type-helper text-tertiary" }, "No connections yet."),
+    ]);
+  }
+
+  function deviceSection(entries: readonly UiProviderEntry[]): m.Children {
+    if (entries.length === 0) return null;
+    return m("div", { class: "mt-3", "data-account-section": "device" }, [
+      m("div", { class: "mb-1.5" }, [
+        m(
+          "span",
+          { class: "type-label uppercase tracking-wide text-secondary" },
+          "This device's providers",
+        ),
+      ]),
       m(
-        "span",
-        {
-          class:
-            `${BADGE_CLASS} ` +
-            (entry.status === "OK"
-              ? "bg-success/15 text-success"
-              : entry.status === "ERROR"
-                ? "bg-important/15 text-important"
-                : "bg-fill-subtle text-primary"),
-        },
-        entry.status === "OK" ? "OK" : entry.status === "ERROR" ? "Error" : "Disabled",
+        "div",
+        { class: "flex flex-col gap-1.5" },
+        entries.map((entry) => providerRow(entry)),
       ),
-      entry.status === "ERROR" && entry.error_message
-        ? m(
-            "span",
-            {
-              class: "flex-1 type-helper text-primary truncate",
-              title: `${entry.error_type ?? ""}: ${entry.error_message}`,
-            },
-            `${entry.error_type ?? ""}: ${entry.error_message}`,
-          )
-        : m("span", { class: "flex-1" }),
-      m(
-        Button,
-        {
-          variant: "secondary",
-          disabled: isPending,
-          onclick: () => toggleProvider(entry.name, entry.status === "DISABLED"),
-        },
-        isPending ? "Waiting…" : entry.status === "DISABLED" ? "Enable" : "Disable",
-      ),
-      entry.is_cloud_account
-        ? m(
-            Button,
-            {
-              variant: "secondary",
-              disabled: (entry.workspace_count ?? 0) > 0,
-              title:
-                (entry.workspace_count ?? 0) > 0
-                  ? `In use by ${entry.workspace_count} workspace${entry.workspace_count === 1 ? "" : "s"} — destroy them first.`
-                  : undefined,
-              onclick: () => deleteCloudAccount(entry.name),
-            },
-            "Delete",
-          )
-        : null,
     ]);
   }
 
@@ -724,7 +1035,13 @@ export const LandingPage: m.ClosureComponent = () => {
   // navigation.
   function redirectToStartFlowIfDue(): void {
     const hasRows = getAppContext().stores.workspaces.workspaces.length > 0;
-    if (shouldRedirectToStartFlow(onboardingProgress.isComplete, hasRows, state.extras)) {
+    if (
+      shouldRedirectToStartFlow(
+        onboardingProgress.isComplete,
+        hasRows,
+        state.extras,
+      )
+    ) {
       m.route.set("/start");
     }
   }
@@ -732,7 +1049,9 @@ export const LandingPage: m.ClosureComponent = () => {
   return {
     oninit() {
       loadExtras(state);
-      state.unsubscribe = getAppContext().stores.workspaces.onChanged(() => loadExtras(state));
+      state.unsubscribe = getAppContext().stores.workspaces.onChanged(() =>
+        loadExtras(state),
+      );
     },
     onupdate() {
       redirectToStartFlowIfDue();
@@ -743,25 +1062,42 @@ export const LandingPage: m.ClosureComponent = () => {
     view() {
       const { stores } = getAppContext();
       const entries = stores.workspaces.workspaces;
-      const liveEntries = entries.filter((entry) => !(entry.is_remote ?? false) && (entry.create_attempt_state ?? "") === "");
-      const createEntries = entries.filter((entry) => (entry.create_attempt_state ?? "") !== "");
+      const liveEntries = entries.filter(
+        (entry) =>
+          !(entry.is_remote ?? false) &&
+          (entry.create_attempt_state ?? "") === "",
+      );
+      const createEntries = entries.filter(
+        (entry) => (entry.create_attempt_state ?? "") !== "",
+      );
       const extras = state.extras;
       // A destroy that failed after its host went away has no live entry to badge.
-      const orphanedFailedDestroys = (extras?.orphaned_failed_destroys ?? []).filter(
+      const orphanedFailedDestroys = (
+        extras?.orphaned_failed_destroys ?? []
+      ).filter(
         (orphan) => !liveEntries.some((entry) => entry.id === orphan.agent_id),
       );
       // Until discovery re-lists the destroyed host, its still-active record also reads as a remote tile.
       const remoteEntries = entries.filter(
         (entry) =>
-          (entry.is_remote ?? false) && !orphanedFailedDestroys.some((orphan) => orphan.agent_id === entry.id),
+          (entry.is_remote ?? false) &&
+          !orphanedFailedDestroys.some(
+            (orphan) => orphan.agent_id === entry.id,
+          ),
       );
       const hasRows =
-        liveEntries.length + orphanedFailedDestroys.length + createEntries.length + remoteEntries.length > 0;
+        liveEntries.length +
+          orphanedFailedDestroys.length +
+          createEntries.length +
+          remoteEntries.length >
+        0;
       const isDiscovering =
         !hasRows &&
         !state.isExtrasFailed &&
-        (extras === null || !extras.is_discovery_complete || extras.has_restorable_workspaces);
-      const providerEntries = stores.providers.providers;
+        (extras === null ||
+          !extras.is_discovery_complete ||
+          extras.has_restorable_workspaces);
+      const providersStore = stores.providers;
 
       return m(PageContainer, [
         state.isExtrasFailed
@@ -769,8 +1105,15 @@ export const LandingPage: m.ClosureComponent = () => {
               Notice,
               { variant: "error", extra: "mb-4", id: "landing-extras-error" },
               m("div", { class: "flex items-center justify-between gap-3" }, [
-                m("span", "Could not load workspace details. Some rows may be missing or incomplete."),
-                m(Button, { variant: "secondary", onclick: () => loadExtras(state) }, "Retry"),
+                m(
+                  "span",
+                  "Could not load workspace details. Some rows may be missing or incomplete.",
+                ),
+                m(
+                  Button,
+                  { variant: "secondary", onclick: () => loadExtras(state) },
+                  "Retry",
+                ),
               ]),
             )
           : null,
@@ -778,7 +1121,11 @@ export const LandingPage: m.ClosureComponent = () => {
           ? m("div", [
               m("div", { class: "flex items-center justify-between mb-4" }, [
                 m("h1", { class: "type-heading text-primary" }, "Workspaces"),
-                m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/create") }, "Create"),
+                m(
+                  ButtonLink,
+                  { variant: "primary", ...routeLinkAttrs("/create") },
+                  "Create",
+                ),
               ]),
               bulkUpdateActions(),
               extras !== null && extras.locked_account_emails.length > 0
@@ -795,10 +1142,13 @@ export const LandingPage: m.ClosureComponent = () => {
                           id: "sync-unlock-password",
                           autocomplete: "current-password",
                           placeholder: "master password",
-                          class: "h-[34px] px-3 rounded-full type-body bg-fill-subtle text-primary",
+                          class:
+                            "h-[34px] px-3 rounded-full type-body bg-fill-subtle text-primary",
                           value: state.unlockPassword,
                           oninput: (event: InputEvent) => {
-                            state.unlockPassword = (event.target as HTMLInputElement).value;
+                            state.unlockPassword = (
+                              event.target as HTMLInputElement
+                            ).value;
                           },
                         }),
                         m(
@@ -813,26 +1163,59 @@ export const LandingPage: m.ClosureComponent = () => {
                         ),
                       ]),
                       state.unlockError
-                        ? m("p", { class: "type-helper text-important", role: "alert" }, state.unlockError)
+                        ? m(
+                            "p",
+                            {
+                              class: "type-helper text-important",
+                              role: "alert",
+                            },
+                            state.unlockError,
+                          )
                         : null,
                     ]),
                   ])
                 : null,
               m("div", { class: "flex flex-col gap-1.5" }, [
                 liveEntries.map((entry) => liveRow(entry)),
-                orphanedFailedDestroys.map((orphan) => destroyRow(orphan.agent_id, orphan.name, orphan.accent, "failed")),
+                orphanedFailedDestroys.map((orphan) =>
+                  destroyRow(
+                    orphan.agent_id,
+                    orphan.name,
+                    orphan.accent,
+                    "failed",
+                  ),
+                ),
                 createEntries.map((entry) => createAttemptRow(entry)),
                 remoteEntries.map((entry) => remoteRow(entry)),
               ]),
             ])
           : isDiscovering
-            ? m("div", { class: "flex flex-col items-center justify-center min-h-[80vh] gap-6" }, [
-                m("p", { class: "text-tertiary text-center" }, "Discovering workspaces..."),
-                m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/create") }, "Create"),
-              ])
+            ? m(
+                "div",
+                {
+                  class:
+                    "flex flex-col items-center justify-center min-h-[80vh] gap-6",
+                },
+                [
+                  m(
+                    "p",
+                    { class: "text-tertiary text-center" },
+                    "Discovering workspaces...",
+                  ),
+                  m(
+                    ButtonLink,
+                    { variant: "primary", ...routeLinkAttrs("/create") },
+                    "Create",
+                  ),
+                ],
+              )
             : m("div", { class: "text-center py-12" }, [
                 m("p", { class: "text-tertiary mb-6" }, "No workspaces yet"),
-                m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/create") }, "Create"),
+                m(
+                  ButtonLink,
+                  { variant: "primary", ...routeLinkAttrs("/create") },
+                  "Create",
+                ),
               ]),
         m(
           "div",
@@ -841,80 +1224,114 @@ export const LandingPage: m.ClosureComponent = () => {
             "a",
             {
               id: "landing-destroyed",
-              class: "inline-flex items-center gap-2 type-helper text-tertiary hover:text-primary no-underline",
+              class:
+                "inline-flex items-center gap-2 type-helper text-tertiary hover:text-primary no-underline",
               ...routeLinkAttrs("/workspaces/destroyed"),
             },
             m("span", "Recently destroyed workspaces"),
           ),
         ),
-        providerEntries.length > 0
-          ? m("section", { class: "mt-8 pt-6 border-t border-default" }, [
-              m(
-                "button",
-                {
-                  type: "button",
-                  class:
-                    "w-full flex items-center justify-between text-left type-body text-primary bg-transparent border-0 cursor-pointer p-0",
-                  onclick: () => {
-                    state.isProvidersOpen = !state.isProvidersOpen;
-                  },
+        m(
+          "section",
+          {
+            class: "mt-8 pt-6 border-t border-default",
+            id: "landing-providers",
+          },
+          [
+            m(
+              "button",
+              {
+                type: "button",
+                class:
+                  "w-full flex items-center justify-between text-left type-body text-primary bg-transparent border-0 cursor-pointer p-0",
+                onclick: () => {
+                  state.isProvidersOpen = !state.isProvidersOpen;
                 },
-                [
-                  m(
-                    "span",
-                    (() => {
-                      const enabledCount = providerEntries.filter((entry) => entry.status !== "DISABLED").length;
-                      const errorCount = providerEntries.filter((entry) => entry.status === "ERROR").length;
-                      const providerWord = enabledCount === 1 ? "provider" : "providers";
-                      const errorSuffix =
-                        errorCount > 0 ? ` (${errorCount} ${errorCount === 1 ? "error" : "errors"})` : "";
-                      return `${enabledCount} ${providerWord} enabled${errorSuffix}`;
-                    })(),
-                  ),
-                  m("span", { class: "text-tertiary ml-2" }, state.isProvidersOpen ? "▾" : "▸"),
-                ],
-              ),
-              state.isProvidersOpen
-                ? m("div", { class: "mt-3 flex flex-col gap-1.5" }, providerEntries.map((entry) => providerRow(entry)))
-                : null,
-            ])
-          : null,
+              },
+              [
+                m(
+                  "span",
+                  (() => {
+                    const rowCount = providersStore.rowCount();
+                    const errorCount = providersStore.errorCount();
+                    const providerWord =
+                      rowCount === 1 ? "provider" : "providers";
+                    const errorSuffix =
+                      errorCount > 0
+                        ? ` (${errorCount} ${errorCount === 1 ? "error" : "errors"})`
+                        : "";
+                    return `${rowCount} ${providerWord}${errorSuffix}`;
+                  })(),
+                ),
+                m(
+                  "span",
+                  { class: "text-tertiary ml-2" },
+                  state.isProvidersOpen ? "▾" : "▸",
+                ),
+              ],
+            ),
+            state.isProvidersOpen
+              ? m("div", [
+                  providersStore.accounts.map((entry) => accountSection(entry)),
+                  deviceSection(providersStore.deviceProviders),
+                ])
+              : null,
+          ],
+        ),
+        m(CloudAccountsModal, {
+          state: state.connectionModal,
+          regionOptionsByBackend:
+            state.formDefaults?.region_options_by_launch_mode ?? {},
+          backends: state.formDefaults?.connection_backends ?? [],
+          ownerOptions: providersStore.connectionOwnerOptions(),
+          // The panel re-renders from the next providers frame (the materializer bounces discovery).
+          onAccountAdded: () => m.redraw(),
+        }),
         m("div", { class: "h-20", "aria-hidden": "true" }),
-        m("div", { class: "fixed bottom-3 left-3 flex flex-col items-start gap-0.5" }, [
-          m(
-            "button",
-            {
-              type: "button",
-              id: "landing-minds-settings",
-              class:
-                "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
-              onclick: () => m.route.set("/settings"),
-            },
-            [m(Icon16, { name: "settings", extra: "shrink-0" }), m("span", "Imbue Studio Settings")],
-          ),
-          m(
-            "button",
-            {
-              type: "button",
-              id: "landing-account",
-              "data-signed-in": stores.accounts.accountEmail ? "true" : "false",
-              class:
-                "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
-              onclick: () => m.route.set("/accounts"),
-            },
-            [
-              m(Icon16, { name: "user", extra: "shrink-0" }),
-              m(
-                "span",
-                stores.accounts.accountEmail
-                  ? stores.accounts.extraAccountCount > 0
-                    ? `${stores.accounts.accountEmail} (+${stores.accounts.extraAccountCount})`
-                    : stores.accounts.accountEmail
-                  : "Log in",
-              ),
-            ],
-          ),
-        ]),
+        m(
+          "div",
+          { class: "fixed bottom-3 left-3 flex flex-col items-start gap-0.5" },
+          [
+            m(
+              "button",
+              {
+                type: "button",
+                id: "landing-minds-settings",
+                class:
+                  "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
+                onclick: () => m.route.set("/settings"),
+              },
+              [
+                m(Icon16, { name: "settings", extra: "shrink-0" }),
+                m("span", "Imbue Studio Settings"),
+              ],
+            ),
+            m(
+              "button",
+              {
+                type: "button",
+                id: "landing-account",
+                "data-signed-in": stores.accounts.accountEmail
+                  ? "true"
+                  : "false",
+                class:
+                  "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
+                onclick: () => m.route.set("/accounts"),
+              },
+              [
+                m(Icon16, { name: "user", extra: "shrink-0" }),
+                m(
+                  "span",
+                  stores.accounts.accountEmail
+                    ? stores.accounts.extraAccountCount > 0
+                      ? `${stores.accounts.accountEmail} (+${stores.accounts.extraAccountCount})`
+                      : stores.accounts.accountEmail
+                    : "Log in",
+                ),
+              ],
+            ),
+          ],
+        ),
       ]);
     },
   };

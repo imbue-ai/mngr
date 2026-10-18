@@ -1,0 +1,1 @@
+`DirectModalInterface` accepts optional `token_id` / `token_secret`; when set, every SDK call authenticates through a client built from those credentials (`client=`), and the `modal` CLI subprocesses (environment create, deploy) receive the tokens through their own environment without mutating the process environment. Unset, the SDK's own credential resolution applies unchanged.

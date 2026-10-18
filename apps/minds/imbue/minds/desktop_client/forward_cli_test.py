@@ -46,6 +46,7 @@ from imbue.minds.desktop_client.testing import record_sleep_of
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
@@ -94,6 +95,17 @@ def _make_agent(agent_id: AgentId, host_id: HostId = _HOST_ID_1) -> DiscoveredAg
     )
 
 
+def _make_primary_agent(agent_id: AgentId, host_id: HostId, provider_name: str) -> DiscoveredAgent:
+    """An Imbue Studio primary machine agent (the labelled system-services agent) on the named provider instance."""
+    return DiscoveredAgent(
+        host_id=host_id,
+        agent_id=agent_id,
+        agent_name=AgentName("system-services"),
+        provider_name=ProviderInstanceName(provider_name),
+        certified_data={"labels": {"is_primary": "true"}},
+    )
+
+
 def _make_host(host_id: HostId, state: HostState) -> DiscoveredHost:
     return DiscoveredHost(
         host_id=host_id,
@@ -120,6 +132,19 @@ def _provider_snapshot(
         discovery_finished_at=discovery_finished_at,
         error=error,
         unknown_host_ids=unknown_host_ids,
+    )
+
+
+def _provider_error_event(provider_name: str, message: str) -> DiscoveryErrorEvent:
+    """A whole-provider discovery error (the provider itself is the source), as an errored poll emits."""
+    return DiscoveryErrorEvent(
+        timestamp=_TIMESTAMP,
+        event_id=EventId(f"evt-error-{provider_name}"),
+        source=_EVENT_SOURCE,
+        error_type="ProviderError",
+        error_message=message,
+        source_name=provider_name,
+        provider_name=provider_name,
     )
 
 
@@ -439,6 +464,69 @@ def test_snapshot_retains_agent_whose_provider_errored_then_drops_on_clean(
     assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1}
     # A clean snapshot clears the prior error for that provider.
     assert ProviderInstanceName("local") not in consumer.resolver.get_provider_errors()
+
+
+def test_forget_provider_instances_drops_the_aggregated_agents_so_a_later_push_cannot_restore_them() -> None:
+    """Forgetting an instance empties the aggregator too; the next event's push must not hand its hosts back."""
+    instance = "modal_" + "2" * 32
+    consumer = EnvelopeStreamConsumer(resolver=MngrCliBackendResolver())
+    agent = _make_primary_agent(_AGENT_ID_1, _HOST_ID_1, instance)
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((agent,), provider_name=instance)))
+    assert _AGENT_ID_1 in set(consumer.resolver.list_known_agent_ids())
+
+    consumer.forget_provider_instances({instance})
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_2),))))
+
+    assert _AGENT_ID_1 not in set(consumer.resolver.list_known_agent_ids())
+    assert _AGENT_ID_2 in set(consumer.resolver.list_known_agent_ids())
+
+
+def test_discovery_for_a_provider_this_device_does_not_poll_is_dropped() -> None:
+    """A removed connection's snapshot (replayed from the events file, or a poll that raced the removal) is ignored,
+    and so is a suppressed default's (the bare ``modal`` block pinned ``is_enabled = false``).
+
+    The replay window keeps an unpolled provider's last snapshot forever, so
+    without this its machines come back on every start as running, local rows.
+    A managed instance that still has a block, and every backend default this
+    device polls (``local``, the slice backend), pass through unchanged.
+    """
+    gone_instance = "aws_" + "0" * 32
+    kept_instance = "modal_" + "1" * 32
+    polled = {kept_instance, "local", "imbue_cloud_slice"}
+    consumer = EnvelopeStreamConsumer(
+        resolver=MngrCliBackendResolver(),
+        started_at=_DISCOVERY_FINISHED_AT + timedelta(hours=1),
+        is_provider_polled_here=lambda name: name in polled,
+    )
+    gone_agent = _make_primary_agent(_AGENT_ID_1, _HOST_ID_1, gone_instance)
+    kept_agent = _make_primary_agent(_AGENT_ID_2, _HOST_ID_2, kept_instance)
+    suppressed_default_agent = _make_primary_agent(AgentId.generate(), HostId.generate(), "modal")
+
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((gone_agent,), provider_name=gone_instance)))
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((kept_agent,), provider_name=kept_instance)))
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((suppressed_default_agent,), provider_name="modal")))
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(AgentId.generate()),))))
+    # A backend's own default instance shares the account prefix but is mngr's, not the materializer's.
+    slice_agent = _make_primary_agent(AgentId.generate(), HostId.generate(), "imbue_cloud_slice")
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((slice_agent,), provider_name="imbue_cloud_slice")))
+    # The removed connection's errored polls are in the replay window too; only the kept instance's error is news.
+    with capture_loguru(level="WARNING") as log_output:
+        for instance in (gone_instance, kept_instance):
+            _dispatch(consumer, _observe_envelope(_provider_error_event(instance, "credentials were revoked")))
+
+    known = set(consumer.resolver.list_known_agent_ids())
+    assert _AGENT_ID_1 not in known
+    assert suppressed_default_agent.agent_id not in known
+    assert _AGENT_ID_2 in known
+    assert slice_agent.agent_id in known
+    assert len(known) == 3
+    provider_names = {p.provider_name for p in consumer.resolver.list_providers()}
+    assert ProviderInstanceName(gone_instance) not in provider_names
+    assert ProviderInstanceName("modal") not in provider_names
+    error_lines = [line for line in log_output.getvalue().splitlines() if "Discovery error from" in line]
+    assert len(error_lines) == 1
+    assert kept_instance in error_lines[0]
+    assert gone_instance not in log_output.getvalue()
 
 
 def test_pre_start_snapshot_error_is_dropped_but_topology_merges() -> None:

@@ -23,6 +23,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import SnapshotRecord
@@ -32,6 +33,9 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
+from imbue.mngr.providers.host_key_store import load_host_key_record
+from imbue.mngr.providers.ssh_utils import per_host_key_dir
+from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
@@ -41,10 +45,14 @@ from imbue.mngr_vps.container_setup import is_retryable_rsync_error
 from imbue.mngr_vps.container_setup import redact_secret_env
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import resolve_dockerfile_paths
+from imbue.mngr_vps.data_types import PlacementHandle
+from imbue.mngr_vps.data_types import VpsListingEntry
 from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.errors import BareIsolationNotSupportedError
 from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsHostKeyMissingError
 from imbue.mngr_vps.errors import VpsHostSizeUnknownError
+from imbue.mngr_vps.errors import VpsInstanceLeakedError
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.host_setup import MEM_TOTAL_PROBE_COMMAND
 from imbue.mngr_vps.host_store import VpsHostConfig
@@ -53,18 +61,22 @@ from imbue.mngr_vps.instance import MinimalVpsProvider
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.instance import _wait_for_cloud_init_marker
 from imbue.mngr_vps.instance import build_vps_tags
+from imbue.mngr_vps.instance import listing_entry_from_host_id_marker
 from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import IsolationMode
+from imbue.mngr_vps.primitives import VPS_SSH_KEY_NAME
 from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
 from imbue.mngr_vps.primitives import VpsMemoryMib
 from imbue.mngr_vps.primitives import VpsVcpuCount
 from imbue.mngr_vps.primitives import isolation_from_marker
 from imbue.mngr_vps.sizing import VpsInstanceShape
 from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
 from imbue.mngr_vps.vps_client import VpsClientInterface
+from imbue.mngr_vps.vps_keys import mint_vps_root_keypair
 
 # MinimalVpsProvider._parse_build_args (no-provisioning, no-prefix shape)
 
@@ -593,9 +605,10 @@ def _minimal_provider(
     isolation: IsolationMode = IsolationMode.CONTAINER,
     vps_client: VpsClientInterface | None = None,
     config: VpsProviderConfig | None = None,
+    provider_cls: type[MinimalVpsProvider] = MinimalVpsProvider,
 ) -> MinimalVpsProvider:
-    """A MinimalVpsProvider on the test context; ``config`` replaces the default config built from ``isolation``."""
-    return MinimalVpsProvider(
+    """A ``provider_cls`` on the test context; ``config`` replaces the default config built from ``isolation``."""
+    return provider_cls(
         name=ProviderInstanceName("test-vps-docker"),
         host_dir=temp_mngr_ctx.config.default_host_dir,
         mngr_ctx=temp_mngr_ctx,
@@ -661,11 +674,14 @@ def test_realizer_for_record_picks_bare_for_a_bare_record_under_default_containe
     provider = _minimal_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
     # The create-time default realizer is unchanged (still the container one).
     assert isinstance(provider._realizer, DockerRealizer)
-    bare_record = _record_for(HostId.generate(), container_name=None)
+    host_id = HostId.generate()
+    bare_record = _record_for(host_id, container_name=None)
     realizer = provider._realizer_for_record(bare_record)
     assert isinstance(realizer, BareRealizer)
-    # The bare agent endpoint is the VM's own port 22 -- not the container port 2222.
-    assert realizer.agent_endpoint("10.0.0.1", HostId.generate()).port == 22
+    # The bare agent endpoint is the VM's own port 22 -- not the container port
+    # 2222 -- opened with the host's own VPS-root key (minted at create).
+    mint_vps_root_keypair(provider._key_dir(), host_id)
+    assert realizer.agent_endpoint("10.0.0.1", host_id).port == 22
 
 
 def test_realizer_for_record_picks_container_for_a_container_record(temp_mngr_ctx: MngrContext) -> None:
@@ -742,7 +758,7 @@ class _CaptureDeleteProvider(MinimalVpsProvider):
         return cast(SnapshotCapableRealizer, realizer)
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
         yield cast(OuterHostInterface, object())
 
     def _write_and_mirror(self, host_store: Any, record: VpsHostRecord) -> None:
@@ -1138,3 +1154,477 @@ def test_describe_instance_shape_tolerates_an_api_error_so_the_create_still_fini
     with capture_loguru() as captured:
         assert provider._describe_instance_shape(VpsInstanceId("i-1"), "p") is None
     assert any("throttled" in line for line in captured.getvalue().splitlines())
+
+
+# Per-host VPS-root client key: listing entries, create-time minting, reads
+
+
+def test_listing_entry_from_host_id_marker_parses_a_host_id() -> None:
+    host_id = HostId.generate()
+    entry = listing_entry_from_host_id_marker("203.0.113.1", str(host_id), "i-1")
+    assert entry == VpsListingEntry(hostname="203.0.113.1", host_id=host_id)
+
+
+def test_listing_entry_from_host_id_marker_skips_missing_or_malformed_markers() -> None:
+    """A row whose marker is missing or not a host id has no per-host key to open it with.
+
+    It is skipped with a warning that names the row and the offending marker, so
+    an unexpected value stamped on an instance is visible on every listing.
+    """
+    with capture_loguru() as logs:
+        assert listing_entry_from_host_id_marker("203.0.113.2", None, "i-untagged") is None
+        assert listing_entry_from_host_id_marker("203.0.113.3", "not-a-host-id", "i-garbage") is None
+    output = logs.getvalue()
+    assert "i-untagged" in output
+    assert "i-garbage" in output
+    assert "not-a-host-id" in output
+
+
+def test_make_outer_for_vps_ip_raises_before_connecting_when_no_key_opens_the_host(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Read paths resolve the host's key and never mint one; a keyless host fails before any SSH."""
+    provider = _minimal_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
+    host_id = HostId.generate()
+    with pytest.raises(VpsHostKeyMissingError):
+        with provider._make_outer_for_vps_ip("192.0.2.1", host_id):
+            raise AssertionError("an outer must not be opened without a key")
+    assert not per_host_key_dir(provider._key_dir(), host_id).exists()
+    assert not (provider._key_dir() / VPS_SSH_KEY_NAME).exists()
+
+
+def test_record_outer_host_key_attributes_the_pin_to_the_host(temp_mngr_ctx: MngrContext) -> None:
+    provider = _minimal_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
+    host_id = HostId.generate()
+    public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExampleExampleExampleExampleEx"
+
+    provider.record_outer_host_key("203.0.113.5", 22, public_key, host_id=host_id)
+
+    record = load_host_key_record(provider._vps_known_hosts_path(), host_id)
+    assert record is not None
+    assert [(pin.address, pin.port, pin.public_key) for pin in record.pins] == [("203.0.113.5", 22, public_key)]
+
+
+class _RecordingVpsClient(VpsClientInterface):
+    """VPS client that records the key/instance calls the create path makes and provisions nothing real."""
+
+    uploaded_public_keys: list[str] = Field(default_factory=list)
+    deleted_key_ids: list[str] = Field(default_factory=list)
+    created_user_data: list[str] = Field(default_factory=list)
+    created_ssh_key_ids: list[tuple[str, ...]] = Field(default_factory=list)
+    destroyed_instance_ids: list[VpsInstanceId] = Field(default_factory=list)
+    instance_ip: str = Field(default="203.0.113.9")
+    is_destroy_failing: bool = Field(default=False)
+    is_upload_failing: bool = Field(default=False)
+
+    def create_instance(
+        self,
+        label: str,
+        region: str,
+        plan: str,
+        user_data: str,
+        ssh_key_ids: Sequence[str],
+        tags: Mapping[str, str],
+    ) -> VpsInstanceId:
+        self.created_user_data.append(user_data)
+        self.created_ssh_key_ids.append(tuple(ssh_key_ids))
+        return VpsInstanceId("i-recorded")
+
+    def destroy_instance(self, instance_id: VpsInstanceId) -> None:
+        self.destroyed_instance_ids.append(instance_id)
+        if self.is_destroy_failing:
+            raise MngrError(f"simulated destroy failure for {instance_id}")
+
+    def get_instance_status(self, instance_id: VpsInstanceId) -> VpsInstanceStatus:
+        return VpsInstanceStatus.ACTIVE
+
+    def get_instance_ip(self, instance_id: VpsInstanceId) -> str:
+        return self.instance_ip
+
+    def get_instance_shape(self, instance_id: VpsInstanceId, plan: str) -> VpsInstanceShape | None:
+        return None
+
+    def wait_for_instance_active(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> str:
+        return self.instance_ip
+
+    def upload_ssh_key(self, name: str, public_key: str) -> str:
+        if self.is_upload_failing:
+            raise MngrError("simulated SSH key upload failure")
+        self.uploaded_public_keys.append(public_key)
+        return f"key-{len(self.uploaded_public_keys)}"
+
+    def delete_ssh_key(self, key_id: str) -> None:
+        self.deleted_key_ids.append(key_id)
+
+
+class _StopAfterProvisionProbe(MngrError):
+    """Sentinel raised by the probe provider once the pre-provision state has been captured."""
+
+
+class _ProvisionProbeProvider(MinimalVpsProvider):
+    """Captures what ``create_host`` had on disk (and threaded in) at the moment it provisions."""
+
+    _threaded_public_key: str | None = PrivateAttr(default=None)
+    _per_host_key_present_at_provision: bool = PrivateAttr(default=False)
+    _legacy_key_present_at_provision: bool = PrivateAttr(default=True)
+
+    def _provision_vps(
+        self,
+        host_id: HostId,
+        name: HostName,
+        parsed: ParsedVpsBuildOptions,
+        vps_host_key_path: Path,
+        vps_host_public_key: str,
+        vps_ssh_key_id: str,
+        vps_public_key: str,
+    ) -> tuple[VpsInstanceId, str]:
+        self._threaded_public_key = vps_public_key
+        self._per_host_key_present_at_provision = (
+            per_host_key_dir(self._key_dir(), host_id) / VPS_SSH_KEY_NAME
+        ).exists()
+        self._legacy_key_present_at_provision = (self._key_dir() / VPS_SSH_KEY_NAME).exists()
+        raise _StopAfterProvisionProbe("stop after capturing the pre-provision state")
+
+
+def test_opening_hosts_with_the_legacy_provider_key_is_reported_once_per_process(temp_mngr_ctx: MngrContext) -> None:
+    """Hosts that only authorize the retired provider-wide key are reported at info once, naming the instance."""
+    provider = _minimal_provider(temp_mngr_ctx)
+    save_ssh_keypair(provider._key_dir(), VPS_SSH_KEY_NAME)
+    first_host_id = HostId.generate()
+    second_host_id = HostId.generate()
+
+    with capture_loguru("INFO") as log_output:
+        first_keypair = provider._resolve_vps_ssh_keypair(first_host_id)
+        second_keypair = provider._resolve_vps_ssh_keypair(second_host_id)
+        provider._resolve_vps_ssh_keypair(first_host_id)
+
+    assert first_keypair.is_legacy_provider_key is True
+    assert second_keypair.is_legacy_provider_key is True
+    assert provider.is_legacy_key_fallback_logged is True
+    legacy_lines = [line for line in log_output.getvalue().splitlines() if "legacy provider-wide VPS key" in line]
+    assert len(legacy_lines) == 1
+    assert str(provider.name) in legacy_lines[0]
+    assert str(first_host_id) in legacy_lines[0]
+
+
+def test_opening_a_host_with_its_own_key_reports_nothing(temp_mngr_ctx: MngrContext) -> None:
+    provider = _minimal_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    mint_vps_root_keypair(provider._key_dir(), host_id)
+
+    with capture_loguru("INFO") as log_output:
+        keypair = provider._resolve_vps_ssh_keypair(host_id)
+
+    assert keypair.is_legacy_provider_key is False
+    assert provider.is_legacy_key_fallback_logged is False
+    assert "legacy provider-wide VPS key" not in log_output.getvalue()
+
+
+def test_create_host_mints_a_per_host_vps_key_uploads_it_and_cleans_it_up_on_failure(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """``create_host`` mints the host's own VPS-root key (no provider-wide key), uploads exactly that
+    public key to the cloud, threads it into provisioning, and removes the per-host material again
+    when the create fails (alongside the cloud-side key)."""
+    client = _RecordingVpsClient()
+    provider = _minimal_provider(temp_mngr_ctx, vps_client=client, provider_cls=_ProvisionProbeProvider)
+    assert isinstance(provider, _ProvisionProbeProvider)
+
+    with pytest.raises(_StopAfterProvisionProbe):
+        provider.create_host(HostName("probe-host"))
+
+    assert provider._per_host_key_present_at_provision is True
+    assert provider._legacy_key_present_at_provision is False
+    assert client.uploaded_public_keys == [provider._threaded_public_key]
+    assert client.deleted_key_ids == ["key-1"]
+    # The failed create leaves no per-host material (and no provider-wide key) behind.
+    assert list((provider._key_dir() / "host_keys").glob("*")) == []
+    assert not (provider._key_dir() / VPS_SSH_KEY_NAME).exists()
+
+
+def test_create_host_removes_the_per_host_key_when_the_cloud_key_upload_fails(temp_mngr_ctx: MngrContext) -> None:
+    """The key material is minted before the first provider write, so a failed upload must drop it again.
+
+    Nothing was created cloud-side (no instance, no registered key), so the cleanup
+    has nothing to destroy or delete there and only removes the orphaned local material.
+    """
+    client = _RecordingVpsClient(is_upload_failing=True)
+    provider = _minimal_provider(temp_mngr_ctx, vps_client=client, provider_cls=_ProvisionProbeProvider)
+    assert isinstance(provider, _ProvisionProbeProvider)
+
+    with pytest.raises(MngrError, match="simulated SSH key upload failure"):
+        provider.create_host(HostName("upload-fails-host"))
+
+    assert provider._threaded_public_key is None, "provisioning must not start without a registered key"
+    assert client.deleted_key_ids == []
+    assert client.destroyed_instance_ids == []
+    assert list((provider._key_dir() / "host_keys").glob("*")) == []
+    assert not (provider._key_dir() / VPS_SSH_KEY_NAME).exists()
+
+
+class _OuterOpenFailure(MngrError):
+    """Sentinel raised in place of opening the outer host once the VPS has been provisioned."""
+
+
+class _FailAfterProvisionProvider(MinimalVpsProvider):
+    """Provisions a (fake) VPS and then fails on the first outer connection, exercising create's cleanup."""
+
+    _created_host_id: HostId | None = PrivateAttr(default=None)
+
+    def _provision_vps(
+        self,
+        host_id: HostId,
+        name: HostName,
+        parsed: ParsedVpsBuildOptions,
+        vps_host_key_path: Path,
+        vps_host_public_key: str,
+        vps_ssh_key_id: str,
+        vps_public_key: str,
+    ) -> tuple[VpsInstanceId, str]:
+        self._created_host_id = host_id
+        return VpsInstanceId("i-leaked"), "203.0.113.9"
+
+    @contextmanager
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+        raise _OuterOpenFailure("simulated outer connection failure after provisioning")
+        yield
+
+
+@pytest.mark.parametrize(
+    ("is_destroy_failing", "is_key_kept"),
+    [
+        pytest.param(False, False, id="destroyed"),
+        pytest.param(True, True, id="destroy-failed"),
+    ],
+)
+def test_create_host_keeps_the_per_host_key_when_the_failed_vps_cannot_be_destroyed(
+    temp_mngr_ctx: MngrContext, is_destroy_failing: bool, is_key_kept: bool
+) -> None:
+    """A leaked VPS authorizes only this host's per-host key, so the failed create keeps it on disk.
+
+    When the cleanup destroy succeeds the material opens nothing and is removed;
+    when it fails the instance lives on under this host id, and dropping the key
+    would leave it unreachable from (and invisible to) this machine.
+    """
+    client = _RecordingVpsClient(is_destroy_failing=is_destroy_failing)
+    provider = _minimal_provider(temp_mngr_ctx, vps_client=client, provider_cls=_FailAfterProvisionProvider)
+    assert isinstance(provider, _FailAfterProvisionProvider)
+
+    with pytest.raises(_OuterOpenFailure):
+        provider.create_host(HostName("leaked-host"))
+
+    host_id = provider._created_host_id
+    assert host_id is not None
+    assert client.destroyed_instance_ids == [VpsInstanceId("i-leaked")]
+    assert client.deleted_key_ids == ["key-1"]
+    assert (per_host_key_dir(provider._key_dir(), host_id) / VPS_SSH_KEY_NAME).exists() is is_key_kept
+
+
+class _BootstrapProvisionProvider(MinimalVpsProvider):
+    """Runs the real ``_provision_vps`` with the boot/SSH waits stubbed out (no network)."""
+
+    _outer_host_ids: list[HostId] = PrivateAttr(default_factory=list)
+
+    def _wait_for_sshd_on_vps(self, vps_ip: str, timeout_seconds: float) -> None:
+        pass
+
+    def _wait_for_cloud_init(self, outer: OuterHostInterface, timeout_seconds: float) -> None:
+        pass
+
+    @contextmanager
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+        self._outer_host_ids.append(host_id)
+        yield cast(OuterHostInterface, object())
+
+
+def test_provision_vps_injects_the_per_host_key_into_the_bootstrap_and_pins_the_vps_host_key(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The first-boot payload authorizes the host's own VPS-root public key on root, the cloud
+    create receives the uploaded per-host key id, and the VPS sshd host key is pinned under the
+    host's own store record."""
+    client = _RecordingVpsClient()
+    provider = _minimal_provider(temp_mngr_ctx, vps_client=client, provider_cls=_BootstrapProvisionProvider)
+    assert isinstance(provider, _BootstrapProvisionProvider)
+    host_id = HostId.generate()
+    _vps_key_path, vps_public_key = provider._mint_vps_ssh_keypair(host_id)
+    vps_host_key_path, vps_host_public_key = provider._get_vps_host_keypair(host_id)
+    key_id = client.upload_ssh_key(f"mngr-{provider.name}-{host_id}", vps_public_key)
+
+    instance_id, vps_ip = provider._provision_vps(
+        host_id=host_id,
+        name=HostName("boot-host"),
+        parsed=provider._parse_build_args(None),
+        vps_host_key_path=vps_host_key_path,
+        vps_host_public_key=vps_host_public_key,
+        vps_ssh_key_id=key_id,
+        vps_public_key=vps_public_key,
+    )
+
+    assert (instance_id, vps_ip) == (VpsInstanceId("i-recorded"), "203.0.113.9")
+    assert client.created_ssh_key_ids == [(key_id,)]
+    assert vps_public_key in client.created_user_data[0]
+    # The bootstrap wait opened the outer for THIS host (its per-host key).
+    assert provider._outer_host_ids == [host_id]
+    record = load_host_key_record(provider._vps_known_hosts_path(), host_id)
+    assert record is not None
+    assert [(pin.address, pin.port, pin.public_key) for pin in record.pins] == [
+        ("203.0.113.9", 22, vps_host_public_key)
+    ]
+
+
+class _CloudInitFailure(MngrError):
+    """Sentinel raised in place of the cloud-init wait once the (fake) VPS instance exists."""
+
+
+class _BootstrapFailingProvider(_BootstrapProvisionProvider):
+    """Runs the real ``_provision_vps`` whose bootstrap wait fails after the instance was created."""
+
+    def _wait_for_cloud_init(self, outer: OuterHostInterface, timeout_seconds: float) -> None:
+        raise _CloudInitFailure("simulated bootstrap timeout")
+
+
+def test_provision_vps_destroys_its_instance_when_a_later_wait_fails(temp_mngr_ctx: MngrContext) -> None:
+    """A boot/bootstrap wait failing after the cloud create must not leak the instance.
+
+    ``create_host`` only learns the instance id from ``_provision_vps``'s return value,
+    so the base ``_provision_vps`` tears down the instance it created itself; the
+    caller's cleanup then correctly treats the VPS as gone and removes the per-host
+    key material (alongside the cloud-side key).
+    """
+    client = _RecordingVpsClient()
+    provider = _minimal_provider(temp_mngr_ctx, vps_client=client, provider_cls=_BootstrapFailingProvider)
+    assert isinstance(provider, _BootstrapFailingProvider)
+
+    with pytest.raises(_CloudInitFailure):
+        provider.create_host(HostName("boot-fails-host"))
+
+    assert client.destroyed_instance_ids == [VpsInstanceId("i-recorded")]
+    assert client.deleted_key_ids == ["key-1"]
+    (host_id,) = provider._outer_host_ids
+    assert not per_host_key_dir(provider._key_dir(), host_id).exists()
+
+
+def test_provision_vps_surfaces_a_leaked_instance_and_keeps_its_key(temp_mngr_ctx: MngrContext) -> None:
+    """When the instance a failed provision created cannot be destroyed, the leak is reported and the key kept.
+
+    ``create_host`` never sees the instance id of a ``_provision_vps`` that raised,
+    so the leak travels on ``VpsInstanceLeakedError``, which names the bootstrap
+    failure and chains it as its cause; the cleanup then
+    keeps the per-host key -- the only key the leaked VPS authorizes -- exactly as
+    it does for a leak after provisioning returned.
+    """
+    client = _RecordingVpsClient(is_destroy_failing=True)
+    provider = _minimal_provider(temp_mngr_ctx, vps_client=client, provider_cls=_BootstrapFailingProvider)
+    assert isinstance(provider, _BootstrapFailingProvider)
+
+    with pytest.raises(VpsInstanceLeakedError) as exc_info:
+        provider.create_host(HostName("boot-fails-leaked-host"))
+
+    assert exc_info.value.vps_instance_id == VpsInstanceId("i-recorded")
+    assert isinstance(exc_info.value.__cause__, _CloudInitFailure)
+    assert "simulated bootstrap timeout" in str(exc_info.value)
+    # One destroy attempt (in the provision path), none repeated by create's cleanup.
+    assert client.destroyed_instance_ids == [VpsInstanceId("i-recorded")]
+    assert client.deleted_key_ids == ["key-1"]
+    (host_id,) = provider._outer_host_ids
+    assert (per_host_key_dir(provider._key_dir(), host_id) / VPS_SSH_KEY_NAME).exists()
+
+
+def test_provision_vps_keeps_its_instance_and_key_when_failed_hosts_are_kept(
+    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``MNGR_KEEP_FAILED_HOSTS=1`` leaves the created instance, its cloud key, and the local key material for debugging."""
+    monkeypatch.setenv("MNGR_KEEP_FAILED_HOSTS", "1")
+    client = _RecordingVpsClient()
+    provider = _minimal_provider(temp_mngr_ctx, vps_client=client, provider_cls=_BootstrapFailingProvider)
+    assert isinstance(provider, _BootstrapFailingProvider)
+
+    with pytest.raises(_CloudInitFailure):
+        provider.create_host(HostName("boot-fails-kept-host"))
+
+    assert client.destroyed_instance_ids == []
+    assert client.deleted_key_ids == []
+    (host_id,) = provider._outer_host_ids
+    assert (per_host_key_dir(provider._key_dir(), host_id) / VPS_SSH_KEY_NAME).exists()
+
+
+class _NoopTeardownRealizer:
+    """Duck-typed realizer whose placement teardown is a no-op, so destroy runs without real docker."""
+
+    def teardown_placement(self, outer: OuterHostInterface, host_id: HostId, handle: PlacementHandle) -> None:
+        pass
+
+
+class _DestroyProbeProvider(MinimalVpsProvider):
+    """Destroys a host whose record is seeded in the cache, with the outer connection stubbed out."""
+
+    @contextmanager
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
+        yield cast(OuterHostInterface, object())
+
+
+def _provider_with_cached_container_host(
+    mngr_ctx: MngrContext, client: _RecordingVpsClient, provider_cls: type[MinimalVpsProvider]
+) -> tuple[MinimalVpsProvider, HostId]:
+    """A provider holding one cached container-placed host record, with the placement teardown stubbed out."""
+    provider = _minimal_provider(mngr_ctx, vps_client=client, provider_cls=provider_cls)
+    provider._realizer_cache = {IsolationMode.CONTAINER: cast(HostRealizer, _NoopTeardownRealizer())}
+    host_id = HostId.generate()
+    provider._host_record_cache[host_id] = _record_for(host_id, container_name="mngr-host")
+    return provider, host_id
+
+
+@pytest.mark.parametrize(
+    ("is_destroy_failing", "is_key_kept"),
+    [
+        pytest.param(False, False, id="destroyed"),
+        pytest.param(True, True, id="destroy-failed"),
+    ],
+)
+def test_destroy_host_removes_the_local_key_material_only_once_the_vps_is_gone(
+    temp_mngr_ctx: MngrContext, is_destroy_failing: bool, is_key_kept: bool
+) -> None:
+    """The per-host key and pins are removed with the VPS -- and kept when the VPS destroy fails.
+
+    The per-host key is the only key that opens the VPS root, so dropping it after
+    a failed cloud destroy would leave the still-billing instance unreachable
+    from this machine: a retried destroy would fail on the missing key before it
+    ever reached the cloud API again.
+    """
+    client = _RecordingVpsClient(is_destroy_failing=is_destroy_failing)
+    provider, host_id = _provider_with_cached_container_host(temp_mngr_ctx, client, _DestroyProbeProvider)
+    mint_vps_root_keypair(provider._key_dir(), host_id)
+    provider.record_outer_host_key(
+        "10.0.0.1", 22, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExampleExampleExampleExampleEx", host_id
+    )
+
+    if is_destroy_failing:
+        with pytest.raises(CleanupFailedGroup):
+            provider.destroy_host(host_id)
+    else:
+        provider.destroy_host(host_id)
+
+    assert client.destroyed_instance_ids == [VpsInstanceId("i-1")]
+    assert (per_host_key_dir(provider._key_dir(), host_id) / VPS_SSH_KEY_NAME).exists() is is_key_kept
+    assert (load_host_key_record(provider._vps_known_hosts_path(), host_id) is not None) is is_key_kept
+
+
+def test_destroy_host_still_destroys_the_vps_when_no_local_key_opens_it(temp_mngr_ctx: MngrContext) -> None:
+    """A host this machine holds no key for is still destroyed through the cloud API.
+
+    The placement teardown needs the outer connection (and so the per-host key),
+    but the VPS destroy takes the placement with it, so a missing key skips that
+    step with a warning instead of aborting before the cloud destroy -- otherwise a
+    host created elsewhere (or one whose key dir was removed) could never be
+    destroyed from here.
+    """
+    client = _RecordingVpsClient()
+    provider, host_id = _provider_with_cached_container_host(temp_mngr_ctx, client, MinimalVpsProvider)
+    assert not per_host_key_dir(provider._key_dir(), host_id).exists()
+
+    with capture_loguru() as logs:
+        provider.destroy_host(host_id)
+
+    assert client.destroyed_instance_ids == [VpsInstanceId("i-1")]
+    assert "Skipping the placement teardown" in logs.getvalue()

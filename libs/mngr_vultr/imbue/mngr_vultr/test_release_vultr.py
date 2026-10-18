@@ -18,6 +18,7 @@ import pytest
 from pydantic import SecretStr
 
 from imbue.mngr.providers.provider_release_testing import assert_host_resources_match
+from imbue.mngr.providers.provider_release_testing import assert_vps_root_keys_are_per_host
 from imbue.mngr.providers.provider_release_testing import host_from_list_json
 from imbue.mngr.providers.provider_release_testing import host_resources_from_list_json
 from imbue.mngr_vps.primitives import VpsInstanceId
@@ -66,8 +67,14 @@ def vultr_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
     yield tmp_path
 
 
-def _run_mngr(project_config_dir: Path, *args: str, timeout: int = 600) -> subprocess.CompletedProcess[str]:
+def _run_mngr(project_config_dir: Path, cwd: Path, *args: str, timeout: int = 600) -> subprocess.CompletedProcess[str]:
     """Run a mngr command with the test settings.toml in scope.
+
+    ``cwd`` must be inside a git repository: ``mngr create`` reads the source
+    from the current checkout unless ``--from`` is passed, and the test
+    isolation fixtures move the process cwd away from the repo, so the tests
+    pass the ``temp_git_repo`` fixture explicitly (as the AWS / GCP release
+    tests do).
 
     The default timeout is generous because ``create`` provisions a real VPS:
     Vultr provisioning alone can take ~90s, and on a slow run the full
@@ -83,12 +90,12 @@ def _run_mngr(project_config_dir: Path, *args: str, timeout: int = 600) -> subpr
         capture_output=True,
         text=True,
         timeout=timeout,
-        cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
+        cwd=cwd,
         env=env,
     )
 
 
-def _destroy(project_config_dir: Path, agent_name: str) -> None:
+def _destroy(project_config_dir: Path, cwd: Path, agent_name: str) -> None:
     """Force-destroy an agent with the test settings.toml in scope."""
     env = os.environ.copy()
     env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
@@ -98,7 +105,7 @@ def _destroy(project_config_dir: Path, agent_name: str) -> None:
         capture_output=True,
         text=True,
         timeout=120,
-        cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
+        cwd=cwd,
         env=env,
     )
     # Wait for background destroy to complete.
@@ -110,7 +117,7 @@ class TestVultrProviderLifecycle:
 
     @pytest.mark.rsync
     def test_create_exec_and_destroy(
-        self, vultr_test_settings_dir: Path, vultr_release_client: VultrVpsClient
+        self, vultr_test_settings_dir: Path, temp_git_repo: Path, vultr_release_client: VultrVpsClient
     ) -> None:
         """Provisioning a real Vultr VPS yields an agent that is fully usable end to end.
 
@@ -126,6 +133,7 @@ class TestVultrProviderLifecycle:
         # Create (uses rsync to upload the build context to the VPS)
         result = _run_mngr(
             vultr_test_settings_dir,
+            temp_git_repo,
             "create",
             agent_name,
             "--type",
@@ -137,28 +145,33 @@ class TestVultrProviderLifecycle:
             "just say hello",
         )
         assert result.returncode == 0, f"Create failed: {result.stderr}"
-        assert "Done" in result.stdout or "created successfully" in result.stderr
 
         try:
+            assert "Done" in result.stdout or "created successfully" in result.stderr
+            # The create minted this host's own VM-root client key; no provider-wide key may exist.
+            assert_vps_root_keys_are_per_host()
+
             # Exec
-            result = _run_mngr(vultr_test_settings_dir, "exec", agent_name, "echo hello-from-vultr")
+            result = _run_mngr(vultr_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-vultr")
             assert result.returncode == 0, f"Exec failed: {result.stderr}"
             assert "hello-from-vultr" in result.stdout
 
             # Verify host_dir exists
-            result = _run_mngr(vultr_test_settings_dir, "exec", agent_name, "test -d /mngr && echo exists")
+            result = _run_mngr(
+                vultr_test_settings_dir, temp_git_repo, "exec", agent_name, "test -d /mngr && echo exists"
+            )
             assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
             assert "exists" in result.stdout
 
             # List
-            result = _run_mngr(vultr_test_settings_dir, "list")
+            result = _run_mngr(vultr_test_settings_dir, temp_git_repo, "list")
             assert result.returncode == 0, f"List failed: {result.stderr}"
             assert agent_name in result.stdout
             assert "vultr" in result.stdout
 
             # The size `list` reports is the size Vultr says the instance has. The host is
             # auto-named, so it is found through the agent; Vultr labels the instance after it.
-            result = _run_mngr(vultr_test_settings_dir, "list", "--format", "json")
+            result = _run_mngr(vultr_test_settings_dir, temp_git_repo, "list", "--format", "json")
             assert result.returncode == 0, f"List failed: {result.stderr}"
             listed_host = host_from_list_json(result.stdout, agent_name)
             assert listed_host is not None, f"`mngr list` does not list {agent_name}"
@@ -172,10 +185,10 @@ class TestVultrProviderLifecycle:
             assert shape is not None, f"Vultr reports no shape for instance {instance['id']}"
             assert_host_resources_match(listed_resources, host_resources_for_shape(shape))
         finally:
-            _destroy(vultr_test_settings_dir, agent_name)
+            _destroy(vultr_test_settings_dir, temp_git_repo, agent_name)
 
     @pytest.mark.rsync
-    def test_create_stop_start_destroy(self, vultr_test_settings_dir: Path) -> None:
+    def test_create_stop_start_destroy(self, vultr_test_settings_dir: Path, temp_git_repo: Path) -> None:
         """A Vultr agent survives a stop/start cycle and is runnable again afterward.
 
         Asserts that ``stop`` then ``start`` both succeed on a real VPS-backed agent
@@ -187,6 +200,7 @@ class TestVultrProviderLifecycle:
 
         result = _run_mngr(
             vultr_test_settings_dir,
+            temp_git_repo,
             "create",
             agent_name,
             "--type",
@@ -201,27 +215,27 @@ class TestVultrProviderLifecycle:
 
         try:
             # Stop the agent
-            result = _run_mngr(vultr_test_settings_dir, "stop", agent_name)
+            result = _run_mngr(vultr_test_settings_dir, temp_git_repo, "stop", agent_name)
             assert result.returncode == 0, f"Stop failed: {result.stderr}"
 
             # Verify it appears as stopped in list
-            result = _run_mngr(vultr_test_settings_dir, "list")
+            result = _run_mngr(vultr_test_settings_dir, temp_git_repo, "list")
             assert result.returncode == 0
             assert agent_name in result.stdout
 
             # Start the agent
-            result = _run_mngr(vultr_test_settings_dir, "start", agent_name, "--no-connect")
+            result = _run_mngr(vultr_test_settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
             assert result.returncode == 0, f"Start failed: {result.stderr}"
 
             # Verify it's running again
-            result = _run_mngr(vultr_test_settings_dir, "exec", agent_name, "echo alive-after-restart")
+            result = _run_mngr(vultr_test_settings_dir, temp_git_repo, "exec", agent_name, "echo alive-after-restart")
             assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
             assert "alive-after-restart" in result.stdout
         finally:
-            _destroy(vultr_test_settings_dir, agent_name)
+            _destroy(vultr_test_settings_dir, temp_git_repo, agent_name)
 
     @pytest.mark.rsync
-    def test_ssh_connectivity(self, vultr_test_settings_dir: Path) -> None:
+    def test_ssh_connectivity(self, vultr_test_settings_dir: Path, temp_git_repo: Path) -> None:
         """The provisioned Vultr container runs the expected OS with a live sshd.
 
         Asserts that ``exec`` (which reaches the box over SSH) reports a Debian-based
@@ -233,6 +247,7 @@ class TestVultrProviderLifecycle:
 
         result = _run_mngr(
             vultr_test_settings_dir,
+            temp_git_repo,
             "create",
             agent_name,
             "--type",
@@ -247,17 +262,19 @@ class TestVultrProviderLifecycle:
 
         try:
             # Check OS inside container
-            result = _run_mngr(vultr_test_settings_dir, "exec", agent_name, "cat /etc/os-release | head -1")
+            result = _run_mngr(
+                vultr_test_settings_dir, temp_git_repo, "exec", agent_name, "cat /etc/os-release | head -1"
+            )
             assert result.returncode == 0, f"OS check failed: {result.stderr}"
             assert "Debian" in result.stdout or "debian" in result.stdout.lower()
 
             # Verify sshd is running
-            result = _run_mngr(vultr_test_settings_dir, "exec", agent_name, "pgrep -c sshd")
+            result = _run_mngr(vultr_test_settings_dir, temp_git_repo, "exec", agent_name, "pgrep -c sshd")
             assert result.returncode == 0, f"sshd check failed: {result.stderr}"
             sshd_count = int(result.stdout.strip().split("\n")[0])
             assert sshd_count >= 1
         finally:
-            _destroy(vultr_test_settings_dir, agent_name)
+            _destroy(vultr_test_settings_dir, temp_git_repo, agent_name)
 
 
 @pytest.fixture()

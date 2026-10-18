@@ -9,30 +9,46 @@ blueprint factory, which would be a cycle), so this lower-level module is the
 single home both import.
 """
 
+from typing import Final
+
 from loguru import logger
 from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
+from imbue.minds.desktop_client.connections.data_types import ConnectionAvailability
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.connections.primitives import connection_backend_from_name
+from imbue.minds.desktop_client.connections.primitives import is_region_pinned_for_backend
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.notification_feed import NotificationFeed
+from imbue.minds.desktop_client.notification_feed import SystemEventCard
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
+from imbue.minds.desktop_client.region_preference import MODAL_PROVIDER_KEY
+from imbue.minds.desktop_client.region_preference import MODAL_REGION_ANY
+from imbue.minds.desktop_client.region_preference import MODAL_REGION_NEAREST
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import default_region_for_provider
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
+from imbue.minds.desktop_client.region_preference import modal_region_choices
 from imbue.minds.desktop_client.region_preference import resolve_default_region
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import enable_web_access_for_workspace
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.primitives import BackupProvider
@@ -40,20 +56,23 @@ from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 
-# -- Region resolution --
+# Region resolution
 
 
 def region_provider_key_for_launch_mode(launch_mode: LaunchMode) -> str | None:
     """Map a compute launch mode to its region-config provider key, or None if region-less.
 
-    Only ``IMBUE_CLOUD`` and ``VULTR`` offer an ambient region choice at create
-    time; ``DOCKER`` / ``LIMA`` run locally, and the cloud modes (AWS / GCP /
-    AZURE) are bring-your-own-key-account with placement pinned per account entry.
+    ``IMBUE_CLOUD``, ``VULTR``, and ``MODAL`` pick the region per create;
+    ``DOCKER`` / ``LIMA`` run locally, and the pinned-region clouds (AWS / GCP /
+    AZURE) carry their placement on the connection (see
+    ``is_region_pinned_for_backend``).
     """
     if launch_mode is LaunchMode.IMBUE_CLOUD:
         return IMBUE_CLOUD_PROVIDER_KEY
     if launch_mode is LaunchMode.VULTR:
         return VULTR_PROVIDER_KEY
+    if launch_mode is LaunchMode.MODAL:
+        return MODAL_PROVIDER_KEY
     return None
 
 
@@ -72,24 +91,67 @@ def default_region_for_provider_with_config(
     return default_region_for_provider(provider_key)
 
 
+def default_modal_region_choice(minds_config: MindsConfig | None) -> str:
+    """The Modal placement choice the form pre-selects: the last-used choice, else any region."""
+    configured = minds_config.get_region(MODAL_PROVIDER_KEY) if minds_config is not None else None
+    if configured and configured in modal_region_choices():
+        return configured
+    return MODAL_REGION_ANY
+
+
+class ResolvedRegion(FrozenModel):
+    """What a create request's region submission resolved to."""
+
+    region: str = Field(description="The region the create runs in; empty means no placement constraint")
+    choice_to_remember: str = Field(
+        description="What to store as the provider's last-used pick (a region, or a Modal placement choice); empty stores nothing"
+    )
+
+
+def _resolve_modal_region(
+    submitted_choice: str,
+    minds_config: MindsConfig | None,
+    geo_cache: GeoLocationCache | None,
+) -> ResolvedRegion:
+    """Modal's placement: any region (no constraint), the nearest resolved now, or a named region."""
+    choice = (
+        submitted_choice if submitted_choice in modal_region_choices() else default_modal_region_choice(minds_config)
+    )
+    if choice == MODAL_REGION_ANY:
+        return ResolvedRegion(region="", choice_to_remember=choice)
+    if choice == MODAL_REGION_NEAREST:
+        nearest = (
+            resolve_default_region(MODAL_PROVIDER_KEY, None, geo_cache)
+            if geo_cache is not None
+            else default_region_for_provider(MODAL_PROVIDER_KEY)
+        )
+        return ResolvedRegion(region=nearest, choice_to_remember=choice)
+    return ResolvedRegion(region=choice, choice_to_remember=choice)
+
+
 def resolve_effective_region(
     launch_mode: LaunchMode,
     submitted_region: str,
     minds_config: MindsConfig | None,
     geo_cache: GeoLocationCache | None,
-) -> str:
+) -> ResolvedRegion:
     """Resolve the region to actually create in for a submitted create request.
 
     Honors the user's submitted value when it's a known region for the provider;
-    otherwise falls back to the same default precedence the form uses. Returns
-    "" for region-less providers (DOCKER / LIMA).
+    otherwise falls back to the same default precedence the form uses. Modal
+    additionally takes the ``any`` and ``nearest`` placement choices, and
+    defaults to ``any`` (no ``--region``, which is Modal's cheapest placement).
+    Region-less providers (DOCKER / LIMA) resolve to no region.
     """
     provider_key = region_provider_key_for_launch_mode(launch_mode)
     if provider_key is None:
-        return ""
+        return ResolvedRegion(region="", choice_to_remember="")
+    if provider_key == MODAL_PROVIDER_KEY:
+        return _resolve_modal_region(submitted_region, minds_config, geo_cache)
     if submitted_region and submitted_region in known_regions_for_provider(provider_key):
-        return submitted_region
-    return default_region_for_provider_with_config(provider_key, minds_config, geo_cache)
+        return ResolvedRegion(region=submitted_region, choice_to_remember=submitted_region)
+    region = default_region_for_provider_with_config(provider_key, minds_config, geo_cache)
+    return ResolvedRegion(region=region, choice_to_remember=region)
 
 
 def persist_region_for_launch_mode(
@@ -97,7 +159,7 @@ def persist_region_for_launch_mode(
     launch_mode: LaunchMode,
     region: str,
 ) -> None:
-    """Persist the chosen region as the provider's new last-used default. Best-effort."""
+    """Persist the chosen region (or Modal placement choice) as the provider's new last-used default. Best-effort."""
     provider_key = region_provider_key_for_launch_mode(launch_mode)
     if minds_config is None or provider_key is None or not region:
         return
@@ -113,7 +175,64 @@ def persist_region_for_launch_mode(
         logger.debug("Failed to persist region {} for provider {}: {}", region, provider_key, exc)
 
 
-# -- Post-create-attempt account-association callback --
+# The remote clouds are reachable only through a connection instance
+# (``<backend>_<hex>``): they never appear as plain compute options in the form
+# (each available connection is its own row), and a create in one of these modes
+# must name a connection whose credentials are available here.
+CONNECTION_ONLY_LAUNCH_MODES: Final[frozenset[LaunchMode]] = frozenset(
+    {LaunchMode.AWS, LaunchMode.GCP, LaunchMode.AZURE, LaunchMode.MODAL}
+)
+
+
+class CloudAccountOption(FrozenModel):
+    """One cloud connection whose credentials are available on this device."""
+
+    name: str = Field(description="Connection instance name (the create request's cloud_account value)")
+    alias: str = Field(description="User-chosen display alias")
+    backend: str = Field(description="Cloud backend (aws / gcp / azure / modal)")
+    region: str = Field(description="Pinned region / zone for this connection (empty when the region is per create)")
+    owner_user_id: str = Field(description="The owning account's user id, or 'local' for the local profile")
+    is_region_pinned: bool = Field(
+        description="Whether the region is fixed on the connection (else the create form's region picker applies)"
+    )
+
+
+def available_cloud_account_options(connection_store: ConnectionStore | None) -> list[CloudAccountOption]:
+    """The create form's connection rows: only connections whose credentials are usable here."""
+    if connection_store is None:
+        return []
+    options: list[CloudAccountOption] = []
+    for view in connection_store.list_all_views():
+        if view.availability is not ConnectionAvailability.AVAILABLE:
+            continue
+        backend = connection_backend_from_name(view.backend)
+        options.append(
+            CloudAccountOption(
+                name=view.instance_name,
+                alias=view.alias,
+                backend=view.backend,
+                region=view.region,
+                owner_user_id=view.owner_user_id,
+                is_region_pinned=backend is not None and is_region_pinned_for_backend(backend),
+            )
+        )
+    return options
+
+
+@pure
+def is_cloud_account_owned_by(option: CloudAccountOption, account_id: str) -> bool:
+    """Whether the create's selected account (``""`` for none) may use a connection.
+
+    A local-profile connection is a device provider, like docker and lima: it
+    is offered under every account and under none. An account-owned
+    connection is offered only under its own account.
+    """
+    if option.owner_user_id == LOCAL_PROFILE_USER_ID:
+        return True
+    return option.owner_user_id == account_id
+
+
+# Post-create-attempt account-association callback
 
 
 class OnCreatedCallback(MutableModel):
@@ -158,7 +277,18 @@ class OnCreatedCallback(MutableModel):
     is_cloud_row: bool = Field(
         frozen=True,
         default=False,
-        description="True for imbue_cloud compute: the record carries no hosting device (any device may modify).",
+        description=(
+            "True for an account-synced row (imbue_cloud compute or an account-owned connection): the record "
+            "carries no hosting device (any device may modify)."
+        ),
+    )
+    provider_kind: str | None = Field(
+        frozen=True,
+        default=None,
+        description=(
+            "The provider instance the create addressed, seeded as the record's provider; None leaves the "
+            "association to derive it (the account's Imbue Cloud instance for a cloud row, else discovery)."
+        ),
     )
 
     def __call__(self, agent_id: AgentId, host_id: HostId) -> None:
@@ -177,6 +307,7 @@ class OnCreatedCallback(MutableModel):
                 display_name=self.display_name,
                 color=self.color,
                 is_cloud_row=self.is_cloud_row,
+                provider_kind=self.provider_kind,
             )
         except WorkspaceSyncError as exc:
             logger.warning("Could not record the account association for {}: {}", agent_id, exc)
@@ -221,6 +352,14 @@ class WebAccessEnabler(MutableModel):
             "in the post-create worker thread, where get_state()'s current_app is unbound."
         ),
     )
+    notification_feed: NotificationFeed | None = Field(
+        frozen=True,
+        default=None,
+        description=(
+            "Where a failed bring-up is reported to the user: the create itself succeeded and the creating page "
+            "has already moved on, so the feed is the one surface that outlives it."
+        ),
+    )
     active_share_cache: ActiveShareCache = Field(
         frozen=True,
         description=(
@@ -253,6 +392,7 @@ class WebAccessEnabler(MutableModel):
             )
         except SharingError as exc:
             logger.warning("Could not enable web access for {}: {}", agent_id, exc)
+            self._notify_sharing_not_enabled(agent_id, str(exc))
         except Exception as exc:
             # Best-effort side effect: any unexpected failure (a bug, a
             # transport error the share flow did not wrap into SharingError)
@@ -261,6 +401,7 @@ class WebAccessEnabler(MutableModel):
             # that worker and skip the create's remaining steps (region
             # persistence). The user can still enable sharing from settings.
             logger.opt(exception=exc).error("Unexpected error enabling web access for {}", agent_id)
+            self._notify_sharing_not_enabled(agent_id, "an unexpected error; see the logs")
         finally:
             # Mirror the sharing PUT handler: the share state may have changed
             # even on failure (the connector create can succeed before the
@@ -268,6 +409,21 @@ class WebAccessEnabler(MutableModel):
             # have cached a "not shared" lookup -- drop it so the poll sees
             # the new state immediately rather than at TTL expiry.
             self.active_share_cache.invalidate(str(host_id))
+
+    def _notify_sharing_not_enabled(self, agent_id: AgentId, detail: str) -> None:
+        if self.notification_feed is None:
+            return
+        workspace_name = self.backend_resolver.get_workspace_name(agent_id) or str(agent_id)[:8]
+        accent = self.backend_resolver.get_workspace_color(agent_id) or DEFAULT_WORKSPACE_COLOR
+        self.notification_feed.append_system_event(
+            SystemEventCard(
+                title="Sharing was not enabled",
+                body=f"{detail.rstrip('.')}. Turn sharing on from the workspace's Share panel to try again.",
+                workspace_agent_id=str(agent_id),
+                workspace_name=workspace_name,
+                workspace_accent=accent,
+            )
+        )
 
 
 class CreateOnCreatedCallback(MutableModel):
@@ -287,7 +443,11 @@ class CreateOnCreatedCallback(MutableModel):
         frozen=True, default=None, description="Config used to persist the chosen region as the new default."
     )
     launch_mode: LaunchMode = Field(frozen=True, description="Compute launch mode whose region default is updated.")
-    region: str = Field(frozen=True, default="", description="Resolved region to persist on a successful create.")
+    region: str = Field(
+        frozen=True,
+        default="",
+        description="The region, or Modal placement choice, to persist as last-used on a successful create.",
+    )
     web_access_enabler: WebAccessEnabler | None = Field(
         frozen=True,
         default=None,
@@ -327,6 +487,7 @@ def _build_web_access_enabler(launch_mode: LaunchMode, is_web_access_enabled: bo
         is_cloud_row=launch_mode is LaunchMode.IMBUE_CLOUD,
         backend_resolver=get_state().backend_resolver,
         client_env_config=client_env_config,
+        notification_feed=get_state().notification_feed,
         active_share_cache=get_state().active_share_cache,
         identity_cache=get_state().identity_cache,
         forward_identity=get_state().forward_identity,
@@ -337,10 +498,16 @@ def build_create_on_created_callback(
     account_id: str,
     minds_config: MindsConfig | None,
     launch_mode: LaunchMode,
+    # The region, or Modal placement choice, to remember as the provider's last-used pick.
     region: str,
     display_name: str = "",
     color: str | None = None,
     is_web_access_enabled: bool = False,
+    # True when the create targets a connection the selected account owns: like
+    # the account instance, any device that unlocks the account can reach it.
+    is_account_owned_connection: bool = False,
+    # The connection instance the create addresses (None for every other compute).
+    connection_instance_name: str | None = None,
 ) -> CreateOnCreatedCallback:
     """Build the composed post-create-attempt callback (association + web access + region persistence)."""
     return CreateOnCreatedCallback(
@@ -348,7 +515,8 @@ def build_create_on_created_callback(
             account_id,
             display_name=display_name,
             color=color,
-            is_cloud_row=launch_mode is LaunchMode.IMBUE_CLOUD,
+            is_cloud_row=launch_mode is LaunchMode.IMBUE_CLOUD or is_account_owned_connection,
+            provider_kind=connection_instance_name,
         ),
         minds_config=minds_config,
         launch_mode=launch_mode,
@@ -362,6 +530,7 @@ def build_on_created_callback(
     display_name: str = "",
     color: str | None = None,
     is_cloud_row: bool = False,
+    provider_kind: str | None = None,
 ) -> OnCreatedCallback | None:
     """Build a callback that records the account association after an agent create attempt.
 
@@ -383,10 +552,11 @@ def build_on_created_callback(
         display_name=display_name,
         color=color,
         is_cloud_row=is_cloud_row,
+        provider_kind=provider_kind,
     )
 
 
-# -- Backup request --
+# Backup request
 
 
 def build_backup_request_or_error(

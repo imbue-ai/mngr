@@ -11,15 +11,21 @@ import pytest
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_ovh import backend as backend_module
 from imbue.mngr_ovh.backend import OVH_BACKEND_NAME
 from imbue.mngr_ovh.backend import OvhProvider
 from imbue.mngr_ovh.backend import OvhProviderBackend
 from imbue.mngr_ovh.backend import _LEGACY_OVH_PLAN_SHAPES
+from imbue.mngr_ovh.backend import _listing_entries_from_iam_resources
 from imbue.mngr_ovh.backend import register_provider_backend
 from imbue.mngr_ovh.config import OvhProviderConfig
+from imbue.mngr_ovh.iam_tags import IamResource
+from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
+from imbue.mngr_ovh.iam_tags import ORPHAN_HOST_ID_PLACEHOLDER_PREFIX
 
 # python-ovh resolves credentials from these fixed files (no env override exists for
 # the path). If any are present on the host, an "unconfigured" config could still pick
@@ -96,7 +102,38 @@ def test_build_provider_instance_raises_not_authorized_when_unconfigured(
     assert exc_info.value.provider_name == name
 
 
-# -- F1 invariant -------------------------------------------------------------
+def _iam_vps_resource(service_name: str, tags: dict[str, str]) -> IamResource:
+    return IamResource(urn=f"urn:v1:us:resource:vps:{service_name}", name=service_name, type="vps", tags=tags)
+
+
+def test_listing_entries_skip_recycle_orphans_quietly_and_warn_only_on_unexpected_markers() -> None:
+    """Discovery lists the VPSes with a real host id, and stays quiet about the recycle pool's orphans.
+
+    An adopted orphan carries the ``host-orphan-from-order-*`` placeholder in its
+    ``mngr-host-id`` tag by design (until the recycle path claims it), so it must
+    not trip the malformed-marker warning on every ``mngr list``; a row with no
+    host id at all is unexpected and does.
+    """
+    host_id = HostId.generate()
+    resources = [
+        _iam_vps_resource("vps-real.vps.ovh.us", {MNGR_HOST_ID_TAG_KEY: str(host_id)}),
+        _iam_vps_resource(
+            "vps-orphan.vps.ovh.us", {MNGR_HOST_ID_TAG_KEY: f"{ORPHAN_HOST_ID_PLACEHOLDER_PREFIX}7-abc"}
+        ),
+        _iam_vps_resource("vps-untagged.vps.ovh.us", {}),
+        _iam_vps_resource("", {MNGR_HOST_ID_TAG_KEY: str(HostId.generate())}),
+    ]
+
+    with capture_loguru() as logs:
+        entries = _listing_entries_from_iam_resources(resources)
+
+    assert [(entry.hostname, entry.host_id) for entry in entries] == [("vps-real.vps.ovh.us", host_id)]
+    warnings = logs.getvalue()
+    assert "vps-orphan" not in warnings
+    assert "vps-untagged" in warnings
+
+
+# F1 invariant
 #
 # Constructing a full ``OvhProvider`` for a behaviour-level test is
 # expensive (it inherits from ``VpsProvider`` which inherits from
@@ -153,7 +190,7 @@ def test_f1_provision_vps_imports_parse_extra_tags_env() -> None:
     assert hasattr(backend_module, "parse_extra_tags_env")
 
 
-# -- Pending-order reconciliation invariants ----------------------------------
+# Pending-order reconciliation invariants
 #
 # ``_reconcile_pending_orders`` MUST run at the top of ``_provision_vps``,
 # specifically BEFORE ``_maybe_claim_recycled_vps``, so any orphan that

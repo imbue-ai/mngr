@@ -2,9 +2,34 @@ from typing import Final
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.providers.host_access_manifest import HostAccessManifest
+from imbue.mngr.providers.host_access_manifest import PerHostDirScheme
+from imbue.mngr.providers.host_access_manifest import keypair_file_names
 from imbue.mngr_lima.primitives import LimaDiskSize
 
 LIMA_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("lima")
+
+# The key-file names under a VM's own dir, ``keys/hosts/<host id>/``: the
+# pre-injected sshd host key, and the root client key mngr uses to reach the VM
+# when is_run_as_root is set (the same name directly under ``keys/`` is the
+# legacy provider-wide pair older VMs authorize). Pins live per host, next to
+# the keys, because localhost ports churn and get reused across VMs.
+LIMA_HOST_KEY_NAME: Final[str] = "ssh_host_ed25519_key"
+LIMA_ROOT_SSH_KEY_NAME: Final[str] = "root_ssh_key"
+LIMA_KNOWN_HOSTS_NAME: Final[str] = "known_hosts"
+LIMA_KEY_DIR_NAME: Final[str] = "keys"
+
+# The per-host layout contract, published for consumers that carry a VM's
+# access material to another machine.
+LIMA_HOST_ACCESS_MANIFEST: Final[HostAccessManifest] = HostAccessManifest(
+    key_dir_name=LIMA_KEY_DIR_NAME,
+    per_host_dir_scheme=PerHostDirScheme.HOSTS_HOST_ID,
+    file_names=keypair_file_names(LIMA_HOST_KEY_NAME, LIMA_ROOT_SSH_KEY_NAME),
+    agent_key_file_name=LIMA_ROOT_SSH_KEY_NAME,
+    pin_store_names=(LIMA_KNOWN_HOSTS_NAME,),
+    is_pin_store_per_host=True,
+    known_hosts_link_store_name=None,
+)
 
 LIMA_INSTANCE_PREFIX: Final[str] = "mngr-"
 

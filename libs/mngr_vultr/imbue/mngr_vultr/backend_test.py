@@ -1,13 +1,16 @@
 """Tests for Vultr provider backend registration."""
 
 import pytest
+from pydantic import SecretStr
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vultr.backend import VULTR_BACKEND_NAME
+from imbue.mngr_vultr.backend import VultrProvider
 from imbue.mngr_vultr.backend import VultrProviderBackend
 from imbue.mngr_vultr.backend import _LEGACY_VULTR_PLAN_SHAPES
 from imbue.mngr_vultr.backend import register_provider_backend
@@ -75,3 +78,27 @@ def test_legacy_plan_table_covers_the_default_plan_with_its_bundled_disk() -> No
     assert shape.vcpu_count == 2
     assert shape.memory_mib == 4096
     assert shape.root_disk_gb == 80
+
+
+def test_list_provider_vps_entries_reads_host_ids_from_flat_tags(temp_mngr_ctx: MngrContext) -> None:
+    """Discovery pairs each of this provider's reachable instances with the host id in its ``mngr-host-id=`` tag.
+
+    Instances of other providers, ones without an IP yet, and ones whose host-id
+    tag is missing or malformed (nothing could open them) are skipped.
+    """
+    name = ProviderInstanceName("vultr-listing")
+    config = VultrProviderConfig(backend=VULTR_BACKEND_NAME, api_key=SecretStr("test-key"))
+    provider = VultrProviderBackend.build_provider_instance(name, config, temp_mngr_ctx)
+    assert isinstance(provider, VultrProvider)
+    host_a, host_b = HostId.generate(), HostId.generate()
+    provider._instances_cache = [
+        {"id": "i-a", "main_ip": "203.0.113.1", "tags": [f"mngr-provider={name}", f"mngr-host-id={host_a}"]},
+        {"id": "i-other", "main_ip": "203.0.113.2", "tags": ["mngr-provider=other", f"mngr-host-id={host_b}"]},
+        {"id": "i-booting", "main_ip": "0.0.0.0", "tags": [f"mngr-provider={name}", f"mngr-host-id={host_b}"]},
+        {"id": "i-untagged", "main_ip": "203.0.113.3", "tags": [f"mngr-provider={name}"]},
+        {"id": "i-b", "main_ip": "203.0.113.4", "tags": [f"mngr-provider={name}", f"mngr-host-id={host_b}"]},
+    ]
+
+    entries = provider._list_provider_vps_entries()
+
+    assert [(entry.hostname, entry.host_id) for entry in entries] == [("203.0.113.1", host_a), ("203.0.113.4", host_b)]

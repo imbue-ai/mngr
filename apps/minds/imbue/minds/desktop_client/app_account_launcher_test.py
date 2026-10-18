@@ -105,12 +105,8 @@ def test_accounts_frame_names_the_default_account_and_lists_them_all(tmp_path: P
         1,
     )
     assert message.accounts == (
-        UiAccountEntry(
-            user_id="user-first", email="first@example.com", workspace_count=0, is_default=False, is_enabled=True
-        ),
-        UiAccountEntry(
-            user_id="user-second", email="second@example.com", workspace_count=0, is_default=True, is_enabled=True
-        ),
+        UiAccountEntry(user_id="user-first", email="first@example.com", workspace_count=0, is_default=False),
+        UiAccountEntry(user_id="user-second", email="second@example.com", workspace_count=0, is_default=True),
     )
 
 

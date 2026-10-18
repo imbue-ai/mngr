@@ -231,7 +231,8 @@ def resolve_keypair_with_fallback(
     The per-host/legacy resolution used by every provider: the preferred dir is
     the host's own key dir, the fallback dir holds the legacy shared pair that
     hosts created before per-host keys existed still authorize, and ``create``
-    mints a fresh preferred pair when neither is on disk.
+    decides what happens when neither is on disk: mint a fresh preferred pair,
+    or raise for material that must never be minted on a read path.
     """
     preferred_private = preferred_dir / key_name
     preferred_public = preferred_dir / f"{key_name}.pub"

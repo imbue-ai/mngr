@@ -52,6 +52,8 @@ class VpsCloudReleaseProfile(ProviderReleaseProfile):
     """
 
     supports_shutdown_hosts = True
+    # Every VPS-family provider opens its VM root with the host's own per-host client key.
+    uses_per_host_vps_root_keys = True
     # The container shape snapshots via `docker commit`, which lives on the VPS's own disk and
     # dies with `destroy_host`; so a VPS-family snapshot is not portable.
     snapshot_survives_destroy = False

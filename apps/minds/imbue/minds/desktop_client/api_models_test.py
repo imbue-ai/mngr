@@ -7,7 +7,7 @@ from imbue.minds.desktop_client.api_models import BugReportRequest
 from imbue.minds.desktop_client.api_models import CloudAccountCreateRequest
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import GcpCloudAccountCreateRequest
-from imbue.minds.desktop_client.api_models import SetProviderEnabledRequest
+from imbue.minds.desktop_client.api_models import ModalCloudAccountCreateRequest
 from imbue.minds.desktop_client.api_models import WorkspaceSummary
 
 
@@ -58,6 +58,13 @@ def test_cloud_account_create_discriminates_on_backend() -> None:
     )
     assert isinstance(azure.root, AzureCloudAccountCreateRequest)
 
+    # Modal has no placement: no region, just the token pair (and an optional owner).
+    modal = CloudAccountCreateRequest.model_validate(
+        {"backend": "modal", "alias": "m", "owner": "local", "modal_token_id": "ak-1", "modal_token_secret": "as-1"}
+    )
+    assert isinstance(modal.root, ModalCloudAccountCreateRequest)
+    assert modal.root.owner == "local"
+
     # An aws body carrying a stray gcp field validates as aws (extra ignored).
     mixed = CloudAccountCreateRequest.model_validate(
         {"backend": "aws", "alias": "x", "region": "us-east-1", "gcp_service_account_key_json": "{}"}
@@ -68,18 +75,11 @@ def test_cloud_account_create_discriminates_on_backend() -> None:
 def test_cloud_account_create_rejects_unknown_backend_and_missing_shared_fields() -> None:
     with pytest.raises(ValidationError):
         CloudAccountCreateRequest.model_validate({"backend": "digitalocean", "alias": "x", "region": "r"})
-    # ``alias``/``region`` are shared-and-required on every variant.
+    # ``alias`` is required on every variant; ``region`` on the placed (VPS) ones.
     with pytest.raises(ValidationError):
         CloudAccountCreateRequest.model_validate({"backend": "aws", "region": "us-east-1"})
-
-
-def test_set_provider_enabled_rejects_non_bool() -> None:
-    # StrictBool: a truthy int/str must not be coerced (matches the prior
-    # isinstance(enabled, bool) check on the route).
-    assert SetProviderEnabledRequest.model_validate({"enabled": True}).enabled is True
-    for bad_value in (1, "yes"):
-        with pytest.raises(ValidationError):
-            SetProviderEnabledRequest.model_validate({"enabled": bad_value})
+    with pytest.raises(ValidationError):
+        CloudAccountCreateRequest.model_validate({"backend": "aws", "alias": "x"})
 
 
 def test_bug_report_requires_nonempty_description() -> None:

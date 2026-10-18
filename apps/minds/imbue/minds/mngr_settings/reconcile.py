@@ -9,6 +9,7 @@ from tomlkit.items import Table
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.mngr_settings._migrations import apply_data_dir_migrations
+from imbue.minds.mngr_settings._migrations import apply_one_shot_settings_migrations
 from imbue.minds.mngr_settings._migrations import apply_settings_document_migrations
 from imbue.minds.mngr_settings.errors import MindsSettingsError
 from imbue.minds.mngr_settings.file_store import settings_store_for
@@ -17,8 +18,6 @@ from imbue.minds.mngr_settings.provider_blocks import AZURE_BACKEND_NAME
 from imbue.minds.mngr_settings.provider_blocks import GCP_BACKEND_NAME
 from imbue.minds.mngr_settings.provider_blocks import IMBUE_CLOUD_BACKEND_NAME
 from imbue.minds.mngr_settings.provider_blocks import MODAL_BACKEND_NAME
-from imbue.minds.mngr_settings.provider_blocks import MODAL_MODE_DIRECT
-from imbue.minds.mngr_settings.provider_blocks import MODAL_PROVIDER_NAME
 
 
 def ensure_mngr_settings_before_mngr_import() -> None:
@@ -39,32 +38,20 @@ def ensure_mngr_settings_before_mngr_import() -> None:
     ensure_mngr_settings(MindsRoot.from_environment())
 
 
-# Provider blocks Imbue Studio pins in the profile settings, keyed by provider name.
-# ``pinned`` fields are re-asserted on every reconcile; ``user_owned_defaults``
-# fields are seeded once and then owned by the user (the providers panel's
-# Enable/Disable toggle writes them), so an existing boolean value always wins.
-#
-# The suppression blocks (imbue_cloud, aws, gcp, azure) pin is_enabled=false:
-# mngr auto-creates a default provider instance for every registered backend,
-# and those credential-less defaults fail every ``mngr list`` discovery cycle
-# with spurious warnings. The usable instances are the per-account blocks
-# written on signin (imbue_cloud_<slug>) or via the cloud-accounts modal
-# (byok-*).
-#
-# The Modal (DIRECT) block pins is_persistent=true: each ``mngr create`` is a
-# one-shot subprocess, and a non-persistent Modal app would terminate the
-# sandbox the instant that subprocess exits. An older build wrote
-# is_persistent=false; pinning catches and overwrites that stale value.
-_DESIRED_PROVIDER_BLOCKS: Final[tuple[tuple[str, dict[str, object], dict[str, object]], ...]] = (
-    (IMBUE_CLOUD_BACKEND_NAME, {"backend": IMBUE_CLOUD_BACKEND_NAME, "is_enabled": False}, {}),
-    (AWS_BACKEND_NAME, {"backend": AWS_BACKEND_NAME, "is_enabled": False}, {}),
-    (GCP_BACKEND_NAME, {"backend": GCP_BACKEND_NAME, "is_enabled": False}, {}),
-    (AZURE_BACKEND_NAME, {"backend": AZURE_BACKEND_NAME, "is_enabled": False}, {}),
-    (
-        MODAL_PROVIDER_NAME,
-        {"backend": MODAL_BACKEND_NAME, "mode": MODAL_MODE_DIRECT, "is_persistent": True},
-        {"is_enabled": True},
-    ),
+# The default-instance suppression blocks, keyed by provider name, each pinned
+# to ``is_enabled = false`` on every reconcile: mngr auto-creates a default
+# provider instance for every registered backend, and those credential-less
+# defaults fail every ``mngr list`` discovery cycle with spurious warnings. The
+# usable instances are derived by the materializer in
+# ``desktop_client/connections/provider_settings.py`` after mngr is importable;
+# this pre-import reconcile owns only what must be on disk before ``imbue.mngr``
+# loads.
+_DESIRED_PROVIDER_BLOCKS: Final[tuple[tuple[str, dict[str, object]], ...]] = (
+    (IMBUE_CLOUD_BACKEND_NAME, {"backend": IMBUE_CLOUD_BACKEND_NAME, "is_enabled": False}),
+    (AWS_BACKEND_NAME, {"backend": AWS_BACKEND_NAME, "is_enabled": False}),
+    (GCP_BACKEND_NAME, {"backend": GCP_BACKEND_NAME, "is_enabled": False}),
+    (AZURE_BACKEND_NAME, {"backend": AZURE_BACKEND_NAME, "is_enabled": False}),
+    (MODAL_BACKEND_NAME, {"backend": MODAL_BACKEND_NAME, "is_enabled": False}),
 )
 
 # Plugins Imbue Studio disables for every mngr subprocess it spawns, keyed by the
@@ -90,17 +77,10 @@ _DESIRED_TOP_LEVEL_SETTINGS: Final[dict[str, object]] = {
 }
 
 
-def _merge_block(
-    section: Table | tomlkit.TOMLDocument,
-    name: str,
-    pinned: dict[str, object],
-    user_owned_defaults: dict[str, object],
-) -> bool:
+def _merge_block(section: Table | tomlkit.TOMLDocument, name: str, pinned: dict[str, object]) -> bool:
     """Merge one desired block into the section, returning whether anything changed.
 
-    Pinned fields are forced to their desired values.
-    User-owned fields are seeded with their default only when missing or non-boolean; an existing boolean value is the user's and is left alone.
-    Fields Imbue Studio does not manage are never touched.
+    Pinned fields are forced to their desired values; fields minds does not manage are never touched.
     """
     block = section.get(name)
     if not isinstance(block, dict):
@@ -111,10 +91,6 @@ def _merge_block(
         if block.get(key) != desired_value:
             block[key] = desired_value
             is_changed = True
-    for key, default_value in user_owned_defaults.items():
-        if not isinstance(block.get(key), bool):
-            block[key] = default_value
-            is_changed = True
     return is_changed
 
 
@@ -123,12 +99,12 @@ def _reconcile_document(doc: tomlkit.TOMLDocument) -> bool:
     is_changed = apply_settings_document_migrations(doc)
     providers_section = doc.setdefault("providers", tomlkit.table())
 
-    for name, pinned, user_owned_defaults in _DESIRED_PROVIDER_BLOCKS:
-        is_changed = _merge_block(providers_section, name, pinned, user_owned_defaults) or is_changed
+    for name, pinned in _DESIRED_PROVIDER_BLOCKS:
+        is_changed = _merge_block(providers_section, name, pinned) or is_changed
 
     plugins_section = doc.setdefault("plugins", tomlkit.table())
     for name, pinned in _DESIRED_PLUGIN_BLOCKS:
-        is_changed = _merge_block(plugins_section, name, pinned, {}) or is_changed
+        is_changed = _merge_block(plugins_section, name, pinned) or is_changed
 
     for key, desired_value in _DESIRED_TOP_LEVEL_SETTINGS.items():
         if doc.get(key) != desired_value:
@@ -150,5 +126,6 @@ def ensure_mngr_settings(root: MindsRoot) -> bool:
     is_modified = store.update(_reconcile_document)
     if is_modified:
         logger.debug("Updated mngr settings at {} with Imbue Studio overrides", store.settings_path)
+    is_migrated = apply_one_shot_settings_migrations(root, store)
     apply_data_dir_migrations(root)
-    return is_modified
+    return is_modified or is_migrated

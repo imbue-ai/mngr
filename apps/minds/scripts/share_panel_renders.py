@@ -198,7 +198,7 @@ def _options_payload(labels: Mapping[str, str]) -> str:
         color="#7c9885",
         palette={"sage": "#7c9885"},
         is_stale=False,
-        is_leased_imbue_cloud=False,
+        is_account_owned_provider=False,
         has_account=True,
         account_email=GRANTER_EMAIL,
         account_display_name="Alice Nguyen",

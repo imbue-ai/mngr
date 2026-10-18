@@ -1,5 +1,6 @@
 import pytest
 from pydantic import Field
+from pydantic import ValidationError
 
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.wire import WireModel
@@ -10,6 +11,7 @@ from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.wire_types import PublishedPortInfo
 from imbue.mngr_imbue_cloud.wire_types import PublishedPortProtocol
 from imbue.mngr_imbue_cloud.wire_types import R2BucketAccess
+from imbue.mngr_imbue_cloud.wire_types import SyncDocument
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStopKind
@@ -129,3 +131,9 @@ def test_lease_result_published_ports_are_additive_and_coerce_unknown_protocols(
     )
     assert info.published_ports == ()
     assert validate_wire(LeasedHostInfo, {**base, "leased_at": "2026-01-01T00:00:00Z"}).published_ports == ()
+
+
+def test_sync_document_requires_metadata() -> None:
+    """A push sends only set fields and the server replaces metadata whole, so an unset metadata must not validate."""
+    with pytest.raises(ValidationError):
+        SyncDocument.model_validate({"kind": "connection", "doc_id": "conn-1", "state": "active", "revision": 1})

@@ -27,7 +27,12 @@ interface ModalAttrs extends m.Attributes {
  * The SPA port of Modal.jinja, with visibility driven by `isOpen` instead of
  * a hidden-class toggle (there is no overlay-iframe layer anymore -- every
  * modal is a plain component). Clicking the backdrop (not the card) invokes
- * onClose when provided.
+ * onClose when provided: the press, the release, and the click itself all
+ * have to land on the backdrop. A browser fires `click` on the common
+ * ancestor of the mousedown and mouseup targets, which is the backdrop
+ * whenever one of them was on the card (a text selection dragged out of the
+ * card, or a press on the dim released over the card), so the click's own
+ * target cannot tell those apart.
  *
  * The card is bounded by the window, not its content: `size` is a ceiling it
  * only reaches when there is room, it stops at what .modal-viewport leaves and
@@ -38,6 +43,8 @@ interface ModalAttrs extends m.Attributes {
  * gives .modal-viewport the matching no-drag so clicks up there still land.
  */
 export function Modal(): m.Component<ModalAttrs> {
+  let isPressStartedOnBackdrop = false;
+  let isPressEndedOnBackdrop = false;
   return {
     view(vnode) {
       const { isOpen, onClose, size = "sm", cardExtra = "" } = vnode.attrs;
@@ -49,8 +56,20 @@ export function Modal(): m.Component<ModalAttrs> {
         {
           class:
             "modal-viewport fixed inset-0 z-[110] flex items-center justify-center bg-surface-overlay",
+          onmousedown: (event: MouseEvent) => {
+            isPressStartedOnBackdrop = event.target === event.currentTarget;
+          },
+          onmouseup: (event: MouseEvent) => {
+            isPressEndedOnBackdrop = event.target === event.currentTarget;
+          },
           onclick: (event: MouseEvent) => {
-            if (onClose !== undefined && event.target === event.currentTarget) {
+            // The click's own target too: a secondary-button press leaves the flags set (no click follows
+            // it), and a keyboard click on a control in the card must not spend them.
+            const isBackdropClick =
+              isPressStartedOnBackdrop && isPressEndedOnBackdrop && event.target === event.currentTarget;
+            isPressStartedOnBackdrop = false;
+            isPressEndedOnBackdrop = false;
+            if (onClose !== undefined && isBackdropClick) {
               onClose();
             }
           },

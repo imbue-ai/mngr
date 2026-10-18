@@ -79,26 +79,17 @@ describe("AccountsDetailModel", () => {
     );
   });
 
-  it("reloads the plan of an account signed back in, or logged out and added back", async () => {
-    // A plan loaded while signed out reads as unavailable; the sign-in that
-    // follows must replace it rather than leave the card saying so.
-    let planView: AccountPlanView | null = null;
+  it("reloads the plan of an account logged out and added back", async () => {
     const urls: string[] = [];
     const model = new AccountsDetailModel(
       async (input) => {
         urls.push(String(input));
-        return jsonResponse({ plan_view: planView, trim_status: null });
+        return jsonResponse({ plan_view: PLAN_VIEW, trim_status: null });
       },
       () => {},
       (callback) => callback(),
     );
-    const signedOut = accountEntry({ is_enabled: false });
 
-    model.syncAccounts([signedOut]);
-    await settle();
-    expect(model.planStateFor("user-1").isUnavailable).toBe(true);
-
-    planView = PLAN_VIEW;
     model.syncAccounts([ACCOUNT]);
     await settle();
     expect(model.planStateFor("user-1").planView).toEqual(PLAN_VIEW);
@@ -108,7 +99,6 @@ describe("AccountsDetailModel", () => {
     await settle();
 
     expect(urls.filter((url) => url.endsWith("/plan"))).toEqual([
-      "/ui/api/accounts/user-1/plan",
       "/ui/api/accounts/user-1/plan",
       "/ui/api/accounts/user-1/plan",
     ]);
@@ -285,22 +275,6 @@ describe("the cached plan", () => {
     expect(shown.isUnavailable).toBe(false);
     expect(shown.isRefreshing).toBe(false);
     expect(shown.isRefreshFailed).toBe(true);
-  });
-
-  it("does not show a signed-out account's earlier plan, which reads as unavailable", async () => {
-    await visitOnce(PLAN_VIEW);
-    const { model, answer } = modelWithHeldReads();
-
-    model.syncAccounts([{ ...ACCOUNT, is_enabled: false }]);
-    const shown = model.planStateFor(ACCOUNT.user_id);
-    expect(shown.isLoaded).toBe(false);
-    expect(shown.planView).toBeNull();
-
-    answer(null);
-    await settle();
-
-    expect(shown.isUnavailable).toBe(true);
-    expect(shown.isRefreshFailed).toBe(false);
   });
 
   it("drops a logged-out account's plan, so adding it back loads from scratch", async () => {

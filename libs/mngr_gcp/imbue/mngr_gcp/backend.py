@@ -380,7 +380,7 @@ class GcpProvider(OfflineCapableVpsProvider):
             timeout_seconds=timeout_seconds,
         )
 
-    # The shared ``OfflineCapableVpsProvider._list_provider_vps_hostnames``
+    # The shared ``OfflineCapableVpsProvider._list_provider_vps_entries``
     # (cached listing -> non-empty main_ip) covers GCP unchanged: a stopped GCE
     # instance loses its external IP and is excluded by the non-empty IP check.
 
@@ -414,6 +414,10 @@ class GcpProvider(OfflineCapableVpsProvider):
     # at ``mngr stop`` to the GCS state bucket; ``_host_dir_backend`` (selected
     # below) is bucket-backed when the bucket exists and the feature is enabled,
     # and the no-op backend otherwise.
+
+    def _host_id_marker_for_instance(self, instance: Mapping[str, Any]) -> str | None:
+        """Read the host id from instance metadata (GCE labels cannot hold a raw mngr host id)."""
+        return self._metadata_dict(instance).get(HOST_ID_METADATA_KEY)
 
     def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
         """Match on the host id stored verbatim in instance metadata (GCE labels cannot hold a raw mngr host id)."""

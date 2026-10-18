@@ -36,12 +36,22 @@ from imbue.minds.primitives import DEFAULT_AWS_REGION
 # ``[providers.<name>]`` section names in ``~/.minds/config.toml`` and the
 # provider instance names mngr uses (``imbue_cloud`` leases an OVH-US host;
 # ``vultr`` is the cloud-VM provider). ``aws`` is the create-form-level key for
-# the AWS provider: Imbue Studio collapses the per-region ``aws-<region>`` mngr
-# provider instances behind this single key (the chosen region is selected
-# explicitly in the form, not encoded in the key).
+# the AWS backend: every AWS connection instance (``aws_<hex>``) shares this
+# key's region table and default (a connection's region is pinned when it is
+# registered, not encoded in the key).
 IMBUE_CLOUD_PROVIDER_KEY: Final[str] = "imbue_cloud"
 VULTR_PROVIDER_KEY: Final[str] = "vultr"
 AWS_PROVIDER_KEY: Final[str] = "aws"
+# Every Modal connection instance (``modal_<hex>``) shares this key: Modal
+# places each sandbox per create, so the region is a create-form pick.
+MODAL_PROVIDER_KEY: Final[str] = "modal"
+
+# The two Modal placement choices that are not region names: let Modal place
+# the sandbox anywhere (no ``--region``, the cheapest option), or the region
+# nearest the user resolved at create time. Neither collides with Modal's broad
+# region names.
+MODAL_REGION_ANY: Final[str] = "any"
+MODAL_REGION_NEAREST: Final[str] = "nearest"
 
 # Approximate (latitude, longitude) of each provider's regions, used for the
 # coarse nearest-region geolocation default. The imbue_cloud pool lands hosts in
@@ -112,10 +122,29 @@ _AWS_REGION_COORDINATES: Final[dict[str, tuple[float, float]]] = {
     "ap-northeast-1": (35.68, 139.69),
 }
 
+# Modal's broad region names (https://modal.com/docs/guide/region-selection),
+# mapped to a representative datacenter of each, in declaration order:
+# Virginia, Oregon, Iowa, Texas, Ireland, Stockholm, Milan, Tokyo, Singapore,
+# Mumbai. Broad names keep Modal's placement pool wide, which is what its docs
+# recommend for cold-start time and availability.
+_MODAL_REGION_COORDINATES: Final[dict[str, tuple[float, float]]] = {
+    "us-east": (38.90, -77.04),
+    "us-west": (45.52, -122.68),
+    "us-central": (41.88, -93.10),
+    "us-south": (32.78, -96.80),
+    "eu-west": (53.35, -6.26),
+    "eu-north": (59.33, 18.07),
+    "eu-south": (45.46, 9.19),
+    "ap-northeast": (35.68, 139.69),
+    "ap-southeast": (1.35, 103.82),
+    "ap-south": (19.08, 72.88),
+}
+
 _REGION_COORDINATES_BY_PROVIDER: Final[dict[str, dict[str, tuple[float, float]]]] = {
     IMBUE_CLOUD_PROVIDER_KEY: _IMBUE_CLOUD_REGION_COORDINATES,
     VULTR_PROVIDER_KEY: _VULTR_REGION_COORDINATES,
     AWS_PROVIDER_KEY: _AWS_REGION_COORDINATES,
+    MODAL_PROVIDER_KEY: _MODAL_REGION_COORDINATES,
 }
 
 # Fallback region per provider when there is no stored value and geolocation has
@@ -124,6 +153,7 @@ _DEFAULT_REGION_BY_PROVIDER: Final[dict[str, str]] = {
     IMBUE_CLOUD_PROVIDER_KEY: "US-EAST-VA",
     VULTR_PROVIDER_KEY: "ewr",
     AWS_PROVIDER_KEY: DEFAULT_AWS_REGION,
+    MODAL_PROVIDER_KEY: "us-east",
 }
 
 _EARTH_RADIUS_KM: Final[float] = 6371.0
@@ -147,6 +177,12 @@ def known_regions_for_provider(provider_key: str) -> tuple[str, ...]:
     if coordinates is None:
         return ()
     return tuple(coordinates.keys())
+
+
+@pure
+def modal_region_choices() -> tuple[str, ...]:
+    """The create form's Modal placement choices: any, nearest, then Modal's broad region names."""
+    return (MODAL_REGION_ANY, MODAL_REGION_NEAREST, *known_regions_for_provider(MODAL_PROVIDER_KEY))
 
 
 @pure

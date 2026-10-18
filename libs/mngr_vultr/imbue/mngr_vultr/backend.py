@@ -18,7 +18,11 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import parse_vps_build_args
+from imbue.mngr_vps.data_types import VpsListingEntry
 from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.instance import listing_entry_from_host_id_marker
+from imbue.mngr_vps.instance import normalized_tags_to_dict
+from imbue.mngr_vps.primitives import HOST_ID_TAG_KEY
 from imbue.mngr_vps.primitives import VpsDiskGb
 from imbue.mngr_vps.primitives import VpsMemoryMib
 from imbue.mngr_vps.primitives import VpsVcpuCount
@@ -79,24 +83,28 @@ class VultrProvider(VpsProvider):
             plan_arg_name="plan",
         )
 
-    def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return public IPs of Vultr instances tagged with this provider's name.
+    def _list_provider_vps_entries(self) -> list[VpsListingEntry]:
+        """Return the Vultr instances tagged with this provider's name, with their host ids.
 
-        Vultr uses raw IPv4 addresses as SSH targets, not DNS names. The
-        return values are strings to satisfy the base-class contract,
-        which accepts either IPs or hostnames. The API key is guaranteed present
-        (the backend raises ProviderNotAuthorizedError at construction otherwise).
+        Vultr uses raw IPv4 addresses as SSH targets, not DNS names, and stores
+        tags as flat ``key=value`` strings, so the host id is read from the
+        ``mngr-host-id=`` entry. The API key is guaranteed present (the backend
+        raises ProviderNotAuthorizedError at construction otherwise).
         """
         provider_tag = f"mngr-provider={self.name}"
-        instances = self._list_instances_cached()
-        vps_ips: list[str] = []
-        for instance in instances:
+        entries: list[VpsListingEntry] = []
+        for instance in self._list_instances_cached():
             if provider_tag not in instance.get("tags", []):
                 continue
             vps_ip = instance.get("main_ip", "")
-            if vps_ip and vps_ip != "0.0.0.0":
-                vps_ips.append(vps_ip)
-        return vps_ips
+            if not vps_ip or vps_ip == "0.0.0.0":
+                continue
+            entry = listing_entry_from_host_id_marker(
+                vps_ip, normalized_tags_to_dict(instance).get(HOST_ID_TAG_KEY), str(instance.get("id"))
+            )
+            if entry is not None:
+                entries.append(entry)
+        return entries
 
 
 class VultrProviderBackend(ProviderBackendInterface):

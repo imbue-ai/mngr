@@ -35,6 +35,8 @@ from modal.stream_type import StreamType as ModalStreamType
 from modal.types import FileEntryType as ModalFileEntryType
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import PrivateAttr
+from pydantic import SecretStr
 from tenacity import RetryCallState
 from tenacity import retry
 from tenacity import retry_if_exception
@@ -142,6 +144,27 @@ def _translate_exceptions(func: Callable[_P, _R]) -> Callable[_P, _R]:
             raise _translate_modal_error(e) from e
 
     return wrapper
+
+
+def build_modal_cli_env(
+    base_env: Mapping[str, str], token_id: str | None, token_secret: SecretStr | None
+) -> dict[str, str]:
+    """The environment for a ``modal`` CLI subprocess: ``base_env`` plus the instance's own tokens, if any.
+
+    The CLI resolves credentials the same way the SDK does (``MODAL_TOKEN_*``
+    env, then ``~/.modal.toml``), so an instance that carries its own tokens
+    hands them to the subprocess through its environment rather than mutating
+    this process's ``os.environ``. Without tokens the base environment is
+    returned unchanged, so the CLI's own resolution applies.
+    """
+    env = dict(base_env)
+    if token_id is not None and token_secret is not None:
+        env["MODAL_TOKEN_ID"] = token_id
+        env["MODAL_TOKEN_SECRET"] = token_secret.get_secret_value()
+    return env
+
+
+# Conversion helpers
 
 
 def _to_modal_stream_type(st: StreamType) -> ModalStreamType:
@@ -549,6 +572,11 @@ class DirectApp(AppInterface):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     app: modal.App = Field(description="The underlying modal.App", repr=False)
+    client: modal.Client | None = Field(
+        default=None,
+        description="Credentials-built client the app's run context authenticates with (None: SDK default)",
+        repr=False,
+    )
 
     def get_app_id(self) -> str:
         app_id = self.app.app_id
@@ -564,16 +592,29 @@ class DirectApp(AppInterface):
 
     def run(self, *, environment_name: str) -> Generator[AppInterface, None, None]:
         try:
-            with self.app.run(environment_name=environment_name):
+            with self.app.run(client=self.client, environment_name=environment_name):
                 yield self
         except modal.exception.Error as e:
             raise _translate_modal_error(e) from e
 
 
 class DirectModalInterface(ModalInterface):
-    """Implementation of ModalInterface that calls the real Modal Python SDK."""
+    """Implementation of ModalInterface that calls the real Modal Python SDK.
+
+    With ``token_id`` / ``token_secret`` set, every SDK call authenticates
+    through a client built from exactly those credentials (``client=``), so a
+    provider instance can carry its own Modal account independent of the
+    ``MODAL_TOKEN_*`` environment and ``~/.modal.toml``. Unset, the SDK's own
+    credential resolution applies unchanged.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    token_id: str | None = Field(default=None, description="Modal token id to authenticate with (None: SDK default)")
+    token_secret: SecretStr | None = Field(
+        default=None, description="Modal token secret to authenticate with (None: SDK default)"
+    )
+    _client: modal.Client | None = PrivateAttr(default=None)
 
     deploy_attempt_timeout_seconds: float = Field(
         default=DEPLOY_ATTEMPT_TIMEOUT_SECONDS,
@@ -587,12 +628,33 @@ class DirectModalInterface(ModalInterface):
     )
 
     def model_post_init(self, context: Any) -> None:
+        if (self.token_id is None) != (self.token_secret is None):
+            raise ModalProxyInvalidError("token_id and token_secret must be set together (or both left unset)")
         # Opt every real Modal Sandbox operation into Modal's V2 Sandbox backend. Modal
         # reads MODAL_SANDBOX_V2 from the environment live on each Sandbox call,
         # and Sandbox.list only returns V2 sandboxes when it is set, so it must
         # be process-wide rather than per-create. setdefault preserves an
         # explicit MODAL_SANDBOX_V2=0 opt-out; GPU sandboxes fall back to V1.
         os.environ.setdefault("MODAL_SANDBOX_V2", "1")
+
+    def _resolve_client(self) -> modal.Client | None:
+        """The client every SDK call authenticates with: built once from the instance's tokens, or None.
+
+        None means "use the SDK's own credential resolution" (the ``client=``
+        default). Building the client opens no connection -- the SDK dials
+        lazily on the first RPC -- so this is safe to call eagerly.
+        """
+        if self.token_id is None or self.token_secret is None:
+            return None
+        if self._client is None:
+            try:
+                self._client = modal.Client.from_credentials(self.token_id, self.token_secret.get_secret_value())
+            except modal.exception.Error as e:
+                raise _translate_modal_error(e) from e
+        return self._client
+
+    def _cli_env(self) -> dict[str, str]:
+        return build_modal_cli_env(os.environ, self.token_id, self.token_secret)
 
     # Environment
 
@@ -604,6 +666,7 @@ class DirectModalInterface(ModalInterface):
                 check=False,
                 capture_output=True,
                 text=True,
+                env=self._cli_env(),
             )
         except FileNotFoundError as e:
             _translate_modal_cli_not_found(e)
@@ -613,7 +676,7 @@ class DirectModalInterface(ModalInterface):
     # App
 
     def app_create(self, name: str) -> AppInterface:
-        return DirectApp.model_construct(app=modal.App(name))
+        return DirectApp.model_construct(app=modal.App(name), client=self._resolve_client())
 
     @_retry_transient
     @_translate_exceptions
@@ -625,8 +688,13 @@ class DirectModalInterface(ModalInterface):
         environment_name: str,
     ) -> AppInterface:
         # Get-or-create keyed by name, so re-issuing it cannot produce a second app.
-        app = modal.App.lookup(name, create_if_missing=create_if_missing, environment_name=environment_name)
-        return DirectApp.model_construct(app=app)
+        app = modal.App.lookup(
+            name,
+            client=self._resolve_client(),
+            create_if_missing=create_if_missing,
+            environment_name=environment_name,
+        )
+        return DirectApp.model_construct(app=app, client=self._resolve_client())
 
     # Image
 
@@ -637,7 +705,7 @@ class DirectModalInterface(ModalInterface):
         return DirectImage.model_construct(image=modal.Image.from_registry(name))
 
     def image_from_id(self, image_id: str) -> ImageInterface:
-        return DirectImage.model_construct(image=modal.Image.from_id(image_id))
+        return DirectImage.model_construct(image=modal.Image.from_id(image_id, client=self._resolve_client()))
 
     # Sandbox
 
@@ -673,6 +741,7 @@ class DirectModalInterface(ModalInterface):
                 cidr_allowlist=list(cidr_allowlist) if cidr_allowlist is not None else None,
                 volumes=modal_volumes,
                 experimental_options=dict(experimental_options) if experimental_options is not None else None,
+                client=self._resolve_client(),
             )
         except modal.exception.Error as e:
             raise _translate_modal_error(e) from e
@@ -681,12 +750,15 @@ class DirectModalInterface(ModalInterface):
     @_retry_transient
     @_translate_exceptions
     def sandbox_list(self, *, app_id: str) -> list[SandboxInterface]:
-        return [DirectSandbox.model_construct(sandbox=sb) for sb in modal.Sandbox.list(app_id=app_id)]
+        return [
+            DirectSandbox.model_construct(sandbox=sb)
+            for sb in modal.Sandbox.list(app_id=app_id, client=self._resolve_client())
+        ]
 
     @_retry_transient
     @_translate_exceptions
     def sandbox_from_id(self, sandbox_id: str) -> SandboxInterface:
-        return DirectSandbox.model_construct(sandbox=modal.Sandbox.from_id(sandbox_id))
+        return DirectSandbox.model_construct(sandbox=modal.Sandbox.from_id(sandbox_id, client=self._resolve_client()))
 
     # Volume
 
@@ -705,12 +777,14 @@ class DirectModalInterface(ModalInterface):
                     create_if_missing=create_if_missing,
                     environment_name=environment_name,
                     version=version,
+                    client=self._resolve_client(),
                 )
             else:
                 vol = modal.Volume.from_name(
                     name,
                     create_if_missing=create_if_missing,
                     environment_name=environment_name,
+                    client=self._resolve_client(),
                 )
         except modal.exception.Error as e:
             raise _translate_modal_error(e) from e
@@ -721,12 +795,12 @@ class DirectModalInterface(ModalInterface):
     def volume_list(self, *, environment_name: str) -> list[VolumeInterface]:
         return [
             DirectVolume.model_construct(volume=vol, volume_name=vol.name)
-            for vol in modal.Volume.objects.list(environment_name=environment_name)
+            for vol in modal.Volume.objects.list(environment_name=environment_name, client=self._resolve_client())
         ]
 
     def volume_delete(self, name: str, *, environment_name: str) -> None:
         try:
-            modal.Volume.objects.delete(name, environment_name=environment_name)
+            modal.Volume.objects.delete(name, environment_name=environment_name, client=self._resolve_client())
         except modal.exception.Error as e:
             raise _translate_modal_error(e) from e
 
@@ -745,7 +819,9 @@ class DirectModalInterface(ModalInterface):
         app_name: str,
         environment_name: str | None = None,
     ) -> FunctionInterface:
-        func = modal.Function.from_name(name=name, app_name=app_name, environment_name=environment_name)
+        func = modal.Function.from_name(
+            name=name, app_name=app_name, environment_name=environment_name, client=self._resolve_client()
+        )
         return DirectFunction.model_construct(function=func)
 
     @_retry_transient
@@ -758,7 +834,9 @@ class DirectModalInterface(ModalInterface):
         environment_name: str | None = None,
     ) -> bool:
         # from_name is lazy, so the server lookup happens in hydrate()
-        func = modal.Function.from_name(name=name, app_name=app_name, environment_name=environment_name)
+        func = modal.Function.from_name(
+            name=name, app_name=app_name, environment_name=environment_name, client=self._resolve_client()
+        )
         try:
             func.hydrate()
         except modal.exception.NotFoundError:
@@ -789,7 +867,7 @@ class DirectModalInterface(ModalInterface):
                     capture_output=True,
                     text=True,
                     env={
-                        **os.environ,
+                        **self._cli_env(),
                         **extra_env,
                         "MNGR_MODAL_APP_NAME": app_name,
                         "MNGR_MODAL_APP_BUILD_PATH": tmpdir,

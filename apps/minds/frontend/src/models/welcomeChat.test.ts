@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { CreateAttemptRequestSummary } from "./create";
-import { SETUP_LINE, SETUP_SECTIONS, readyTurnMarkdown } from "./creationTranscript";
+import {
+  SETUP_LINE,
+  SETUP_SECTIONS,
+  readyTurnMarkdown,
+} from "./creationTranscript";
 import {
   MANIFESTO_POINTS,
   MANIFESTO_QUESTION,
@@ -23,6 +27,8 @@ const REQUEST: CreateAttemptRequestSummary = {
   display_name: "workspace-1",
   launch_mode: "IMBUE_CLOUD",
   cloud_account: "",
+  cloud_account_alias: "",
+  cloud_account_backend_label: "",
   backup_provider: "IMBUE_CLOUD",
   region: "US-EAST-VA",
   instance_type: "",
@@ -174,7 +180,10 @@ describe("postWelcomeChat", () => {
       postWelcomeChat("attempt-1", { title: "", turns: [] }, () =>
         Promise.resolve(
           jsonResponse(
-            { error: "Couldn't open the welcome chat in the workspace.", detail: "the chat app answered HTTP 400" },
+            {
+              error: "Couldn't open the welcome chat in the workspace.",
+              detail: "the chat app answered HTTP 400",
+            },
             502,
           ),
         ),

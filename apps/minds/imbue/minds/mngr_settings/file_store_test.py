@@ -41,3 +41,20 @@ def test_update_preserves_unrelated_content(tmp_path: Path) -> None:
     text = settings_path.read_text()
     assert "# user comment" in text
     assert store.read() == {"existing": "kept-51826", "added": "new-90417"}
+
+
+def test_update_leaves_the_settings_file_owner_only(tmp_path: Path) -> None:
+    """The provider blocks carry cloud credentials, so every write ends 0600, even over a wider mode."""
+    settings_path = tmp_path / "settings.toml"
+    store = FileMindsSettingsStore(settings_path=settings_path)
+
+    def add_value(doc: tomlkit.TOMLDocument) -> bool:
+        doc["marker"] = "value"
+        return True
+
+    store.update(add_value)
+    assert settings_path.stat().st_mode & 0o777 == 0o600
+
+    settings_path.chmod(0o644)
+    store.update(add_value)
+    assert settings_path.stat().st_mode & 0o777 == 0o600

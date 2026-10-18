@@ -11,6 +11,7 @@ from imbue.minds.desktop_client.local_prerequisites import LocalBackendKey
 from imbue.minds.desktop_client.local_prerequisites import LocalBackendPrerequisite
 from imbue.minds.desktop_client.local_prerequisites import SubprocessHostProbe
 from imbue.minds.desktop_client.local_prerequisites import detect_host_package_manager
+from imbue.minds.desktop_client.local_prerequisites import docker_daemon_cpu_count
 from imbue.minds.desktop_client.local_prerequisites import host_platform_from_system
 from imbue.minds.desktop_client.local_prerequisites import local_launch_mode_for
 from imbue.minds.desktop_client.local_prerequisites import probe_local_prerequisites
@@ -19,6 +20,7 @@ from imbue.minds.primitives import LaunchMode
 
 _DOCKER_VERSION_PROBE = "docker version --format {{.Server.Version}}"
 _DOCKER_RUNTIMES_PROBE = "docker info --format {{json .Runtimes}}"
+_DOCKER_CPU_COUNT_PROBE = "docker info --format {{.NCPU}}"
 _ANSWERING = CommandProbeResult(returncode=0, stdout="28.1.0\n")
 _RUNTIMES_WITH_RUNSC = CommandProbeResult(
     returncode=0, stdout='{"runc":{"path":"runc"},"runsc":{"path":"/usr/bin/runsc"}}\n'
@@ -94,6 +96,28 @@ def test_runsc_is_available_only_when_the_daemon_lists_it() -> None:
     # No apt here, so there is no command to paste -- only the docs.
     assert runsc.install_command == ""
     assert runsc.docs_url.startswith("https://gvisor.dev/")
+
+
+def test_the_daemons_cpu_count_is_read_from_docker_info() -> None:
+    probe = FakeHostProbe(result_by_command={_DOCKER_CPU_COUNT_PROBE: CommandProbeResult(returncode=0, stdout="2\n")})
+
+    assert docker_daemon_cpu_count(probe) == 2
+    assert probe.commands_run == [_DOCKER_CPU_COUNT_PROBE]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param(None, id="not-launched"),
+        pytest.param(CommandProbeResult(returncode=1, stdout=""), id="daemon-refused"),
+        pytest.param(CommandProbeResult(returncode=0, stdout="many\n"), id="not-a-number"),
+        pytest.param(CommandProbeResult(returncode=0, stdout="0\n"), id="not-positive"),
+    ],
+)
+def test_an_unreadable_daemon_cpu_count_reads_as_unknown(result: CommandProbeResult | None) -> None:
+    probe = FakeHostProbe(result_by_command={_DOCKER_CPU_COUNT_PROBE: result})
+
+    assert docker_daemon_cpu_count(probe) is None
 
 
 @pytest.mark.parametrize("runtime_list", ["not json", '["runsc"]'])

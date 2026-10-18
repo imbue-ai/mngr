@@ -1,8 +1,8 @@
-"""End-to-end release test for the minds Azure (bring-your-own-key) compute provider.
+"""End-to-end release test for the minds Azure connection compute provider.
 
-Provisions a real Azure VM through a minds-shaped BYOK Azure account block
-(``[providers.byok-azure-<slug>]``, the shape ``set_cloud_account_provider``
-writes) and asserts the agent container has the shape minds relies on: a runsc
+Provisions a real Azure VM through a minds-shaped Azure connection block
+(the knobs minds' ``connection_provider_block`` writes, under a test-only
+instance name) and asserts the agent container has the shape minds relies on: a runsc
 (gVisor) hardened Docker container on the Azure VM *outer* host, with /run and
 /tmp on tmpfs and a memory cap derived from the VM's RAM.
 
@@ -53,15 +53,16 @@ pytestmark = [
     ),
 ]
 
-# The same ``byok-azure-<slug>`` naming minds gives an account block, so the
-# create address (``...@<host>.byok-azure-release``) selects exactly this block.
-_AZURE_PROVIDER_NAME = "byok-azure-release"
+# A test-only instance name: the create address (``...@<host>.azure-release``)
+# selects exactly this block, which the test writes itself (minds names its
+# connection instances ``azure_<hex>`` and never runs its materializer here).
+_AZURE_PROVIDER_NAME = "azure-release"
 _REGION = AZURE_DEFAULT_REGION
 
 
 @pytest.fixture()
 def azure_release_env(tmp_path: Path) -> dict[str, str]:
-    """The subprocess env for the release test: the BYOK Azure provider block exactly as minds writes it.
+    """The subprocess env for the release test: the Azure connection instance block exactly as minds writes it.
 
     Backend ``azure``, the region, VM size and resource group, the user-data
     layout, the runsc hardening knobs, plus the release-test-only
@@ -90,7 +91,7 @@ def azure_release_env(tmp_path: Path) -> dict[str, str]:
 def test_azure_workspace_runs_in_runsc_container_on_azure_vm(
     azure_release_env: dict[str, str], temp_git_repo: Path
 ) -> None:
-    """A minds BYOK Azure account block lands a runsc-hardened, tmpfs-mounted, memory-capped container on a real Azure VM."""
+    """A minds Azure connection block lands a runsc-hardened, tmpfs-mounted, memory-capped container on a real Azure VM."""
     host_name = f"test-azure-mind-{uuid.uuid4().hex}"
     agent_address = f"agent@{host_name}.{_AZURE_PROVIDER_NAME}"
 

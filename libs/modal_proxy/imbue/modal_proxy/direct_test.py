@@ -1,3 +1,4 @@
+import ast
 import inspect
 import os
 import subprocess
@@ -24,6 +25,7 @@ from modal.stream_type import StreamType as ModalStreamType
 from modal.types import FileEntryType as ModalFileEntryType
 from modal.volume import _raise_on_block_response_error
 from pydantic import BaseModel
+from pydantic import SecretStr
 from tenacity import RetryCallState
 from tenacity import Retrying
 
@@ -52,6 +54,7 @@ from imbue.modal_proxy.direct import _unwrap_app
 from imbue.modal_proxy.direct import _unwrap_image
 from imbue.modal_proxy.direct import _unwrap_secret
 from imbue.modal_proxy.direct import _unwrap_volume
+from imbue.modal_proxy.direct import build_modal_cli_env
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyBlockStorageError
@@ -1020,3 +1023,101 @@ def test_every_boundary_call_declares_whether_it_is_safe_to_reissue() -> None:
 
     assert sorted(method.__qualname__ for method in defined - declared) == []
     assert sorted(method.__qualname__ for method in declared - defined) == []
+
+
+# Per-instance credentials
+
+
+def test_direct_modal_interface_uses_the_sdk_default_client_without_tokens() -> None:
+    assert DirectModalInterface()._resolve_client() is None
+
+
+def test_direct_modal_interface_builds_a_credentials_client_from_its_tokens() -> None:
+    """With tokens set, every SDK call goes through one client built from exactly those credentials.
+
+    Building the client opens no connection (the SDK dials lazily on the first
+    RPC), so this needs neither a network nor a real token.
+    """
+    iface = DirectModalInterface(token_id="ak-test", token_secret=SecretStr("as-test"))
+
+    client = iface._resolve_client()
+
+    assert isinstance(client, modal.Client)
+    assert iface._resolve_client() is client, "the credentials client is built once and reused"
+
+
+_SDK_CLASSES_BY_NAME: Final[dict[str, type]] = {
+    "App": modal.App,
+    "Client": modal.Client,
+    "Function": modal.Function,
+    "Image": modal.Image,
+    "Sandbox": modal.Sandbox,
+    "Secret": modal.Secret,
+    "Volume": modal.Volume,
+}
+
+
+def test_every_sdk_call_that_accepts_a_client_receives_the_instance_client() -> None:
+    """A per-instance token pair reaches Modal only through ``client=``, so every SDK classmethod call in
+    direct.py whose signature takes one has to pass it, or that call silently falls back to the ambient
+    credentials."""
+    source_path = inspect.getsourcefile(DirectModalInterface)
+    assert source_path is not None
+    missing: list[str] = []
+    for node in ast.walk(ast.parse(Path(source_path).read_text())):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        owner = node.func.value
+        if not (isinstance(owner, ast.Attribute) and isinstance(owner.value, ast.Name) and owner.value.id == "modal"):
+            continue
+        sdk_class = _SDK_CLASSES_BY_NAME.get(owner.attr)
+        sdk_method = dict(inspect.getmembers(sdk_class)).get(node.func.attr) if sdk_class is not None else None
+        if sdk_method is None or "client" not in inspect.signature(sdk_method).parameters:
+            continue
+        if not any(keyword.arg == "client" for keyword in node.keywords):
+            missing.append(f"modal.{owner.attr}.{node.func.attr} at line {node.lineno}")
+    assert missing == []
+
+
+def test_direct_modal_interface_rejects_half_a_token() -> None:
+    with pytest.raises(ModalProxyInvalidError, match="token_id and token_secret"):
+        DirectModalInterface(token_id="ak-only")
+
+
+def test_build_modal_cli_env_hands_the_tokens_to_the_cli_without_touching_the_base_env() -> None:
+    base_env = {"PATH": "/usr/bin", "MODAL_TOKEN_ID": "ak-ambient", "MODAL_TOKEN_SECRET": "as-ambient"}
+
+    env = build_modal_cli_env(base_env, "ak-instance", SecretStr("as-instance"))
+
+    assert env["MODAL_TOKEN_ID"] == "ak-instance"
+    assert env["MODAL_TOKEN_SECRET"] == "as-instance"
+    assert env["PATH"] == "/usr/bin"
+    assert base_env["MODAL_TOKEN_ID"] == "ak-ambient"
+
+
+def test_build_modal_cli_env_leaves_the_base_env_alone_without_tokens() -> None:
+    base_env = {"PATH": "/usr/bin", "MODAL_TOKEN_ID": "ak-ambient"}
+    assert build_modal_cli_env(base_env, None, None) == base_env
+
+
+def test_deploy_runs_the_cli_with_the_instance_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ``modal deploy`` subprocess authenticates with the instance's tokens, not the ambient ones, and
+    carries the caller's extra env (the deployed script reads its marker name from it)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    seen_env = tmp_path / "seen_env"
+    script = bin_dir / "modal"
+    script.write_text(
+        f'#!/bin/sh\necho "$MODAL_TOKEN_ID:$MODAL_TOKEN_SECRET:$MNGR_MODAL_SOURCE_MARKER_NAME" > "{seen_env}"\nexit 0\n'
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "ak-ambient")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "as-ambient")
+
+    DirectModalInterface(token_id="ak-instance", token_secret=SecretStr("as-instance")).deploy(
+        tmp_path / "snapshot.py", app_name="my-app", extra_env={"MNGR_MODAL_SOURCE_MARKER_NAME": "marker-fn"}
+    )
+
+    assert seen_env.read_text().strip() == "ak-instance:as-instance:marker-fn"
+    assert os.environ["MODAL_TOKEN_ID"] == "ak-ambient", "the instance tokens never leak into this process"

@@ -13,16 +13,22 @@ from imbue.minds.desktop_client.backend_resolver import ServiceShareKind
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
+from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
+from imbue.minds.desktop_client.conftest import make_connection_store_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.conftest import unlock_account_with_master_password_for_test
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
+from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
+from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
+from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
 from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.ui_api_options import _workspace_host_coordinate_for_options
 from imbue.minds.desktop_client.ui_api_options import accepted_service_icon
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
-from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import ProviderInstanceName
@@ -119,8 +125,8 @@ def test_options_data_returns_workspace_context(tmp_path: Path) -> None:
     assert data["color"] == "#9fbbd3"
     assert data["palette"] == dict(WORKSPACE_PALETTE)
     assert data["is_stale"] is False
-    assert data["is_leased_imbue_cloud"] is False
     assert data["leased_owner_email"] == ""
+    assert data["is_account_owned_provider"] is False
     # No session store in this minimal app: unassociated, no accounts offered.
     assert data["has_account"] is False
     assert data["account_email"] == ""
@@ -234,24 +240,29 @@ def test_options_data_flags_stale_and_leased_workspaces(tmp_path: Path) -> None:
 
     data = json.loads(response.get_data(as_text=True))
     assert data["is_stale"] is True
-    assert data["is_leased_imbue_cloud"] is True
     # No linked account and no signed-in account's provider hosts it: the owner is not known.
     assert data["leased_owner_email"] == ""
+    assert data["is_account_owned_provider"] is True
     # No stored color label: the default is reported.
     assert data["color"] == DEFAULT_WORKSPACE_COLOR
 
 
 def _leased_machine_options_data(
-    tmp_path: Path, hosting_email: str, cli: FakeImbueCloudCli, session_store: MultiAccountSessionStore
+    tmp_path: Path,
+    hosting_user_id: str,
+    cli: FakeImbueCloudCli,
+    session_store: MultiAccountSessionStore,
+    provider_name: str | None = None,
+    connection_store: ConnectionStore | None = None,
 ) -> dict[str, Any]:
-    """The options data for a machine leased under ``hosting_email``'s Imbue Cloud provider instance."""
+    """The options data for a machine on ``provider_name`` (default: ``hosting_user_id``'s Imbue Cloud instance)."""
     resolver = _OptionsSeededResolver(
         url_by_agent_and_service={_AGENT_ID: {}},
         display_info_by_agent_id={
             _AGENT_ID: AgentDisplayInfo(
                 agent_name="leased",
                 host_id=_HOST_ID,
-                provider_name=imbue_cloud_provider_name_for_account(hosting_email),
+                provider_name=provider_name or imbue_cloud_provider_name_for_user(hosting_user_id),
             )
         },
     )
@@ -261,6 +272,7 @@ def _leased_machine_options_data(
         backend_resolver=resolver,
         imbue_cloud_cli=cli,
         session_store=session_store,
+        connection_store=connection_store,
     )
     return json.loads(client.get(f"/ui/api/workspaces/{_AGENT_ID}/options").get_data(as_text=True))
 
@@ -273,11 +285,28 @@ def test_options_data_names_a_leased_machines_owner_from_its_provider_when_it_ha
     cli.add_account(user_id="user-alice", email="alice@example.com")
     session_store = make_session_store_for_test(tmp_path / "session-store", cli)
 
-    data = _leased_machine_options_data(tmp_path, "alice@example.com", cli, session_store)
-
-    assert data["is_leased_imbue_cloud"] is True
+    data = _leased_machine_options_data(tmp_path, "user-alice", cli, session_store)
     assert data["current_account"] is None
     assert data["leased_owner_email"] == "alice@example.com"
+
+
+def test_options_data_names_the_owner_of_a_machine_on_an_account_owned_connection(tmp_path: Path) -> None:
+    """A machine on a connection instance belongs to the signed-in account that owns the connection."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-bob", email="bob@example.com")
+    cli.add_account(user_id="user-alice", email="alice@example.com")
+    session_store = make_session_store_for_test(tmp_path / "session-store", cli)
+    connection_store = make_connection_store_for_test(tmp_path / "connections", cli)
+    unlock_account_with_master_password_for_test(connection_store.paths, "user-alice")
+    connection_id = add_modal_connection_for_test(connection_store, "user-alice", "team modal")
+    instance_name = provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id)
+
+    data = _leased_machine_options_data(
+        tmp_path, "user-bob", cli, session_store, provider_name=instance_name, connection_store=connection_store
+    )
+    assert data["current_account"] is None
+    assert data["leased_owner_email"] == "alice@example.com"
+    assert data["is_account_owned_provider"] is True
 
 
 def test_options_data_names_a_leased_machines_linked_account_as_its_owner(tmp_path: Path) -> None:
@@ -290,9 +319,7 @@ def test_options_data_names_a_leased_machines_linked_account_as_its_owner(tmp_pa
         user_id="user-owner", agent_id=_AGENT_ID, host_id=_HOST_ID, display_name="", color=None, is_cloud_row=True
     )
 
-    data = _leased_machine_options_data(tmp_path, "other@example.com", cli, session_store)
-
-    assert data["is_leased_imbue_cloud"] is True
+    data = _leased_machine_options_data(tmp_path, "user-other", cli, session_store)
     assert data["leased_owner_email"] == "owner@example.com"
 
 
@@ -426,7 +453,7 @@ def test_machine_size_is_unavailable_when_discovery_recorded_no_size(tmp_path: P
 @pytest.mark.witnesses("machine-size.recorded-size-shown")
 @pytest.mark.parametrize(
     ("provider_name", "is_resizable", "is_disk_resizable"),
-    [("docker", True, False), ("lima", True, True), ("modal", False, False), ("byok-aws-team", False, False)],
+    [("docker", True, False), ("lima", True, True), ("modal", False, False), ("aws_" + "0" * 32, False, False)],
 )
 def test_machine_size_reports_the_size_discovery_recorded_for_any_provider(
     tmp_path: Path, provider_name: str, is_resizable: bool, is_disk_resizable: bool

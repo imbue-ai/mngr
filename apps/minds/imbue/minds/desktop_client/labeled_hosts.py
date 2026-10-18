@@ -24,7 +24,8 @@ from imbue.minds.desktop_client.pending_create_attempts import read_create_attem
 # create stamps it only for the local-VM modes): the scope of both the startup
 # reconcile and the create attempt discard flows. Modal is excluded (sandboxes
 # self-expire within ~a day), imbue_cloud pool hosts have their own reconcile,
-# and the cloud BYOK providers were never part of the orphan failure mode.
+# and the cloud connection instances (aws, gcp, azure) were never part of the
+# orphan failure mode.
 WORKSPACE_ID_LABELED_PROVIDER_NAMES: Final[tuple[str, ...]] = ("lima", "docker")
 
 

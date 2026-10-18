@@ -27,8 +27,6 @@ from imbue.imbue_common.sentry.testing import TEST_S3_BUCKET
 from imbue.imbue_common.sentry.testing import capturing_sentry_client
 from imbue.imbue_common.sentry.testing import recording_s3_bucket
 from imbue.imbue_common.sentry.testing import registered_attachments_uploader
-from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
-from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_requests_payload
@@ -44,12 +42,23 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
+from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_agents_json
+from imbue.minds.desktop_client.conftest import make_connection_store_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_profiled_device_for_test
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.conftest import unlock_account_with_master_password_for_test
+from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
+from imbue.minds.desktop_client.connections.data_types import CONNECTION_STATE_DELETED
+from imbue.minds.desktop_client.connections.primitives import CONNECTION_DOCUMENT_KIND
+from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
+from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
+from imbue.minds.desktop_client.connections.provider_settings import legacy_imbue_cloud_provider_name_for_account
 from imbue.minds.desktop_client.console_log_staging import ELECTRON_CONSOLE_TAIL_FILENAME
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import _COOKIE_MAX_AGE_SECONDS
@@ -92,12 +101,9 @@ from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIV
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceSecretsPayload
 from imbue.minds.desktop_client.workspace_record_store import encode_encrypted_secrets
-from imbue.minds.mngr_settings.imbue_cloud_accounts import set_imbue_cloud_provider_for_account
-from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
-from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
@@ -631,7 +637,7 @@ def test_build_workspace_list_says_why_a_cloud_row_cannot_open_from_this_device(
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
     paths, record_store, session_store, _profile_dir = make_profiled_device_for_test(tmp_path, "this", cli)
-    instance_name = imbue_cloud_provider_name_for_account("a@b.com")
+    instance_name = imbue_cloud_provider_name_for_user("user-1")
     agent_id = AgentId.generate()
     host_id = HostId.generate()
     agents = [
@@ -661,7 +667,9 @@ def test_build_workspace_list_says_why_a_cloud_row_cannot_open_from_this_device(
     delete_dek(paths, "user-1")
     assert _build_workspace_list(backend_resolver, session_store)[0]["key_state"] == "locked"
     # With the key on disk the row opens like any other, whatever the lock state.
-    key_path = record_store.imbue_cloud_host_ssh_key_path("a@b.com", str(host_id))
+    found = record_store.find_active_record(str(agent_id))
+    assert found is not None
+    key_path = record_store.host_access_key_path(found[0], found[1])
     assert key_path is not None
     key_path.parent.mkdir(parents=True)
     key_path.write_text("not-a-real-key\n")
@@ -926,7 +934,7 @@ def test_cloud_record_outside_discovery_is_badged_with_its_provider_not_the_crea
         user_id="user-1",
         email="a@b.com",
         agent_id=cloud_agent_id,
-        provider_kind=imbue_cloud_provider_name_for_account("a@b.com"),
+        provider_kind=legacy_imbue_cloud_provider_name_for_account("a@b.com"),
         device_label="mac",
         encrypted_secrets=None,
     )
@@ -952,6 +960,45 @@ def test_cloud_record_outside_discovery_is_badged_with_its_provider_not_the_crea
     assert other_device_tile.location == "mac"
 
 
+def test_record_on_an_account_connection_is_badged_with_the_alias_and_stays_a_cloud_tile_once_removed(
+    tmp_path: Path,
+) -> None:
+    """A row written on an account-owned connection has no hosting device and is badged with the connection's
+    alias while the account holds it; once the connection is gone from the account it must still render as a
+    cloud row (with the missing-connection state), never as a machine on the device that created it."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    connection_store = make_connection_store_for_test(tmp_path, cli)
+    session_store = make_session_store_for_test(tmp_path, cli=cli, connection_store=connection_store)
+    unlock_account_with_master_password_for_test(InstallationPaths(data_dir=tmp_path), "user-1")
+    connection_id = add_modal_connection_for_test(connection_store, "user-1", "team modal")
+    agent_id = AgentId.generate()
+    _upsert_remote_record(
+        session_store,
+        user_id="user-1",
+        email="a@b.com",
+        agent_id=agent_id,
+        provider_kind=provider_instance_name_for_connection(ConnectionBackend.MODAL, connection_id),
+        device_label="mac",
+        encrypted_secrets=None,
+    )
+    resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
+
+    (tile,) = _collect_remote_workspace_tiles(resolver, session_store)
+
+    assert tile.kind is RemoteWorkspaceKind.CLOUD
+    assert tile.location == "team modal (Modal)"
+    assert tile.state == ""
+
+    connection_store.remove_connection("user-1", "a@b.com", str(connection_id))
+
+    (tile,) = _collect_remote_workspace_tiles(resolver, session_store)
+
+    assert tile.kind is RemoteWorkspaceKind.CLOUD
+    assert tile.location == "Modal"
+    assert tile.state == "missing_connection"
+
+
 def test_remote_tile_backup_access_follows_where_the_credentials_are(tmp_path: Path) -> None:
     """The tile says whether this device can read the backups now, and if not, why.
 
@@ -967,7 +1014,7 @@ def test_remote_tile_backup_access_follows_where_the_credentials_are(tmp_path: P
     session_store = make_session_store_for_test(tmp_path, cli=cli)
     record_store = session_store.record_store
     assert record_store is not None
-    provider_kind = imbue_cloud_provider_name_for_account("a@b.com")
+    provider_kind = legacy_imbue_cloud_provider_name_for_account("a@b.com")
 
     local_env_agent_id = AgentId.generate()
     _upsert_remote_record(
@@ -1003,7 +1050,7 @@ def test_remote_tile_backup_access_follows_where_the_credentials_are(tmp_path: P
     unlocked_user_id = "user-2"
     unlocked_email = "c@d.com"
     cli.add_account(user_id=unlocked_user_id, email=unlocked_email)
-    unlocked_provider_kind = imbue_cloud_provider_name_for_account(unlocked_email)
+    unlocked_provider_kind = legacy_imbue_cloud_provider_name_for_account(unlocked_email)
     dek = ensure_dek(record_store.paths, unlocked_user_id)
     synced_agent_id = AgentId.generate()
     _upsert_remote_record(
@@ -1120,6 +1167,9 @@ def _create_test_client_with_stores(
     # collection subprocess -- resolving ``mngr`` via PATH, so tests stub it
     # there -- instead of short-circuiting.
     root_concurrency_group: ConcurrencyGroup | None = None,
+    # When set, wired into the app state so the routes that move or list
+    # cloud connections (e.g. the clear-password re-homing) see it.
+    connection_store: ConnectionStore | None = None,
 ) -> tuple[FlaskClient, FileAuthStore]:
     """Create a desktop client with session store and config for testing new routes.
 
@@ -1148,6 +1198,7 @@ def _create_test_client_with_stores(
         imbue_cloud_cli=imbue_cloud_cli,
         sync_scheduler=sync_scheduler,
         root_concurrency_group=root_concurrency_group,
+        connection_store=connection_store,
     )
     client = app.test_client()
     return client, auth_store
@@ -1241,43 +1292,6 @@ def test_set_default_account(tmp_path: Path) -> None:
 
     config = MindsConfig(data_dir=tmp_path)
     assert config.get_default_account_id() == "user-default-123"
-
-
-def test_disabling_an_account_provider_republishes_the_accounts_frame(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """Manage Accounts renders from the accounts frame and lists an account whose provider is off as signed out."""
-    stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-tname")
-    email = "only@example.com"
-    set_imbue_cloud_provider_for_account(
-        email, connector_url="https://test--rsc-api.modal.run", root=MindsRoot.from_environment()
-    )
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-only", email=email)
-    client, auth_store = _create_test_client_with_stores(
-        tmp_path, cli=cli, root_concurrency_group=root_concurrency_group
-    )
-    _authenticate_client(client, auth_store)
-    publisher = get_state(client.application).ui_publisher
-    assert publisher is not None
-    client_queue = publisher.broadcaster.register()
-    publisher.publish_now()
-    baseline = [frame for frame in drain_ui_channel_frames(client_queue) if frame["type"] == "accounts"]
-    assert baseline[-1]["accounts"][0]["is_enabled"] is True
-
-    publisher.start(root_concurrency_group)
-    try:
-        response = client.patch(
-            f"/api/v1/desktop/providers/{imbue_cloud_provider_name_for_account(email)}", json={"enabled": False}
-        )
-        assert response.status_code == 200
-
-        frame = _await_ui_frame(client_queue, "accounts")
-    finally:
-        publisher.stop()
-
-    assert [(entry["email"], entry["is_enabled"]) for entry in frame["accounts"]] == [(email, False)]
 
 
 # error-reporting consent + settings tests
@@ -1405,6 +1419,39 @@ def test_backup_password_change_may_return_to_the_empty_password(tmp_path: Path)
     assert verify_master_password_for_account(paths, "user-1", SecretStr("")) is True
     # Clearing scrubs the server: no bundle remains on the (fake) connector.
     assert "a@b.com" not in cli.sync_bundle_by_email
+
+
+def test_backup_password_change_clear_rehomes_the_accounts_connections_into_the_local_profile(
+    tmp_path: Path,
+) -> None:
+    """Clearing the password strips every connection payload server-side, so the account's
+    decryptable connections move into the local profile first, keeping their ids."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    connection_store = make_connection_store_for_test(tmp_path, cli)
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli, connection_store=connection_store)
+    _authenticate_client(client, auth_store)
+    assert (
+        client.post(
+            "/_chrome/backup-password", json={"new_password": "temp", "new_password_confirm": "temp"}
+        ).status_code
+        == 200
+    )
+    connection_id = add_modal_connection_for_test(connection_store, "user-1", "my modal")
+    connection_store.push_connection("user-1", "a@b.com", str(connection_id))
+
+    response = client.post("/_chrome/backup-password", json={"new_password": "", "new_password_confirm": ""})
+
+    assert response.status_code == 200
+    assert response.get_json()["ok"] is True
+    assert connection_store.list_connections("user-1") == []
+    (local_record,) = connection_store.list_connections(LOCAL_PROFILE_USER_ID)
+    assert local_record.doc_id == str(connection_id)
+    assert local_record.payload is not None and local_record.payload["token_secret"] == "as"
+    # The account's copy is tombstoned on the (fake) connector, and the scrub left no payload behind.
+    stored = cli.sync_documents_by_email["a@b.com"][CONNECTION_DOCUMENT_KIND][str(connection_id)]
+    assert stored["state"] == CONNECTION_STATE_DELETED
+    assert stored["encrypted_payload"] is None
 
 
 def test_backup_password_change_refuses_accounts_locked_on_this_device(tmp_path: Path) -> None:

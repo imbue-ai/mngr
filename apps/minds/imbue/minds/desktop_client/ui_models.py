@@ -55,7 +55,7 @@ from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 25
+UI_SCHEMA_VERSION: int = 27
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -153,6 +153,18 @@ class UiHelloMessage(FrozenModel):
     schema_version: int = Field(description="UI_SCHEMA_VERSION the server was built with")
 
 
+class RemoteTileState(FrozenModel):
+    """The derived access state of a remote tile (a workspace known only from a synced record)."""
+
+    state: str = Field(
+        description=(
+            "'' (plain), 'locked', 'missing_connection', 'no_credentials', 'read_only', 'connecting', "
+            "'unreachable', or 'error'"
+        )
+    )
+    detail: str | None = Field(default=None, description="The failure detail behind the 'error' state (chip tooltip)")
+
+
 class UiWorkspacesMessage(FrozenModel):
     """Full workspace-list state (always the complete list, never a delta)."""
 
@@ -171,8 +183,8 @@ class UiWorkspacesMessage(FrozenModel):
     restorable_workspace_ids: tuple[str, ...] = Field(
         description="Agent ids AND host ids that window restore may target (both coordinates, see UiWorkspaceEntry)"
     )
-    remote_workspace_states: dict[str, str] = Field(
-        description="agent_id -> derived access state for remote tiles (empty string = plain remote)"
+    remote_workspace_states: dict[str, RemoteTileState] = Field(
+        description="agent_id -> derived access state (and its detail) for remote tiles"
     )
 
 
@@ -183,7 +195,6 @@ class UiAccountEntry(FrozenModel):
     email: str = Field(description="The account's email")
     workspace_count: int = Field(description="Number of machines owned by this account")
     is_default: bool = Field(description="Whether this account is the default for new machines")
-    is_enabled: bool = Field(description="False when the provider block was disabled (shown as signed out)")
 
 
 class UiAccountsMessage(FrozenModel):
@@ -197,31 +208,89 @@ class UiAccountsMessage(FrozenModel):
 
 
 class ProviderPanelStatus(UpperCaseStrEnum):
-    """Status bucket for a provider row in the providers panel."""
+    """Status bucket for a provider instance row in the providers panel."""
 
     OK = auto()
     ERROR = auto()
-    DISABLED = auto()
+    # Discovery has not reported the instance yet (a freshly written block
+    # before the bounced observer's first snapshot).
+    UNLISTED = auto()
+
+
+class ConnectionPanelStatus(UpperCaseStrEnum):
+    """Status bucket for a connection row: discovery's verdict, or why the connection is not materialized here."""
+
+    OK = auto()
+    ERROR = auto()
+    UNLISTED = auto()
+    # The owning account has no DEK on this device.
+    LOCKED = auto()
+    # The credentials payload was scrubbed server-side (master password cleared).
+    NO_CREDENTIALS = auto()
+    # Written by a newer app version; shown, never materialized or edited here.
+    READ_ONLY = auto()
+
+
+class AccountPanelState(UpperCaseStrEnum):
+    """Whether an account section's owner is signed in here, signed in but locked, or signed out."""
+
+    SIGNED_IN = auto()
+    LOCKED = auto()
+    SIGNED_OUT = auto()
 
 
 class UiProviderEntry(FrozenModel):
-    """One provider row in the providers panel."""
+    """One provider instance row: a device provider, or an account's imbue_cloud instance."""
 
     name: str = Field(description="Provider instance name")
-    backend: str | None = Field(description="Provider backend, None when errored/disabled")
+    backend: str | None = Field(description="Provider backend, None when errored or unlisted")
     status: ProviderPanelStatus = Field(description="Panel status bucket")
-    is_enabled: bool = Field(description="Whether Imbue Studio's settings enable the provider")
     error_type: str | None = Field(default=None, description="Discovery error type for errored providers")
     error_message: str | None = Field(default=None, description="Discovery error message for errored providers")
-    is_cloud_account: bool = Field(default=False, description="Bring-your-own-key account row (deletable)")
-    workspace_count: int = Field(default=0, description="Active workspaces on this provider (for byok Delete gating)")
+
+
+class UiConnectionEntry(FrozenModel):
+    """One connection row under its owner's section."""
+
+    id: str = Field(description="The connection id")
+    instance: str = Field(description="The connection's provider instance name, <backend>_<hex>")
+    backend: str = Field(description="Cloud backend name (aws / gcp / azure / modal, or one this app does not know)")
+    backend_label: str = Field(
+        description="Display label of the backend (the raw name for one this app does not know)"
+    )
+    alias: str = Field(description="User-chosen display alias")
+    identifier: str = Field(description="Masked credential hint; never a secret")
+    placement: dict[str, str] = Field(description="Backend-specific placement defaults, as display strings")
+    status: ConnectionPanelStatus = Field(description="Discovery's verdict, or why the connection is unusable here")
+    error_type: str | None = Field(default=None, description="Discovery error type for errored connections")
+    error_message: str | None = Field(default=None, description="Discovery error message for errored connections")
+    workspace_count: int = Field(description="Active workspaces on the connection (disables Remove while > 0)")
+
+
+class UiAccountProvidersEntry(FrozenModel):
+    """One account's section of the providers panel (the local profile is the section with user_id 'local')."""
+
+    user_id: str = Field(description="The account's user id, or 'local' for the local profile")
+    email: str = Field(description="The account's email; empty for the local profile or when unknown")
+    state: AccountPanelState = Field(description="Signed in, locked, or signed out here")
+    is_connection_owner_eligible: bool = Field(
+        description="Whether a new synced connection can be added under this owner here: the account is unlocked "
+        "with a master password set (always true for the local profile)"
+    )
+    imbue_cloud: UiProviderEntry | None = Field(description="The account instance; None for the local profile")
+    connections: tuple[UiConnectionEntry, ...] = Field(description="The owner's connections, alias order")
 
 
 class UiProvidersMessage(FrozenModel):
-    """Providers panel state."""
+    """Providers panel state: one section per account plus the local profile, and the device providers."""
 
     type: Literal["providers"] = "providers"
-    providers: tuple[UiProviderEntry, ...] = Field(description="Sorted provider entries")
+    accounts: tuple[UiAccountProvidersEntry, ...] = Field(
+        description="Signed-in accounts in session-store order, then signed-out ones, then the local profile"
+    )
+    device_providers: tuple[UiProviderEntry, ...] = Field(
+        description="Providers that belong to no account (docker, lima, vultr), sorted by name"
+    )
     last_event_at: str | None = Field(description="ISO timestamp of the last discovery event, None before any")
     last_full_snapshot_at: str | None = Field(description="ISO timestamp of the last full discovery snapshot")
 

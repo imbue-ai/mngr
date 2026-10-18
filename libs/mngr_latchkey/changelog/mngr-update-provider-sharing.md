@@ -1,0 +1,1 @@
+Carries the per-provider machine sizing branch (`mngr/per-provider-sizing`, PR #1750) merged into the account-owned remote providers branch ahead of its own landing on main; the entry `mngr-per-provider-sizing.md` in this directory describes the change. Nothing beyond that merge touches this project.

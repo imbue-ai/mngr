@@ -35,8 +35,8 @@ describe("cloudCreateBody", () => {
   it("runs under the flow's account rather than the default", () => {
     const withBob = createFormDefaults({
       accounts: [
-        { user_id: "user-1", email: "alice@example.com" },
-        { user_id: "user-2", email: "bob@example.com" },
+        { user_id: "user-1", email: "alice@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
+        { user_id: "user-2", email: "bob@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
       ],
     });
     expect(cloudCreateBody(withBob, "user-2")).toMatchObject({ account_id: "user-2" });

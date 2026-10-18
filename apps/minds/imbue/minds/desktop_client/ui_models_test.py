@@ -5,6 +5,7 @@ from inline_snapshot import snapshot
 from pydantic import ValidationError
 
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.ui_models import RemoteTileState
 from imbue.minds.desktop_client.ui_models import UI_CLIENT_MESSAGE_ADAPTER
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiClientStateMessage
@@ -84,8 +85,15 @@ def test_schema_version_tracks_breaking_wire_changes() -> None:
     to 25 when a connection's desktop egress became a route set through
     ``desktop-egress-route`` -- an older window reads ``is_enabled`` off a
     setting that no longer has it, and posts to a toggle route that is no
-    longer registered."""
-    assert UI_SCHEMA_VERSION == 25
+    longer registered, and to 26 when the providers frame became an
+    accounts-and-connections list (``accounts`` and ``device_providers``
+    replacing the flat ``providers``), so a window on the old shape would
+    render an empty panel and offer an Enable/Disable on rows that no longer
+    exist, and to 27 when a remote tile's state became a ``RemoteTileState``
+    pair (its state and the detail behind an error) and a connection row
+    gained ``backend_label`` -- an older window reads an object where a string
+    sat and so renders every remote tile's chip from ``[object Object]``."""
+    assert UI_SCHEMA_VERSION == 27
 
 
 def test_hello_message_serializes_with_type_discriminator() -> None:
@@ -94,7 +102,7 @@ def test_hello_message_serializes_with_type_discriminator() -> None:
     # fail, whatever the constant becomes.
     frame = UiHelloMessage(schema_version=UI_SCHEMA_VERSION).model_dump_json()
     parsed = json.loads(frame)
-    assert parsed == {"type": "hello", "schema_version": 25}
+    assert parsed == {"type": "hello", "schema_version": 27}
 
 
 def test_workspaces_message_round_trips_through_json() -> None:
@@ -111,7 +119,10 @@ def test_workspaces_message_round_trips_through_json() -> None:
         ),
         destroying_agent_ids=("agent-ffffffffffffffffffffffffffffffff",),
         restorable_workspace_ids=("agent-0123456789abcdef0123456789abcdef",),
-        remote_workspace_states={"agent-11111111111111111111111111111111": "connecting"},
+        remote_workspace_states={
+            "agent-11111111111111111111111111111111": RemoteTileState(state="connecting", detail=None),
+            "agent-22222222222222222222222222222222": RemoteTileState(state="error", detail="could not decrypt"),
+        },
     )
 
     restored = UiWorkspacesMessage.model_validate_json(message.model_dump_json())
@@ -148,7 +159,9 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
     schema = UiWireSchema.model_json_schema()
     assert sorted(schema["$defs"].keys()) == snapshot(
         [
+            "AccountPanelState",
             "AgentHealth",
+            "ConnectionPanelStatus",
             "DesktopEgressMode",
             "DiscoveryHealth",
             "EnvironmentCondition",
@@ -161,7 +174,9 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "NotificationKind",
             "NotificationOutcome",
             "ProviderPanelStatus",
+            "RemoteTileState",
             "UiAccountEntry",
+            "UiAccountProvidersEntry",
             "UiAccountsMessage",
             "UiAvailableConnection",
             "UiBootstrap",
@@ -169,6 +184,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiBringAppToFrontMessage",
             "UiClientStateMessage",
             "UiConnectCredentialsRequest",
+            "UiConnectionEntry",
             "UiConnectorDisconnectRequest",
             "UiConnectorRevokeAllRequest",
             "UiConnectorToggleRequest",

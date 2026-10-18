@@ -81,6 +81,56 @@ Note this is the *local* session with the desktop client itself. *Imbue account*
     page becomes the record-backed detail view: retry + discard for an interrupted
     create attempt, persisted error + log tail + dismiss for a failed one
 
+`/api/v1/desktop/cloud-accounts` (POST, cookie or bearer auth):
+    registers a cloud connection: body carries the backend (aws / gcp / azure / modal), an alias,
+    the credentials, the region for the pinned backends, and the owner (an account's user id, or
+    "local" for this device only; default: the default account). A this-device-only Modal connection
+    may also name its Modal namespace (``modal_user_id``, the block's ``user_id`` and so the
+    environment name) instead of deriving it from the connection id; 400 under an account owner. The connection is stored
+    and its provider block materialized at once; then the route answers 202 with an operation handle
+    (``operation_id`` is the connection's instance name, ``kind`` is ``connection_add``) and a worker
+    validates the credentials against the cloud (``mngr <backend> prepare``, or one listing for Modal)
+    and, for an account owner, pushes the document. A validation failure (``credentials_rejected``,
+    502) or a failed push (``sync_failed``, 502: adding a synced connection needs the connector) rolls
+    the connection back. 400 for an unknown or signed-out owner; 409 when the owning account is locked
+    here or has no master password; 503 (the row dropped) when the signed-in account listing fails, so
+    the caller retries, and 503 when the connection stores or the app's concurrency group are not wired.
+    Error bodies of the add, update and delete routes (and the failure a status read reports) carry a
+    ``code`` naming the failure where the status alone is ambiguous: ``master_password_required`` (409),
+    ``connection_in_use`` (409), ``connection_removed_elsewhere`` (409, PUT), ``credentials_rejected``
+    (502), ``sync_failed`` (502), ``account_listing_failed`` (503).
+
+`/api/v1/desktop/cloud-accounts/operations/<instance>` (GET):
+    the state of a registration or update: ``status`` (RUNNING, DONE, FAILED), ``is_done``, the
+    ``account`` once done, and on failure the ``error``, its ``code`` and the ``status_code`` the
+    synchronous route used to answer with. ``.../logs`` streams the prepare's output as server-sent
+    events (``{"log": line}`` frames, replayed from the start, then ``{"done": true}``), the way the
+    create operation's logs are streamed; the add-connection dialog shows them under "Show details".
+
+`/api/v1/desktop/cloud-accounts/<instance>` (PUT):
+    replaces a connection's credentials (and optionally its alias) in place, keeping its id, instance
+    name, owner, backend, and placement: the body carries the backend (which must be the connection's
+    own, 400 otherwise) and every one of that backend's credential fields. The route answers 202 with
+    an operation handle (``kind`` ``connection_update``) once the new row and block exist; the worker
+    validates the new credentials the way the add route does and, for an account owner, pushes the
+    document. On a failure the previous credentials come back and the status read reports 502, or 409
+    when the connection was removed on another device meanwhile. An account-owned connection needs the account unlocked
+    here with a master password (409); a this-device-only connection needs nothing. While the
+    connection's registration or an update is validating, a second update or a removal of the
+    connection is refused (409, ``connection_in_use``).
+    An app killed mid-update restores the previous credentials on its next start; an account that signs
+    out mid-update drops the row, and the update answers 409 (the connection is no longer on this device).
+
+`/api/v1/desktop/cloud-accounts/<instance>` (DELETE):
+    removes a connection; 409 while any active machine on it exists in local discovery or in
+    any account's synced records, while a workspace is still being created on it, or while its
+    registration or an update of its credentials is still validating.
+
+The providers panel on the home screen is fed by the `/ui/ws` channel's ``providers`` frame:
+    one section per signed-in account (its Imbue Cloud instance and its connections, each with
+    a status), a section for an account that is signed out but still hosts local machines,
+    the local profile's section, and the device providers (docker, lima, vultr).
+
 `[<service>.]agent-<hex>.localhost:PORT/*` (workspace-origin catch-all, requires auth):
     a host-header middleware and a catch-all WebSocket route recognize
     `[<service>.]agent-<hex>.localhost(:port)` hosts and byte-forward the

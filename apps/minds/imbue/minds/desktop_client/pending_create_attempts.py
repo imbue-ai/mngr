@@ -72,7 +72,7 @@ class PendingCreateAttemptRequest(FrozenModel):
     account_email: str = Field(default="", description="Owning account's email, empty for a private workspace")
     branch_or_tag: str = Field(default="", description="Resolved template version for imbue_cloud leases")
     region: str = Field(default="", description="Resolved region, empty for region-less providers")
-    cloud_account: str = Field(default="", description="Bring-your-own-key account block name, if any")
+    cloud_account: str = Field(default="", description="Connection instance name (``<backend>_<hex>``), if any")
     instance_type: str = Field(default="", description="Per-create machine size, if the mode has one")
     cpu_count: int | None = Field(default=None, description="Chosen CPU count, for the modes sized by numbers")
     memory_gb: int | None = Field(default=None, description="Chosen memory in GB, for the modes sized by numbers")

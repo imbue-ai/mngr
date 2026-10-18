@@ -34,11 +34,19 @@ incidentally (that is what surfaced the Azure operator blob-RBAC gap), but nothi
 an offline host_dir *file* read end to end, which is the actual user-visible promise of the
 offline-host_dir feature.
 
-These tests are not run in CI (release-marked) and cost real money; run a provider's test
-manually with credentials present, e.g.::
+These trips boot real cloud resources and cost real money, so they self-skip unless the
+provider's ``MNGR_<CLOUD>_RELEASE_TESTS=1`` opt-in is set: no per-PR CI path runs them. The
+``Release Tests`` workflow (``.github/workflows/release-tests.yml``) runs an opted-in cloud's trips
+on manual dispatch (its ``run_<cloud>`` inputs). To run a provider's trips locally with credentials
+present, e.g.::
 
     MNGR_AWS_RELEASE_TESTS=1 just test \\
         libs/mngr_aws/imbue/mngr_aws/test_release_aws.py
+
+Two further opt-in steps of Trip 1 are off by default and enabled per env var:
+``MNGR_RELEASE_TEST_OFFLINE_HOST_DIR=1`` (the stopped host's host_dir is served offline) and
+``MNGR_RELEASE_TEST_LEGACY_VPS_KEY=1`` (a host that only authorizes the retired provider-wide
+VM-root key stays reachable through the read-only fallback).
 """
 
 from __future__ import annotations
@@ -48,8 +56,10 @@ import json
 import math
 import os
 import subprocess
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -91,6 +101,16 @@ _OFFLINE_HOST_DIR_ENV_VAR: Final[str] = "MNGR_RELEASE_TEST_OFFLINE_HOST_DIR"
 # stop and the subsequent ``mngr start`` resume -- the same rationale as the Trip 1 marker.
 _TRIP2_MARKER_HOST_PATH: Final[str] = "/mngr/trip2-marker.txt"
 
+# File name of a VPS-family provider's VM-root client key. Every such key lives under
+# ``keys/host_keys/<host-uuid-hex>/``; a provider-wide ``keys/vps_ssh_key`` would open every host the
+# instance ever ordered, so Trip 1 asserts none exists for ``uses_per_host_vps_root_keys`` profiles.
+_VPS_ROOT_KEY_FILE_NAME: Final[str] = "vps_ssh_key"
+_PER_HOST_KEYS_DIR_NAME: Final[str] = "host_keys"
+# Opt-in gate for Trip 1's legacy-key step. A host created by a release before per-host VM-root keys
+# authorizes only the retired provider-wide ``keys/vps_ssh_key``, which the VPS family still reads as a
+# fallback; set to "1" to additionally prove such a host stays listable and reachable through it.
+_LEGACY_VPS_KEY_ENV_VAR: Final[str] = "MNGR_RELEASE_TEST_LEGACY_VPS_KEY"
+
 # The bare host store. On a bare (no-container) host the agent shell is the VM's own root, so this
 # directory exists and ``/.dockerenv`` does not -- the signature Trip 1 checks for ``is_bare_host``
 # profiles to prove the shape did not silently fall back to a container.
@@ -123,6 +143,12 @@ class ProviderReleaseProfile(abc.ABC):
     supports_shutdown_hosts: bool
     supports_snapshots: bool
     snapshot_survives_destroy: bool
+    # Whether the provider opens its VM root with a per-host client key (the VPS family: aws / gcp /
+    # azure / vultr / ovh). When True, Trip 1 asserts right after create that every VM-root key on
+    # this machine is per-host (``keys/host_keys/<hex>/vps_ssh_key``) and no provider-wide
+    # ``keys/vps_ssh_key`` was minted -- the layout contract a later per-host key sync relies on.
+    # Modal has no VM root, so it stays False.
+    uses_per_host_vps_root_keys: bool = False
     # Whether a stopped host's host_dir is readable from the offline mirror (captured to the state
     # bucket at ``mngr stop``). True for clouds with a real host_dir backend (AWS S3 / Azure Blob /
     # GCP GCS); Modal has no ``--stop-host`` window, so it stays False. Read only by Trip 1's opt-in
@@ -260,6 +286,69 @@ class ProviderReleaseProfile(abc.ABC):
         """
         del handle
         return None
+
+
+def _find_vps_root_key_files() -> list[Path]:
+    """Every ``vps_ssh_key`` private key under this test's isolated mngr state (HOME and MNGR_HOST_DIR).
+
+    The release harness swaps HOME to a temp dir, and the subprocess's profile lives
+    under it (or under ``MNGR_HOST_DIR`` when that is set), so scanning both roots
+    finds exactly the key material the trip's ``mngr create`` minted.
+    """
+    roots = [Path.home()]
+    host_dir = os.environ.get("MNGR_HOST_DIR")
+    if host_dir:
+        roots.append(Path(host_dir))
+    found: list[Path] = []
+    for root in roots:
+        if root.exists():
+            found.extend(path for path in root.rglob(_VPS_ROOT_KEY_FILE_NAME) if path.is_file())
+    return sorted(set(found))
+
+
+def assert_vps_root_keys_are_per_host() -> None:
+    """Assert the VM-root client keys minted so far are all per-host, and that at least one exists.
+
+    A key is per-host when it sits at ``keys/host_keys/<host-uuid-hex>/vps_ssh_key``; the
+    retired provider-wide ``keys/vps_ssh_key`` would open every host the provider instance
+    ever ordered, which is exactly what must never exist any more.
+    """
+    key_files = _find_vps_root_key_files()
+    assert key_files, "expected the create to mint a per-host VM-root client key, found none"
+    provider_wide = [path for path in key_files if path.parent.parent.name != _PER_HOST_KEYS_DIR_NAME]
+    assert not provider_wide, f"provider-wide VM-root client keys must not be created: {provider_wide}"
+
+
+@contextmanager
+def _provider_wide_vps_root_key_layout() -> Iterator[Path]:
+    """Temporarily move the trip's per-host VM-root key up to the retired provider-wide location.
+
+    A host created before per-host VM-root keys existed authorizes exactly the material at
+    ``keys/vps_ssh_key``. The cloud authorized this trip's key the same way, so relocating the
+    pair from ``keys/host_keys/<hex>/`` to ``keys/`` emulates such a host faithfully without
+    booting another VM. Yields the provider-wide private key path; on exit, moves the pair back
+    and asserts no read path minted a replacement per-host key in the meantime.
+    """
+    key_files = _find_vps_root_key_files()
+    assert len(key_files) == 1, f"expected exactly one per-host VM-root key for this trip, found {key_files}"
+    per_host_private = key_files[0]
+    per_host_public = per_host_private.with_name(f"{per_host_private.name}.pub")
+    provider_key_dir = per_host_private.parent.parent.parent
+    legacy_private = provider_key_dir / per_host_private.name
+    legacy_public = provider_key_dir / per_host_public.name
+    per_host_private.rename(legacy_private)
+    per_host_public.rename(legacy_public)
+    try:
+        yield legacy_private
+    finally:
+        # Restore the layout before judging it, so the guard can never leave the trip (and its
+        # host cleanup) running against a minted, unauthorized per-host key.
+        minted_replacement = per_host_private.exists()
+        legacy_private.rename(per_host_private)
+        legacy_public.rename(per_host_public)
+        assert not minted_replacement, (
+            f"a read path minted a per-host VM-root key while only the legacy key existed: {per_host_private}"
+        )
 
 
 def _run_mngr(
@@ -509,6 +598,29 @@ def run_provider_release_trip1(
             listed_resources = _host_resources_in_list(settings_dir, project_dir, host_name)
             assert listed_resources is not None, f"`mngr list` reports no size for {host_name}"
             assert_host_resources_match(listed_resources, expected_resources)
+        # 3c. VPS family: the create minted the host's own VM-root client key and no provider-wide
+        #     one; the `mngr list` above (a fresh process) already proved discovery opens the VPS
+        #     with only that per-host material.
+        if profile.uses_per_host_vps_root_keys:
+            assert_vps_root_keys_are_per_host()
+
+        # 3d. Opt-in legacy layout (kept out of the default happy path behind an env var): a host
+        #     created before per-host VM-root keys authorizes only the retired provider-wide
+        #     ``keys/vps_ssh_key``. With this trip's key relocated there, a fresh ``mngr list`` and
+        #     ``mngr exec`` must still open the VPS through the read-only fallback -- and the fallback
+        #     must mint nothing, which the layout guard and the re-run per-host assertion check.
+        if profile.uses_per_host_vps_root_keys and os.environ.get(_LEGACY_VPS_KEY_ENV_VAR) == "1":
+            legacy_token = f"legacy-{get_short_random_string()}"
+            with _provider_wide_vps_root_key_layout() as legacy_key_path:
+                assert _host_state_in_list(settings_dir, project_dir, host_name) == "RUNNING", (
+                    f"host should be RUNNING in `mngr list` through the legacy key {legacy_key_path}:\n"
+                    f"{_run_mngr(settings_dir, project_dir, 'list', timeout=_LIFECYCLE_TIMEOUT_SECONDS).stdout}"
+                )
+                legacy_exec = _exec_on_host(settings_dir, project_dir, host_name, f"echo {legacy_token}")
+                assert legacy_token in legacy_exec.stdout, (
+                    f"exec through the legacy key {legacy_key_path} failed:\n{legacy_exec.stdout}"
+                )
+            assert_vps_root_keys_are_per_host()
 
         # 4. Write a marker file on the host and read it straight back.
         written = _exec_on_host(settings_dir, project_dir, host_name, f"echo {marker_token} > {_MARKER_HOST_PATH}")

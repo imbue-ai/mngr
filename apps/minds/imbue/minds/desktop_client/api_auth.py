@@ -33,8 +33,12 @@ def json_response(data: dict[str, object], status_code: int = 200) -> Response:
     )
 
 
-def json_error(message: str, status_code: int) -> Response:
-    return json_response({"error": message}, status_code=status_code)
+def json_error(message: str, status_code: int, code: str | None = None) -> Response:
+    """An error body; ``code`` names the failure for a client that branches on it (the status alone is ambiguous)."""
+    body: dict[str, object] = {"error": message}
+    if code is not None:
+        body["code"] = code
+    return json_response(body, status_code=status_code)
 
 
 def json_field_error(message: str, field: str, status_code: int = 400) -> Response:

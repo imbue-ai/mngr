@@ -21,10 +21,10 @@ from imbue.mngr.providers.ssh_utils import per_host_key_dir
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.data_types import PlacementHandle
-from imbue.mngr_vps.docker_realizer import CONTAINER_KNOWN_HOSTS_NAME
-from imbue.mngr_vps.docker_realizer import CONTAINER_SSH_KEY_NAME
 from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
+from imbue.mngr_vps.primitives import CONTAINER_KNOWN_HOSTS_NAME
+from imbue.mngr_vps.primitives import CONTAINER_SSH_KEY_NAME
 
 
 def _realizer(

@@ -1,4 +1,5 @@
 from imbue.mngr.errors import MngrError
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 
 class VpsError(MngrError):
@@ -59,3 +60,32 @@ class VpsConfigError(VpsError, ValueError):
 
 class VpsHostSizeUnknownError(VpsError):
     """Raised when a host's size cannot be determined from its record (no recorded shape and an unknown plan)."""
+
+
+class VpsHostKeyMissingError(VpsError):
+    """Raised when no client key that opens a host's VPS root is on disk.
+
+    Read paths never mint the VPS-root client key: it is created once, at host
+    creation, under the host's per-host key dir. A host whose per-host key is
+    absent (and for which no legacy provider-wide key exists either) cannot be
+    reached from this machine, so the operation fails here instead of opening
+    an SSH connection that would be rejected.
+    """
+
+    user_help_text = (
+        "This host was created on another device, or before per-host keys existed, so it has to be reached "
+        "from the device that created it, or its record synced to this one."
+    )
+
+
+class VpsInstanceLeakedError(VpsProvisioningError):
+    """A failed provision left a VPS instance behind that its cleanup could not destroy.
+
+    Carries ``vps_instance_id`` so ``create_host``'s cleanup knows the instance
+    survives and keeps the host's per-host key material (the only key the
+    leaked VPS authorizes) instead of treating the VPS as never created.
+    """
+
+    def __init__(self, message: str, vps_instance_id: VpsInstanceId) -> None:
+        self.vps_instance_id = vps_instance_id
+        super().__init__(message)

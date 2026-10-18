@@ -85,7 +85,7 @@ describe("WorkspaceOptionsModel", () => {
             color: "#0b292b",
             palette: { confusion: "#0b292b" },
             is_stale: false,
-            is_leased_imbue_cloud: false,
+            is_account_owned_provider: false,
             leased_owner_email: "",
             has_account: true,
             account_email: OWNER,

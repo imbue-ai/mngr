@@ -9,8 +9,47 @@ from imbue.mngr_imbue_cloud.cli.sync import sync
 def test_sync_group_lists_subcommands() -> None:
     result = CliRunner().invoke(sync, ["--help"])
     assert result.exit_code == 0
-    for name in ("records", "bundle", "scrub-secrets"):
+    for name in ("records", "bundle", "scrub-secrets", "documents"):
         assert name in result.output
+
+
+def test_sync_documents_group_lists_subcommands() -> None:
+    result = CliRunner().invoke(sync, ["documents", "--help"])
+    assert result.exit_code == 0
+    for name in ("pull", "push", "delete"):
+        assert name in result.output
+
+
+def test_documents_pull_requires_a_kind() -> None:
+    result = CliRunner().invoke(sync, ["documents", "pull"])
+    assert result.exit_code == 2
+    assert "--kind" in result.output
+
+
+def test_documents_push_rejects_non_json_stdin() -> None:
+    result = CliRunner().invoke(sync, ["documents", "push"], input="not json at all")
+    assert result.exit_code == 2
+    assert "not valid JSON" in result.output
+
+
+def test_documents_push_rejects_invalid_document() -> None:
+    result = CliRunner().invoke(sync, ["documents", "push"], input=json.dumps({"kind": "connection"}))
+    assert result.exit_code == 2
+    assert "invalid account document" in result.output
+
+
+def test_documents_push_reads_payload_from_input_file(tmp_path: Path) -> None:
+    payload_path = tmp_path / "document.json"
+    payload_path.write_text(json.dumps({"kind": "connection"}))
+    result = CliRunner().invoke(sync, ["documents", "push", "--input-file", str(payload_path)])
+    assert result.exit_code == 2
+    assert "invalid account document" in result.output
+
+
+def test_documents_delete_requires_kind_and_doc_id() -> None:
+    result = CliRunner().invoke(sync, ["documents", "delete", "connection"])
+    assert result.exit_code == 2
+    assert "DOC_ID" in result.output
 
 
 def test_sync_records_group_lists_subcommands() -> None:

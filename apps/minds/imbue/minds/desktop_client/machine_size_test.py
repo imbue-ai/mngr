@@ -3,6 +3,7 @@ import pytest
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.machine_size import DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE
 from imbue.minds.desktop_client.machine_size import MachineNotResizableError
+from imbue.minds.desktop_client.machine_size import clamp_machine_size_to_cpu_count
 from imbue.minds.desktop_client.machine_size import is_machine_disk_resizable_provider
 from imbue.minds.desktop_client.machine_size import is_machine_resizable_provider
 from imbue.minds.desktop_client.machine_size import machine_size_create_args
@@ -17,6 +18,14 @@ def test_every_launch_mode_sized_by_numbers_has_a_default_the_form_can_offer() -
     assert set(DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE) == {LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.MODAL}
     for launch_mode, default_size in DEFAULT_MACHINE_SIZE_BY_LAUNCH_MODE.items():
         assert narrow_machine_size_to_launch_mode(default_size, launch_mode) == default_size
+
+
+def test_clamping_to_a_cpu_count_lowers_only_a_cpu_count_above_it() -> None:
+    assert clamp_machine_size_to_cpu_count(_FULL, 2) == MachineSizeSelection(cpu_count=2, memory_gb=16, disk_gb=200)
+    assert clamp_machine_size_to_cpu_count(_FULL, 4) == _FULL
+    assert clamp_machine_size_to_cpu_count(_FULL, 8) == _FULL
+    unsized = MachineSizeSelection(memory_gb=16)
+    assert clamp_machine_size_to_cpu_count(unsized, 1) == unsized
 
 
 @pytest.mark.parametrize(
@@ -64,7 +73,7 @@ def test_only_local_docker_and_lima_machines_are_resizable_and_only_lima_grows_i
     assert is_machine_resizable_provider("lima")
     assert not is_machine_resizable_provider("modal")
     assert not is_machine_resizable_provider("imbue_cloud_alice")
-    assert not is_machine_resizable_provider("byok-aws-team")
+    assert not is_machine_resizable_provider("aws_" + "0" * 32)
     assert is_machine_disk_resizable_provider("lima")
     assert not is_machine_disk_resizable_provider("docker")
 

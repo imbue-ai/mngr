@@ -178,10 +178,27 @@ Key concepts in the Imbue Studio system:
   VULTR runs in Docker on a Vultr VPS.
   AWS runs on an EC2 instance.
   IMBUE_CLOUD leases a pre-baked pool host via the imbue_cloud provider plugin.
-  MODAL runs in a Modal sandbox using the local machine's own Modal token; sandboxes are ephemeral (~1 day max), so it is testing-only.
+  MODAL runs in a Modal sandbox on a Modal connection; sandboxes are ephemeral (~1 day max).
+  AWS, GCP, AZURE, and MODAL are reachable only through a *connection*: one set of cloud credentials plus placement defaults, owned by an imbue cloud account (synced to every device that unlocks the account) or by the device's local profile, and materialized as a `<backend>_<hex>` mngr provider instance.
+  The imbue cloud account's own provider instance is `imbue_cloud_<user id>`; signing out removes the account's instances from the machine.
+  docker, lima, and the local profile's connections are device providers, available under every account and under none.
+
+- **connection**: one set of cloud credentials (aws, gcp, azure, or modal) plus placement defaults, materialized as a `<backend>_<connection id hex>` mngr provider instance.
+  Owned by an imbue cloud account it is a synced document (plaintext metadata, credentials encrypted under the account's key), so it follows the user to every device that unlocks the account, and it is offered only under that account; owned by the *local profile* it stays on the device and is a device provider, offered under every account and under none.
+  The create form offers the selected account's connections and the local profile's; the providers panel lists them per owner with their status, and refuses to remove one while machines use it (recorded under any account) or are still being created on it.
+  A connection's credentials can be replaced in place, keeping its id and instance name, so rotating a key never orphans the machines tagged with the old name.
+  aws, gcp, and azure connections pin their region when added; modal picks it per create.
+
+- **local profile**: the pseudo-account (user id `local`) that owns a device's unsynced connections.
+  Same document schema as an account's connections, stored plaintext under the minds data dir, never pushed.
+  Its connections are device providers like docker and lima: available under every account and under none, so a workspace on one may be associated with an account and is recorded, like a docker workspace, as hosted by this device.
+  Clearing the master password moves the account's connections into it so their instances survive the server-side scrub.
+
+- **account instance**: an imbue cloud account's own mngr provider instance, `imbue_cloud_<full user id>`, which exists while the account is signed in on the device.
+  Together with the account's connections it is an *account-owned provider*: a workspace on one is bound to that account (its record is what every device's remove-connection gate counts), and any device that unlocks the account can reach the workspace's machine because the record's encrypted secrets carry the machine's per-host access material in its backend's layout.
 
 - **machine size**: the CPUs, memory, and disk a machine's provider allocated to it, chosen when the workspace is created and shown on the workspace's General settings for every provider that records one (the desktop reads it from discovery, as `mngr list` reports `host.resource`).
-  The local docker and modal modes take CPUs and memory on the create form, and the local lima mode also the size of the data disk the workspace's data lives on; the bring-your-own-key cloud modes take a named instance shape; Imbue Cloud sizes every new machine the same.
+  The local docker and modal modes take CPUs and memory on the create form, and the local lima mode also the size of the data disk the workspace's data lives on; the aws, gcp, and azure connection modes take a named instance shape; Imbue Cloud sizes every new machine the same.
   A local docker machine (CPUs, memory) and a local lima machine (CPUs, memory, and a disk that only grows) can be resized from that settings section, which records the size through `mngr docker resize` / `mngr lima resize` and restarts a running machine to apply it.
   A remote (imbue_cloud) machine's size has two independent factors (specs/slice-fleet). *Units* are the single compute knob -- 1 unit = 1GiB of machine RAM, with vCPUs and fair-share bandwidth scaling proportionally; allowed sizes are multiples of 8 units up to 128. *Disk* is a second, grow-only factor, sized once at creation (3.5GiB per unit) and grown independently afterwards; it never shrinks. Resizing is record-then-restart: `mngr imbue_cloud machines resize` stamps the desired size, and the machine's next restart applies it (in place when its box has room, otherwise via a restore onto a box that does); the settings section notes a pending size until then. Every new workspace starts at the default 8-unit size.
 

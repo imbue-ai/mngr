@@ -110,8 +110,8 @@ export class AccountsDetailModel {
   private readonly redraw: () => void;
   private readonly schedule: ScheduleLike;
   private isDisposed = false;
-  // is_enabled by user_id, as of the last syncAccounts.
-  private listedIsEnabledByUserId = new Map<string, boolean>();
+  // The user ids listed as of the last syncAccounts.
+  private listedUserIds = new Set<string>();
 
   constructor(
     // A plain-call wrapper: passing the global `fetch` itself would invoke it
@@ -132,25 +132,20 @@ export class AccountsDetailModel {
   }
 
   /** Load the plan section and the notification preferences of each account
-   * that is newly listed or was just signed back in, dropping its old
-   * answers: a section loaded while signed out reads as unavailable, and a
-   * sign-in while the page is open must replace it. The cached plan, when
-   * there is one, is shown until the read lands. */
+   * that is newly listed (a sign-in while the page is open adds it), dropping
+   * its old answers. The cached plan, when there is one, is shown until the
+   * read lands. */
   syncAccounts(accounts: readonly UiAccountEntry[]): void {
-    const previous = this.listedIsEnabledByUserId;
-    this.listedIsEnabledByUserId = new Map(
-      accounts.map((account) => [account.user_id, account.is_enabled]),
-    );
+    const previous = this.listedUserIds;
+    this.listedUserIds = new Set(accounts.map((account) => account.user_id));
     for (const userId of cachedPlanByUserId.keys()) {
-      if (!this.listedIsEnabledByUserId.has(userId)) cachedPlanByUserId.delete(userId);
+      if (!this.listedUserIds.has(userId)) cachedPlanByUserId.delete(userId);
     }
     for (const account of accounts) {
-      const wasEnabled = previous.get(account.user_id);
-      if (wasEnabled === undefined || (!wasEnabled && account.is_enabled)) {
+      if (!previous.has(account.user_id)) {
         this.planByUserId.delete(account.user_id);
         this.notificationPreferencesByUserId.delete(account.user_id);
-        // A signed-out account's read cannot succeed, so its old figures would only mislead.
-        const cached = account.is_enabled ? cachedPlanByUserId.get(account.user_id) : undefined;
+        const cached = cachedPlanByUserId.get(account.user_id);
         if (cached !== undefined) {
           const state = this.planStateFor(account.user_id);
           state.isLoaded = true;

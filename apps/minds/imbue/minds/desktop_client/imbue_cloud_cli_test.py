@@ -5,6 +5,7 @@ import pytest
 from pydantic import AnyUrl
 
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.imbue_cloud_cli import AuthRefreshOutcome
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthFailedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -12,6 +13,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifie
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudLeaseActiveCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudWebLoginIncompleteCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import WEB_LOGIN_LISTEN_SECONDS
 from imbue.minds.desktop_client.imbue_cloud_cli import WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS
@@ -475,6 +477,23 @@ def test_sync_records_pull_raises_on_an_unexpected_shape() -> None:
         cli.sync_records_pull("owner@example.com")
 
 
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        json.dumps([{"doc_id": "x"}]),
+        json.dumps({"documents": "x"}),
+        json.dumps({"documents": [{"doc_id": "x"}, "not-a-document"]}),
+    ],
+)
+def test_sync_documents_pull_raises_on_an_unexpected_shape(stdout: str) -> None:
+    """A malformed listing (or entry) must not read as a smaller server set, which would wipe local rows."""
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=stdout))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    with pytest.raises(ImbueCloudCliError, match="sync documents pull"):
+        cli.sync_documents_pull("owner@example.com", "connection")
+
+
 def _plugin_failure(error_class: str) -> MngrCallResult:
     body = json.dumps({"error": f"plugin said {error_class}", "error_class": error_class}, indent=2)
     return MngrCallResult(returncode=1, stdout="", stderr="Open this URL in your browser\n" + body + "\n")
@@ -632,3 +651,73 @@ def test_notification_preferences_round_trip_through_the_plugin() -> None:
         "--no-email",
         "--in-app",
     ]
+
+
+def _cli_with_result(result: MngrCallResult) -> tuple[ImbueCloudCli, RecordingMngrCaller]:
+    caller = RecordingMngrCaller(result=result)
+    return ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/")), caller
+
+
+def test_auth_refresh_outcome_reports_a_refreshed_session() -> None:
+    cli, _caller = _cli_with_result(MngrCallResult(returncode=0, stdout=json.dumps({"refreshed": True})))
+    assert cli.auth_refresh_outcome("alice@example.com") is AuthRefreshOutcome.REFRESHED
+
+
+def test_auth_refresh_outcome_reports_a_dead_session_only_on_the_plugins_auth_error_class() -> None:
+    """Only the plugin's own auth error proves the session dead; every other failure is transient."""
+    dead_body = json.dumps(
+        {"error": "Refresh rejected by connector: UNAUTHORISED", "error_class": "ImbueCloudAuthError"}
+    )
+    dead_cli, _ = _cli_with_result(MngrCallResult(returncode=1, stdout="", stderr=f"some log line\n{dead_body}\n"))
+    assert dead_cli.auth_refresh_outcome("alice@example.com") is AuthRefreshOutcome.SESSION_DEAD
+
+    unreachable_body = json.dumps(
+        {
+            "error": "could not reach the imbue_cloud connector at https://c/auth/session/refresh after 1 attempt(s)",
+            "error_class": "ImbueCloudUnreachableError",
+        }
+    )
+    unreachable_cli, _ = _cli_with_result(MngrCallResult(returncode=1, stdout="", stderr=unreachable_body))
+    assert unreachable_cli.auth_refresh_outcome("alice@example.com") is AuthRefreshOutcome.TRANSIENT_FAILURE
+
+    server_error_body = json.dumps(
+        {"error": "Connector error 502: bad gateway", "error_class": "ImbueCloudConnectorError"}
+    )
+    server_error_cli, _ = _cli_with_result(MngrCallResult(returncode=1, stdout="", stderr=server_error_body))
+    assert server_error_cli.auth_refresh_outcome("alice@example.com") is AuthRefreshOutcome.TRANSIENT_FAILURE
+
+    crashed_cli, _ = _cli_with_result(
+        MngrCallResult(returncode=1, stdout="", stderr="Traceback (most recent call last)")
+    )
+    assert crashed_cli.auth_refresh_outcome("alice@example.com") is AuthRefreshOutcome.TRANSIENT_FAILURE
+
+
+def test_sync_documents_pull_passes_the_kind_and_returns_the_documents() -> None:
+    documents = [{"kind": "connection", "doc_id": "conn-1", "metadata": {}, "state": "active", "revision": 1}]
+    cli, caller = _cli_with_result(MngrCallResult(returncode=0, stdout=json.dumps({"documents": documents})))
+
+    assert cli.sync_documents_pull("alice@example.com", "connection") == documents
+    assert caller.recorded_calls[0].argv == (
+        "imbue_cloud",
+        "sync",
+        "documents",
+        "pull",
+        "--kind",
+        "connection",
+        "--account",
+        "alice@example.com",
+    )
+
+
+def test_sync_document_push_raises_the_typed_conflict_with_the_stored_row() -> None:
+    stored = {"kind": "connection", "doc_id": "conn-1", "revision": 3, "state": "active", "metadata": {}}
+    body = json.dumps({"error": "revision conflict", "error_class": "ImbueCloudSyncConflictError", "stored": stored})
+    cli, caller = _cli_with_result(MngrCallResult(returncode=1, stdout="", stderr=f"log\n{body}\n"))
+
+    with pytest.raises(ImbueCloudSyncConflictCliError) as exc_info:
+        cli.sync_document_push("alice@example.com", {"kind": "connection", "doc_id": "conn-1", "revision": 1})
+
+    assert exc_info.value.stored_record == stored
+    argv = caller.recorded_calls[0].argv
+    assert argv[:5] == ("imbue_cloud", "sync", "documents", "push", "--account")
+    assert "--input-file" in argv

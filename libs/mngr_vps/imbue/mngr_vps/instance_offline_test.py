@@ -115,14 +115,14 @@ class _ResumeMirrorProvider(OfflineCapableVpsProvider):
         pass
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
         yield _LocalFakeOuter(id=HostId.generate(), connector=_make_local_connector())
 
     def _persist_host_record_externally(self, record: VpsHostRecord) -> None:
         self._mirrored_record = record
         raise _MirrorCalled
 
-    # -- abstract hooks not exercised by the resume path under test --------------
+    # abstract hooks not exercised by the resume path under test
     @property
     def _state_store(self) -> HostStateStore:
         raise AssertionError("not exercised by this test")
@@ -232,7 +232,7 @@ class _HostKeyWaitProvider(_ResumeMirrorProvider):
         self._expected_key_arg = expected_host_public_key
 
     @contextmanager
-    def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
+    def _make_outer_for_vps_ip(self, vps_ip: str, host_id: HostId) -> Iterator[OuterHostInterface]:
         self._calls.append("open_outer")
         yield _LocalFakeOuter(id=HostId.generate(), connector=_make_local_connector())
 
@@ -329,53 +329,62 @@ def _marker_provider(temp_mngr_ctx: MngrContext, instances: list[dict[str, Any]]
     return provider
 
 
-def test_realizer_for_vps_ip_picks_bare_from_isolation_none_marker(temp_mngr_ctx: MngrContext) -> None:
+def test_realizer_for_host_id_picks_bare_from_isolation_none_marker(temp_mngr_ctx: MngrContext) -> None:
     """Discovery probes a bare host's VPS with the BARE realizer when its instance
     carries ``mngr-isolation=none`` -- even though the provider config defaults to
     CONTAINER.
 
     This is the core fix for the connect/discovery bug: ``_read_records_from_vps``
-    has only the IP (not yet the record), so it resolves the realizer from the
-    instance's marker via ``_realizer_for_vps_ip``. Without this a bare host probed
-    by the default container realizer finds no container and is invisible. Asserting
-    the realizer type AND its port-22 endpoint captures the exact wrong behavior.
+    has only the listing entry (not yet the record), so it resolves the realizer
+    from the instance's marker via ``_realizer_for_host_id``. Without this a bare
+    host probed by the default container realizer finds no container and is
+    invisible. Asserting the realizer type AND its port-22 endpoint captures the
+    exact wrong behavior.
     """
-    instances = [{"id": "i-bare", "main_ip": "10.0.0.5", "tags": [f"{ISOLATION_TAG_KEY}=none"]}]
+    host_id = HostId.generate()
+    instances = [
+        {"id": "i-bare", "main_ip": "10.0.0.5", "tags": [f"mngr-host-id={host_id}", f"{ISOLATION_TAG_KEY}=none"]}
+    ]
     provider = _marker_provider(temp_mngr_ctx, instances)
     # The create-time default realizer is unchanged (still the container one).
     assert isinstance(provider._realizer, DockerRealizer)
-    realizer = provider._realizer_for_vps_ip("10.0.0.5")
+    realizer = provider._realizer_for_host_id(host_id)
     assert isinstance(realizer, BareRealizer)
-    assert realizer.agent_endpoint("10.0.0.5", HostId.generate()).port == 22
 
 
-def test_realizer_for_vps_ip_picks_container_from_isolation_container_marker(temp_mngr_ctx: MngrContext) -> None:
+def test_realizer_for_host_id_picks_container_from_isolation_container_marker(temp_mngr_ctx: MngrContext) -> None:
     """An instance marked ``mngr-isolation=container`` probes with the container realizer."""
-    instances = [{"id": "i-ctr", "main_ip": "10.0.0.6", "tags": [f"{ISOLATION_TAG_KEY}=container"]}]
+    host_id = HostId.generate()
+    instances = [
+        {"id": "i-ctr", "main_ip": "10.0.0.6", "tags": [f"mngr-host-id={host_id}", f"{ISOLATION_TAG_KEY}=container"]}
+    ]
     provider = _marker_provider(temp_mngr_ctx, instances)
-    realizer = provider._realizer_for_vps_ip("10.0.0.6")
+    realizer = provider._realizer_for_host_id(host_id)
     assert isinstance(realizer, DockerRealizer)
 
 
-def test_realizer_for_vps_ip_defaults_untagged_instance_to_container(temp_mngr_ctx: MngrContext) -> None:
+def test_realizer_for_host_id_defaults_untagged_instance_to_container(temp_mngr_ctx: MngrContext) -> None:
     """A pre-marker instance (no ``mngr-isolation`` tag) defaults to the container realizer.
 
     Backward-compat guard: hosts created before the marker existed were all
     container placements, so an absent marker preserves the prior behavior.
     """
-    instances = [{"id": "i-old", "main_ip": "10.0.0.7", "tags": ["mngr-host-id=abc"]}]
+    host_id = HostId.generate()
+    instances = [{"id": "i-old", "main_ip": "10.0.0.7", "tags": [f"mngr-host-id={host_id}"]}]
     provider = _marker_provider(temp_mngr_ctx, instances)
-    realizer = provider._realizer_for_vps_ip("10.0.0.7")
+    realizer = provider._realizer_for_host_id(host_id)
     assert isinstance(realizer, DockerRealizer)
 
 
-def test_realizer_for_vps_ip_falls_back_to_create_time_realizer_for_unknown_ip(temp_mngr_ctx: MngrContext) -> None:
-    """An IP not in the listing (e.g. a just-created host) uses the create-time realizer."""
+def test_realizer_for_host_id_falls_back_to_create_time_realizer_for_unknown_host(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A host id not in the listing (e.g. a just-created host) uses the create-time realizer."""
     provider = _marker_provider(temp_mngr_ctx, instances=[])
-    assert provider._realizer_for_vps_ip("10.0.0.99") is provider._realizer
+    assert provider._realizer_for_host_id(HostId.generate()) is provider._realizer
 
 
-def test_realizer_for_vps_ip_raises_mngr_error_on_corrupt_marker(temp_mngr_ctx: MngrContext) -> None:
+def test_realizer_for_host_id_raises_mngr_error_on_corrupt_marker(temp_mngr_ctx: MngrContext) -> None:
     """A corrupt ``mngr-isolation`` marker raises an ``MngrError`` (not a bare ``ValueError``).
 
     The marker is an account-writable tag, so a corrupt value is a realistic input.
@@ -384,10 +393,37 @@ def test_realizer_for_vps_ip_raises_mngr_error_on_corrupt_marker(temp_mngr_ctx: 
     discovery sweep, dropping every other VPS's hosts. Asserting ``MngrError`` here
     pins the failure into the family that per-VPS degradation handles.
     """
-    instances = [{"id": "i-bad", "main_ip": "10.0.0.8", "tags": [f"{ISOLATION_TAG_KEY}=gvisor"]}]
+    host_id = HostId.generate()
+    instances = [
+        {"id": "i-bad", "main_ip": "10.0.0.8", "tags": [f"mngr-host-id={host_id}", f"{ISOLATION_TAG_KEY}=gvisor"]}
+    ]
     provider = _marker_provider(temp_mngr_ctx, instances)
     with pytest.raises(MngrError):
-        provider._realizer_for_vps_ip("10.0.0.8")
+        provider._realizer_for_host_id(host_id)
+
+
+def test_list_provider_vps_entries_pairs_reachable_instances_with_their_host_ids(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The shared listing yields one entry per instance with an IP and a parseable host-id tag.
+
+    Discovery opens each VPS with that host's own key, so an instance without a
+    usable host id (missing or a non-HostId value) has nothing to open it with
+    and is skipped; a stopped instance with no IP is skipped as before.
+    """
+    host_a, host_b = HostId.generate(), HostId.generate()
+    instances = [
+        {"id": "i-a", "main_ip": "10.0.0.1", "tags": [f"mngr-host-id={host_a}"]},
+        {"id": "i-b", "main_ip": "10.0.0.2", "tags": [f"mngr-host-id={host_b}"]},
+        {"id": "i-no-ip", "main_ip": "", "tags": [f"mngr-host-id={HostId.generate()}"]},
+        {"id": "i-untagged", "main_ip": "10.0.0.3", "tags": ["mngr-provider=offline-test"]},
+        {"id": "i-garbage", "main_ip": "10.0.0.4", "tags": ["mngr-host-id=not-a-host-id"]},
+    ]
+    provider = _marker_provider(temp_mngr_ctx, instances)
+
+    entries = provider._list_provider_vps_entries()
+
+    assert [(entry.hostname, entry.host_id) for entry in entries] == [("10.0.0.1", host_a), ("10.0.0.2", host_b)]
 
 
 # Post-finalize idle-watcher invariant (_on_host_finalized)
