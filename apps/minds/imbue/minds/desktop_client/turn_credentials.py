@@ -130,8 +130,11 @@ class TurnCredentialClientInterface(MutableModel, ABC):
     """Mints relay credentials for a signed-in account."""
 
     @abstractmethod
-    def mint_credential(self, user_id: str) -> TurnCredential:
-        """Mint one credential for the account; raises TurnCredentialRefusedError or TurnCredentialUnavailableError."""
+    def mint_credential(self, user_id: str, workspace_id: str | None) -> TurnCredential:
+        """Mint one credential for the account, attributed to the workspace host ``workspace_id`` when known.
+
+        Raises TurnCredentialRefusedError or TurnCredentialUnavailableError.
+        """
 
 
 class ConnectorTurnCredentialClient(TurnCredentialClientInterface):
@@ -154,7 +157,7 @@ class ConnectorTurnCredentialClient(TurnCredentialClientInterface):
         default=None, frozen=True, description="httpx transport override; tests inject an httpx.MockTransport"
     )
 
-    def mint_credential(self, user_id: str) -> TurnCredential:
+    def mint_credential(self, user_id: str, workspace_id: str | None) -> TurnCredential:
         session = self._session_with_live_token(user_id)
         identifier = get_client_identifier()
         headers = {
@@ -163,9 +166,12 @@ class ConnectorTurnCredentialClient(TurnCredentialClientInterface):
             "Authorization": f"Bearer {session.access_token.get_secret_value()}",
         }
         url = str(self.connector_url).rstrip("/") + TURN_ICE_SERVERS_PATH
+        # The connector records the workspace against the mint (its ledger's attribution);
+        # the account stays the customIdentifier it meters by.
+        params = {} if workspace_id is None else {"workspace_id": workspace_id}
         try:
             with httpx.Client(transport=self.transport, timeout=self.timeout_seconds) as client:
-                response = client.get(url, headers=headers)
+                response = client.get(url, headers=headers, params=params)
         except httpx.HTTPError as e:
             raise TurnCredentialUnavailableError(f"could not reach the connector: {e}") from e
         return credential_from_connector_response(response.status_code, response.text, datetime.now(timezone.utc))
@@ -212,14 +218,18 @@ class TurnCredentialBroker(MutableModel):
     _credential_by_user_id: dict[str, TurnCredential] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
-    def credential_for_account(self, user_id: str) -> TurnCredential | None:
-        """The account's credential, minted or refreshed as its half life asks; None when none can be had."""
+    def credential_for_account(self, user_id: str, workspace_id: str | None) -> TurnCredential | None:
+        """The account's credential, minted or refreshed as its half life asks; None when none can be had.
+
+        ``workspace_id`` (the host of the workspace asking) is attribution for the mint this call makes,
+        if it makes one; the cache stays per account, so a credential serves every workspace of the account.
+        """
         now = self.now_fn()
         with self._lock:
             cached = self._credential_by_user_id.get(user_id)
             if cached is not None and not is_past_half_life(cached, now):
                 return cached
-            fresh = self._mint_or_none(user_id)
+            fresh = self._mint_or_none(user_id, workspace_id)
             if fresh is not None:
                 self._credential_by_user_id[user_id] = fresh
                 return fresh
@@ -228,9 +238,9 @@ class TurnCredentialBroker(MutableModel):
             self._credential_by_user_id.pop(user_id, None)
             return None
 
-    def _mint_or_none(self, user_id: str) -> TurnCredential | None:
+    def _mint_or_none(self, user_id: str, workspace_id: str | None) -> TurnCredential | None:
         try:
-            return self.client.mint_credential(user_id)
+            return self.client.mint_credential(user_id, workspace_id)
         except TurnCredentialRefusedError as e:
             logger.debug("Connector refused a relay credential for account {}: {}", user_id, e)
             return None

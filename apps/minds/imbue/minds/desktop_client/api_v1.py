@@ -142,6 +142,7 @@ from imbue.minds.desktop_client.api_spec import API_SPEC
 from imbue.minds.desktop_client.api_spec import json_response_model
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
 from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.backup_export import BackupExportError
@@ -367,14 +368,32 @@ def _handle_agent_media_endpoints(agent_id: str) -> MediaEndpointsResponse | Res
     )
 
 
+def _is_workspace_network_restricted(workspace_agent_id: AgentId, backend_resolver: BackendResolverInterface) -> bool:
+    """Whether the workspace's create restricted its host's outbound network (the ``network_restricted`` label)."""
+    return backend_resolver.get_agent_label(workspace_agent_id, NETWORK_RESTRICTED_LABEL) == "true"
+
+
+def _attributable_host_id(workspace_agent_id: AgentId, backend_resolver: BackendResolverInterface) -> str | None:
+    """The workspace host's real ``host-<hex>`` id for the connector's ledger; None for a placeholder or unknown host."""
+    info = backend_resolver.get_agent_display_info(workspace_agent_id)
+    if info is None:
+        return None
+    try:
+        return str(HostId(info.host_id))
+    except ValueError:
+        return None
+
+
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(IceServersResponse))
 def _handle_agent_ice_servers(agent_id: str) -> IceServersResponse | Response:
     """Relay (TURN) servers for the Screen's viewer, minted for the signed-in account that owns the workspace.
 
-    An empty list with status 200 when no account is signed in for the workspace, when the connector
-    refuses (plan, quota, rate limit) or cannot answer, or in an app built without the broker; the
-    viewer then proceeds with host candidates alone.
+    An empty list with status 200 when the workspace's host was created with a restricted outbound
+    network (a relay credential would be an egress tunnel around that restriction; spec section 3),
+    when no account is signed in for the workspace, when the connector refuses (plan, quota, rate
+    limit) or cannot answer, or in an app built without the broker; the viewer then proceeds with
+    host candidates alone. A mint names the workspace's host so the connector's ledger attributes it.
     """
     state = get_state()
     parsed_id = AgentId(agent_id)
@@ -384,11 +403,16 @@ def _handle_agent_ice_servers(agent_id: str) -> IceServersResponse | Response:
     if state.turn_credential_broker is None or state.session_store is None:
         return empty
     workspace_agent_id = _workspace_agent_id_for_agent(parsed_id, state.backend_resolver)
+    if _is_workspace_network_restricted(workspace_agent_id, state.backend_resolver):
+        logger.debug("Answering no relay servers for {}: the workspace's network is restricted", agent_id)
+        return empty
     account = state.session_store.get_account_for_workspace(str(workspace_agent_id))
     if account is None:
         logger.debug("Answering no relay servers for {}: no signed-in account owns the workspace", agent_id)
         return empty
-    credential = state.turn_credential_broker.credential_for_account(str(account.user_id))
+    credential = state.turn_credential_broker.credential_for_account(
+        str(account.user_id), _attributable_host_id(workspace_agent_id, state.backend_resolver)
+    )
     if credential is None:
         return empty
     return IceServersResponse(ice_servers=list(credential.ice_servers), expires_at=credential.expires_at.isoformat())

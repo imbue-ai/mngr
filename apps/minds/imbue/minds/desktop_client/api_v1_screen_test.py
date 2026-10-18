@@ -12,6 +12,8 @@ from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backend_resolver import NETWORK_RESTRICTED_LABEL
+from imbue.minds.desktop_client.conftest import _FIXED_TEST_HOST_ID
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
@@ -100,10 +102,12 @@ def test_screen_routes_reject_an_unknown_agent_and_require_the_bearer(tmp_path: 
     assert unauthenticated.status_code == 401
 
 
-def _owned_workspace(tmp_path: Path) -> tuple[AgentId, BackendResolverInterface, MultiAccountSessionStore]:
-    """A workspace an account is signed in for and owns."""
+def _owned_workspace(
+    tmp_path: Path, labels: dict[str, str] | None = None
+) -> tuple[AgentId, BackendResolverInterface, MultiAccountSessionStore]:
+    """A workspace an account is signed in for and owns; ``labels`` replaces the default ``is_primary`` label set."""
     agent_id = AgentId.generate()
-    resolver = make_resolver_with_data(make_agents_json(agent_id, host_name="ws"))
+    resolver = make_resolver_with_data(make_agents_json(agent_id, labels=labels, host_name="ws"))
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(_ACCOUNT_USER_ID, _ACCOUNT_EMAIL)
     session_store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
@@ -128,6 +132,36 @@ def test_ice_servers_answers_the_owning_accounts_credential_and_caches_it(tmp_pa
     assert body["ice_servers"][1]["username"] == "u-1"
     assert body["ice_servers"][1]["credential"] is not None
     assert json.loads(again.data) == body
+    # One mint, attributed to the workspace's host for the connector's ledger.
+    assert turn_client.minted_for_workspaces() == [(_ACCOUNT_USER_ID, _FIXED_TEST_HOST_ID)]
+
+
+def test_ice_servers_refuses_a_workspace_whose_host_network_is_restricted(tmp_path: Path) -> None:
+    """A relay credential would be an egress tunnel around the host's allowlist, so the broker is never asked."""
+    agent_id, resolver, session_store = _owned_workspace(
+        tmp_path, labels={"is_primary": "true", NETWORK_RESTRICTED_LABEL: "true"}
+    )
+    turn_client = ScriptedTurnCredentialClient(mint_fn=lambda _user_id: make_test_credential(_T0))
+    client = _client(tmp_path, resolver, session_store, TurnCredentialBroker(client=turn_client))
+
+    response = client.get(f"/api/v1/agents/{agent_id}/ice-servers", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {"ice_servers": [], "expires_at": None}
+    assert turn_client.minted_for() == []
+
+
+def test_ice_servers_serves_a_workspace_whose_label_is_anything_but_true(tmp_path: Path) -> None:
+    agent_id, resolver, session_store = _owned_workspace(
+        tmp_path, labels={"is_primary": "true", NETWORK_RESTRICTED_LABEL: "false"}
+    )
+    turn_client = ScriptedTurnCredentialClient(mint_fn=lambda _user_id: make_test_credential(_T0))
+    client = _client(tmp_path, resolver, session_store, TurnCredentialBroker(client=turn_client))
+
+    response = client.get(f"/api/v1/agents/{agent_id}/ice-servers", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["ice_servers"][1]["username"] == "u-1"
     assert turn_client.minted_for() == [_ACCOUNT_USER_ID]
 
 

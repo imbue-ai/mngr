@@ -29,15 +29,20 @@ def make_test_credential(issued_at: datetime, username: str = "u-1") -> TurnCred
 
 
 class ScriptedTurnCredentialClient(TurnCredentialClientInterface):
-    """Mints through a script the test supplies (which may raise), recording every account asked for."""
+    """Mints through a script the test supplies (which may raise), recording every account and workspace asked for."""
 
     mint_fn: Callable[[str], TurnCredential] = Field(frozen=True, description="Answers (or raises for) each mint")
 
-    _minted_for: list[str] = PrivateAttr(default_factory=list)
+    _mints: list[tuple[str, str | None]] = PrivateAttr(default_factory=list)
 
-    def mint_credential(self, user_id: str) -> TurnCredential:
-        self._minted_for.append(user_id)
+    def mint_credential(self, user_id: str, workspace_id: str | None) -> TurnCredential:
+        self._mints.append((user_id, workspace_id))
         return self.mint_fn(user_id)
 
     def minted_for(self) -> list[str]:
-        return list(self._minted_for)
+        """The account of every mint, in order."""
+        return [user_id for user_id, _workspace_id in self._mints]
+
+    def minted_for_workspaces(self) -> list[tuple[str, str | None]]:
+        """Every (account, workspace host id) mint, in order."""
+        return list(self._mints)

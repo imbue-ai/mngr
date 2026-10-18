@@ -31,6 +31,8 @@ from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 _T0 = datetime(2026, 10, 17, 12, 0, 0, tzinfo=timezone.utc)
 _USER_A = "user-a-" + uuid4().hex
 _USER_B = "user-b-" + uuid4().hex
+_HOST_A = "host-" + uuid4().hex
+_HOST_B = "host-" + uuid4().hex
 
 _CONNECTOR_BODY = {
     "ice_servers": [
@@ -105,12 +107,13 @@ def test_broker_mints_once_and_serves_the_cached_credential_until_half_life() ->
     client = ScriptedTurnCredentialClient(mint_fn=lambda _user_id: make_test_credential(clock()))
     broker = _broker(clock, client)
 
-    first = broker.credential_for_account(_USER_A)
+    first = broker.credential_for_account(_USER_A, _HOST_A)
     clock.advance(29 * 60)
-    again = broker.credential_for_account(_USER_A)
+    # A second workspace of the same account shares the cached credential: no second mint.
+    again = broker.credential_for_account(_USER_A, _HOST_B)
 
     assert first is not None and again is first
-    assert client.minted_for() == [_USER_A]
+    assert client.minted_for_workspaces() == [(_USER_A, _HOST_A)]
 
 
 def test_broker_refreshes_at_half_life_and_caches_per_account() -> None:
@@ -124,17 +127,18 @@ def test_broker_refreshes_at_half_life_and_caches_per_account() -> None:
     client = ScriptedTurnCredentialClient(mint_fn=mint)
     broker = _broker(clock, client)
 
-    first = broker.credential_for_account(_USER_A)
-    other = broker.credential_for_account(_USER_B)
+    first = broker.credential_for_account(_USER_A, _HOST_A)
+    other = broker.credential_for_account(_USER_B, _HOST_B)
     clock.advance(30 * 60)
-    refreshed = broker.credential_for_account(_USER_A)
+    refreshed = broker.credential_for_account(_USER_A, None)
 
     assert first is not None and other is not None and refreshed is not None
     assert first.ice_servers[1].username == "u-1"
     assert other.ice_servers[1].username == "u-2"
     assert refreshed.ice_servers[1].username == "u-3"
     assert refreshed.issued_at == _T0 + timedelta(minutes=30)
-    assert client.minted_for() == [_USER_A, _USER_B, _USER_A]
+    # Each mint is attributed to the workspace whose read made it, including a read naming none.
+    assert client.minted_for_workspaces() == [(_USER_A, _HOST_A), (_USER_B, _HOST_B), (_USER_A, None)]
 
 
 def test_broker_answers_none_when_the_connector_refuses_and_nothing_is_cached() -> None:
@@ -144,7 +148,7 @@ def test_broker_answers_none_when_the_connector_refuses_and_nothing_is_cached() 
         raise TurnCredentialRefusedError("plan cannot share")
 
     broker = _broker(clock, ScriptedTurnCredentialClient(mint_fn=refuse))
-    assert broker.credential_for_account(_USER_A) is None
+    assert broker.credential_for_account(_USER_A, _HOST_A) is None
 
 
 def test_broker_keeps_serving_a_cached_credential_through_a_failed_refresh_until_it_expires() -> None:
@@ -158,13 +162,13 @@ def test_broker_keeps_serving_a_cached_credential_through_a_failed_refresh_until
 
     client = ScriptedTurnCredentialClient(mint_fn=mint)
     broker = _broker(clock, client)
-    first = broker.credential_for_account(_USER_A)
+    first = broker.credential_for_account(_USER_A, _HOST_A)
     state["is_failing"] = True
 
     clock.advance(45 * 60)
-    still_served = broker.credential_for_account(_USER_A)
+    still_served = broker.credential_for_account(_USER_A, _HOST_A)
     clock.advance(16 * 60)
-    gone = broker.credential_for_account(_USER_A)
+    gone = broker.credential_for_account(_USER_A, _HOST_A)
 
     assert still_served is first
     assert gone is None
@@ -214,13 +218,17 @@ def test_connector_client_mints_with_the_session_bearer_and_client_headers(tmp_p
         transport=httpx.MockTransport(handle),
     )
 
-    credential = client.mint_credential(_USER_A)
+    credential = client.mint_credential(_USER_A, _HOST_A)
+    client.mint_credential(_USER_A, None)
 
-    (request,) = seen_requests
-    assert str(request.url) == "https://connector.example.com" + TURN_ICE_SERVERS_PATH
-    assert request.headers["Authorization"] == f"Bearer {token}"
-    assert request.headers[CLIENT_ID_HEADER]
+    attributed, unattributed = seen_requests
+    # The workspace's host rides as the query parameter the connector's ledger records.
+    assert str(attributed.url) == f"https://connector.example.com{TURN_ICE_SERVERS_PATH}?workspace_id={_HOST_A}"
+    assert attributed.headers["Authorization"] == f"Bearer {token}"
+    assert attributed.headers[CLIENT_ID_HEADER]
     assert credential.ice_servers[1].username == "cf-user"
+    # A mint for no particular workspace sends no parameter at all.
+    assert str(unattributed.url) == "https://connector.example.com" + TURN_ICE_SERVERS_PATH
 
 
 def test_connector_client_reports_no_session_and_an_unreachable_connector_as_unavailable(tmp_path: Path) -> None:
@@ -237,9 +245,9 @@ def test_connector_client_reports_no_session_and_an_unreachable_connector_as_una
         transport=httpx.MockTransport(unreachable),
     )
     with pytest.raises(TurnCredentialUnavailableError, match="no session"):
-        client.mint_credential(_USER_B)
+        client.mint_credential(_USER_B, _HOST_A)
     with pytest.raises(TurnCredentialUnavailableError, match="could not reach"):
-        client.mint_credential(_USER_A)
+        client.mint_credential(_USER_A, _HOST_A)
     # An mngr host dir with no profile yet cannot hold a session either.
     bare = ConnectorTurnCredentialClient(
         connector_url=AnyUrl("https://connector.example.com"),
@@ -247,4 +255,4 @@ def test_connector_client_reports_no_session_and_an_unreachable_connector_as_una
         transport=httpx.MockTransport(unreachable),
     )
     with pytest.raises(TurnCredentialUnavailableError, match="profile"):
-        bare.mint_credential(_USER_A)
+        bare.mint_credential(_USER_A, _HOST_A)

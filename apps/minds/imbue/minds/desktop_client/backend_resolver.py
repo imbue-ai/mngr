@@ -52,6 +52,10 @@ SYSTEM_SERVICES_AGENT_NAME: Final[str] = "system-services"
 # It lives on the ``system-services`` (primary) agent. The host's normalized
 # slug name lives on the host itself, not in a label.
 WORKSPACE_DISPLAY_NAME_LABEL: Final[str] = "workspace_display_name"
+# Stamped ``true`` on a workspace's primary agent when its create restricted the host's outbound
+# network (Modal's ``--offline`` / ``--cidr-allowlist``); the desktop's relay broker refuses such
+# a workspace a TURN credential (specs/turn-relay/spec.md, section 3).
+NETWORK_RESTRICTED_LABEL: Final[str] = "network_restricted"
 
 # The chat app inside a workspace labels every agent it launches as a member of its
 # chat (``chat_id=<chat id>``, ``chat_seq=<member ordinal>``). A permission request
