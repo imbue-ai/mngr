@@ -9,3 +9,5 @@
 - Every tier's `deploy.toml` gains `max_turn_relay_gb_per_month` on every plan (20 / 50 / 200 GB for free / explorer / ally, 0 for guest) and the `turn` secret in `[secrets] services`, which `minds-admin env deploy` pushes from `secrets/minds/<tier>/turn`; the entry must exist (empty values allowed) before a tier's next deploy.
 
 - `docs/deploy/setup/host-pool-setup.md` explains that a pool host publishes exactly the ports the bake's create templates declare, that pool hosts baked before published ports existed never match a lease that declares them, and that the pool must be rebaked at a template tag that starts declaring ports before that tag is promoted.
+
+- `test_mngr_settings.py::test_a_refused_session_refresh_reaches_the_sync_pass_through_a_real_observe_stream` is marked flaky: its stub connector occasionally resets the refresh connection instead of answering 401, which CI saw once on this branch.
