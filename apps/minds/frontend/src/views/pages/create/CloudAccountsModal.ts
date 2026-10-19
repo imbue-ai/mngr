@@ -2,9 +2,12 @@
 // that replaces an existing connection's credentials in place. A connection
 // is one set of cloud credentials (aws, gcp, azure, or modal) owned by an
 // imbue cloud account (synced to every device that unlocks it) or by this
-// device's local profile. The preparing view deliberately has no way out --
-// `mngr <backend> prepare` is creating real cloud resources (modal only
-// verifies its token) and must not look abandonable mid-flight.
+// device's local profile. Its credentials are either pasted keys or a login
+// installed on each device (an AWS profile, an az login, a Modal profile),
+// in which case nothing secret is stored or synced. The preparing view
+// deliberately has no way out -- `mngr <backend> prepare` is creating real
+// cloud resources (modal only verifies its token) and must not look
+// abandonable mid-flight.
 
 import m from "mithril";
 import type { UiConnectionEntry } from "../../../generated/ui";
@@ -30,6 +33,42 @@ import { Modal } from "../../components/Modal";
 
 type ModalView = "form" | "progress" | "result";
 
+/** Where a connection's credentials come from, as the server spells it. */
+export type CredentialSource = "pasted" | "local_profile";
+
+/** One login on this machine, as `GET /api/v1/desktop/cloud-accounts/local-profiles` lists it. */
+export interface LocalProfileOption {
+  name: string;
+  label: string;
+  region: string | null;
+  tenant_id: string | null;
+  subscription_id: string | null;
+  unusable_reason: string;
+}
+
+/** Fetches the logins on this machine for one backend; injected so tests need no network. */
+export type LocalProfilesLoader = (backend: string) => Promise<LocalProfileOption[]>;
+
+export async function fetchLocalProfiles(backend: string): Promise<LocalProfileOption[]> {
+  const response = await fetch(
+    `/api/v1/desktop/cloud-accounts/local-profiles?backend=${encodeURIComponent(backend)}`,
+    { credentials: "same-origin" },
+  );
+  if (!response.ok) throw new Error(`local profiles: HTTP ${response.status}`);
+  const body = (await response.json()) as { profiles: LocalProfileOption[] };
+  return body.profiles;
+}
+
+/**
+ * `loader` plus a Mithril redraw once its listing settles: the listing lands
+ * outside any event handler, so nothing else would render it. The state takes
+ * the result in the continuation right after the promise settles, and
+ * `m.redraw()` only schedules the next frame, so that frame shows the result.
+ */
+export function redrawingLocalProfilesLoader(loader: LocalProfilesLoader): LocalProfilesLoader {
+  return (backend) => loader(backend).finally(() => m.redraw());
+}
+
 /** Adding a connection, or replacing an existing one's credentials (its id, owner, backend and region fixed). */
 export type ConnectionModalMode = "add" | "edit";
 
@@ -51,6 +90,16 @@ export class CloudAccountsModalState {
   backend = "aws";
   /** Whether the selected backend's region is fixed when the connection is added (the create form picks it for the rest). */
   isRegionPinned = true;
+  /** Whether the selected backend lets a connection name a login on this device instead of pasting keys. */
+  isLocalProfileSupported = true;
+  credentialSource: CredentialSource = "pasted";
+  /** The login a local-profile connection names: the AWS or Modal profile name. */
+  awsProfile = "";
+  modalProfile = "";
+  /** The logins found on this machine for the selected backend, once loaded. */
+  localProfiles: LocalProfileOption[] = [];
+  isLocalProfilesLoading = false;
+  localProfilesError = "";
   ownerUserId = LOCAL_PROFILE_USER_ID;
   /** Why the preselected owner was replaced by this device only; "" when it was kept. */
   ineligibleOwnerNote = "";
@@ -144,6 +193,7 @@ export class CloudAccountsModalState {
   ): void {
     this.mode = "add";
     this.editInstance = "";
+    this.credentialSource = "pasted";
     this.selectBackend(backend, defaultRegionByBackend[backend.name.toUpperCase()] ?? "");
     const isOwnerEligible = ownerOptions.some(
       (option) => option.userId === owner.userId,
@@ -161,12 +211,16 @@ export class CloudAccountsModalState {
   /**
    * Open the form to replace `entry`'s credentials: its owner, backend and
    * region are fixed and shown, the alias is prefilled, and every credential
-   * field starts empty (an update replaces the stored keys whole).
+   * field starts empty (an update replaces the stored keys whole). A
+   * local-profile connection opens on its login form, so this device's logins
+   * are listed through `loadProfiles` right away.
    */
   openForEdit(
-    entry: Pick<UiConnectionEntry, "instance" | "backend_label" | "alias" | "placement">,
+    entry: Pick<UiConnectionEntry, "instance" | "backend_label" | "alias" | "placement"> &
+      Partial<Pick<UiConnectionEntry, "credential_source">>,
     backend: ConnectionBackendOption,
     owner: ConnectionOwnerOption,
+    loadProfiles: LocalProfilesLoader,
   ): void {
     this.mode = "edit";
     this.editInstance = entry.instance;
@@ -177,9 +231,85 @@ export class CloudAccountsModalState {
     this.selectBackend(backend, entry.placement.default_region ?? entry.placement.default_zone ?? "");
     this.clearSecrets();
     this.alias = entry.alias;
+    // A local-profile connection opens on the login it names, so a user who only
+    // wants to switch profiles sees the current one; pasted keys are never shown back.
+    if (entry.credential_source === "local_profile" && backend.is_local_profile_supported) {
+      this.credentialSource = "local_profile";
+      this.awsProfile = entry.placement.aws_profile ?? "";
+      this.modalProfile = entry.placement.modal_profile ?? "";
+      this.azureTenantId = entry.placement.tenant_id ?? "";
+      this.azureSubscriptionId = entry.placement.subscription_id ?? "";
+    } else {
+      this.credentialSource = "pasted";
+    }
     this.formError = "";
     this.view = "form";
     this.isOpen = true;
+    this.refreshLocalProfiles(loadProfiles);
+  }
+
+  /**
+   * Switch between pasting keys and naming a login on this device. Both forms
+   * keep their values (toggling back shows what was typed); `buildRequestBody`
+   * sends only the chosen source's fields.
+   */
+  selectCredentialSource(source: CredentialSource, loadProfiles: LocalProfilesLoader): void {
+    if (source === "local_profile" && !this.isLocalProfileSupported) return;
+    this.credentialSource = source;
+    this.formError = "";
+    this.refreshLocalProfiles(loadProfiles);
+  }
+
+  /** (Re)list this device's logins whenever the form is on the local-profile source: it opened there, or its backend changed. */
+  refreshLocalProfiles(loadProfiles: LocalProfilesLoader): void {
+    if (this.credentialSource !== "local_profile") return;
+    void this.loadLocalProfiles(loadProfiles);
+  }
+
+  /** List this machine's logins for the selected backend; a failed listing leaves the free-text field. */
+  async loadLocalProfiles(loadProfiles: LocalProfilesLoader): Promise<void> {
+    const backend = this.backend;
+    // The form may have moved on while the listing was in flight (another backend,
+    // or back to pasted keys); a late result must not seed the fields it now shows.
+    const isListingStillWanted = () => this.backend === backend && this.credentialSource === "local_profile";
+    this.isLocalProfilesLoading = true;
+    this.localProfilesError = "";
+    try {
+      const profiles = await loadProfiles(backend);
+      if (!isListingStillWanted()) return;
+      this.localProfiles = profiles;
+      this.pickFirstUsableLocalProfile();
+    } catch (error) {
+      console.error("Failed to list this device's logins", error);
+      if (isListingStillWanted()) {
+        this.localProfiles = [];
+        this.localProfilesError = "Could not read this device's logins; type the name below.";
+      }
+    } finally {
+      if (isListingStillWanted()) this.isLocalProfilesLoading = false;
+    }
+  }
+
+  /** Seed the login fields from the first usable listed login when nothing is chosen yet. */
+  pickFirstUsableLocalProfile(): void {
+    const first = this.localProfiles.find((profile) => profile.unusable_reason === "");
+    if (first === undefined) return;
+    if (this.backend === "aws" && this.awsProfile === "") this.selectLocalProfile(first);
+    if (this.backend === "modal" && this.modalProfile === "") this.selectLocalProfile(first);
+    if (this.backend === "azure" && this.azureSubscriptionId === "") this.selectLocalProfile(first);
+  }
+
+  /** Take a listed login: its name, and for Azure its tenant and subscription; an AWS region seeds the picker. */
+  selectLocalProfile(profile: LocalProfileOption): void {
+    if (this.backend === "aws") {
+      this.awsProfile = profile.name;
+      if (this.mode === "add" && profile.region) this.region = profile.region;
+    } else if (this.backend === "modal") {
+      this.modalProfile = profile.name;
+    } else if (this.backend === "azure") {
+      this.azureSubscriptionId = profile.subscription_id ?? profile.name;
+      this.azureTenantId = profile.tenant_id ?? "";
+    }
   }
 
   /** Where a submit goes: the add route, or the edited connection's own update route. */
@@ -196,7 +326,13 @@ export class CloudAccountsModalState {
   selectBackend(backend: ConnectionBackendOption, defaultRegion: string): void {
     this.backend = backend.name;
     this.isRegionPinned = backend.is_region_pinned;
+    this.isLocalProfileSupported = backend.is_local_profile_supported;
+    if (!this.isLocalProfileSupported) this.credentialSource = "pasted";
     this.region = defaultRegion;
+    this.localProfiles = [];
+    this.localProfilesError = "";
+    this.awsProfile = "";
+    this.modalProfile = "";
   }
 
   close(): void {
@@ -216,13 +352,16 @@ export class CloudAccountsModalState {
     this.azureClientSecret = "";
     this.modalTokenId = "";
     this.modalTokenSecret = "";
+    this.awsProfile = "";
+    this.modalProfile = "";
     this.alias = "";
   }
 
   /**
    * The request body, or the message for a field still missing. An edit
    * carries the alias and the credentials only: the owner and the region are
-   * the connection's own and the update route keeps them.
+   * the connection's own and the update route keeps them. A local-profile
+   * connection sends the login it names in place of any key.
    */
   buildRequestBody(): Record<string, string> | string {
     const alias = this.alias.trim();
@@ -231,6 +370,25 @@ export class CloudAccountsModalState {
     if (this.mode === "add") {
       body.owner = this.ownerUserId;
       if (this.isRegionPinned) body.region = this.region;
+    }
+    if (this.credentialSource === "local_profile") {
+      body.credential_source = "local_profile";
+      if (this.backend === "aws") {
+        body.aws_profile = this.awsProfile.trim();
+        if (!body.aws_profile) return "Name the AWS profile from ~/.aws/config to use.";
+      } else if (this.backend === "azure") {
+        body.azure_subscription_id = this.azureSubscriptionId.trim();
+        body.azure_tenant_id = this.azureTenantId.trim();
+        if (!body.azure_subscription_id || !body.azure_tenant_id) {
+          return "The subscription id and tenant id of your az login are both required.";
+        }
+      } else if (this.backend === "modal") {
+        body.modal_profile = this.modalProfile.trim();
+        if (!body.modal_profile) return "Name the Modal profile from ~/.modal.toml to use.";
+      } else {
+        return `A ${this.backend} connection cannot use a login on this device.`;
+      }
+      return body;
     }
     if (this.backend === "aws") {
       body.aws_access_key_id = this.awsAccessKeyId.trim();
@@ -275,6 +433,22 @@ export interface CloudAccountsModalAttrs {
   backends: readonly ConnectionBackendOption[];
   ownerOptions: readonly ConnectionOwnerOption[];
   onAccountAdded(account: CloudAccountOption): void;
+  /** Lists this device's logins for a backend; defaults to the API route. */
+  loadLocalProfiles?: LocalProfilesLoader;
+}
+
+/** The credential-source switch's copy per backend: what a login on this device is called there. */
+export function localProfileChoiceLabel(backend: string): string {
+  switch (backend) {
+    case "aws":
+      return "Use an AWS profile on this device";
+    case "azure":
+      return "Use my az login on this device";
+    case "modal":
+      return "Use a Modal profile on this device";
+    default:
+      return "Use a login on this device";
+  }
 }
 
 /** The explanation shown when no signed-in account can own a synced connection here. */
@@ -385,6 +559,42 @@ function labeledInput(
   ]);
 }
 
+/** A login-name field backed by a datalist of the logins found on this device (free text stays allowed). */
+function localProfileInput(
+  state: CloudAccountsModalState,
+  id: string,
+  label: string,
+  value: string,
+  onValue: (next: string) => void,
+  placeholder: string,
+): m.Children {
+  const listId = `${id}-list`;
+  const unusable = state.localProfiles.find((profile) => profile.name === value && profile.unusable_reason !== "");
+  return m("div", { class: "mt-3" }, [
+    m(FormLabel, { target: id }, label),
+    m(TextInput, {
+      id,
+      name: id,
+      value,
+      list: listId,
+      placeholder,
+      oninput: (event: InputEvent) => onValue((event.target as HTMLInputElement).value),
+    }),
+    m(
+      "datalist",
+      { id: listId },
+      state.localProfiles.map((profile) => m("option", { value: profile.name }, profile.label)),
+    ),
+    unusable !== undefined
+      ? m(
+          "p",
+          { id: `${id}-unusable`, class: "mt-1 type-helper text-important" },
+          `This profile ${unusable.unusable_reason}.`,
+        )
+      : null,
+  ]);
+}
+
 export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
   // Drives the time-eased progress bar while the prepare fetch is in flight:
   // progressPercent derives from Date.now(), and without a ticker nothing
@@ -418,7 +628,10 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
         backends,
         ownerOptions,
         onAccountAdded,
+        loadLocalProfiles: listLocalProfiles = fetchLocalProfiles,
       } = vnode.attrs;
+      const loadLocalProfiles = redrawingLocalProfilesLoader(listLocalProfiles);
+      const isLocalProfile = state.credentialSource === "local_profile";
       const regionOptions =
         regionOptionsByBackend[state.backend.toUpperCase()] ?? [];
       const isEdit = state.mode === "edit";
@@ -500,7 +713,8 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
                   ? m(
                       "p",
                       { class: "mt-1 type-helper text-tertiary" },
-                      "The connection keeps its owner, provider and region; paste the full set of new credentials.",
+                      "The connection keeps its owner, provider and region; paste the full set of new credentials, " +
+                        "or switch it to a login on this device.",
                     )
                   : state.ineligibleOwnerNote !== "" || isOnlyLocalOwner
                     ? m(
@@ -553,6 +767,7 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
                                 regionOptionsByBackend[name.toUpperCase()]?.[0] ??
                                   "",
                               );
+                              state.refreshLocalProfiles(loadLocalProfiles);
                             },
                           },
                           backends.map((backend) =>
@@ -613,7 +828,129 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
                   },
                   { placeholder: "my cloud connection" },
                 ),
-                state.backend === "aws"
+                state.isLocalProfileSupported
+                  ? m(
+                      "div",
+                      { id: "ca-credential-source", class: "mt-3 flex items-center justify-between gap-3" },
+                      [
+                        m(FormLabel, { target: "ca-credential-source-select", inline: true }, "Credentials"),
+                        m(
+                          Select,
+                          {
+                            id: "ca-credential-source-select",
+                            name: "ca-credential-source",
+                            width: "w-72",
+                            value: state.credentialSource,
+                            onchange: (event: Event) => {
+                              state.selectCredentialSource(
+                                (event.target as HTMLSelectElement).value as CredentialSource,
+                                loadLocalProfiles,
+                              );
+                            },
+                          },
+                          [
+                            m("option", { value: "pasted", selected: !isLocalProfile }, "Paste keys"),
+                            m(
+                              "option",
+                              { value: "local_profile", selected: isLocalProfile },
+                              localProfileChoiceLabel(state.backend),
+                            ),
+                          ],
+                        ),
+                      ],
+                    )
+                  : null,
+                isLocalProfile
+                  ? m("p", { id: "ca-local-profile-note", class: "mt-1 type-helper text-tertiary" }, [
+                      "Nothing secret is stored or synced: the connection names the login, and each device ",
+                      "that uses it needs that login set up (",
+                      state.backend === "aws"
+                        ? "aws configure --profile <name>"
+                        : state.backend === "azure"
+                          ? "az login"
+                          : "modal token new --profile <name>",
+                      "). ",
+                      state.isLocalProfilesLoading ? "Looking for logins on this device…" : "",
+                      state.localProfilesError,
+                    ])
+                  : null,
+                isLocalProfile && state.backend === "aws"
+                  ? m("div", { id: "ca-fields-aws-profile" }, [
+                      localProfileInput(
+                        state,
+                        "ca-aws-profile",
+                        "AWS profile",
+                        state.awsProfile,
+                        (next) => {
+                          state.awsProfile = next;
+                        },
+                        "the [profile <name>] section of ~/.aws/config",
+                      ),
+                    ])
+                  : null,
+                isLocalProfile && state.backend === "modal"
+                  ? m("div", { id: "ca-fields-modal-profile" }, [
+                      localProfileInput(
+                        state,
+                        "ca-modal-profile",
+                        "Modal profile",
+                        state.modalProfile,
+                        (next) => {
+                          state.modalProfile = next;
+                        },
+                        "a section of ~/.modal.toml",
+                      ),
+                    ])
+                  : null,
+                isLocalProfile && state.backend === "azure"
+                  ? m("div", { id: "ca-fields-azure-login" }, [
+                      state.localProfiles.length > 0
+                        ? m("div", { class: "mt-3" }, [
+                            m(FormLabel, { target: "ca-azure-subscription-pick" }, "Subscription of your az login"),
+                            m(
+                              Select,
+                              {
+                                id: "ca-azure-subscription-pick",
+                                name: "ca-azure-subscription-pick",
+                                value: state.azureSubscriptionId,
+                                onchange: (event: Event) => {
+                                  const picked = state.localProfiles.find(
+                                    (profile) => profile.name === (event.target as HTMLSelectElement).value,
+                                  );
+                                  if (picked !== undefined) state.selectLocalProfile(picked);
+                                },
+                              },
+                              state.localProfiles.map((profile) =>
+                                m(
+                                  "option",
+                                  { value: profile.name, selected: profile.name === state.azureSubscriptionId },
+                                  profile.label,
+                                ),
+                              ),
+                            ),
+                          ])
+                        : null,
+                      labeledInput(
+                        "ca-azure-login-subscription-id",
+                        "Subscription ID",
+                        state.azureSubscriptionId,
+                        (next) => {
+                          state.azureSubscriptionId = next;
+                        },
+                        { placeholder: "00000000-0000-0000-0000-000000000000" },
+                      ),
+                      labeledInput(
+                        "ca-azure-login-tenant-id",
+                        "Tenant ID",
+                        state.azureTenantId,
+                        (next) => {
+                          state.azureTenantId = next;
+                        },
+                        { placeholder: "Entra directory (tenant) id" },
+                      ),
+                    ])
+                  : null,
+                !isLocalProfile && state.backend === "aws"
                   ? m("div", { id: "ca-fields-aws" }, [
                       labeledInput(
                         "ca-access-key-id",
@@ -664,7 +1001,7 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
                       ]),
                     ])
                   : null,
-                state.backend === "azure"
+                !isLocalProfile && state.backend === "azure"
                   ? m("div", { id: "ca-fields-azure" }, [
                       labeledInput(
                         "ca-azure-subscription-id",
@@ -707,7 +1044,7 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
                       ),
                     ])
                   : null,
-                state.backend === "modal"
+                !isLocalProfile && state.backend === "modal"
                   ? m("div", { id: "ca-fields-modal" }, [
                       labeledInput(
                         "ca-modal-token-id",
@@ -809,7 +1146,9 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
                         submitAccount(state, onAccountAdded, browserLifecycleDeps(() => m.redraw())),
                     },
                     isEdit
-                      ? "Save & verify credentials"
+                      ? isLocalProfile
+                        ? "Save & verify login"
+                        : "Save & verify credentials"
                       : "Save & prepare connection",
                   ),
                 ]),

@@ -10,6 +10,7 @@ from imbue.mngr.config.provider_config_registry import register_provider_config
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.testing import setup_layered_config_test_env
 from imbue.mngr_modal.config import ModalProviderConfig
+from imbue.mngr_modal.config import read_modal_profiles
 
 
 def test_tokens_default_to_unset() -> None:
@@ -57,3 +58,20 @@ def test_tokens_arrive_through_the_mngr_env_override_path() -> None:
     assert config.token_id == "ak-env"
     assert config.token_secret is not None
     assert config.token_secret.get_secret_value() == "as-env"
+
+
+def test_read_modal_profiles_lists_the_sections_holding_a_token_pair_in_file_order(tmp_path: Path) -> None:
+    config_path = tmp_path / "modal.toml"
+    config_path.write_text(
+        '[work]\ntoken_id = "ak-w"\ntoken_secret = "as-w"\n\n'
+        '[default]\ntoken_id = "ak-d"\ntoken_secret = "as-d"\nactive = true\n\n'
+        '[half]\ntoken_id = "ak-h"\n\n[blank]\ntoken_id = ""\ntoken_secret = "as-b"\n\nloose = "not a section"\n'
+    )
+
+    profiles = read_modal_profiles(config_path)
+
+    assert list(profiles) == ["work", "default"]
+    assert profiles["work"].token_id == "ak-w"
+    assert profiles["work"].token_secret.get_secret_value() == "as-w"
+    with pytest.raises(FileNotFoundError):
+        read_modal_profiles(tmp_path / "missing.toml")

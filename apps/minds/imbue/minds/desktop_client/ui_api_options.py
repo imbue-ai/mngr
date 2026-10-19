@@ -24,15 +24,26 @@ from typing import Final
 
 from flask import Blueprint
 from flask import Response
+from flask import request
+from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
 from imbue.minds.desktop_client.connections.primitives import IMBUE_CLOUD_PROVIDER_NAME_PREFIX
 from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.machine_size import ImbueCloudMachineQuotaUsage
+from imbue.minds.desktop_client.machine_size import ImbueCloudResizeBounds
+from imbue.minds.desktop_client.machine_size import compute_imbue_cloud_resize_bounds
+from imbue.minds.desktop_client.machine_size import is_imbue_cloud_machine_running
+from imbue.minds.desktop_client.machine_size import is_imbue_cloud_machine_transitioning
+from imbue.minds.desktop_client.machine_size import is_imbue_cloud_resize_offered_to_plan
 from imbue.minds.desktop_client.machine_size import is_machine_disk_resizable_provider
 from imbue.minds.desktop_client.machine_size import is_machine_resizable_provider
 from imbue.minds.desktop_client.responses import make_response
@@ -48,10 +59,16 @@ from imbue.minds.desktop_client.ui_api_lifecycle import build_ssh_command
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import is_account_synced_provider
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_imbue_cloud.wire import validate_wire
+from imbue.mngr_imbue_cloud.wire_types import AccountInfo
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 
 # App icons are SVG markup authored inside the workspace -- untrusted content
 # headed for the trusted shell's DOM. This is the server-side backstop
@@ -146,19 +163,49 @@ class WorkspaceOptionsData(FrozenModel):
 class WorkspaceMachineSizeData(FrozenModel):
     """The machine-size facts the settings page renders for a workspace, whatever its provider.
 
-    ``is_available`` is False when the size cannot be shown (the provider
-    reported none, or the imbue_cloud connector lookup failed); every other
-    field is then absent/None and the page hides the section rather than
-    rendering an error. The pending ``target_*`` facts exist only for
-    imbue_cloud, whose resize applies at the machine's next restart.
+    ``is_available`` is False when the size cannot be shown; every size fact
+    is then absent/None, only ``is_restart_in_progress`` is still answered,
+    and ``is_read_failed`` tells a size this app failed to read (the
+    imbue_cloud connector lookup failed) from one the provider does not
+    report, so the page says which rather than rendering an error. The
+    pending ``target_*`` facts exist only for imbue_cloud, whose resize
+    applies at the machine's next restart.
+
+    An imbue_cloud machine's size and its resize offer come from two connector
+    reads of very different cost (``machines show`` against ``account show``),
+    so the default answer carries the size alone with
+    ``is_resize_offer_pending`` set, and a second read with
+    ``include_resize_offer=1`` adds the offer.
     """
 
     is_available: bool = Field(description="Whether machine-size facts could be read for this workspace")
+    is_read_failed: bool = Field(
+        default=False,
+        description=(
+            "Whether an unavailable size is one this app failed to read (the imbue_cloud connector could not "
+            "answer for the machine) rather than one the provider does not report"
+        ),
+    )
     cpu_count: int | None = Field(default=None, description="CPUs the machine has; None when unknown or not shown")
     memory_gb: float | None = Field(default=None, description="Memory in GB; None when unknown")
     disk_gb: float | None = Field(default=None, description="Data-disk size in GB; None when unknown or uncapped")
     is_resizable: bool = Field(default=False, description="Whether the settings page can change the machine's size")
     is_disk_resizable: bool = Field(default=False, description="Whether the data disk can be grown from the page")
+    is_resize_offer_pending: bool = Field(
+        default=False,
+        description=(
+            "Whether this answer carries the size but not yet whether the page may change it: a second read "
+            "with include_resize_offer=1 answers that (imbue_cloud only; every other provider's offer is known "
+            "from the provider alone)"
+        ),
+    )
+    is_restart_in_progress: bool = Field(
+        default=False,
+        description=(
+            "Whether this app is restarting the workspace's host right now (a host recovery is running), "
+            "during which the page offers no second restart"
+        ),
+    )
     target_memory_gb: int | None = Field(
         default=None, description="Pending resize's memory target (applied at the next restart); None when none"
     )
@@ -167,6 +214,40 @@ class WorkspaceMachineSizeData(FrozenModel):
     )
     is_restart_needed_to_apply: bool = Field(
         default=False, description="Whether a pending size target exists that a restart would apply"
+    )
+    is_running: bool | None = Field(
+        default=None,
+        description="Whether the machine is running (so a restart would apply a pending size now); None when unknown",
+    )
+    is_transitioning: bool = Field(
+        default=False,
+        description="Whether the machine is mid stop or start, during which a resize is refused (imbue_cloud only)",
+    )
+    memory_choices_gb: tuple[int, ...] = Field(
+        default=(),
+        description=(
+            "The RAM sizes an imbue_cloud machine may be set to within its account's quota, its current size "
+            "included; empty for machines sized by free numbers (docker, lima)"
+        ),
+    )
+    is_memory_capped_by_plan: bool = Field(
+        default=False, description="Whether the plan's units quota, not the fleet's largest size, bounds the choices"
+    )
+    plan_memory_limit_gb: int | None = Field(
+        default=None, description="The plan's RAM quota across running machines (imbue_cloud only)"
+    )
+    other_machines_memory_gb: int | None = Field(
+        default=None, description="RAM the account's other running machines use against that quota"
+    )
+    max_disk_gb: int | None = Field(
+        default=None,
+        description="The largest data disk the machine may be grown to within its quota (imbue_cloud only)",
+    )
+    plan_disk_limit_gb: int | None = Field(
+        default=None, description="The plan's data-disk quota across running + stopped machines (imbue_cloud only)"
+    )
+    other_machines_disk_gb: int | None = Field(
+        default=None, description="Data-disk GB the account's other machines use against that quota"
     )
 
 
@@ -320,6 +401,11 @@ def _handle_workspace_machine_size(agent_id: str) -> Response:
     machine's comes from ``mngr imbue_cloud machines show`` (a connector round
     trip), which also knows about a resize pending its next restart. The
     imbue_cloud vCPU count does not follow a resize, so it is not shown there.
+
+    An imbue_cloud machine's answer carries only its size unless the query
+    names ``include_resize_offer=1``: the offer needs the account's plan and
+    usage, a connector read that can take tens of seconds, and the page shows
+    the size while it waits for it.
     """
     if not is_ui_request_authenticated():
         return _json_error_response(401, "Not authenticated")
@@ -327,20 +413,38 @@ def _handle_workspace_machine_size(agent_id: str) -> Response:
         parsed_agent_id = AgentId(agent_id)
     except InvalidRandomIdError:
         return _json_error_response(404, "Unknown workspace")
+    is_resize_offer_included = request.args.get("include_resize_offer", "") == "1"
 
-    unavailable = WorkspaceMachineSizeData(is_available=False)
     state = get_state()
     backend_resolver = state.backend_resolver
     info = backend_resolver.get_agent_display_info(parsed_agent_id)
     host_id = _workspace_host_coordinate_for_options(backend_resolver, state.session_store, agent_id)
+    provider_name = "" if info is None else (info.provider_name or "")
     if info is None or not host_id:
-        return make_response(content=unavailable.model_dump_json(), status_code=200, media_type="application/json")
-    provider_name = info.provider_name or ""
-    if provider_name.startswith(IMBUE_CLOUD_PROVIDER_NAME_PREFIX):
-        data = _imbue_cloud_machine_size(state, agent_id, host_id)
+        size = WorkspaceMachineSizeData(is_available=False)
+    elif provider_name.startswith(IMBUE_CLOUD_PROVIDER_NAME_PREFIX):
+        size = _imbue_cloud_machine_size(state, agent_id, host_id, is_resize_offer_included)
     else:
-        data = _recorded_machine_size(backend_resolver, HostId(host_id), provider_name)
+        size = _recorded_machine_size(backend_resolver, HostId(host_id), provider_name)
+    # Answered on every path, an unavailable size included: the page follows it
+    # to know when a restart it dispatched is over.
+    data = size.model_copy_update(
+        to_update(
+            size.field_ref().is_restart_in_progress,
+            _is_host_recovery_running(state.workspace_operation_registry, parsed_agent_id),
+        ),
+    )
     return make_response(content=data.model_dump_json(), status_code=200, media_type="application/json")
+
+
+def _is_host_recovery_running(registry: WorkspaceOperationRegistryInterface, agent_id: AgentId) -> bool:
+    """Whether this app is restarting (or starting) the workspace's host right now."""
+    operation = registry.get(agent_id)
+    return (
+        operation is not None
+        and operation.kind == WorkspaceOperationKind.RECOVERY
+        and operation.status == WorkspaceOperationStatus.RUNNING
+    )
 
 
 def _recorded_machine_size(
@@ -360,9 +464,20 @@ def _recorded_machine_size(
     )
 
 
-def _imbue_cloud_machine_size(state: DesktopClientState, agent_id: str, host_id: str) -> WorkspaceMachineSizeData:
-    """The connector's size facts for the leased machine at ``host_id``, read through the plugin (specs/slice-fleet)."""
-    unavailable = WorkspaceMachineSizeData(is_available=False)
+def _imbue_cloud_machine_size(
+    state: DesktopClientState, agent_id: str, host_id: str, is_resize_offer_included: bool
+) -> WorkspaceMachineSizeData:
+    """The connector's size facts for the leased machine at ``host_id``, read through the plugin (specs/slice-fleet).
+
+    The size controls are offered only to accounts on a plan in
+    ``IMBUE_CLOUD_RESIZE_PLAN_NAMES``, bounded by what the account's quotas
+    would grant; when the account's plan and usage cannot be read, the size
+    is shown read-only rather than hidden. The offer is computed only when
+    asked for: it costs an ``account show`` round trip on top of the
+    ``machines show`` the size needs, and the page reads the two separately.
+    """
+    # Every leased machine has a size, so one that cannot be shown is one that could not be read.
+    unavailable = WorkspaceMachineSizeData(is_available=False, is_read_failed=True)
     session_store = state.session_store
     imbue_cloud_cli = state.imbue_cloud_cli
     account = session_store.get_account_for_workspace(agent_id) if session_store else None
@@ -371,14 +486,81 @@ def _imbue_cloud_machine_size(state: DesktopClientState, agent_id: str, host_id:
     machine = imbue_cloud_cli.show_machine(account.email, host_id)
     if machine is None:
         return unavailable
+    status = WorkspaceStatus(machine.status)
     # One unit is one GiB of machine RAM.
-    return WorkspaceMachineSizeData(
+    size = WorkspaceMachineSizeData(
         is_available=True,
         memory_gb=machine.memory_units,
         disk_gb=machine.disk_gb,
         target_memory_gb=machine.target_memory_units,
         target_disk_gb=machine.target_disk_gb,
         is_restart_needed_to_apply=machine.is_restart_needed_to_apply,
+        is_running=is_imbue_cloud_machine_running(status),
+        is_transitioning=is_imbue_cloud_machine_transitioning(status),
+    )
+    if machine.memory_units is None or machine.disk_gb is None:
+        return size
+    if not is_resize_offer_included:
+        return size.model_copy_update(to_update(size.field_ref().is_resize_offer_pending, True))
+    account_info = _imbue_cloud_account_info(imbue_cloud_cli, str(account.email))
+    if account_info is None or not is_imbue_cloud_resize_offered_to_plan(account_info.plan_name):
+        return size
+    quotas = _machine_quota_usage(account_info)
+    if quotas is None:
+        return size
+    bounds = compute_imbue_cloud_resize_bounds(
+        status=status,
+        memory_units=machine.memory_units,
+        target_memory_units=machine.target_memory_units,
+        disk_gb=machine.disk_gb,
+        target_disk_gb=machine.target_disk_gb,
+        quotas=quotas,
+    )
+    return _with_resize_offer(size, bounds)
+
+
+def _imbue_cloud_account_info(imbue_cloud_cli: ImbueCloudCli, email: str) -> AccountInfo | None:
+    """The account's plan, quotas and usage, or None when the connector cannot be read (the size stays read-only)."""
+    try:
+        raw_info = imbue_cloud_cli.get_account_info(email)
+    except ImbueCloudCliError as exc:
+        logger.debug("Could not read the plan and usage of {} for the machine-size controls: {}", email, exc)
+        return None
+    return validate_wire(AccountInfo, raw_info)
+
+
+@pure
+def _machine_quota_usage(account_info: AccountInfo) -> ImbueCloudMachineQuotaUsage | None:
+    """The machine quotas with their usage, or None against a connector too old to report them."""
+    entitlements = account_info.entitlements
+    usage = account_info.usage
+    if (
+        entitlements.max_active_machine_units is None
+        or entitlements.max_total_machine_disk_gb is None
+        or usage.active_machine_units is None
+        or usage.total_machine_disk_gb is None
+    ):
+        return None
+    return ImbueCloudMachineQuotaUsage(
+        max_active_machine_units=entitlements.max_active_machine_units,
+        active_machine_units=usage.active_machine_units,
+        max_total_machine_disk_gb=entitlements.max_total_machine_disk_gb,
+        total_machine_disk_gb=usage.total_machine_disk_gb,
+    )
+
+
+@pure
+def _with_resize_offer(size: WorkspaceMachineSizeData, bounds: ImbueCloudResizeBounds) -> WorkspaceMachineSizeData:
+    return size.model_copy_update(
+        to_update(size.field_ref().is_resizable, True),
+        to_update(size.field_ref().is_disk_resizable, True),
+        to_update(size.field_ref().memory_choices_gb, bounds.memory_choices_gb),
+        to_update(size.field_ref().is_memory_capped_by_plan, bounds.is_memory_capped_by_plan),
+        to_update(size.field_ref().plan_memory_limit_gb, bounds.plan_memory_limit_gb),
+        to_update(size.field_ref().other_machines_memory_gb, bounds.other_machines_memory_gb),
+        to_update(size.field_ref().max_disk_gb, bounds.max_disk_gb),
+        to_update(size.field_ref().plan_disk_limit_gb, bounds.plan_disk_limit_gb),
+        to_update(size.field_ref().other_machines_disk_gb, bounds.other_machines_disk_gb),
     )
 
 

@@ -177,6 +177,9 @@ class UiAccountPlanView(FrozenModel):
     usage_rows: tuple[UiPlanUsageRow, ...] = Field(description="Usage table rows")
     is_over_storage_quota: bool = Field(description="Gates the free-up-backup-space action")
     is_at_bucket_quota: bool = Field(description="Gates the review-destroyed-backups link")
+    is_sharing_workspaces: bool = Field(
+        default=False, description="Gates the review-shared-workspaces link (the account holds an active share)"
+    )
 
 
 class UiTrimStatus(FrozenModel):

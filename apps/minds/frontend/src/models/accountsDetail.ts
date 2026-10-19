@@ -32,6 +32,9 @@ export interface AccountPlanView {
   usage_rows: PlanUsageRow[];
   is_over_storage_quota: boolean;
   is_at_bucket_quota: boolean;
+  /** The account holds at least one share: the shared-workspaces page has
+   * something to review (and a leaked share to remove, if any). */
+  is_sharing_workspaces: boolean;
 }
 
 export interface TrimStatus {

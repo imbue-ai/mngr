@@ -15,6 +15,7 @@ from imbue.minds.desktop_client.connections.connection_store import ConnectionSt
 from imbue.minds.desktop_client.connections.connection_store import _encode_encrypted_payload
 from imbue.minds.desktop_client.connections.data_types import CONNECTION_STATE_DELETED
 from imbue.minds.desktop_client.connections.data_types import ConnectionAvailability
+from imbue.minds.desktop_client.connections.data_types import ConnectionCredentialSource
 from imbue.minds.desktop_client.connections.data_types import ConnectionCredentials
 from imbue.minds.desktop_client.connections.primitives import CONNECTION_DOCUMENT_KIND
 from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
@@ -677,3 +678,147 @@ def test_replica_files_are_owner_only(tmp_path: Path) -> None:
     path = store.paths.data_dir / "connections" / f"{user_id}.json"
     assert path.stat().st_mode & 0o777 == 0o600
     assert json.loads(path.read_text())["connections"][0]["doc_id"].startswith("conn-")
+
+
+def _add_aws_profile(store: ConnectionStore, owner: str, profile_name: str) -> ConnectionId:
+    connection_id = ConnectionId.generate()
+    store.add_connection(
+        owner,
+        connection_id,
+        ConnectionBackend.AWS,
+        "Work AWS (profile)",
+        f"profile {profile_name}",
+        {**_AWS_PLACEMENT, "aws_profile": profile_name},
+        None,
+        ConnectionCredentialSource.LOCAL_PROFILE,
+    )
+    return connection_id
+
+
+def test_a_local_profile_connection_carries_no_payload_and_stays_available_when_the_account_locks(
+    tmp_path: Path,
+) -> None:
+    """Nothing is encrypted for a profile connection, so no DEK is needed to use it; whether the
+    login exists on this machine is discovery's verdict, not the replica's."""
+    cli = make_fake_imbue_cloud_cli()
+    store = make_connection_store_for_test(tmp_path, cli)
+    user_id, email = _unlocked_account(store.paths)
+
+    connection_id = _add_aws_profile(store, user_id, "work")
+    store.push_connection(user_id, email, str(connection_id))
+
+    (record,) = store.list_connections(user_id)
+    assert record.encrypted_payload is None and record.payload is None
+    assert record.metadata["credential_source"] == "local_profile"
+    assert record.metadata["placement"]["aws_profile"] == "work"
+    stored = cli.sync_documents_by_email[email][CONNECTION_DOCUMENT_KIND][str(connection_id)]
+    assert stored["encrypted_payload"] is None and stored["metadata"]["placement"]["aws_profile"] == "work"
+    (view,) = store.list_views(user_id)
+    assert view.availability is ConnectionAvailability.AVAILABLE and view.credential_source == "local_profile"
+    assert store.credentials_by_connection_id([user_id]) == {}
+    # Locked: a pasted connection would read LOCKED; the profile one is still usable.
+    delete_dek(store.paths, user_id)
+    (view,) = store.list_views(user_id)
+    assert view.availability is ConnectionAvailability.AVAILABLE
+    assert store.has_encrypted_connections(user_id) is False
+
+
+def test_a_connection_written_with_an_unknown_credential_source_is_read_only(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    store = make_connection_store_for_test(tmp_path, cli)
+    user_id, email = _unlocked_account(store.paths)
+    cli.seed_connection_document(
+        email,
+        str(ConnectionId.generate()),
+        {"backend": "aws", "alias": "future", "connection_format": 1, "credential_source": "vault"},
+        encrypted_payload=None,
+    )
+    store.pull(user_id, email)
+
+    (view,) = store.list_views(user_id)
+    assert view.availability is ConnectionAvailability.READ_ONLY
+    # Read-only means an update cannot rewrite the newer app's source either.
+    with pytest.raises(ConnectionTooNewError):
+        store.update_connection(
+            user_id, view.connection_id, alias="mine now", identifier="AKIA…PLE9", credentials=_AWS_CREDENTIALS
+        )
+    (record,) = store.list_connections(user_id)
+    assert record.metadata["credential_source"] == "vault" and record.metadata["alias"] == "future"
+
+
+def test_add_refuses_a_credential_source_that_disagrees_with_the_payload(tmp_path: Path) -> None:
+    store = make_connection_store_for_test(tmp_path)
+    with pytest.raises(WorkspaceSyncError, match="carries no credentials payload"):
+        store.add_connection(
+            LOCAL_PROFILE_USER_ID,
+            ConnectionId.generate(),
+            ConnectionBackend.AWS,
+            "x",
+            "x",
+            _AWS_PLACEMENT,
+            _AWS_CREDENTIALS,
+            ConnectionCredentialSource.LOCAL_PROFILE,
+        )
+    with pytest.raises(WorkspaceSyncError, match="needs its credentials"):
+        store.add_connection(
+            LOCAL_PROFILE_USER_ID, ConnectionId.generate(), ConnectionBackend.AWS, "x", "x", _AWS_PLACEMENT, None
+        )
+
+
+def test_update_switches_a_pasted_connection_to_a_local_profile_and_back_keeping_its_placement(
+    tmp_path: Path,
+) -> None:
+    store = make_connection_store_for_test(tmp_path)
+    user_id, _email = _unlocked_account(store.paths)
+    connection_id = _add_aws(store, user_id)
+
+    store.update_connection(
+        user_id,
+        str(connection_id),
+        alias="Work AWS",
+        identifier="profile work",
+        credentials=None,
+        credential_source=ConnectionCredentialSource.LOCAL_PROFILE,
+        placement={**_AWS_PLACEMENT, "aws_profile": "work"},
+    )
+    store.clear_validation_rollback(user_id, str(connection_id))
+
+    (record,) = store.list_connections(user_id)
+    assert record.encrypted_payload is None
+    assert record.metadata["credential_source"] == "local_profile"
+    assert record.metadata["placement"] == {**_AWS_PLACEMENT, "aws_profile": "work"}
+    (view,) = store.list_views(user_id)
+    assert view.availability is ConnectionAvailability.AVAILABLE
+
+    store.update_connection(
+        user_id,
+        str(connection_id),
+        alias="Work AWS",
+        identifier="AKIA…PLE9",
+        credentials=_AWS_CREDENTIALS,
+        credential_source=ConnectionCredentialSource.PASTED,
+        placement=_AWS_PLACEMENT,
+    )
+    store.clear_validation_rollback(user_id, str(connection_id))
+
+    (record,) = store.list_connections(user_id)
+    assert record.encrypted_payload is not None and record.metadata["credential_source"] == "pasted"
+    assert record.metadata["placement"] == _AWS_PLACEMENT
+    assert store.decrypt_credentials(user_id, record) == _AWS_CREDENTIALS
+
+
+def test_rehome_moves_a_local_profile_connection_as_it_is(tmp_path: Path) -> None:
+    cli: FakeImbueCloudCli = make_fake_imbue_cloud_cli()
+    store = make_connection_store_for_test(tmp_path, cli)
+    user_id, email = _unlocked_account(store.paths)
+    connection_id = _add_aws_profile(store, user_id, "work")
+    store.push_connection(user_id, email, str(connection_id))
+
+    rehomed = store.rehome_account_connections_to_local(user_id, email)
+
+    assert rehomed == [str(connection_id)]
+    (local_record,) = store.list_connections(LOCAL_PROFILE_USER_ID)
+    assert local_record.doc_id == str(connection_id) and local_record.payload is None
+    assert local_record.metadata["placement"]["aws_profile"] == "work"
+    stored = cli.sync_documents_by_email[email][CONNECTION_DOCUMENT_KIND][str(connection_id)]
+    assert stored["state"] == CONNECTION_STATE_DELETED

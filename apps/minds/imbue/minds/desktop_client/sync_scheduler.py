@@ -54,7 +54,7 @@ from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordSto
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.mngr_settings.errors import MindsSettingsError
-from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import PROVIDER_AUTHORIZATION_ERROR_TYPE_NAMES
 from imbue.mngr.primitives import ProviderInstanceName
 
 # How often the loop re-reconciles when nothing kicks it. Records change
@@ -72,9 +72,9 @@ _DISCOVERY_POLL_SECONDS = 2.0
 _STOP_WAIT_TIMEOUT_SECONDS = 10.0
 # Discovery error type names that mean an account instance's session no longer
 # authenticates: the plugin's own auth error (what its discovery raises on an
-# expired or revoked session) and mngr's not-authorized provider error.
+# expired or revoked session) and mngr's not-authorized provider errors.
 SESSION_EXPIRED_ERROR_TYPE_NAMES: Final[frozenset[str]] = frozenset(
-    {IMBUE_CLOUD_AUTH_ERROR_CLASS, ProviderNotAuthorizedError.__name__}
+    {IMBUE_CLOUD_AUTH_ERROR_CLASS, *PROVIDER_AUTHORIZATION_ERROR_TYPE_NAMES}
 )
 # A refresh that succeeded leaves the errored snapshot in place until the
 # bounced observe child reports again, so the same account is not re-refreshed
@@ -131,6 +131,14 @@ class WorkspaceSyncScheduler(MutableModel):
         description=(
             "Reaps destroyed workspaces' backups past the retention window. Ticked at the "
             "end of every pass; it runs on its own (much longer) cadence internally"
+        ),
+    )
+    on_shares_retired_elsewhere: Callable[[Mapping[str, Sequence[str]]], None] | None = Field(
+        default=None,
+        description=(
+            "Given user_id -> the workspaces a pass found no longer shared, clears the share materials of the "
+            "ones this device hosts (a share retired from another device or by the connector leaves a workspace "
+            "whose gateway would otherwise retry its tunnel forever); None skips it"
         ),
     )
     forward_identity: ForwardIdentityPublisher | None = Field(
@@ -233,7 +241,9 @@ class WorkspaceSyncScheduler(MutableModel):
         self._sync_connections(accounts)
         self._resolve_initial_syncs(tracked_user_ids, accounts, outcome.is_pull_ok_by_user_id)
         if self.forward_identity is not None:
-            self.forward_identity.apply_sync_results(outcome.shared_agent_ids_by_user_id)
+            no_longer_shared = self.forward_identity.apply_sync_results(outcome.shared_agent_ids_by_user_id)
+            if no_longer_shared and self.on_shares_retired_elsewhere is not None:
+                self.on_shares_retired_elsewhere(no_longer_shared)
         # Materialize synced secrets (backup envs + cloud-row SSH material)
         # into their local consumers for every unlocked account. The SSH
         # application (key files + known_hosts pins, applied through the

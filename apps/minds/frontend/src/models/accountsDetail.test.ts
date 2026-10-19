@@ -21,6 +21,7 @@ const PLAN_VIEW: AccountPlanView = {
   usage_rows: [],
   is_over_storage_quota: false,
   is_at_bucket_quota: false,
+  is_sharing_workspaces: false,
 };
 
 afterEach(() => {

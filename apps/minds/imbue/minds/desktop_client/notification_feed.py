@@ -145,6 +145,13 @@ class SystemEventCard(FrozenModel):
     workspace_agent_id: str = Field(description="The workspace it concerns; '' for an account-level event")
     workspace_name: str = Field(description="The workspace's display name, or the account for an account-level event")
     workspace_accent: str = Field(description="The workspace's ``#rrggbb`` accent")
+    link_path: str = Field(
+        default="",
+        description=(
+            "The in-app route the entry opens; '' lands on the default (the workspace's backups page, "
+            "or the accounts page for an account-level event)"
+        ),
+    )
 
 
 class ClearedNotificationRequests(FrozenModel):
@@ -332,6 +339,7 @@ class NotificationFeed(MutableModel):
             workspace_name=card.workspace_name,
             workspace_accent=card.workspace_accent,
             service_name="",
+            link_path=card.link_path,
         )
         self._append_entry(entry)
         return entry
@@ -616,7 +624,12 @@ def build_dispatch_request(entry: UiNotificationEntry) -> NotificationRequest:
             )
             body = entry.body
         case NotificationKind.SYSTEM_EVENT:
-            url = f"/workspace/{entry.workspace_agent_id}/backups" if entry.workspace_agent_id else "/accounts"
+            if entry.link_path:
+                url = entry.link_path
+            elif entry.workspace_agent_id:
+                url = f"/workspace/{entry.workspace_agent_id}/backups"
+            else:
+                url = "/accounts"
             body = entry.body
         case _ as unreachable:
             assert_never(unreachable)

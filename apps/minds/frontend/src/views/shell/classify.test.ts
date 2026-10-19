@@ -91,6 +91,9 @@ describe("classifyRoute", () => {
     expect(classifyRoute("/workspaces/destroyed").pageLabel).toBe(
       "Recently destroyed",
     );
+    expect(classifyRoute("/workspaces/shared").pageLabel).toBe(
+      "Shared workspaces",
+    );
     expect(classifyRoute("/start").kind).toBe("start");
     expect(classifyRoute("/").kind).toBe("home");
     expect(classifyRoute("/definitely/unknown").kind).toBe("home");

@@ -16,6 +16,7 @@ from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.conftest import make_share_probe_result
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
@@ -262,6 +263,43 @@ def test_web_access_enabler_swallows_sharing_failures_and_tells_the_user(tmp_pat
         "Turn sharing on from the workspace's Share panel to try again."
     )
     assert workspace_agent_id == str(_AGENT_ID)
+
+
+def test_web_access_enabler_points_a_quota_refusal_at_the_shared_workspaces_page(tmp_path: Path) -> None:
+    # A full share quota is fixed on the shared-workspaces page (a leaked share
+    # holds the slot), so that card's gesture lands there, not on the backups page.
+    quota_refusing_cli = FakeImbueCloudCli(
+        connector_url=FAKE_CONNECTOR_URL,
+        create_share_error_to_raise=ImbueCloudQuotaExceededCliError(
+            "shares create: Shared workspace limit reached (50 of 50)."
+        ),
+    )
+    store, cli = _store_with_associated_workspace(tmp_path, cli=quota_refusing_cli, is_cloud_row=True)
+    feed = NotificationFeed(
+        notification_dispatcher=None,
+        get_dispatch_preferences=lambda: NotificationDispatchPreferences(
+            is_enabled=True, style=NotificationStyle.BOTH
+        ),
+        is_main_window_focused=lambda: False,
+        is_screen_locked=lambda: False,
+    )
+    enabler = WebAccessEnabler(
+        cli=cli,
+        session_store=store,
+        is_cloud_row=True,
+        backend_resolver=_empty_resolver(),
+        client_env_config=_client_env_config(),
+        notification_feed=feed,
+        active_share_cache=ActiveShareCache(),
+    )
+
+    enabler(_AGENT_ID, HostId(_HOST_ID))
+
+    (entry,) = [e for e in feed.reconcile((), {}).entries if e.kind == NotificationKind.SYSTEM_EVENT]
+    assert entry.title == "Sharing was not enabled"
+    assert entry.link_path == "/workspaces/shared"
+    assert "Review your shared workspaces to free a slot" in entry.body
+    assert "Shared workspace limit reached (50 of 50)" in entry.body
 
 
 def test_web_access_enabler_enables_sharing_for_cloud_rows(tmp_path: Path) -> None:

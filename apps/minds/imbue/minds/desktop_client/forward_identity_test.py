@@ -92,7 +92,7 @@ def test_rebuild_writes_only_the_default_entry_when_nothing_is_shared(tmp_path: 
 def test_sync_results_map_each_shared_workspace_to_its_owning_accounts_session(tmp_path: Path) -> None:
     publisher, headers_file, sync_requests, _ = _publisher(tmp_path)
 
-    publisher.apply_sync_results({_OWNER_ID: [_AGENT_A, _AGENT_B], _OTHER_ID: [_AGENT_C]})
+    assert publisher.apply_sync_results({_OWNER_ID: [_AGENT_A, _AGENT_B], _OTHER_ID: [_AGENT_C]}) == {}
 
     assert _identity_by_agent_id(headers_file) == {
         _AGENT_A: {"owner": True, "user_id": _OWNER_ID, "email": "owner@example.com"},
@@ -104,7 +104,9 @@ def test_sync_results_map_each_shared_workspace_to_its_owning_accounts_session(t
 
     # An account absent from the results (its pull failed) keeps its previous
     # set; a listed account's set is replaced wholesale.
-    publisher.apply_sync_results({_OWNER_ID: [_AGENT_B]})
+    # The pass names the workspaces that stopped being shared since the last
+    # one, per account: what a device hosting one of them has to act on.
+    assert publisher.apply_sync_results({_OWNER_ID: [_AGENT_B]}) == {_OWNER_ID: [_AGENT_A]}
     assert sorted(_identity_by_agent_id(headers_file)) == sorted([_AGENT_B, _AGENT_C])
 
 

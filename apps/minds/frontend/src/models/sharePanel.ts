@@ -68,7 +68,26 @@ function publicationMutationKey(coordinate: string): MutationKey {
 }
 
 /** A sharing route that answered with a failure, in its own words. */
-export class SharingRequestError extends Error {}
+export class SharingRequestError extends Error {
+  /** The in-app page that fixes a refusal with a structured code (the
+   * shared-workspaces page for a full share quota); "" otherwise. */
+  readonly remedyPath: string;
+
+  constructor(message: string, remedyPath = "") {
+    super(message);
+    this.remedyPath = remedyPath;
+  }
+}
+
+/** The page a publish refusal points at, read from its body: the connector's
+ * quota_exceeded refusal names the shared-workspaces page, where a leaked
+ * share holding the slot is removed. */
+export function remedyPathFromBody(body: unknown): string {
+  if (body === null || typeof body !== "object") return "";
+  const record = body as Record<string, unknown>;
+  const path = record["shared_workspaces_path"];
+  return record["code"] === "quota_exceeded" && typeof path === "string" ? path : "";
+}
 
 /** One throw of the switch, as its mutation remembers it: the token by which
  * an answer is told to be the newest attempt's, and the place of the write
@@ -162,7 +181,7 @@ export type PublishWrite =
   | { readonly state: "idle" }
   | { readonly state: "publishing" }
   | { readonly state: "unpublishing" }
-  | { readonly state: "failed"; readonly message: string };
+  | { readonly state: "failed"; readonly message: string; readonly remedyPath: string };
 
 /** The workspace gateway's own bring-up report while the link is not live. */
 const GATEWAY_STATES = ["up", "retrying", "halted"] as const;
@@ -424,6 +443,7 @@ export class SharePanelModel {
       return {
         state: "failed",
         message: error?.message ?? "Could not change sharing",
+        remedyPath: error instanceof SharingRequestError ? error.remedyPath : "",
       };
     return { state: "idle" };
   }
@@ -1564,6 +1584,7 @@ export class SharePanelModel {
     if (!result.ok)
       throw new SharingRequestError(
         errorMessageFromBody(result.body, `HTTP ${result.status}`),
+        remedyPathFromBody(result.body),
       );
     return result.body as MachineSharingResponse;
   }

@@ -58,7 +58,26 @@ export function connectionStatusChipFor(
       return { label: "No credentials", tone: "warn" };
     case "READ_ONLY":
       return { label: "Needs a newer app", tone: "warn" };
+    case "PROFILE_MISSING":
+      return { label: "Set up on this device", tone: "warn" };
   }
+}
+
+/**
+ * What a connection row says beside its chip: for a login this device lacks,
+ * the setup step to take; for any other error, the provider's own words plus
+ * its fix when it named one.
+ */
+export function connectionDetailFor(
+  entry: Pick<UiConnectionEntry, "status" | "error_type" | "error_message" | "remediation">,
+): string {
+  if (entry.status === "PROFILE_MISSING") {
+    const fix = entry.remediation ? ` To use it here, ${entry.remediation}, then check again.` : "";
+    return `This connection uses a login that is not set up on this device.${fix}`;
+  }
+  if (!entry.error_message) return "";
+  const text = `${entry.error_type ?? ""}: ${entry.error_message}`;
+  return entry.remediation ? `${text} (fix: ${entry.remediation})` : text;
 }
 
 interface RemoveControl {
@@ -116,6 +135,8 @@ export function editControlFor(
         isEnabled: false,
         tooltip: "This connection was added by a newer version of the app.",
       };
+    case "PROFILE_MISSING":
+      return { isEnabled: true, tooltip: "Use another login or paste keys instead" };
     case "OK":
     case "ERROR":
     case "UNLISTED":

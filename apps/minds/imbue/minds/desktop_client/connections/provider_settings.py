@@ -41,6 +41,7 @@ from imbue.minds.desktop_client.connections.connection_store import parse_connec
 from imbue.minds.desktop_client.connections.data_types import AwsPlacement
 from imbue.minds.desktop_client.connections.data_types import AzurePlacement
 from imbue.minds.desktop_client.connections.data_types import CONNECTION_STATE_ACTIVE
+from imbue.minds.desktop_client.connections.data_types import ConnectionCredentialSource
 from imbue.minds.desktop_client.connections.data_types import ConnectionCredentials
 from imbue.minds.desktop_client.connections.data_types import ConnectionMetadata
 from imbue.minds.desktop_client.connections.data_types import ConnectionReplicaRecord
@@ -49,6 +50,7 @@ from imbue.minds.desktop_client.connections.data_types import ModalPlacement
 from imbue.minds.desktop_client.connections.data_types import ProviderMaterializationOutcome
 from imbue.minds.desktop_client.connections.data_types import SignedInAccount
 from imbue.minds.desktop_client.connections.data_types import parse_connection_backend
+from imbue.minds.desktop_client.connections.data_types import parse_credential_source
 from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
 from imbue.minds.desktop_client.connections.primitives import ConnectionId
 from imbue.minds.desktop_client.connections.primitives import IMBUE_CLOUD_PROVIDER_NAME_PREFIX
@@ -126,21 +128,100 @@ def _secret(value: SecretStr) -> str:
 
 
 @pure
+def _aws_credential_keys(
+    placement: AwsPlacement, credentials: ConnectionCredentials | None, source: ConnectionCredentialSource
+) -> dict[str, object] | None:
+    match source:
+        case ConnectionCredentialSource.LOCAL_PROFILE:
+            if placement.aws_profile is None:
+                return None
+            return {"aws_profile": placement.aws_profile}
+        case ConnectionCredentialSource.PASTED:
+            if (
+                credentials is None
+                or credentials.aws_access_key_id is None
+                or credentials.aws_secret_access_key is None
+            ):
+                return None
+            return {
+                "aws_access_key_id": credentials.aws_access_key_id,
+                "aws_secret_access_key": _secret(credentials.aws_secret_access_key),
+            }
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@pure
+def _azure_credential_keys(
+    placement: AzurePlacement, credentials: ConnectionCredentials | None, source: ConnectionCredentialSource
+) -> dict[str, object] | None:
+    match source:
+        case ConnectionCredentialSource.LOCAL_PROFILE:
+            if placement.tenant_id is None or placement.subscription_id is None:
+                return None
+            return {
+                "subscription_id": placement.subscription_id,
+                "tenant_id": placement.tenant_id,
+                "use_azure_cli_login": True,
+            }
+        case ConnectionCredentialSource.PASTED:
+            if (
+                credentials is None
+                or credentials.subscription_id is None
+                or credentials.tenant_id is None
+                or credentials.client_id is None
+                or credentials.client_secret is None
+            ):
+                return None
+            return {
+                "subscription_id": credentials.subscription_id,
+                "tenant_id": credentials.tenant_id,
+                "client_id": credentials.client_id,
+                "client_secret": _secret(credentials.client_secret),
+            }
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@pure
+def _modal_credential_keys(
+    placement: ModalPlacement, credentials: ConnectionCredentials | None, source: ConnectionCredentialSource
+) -> dict[str, object] | None:
+    match source:
+        case ConnectionCredentialSource.LOCAL_PROFILE:
+            if placement.modal_profile is None:
+                return None
+            return {"modal_profile": placement.modal_profile}
+        case ConnectionCredentialSource.PASTED:
+            if credentials is None or credentials.token_id is None or credentials.token_secret is None:
+                return None
+            return {"token_id": credentials.token_id, "token_secret": _secret(credentials.token_secret)}
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@pure
 def connection_provider_block(
     backend: ConnectionBackend,
     connection_id: ConnectionId,
     metadata: ConnectionMetadata,
-    credentials: ConnectionCredentials,
+    credentials: ConnectionCredentials | None,
 ) -> dict[str, object] | None:
     """The ``[providers.<backend>_<hex>]`` block for one connection.
 
-    Returns None when the credentials lack a field the backend needs; raises
-    ``ValueError`` when the placement metadata is malformed.
+    Returns None when the credentials (or, for a local-profile connection, the
+    placement) lack a field the backend needs, or when the metadata names a
+    credential source this app does not know; raises ``ValueError`` when the
+    placement metadata is malformed.
     """
+    source = parse_credential_source(metadata)
+    if source is None:
+        return None
     match backend:
         case ConnectionBackend.AWS:
             aws_placement = AwsPlacement.model_validate(metadata.placement)
-            if credentials.aws_access_key_id is None or credentials.aws_secret_access_key is None:
+            aws_keys = _aws_credential_keys(aws_placement, credentials, source)
+            if aws_keys is None:
                 return None
             return {
                 "backend": mngr_backend_name(backend),
@@ -148,12 +229,14 @@ def connection_provider_block(
                 "default_instance_type": aws_placement.default_instance_type,
                 **_cloud_connection_hardening_knobs(),
                 **_user_data_layout_knobs(),
-                "aws_access_key_id": credentials.aws_access_key_id,
-                "aws_secret_access_key": _secret(credentials.aws_secret_access_key),
+                **aws_keys,
             }
         case ConnectionBackend.GCP:
             gcp_placement = GcpPlacement.model_validate(metadata.placement)
-            if credentials.service_account_key_json is None:
+            # GCP has no local login a connection could name (see LOCAL_PROFILE_BACKENDS).
+            if source is not ConnectionCredentialSource.PASTED:
+                return None
+            if credentials is None or credentials.service_account_key_json is None:
                 return None
             return {
                 "backend": mngr_backend_name(backend),
@@ -165,12 +248,8 @@ def connection_provider_block(
             }
         case ConnectionBackend.AZURE:
             azure_placement = AzurePlacement.model_validate(metadata.placement)
-            if (
-                credentials.subscription_id is None
-                or credentials.tenant_id is None
-                or credentials.client_id is None
-                or credentials.client_secret is None
-            ):
+            azure_keys = _azure_credential_keys(azure_placement, credentials, source)
+            if azure_keys is None:
                 return None
             return {
                 "backend": mngr_backend_name(backend),
@@ -179,14 +258,12 @@ def connection_provider_block(
                 "resource_group": azure_placement.resource_group,
                 **_cloud_connection_hardening_knobs(),
                 **_user_data_layout_knobs(),
-                "subscription_id": credentials.subscription_id,
-                "tenant_id": credentials.tenant_id,
-                "client_id": credentials.client_id,
-                "client_secret": _secret(credentials.client_secret),
+                **azure_keys,
             }
         case ConnectionBackend.MODAL:
             modal_placement = ModalPlacement.model_validate(metadata.placement)
-            if credentials.token_id is None or credentials.token_secret is None:
+            modal_keys = _modal_credential_keys(modal_placement, credentials, source)
+            if modal_keys is None:
                 return None
             # ``user_id`` names the Modal environment (see ModalProviderBackend._derive_modal_names):
             # the connection id hex, so every device derives the same one, unless a
@@ -200,8 +277,7 @@ def connection_provider_block(
                 "default_memory": MODAL_DEFAULT_MEMORY_GB,
                 "default_sandbox_timeout": MODAL_DEFAULT_SANDBOX_TIMEOUT_SECONDS,
                 "default_idle_timeout": MODAL_DEFAULT_IDLE_TIMEOUT_SECONDS,
-                "token_id": credentials.token_id,
-                "token_secret": _secret(credentials.token_secret),
+                **modal_keys,
             }
         case _ as unreachable:
             assert_never(unreachable)
@@ -217,10 +293,12 @@ def desired_provider_blocks(
 
     One account instance per signed-in account, and one connection instance
     per ACTIVE connection whose credentials are available (present in
-    ``credentials_by_connection_id``) and whose formats this app supports. A
-    locked account contributes its account instance but none of its
-    connections; a connection with an unknown backend or malformed placement
-    is skipped with a warning (shown as read-only elsewhere, never dropped).
+    ``credentials_by_connection_id``, or a local-profile connection, which
+    carries none and so materializes even under a locked account) and whose
+    formats this app supports. A locked account contributes its account
+    instance but none of its pasted-credentials connections; a connection
+    with an unknown backend or malformed placement is skipped with a warning
+    (shown as read-only elsewhere, never dropped).
     """
     blocks: dict[str, dict[str, object]] = {}
     for account in accounts:
@@ -244,11 +322,19 @@ def _connection_instance_block(
     """``(instance name, block)`` for one connection record, or None when it is not materialized here."""
     if record.state != CONNECTION_STATE_ACTIVE or is_connection_metadata_too_new(record):
         return None
-    credentials = credentials_by_connection_id.get(record.doc_id)
-    if credentials is None:
-        return None
     metadata = parse_connection_metadata(record)
     if metadata is None:
+        return None
+    source = parse_credential_source(metadata)
+    if source is None:
+        logger.warning(
+            "Connection {} names an unknown credential source {!r}; not materialized",
+            record.doc_id,
+            metadata.credential_source,
+        )
+        return None
+    credentials = credentials_by_connection_id.get(record.doc_id)
+    if credentials is None and source is ConnectionCredentialSource.PASTED:
         return None
     backend = parse_connection_backend(metadata)
     if backend is None:

@@ -293,6 +293,21 @@ function planSection(
           ),
         )
       : null,
+    view.is_sharing_workspaces
+      ? m(
+          "div",
+          { class: "mt-2" },
+          m(
+            Link,
+            {
+              id: "account-shared-workspaces-link",
+              extra: "type-helper",
+              ...routeLinkAttrs("/workspaces/shared"),
+            },
+            "Review shared workspaces →",
+          ),
+        )
+      : null,
   ]);
 }
 

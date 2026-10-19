@@ -821,6 +821,26 @@ def test_a_workspace_system_event_dispatches_a_link_to_its_backups_page() -> Non
     assert request.url == f"/workspace/{_WORKSPACE_ID}/backups"
 
 
+def test_a_system_event_with_its_own_link_dispatches_that_link() -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher)
+
+    entry = feed.append_system_event(
+        SystemEventCard(
+            title="Sharing was not enabled",
+            body="The account's share quota is full.",
+            workspace_agent_id=_WORKSPACE_ID,
+            workspace_name="alpha",
+            workspace_accent="#aabbcc",
+            link_path="/workspaces/shared",
+        )
+    )
+
+    (request,) = dispatcher.dispatched
+    assert request.url == "/workspaces/shared"
+    assert entry.link_path == "/workspaces/shared"
+
+
 def test_an_account_level_system_event_titles_itself_with_the_account_and_links_to_accounts() -> None:
     dispatcher = _make_recording_dispatcher()
     feed = _make_feed(dispatcher=dispatcher)

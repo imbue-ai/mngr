@@ -33,6 +33,7 @@ import type {
 } from "../../models/providers";
 import {
   accountSectionTitleFor,
+  connectionDetailFor,
   connectionStatusChipFor,
   editControlFor,
   providerStatusChipFor,
@@ -41,6 +42,8 @@ import {
 import {
   CloudAccountsModal,
   CloudAccountsModalState,
+  fetchLocalProfiles,
+  redrawingLocalProfilesLoader,
 } from "./create/CloudAccountsModal";
 import { Button, ButtonLink } from "../components/Button";
 import { Card } from "../components/Card";
@@ -93,6 +96,8 @@ interface LandingState {
   removedHostIds: Set<string>;
   /** Connection instances whose removal is in flight or done, so Remove cannot be pressed twice. */
   removingConnectionInstances: Set<string>;
+  /** Connection instances whose "Check now" is in flight, so it cannot be pressed twice. */
+  recheckingConnectionInstances: Set<string>;
   isProvidersOpen: boolean;
   isExtrasFailed: boolean;
   /** `<agent id>:<version>` of each "Updated to X" note dismissed this
@@ -147,6 +152,7 @@ export const LandingPage: m.ClosureComponent = () => {
     unlockPassword: "",
     removedHostIds: new Set(),
     removingConnectionInstances: new Set(),
+    recheckingConnectionInstances: new Set(),
     isProvidersOpen: false,
     isExtrasFailed: false,
     dismissedNoteKeys: new Set(),
@@ -207,7 +213,12 @@ export const LandingPage: m.ClosureComponent = () => {
         );
         return;
       }
-      state.connectionModal.openForEdit(entry, backend, owner);
+      state.connectionModal.openForEdit(
+        entry,
+        backend,
+        owner,
+        redrawingLocalProfilesLoader(fetchLocalProfiles),
+      );
       m.redraw();
     });
   }
@@ -272,10 +283,39 @@ export const LandingPage: m.ClosureComponent = () => {
       });
   }
 
+  /** Re-check a connection whose login was set up outside the app: bounce discovery and wait for the next frame. */
+  function recheckConnection(entry: UiConnectionEntry): void {
+    if (state.recheckingConnectionInstances.has(entry.instance)) return;
+    state.recheckingConnectionInstances.add(entry.instance);
+    fetch(
+      `/api/v1/desktop/cloud-accounts/${encodeURIComponent(entry.instance)}/recheck`,
+      { method: "POST", credentials: "same-origin" },
+    )
+      .then(async (response) => {
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as { error?: string } | null;
+          window.alert(body?.error ?? "Could not re-check the connection.");
+        }
+      })
+      .catch((error: unknown) => {
+        console.error("Failed to re-check connection", entry.instance, error);
+        window.alert("Could not re-check the connection.");
+      })
+      .finally(() => {
+        state.recheckingConnectionInstances.delete(entry.instance);
+        m.redraw();
+      });
+  }
+
   function removeConnection(entry: UiConnectionEntry): void {
+    const whatIsForgotten =
+      entry.credential_source === "local_profile"
+        ? "The connection is removed from every device that syncs this account; the login it uses on each " +
+          "device is untouched."
+        : "The stored keys are forgotten on every device that syncs this account.";
     const isConfirmed = window.confirm(
-      `Remove "${entry.alias}" (${entry.backend_label}) from Imbue Studio? The stored keys are forgotten on ` +
-        "every device that syncs this account. Your cloud resources (and anything created outside Imbue Studio) are " +
+      `Remove "${entry.alias}" (${entry.backend_label}) from Imbue Studio? ${whatIsForgotten} ` +
+        "Your cloud resources (and anything created outside Imbue Studio) are " +
         "untouched; a workspace created on this connection by an older version of the app, or never linked to " +
         "the account, would disappear from the list for good (adding the connection again makes a new one, " +
         "which does not bring such a workspace back).",
@@ -889,16 +929,21 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
-  function errorDetail(
-    entry: Pick<UiProviderEntry, "error_type" | "error_message">,
-  ): m.Children {
-    if (!entry.error_message) return m("span", { class: "flex-1" });
-    const text = `${entry.error_type ?? ""}: ${entry.error_message}`;
+  /** The row's detail text beside its chip, or the empty spacer that keeps the controls right-aligned. */
+  function detailSpan(text: string): m.Children {
+    if (!text) return m("span", { class: "flex-1" });
     return m(
       "span",
       { class: "flex-1 type-helper text-primary truncate", title: text },
       text,
     );
+  }
+
+  function errorDetail(
+    entry: Pick<UiProviderEntry, "error_type" | "error_message">,
+  ): m.Children {
+    if (!entry.error_message) return detailSpan("");
+    return detailSpan(`${entry.error_type ?? ""}: ${entry.error_message}`);
   }
 
   function providerRow(entry: UiProviderEntry): m.Children {
@@ -927,6 +972,7 @@ export const LandingPage: m.ClosureComponent = () => {
     const remove = removeControlFor(entry);
     const edit = editControlFor(entry);
     const isRemoving = state.removingConnectionInstances.has(entry.instance);
+    const isRechecking = state.recheckingConnectionInstances.has(entry.instance);
     const placement =
       entry.placement.default_region ?? entry.placement.default_zone ?? "";
     return m(
@@ -952,7 +998,20 @@ export const LandingPage: m.ClosureComponent = () => {
           entry.identifier,
         ),
         statusChipBadge(connectionStatusChipFor(entry.status)),
-        errorDetail(entry),
+        detailSpan(connectionDetailFor(entry)),
+        entry.status === "PROFILE_MISSING"
+          ? m(
+              Button,
+              {
+                variant: "secondary",
+                disabled: isRechecking || isRemoving,
+                title: "Check again whether the login is set up on this device",
+                "data-connection-recheck": entry.instance,
+                onclick: () => recheckConnection(entry),
+              },
+              isRechecking ? "Checking…" : "Check now",
+            )
+          : null,
         m(
           Button,
           {

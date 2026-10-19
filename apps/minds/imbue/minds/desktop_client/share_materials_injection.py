@@ -312,24 +312,24 @@ def probe_share_state_in_agent(agent_address: str, mngr_caller: MngrCaller) -> S
     )
 
 
-def clear_share_publication_from_agent(agent_address: str, mngr_caller: MngrCaller) -> None:
-    """Remove share.env and the gateway's status file, keeping the grants document."""
-    _remove_share_files_from_agent(agent_address, (_SHARE_ENV_FILE, _SHARE_GATEWAY_STATUS_FILE), mngr_caller)
+def clear_share_publication_from_agent(agent_address: str, mngr_caller: MngrCaller) -> bool:
+    """Remove share.env and the gateway's status file, keeping the grants document; returns whether it succeeded."""
+    return _remove_share_files_from_agent(agent_address, (_SHARE_ENV_FILE, _SHARE_GATEWAY_STATUS_FILE), mngr_caller)
 
 
-def clear_share_materials_from_agent(agent_address: str, mngr_caller: MngrCaller) -> None:
-    """Remove share.env, the gateway's status file, and the grants document.
+def clear_share_materials_from_agent(agent_address: str, mngr_caller: MngrCaller) -> bool:
+    """Remove share.env, the gateway's status file, and the grants document; returns whether it succeeded.
 
     For unlinking a workspace from the account that made its grants: nobody is
     left who can answer for them.
     """
-    _remove_share_files_from_agent(
+    return _remove_share_files_from_agent(
         agent_address, (_SHARE_ENV_FILE, _SHARE_GATEWAY_STATUS_FILE, _SHARE_GRANTS_FILE), mngr_caller
     )
 
 
-def _remove_share_files_from_agent(agent_address: str, relative_paths: Sequence[str], mngr_caller: MngrCaller) -> None:
-    """Delete share files inside the workspace, best effort.
+def _remove_share_files_from_agent(agent_address: str, relative_paths: Sequence[str], mngr_caller: MngrCaller) -> bool:
+    """Delete share files inside the workspace, best effort; returns whether the exec succeeded.
 
     The share-gateway tears the stack down when share.env disappears and
     removes its own status file on its next tick; removing it here too keeps a
@@ -345,6 +345,8 @@ def _remove_share_files_from_agent(agent_address: str, relative_paths: Sequence[
     )
     if result.returncode != 0:
         logger.warning("Failed to clear share files from agent {}: {}", agent_address, result.stderr.strip())
+        return False
+    return True
 
 
 def read_share_grants_from_agent(agent_address: str, mngr_caller: MngrCaller) -> str | None:

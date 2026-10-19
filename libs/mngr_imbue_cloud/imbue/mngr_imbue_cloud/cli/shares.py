@@ -33,6 +33,12 @@ def _share_to_json(info: ShareInfo, include_token: bool) -> dict[str, object]:
         # Per-relay tunnel login stamps (populated by status documents only).
         "relays": [entry.model_dump() for entry in info.relays],
         "last_tunnel_login_at": info.last_tunnel_login_at,
+        # When the tunnel last proved itself alive (Login or heartbeat).
+        "last_seen_at": info.last_seen_at,
+        "created_at": info.created_at,
+        "updated_at": info.updated_at,
+        "entry_label": info.entry_label,
+        "share_label": info.share_label,
         "cert_not_after": info.cert_not_after,
         # The tier's hosted web-chrome origin (None on connectors that predate
         # it); the desktop stamps it into share.env as SHARE_CHROME_ORIGIN.

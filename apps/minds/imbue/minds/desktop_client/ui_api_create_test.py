@@ -260,10 +260,10 @@ def test_form_defaults_list_the_connection_backends_with_their_labels_and_region
     assert response.status_code == 200
     backends = json.loads(response.get_data(as_text=True))["connection_backends"]
     assert backends == [
-        {"name": "aws", "label": "AWS", "is_region_pinned": True},
-        {"name": "gcp", "label": "GCP", "is_region_pinned": True},
-        {"name": "azure", "label": "Azure", "is_region_pinned": True},
-        {"name": "modal", "label": "Modal", "is_region_pinned": False},
+        {"name": "aws", "label": "AWS", "is_region_pinned": True, "is_local_profile_supported": True},
+        {"name": "gcp", "label": "GCP", "is_region_pinned": True, "is_local_profile_supported": False},
+        {"name": "azure", "label": "Azure", "is_region_pinned": True, "is_local_profile_supported": True},
+        {"name": "modal", "label": "Modal", "is_region_pinned": False, "is_local_profile_supported": True},
     ]
 
 

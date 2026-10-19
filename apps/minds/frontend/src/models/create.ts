@@ -25,6 +25,8 @@ export interface ConnectionBackendOption {
   name: string;
   label: string;
   is_region_pinned: boolean;
+  /** Whether a connection may name a login on this device (an AWS profile, an az login, a Modal profile) instead of pasting keys. */
+  is_local_profile_supported: boolean;
 }
 
 /** The backend option named `backendName`, or null for one this app's server does not table. */

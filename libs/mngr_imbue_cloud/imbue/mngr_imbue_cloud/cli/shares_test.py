@@ -89,6 +89,31 @@ def test_share_to_json_passes_the_needs_reshare_flag_through() -> None:
     assert _share_to_json(current, include_token=False)["needs_reshare"] is False
 
 
+def test_share_to_json_passes_the_liveness_stamps_and_labels_through() -> None:
+    # The desktop's shared-workspaces page reads these from this JSON; a wire
+    # field the model parses but this dict drops would never reach it.
+    info = ShareInfo(
+        host_id="host-" + "a" * 32,
+        workspace_domain="host-" + "a" * 32 + ".b.us1.shares.example",
+        region="us1",
+        state="active",
+        created_at="2026-09-01 10:00:00+00:00",
+        updated_at="2026-09-02 10:00:00+00:00",
+        last_seen_at="2026-09-02 09:59:00+00:00",
+        entry_label="system-interface-ab12",
+        share_label="c" * 32,
+    )
+    payload = _share_to_json(info, include_token=False)
+    assert payload["created_at"] == "2026-09-01 10:00:00+00:00"
+    assert payload["updated_at"] == "2026-09-02 10:00:00+00:00"
+    assert payload["last_seen_at"] == "2026-09-02 09:59:00+00:00"
+    assert payload["entry_label"] == "system-interface-ab12"
+    assert payload["share_label"] == "c" * 32
+
+    unseen = ShareInfo(host_id=info.host_id, workspace_domain=info.workspace_domain, region="us1", state="active")
+    assert _share_to_json(unseen, include_token=False)["last_seen_at"] is None
+
+
 def test_set_grantees_help_documents_the_repeatable_user_id_option() -> None:
     result = CliRunner().invoke(shares, ["set-grantees", "--help"])
     assert result.exit_code == 0

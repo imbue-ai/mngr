@@ -39,8 +39,8 @@ def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
     """Build the template view model from the connector's account-info JSON.
 
     Returns ``{plan_name, plan_display_name, available_plans, usage_rows,
-    is_over_storage_quota}`` where each usage row is ``{label, used, limit,
-    note}`` (all strings).
+    is_over_storage_quota, is_at_bucket_quota, is_sharing_workspaces}`` where
+    each usage row is ``{label, used, limit, note}`` (all strings).
     """
     entitlements = info.get("entitlements") or {}
     usage = info.get("usage") or {}
@@ -76,6 +76,12 @@ def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
             "limit": str(_int_field(entitlements, "max_active_synced_workspaces")),
             "note": "",
         },
+        {
+            "label": "Shared workspaces",
+            "used": str(_int_field(usage, "shared_workspaces")),
+            "limit": str(_int_field(entitlements, "max_shared_workspaces")),
+            "note": "A share of a destroyed or missing workspace still counts until you remove it.",
+        },
     ]
     plan_name = str(info.get("plan_name") or "")
     available = info.get("available_plans") or []
@@ -90,4 +96,5 @@ def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
         # Gates the "review destroyed workspace backups" link: destroyed
         # workspaces' buckets count against the cap until they are reaped.
         "is_at_bucket_quota": _int_field(usage, "buckets") >= _int_field(entitlements, "max_buckets"),
+        "is_sharing_workspaces": _int_field(usage, "shared_workspaces") > 0,
     }

@@ -1,0 +1,3 @@
+- `ShareInfo` (and the JSON `mngr imbue_cloud shares list` / `status` / `create` print) carries the share's `created_at`, `updated_at`, `entry_label`, `share_label`, and the new `last_seen_at` liveness stamp the connector records from the workspace's relay heartbeats. `AccountUsageInfo` (and `mngr imbue_cloud account show`) carries `shared_workspaces`, the active share count the `max_shared_workspaces` quota is measured against. All additive: None against an older connector.
+
+- The connector client gains `admin_run_share_retirement_sweep` (the on-demand `POST /admin/sweep/share-retirement`, with its dry run), for `minds-admin sweep share-retirement` and the deployment tests.

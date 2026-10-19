@@ -30,6 +30,7 @@ import { LandingPage } from "./views/pages/LandingPage";
 import { PopoutPage } from "./views/pages/PopoutPage";
 import { RecoveryPage } from "./views/pages/RecoveryPage";
 import { SettingsPage } from "./views/pages/SettingsPage";
+import { SharedWorkspacesPage } from "./views/pages/SharedWorkspacesPage";
 import { StartPage } from "./views/pages/StartPage";
 import { WorkspaceBackupsPage } from "./views/pages/WorkspaceBackupsPage";
 import { WorkspaceOptionsPage } from "./views/pages/WorkspaceOptionsPage";
@@ -50,6 +51,7 @@ const ROUTE_ENTRIES: RouteEntry[] = [
   { path: "/settings/ai-keys", component: AiKeysPage },
   { path: "/accounts", component: AccountsPage },
   { path: "/workspaces/destroyed", component: DestroyedWorkspacesPage },
+  { path: "/workspaces/shared", component: SharedWorkspacesPage },
   // The workspace content surface (SPA twin of the deleted /_chrome wrapper).
   // Accepts agent- OR host-scoped ids: cold-start restore navigates with a
   // host-scoped id before the snapshot provides the alias mapping.

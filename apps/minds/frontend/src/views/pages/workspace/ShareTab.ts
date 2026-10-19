@@ -11,6 +11,7 @@ import { Icon16 } from "../../components/Icon";
 import { CopyField } from "../../components/Layout";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
+import { routeLinkAttrs } from "../../components/route-link";
 import { Skeleton, SkeletonRegion } from "../../components/Skeleton";
 import { Spinner } from "../../components/Spinner";
 import type {
@@ -209,7 +210,23 @@ function renderPublishWidget(
               id: "ws-share-publish-error",
               class: "type-helper text-important",
             },
-            publishWrite.message,
+            [
+              publishWrite.message,
+              publishWrite.remedyPath !== ""
+                ? [
+                    " ",
+                    m(
+                      "a",
+                      {
+                        id: "ws-share-publish-remedy",
+                        class: "underline",
+                        ...routeLinkAttrs(publishWrite.remedyPath),
+                      },
+                      "Review shared workspaces",
+                    ),
+                  ]
+                : null,
+            ],
           )
         : null,
       share.loadErrorMessage === null

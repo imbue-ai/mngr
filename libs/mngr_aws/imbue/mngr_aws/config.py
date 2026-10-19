@@ -9,6 +9,9 @@ import boto3
 import botocore.session
 from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
+from botocore.exceptions import ProfileNotFound
+from botocore.exceptions import SSOError
+from botocore.exceptions import TokenRetrievalError
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -34,6 +37,36 @@ class AwsConfigError(MngrError, ValueError):
     ``ProviderUnavailableError`` -- keep working) and from ``MngrError`` (so it
     renders as a clean CLI error and satisfies the no-bare-builtins ratchet).
     """
+
+    # The concise command that resolves the failure, when there is one (e.g.
+    # ``aws sso login --profile X``); the backend lifts it onto the provider error.
+    short_remediation: str | None
+
+    def __init__(self, message: str, short_remediation: str | None = None) -> None:
+        self.short_remediation = short_remediation
+        super().__init__(message)
+
+
+class AwsProfileNotFoundError(AwsConfigError):
+    """The named ``aws_profile`` does not exist in this machine's ``~/.aws/config`` or credentials file."""
+
+
+class AwsProfileUnsupportedError(AwsConfigError):
+    """The named ``aws_profile`` needs an interactive prompt mngr cannot answer (an ``mfa_serial``)."""
+
+
+class AwsProfileCredentialsError(AwsConfigError):
+    """The named ``aws_profile`` exists but its credentials could not be resolved (an expired SSO login, a refused assume-role)."""
+
+
+class AwsProfileSsoLoginError(AwsProfileCredentialsError):
+    """The named ``aws_profile``'s single-sign-on login is missing or expired on this machine (``aws sso login`` fixes it)."""
+
+
+# The botocore errors that mean a profile's single-sign-on token is missing or
+# expired, which ``aws sso login`` fixes. Everything else a profile can fail with
+# is reported with the generic remediation.
+_SSO_TOKEN_ERRORS: Final[tuple[type[BotoCoreError], ...]] = (SSOError, TokenRetrievalError)
 
 
 class ExistingSecurityGroup(FrozenModel):
@@ -112,14 +145,16 @@ def pick_newest_ami_id(images: Sequence[Mapping[str, Any]]) -> str | None:
 class AwsProviderConfig(PublicIpVpsProviderConfig):
     """Configuration for the AWS EC2 VPS Docker provider.
 
-    Credentials resolve in two ways. By default this config stores none and
+    Credentials resolve in three ways. By default this config stores none and
     boto3's default credential chain (``AWS_*`` env vars, ``~/.aws/credentials``,
     ``~/.aws/config``, EC2 IMDS) is used exclusively -- the Modal/GCP/Azure
     convention. When explicit ``aws_access_key_id`` + ``aws_secret_access_key``
     are set (the Imbue Studio "bring your own account" paste flow), they take
     precedence and are handed straight to ``boto3.Session``; the ambient chain
     is bypassed. Mirrors the OVH/Vultr providers, which also hold ``SecretStr``
-    key material for exactly this reason.
+    key material for exactly this reason. When ``aws_profile`` is set instead,
+    that named profile of this machine's ``~/.aws/config`` is used, so the
+    block itself carries no secret; the two are mutually exclusive.
     """
 
     # Cache for the resolved AWS account id (from sts:GetCallerIdentity), used
@@ -229,6 +264,16 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
             "aws_access_key_id / aws_secret_access_key are set."
         ),
     )
+    aws_profile: str | None = Field(
+        default=None,
+        description=(
+            "Name of a profile in this machine's ~/.aws/config (and ~/.aws/credentials) to authenticate with, "
+            "so the block carries no key material. Mutually exclusive with aws_access_key_id / "
+            "aws_secret_access_key. The profile's own region is ignored (default_region applies), and a "
+            "profile with an mfa_serial is refused because it would prompt on stdin. Leave unset to use the "
+            "ambient chain."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -252,6 +297,11 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
         When explicit ``aws_access_key_id`` + ``aws_secret_access_key`` are set,
         they are passed straight to ``boto3.Session`` and the ambient chain is
         bypassed entirely (no IMDS surgery, no ``AwsConfigError``).
+
+        When ``aws_profile`` is set, the session is scoped to that named profile
+        and its credentials are resolved eagerly (see ``_profile_session``), so a
+        missing profile, an unsupported one, or an expired login is reported
+        here rather than mid-discovery.
         """
         access_key = self.aws_access_key_id.get_secret_value() if self.aws_access_key_id else None
         secret_key = self.aws_secret_access_key.get_secret_value() if self.aws_secret_access_key else None
@@ -260,8 +310,17 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
             # chain -- that would authenticate as whoever the environment says.
             raise AwsConfigError(
                 "Both aws_access_key_id and aws_secret_access_key must be set together "
-                "(one without the other is a misconfiguration, not a fallback to the ambient chain)."
+                "(one without the other is a misconfiguration, not a fallback to the ambient chain).",
+                short_remediation="set both aws_access_key_id and aws_secret_access_key on the block, or neither",
             )
+        if self.aws_profile is not None:
+            if access_key or secret_key:
+                raise AwsConfigError(
+                    "aws_profile and aws_access_key_id / aws_secret_access_key are mutually exclusive: a block "
+                    "authenticates either through the named profile or through the pasted keys, never both.",
+                    short_remediation="keep either aws_profile or the pasted keys on the block, not both",
+                )
+            return self._profile_session(self.aws_profile)
         if access_key and secret_key:
             session_token = self.aws_session_token.get_secret_value() if self.aws_session_token else None
             return boto3.Session(
@@ -279,6 +338,59 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
                 "AWS credentials not configured. Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, "
                 "configure ~/.aws/credentials, set AWS_PROFILE, or (when running on an EC2 instance) "
                 "set use_ec2_instance_metadata=true on the provider config to use its instance role."
+            )
+        return session
+
+    def _profile_session(self, profile_name: str) -> boto3.Session:
+        """A session scoped to one named profile, with its credentials resolved up front.
+
+        A profile's failures otherwise arrive late and in the wrong shape: a
+        single-sign-on profile returns deferred credentials whose expired token
+        only surfaces on the first API call as a raw ``BotoCoreError``, and an
+        ``mfa_serial`` profile would prompt on stdin, which hangs a headless
+        ``mngr observe``. Resolving here turns each into a typed
+        ``AwsConfigError`` carrying the command that fixes it.
+        """
+        botocore_session = botocore.session.Session(profile=profile_name)
+        try:
+            scoped_config = botocore_session.get_scoped_config()
+        except ProfileNotFound as e:
+            raise AwsProfileNotFoundError(
+                f"AWS profile {profile_name!r} is not configured on this machine (no such section in "
+                "~/.aws/config or ~/.aws/credentials).",
+                short_remediation=f"run `aws configure --profile {profile_name}` (or `aws configure sso`)",
+            ) from e
+        if scoped_config.get("mfa_serial"):
+            raise AwsProfileUnsupportedError(
+                f"AWS profile {profile_name!r} sets mfa_serial, which prompts for a code on stdin; mngr runs "
+                "without a terminal, so use a profile without MFA (an SSO profile, or static keys).",
+                short_remediation="use a profile without mfa_serial (an SSO profile, or static keys)",
+            )
+        if not self.use_ec2_instance_metadata:
+            botocore_session.get_component("credential_provider").remove(IMDS_CREDENTIAL_PROVIDER_NAME)
+        session = boto3.Session(botocore_session=botocore_session, region_name=self.default_region)
+        # botocore raises a profile's own configuration and retrieval errors (a
+        # source_profile that does not exist, a failing credential_process) from
+        # get_credentials() itself, and a deferred SSO token's from the first freeze.
+        try:
+            credentials = session.get_credentials()
+            if credentials is not None:
+                credentials.get_frozen_credentials()
+        except _SSO_TOKEN_ERRORS as e:
+            raise AwsProfileSsoLoginError(
+                f"The single-sign-on login of AWS profile {profile_name!r} is missing or expired: {e}",
+                short_remediation=f"run `aws sso login --profile {profile_name}`",
+            ) from e
+        except (BotoCoreError, ClientError) as e:
+            raise AwsProfileCredentialsError(
+                f"Could not resolve the credentials of AWS profile {profile_name!r}: {e}",
+                short_remediation=f"check the profile with `aws sts get-caller-identity --profile {profile_name}`",
+            ) from e
+        if credentials is None:
+            raise AwsProfileCredentialsError(
+                f"AWS profile {profile_name!r} exists but names no credentials (no keys, source_profile, "
+                "credential_process, or SSO settings).",
+                short_remediation=f"run `aws configure --profile {profile_name}`",
             )
         return session
 

@@ -32,6 +32,7 @@ from pydantic import TypeAdapter
 from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.connections.data_types import DEFAULT_CREDENTIAL_SOURCE_NAME
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.folder_sync import FolderSyncState
@@ -229,6 +230,8 @@ class ConnectionPanelStatus(UpperCaseStrEnum):
     NO_CREDENTIALS = auto()
     # Written by a newer app version; shown, never materialized or edited here.
     READ_ONLY = auto()
+    # The connection names a login (an AWS profile, an az login, a Modal profile) this machine does not have.
+    PROFILE_MISSING = auto()
 
 
 class AccountPanelState(UpperCaseStrEnum):
@@ -264,6 +267,14 @@ class UiConnectionEntry(FrozenModel):
     status: ConnectionPanelStatus = Field(description="Discovery's verdict, or why the connection is unusable here")
     error_type: str | None = Field(default=None, description="Discovery error type for errored connections")
     error_message: str | None = Field(default=None, description="Discovery error message for errored connections")
+    remediation: str | None = Field(
+        default=None,
+        description="The command that sets up the missing login (PROFILE_MISSING), or the provider's fix for an error",
+    )
+    credential_source: str = Field(
+        default=DEFAULT_CREDENTIAL_SOURCE_NAME,
+        description="'pasted' or 'local_profile': whether the connection names a local login",
+    )
     workspace_count: int = Field(description="Active workspaces on the connection (disables Remove while > 0)")
 
 
@@ -368,6 +379,13 @@ class UiNotificationEntry(FrozenModel):
     )
     workspace_accent: str = Field(description="Origin workspace's ``#rrggbb`` accent, snapshotted at creation")
     service_name: str = Field(description="Catalog service for the brand mark; '' when none")
+    link_path: str = Field(
+        default="",
+        description=(
+            "For a system event, the in-app route its click opens; '' means the default (the workspace's "
+            "backups page, or the accounts page for an account-level event)"
+        ),
+    )
 
 
 class UiNotificationsMessage(FrozenModel):

@@ -65,6 +65,21 @@ def is_region_pinned_for_backend(backend: ConnectionBackend) -> bool:
     return backend in REGION_PINNED_BACKENDS
 
 
+# The backends a connection can authenticate through a login installed on each
+# device instead of pasted keys: an AWS named profile, an Azure CLI login, a
+# Modal profile. GCP has no per-configuration login to name (gcloud named
+# configurations select gcloud's own credentials, not the single ADC file).
+LOCAL_PROFILE_BACKENDS: Final[frozenset[ConnectionBackend]] = frozenset(
+    {ConnectionBackend.AWS, ConnectionBackend.AZURE, ConnectionBackend.MODAL}
+)
+
+
+@pure
+def is_local_profile_supported_for_backend(backend: ConnectionBackend) -> bool:
+    """Whether a connection of this backend may name a local login instead of carrying pasted keys."""
+    return backend in LOCAL_PROFILE_BACKENDS
+
+
 @pure
 def mngr_backend_name(backend: ConnectionBackend) -> str:
     """The lowercase backend name mngr registers the provider under."""

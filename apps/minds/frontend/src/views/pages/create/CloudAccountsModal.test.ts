@@ -7,10 +7,12 @@ import { ALPHA_FEATURE_TITLE, COMMUNITY_DISCORD_URL } from "./ComputeNotices";
 import { LOCAL_PROFILE_USER_ID } from "../../../models/providers";
 import { CONNECTION_BACKEND_OPTIONS } from "../../../testing";
 import type { CloudAccountsModalAttrs } from "./CloudAccountsModal";
+import type { LocalProfileOption, LocalProfilesLoader } from "./CloudAccountsModal";
 import {
   CloudAccountsModal,
   CloudAccountsModalState,
   connectionFailureMessage,
+  localProfileChoiceLabel,
 } from "./CloudAccountsModal";
 
 const ALICE = { userId: "user-1", label: "alice@example.com" };
@@ -133,7 +135,10 @@ describe("CloudAccountsModalState", () => {
       aws_secret_access_key: "s",
     });
 
-    state.selectBackend({ name: "hetzner", label: "Hetzner", is_region_pinned: false }, "");
+    state.selectBackend(
+      { name: "hetzner", label: "Hetzner", is_region_pinned: false, is_local_profile_supported: false },
+      "",
+    );
     expect(state.buildRequestBody()).toBe("Unknown backend hetzner.");
   });
 
@@ -163,6 +168,224 @@ const AWS_CONNECTION = {
   placement: { default_region: "us-east-1" },
 };
 
+/** A loader for tests that do not care about this device's logins: none are found. */
+const NO_PROFILES: LocalProfilesLoader = () => Promise.resolve([]);
+
+function localProfile(overrides: Partial<LocalProfileOption> & Pick<LocalProfileOption, "name">): LocalProfileOption {
+  return {
+    label: overrides.name,
+    region: null,
+    tenant_id: null,
+    subscription_id: null,
+    unusable_reason: "",
+    ...overrides,
+  };
+}
+
+describe("CloudAccountsModalState local profiles", () => {
+  const NEVER_CALLED = () => Promise.reject(new Error("no listing expected"));
+
+  it("sends the profile name in place of keys, and names the login the body lacks", async () => {
+    const state = new CloudAccountsModalState();
+    state.openForBackend(backendOption("aws"), THIS_DEVICE, DEFAULT_REGION_BY_BACKEND, OWNER_OPTIONS);
+    state.alias = "work aws";
+    state.selectCredentialSource("local_profile", () => Promise.resolve([]));
+    await Promise.resolve();
+    expect(state.buildRequestBody()).toBe("Name the AWS profile from ~/.aws/config to use.");
+
+    state.awsProfile = " work ";
+    expect(state.buildRequestBody()).toEqual({
+      alias: "work aws",
+      backend: "aws",
+      owner: LOCAL_PROFILE_USER_ID,
+      region: "us-west-2",
+      credential_source: "local_profile",
+      aws_profile: "work",
+    });
+  });
+
+  it("sends an az login's tenant and subscription, and a Modal profile's name", () => {
+    const state = new CloudAccountsModalState();
+    state.openForBackend(backendOption("azure"), ALICE, { AZURE: "eastus" }, OWNER_OPTIONS);
+    state.alias = "work azure";
+    state.credentialSource = "local_profile";
+    state.azureSubscriptionId = "sub-1";
+    expect(state.buildRequestBody()).toBe(
+      "The subscription id and tenant id of your az login are both required.",
+    );
+    state.azureTenantId = "tenant-1";
+    expect(state.buildRequestBody()).toEqual({
+      alias: "work azure",
+      backend: "azure",
+      owner: "user-1",
+      region: "eastus",
+      credential_source: "local_profile",
+      azure_subscription_id: "sub-1",
+      azure_tenant_id: "tenant-1",
+    });
+
+    state.openForBackend(backendOption("modal"), ALICE, DEFAULT_REGION_BY_BACKEND, OWNER_OPTIONS);
+    state.alias = "work modal";
+    state.credentialSource = "local_profile";
+    state.modalProfile = "work";
+    expect(state.buildRequestBody()).toEqual({
+      alias: "work modal",
+      backend: "modal",
+      owner: "user-1",
+      credential_source: "local_profile",
+      modal_profile: "work",
+    });
+  });
+
+  it("refuses the local-profile source for a backend without one, and drops it when switching to such a backend", () => {
+    const state = new CloudAccountsModalState();
+    state.openForBackend(backendOption("gcp"), THIS_DEVICE, DEFAULT_REGION_BY_BACKEND, OWNER_OPTIONS);
+    expect(state.isLocalProfileSupported).toBe(false);
+    state.selectCredentialSource("local_profile", NEVER_CALLED);
+    expect(state.credentialSource).toBe("pasted");
+
+    state.selectBackend(backendOption("aws"), "us-west-2");
+    state.credentialSource = "local_profile";
+    state.selectBackend(backendOption("gcp"), "us-central1-a");
+    expect(state.credentialSource).toBe("pasted");
+  });
+
+  it("lists this device's logins and takes the first usable one, with its region, when nothing is chosen", async () => {
+    const state = new CloudAccountsModalState();
+    state.openForBackend(backendOption("aws"), THIS_DEVICE, DEFAULT_REGION_BY_BACKEND, OWNER_OPTIONS);
+    state.credentialSource = "local_profile";
+    const listed = [
+      localProfile({ name: "guarded", unusable_reason: "needs an MFA code on every use, which the app cannot enter" }),
+      localProfile({ name: "work", region: "eu-west-1" }),
+    ];
+
+    await state.loadLocalProfiles((backend) => {
+      expect(backend).toBe("aws");
+      return Promise.resolve(listed);
+    });
+
+    expect(state.localProfiles).toEqual(listed);
+    expect(state.awsProfile).toBe("work");
+    expect(state.region).toBe("eu-west-1");
+    expect(state.isLocalProfilesLoading).toBe(false);
+  });
+
+  it("keeps the free-text field when the listing fails", async () => {
+    const state = new CloudAccountsModalState();
+    state.openForBackend(backendOption("modal"), THIS_DEVICE, DEFAULT_REGION_BY_BACKEND, OWNER_OPTIONS);
+    state.credentialSource = "local_profile";
+    const consoleError = console.error;
+    console.error = () => undefined;
+    try {
+      await state.loadLocalProfiles(() => Promise.reject(new Error("offline")));
+    } finally {
+      console.error = consoleError;
+    }
+    expect(state.localProfiles).toEqual([]);
+    expect(state.localProfilesError).toBe("Could not read this device's logins; type the name below.");
+    expect(state.modalProfile).toBe("");
+  });
+
+  it("drops a listing that lands after the form went back to pasted keys", async () => {
+    const state = new CloudAccountsModalState();
+    state.openForBackend(backendOption("aws"), THIS_DEVICE, DEFAULT_REGION_BY_BACKEND, OWNER_OPTIONS);
+    let deliver: (profiles: LocalProfileOption[]) => void = () => undefined;
+    const pending = new Promise<LocalProfileOption[]>((resolve) => {
+      deliver = resolve;
+    });
+    state.selectCredentialSource("local_profile", () => pending);
+    const listing = state.loadLocalProfiles(() => pending);
+    state.selectCredentialSource("pasted", NEVER_CALLED);
+
+    deliver([localProfile({ name: "work", region: "eu-west-1" })]);
+    await listing;
+
+    expect(state.localProfiles).toEqual([]);
+    expect(state.awsProfile).toBe("");
+    expect(state.region).toBe("us-west-2");
+  });
+
+  it("takes an az subscription's tenant and id together", () => {
+    const state = new CloudAccountsModalState();
+    state.openForBackend(backendOption("azure"), THIS_DEVICE, { AZURE: "eastus" }, OWNER_OPTIONS);
+    state.credentialSource = "local_profile";
+    state.selectLocalProfile(
+      localProfile({ name: "sub-1", label: "First (sub-1)", tenant_id: "tenant-1", subscription_id: "sub-1" }),
+    );
+    expect(state.azureSubscriptionId).toBe("sub-1");
+    expect(state.azureTenantId).toBe("tenant-1");
+  });
+
+  it("opens an edit on the login a local-profile connection names, listing this device's logins, and on pasted mode otherwise", async () => {
+    const state = new CloudAccountsModalState();
+    const listedFor: string[] = [];
+    const loader: LocalProfilesLoader = (backend) => {
+      listedFor.push(backend);
+      return Promise.resolve([localProfile({ name: "other" }), localProfile({ name: "work" })]);
+    };
+    state.openForEdit(
+      {
+        instance: "modal_" + "d".repeat(32),
+        backend_label: "Modal",
+        alias: "work modal",
+        placement: { modal_profile: "work" },
+        credential_source: "local_profile",
+      },
+      backendOption("modal"),
+      THIS_DEVICE,
+      loader,
+    );
+    await Promise.resolve();
+    expect(state.credentialSource).toBe("local_profile");
+    expect(listedFor).toEqual(["modal"]);
+    expect(state.localProfiles.map((profile) => profile.name)).toEqual(["other", "work"]);
+    // The connection's own login stays selected; the listing never replaces it.
+    expect(state.modalProfile).toBe("work");
+    expect(state.buildRequestBody()).toEqual({
+      alias: "work modal",
+      backend: "modal",
+      credential_source: "local_profile",
+      modal_profile: "work",
+    });
+
+    state.openForEdit({ ...AWS_CONNECTION, credential_source: "pasted" }, backendOption("aws"), ALICE, loader);
+    expect(state.credentialSource).toBe("pasted");
+    expect(state.awsProfile).toBe("");
+    expect(listedFor).toEqual(["modal"]);
+  });
+
+  it("lists the new backend's logins when the backend changes while a local login is selected", async () => {
+    const state = new CloudAccountsModalState();
+    const listedFor: string[] = [];
+    const loader: LocalProfilesLoader = (backend) => {
+      listedFor.push(backend);
+      return Promise.resolve([localProfile({ name: `${backend}-login` })]);
+    };
+    state.openForBackend(backendOption("aws"), THIS_DEVICE, DEFAULT_REGION_BY_BACKEND, OWNER_OPTIONS);
+    state.selectCredentialSource("local_profile", loader);
+    await Promise.resolve();
+    expect(state.awsProfile).toBe("aws-login");
+
+    state.selectBackend(backendOption("modal"), "");
+    state.refreshLocalProfiles(loader);
+    await Promise.resolve();
+    expect(listedFor).toEqual(["aws", "modal"]);
+    expect(state.modalProfile).toBe("modal-login");
+
+    // Back on pasted keys, a backend change lists nothing.
+    state.selectCredentialSource("pasted", loader);
+    state.selectBackend(backendOption("aws"), "us-west-2");
+    state.refreshLocalProfiles(loader);
+    expect(listedFor).toEqual(["aws", "modal"]);
+  });
+
+  it("names the login each backend uses on the source switch", () => {
+    expect(localProfileChoiceLabel("aws")).toBe("Use an AWS profile on this device");
+    expect(localProfileChoiceLabel("azure")).toBe("Use my az login on this device");
+    expect(localProfileChoiceLabel("modal")).toBe("Use a Modal profile on this device");
+  });
+});
+
 describe("CloudAccountsModalState edit mode", () => {
 
   it("opens with the owner, backend and region fixed, the alias prefilled, and every credential field empty", () => {
@@ -173,7 +396,7 @@ describe("CloudAccountsModalState edit mode", () => {
     state.awsSecretAccessKey = "old-secret";
     state.alias = "something else";
 
-    state.openForEdit(AWS_CONNECTION, backendOption("aws"), ALICE);
+    state.openForEdit(AWS_CONNECTION, backendOption("aws"), ALICE, NO_PROFILES);
 
     expect(state.mode).toBe("edit");
     expect(state.isOpen).toBe(true);
@@ -191,7 +414,7 @@ describe("CloudAccountsModalState edit mode", () => {
 
   it("sends the alias and the full credential set as a PUT to the connection's own route, with no owner and no region", () => {
     const state = new CloudAccountsModalState();
-    state.openForEdit(AWS_CONNECTION, backendOption("aws"), ALICE);
+    state.openForEdit(AWS_CONNECTION, backendOption("aws"), ALICE, NO_PROFILES);
     expect(state.requestTarget()).toEqual({
       method: "PUT",
       url: `/api/v1/desktop/cloud-accounts/${AWS_INSTANCE}`,
@@ -213,7 +436,7 @@ describe("CloudAccountsModalState edit mode", () => {
 
   it("goes back to the add route once an add is opened again", () => {
     const state = new CloudAccountsModalState();
-    state.openForEdit(AWS_CONNECTION, backendOption("aws"), ALICE);
+    state.openForEdit(AWS_CONNECTION, backendOption("aws"), ALICE, NO_PROFILES);
     state.openForBackend(backendOption("modal"), THIS_DEVICE, DEFAULT_REGION_BY_BACKEND, OWNER_OPTIONS);
     expect(state.mode).toBe("add");
     expect(state.requestTarget()).toEqual({ method: "POST", url: "/api/v1/desktop/cloud-accounts" });
@@ -229,6 +452,7 @@ describe("CloudAccountsModalState edit mode", () => {
       { instance: "gcp_" + "b".repeat(32), backend_label: "GCP", alias: "gcp", placement: { default_zone: "us-central1-a" } },
       backendOption("gcp"),
       THIS_DEVICE,
+      NO_PROFILES,
     );
     expect(state.region).toBe("us-central1-a");
     expect(state.editOwnerLabel).toBe("This device only");
@@ -237,6 +461,7 @@ describe("CloudAccountsModalState edit mode", () => {
       { instance: "modal_" + "c".repeat(32), backend_label: "Modal", alias: "modal", placement: {} },
       backendOption("modal"),
       ALICE,
+      NO_PROFILES,
     );
     expect(state.isRegionPinned).toBe(false);
     expect(state.region).toBe("");
@@ -307,6 +532,28 @@ describe("CloudAccountsModal view", () => {
     return collectVnodes(component.view.call(component, vnode));
   }
 
+  it("offers the credential-source switch for backends with a local login, and the login field once chosen", () => {
+    const state = new CloudAccountsModalState();
+    state.openForBackend(backendOption("aws"), THIS_DEVICE, DEFAULT_REGION_BY_BACKEND, OWNER_OPTIONS);
+    const pasted = rendered(state);
+    expect(pasted.find((node) => attrsOf(node).id === "ca-credential-source")).toBeDefined();
+    expect(pasted.find((node) => attrsOf(node).id === "ca-fields-aws")).toBeDefined();
+    expect(pasted.find((node) => attrsOf(node).id === "ca-fields-aws-profile")).toBeUndefined();
+
+    state.credentialSource = "local_profile";
+    state.localProfiles = [localProfile({ name: "work" })];
+    const local = rendered(state);
+    expect(local.find((node) => attrsOf(node).id === "ca-fields-aws")).toBeUndefined();
+    expect(local.find((node) => attrsOf(node).id === "ca-fields-aws-profile")).toBeDefined();
+    expect(local.find((node) => attrsOf(node).id === "ca-aws-profile-list")).toBeDefined();
+    expect(allText(local.find((node) => attrsOf(node).id === "ca-local-profile-note"))).toContain(
+      "aws configure --profile",
+    );
+
+    state.openForBackend(backendOption("gcp"), THIS_DEVICE, DEFAULT_REGION_BY_BACKEND, OWNER_OPTIONS);
+    expect(rendered(state).find((node) => attrsOf(node).id === "ca-credential-source")).toBeUndefined();
+  });
+
   it("opens on the alpha callout, in add and edit mode alike, with the Discord invite", () => {
     const state = new CloudAccountsModalState();
     state.openForBackend(backendOption("aws"), ALICE, DEFAULT_REGION_BY_BACKEND, OWNER_OPTIONS);
@@ -318,7 +565,7 @@ describe("CloudAccountsModal view", () => {
     expect(link).toBeDefined();
     expect(attrsOf(link as AnyVnode).target).toBe("_blank");
 
-    state.openForEdit(AWS_CONNECTION, backendOption("aws"), ALICE);
+    state.openForEdit(AWS_CONNECTION, backendOption("aws"), ALICE, NO_PROFILES);
     expect(rendered(state).find((node) => attrsOf(node).id === "ca-alpha-notice")).toBeDefined();
   });
 });

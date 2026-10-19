@@ -555,6 +555,27 @@ class ProviderNotAuthorizedError(ProviderUnavailableError):
         )
 
 
+class ProviderCredentialSourceMissingError(ProviderNotAuthorizedError):
+    """The provider instance names a credential source that is not set up on this machine.
+
+    A specialization of ``ProviderNotAuthorizedError`` for a provider block that
+    carries no secret of its own but points at a locally installed login (an
+    AWS named profile, an Azure CLI login, a Modal profile) that this machine
+    does not have. Unlike pasted keys, that condition ends through an action
+    outside mngr (``aws configure``, ``az login``, ``modal token new``) that
+    restarts nothing, so discovery keeps re-checking the provider rather than
+    writing it off, and ``short_remediation`` names the command that resolves it.
+    """
+
+
+# The discovery error type names that mean a provider's credentials were missing or
+# refused (as opposed to the provider being unreachable or broken). Consumers that
+# read discovery snapshots match ``DiscoveryError.type_name`` against this set.
+PROVIDER_AUTHORIZATION_ERROR_TYPE_NAMES: Final[frozenset[str]] = frozenset(
+    {ProviderNotAuthorizedError.__name__, ProviderCredentialSourceMissingError.__name__}
+)
+
+
 class HostNotFoundError(ProviderError):
     """No host with this ID or name exists."""
 

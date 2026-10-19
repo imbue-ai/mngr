@@ -1,0 +1,3 @@
+Testing integration branch combining three in-flight changes (each branch's own entry sits beside this one in the projects it touches): Imbue Cloud machine resizing from the workspace settings page (`mngr-allow-imbue-resizing`), shared-workspace cleanup (`mngr-cleanup-shares`), and cloud connections backed by a local login instead of pasted keys (`mngr-allow-provider-profile-vars`).
+
+For this project: an AWS provider instance can name a profile of this machine's `~/.aws/config` (`aws_profile`) instead of pasted keys, with missing or expired profile logins reported as `ProviderCredentialSourceMissingError` naming the fix.

@@ -20,6 +20,7 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -137,6 +138,20 @@ class FakeImbueCloudCli(ImbueCloudCli):
     is_share_lookup_failing: bool = Field(
         default=False,
         description="When True, get_share_status raises ImbueCloudCliError (simulates a connector hiccup)",
+    )
+    create_share_error_to_raise: ImbueCloudCliError | None = Field(
+        default=None,
+        description=(
+            "Error create_share raises instead of creating a share, when set (an ImbueCloudQuotaExceededCliError "
+            "plays the connector's structured quota refusal); honored by every create_share override"
+        ),
+    )
+    share_details_by_host_id: dict[str, ShareCliInfo] = Field(
+        default_factory=dict,
+        description=(
+            "Per host id, the full share row list_shares answers with (workspace id, stamps); a share "
+            "without an entry here is answered in the canned get_share_status shape"
+        ),
     )
     relays_to_return: dict[str, tuple[str, ...]] = Field(
         default_factory=dict,
@@ -259,6 +274,28 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def add_share(self, account: str, host_id: str) -> None:
         self.shares_by_account.setdefault(account, {})[host_id] = "active"
 
+    def _raise_create_share_error_if_configured(self) -> None:
+        if self.create_share_error_to_raise is not None:
+            raise self.create_share_error_to_raise
+
+    def create_share(
+        self,
+        *,
+        account: str,
+        host_id: str,
+        entry_label: str | None = None,
+        preferred_region: str | None = None,
+        workspace_id: str | None = None,
+    ) -> ShareCliInfo:
+        self._raise_create_share_error_if_configured()
+        return super().create_share(
+            account=account,
+            host_id=host_id,
+            entry_label=entry_label,
+            preferred_region=preferred_region,
+            workspace_id=workspace_id,
+        )
+
     def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
         if self.is_share_lookup_failing:
             raise ImbueCloudCliError("fake transient share lookup failure")
@@ -276,6 +313,20 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def delete_share(self, *, account: str, host_id: str) -> None:
         self.deleted_share_host_ids.append(host_id)
         self.shares_by_account.get(account, {}).pop(host_id, None)
+
+    def list_shares(self, *, account: str) -> list[ShareCliInfo]:
+        if self.is_share_lookup_failing:
+            raise ImbueCloudCliError("fake transient share listing failure")
+        rows: list[ShareCliInfo] = []
+        for host_id, state in self.shares_by_account.get(account, {}).items():
+            detailed = self.share_details_by_host_id.get(host_id)
+            if detailed is not None:
+                rows.append(detailed.model_copy_update(to_update(detailed.field_ref().state, state)))
+            else:
+                status = self.get_share_status(account=account, host_id=host_id)
+                assert status is not None
+                rows.append(status)
+        return rows
 
     def list_share_relays(self, *, account: str) -> dict[str, tuple[str, ...]]:
         return {region: tuple(endpoints) for region, endpoints in self.relays_to_return.items()}
@@ -433,6 +484,54 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def show_machine(self, account: str, machine_ref: str) -> MachineSizeCliInfo | None:
         self.machine_show_call_count += 1
         return next((machine for machine in self.machines if machine.host_id == machine_ref), None)
+
+    resize_calls: list[tuple[str, str, int | None, int | None]] = Field(
+        default_factory=list, description="Every resize_machine call: (account, machine ref, units, disk GB)"
+    )
+    resize_error_to_raise: Exception | None = Field(
+        default=None, description="Error resize_machine raises instead of recording the targets, when set"
+    )
+
+    def resize_machine(
+        self, account: str, machine_ref: str, target_memory_units: int | None, target_disk_gb: int | None
+    ) -> MachineSizeCliInfo:
+        self.resize_calls.append((account, machine_ref, target_memory_units, target_disk_gb))
+        if self.resize_error_to_raise is not None:
+            raise self.resize_error_to_raise
+        machine = next((entry for entry in self.machines if entry.host_id == machine_ref), None)
+        if machine is None:
+            raise ImbueCloudCliError(f"machines resize: no machine matches {machine_ref!r} (fake)")
+        # The connector's semantics: a target equal to the current size clears that dimension.
+        recorded = machine.model_copy_update(
+            to_update(
+                machine.field_ref().target_memory_units,
+                None
+                if target_memory_units is None or target_memory_units == machine.memory_units
+                else target_memory_units,
+            ),
+            to_update(
+                machine.field_ref().target_disk_gb,
+                None if target_disk_gb is None or target_disk_gb == machine.disk_gb else target_disk_gb,
+            ),
+        )
+        stamped = recorded.model_copy_update(
+            to_update(
+                recorded.field_ref().is_restart_needed_to_apply,
+                recorded.target_memory_units is not None or recorded.target_disk_gb is not None,
+            )
+        )
+        self.machines = [stamped if entry.host_id == machine_ref else entry for entry in self.machines]
+        return stamped
+
+    account_info_by_email: dict[str, dict[str, Any]] = Field(
+        default_factory=dict, description="The raw `account show` document get_account_info answers per account email"
+    )
+
+    def get_account_info(self, account: str) -> dict[str, Any]:
+        info = self.account_info_by_email.get(account)
+        if info is None:
+            raise ImbueCloudCliError(f"account show: connector unreachable for {account} (fake)")
+        return info
 
     # In-memory workspace-sync backend (mirrors the connector's semantics)
 
@@ -637,6 +736,7 @@ class SucceedingCreateShareCli(FakeImbueCloudCli):
         workspace_id: str | None = None,
     ) -> ShareCliInfo:
         self.create_share_calls.append((account, host_id, entry_label, preferred_region, workspace_id))
+        self._raise_create_share_error_if_configured()
         self.add_share(account, host_id)
         return ShareCliInfo(
             host_id=host_id,
@@ -744,6 +844,32 @@ def make_session_store_for_test(
     return MultiAccountSessionStore(
         data_dir=data_dir, cli=effective_cli, record_store=record_store, mngr_host_dir=mngr_host_dir
     )
+
+
+def associate_hosted_workspace(
+    store: MultiAccountSessionStore,
+    agent_id: AgentId,
+    resolver: BackendResolverInterface,
+    user_id: str,
+    display_name: str = "alpha",
+) -> str:
+    """Associate the workspace ``resolver`` discovers as ``agent_id`` with ``user_id``'s account; returns its host id.
+
+    The setup of a workspace this device hosts under a signed-in account,
+    which the sharing paths resolve back to the account through the host id.
+    """
+    display_info = resolver.get_agent_display_info(agent_id)
+    assert display_info is not None
+    host_id = str(display_info.host_id)
+    store.associate_created_workspace(
+        user_id=user_id,
+        agent_id=str(agent_id),
+        host_id=host_id,
+        display_name=display_name,
+        color=None,
+        is_cloud_row=False,
+    )
+    return host_id
 
 
 def make_profiled_device_with_connections_for_test(

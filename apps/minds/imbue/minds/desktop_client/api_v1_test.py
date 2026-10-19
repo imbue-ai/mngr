@@ -80,6 +80,7 @@ from imbue.minds.desktop_client.connections.data_types import ConnectionCredenti
 from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
 from imbue.minds.desktop_client.connections.primitives import ConnectionId
 from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
 from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
 from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
@@ -88,9 +89,12 @@ from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudClientTooOldCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
+from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.mock_agent_creator_test import InFlightCreateAttempt
@@ -2001,9 +2005,6 @@ class FakeSharingCli(FakeImbueCloudCli):
     created_shares: list[str] = Field(default_factory=list)
     deleted_shares: list[str] = Field(default_factory=list)
     share_status_call_count: int = Field(default=0, description="How many times get_share_status was consulted")
-    create_share_error: str | None = Field(
-        default=None, description="When set, create_share raises an ImbueCloudCliError with this message"
-    )
 
     def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
         self.share_status_call_count += 1
@@ -2031,8 +2032,7 @@ class FakeSharingCli(FakeImbueCloudCli):
         preferred_region: str | None = None,
         workspace_id: str | None = None,
     ) -> ShareCliInfo:
-        if self.create_share_error is not None:
-            raise ImbueCloudCliError(self.create_share_error)
+        self._raise_create_share_error_if_configured()
         self.created_shares.append(host_id)
         self.share = ShareCliInfo(
             host_id=host_id,
@@ -2546,7 +2546,7 @@ def test_machine_sharing_status_reports_a_failed_domain_move_as_an_error(tmp_pat
     cli = _fake_sharing_cli(
         share=stale_share,
         mngr_caller=_ShareProbeCaller(is_share_env_present=True),
-        create_share_error="connector refused",
+        create_share_error_to_raise=ImbueCloudCliError("connector refused"),
     )
     client = _sharing_client(tmp_path, agent_id, cli)
     # The readiness poll's cached lookup from before the move was attempted.
@@ -3169,7 +3169,10 @@ def test_workspace_sharing_delete_keeps_the_grants_in_its_document(tmp_path: Pat
 
 def test_machine_sharing_put_surfaces_connector_errors(tmp_path: Path) -> None:
     agent_id = AgentId()
-    cli = _fake_sharing_cli(create_share_error="shares create failed (exit 1)", mngr_caller=_ShareProbeCaller())
+    cli = _fake_sharing_cli(
+        create_share_error_to_raise=ImbueCloudCliError("shares create failed (exit 1)"),
+        mngr_caller=_ShareProbeCaller(),
+    )
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.put(
@@ -3180,6 +3183,25 @@ def test_machine_sharing_put_surfaces_connector_errors(tmp_path: Path) -> None:
 
     assert response.status_code == 502
     assert "Could not publish this workspace" in json.loads(response.data)["error"]
+
+
+def test_workspace_sharing_put_answers_a_full_share_quota_with_a_structured_code(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(
+        create_share_error_to_raise=ImbueCloudQuotaExceededCliError(
+            "shares create: Shared workspace limit reached (50 of 50)."
+        ),
+        mngr_caller=_ShareProbeCaller(),
+    )
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
+
+    assert response.status_code == 403, response.data
+    body = json.loads(response.data)
+    assert body["code"] == "quota_exceeded"
+    assert body["shared_workspaces_path"] == "/workspaces/shared"
+    assert "Shared workspace limit reached (50 of 50)" in body["error"]
 
 
 def test_machine_sharing_delete_disables(tmp_path: Path) -> None:
@@ -3736,6 +3758,167 @@ def test_machine_size_change_refuses_a_workspace_without_a_host_coordinate(tmp_p
     assert response.status_code == 409
     assert "Cannot resolve a host" in json.loads(response.data)["error"]
     assert caller.calls == []
+
+
+_IMBUE_CLOUD_OWNER_USER_ID = "33333333-3333-3333-3333-333333333333"
+
+
+def _imbue_cloud_resize_client(
+    tmp_path: Path, agent_id: AgentId, host_state: HostState
+) -> tuple[FlaskClient, FakeImbueCloudCli]:
+    """A client whose one workspace is a leased Imbue Cloud machine linked to a signed-in account."""
+    resolver = _resolver_for_machine_resize(
+        agent_id, AgentId(), imbue_cloud_provider_name_for_user(_IMBUE_CLOUD_OWNER_USER_ID), host_state
+    )
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_IMBUE_CLOUD_OWNER_USER_ID, email="owner@example.com")
+    cli.machines = [
+        MachineSizeCliInfo(
+            host_db_id="row-1",
+            host_id=_MACHINE_RESIZE_HOST_ID,
+            host_name="sunny",
+            status="running" if host_state is HostState.RUNNING else "stopped",
+            memory_units=8,
+            disk_gb=28,
+        )
+    ]
+    session_store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    session_store.associate_created_workspace(
+        user_id=_IMBUE_CLOUD_OWNER_USER_ID,
+        agent_id=str(agent_id),
+        host_id=_MACHINE_RESIZE_HOST_ID,
+        display_name="",
+        color=None,
+        is_cloud_row=False,
+    )
+    caller = RecordingMngrCaller()
+    client = _build_client(
+        tmp_path,
+        resolver,
+        imbue_cloud_cli=cli,
+        session_store=session_store,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        mngr_caller=caller,
+    )
+    return client, cli
+
+
+@pytest.mark.witnesses(
+    "machine-size.imbue-cloud-size-is-recorded-for-the-next-restart",
+    partial="the page's rendering is covered by the frontend tests",
+)
+def test_machine_size_change_records_an_imbue_cloud_size_without_restarting(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.RUNNING)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size",
+        headers=_auth_header(),
+        json={"memory_gb": 16, "disk_gb": 56},
+    )
+
+    assert response.status_code == 200
+    # Never a restart: the one that applies the size backs the disks up first, so the user picks when.
+    assert json.loads(response.data) == {"is_restart_dispatched": False, "operation_id": None}
+    assert cli.resize_calls == [("owner@example.com", _MACHINE_RESIZE_HOST_ID, 16, 56)]
+    assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
+    assert cli.machines[0].target_memory_units == 16
+    assert cli.machines[0].target_disk_gb == 56
+
+
+def test_machine_size_change_records_an_imbue_cloud_size_on_a_stopped_machine_too(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.STOPPED)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"memory_gb": 16}
+    )
+
+    assert response.status_code == 200
+    assert cli.resize_calls == [("owner@example.com", _MACHINE_RESIZE_HOST_ID, 16, None)]
+
+
+@pytest.mark.witnesses(
+    "machine-size.imbue-cloud-quota-refusal-is-explained",
+    partial="the page's rendering is covered by the frontend tests",
+)
+def test_machine_size_change_explains_an_imbue_cloud_quota_refusal(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.RUNNING)
+    cli.resize_error_to_raise = ImbueCloudQuotaExceededCliError(
+        "machines resize: Quota exceeded: active machine units limit is 16 (currently 8)"
+    )
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"memory_gb": 32}
+    )
+
+    assert response.status_code == 409
+    assert json.loads(response.data)["error"] == (
+        "Your plan cannot hold this size right now: Quota exceeded: active machine units limit is 16 (currently 8)"
+    )
+
+
+def test_machine_size_change_quotes_the_imbue_cloud_plugins_refusal(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.RUNNING)
+    # The wrapper's own phrasing of a non-quota plugin failure (see ImbueCloudCli._expect_success).
+    cli.resize_error_to_raise = ImbueCloudCliError(
+        "machines resize failed: Disk never shrinks: target_disk_gb=20 is below the machine's current 28GB"
+    )
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"disk_gb": 20})
+
+    assert response.status_code == 502
+    assert json.loads(response.data)["error"] == (
+        "The machine's provider refused the new size: "
+        "Disk never shrinks: target_disk_gb=20 is below the machine's current 28GB"
+    )
+
+
+def test_machine_size_change_keeps_a_refusal_the_wrapper_did_not_prefix_whole(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.RUNNING)
+    # A too-old refusal carries the plugin's message verbatim, with no command prefix in front of it.
+    cli.resize_error_to_raise = ImbueCloudClientTooOldCliError("Client too old: update to 1.2 or newer")
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"memory_gb": 16}
+    )
+
+    assert response.status_code == 502
+    assert json.loads(response.data)["error"] == (
+        "The machine's provider refused the new size: Client too old: update to 1.2 or newer"
+    )
+
+
+def test_machine_size_change_on_an_imbue_cloud_machine_takes_no_cpu_count(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.RUNNING)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"cpu_count": 4}
+    )
+
+    assert response.status_code == 400
+    assert json.loads(response.data)["error"] == "Nothing to resize: pass memory_gb or disk_gb."
+    assert cli.resize_calls == []
+
+
+def test_machine_size_change_refuses_an_imbue_cloud_machine_with_no_linked_account(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    resolver = _resolver_for_machine_resize(agent_id, AgentId(), "imbue_cloud_someone", HostState.RUNNING)
+    cli = make_fake_imbue_cloud_cli()
+    client = _build_client(
+        tmp_path, resolver, imbue_cloud_cli=cli, session_store=make_session_store_for_test(tmp_path / "s", cli=cli)
+    )
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"memory_gb": 16}
+    )
+
+    assert response.status_code == 409
+    assert "not linked" in json.loads(response.data)["error"]
 
 
 def test_machine_size_change_requires_bearer(tmp_path: Path) -> None:
@@ -4796,6 +4979,171 @@ def test_create_vps_connection_runs_prepare_on_its_instance_and_pins_the_placeme
         assert block["resource_group"] == f"mngr-{instance_name.removeprefix('azure_')}-eastus"
 
 
+@pytest.mark.parametrize(
+    ("body", "expected_prepare", "expected_block_keys", "forbidden_block_keys", "expected_placement"),
+    [
+        (
+            {"backend": "aws", "region": "us-west-2", "credential_source": "local_profile", "aws_profile": "work"},
+            "aws prepare --provider {instance} --region us-west-2",
+            {"aws_profile": "work"},
+            ("aws_access_key_id", "aws_secret_access_key"),
+            {"default_region": "us-west-2", "default_instance_type": DEFAULT_AWS_INSTANCE_TYPE, "aws_profile": "work"},
+        ),
+        (
+            {
+                "backend": "azure",
+                "region": "eastus",
+                "credential_source": "local_profile",
+                "azure_subscription_id": "sub-0123456789",
+                "azure_tenant_id": "tenant-1",
+            },
+            "azure prepare --provider {instance}",
+            {"subscription_id": "sub-0123456789", "tenant_id": "tenant-1", "use_azure_cli_login": True},
+            ("client_id", "client_secret"),
+            {"default_region": "eastus", "default_vm_size": DEFAULT_AZURE_VM_SIZE, "tenant_id": "tenant-1"},
+        ),
+        (
+            {"backend": "modal", "credential_source": "local_profile", "modal_profile": "work"},
+            "list --provider {instance} --format json",
+            {"modal_profile": "work"},
+            ("token_id", "token_secret"),
+            {"modal_profile": "work"},
+        ),
+    ],
+    ids=["aws", "azure", "modal"],
+)
+def test_create_local_profile_connection_writes_a_block_naming_the_login_and_no_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root_concurrency_group: ConcurrencyGroup,
+    body: dict[str, str],
+    expected_prepare: str,
+    expected_block_keys: dict[str, object],
+    forbidden_block_keys: tuple[str, ...],
+    expected_placement: dict[str, str],
+) -> None:
+    parts = _connection_client(
+        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
+    )
+    unlock_account_with_master_password_for_test(parts.connection_store.paths, _CONNECTION_OWNER_ID)
+
+    response = _post_connection(parts, {**body, "alias": "work cloud", "owner": _CONNECTION_OWNER_ID})
+
+    assert response.status_code == 200, response.data
+    summary = json.loads(response.data)
+    instance_name = summary["name"]
+    assert summary["credential_source"] == "local_profile"
+    assert expected_prepare.format(instance=instance_name) in parts.stub_argv_path.read_text()
+    block = tomllib.loads(parts.settings_path.read_text())["providers"][instance_name]
+    assert {key: block[key] for key in expected_block_keys} == expected_block_keys
+    assert not any(key in block for key in forbidden_block_keys)
+    # The login rides the synced metadata in plaintext; the document carries no payload at all.
+    (stored,) = parts.cli.sync_documents_by_email[_CONNECTION_OWNER_EMAIL]["connection"].values()
+    assert stored["encrypted_payload"] is None
+    assert {key: stored["metadata"]["placement"][key] for key in expected_placement} == expected_placement
+    assert stored["metadata"]["credential_source"] == "local_profile"
+
+
+def test_create_local_profile_connection_rejects_gcp_a_blank_profile_and_an_unknown_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    parts = _connection_client(
+        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
+    )
+
+    gcp = _post_connection(
+        parts,
+        {
+            "backend": "gcp",
+            "alias": "g",
+            "owner": "local",
+            "region": "us-central1-a",
+            "credential_source": "local_profile",
+        },
+    )
+    assert gcp.status_code == 400 and json.loads(gcp.data)["field"] == "credential_source"
+    blank_profile = _post_connection(
+        parts, {"backend": "modal", "alias": "m", "owner": "local", "credential_source": "local_profile"}
+    )
+    assert blank_profile.status_code == 400 and json.loads(blank_profile.data)["field"] == "modal_profile"
+    half_azure = _post_connection(
+        parts,
+        {
+            "backend": "azure",
+            "alias": "a",
+            "owner": "local",
+            "region": "eastus",
+            "credential_source": "local_profile",
+            "azure_subscription_id": "sub",
+        },
+    )
+    assert half_azure.status_code == 400 and json.loads(half_azure.data)["field"] == "azure_subscription_id"
+    unknown = _post_connection(
+        parts, {"backend": "modal", "alias": "m", "owner": "local", "credential_source": "vault", "modal_profile": "w"}
+    )
+    assert unknown.status_code == 400 and json.loads(unknown.data)["field"] == "credential_source"
+    assert parts.connection_store.list_all_views() == []
+    assert not parts.stub_argv_path.exists()
+
+
+def test_local_profiles_route_lists_this_machines_logins_per_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    parts = _connection_client(
+        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
+    )
+    (tmp_path / "aws-config").write_text("[profile work]\nregion = eu-west-1\n")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "aws-config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "aws-credentials"))
+
+    response = parts.client.get("/api/v1/desktop/cloud-accounts/local-profiles?backend=aws", headers=_auth_header())
+
+    assert response.status_code == 200, response.data
+    assert json.loads(response.data) == {
+        "backend": "aws",
+        "profiles": [
+            {
+                "name": "work",
+                "label": "work",
+                "region": "eu-west-1",
+                "tenant_id": None,
+                "subscription_id": None,
+                "unusable_reason": "",
+            }
+        ],
+    }
+    unknown = parts.client.get("/api/v1/desktop/cloud-accounts/local-profiles?backend=nope", headers=_auth_header())
+    assert unknown.status_code == 400
+
+
+def test_recheck_route_bounces_discovery_for_a_known_connection_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    parts = _connection_client(
+        tmp_path, monkeypatch, root_concurrency_group, StaticBackendResolver(url_by_agent_and_service={}), 0
+    )
+    created = _post_connection(
+        parts,
+        {
+            "backend": "modal",
+            "alias": "m",
+            "owner": "local",
+            "credential_source": "local_profile",
+            "modal_profile": "w",
+        },
+    )
+    assert created.status_code == 200, created.data
+    instance_name = json.loads(created.data)["name"]
+
+    # No forward supervisor is wired in tests, so the bounce is a no-op; the route still answers.
+    response = parts.client.post(f"/api/v1/desktop/cloud-accounts/{instance_name}/recheck", headers=_auth_header())
+    assert response.status_code == 200, response.data
+    missing = parts.client.post(
+        "/api/v1/desktop/cloud-accounts/modal_" + "0" * 32 + "/recheck", headers=_auth_header()
+    )
+    assert missing.status_code == 404
+
+
 def test_create_connection_rolls_back_when_the_credentials_fail_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
 ) -> None:
@@ -5155,6 +5503,30 @@ def test_update_connection_rotates_the_credentials_in_place_and_pushes_the_docum
     assert stored["metadata"]["alias"] == "rotated modal" and stored["revision"] == 2
     (record,) = parts.connection_store.list_connections(_CONNECTION_OWNER_ID)
     assert record.validation_rollback is None and record.is_dirty is False
+
+
+def test_update_connection_switches_a_pasted_connection_to_a_local_profile_and_drops_the_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    parts = _connection_client(tmp_path, monkeypatch, root_concurrency_group, MngrCliBackendResolver(), 0)
+    instance_name = _created_synced_modal_connection(parts)
+
+    response = _put_connection(
+        parts, instance_name, {"backend": "modal", "credential_source": "local_profile", "modal_profile": "work"}
+    )
+
+    assert response.status_code == 200, response.data
+    summary = json.loads(response.data)
+    assert summary["name"] == instance_name and summary["credential_source"] == "local_profile"
+    assert summary["identifier"] == "profile work"
+    block = tomllib.loads(parts.settings_path.read_text())["providers"][instance_name]
+    assert block["modal_profile"] == "work"
+    assert "token_id" not in block and "token_secret" not in block
+    # The environment the connection's hosts live in is unchanged by the switch.
+    assert block["user_id"] == instance_name.removeprefix("modal_")
+    (stored,) = parts.cli.sync_documents_by_email[_CONNECTION_OWNER_EMAIL]["connection"].values()
+    assert stored["encrypted_payload"] is None and stored["metadata"]["credential_source"] == "local_profile"
+    assert stored["metadata"]["placement"]["modal_profile"] == "work"
 
 
 def test_update_connection_restores_the_previous_credentials_when_the_new_ones_fail_validation(

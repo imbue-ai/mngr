@@ -49,6 +49,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.connections.account_lifecycle import account_panel_state
 from imbue.minds.desktop_client.connections.account_lifecycle import is_connection_owner_eligible
 from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
+from imbue.minds.desktop_client.connections.primitives import is_local_profile_supported_for_backend
 from imbue.minds.desktop_client.connections.primitives import is_region_pinned_for_backend
 from imbue.minds.desktop_client.connections.primitives import mngr_backend_name
 from imbue.minds.desktop_client.create_status import expected_create_attempt_duration_seconds
@@ -163,6 +164,9 @@ class ConnectionBackendOption(FrozenModel):
     is_region_pinned: bool = Field(
         description="Whether the region is fixed when the connection is added (else the create form picks it)"
     )
+    is_local_profile_supported: bool = Field(
+        description="Whether a connection may name a login installed on this machine instead of pasting keys"
+    )
 
 
 def connection_backend_options() -> tuple[ConnectionBackendOption, ...]:
@@ -171,6 +175,7 @@ def connection_backend_options() -> tuple[ConnectionBackendOption, ...]:
             name=mngr_backend_name(backend),
             label=connection_backend_label(backend),
             is_region_pinned=is_region_pinned_for_backend(backend),
+            is_local_profile_supported=is_local_profile_supported_for_backend(backend),
         )
         for backend in ConnectionBackend
     )

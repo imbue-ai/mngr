@@ -3,7 +3,11 @@
 // and the share panel's own model, which this load constructs.
 
 import m from "mithril";
-import type { MachineSizeDraft, MachineSizeNumbers } from "./machineSize";
+import type {
+  MachineSizeDimension,
+  MachineSizeDraft,
+  MachineSizeNumbers,
+} from "./machineSize";
 import { parseMachineSizeNumber } from "./machineSize";
 import { SharePanelModel } from "./sharePanel";
 import type { SharePanelModelOptions } from "./sharePanel";
@@ -47,15 +51,99 @@ export interface WorkspaceOptionsData {
 /** Response shape of GET /ui/api/workspaces/<id>/machine-size (ui_api_options.py). */
 export interface WorkspaceMachineSizeData extends MachineSizeNumbers {
   is_available: boolean;
+  /** Whether an unavailable size is one the app failed to read (the connector
+   * could not answer for the machine) rather than one the provider does not report. */
+  is_read_failed?: boolean;
   /** CPUs; null when unknown, or not shown (Imbue Cloud, whose count does not follow a resize). */
   cpu_count: number | null;
-  /** Whether this page can change the machine's size (local docker and lima machines). */
+  /** Whether this page can change the machine's size (local docker and lima
+   * machines, and an Imbue Cloud machine on an account offered the resize). */
   is_resizable: boolean;
-  /** Whether the data disk can be grown from this page (lima only). */
+  /** Whether the data disk can be grown from this page (lima and Imbue Cloud). */
   is_disk_resizable: boolean;
+  /** Whether this answer carries the size but not yet whether it can be changed:
+   * a second read with include_resize_offer=1 says (Imbue Cloud, whose offer
+   * needs the account's plan and usage, a slow connector read). */
+  is_resize_offer_pending?: boolean;
+  /** Whether the app is restarting the machine right now (a host recovery is running). */
+  is_restart_in_progress?: boolean;
   target_memory_gb: number | null;
   target_disk_gb: number | null;
   is_restart_needed_to_apply: boolean;
+  /** Whether the machine is running, so a restart would apply a pending size now; absent when unknown. */
+  is_running?: boolean | null;
+  /** Whether the machine is mid stop or start, during which a resize is refused (Imbue Cloud). */
+  is_transitioning?: boolean;
+  /** The RAM sizes an Imbue Cloud machine may be set to within its plan, its
+   * current size included; empty (or absent) for a machine sized by free numbers. */
+  memory_choices_gb?: number[];
+  /** Whether the plan's quota, not the fleet's largest size, bounds the choices. */
+  is_memory_capped_by_plan?: boolean;
+  plan_memory_limit_gb?: number | null;
+  other_machines_memory_gb?: number | null;
+  /** The largest data disk the machine may be grown to within its plan (Imbue Cloud). */
+  max_disk_gb?: number | null;
+  plan_disk_limit_gb?: number | null;
+  other_machines_disk_gb?: number | null;
+}
+
+/** Whether the machine's RAM is picked from a list of sizes its plan allows (Imbue Cloud)
+ * rather than typed as a free number (docker, lima). */
+export function isMachineSizePickedFromChoices(
+  size: WorkspaceMachineSizeData,
+): boolean {
+  return (size.memory_choices_gb?.length ?? 0) > 0;
+}
+
+/** The dimensions the settings page may change for the machine, in the order its fields are drawn. */
+export function resizableMachineSizeDimensions(
+  size: WorkspaceMachineSizeData,
+): MachineSizeDimension[] {
+  const withDisk = (
+    dimensions: MachineSizeDimension[],
+  ): MachineSizeDimension[] =>
+    size.is_disk_resizable ? [...dimensions, "disk_gb"] : dimensions;
+  return isMachineSizePickedFromChoices(size)
+    ? withDisk(["memory_gb"])
+    : withDisk(["cpu_count", "memory_gb"]);
+}
+
+/** The smallest data disk the machine may be given: its current size, since the disk only grows. */
+export function minimumMachineDiskGb(size: WorkspaceMachineSizeData): number {
+  return size.disk_gb === null ? 1 : Math.round(size.disk_gb);
+}
+
+/**
+ * Why a typed size for a machine sized from choices could not be recorded:
+ * a RAM size off the plan's list, or a disk outside its grow-only range.
+ * Null when the draft is within bounds (or the machine is sized by free
+ * numbers, whose provider is the judge).
+ */
+export function machineSizeDraftError(
+  size: WorkspaceMachineSizeData,
+  draft: MachineSizeDraft,
+): string | null {
+  if (!isMachineSizePickedFromChoices(size)) return null;
+  const choices = size.memory_choices_gb ?? [];
+  const memory = parseMachineSizeNumber(draft.memory_gb);
+  if (
+    draft.memory_gb.trim() !== "" &&
+    (memory === null || !choices.includes(memory))
+  ) {
+    return `Pick one of the RAM sizes offered (up to ${choices[choices.length - 1]} GB).`;
+  }
+  if (size.is_disk_resizable && draft.disk_gb.trim() !== "") {
+    const disk = parseMachineSizeNumber(draft.disk_gb);
+    const current = minimumMachineDiskGb(size);
+    const max = size.max_disk_gb ?? null;
+    if (disk === null || disk < current) {
+      return `The disk only grows: enter a whole number of at least ${current} GB.`;
+    }
+    if (max !== null && disk > max) {
+      return `Your plan allows a disk of up to ${max} GB for this machine.`;
+    }
+  }
+  return null;
 }
 
 /** Body of POST /api/v1/workspaces/<id>/machine-size. */
@@ -97,10 +185,7 @@ export function machineSizeChangeBody(
   draft: MachineSizeDraft,
 ): MachineSizeChangeBody | null {
   const body: MachineSizeChangeBody = {};
-  const dimensions: Array<keyof MachineSizeDraft> = size.is_disk_resizable
-    ? ["cpu_count", "memory_gb", "disk_gb"]
-    : ["cpu_count", "memory_gb"];
-  for (const dimension of dimensions) {
+  for (const dimension of resizableMachineSizeDimensions(size)) {
     if (draft[dimension].trim() === "") continue;
     const value = parseMachineSizeNumber(draft[dimension]);
     if (value === null) return null;
@@ -226,6 +311,17 @@ export interface FetchJson {
   ): Promise<{ ok: boolean; status: number; body: unknown }>;
 }
 
+/** Schedules `refresh` for later and returns how to cancel it. */
+export type ScheduleRefresh = (refresh: () => void) => () => void;
+
+/** How long the page waits between re-reads of a restarting machine's size. */
+const MACHINE_SIZE_REFRESH_MS = 10_000;
+
+function defaultScheduleRefresh(refresh: () => void): () => void {
+  const timer = setTimeout(refresh, MACHINE_SIZE_REFRESH_MS);
+  return () => clearTimeout(timer);
+}
+
 export async function defaultFetchJson(
   url: string,
   init?: RequestInit,
@@ -278,11 +374,25 @@ export class WorkspaceOptionsModel {
   share: SharePanelModel | null = null;
   /** The machine's size as last read; null until (and unless) it loads. */
   machineSize: WorkspaceMachineSizeData | null = null;
+  /** Where the size stands before it is held in `machineSize`: still being read,
+   * not reported for this machine (the server's answer), or not readable at all
+   * (the read itself failed); "ready" once held. */
+  machineSizeState: "loading" | "unavailable" | "load_failed" | "ready" =
+    "loading";
+  /** Whether the read that says if the size can be changed is still in flight (Imbue Cloud). */
+  isResizeOfferLoading = false;
   loadErrorMessage = "";
   resizeErrorMessage = "";
-  /** What the last resize did: a restart under way, or a size recorded for the next start; "" when none. */
+  /** What the last resize did when nothing else on the page says it: a size recorded for a stopped machine's next start; "" when none. */
   resizeNotice = "";
   isResizeBusy = false;
+  /** Whether the restart that applies a recorded size is being dispatched. */
+  isRestartBusy = false;
+  /** Whether this page dispatched a restart the app has not yet reported finished. */
+  isRestartDispatched = false;
+  private machineSizeReadCount = 0;
+  private cancelMachineSizeRefresh: (() => void) | null = null;
+  private isDisposed = false;
 
   renameErrorMessage = "";
   isRenameSaving = false;
@@ -301,6 +411,7 @@ export class WorkspaceOptionsModel {
   private readonly fetchJsonImpl: FetchJson;
   private readonly redrawImpl: () => void;
   private readonly shareOverrides: Partial<SharePanelModelOptions>;
+  private readonly scheduleRefreshImpl: ScheduleRefresh;
 
   constructor(
     agentId: string,
@@ -308,12 +419,24 @@ export class WorkspaceOptionsModel {
       fetchJson?: FetchJson;
       redraw?: () => void;
       shareOverrides?: Partial<SharePanelModelOptions>;
+      /** How a later re-read of the size is scheduled while the machine restarts (a timer by default). */
+      scheduleRefresh?: ScheduleRefresh;
     } = {},
   ) {
     this.agentId = agentId;
     this.fetchJsonImpl = dependencies.fetchJson ?? defaultFetchJson;
     this.redrawImpl = dependencies.redraw ?? m.redraw;
     this.shareOverrides = dependencies.shareOverrides ?? {};
+    this.scheduleRefreshImpl =
+      dependencies.scheduleRefresh ?? defaultScheduleRefresh;
+  }
+
+  /** Whether the machine is restarting: dispatched from this page, or reported running by the app. */
+  get isRestartInProgress(): boolean {
+    return (
+      this.isRestartDispatched ||
+      this.machineSize?.is_restart_in_progress === true
+    );
   }
 
   async load(): Promise<void> {
@@ -356,31 +479,122 @@ export class WorkspaceOptionsModel {
     void this.loadMachineSize();
   }
 
-  /** Fetch the machine's size lazily; failures just leave the section hidden. */
+  /**
+   * Fetch the machine's size lazily, in two reads when the second is slow:
+   * the size itself first, then (for an Imbue Cloud machine) whether the
+   * account may change it, which waits on the connector's plan and usage.
+   * The section shows the size as soon as the first read lands and a
+   * loading state in place of the controls until the second does. A failed
+   * read leaves whatever was last known; before anything is known it says
+   * whether the size is not reported or could not be read, rather than
+   * hiding the section.
+   */
   async loadMachineSize(): Promise<void> {
-    const result = await this.fetchJsonImpl(
-      `/ui/api/workspaces/${encodeURIComponent(this.agentId)}/machine-size`,
-    );
-    if (!result.ok) return;
-    const size = result.body as WorkspaceMachineSizeData;
-    if (!size.is_available) return;
-    this.machineSize = size;
+    const readId = ++this.machineSizeReadCount;
+    // A new read abandons the previous read's offer fetch, if one is in flight.
+    this.isResizeOfferLoading = false;
+    const isCurrent = await this.readMachineSize(readId);
+    if (!isCurrent) return;
+    // The re-read that follows a restart is armed once the whole read has
+    // settled, whatever its outcome: a read that fails mid-restart must not
+    // strand the page, and a re-read must not overlap the slow offer read
+    // (it would supersede it, and the offer would never land).
+    if (this.isRestartInProgress && this.cancelMachineSizeRefresh === null) {
+      this.cancelMachineSizeRefresh = this.scheduleRefreshImpl(() => {
+        this.cancelMachineSizeRefresh = null;
+        void this.loadMachineSize();
+      });
+    }
     this.redrawImpl();
   }
 
+  /** The one or two fetches of a read; resolves to whether `readId` is still the current read. */
+  private async readMachineSize(readId: number): Promise<boolean> {
+    const sizeUrl = `/ui/api/workspaces/${encodeURIComponent(this.agentId)}/machine-size`;
+    const result = await this.fetchJsonImpl(sizeUrl);
+    if (!this.isCurrentMachineSizeRead(readId)) return false;
+    const size = result.ok ? (result.body as WorkspaceMachineSizeData) : null;
+    if (size === null || !size.is_available) {
+      if (this.machineSize === null) {
+        this.machineSizeState =
+          size === null || size.is_read_failed === true
+            ? "load_failed"
+            : "unavailable";
+      } else if (this.machineSize.is_resize_offer_pending === true) {
+        // The held size's offer fetch was abandoned when this read started,
+        // and this read did not answer: nothing is checking the offer any
+        // more, so the size stays read-only rather than "being checked".
+        this.machineSize = {
+          ...this.machineSize,
+          is_resize_offer_pending: false,
+        };
+      }
+      // A size the server cannot show still says whether the app is restarting the machine.
+      if (size !== null) this.followRestartReport(size);
+      return true;
+    }
+    this.takeMachineSize(size);
+    if (size.is_resize_offer_pending !== true) return true;
+    this.isResizeOfferLoading = true;
+    this.redrawImpl();
+    const offer = await this.fetchJsonImpl(`${sizeUrl}?include_resize_offer=1`);
+    if (!this.isCurrentMachineSizeRead(readId)) return false;
+    this.isResizeOfferLoading = false;
+    const offered = offer.ok ? (offer.body as WorkspaceMachineSizeData) : null;
+    if (offered !== null && offered.is_available) {
+      this.takeMachineSize(offered);
+      return true;
+    }
+    // An offer that cannot be read leaves the size read-only, as the server
+    // itself answers when the account's plan cannot be read; a size the
+    // server cannot show still says whether the app is restarting the machine.
+    this.takeMachineSize({ ...size, is_resize_offer_pending: false });
+    if (offered !== null) this.followRestartReport(offered);
+    return true;
+  }
+
+  /** Whether a read is still the one whose answer the page shows: not superseded, and the page not left. */
+  private isCurrentMachineSizeRead(readId: number): boolean {
+    return readId === this.machineSizeReadCount && !this.isDisposed;
+  }
+
+  private takeMachineSize(size: WorkspaceMachineSizeData): void {
+    this.machineSize = size;
+    this.machineSizeState = "ready";
+    this.followRestartReport(size);
+  }
+
+  /** Let go of the restart once the app reports none running: it registers a
+   * restart before it answers the dispatch, so a read that reports none means
+   * the one this page dispatched, or the one a held size reported, is over. */
+  private followRestartReport(size: WorkspaceMachineSizeData): void {
+    if (size.is_restart_in_progress !== false) return;
+    this.isRestartDispatched = false;
+    if (this.machineSize?.is_restart_in_progress === true) {
+      this.machineSize = { ...this.machineSize, is_restart_in_progress: false };
+    }
+  }
+
   /**
-   * Resize the machine to the draft and restart it. Resolves to whether the
-   * size was recorded; the notice says whether a restart is under way (the
-   * machine was running) or the size waits for the next start (it was stopped).
+   * Resize the machine to the draft. Resolves to whether the size was
+   * recorded. A local machine that was running is restarted by the app and
+   * the section says so; an Imbue Cloud size waits for a restart the section
+   * offers; only a stopped local machine's recorded size gets a notice here.
    */
   async resizeMachine(draft: MachineSizeDraft): Promise<boolean> {
     const size = this.machineSize;
     if (size === null) return false;
-    const body = machineSizeChangeBody(size, draft);
     this.resizeErrorMessage = "";
     this.resizeNotice = "";
+    const draftError = machineSizeDraftError(size, draft);
+    const body =
+      draftError === null ? machineSizeChangeBody(size, draft) : null;
     if (body === null) {
-      this.resizeErrorMessage = "Enter a new size as whole numbers of at least 1.";
+      this.resizeErrorMessage =
+        draftError ??
+        (isMachineSizePickedFromChoices(size)
+          ? "Pick a different size first."
+          : "Enter a new size as whole numbers of at least 1.");
       this.redrawImpl();
       return false;
     }
@@ -404,9 +618,14 @@ export class WorkspaceOptionsModel {
       return false;
     }
     const outcome = result.body as MachineSizeChangeResponse;
-    this.resizeNotice = outcome.is_restart_dispatched
-      ? "The new size is recorded. The machine is restarting to apply it."
-      : "The new size is recorded. It applies when the machine next starts.";
+    // A restart under way, or an Imbue Cloud size waiting for one, is said by
+    // the section's own status once the size is re-read; only a size recorded
+    // for a stopped local machine has nothing else to announce it.
+    if (outcome.is_restart_dispatched) this.isRestartDispatched = true;
+    this.resizeNotice =
+      outcome.is_restart_dispatched || isMachineSizePickedFromChoices(size)
+        ? ""
+        : "The new size is recorded. It applies when the machine next starts.";
     // What the page shows is what discovery reports, which follows the record
     // on its next pass; re-read rather than trusting the draft.
     await this.loadMachineSize();
@@ -414,8 +633,50 @@ export class WorkspaceOptionsModel {
     return true;
   }
 
+  /**
+   * Restart the machine now so its recorded size takes effect: the same host
+   * restart the recovery card dispatches (an Imbue Cloud restart backs the
+   * machine's disks up before it comes back). Resolves to whether the restart
+   * was accepted; the shell's own surfaces follow it from there.
+   */
+  async restartMachineToApplySize(): Promise<boolean> {
+    this.isRestartBusy = true;
+    this.resizeErrorMessage = "";
+    this.resizeNotice = "";
+    this.redrawImpl();
+    const result = await this.fetchJsonImpl(
+      `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/restart`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: "host" }),
+      },
+    );
+    this.isRestartBusy = false;
+    if (!result.ok) {
+      this.resizeErrorMessage = errorMessageFromBody(
+        result.body,
+        `Could not restart the machine (HTTP ${result.status})`,
+      );
+      this.redrawImpl();
+      return false;
+    }
+    // The restart was only dispatched (the 202 comes before the stop reaches
+    // the connector), and the connector keeps reporting the machine running
+    // with its size pending until the stop lands, which is exactly what would
+    // offer the restart again. The page remembers the dispatch itself, and
+    // re-reads until the app reports the restart over.
+    this.isRestartDispatched = true;
+    await this.loadMachineSize();
+    this.redrawImpl();
+    return true;
+  }
+
   dispose(): void {
+    this.isDisposed = true;
     this.share?.dispose();
+    this.cancelMachineSizeRefresh?.();
+    this.cancelMachineSizeRefresh = null;
   }
 
   async rename(newName: string): Promise<boolean> {

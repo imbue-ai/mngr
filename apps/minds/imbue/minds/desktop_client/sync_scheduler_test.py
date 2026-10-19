@@ -202,6 +202,37 @@ def test_pass_rebuilds_the_forward_headers_file_from_the_pulled_shared_workspace
     assert list(json.loads(headers_file.path.read_text())) == ["*"]
 
 
+def test_pass_reports_the_shares_retired_elsewhere_to_its_hook(tmp_path: Path) -> None:
+    user_id = uuid4().hex
+    email = f"user-{uuid4().hex}@example.com"
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=user_id, email=email)
+    shared_agent_id = str(AgentId.generate())
+    cli.shared_agent_ids_by_email[email] = {shared_agent_id}
+    record_store, session_store = _make_device(tmp_path, f"retired-{uuid4().hex}", cli)
+    reported: list[dict[str, list[str]]] = []
+    scheduler = WorkspaceSyncScheduler(
+        record_store=record_store,
+        session_store=session_store,
+        resolver=make_resolver_with_data(agents_json=json.dumps({"agents": []})),
+        forward_identity=ForwardIdentityPublisher(
+            session_store=session_store, headers_file=ForwardHeadersFile(path=tmp_path / "forward_headers.json")
+        ),
+        on_shares_retired_elsewhere=lambda dropped: reported.append({k: list(v) for k, v in dropped.items()}),
+    )
+
+    scheduler.run_one_pass()
+    assert reported == []
+
+    cli.shared_agent_ids_by_email[email] = set()
+    scheduler.run_one_pass()
+    assert reported == [{user_id: [shared_agent_id]}]
+
+    # Nothing changed since: the hook is not called for an unchanged set.
+    scheduler.run_one_pass()
+    assert len(reported) == 1
+
+
 def test_stop_blocks_until_in_flight_pass_finishes(tmp_path: Path) -> None:
     # Regression test for the shutdown race: stop() must not return while a
     # pass is mid-flight, so the caller can safely tear down the shared mngr

@@ -13,6 +13,7 @@ from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
 from imbue.minds.desktop_client.conftest import make_connection_store_for_test
 from imbue.minds.desktop_client.conftest import make_provider_materializer_for_test
 from imbue.minds.desktop_client.conftest import unlock_account_with_master_password_for_test
+from imbue.minds.desktop_client.connections.data_types import ConnectionCredentialSource
 from imbue.minds.desktop_client.connections.data_types import ConnectionCredentials
 from imbue.minds.desktop_client.connections.data_types import ConnectionMetadata
 from imbue.minds.desktop_client.connections.data_types import ConnectionReplicaRecord
@@ -47,8 +48,14 @@ _ACCOUNT = SignedInAccount(user_id=_USER_ID, email=_EMAIL)
 _CONNECTION_ID = ConnectionId("conn-0123456789abcdef0123456789abcdef")
 
 
-def _record(backend: str, placement: dict[str, object]) -> ConnectionReplicaRecord:
-    metadata = ConnectionMetadata(backend=backend, alias="my " + backend, identifier="hint", placement=placement)
+def _record(backend: str, placement: dict[str, object], credential_source: str = "pasted") -> ConnectionReplicaRecord:
+    metadata = ConnectionMetadata(
+        backend=backend,
+        alias="my " + backend,
+        identifier="hint",
+        placement=placement,
+        credential_source=credential_source,
+    )
     return ConnectionReplicaRecord(doc_id=str(_CONNECTION_ID), metadata=metadata.model_dump(mode="json"))
 
 
@@ -198,6 +205,89 @@ def test_connections_without_available_credentials_or_with_unknown_backends_are_
     )
     # Only the account instance: aws lacks credentials, the others are unusable.
     assert list(blocks) == [imbue_cloud_provider_name_for_user(_USER_ID)]
+
+
+def test_aws_local_profile_connection_block_names_the_profile_and_carries_no_keys() -> None:
+    record = _record(
+        "aws",
+        {"default_region": "us-west-2", "default_instance_type": "t3.large", "aws_profile": "work"},
+        "local_profile",
+    )
+    blocks = desired_provider_blocks([], {_USER_ID: [record]}, {}, _CONNECTOR_URL)
+    assert _blocks_toml(blocks) == snapshot("""\
+[providers.aws_0123456789abcdef0123456789abcdef]
+backend = "aws"
+default_region = "us-west-2"
+default_instance_type = "t3.large"
+install_gvisor_runtime = true
+docker_runtime = "runsc"
+host_dir = "/home/user/.mngr"
+volume_home_path = "/home/user"
+host_log_dir = "/var/log/mngr"
+aws_profile = "work"
+""")
+
+
+def test_azure_local_profile_connection_block_pins_the_az_login_to_its_tenant_and_subscription() -> None:
+    record = _record(
+        "azure",
+        {
+            "default_region": "eastus",
+            "default_vm_size": "Standard_B2s",
+            "resource_group": "mngr-0123456789abcdef0123456789abcdef-eastus",
+            "tenant_id": "tenant-1",
+            "subscription_id": "sub-1",
+        },
+        "local_profile",
+    )
+    blocks = desired_provider_blocks([], {_USER_ID: [record]}, {}, _CONNECTOR_URL)
+    assert _blocks_toml(blocks) == snapshot("""\
+[providers.azure_0123456789abcdef0123456789abcdef]
+backend = "azure"
+default_region = "eastus"
+default_vm_size = "Standard_B2s"
+resource_group = "mngr-0123456789abcdef0123456789abcdef-eastus"
+install_gvisor_runtime = true
+docker_runtime = "runsc"
+host_dir = "/home/user/.mngr"
+volume_home_path = "/home/user"
+host_log_dir = "/var/log/mngr"
+subscription_id = "sub-1"
+tenant_id = "tenant-1"
+use_azure_cli_login = true
+""")
+
+
+def test_modal_local_profile_connection_block_names_the_profile_instead_of_a_token() -> None:
+    record = _record("modal", {"modal_profile": "work"}, "local_profile")
+    blocks = desired_provider_blocks([], {_USER_ID: [record]}, {}, _CONNECTOR_URL)
+    block = blocks[provider_instance_name_for_connection(ConnectionBackend.MODAL, _CONNECTION_ID)]
+    assert block["modal_profile"] == "work"
+    assert "token_id" not in block and "token_secret" not in block
+    assert block["user_id"] == _CONNECTION_ID.get_uuid().hex
+
+
+@pytest.mark.parametrize(
+    ("backend", "placement", "credential_source"),
+    [
+        # GCP has no local login a connection could name.
+        ("gcp", {"default_zone": "us-west1-a", "default_machine_type": "e2-small"}, "local_profile"),
+        # A local-profile row whose placement never recorded the login.
+        ("aws", {"default_region": "us-west-2", "default_instance_type": "t3.large"}, "local_profile"),
+        ("azure", {"default_region": "eastus", "default_vm_size": "s", "resource_group": "rg"}, "local_profile"),
+        # A credential source a newer app introduced is read-only here.
+        ("modal", {"modal_profile": "work"}, "vault"),
+    ],
+    ids=["gcp-no-local-form", "aws-no-profile-name", "azure-no-tenant", "unknown-source"],
+)
+def test_local_profile_blocks_need_their_login_fields_and_a_known_source(
+    backend: str, placement: dict[str, object], credential_source: str
+) -> None:
+    record = _record(backend, placement, credential_source)
+    blocks = desired_provider_blocks(
+        [], {_USER_ID: [record]}, {record.doc_id: ConnectionCredentials()}, _CONNECTOR_URL
+    )
+    assert blocks == {}
 
 
 def test_connection_block_needs_the_backends_credential_fields() -> None:
@@ -448,11 +538,27 @@ def test_materializer_writes_account_and_connection_blocks_and_locked_accounts_k
     assert providers[modal_instance]["token_secret"] == "as-1"
     assert materializer.materialize() is ProviderMaterializationOutcome.UNCHANGED
 
-    # Locked: the account instance stays, its connection goes; the local profile is unaffected.
+    # Locked: the account instance stays, its pasted-credentials connection goes; the local
+    # profile is unaffected, and so is the account's profile-based connection, which no DEK guards.
+    profile_id = ConnectionId.generate()
+    store.add_connection(
+        _USER_ID,
+        profile_id,
+        ConnectionBackend.MODAL,
+        "profile modal",
+        "profile work",
+        {"modal_profile": "work"},
+        None,
+        ConnectionCredentialSource.LOCAL_PROFILE,
+    )
+    profile_instance = provider_instance_name_for_connection(ConnectionBackend.MODAL, profile_id)
     delete_dek(store.paths, _USER_ID)
     assert materializer.materialize() is ProviderMaterializationOutcome.CHANGED
     providers = tomllib.loads(settings_path.read_text())["providers"]
-    assert sorted(_managed_names(providers)) == sorted([imbue_cloud_provider_name_for_user(_USER_ID), aws_instance])
+    assert sorted(_managed_names(providers)) == sorted(
+        [imbue_cloud_provider_name_for_user(_USER_ID), aws_instance, profile_instance]
+    )
+    assert providers[profile_instance]["modal_profile"] == "work"
 
     # Signed out: nothing of the account remains.
     signed_in_accounts.clear()

@@ -15,6 +15,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderCredentialSourceMissingError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
@@ -22,6 +23,9 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.config import AwsConfigError
+from imbue.mngr_aws.config import AwsProfileNotFoundError
+from imbue.mngr_aws.config import AwsProfileSsoLoginError
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.plugin import AWS_BACKEND_NAME
 from imbue.mngr_aws.plugin import AWS_BUILD_ARGS_HELP
@@ -373,6 +377,29 @@ class AwsProvider(OfflineCapableVpsProvider):
         return instance.get("state") in _HOST_DOWN_STATES
 
 
+# The fix for a provider whose ambient credential chain resolves nothing.
+_AMBIENT_CREDENTIALS_REMEDIATION: Final[str] = (
+    "run `aws configure` (or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, or AWS_PROFILE)"
+)
+
+
+def _aws_credential_source_missing_error(
+    name: ProviderInstanceName, error: AwsConfigError, short_reason: str
+) -> ProviderCredentialSourceMissingError:
+    """The error for a block whose profile login this machine lacks (no such profile, or no current SSO login).
+
+    Both resolve outside mngr (``aws configure``, ``aws sso login``) and restart
+    nothing, so discovery keeps re-checking the provider rather than ending its poller.
+    """
+    return ProviderCredentialSourceMissingError(
+        name,
+        reason=str(error),
+        short_remediation=error.short_remediation,
+        short_reason=short_reason,
+        user_help_text=f"{error}\nSet it up on this machine, or edit the connection to use another credential.",
+    )
+
+
 def _aws_not_authorized_error(
     name: ProviderInstanceName, reason: str, short_remediation: str
 ) -> ProviderNotAuthorizedError:
@@ -442,11 +469,26 @@ class AwsProviderBackend(ProviderBackendInterface):
         # and the rationale.
         try:
             session = config.get_session()
+        except AwsProfileNotFoundError as e:
+            raise _aws_credential_source_missing_error(
+                name, e, short_reason=f"AWS profile {config.aws_profile!r} is not set up on this machine"
+            ) from e
+        except AwsProfileSsoLoginError as e:
+            raise _aws_credential_source_missing_error(
+                name,
+                e,
+                short_reason=f"AWS profile {config.aws_profile!r} has no current single-sign-on login on this machine",
+            ) from e
+        except AwsConfigError as e:
+            # The config error already says what is wrong with the block or the profile
+            # (refused mfa_serial, half a key pair, a refused assume-role); it names its own
+            # fix when it has a more specific one than the ambient-chain setup.
+            raise _aws_not_authorized_error(
+                name, reason=str(e), short_remediation=e.short_remediation or _AMBIENT_CREDENTIALS_REMEDIATION
+            ) from e
         except (ValueError, BotoCoreError) as e:
             raise _aws_not_authorized_error(
-                name,
-                reason="AWS credentials not configured",
-                short_remediation="run `aws configure` (or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, or AWS_PROFILE)",
+                name, reason="AWS credentials not configured", short_remediation=_AMBIENT_CREDENTIALS_REMEDIATION
             ) from e
 
         aws_client = AwsVpsClient(
