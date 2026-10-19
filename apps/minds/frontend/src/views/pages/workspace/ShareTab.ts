@@ -1294,7 +1294,7 @@ async function copyToClipboardWithFlash(
   m.redraw();
 }
 
-// --- visiting agents ---
+// Visiting agents.
 
 /** The section inviting outside coding agents into the target, and listing those already in. */
 function renderVisitingAgentsSection(

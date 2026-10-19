@@ -477,7 +477,7 @@ export class SharePanelModel {
       .subscribe((event) => this.onMutationEvent(event));
   }
 
-  // --- visiting agents ---
+  // Visiting agents: outside coding agents invited into the target.
 
   get visitingAgentList(): readonly VisitingAgentEntry[] {
     return this.visitingAgents;
