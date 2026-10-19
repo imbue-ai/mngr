@@ -23,6 +23,8 @@ a reverse tunnel into the caller's container (see ``workspace_ssh_tunnel`` and t
 route) and returns a ``127.0.0.1:<port>`` endpoint the caller connects to.
 """
 
+import hashlib
+import shlex
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -181,6 +183,36 @@ def compose_pruned_authorized_keys(
     kept = [line for line in pruned.splitlines() if _grant_requester(line) != requester_workspace_id]
     body = "\n".join(kept) + "\n" if kept else ""
     return f"{body}{new_authorized_line}\n"
+
+
+# The lock every writer of the workspace's authorized_keys holds around its
+# read-and-write: the share gateway's visiting-agent reconcile takes the same
+# file (``agent_grants.authorized_keys_lock_path`` in the template).
+AUTHORIZED_KEYS_LOCK_PATH: str = "~/.ssh/authorized_keys.lock"
+AUTHORIZED_KEYS_CHANGED_MARKER: str = "AUTHORIZED_KEYS_CHANGED_SINCE_READ"
+_AUTHORIZED_KEYS_CHANGED_EXIT_CODE: int = 75
+
+
+def build_authorized_keys_write_script(existing_content: str, new_content: str) -> str:
+    """The shell that replaces ``authorized_keys`` with ``new_content``, only while it still reads as ``existing_content``.
+
+    The grant composes the new body from a read made one exec earlier, so the
+    write holds the file's lock and compares the file's digest with the read's
+    before writing; a mismatch (another writer landed in between, such as the
+    gateway's visiting-agent reconcile) exits with
+    ``AUTHORIZED_KEYS_CHANGED_MARKER`` on stderr instead of overwriting it, and
+    the caller re-reads and composes again. The guarded script sets ``-e`` of its
+    own, since the outer one does not reach into ``sh -c``: a failed write must
+    not be reported as a success by the ``chmod`` after it.
+    """
+    expected_digest = hashlib.sha256(existing_content.encode("utf-8")).hexdigest()
+    guarded = (
+        "set -e; current=$(cat ~/.ssh/authorized_keys 2>/dev/null | sha256sum | cut -d' ' -f1); "
+        f'if [ "$current" != "{expected_digest}" ]; then '
+        f"echo {AUTHORIZED_KEYS_CHANGED_MARKER} >&2; exit {_AUTHORIZED_KEYS_CHANGED_EXIT_CODE}; fi; "
+        f"printf '%s' {shlex.quote(new_content)} > ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys"
+    )
+    return f"set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; flock {AUTHORIZED_KEYS_LOCK_PATH} sh -c {shlex.quote(guarded)}"
 
 
 class SshConnectionInfo(FrozenModel):

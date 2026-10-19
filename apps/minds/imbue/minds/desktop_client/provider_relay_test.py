@@ -246,6 +246,36 @@ def test_relay_refuses_everything_but_the_callback_and_forwards_nothing() -> Non
     assert not handled.is_set()
 
 
+def test_relay_answers_a_post_carrying_a_body_with_its_page_rather_than_a_reset() -> None:
+    forwarder = RecordingSignInCallbackForwarder(result=_SIGNED_IN)
+    with _armed_relay(forwarder, threading.Event()) as relay:
+        answers = [
+            httpx.post(
+                f"http://127.0.0.1:{relay.callback.port}/callback?state={_STATE}",
+                content=b"code=c-1&" + b"x" * 32 * 1024,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=10.0,
+            )
+            for _ in range(5)
+        ]
+
+    assert [answer.status_code for answer in answers] == [405] * 5
+    assert forwarder.forwarded() == []
+
+
+def test_relay_answers_a_request_whose_content_length_is_not_a_number() -> None:
+    forwarder = RecordingSignInCallbackForwarder(result=_SIGNED_IN)
+    with _armed_relay(forwarder, threading.Event()) as relay:
+        with socket.create_connection(("127.0.0.1", relay.callback.port), timeout=10.0) as client:
+            client.sendall(
+                f"POST /callback?state={_STATE} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: abc\r\n\r\n".encode()
+            )
+            status_line = client.makefile("rb").readline()
+
+    assert status_line.startswith(b"HTTP/1.0 405 ")
+    assert forwarder.forwarded() == []
+
+
 def test_relay_answers_the_callback_with_its_own_page_saying_how_the_sign_in_ended() -> None:
     forwarder = RecordingSignInCallbackForwarder(result=_SIGNED_IN)
     handled = threading.Event()

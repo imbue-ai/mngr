@@ -12,7 +12,10 @@ import {
   sharePanelOptions,
 } from "../../../testing";
 import { createAppQueryClient } from "../../../models/queryClient";
-import type { MachineSharingResponse } from "../../../models/workspaceOptions";
+import type {
+  MachineSharingResponse,
+  VisitingAgentEntry,
+} from "../../../models/workspaceOptions";
 import { RESOLVE_USER_URL } from "../../../models/workspaceOptions";
 import type { Grant, SharePanelModelOptions } from "../../../models/sharePanel";
 import { GRANT_ADD_KINDS, SharePanelModel } from "../../../models/sharePanel";
@@ -216,7 +219,11 @@ describe("ShareTab publish widget", () => {
     );
     // The pane waits too, as a skeleton: there is no add row to disable and
     // no grant list to call empty until the document says so.
-    expect(addControls(renderTab(share))).toEqual([undefined, undefined, undefined]);
+    expect(addControls(renderTab(share))).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
   });
 
   it("greys the switch out, rather than drawing it off, when the first read failed", async () => {
@@ -724,9 +731,9 @@ describe("ShareTab loading skeleton", () => {
           (vnode) => attrsOf(vnode)["data-share-count"] !== undefined,
         ),
       ).toBe(false);
-      expect(
-        collectVnodes(entry).some((vnode) => vnode.tag === Skeleton),
-      ).toBe(true);
+      expect(collectVnodes(entry).some((vnode) => vnode.tag === Skeleton)).toBe(
+        true,
+      );
     }
   });
 
@@ -1093,7 +1100,9 @@ describe("ShareTab grant list", () => {
       );
       expect(name).toBeDefined();
       expect(classTokensOf(name as AnyVnode)).toContain("truncate");
-      expect(classTokensOf(name as AnyVnode)).not.toContain("whitespace-nowrap");
+      expect(classTokensOf(name as AnyVnode)).not.toContain(
+        "whitespace-nowrap",
+      );
     }
   });
 
@@ -1106,7 +1115,9 @@ describe("ShareTab grant list", () => {
       const slots = collectVnodes(row).filter(
         (vnode) => attrsOf(vnode)["data-slot"] !== undefined,
       );
-      expect(slots.map((slot) => attrsOf(slot)["data-slot"])).toEqual(["invitation"]);
+      expect(slots.map((slot) => attrsOf(slot)["data-slot"])).toEqual([
+        "invitation",
+      ]);
       expect(allText(slots[0])).toBe("");
     }
   });
@@ -2037,7 +2048,9 @@ describe("ShareTab invitations", () => {
     ).toBe(true);
     // A joined person is in: no re-invite is offered.
     expect(inviteControl(rowByText(root, "Carol Reyes"))).toBeUndefined();
-    expect(allText(slotOf(rowByText(root, "Anyone at acme.example"), "invitation"))).toBe("");
+    expect(
+      allText(slotOf(rowByText(root, "Anyone at acme.example"), "invitation")),
+    ).toBe("");
   });
 
   it("says could not invite, and no more than that, plus a re-invite", async () => {
@@ -2077,7 +2090,9 @@ describe("ShareTab invitations", () => {
     expect(attrsOf(friend as AnyVnode)["aria-label"]).toBe("Invite again");
     // The first invitation is automatic, so a person with no outcome shows no button.
     expect(inviteControl(rowByText(root, "Carol Reyes"))).toBeUndefined();
-    expect(inviteControl(rowByText(root, "Anyone at acme.example"))).toBeUndefined();
+    expect(
+      inviteControl(rowByText(root, "Anyone at acme.example")),
+    ).toBeUndefined();
 
     (attrsOf(friend as AnyVnode).onclick as () => void)();
     await settle();
@@ -2151,5 +2166,177 @@ describe("ShareTab invitations", () => {
       "You invited this person too recently",
     );
     expect(allText(inviteControl(row))).toBe("Invite again");
+  });
+});
+
+describe("ShareTab visiting agents", () => {
+  const AGENT: VisitingAgentEntry = {
+    agent_id: "va-" + "1".repeat(32),
+    name: "Josh Claude",
+    fingerprint: "SHA256:abc",
+    scope: "workspace",
+    granter: "user:owner",
+    created_at: "2026-10-15T18:00:00+00:00",
+    expires_at: null,
+    last_seen_at: null,
+  };
+
+  /** A published panel whose agent routes answer `agents` and mint `invite`. */
+  async function agentsPanel(
+    agents: VisitingAgentEntry[],
+    invite: Record<string, unknown> = {
+      code: "7K3M-QX9A-2PFH",
+      expires_at: "2026-10-15T18:15:00+00:00",
+      scope: "workspace",
+      auth_origin: "https://auth-x.alpha.example.com",
+      instructions: "Join with 7K3M-QX9A-2PFH",
+    },
+  ): Promise<SharePanelModel> {
+    return publishedPanel(
+      {},
+      {
+        fetchJson: (url: string) => {
+          if (url.endsWith("/agents/invites"))
+            return Promise.resolve({ ok: true, status: 200, body: invite });
+          if (url.endsWith("/agents"))
+            return Promise.resolve({ ok: true, status: 200, body: { agents } });
+          if (url.endsWith("/invitation-outcomes"))
+            return Promise.resolve({
+              ok: true,
+              status: 200,
+              body: { outcomes: [] },
+            });
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            body: {
+              enabled: true,
+              url: "https://m.relay.example/",
+              grants: {
+                workspace: { emails: [], email_domains: [] },
+                services: {},
+              },
+            },
+          });
+        },
+      },
+    );
+  }
+
+  it("offers the invite under its heading and sentence, and lists the agents once read", async () => {
+    const share = await agentsPanel([AGENT]);
+    await share.ensureVisitingAgentsLoaded();
+    const root = renderTab(share);
+    const section = byId(root, "ws-share-agents");
+    expect(section).toBeDefined();
+    const text = allText(section);
+    expect(text).toContain("Visiting agents");
+    expect(text).toContain("exactly this workspace's access");
+    expect(text).toContain("Invite an agent");
+    expect(text).toContain("Josh Claude");
+    expect(text).toContain("whole workspace");
+    expect(text).toContain("never connected");
+    expect(text).toContain("Revoke");
+  });
+
+  it("offers to read again when the read failed", async () => {
+    let isBroken = true;
+    const share = await publishedPanel(
+      {},
+      {
+        fetchJson: (url: string) => {
+          if (url.endsWith("/agents"))
+            return Promise.resolve(
+              isBroken
+                ? { ok: false, status: 502, body: { error: "it is stopped" } }
+                : { ok: true, status: 200, body: { agents: [AGENT] } },
+            );
+          if (url.endsWith("/invitation-outcomes"))
+            return Promise.resolve({
+              ok: true,
+              status: 200,
+              body: { outcomes: [] },
+            });
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            body: {
+              enabled: true,
+              url: "https://m.relay.example/",
+              grants: {
+                workspace: { emails: [], email_domains: [] },
+                services: {},
+              },
+            },
+          });
+        },
+      },
+    );
+    await share.ensureVisitingAgentsLoaded();
+    const failed = byId(renderTab(share), "ws-share-agents-error");
+    expect(allText(failed)).toContain("it is stopped");
+    const retry = byId(failed, "ws-share-agents-retry");
+    expect(retry).toBeDefined();
+
+    isBroken = false;
+    (attrsOf(retry as AnyVnode).onclick as () => void)();
+    await settle();
+
+    const root = renderTab(share);
+    expect(byId(root, "ws-share-agents-error")).toBeUndefined();
+    expect(allText(byId(root, "ws-share-agents"))).toContain("Josh Claude");
+  });
+
+  it("says no agents have been invited when the list is empty", async () => {
+    const share = await agentsPanel([]);
+    await share.ensureVisitingAgentsLoaded();
+    expect(allText(byId(renderTab(share), "ws-share-agents"))).toContain(
+      "No agents have been invited.",
+    );
+  });
+
+  it("shows the minted instructions with the code and a copy control", async () => {
+    const share = await agentsPanel([]);
+    await share.ensureVisitingAgentsLoaded();
+    await share.inviteVisitingAgent(share.wholeService);
+    const root = renderTab(share);
+    const instructions = byId(root, "ws-share-agents-instructions");
+    expect(instructions).toBeDefined();
+    const textarea = collectVnodes(instructions).find(
+      (vnode) => vnode.tag === "textarea",
+    );
+    expect(textarea).toBeDefined();
+    expect(attrsOf(textarea as AnyVnode).value).toBe(
+      "Join with 7K3M-QX9A-2PFH",
+    );
+    expect(allText(instructions)).toContain("Copy the instructions");
+    expect(allText(instructions)).toContain("7K3M-QX9A-2PFH");
+    expect(byId(root, "ws-share-agents-done")).toBeDefined();
+
+    // The code carries the whole workspace's scope, which an app pane does not
+    // describe, so it is shown on the pane it was minted on and nowhere else.
+    share.selectTarget("web");
+    expect(
+      byId(renderTab(share), "ws-share-agents-instructions"),
+    ).toBeUndefined();
+    share.selectTarget(share.wholeService);
+    expect(
+      byId(renderTab(share), "ws-share-agents-instructions"),
+    ).toBeDefined();
+  });
+
+  it("scopes the invite to the app pane it is pressed on", async () => {
+    const share = await agentsPanel([
+      { ...AGENT, scope: ["web"], name: "Web helper" },
+      AGENT,
+    ]);
+    await share.ensureVisitingAgentsLoaded();
+    share.selectTarget("web");
+    const text = allText(byId(renderTab(share), "ws-share-agents"));
+    expect(text).toContain("to use only this app");
+    expect(text).toContain("Web helper");
+    expect(text).toContain("web");
+    expect(text).not.toContain("Josh Claude");
+    expect(share.visitingAgentScopeFor("web")).toEqual(["web"]);
   });
 });

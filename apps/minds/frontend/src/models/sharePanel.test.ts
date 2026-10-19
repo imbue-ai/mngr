@@ -5,6 +5,7 @@ import type {
   MachineSharingResponse,
   SharingGrantList,
   SharingGrantsDocument,
+  VisitingAgentEntry,
 } from "./workspaceOptions";
 import { RESOLVE_USER_URL } from "./workspaceOptions";
 import { SharePanelModel } from "./sharePanel";
@@ -2133,9 +2134,9 @@ describe("SharePanelModel invitations", () => {
     await model.load();
     await settle();
     expect(model.isPublished).toBe(false);
-    expect(model.canInvite(WHOLE, rowOf(model, WHOLE, "friend@example.com"))).toBe(
-      false,
-    );
+    expect(
+      model.canInvite(WHOLE, rowOf(model, WHOLE, "friend@example.com")),
+    ).toBe(false);
   });
 
   it("invites an address on the whole workspace and an account on an app, the row pending meanwhile", async () => {
@@ -2360,8 +2361,12 @@ describe("SharePanelModel invitations", () => {
         return okResult({ outcome: "invited", invited_at: INVITED_AT });
       }
       if (init?.method === "PUT" && url.endsWith("/grants"))
-        return okResult(sharingResponse({ grants: sentDocument(init), grants_synced: true }));
-      return okResult(sharingResponse({ grants: grantsDocument(), grants_synced: true }));
+        return okResult(
+          sharingResponse({ grants: sentDocument(init), grants_synced: true }),
+        );
+      return okResult(
+        sharingResponse({ grants: grantsDocument(), grants_synced: true }),
+      );
     });
     await model.load();
     await settle();
@@ -2371,8 +2376,15 @@ describe("SharePanelModel invitations", () => {
     await settle();
     await settle();
 
-    expect(invitePayloads).toEqual([{ email: "newcomer@example.com", app: null }]);
-    expect(model.invitationStatusIndicator(WHOLE, rowOf(model, WHOLE, "newcomer@example.com")).kind).toBe("invited");
+    expect(invitePayloads).toEqual([
+      { email: "newcomer@example.com", app: null },
+    ]);
+    expect(
+      model.invitationStatusIndicator(
+        WHOLE,
+        rowOf(model, WHOLE, "newcomer@example.com"),
+      ).kind,
+    ).toBe("invited");
 
     // A domain grant notifies nobody, so none is requested for it.
     model.addGrant(WHOLE, "email_domain", "acme.example");
@@ -2389,7 +2401,13 @@ describe("SharePanelModel invitations", () => {
 
   it("reduces each row to a single typed status indicator state", async () => {
     const { model } = invitablePanel(undefined, [
-      { kind: "email", value: "friend@example.com", app: WHOLE, outcome: "invited", invited_at: INVITED_AT },
+      {
+        kind: "email",
+        value: "friend@example.com",
+        app: WHOLE,
+        outcome: "invited",
+        invited_at: INVITED_AT,
+      },
       {
         kind: "user",
         value: "user-2",
@@ -2402,19 +2420,39 @@ describe("SharePanelModel invitations", () => {
     await model.load();
     await settle();
 
-    expect(model.invitationStatusIndicator(WHOLE, rowOf(model, WHOLE, "friend@example.com"))).toEqual({
+    expect(
+      model.invitationStatusIndicator(
+        WHOLE,
+        rowOf(model, WHOLE, "friend@example.com"),
+      ),
+    ).toEqual({
       kind: "invited",
       at: INVITED_AT,
       canReinvite: true,
     });
-    expect(model.invitationStatusIndicator(WHOLE, rowOf(model, WHOLE, "carol@example.com"))).toEqual({
+    expect(
+      model.invitationStatusIndicator(
+        WHOLE,
+        rowOf(model, WHOLE, "carol@example.com"),
+      ),
+    ).toEqual({
       kind: "joined",
       firstAt: "2026-09-28T00:00:00+00:00",
       lastAt: "2026-09-29T00:00:00+00:00",
     });
     // A domain row, and a person with nothing known yet, show nothing.
-    expect(model.invitationStatusIndicator(WHOLE, rowOf(model, WHOLE, "acme.example"))).toEqual({ kind: "none" });
-    expect(model.invitationStatusIndicator("web", rowOf(model, "web", "dev@example.com"))).toEqual({ kind: "none" });
+    expect(
+      model.invitationStatusIndicator(
+        WHOLE,
+        rowOf(model, WHOLE, "acme.example"),
+      ),
+    ).toEqual({ kind: "none" });
+    expect(
+      model.invitationStatusIndicator(
+        "web",
+        rowOf(model, "web", "dev@example.com"),
+      ),
+    ).toEqual({ kind: "none" });
   });
 
   it("shows the refusal as the status indicator state, with a re-invite still offered", async () => {
@@ -2597,5 +2635,179 @@ describe("SharePanelModel mobile access link", () => {
     await model.load();
 
     expect(model.mobileLinkState).toEqual({ state: "idle" });
+  });
+});
+
+describe("SharePanelModel visiting agents", () => {
+  const AGENTS_SUFFIX = "/agents";
+  const INVITES_SUFFIX = "/agents/invites";
+
+  function agentEntry(
+    overrides: Partial<VisitingAgentEntry> = {},
+  ): VisitingAgentEntry {
+    return {
+      agent_id: "va-" + "1".repeat(32),
+      name: "Josh Claude",
+      fingerprint: "SHA256:abc",
+      scope: "workspace",
+      granter: "user:owner",
+      created_at: "2026-10-15T18:00:00+00:00",
+      expires_at: null,
+      last_seen_at: null,
+      ...overrides,
+    };
+  }
+
+  function agentsPanel(
+    respond: Responder = (url) =>
+      url.endsWith(AGENTS_SUFFIX)
+        ? okResult({ agents: [agentEntry()] })
+        : okResult({
+            code: "7K3M-QX9A-2PFH",
+            expires_at: "2026-10-15T18:15:00+00:00",
+            scope: "workspace",
+            auth_origin: "https://auth-x.alpha.example.com",
+            instructions: "Join with 7K3M-QX9A-2PFH",
+          }),
+  ): { model: SharePanelModel; requests: RecordedRequest[] } {
+    return makeSharePanel((url, init) => {
+      if (
+        url.endsWith(AGENTS_SUFFIX) ||
+        url.endsWith(INVITES_SUFFIX) ||
+        url.includes("/agents/va-")
+      )
+        return respond(url, init);
+      if (url.endsWith("/invitation-outcomes"))
+        return okResult({ outcomes: [] });
+      return okResult(sharingResponse({ enabled: true, grants_synced: true }));
+    });
+  }
+
+  it("reads the agents once on demand and lists them", async () => {
+    const { model, requests } = agentsPanel();
+    expect(model.visitingAgentsLoadState).toBe("idle");
+
+    await model.ensureVisitingAgentsLoaded();
+    await model.ensureVisitingAgentsLoaded();
+
+    expect(model.visitingAgentsLoadState).toBe("ready");
+    expect(model.visitingAgentList.map((agent) => agent.name)).toEqual([
+      "Josh Claude",
+    ]);
+    expect(
+      requests.filter((request) => request.url.endsWith(AGENTS_SUFFIX)),
+    ).toHaveLength(1);
+  });
+
+  it("reports a failed read in the route's words", async () => {
+    const { model } = agentsPanel(() => ({
+      ok: false,
+      status: 502,
+      body: { error: "Could not run agent-access" },
+    }));
+    await model.reloadVisitingAgents();
+    expect(model.visitingAgentsLoadState).toBe("failed");
+    expect(model.visitingAgentsLoadError).toBe("Could not run agent-access");
+  });
+
+  it("mints an invite scoped to the target and holds the instructions", async () => {
+    const { model, requests } = agentsPanel();
+
+    await model.inviteVisitingAgent(model.wholeService);
+    const whole = requests.find((request) =>
+      request.url.endsWith(INVITES_SUFFIX),
+    );
+    expect(whole).toEqual({
+      url: expect.stringContaining(INVITES_SUFFIX),
+      method: "POST",
+      body: { scope: "workspace" },
+    });
+    expect(model.visitingAgentInviteState).toEqual({
+      state: "minted",
+      target: model.wholeService,
+      invite: expect.objectContaining({ code: "7K3M-QX9A-2PFH" }),
+    });
+
+    model.dismissVisitingAgentInvite();
+    expect(model.visitingAgentInviteState).toEqual({ state: "idle" });
+
+    await model.inviteVisitingAgent("web");
+    const app = requests
+      .filter((request) => request.url.endsWith(INVITES_SUFFIX))
+      .at(-1);
+    expect(app?.body).toEqual({ scope: ["web"] });
+    expect(model.visitingAgentInviteState).toMatchObject({
+      state: "minted",
+      target: "web",
+    });
+  });
+
+  it("re-reads the agents when the minted instructions are dismissed", async () => {
+    let agents = [agentEntry()];
+    const { model, requests } = agentsPanel((url) =>
+      url.endsWith(AGENTS_SUFFIX)
+        ? okResult({ agents })
+        : okResult({
+            code: "C",
+            expires_at: "2026-10-15T18:15:00+00:00",
+            scope: "workspace",
+            auth_origin: "https://auth-x.alpha.example.com",
+            instructions: "x",
+          }),
+    );
+    await model.ensureVisitingAgentsLoaded();
+    await model.inviteVisitingAgent(model.wholeService);
+    agents = [
+      agentEntry(),
+      agentEntry({ agent_id: "va-" + "2".repeat(32), name: "Ada" }),
+    ];
+
+    model.dismissVisitingAgentInvite();
+    await settle();
+
+    expect(model.visitingAgentInviteState).toEqual({ state: "idle" });
+    expect(model.visitingAgentList.map((agent) => agent.name)).toEqual([
+      "Josh Claude",
+      "Ada",
+    ]);
+    expect(
+      requests.filter((request) => request.url.endsWith(AGENTS_SUFFIX)),
+    ).toHaveLength(2);
+  });
+
+  it("reports a refused invite in the route's words", async () => {
+    const { model } = agentsPanel((url) =>
+      url.endsWith(INVITES_SUFFIX)
+        ? { ok: false, status: 409, body: { error: "no account" } }
+        : okResult({ agents: [] }),
+    );
+    await model.inviteVisitingAgent(model.wholeService);
+    expect(model.visitingAgentInviteState).toEqual({
+      state: "refused",
+      target: model.wholeService,
+      message: "no account",
+    });
+  });
+
+  it("revokes an agent and drops it from the list, or keeps it with the refusal", async () => {
+    const kept = agentEntry({ agent_id: "va-" + "2".repeat(32), name: "Ada" });
+    const { model, requests } = agentsPanel((url, init) => {
+      if (url.endsWith(AGENTS_SUFFIX))
+        return okResult({ agents: [agentEntry(), kept] });
+      if (init?.method === "DELETE" && url.endsWith(kept.agent_id))
+        return { ok: false, status: 404, body: { error: "no agent" } };
+      return okResult({ revoked: agentEntry().agent_id });
+    });
+    await model.ensureVisitingAgentsLoaded();
+
+    await model.revokeVisitingAgent(agentEntry().agent_id);
+    expect(model.visitingAgentList.map((agent) => agent.name)).toEqual(["Ada"]);
+    expect(
+      requests.find((request) => request.method === "DELETE")?.url,
+    ).toContain(`/agents/${agentEntry().agent_id}`);
+
+    await model.revokeVisitingAgent(kept.agent_id);
+    expect(model.visitingAgentList.map((agent) => agent.name)).toEqual(["Ada"]);
+    expect(model.visitingAgentRevokeErrorMessage).toBe("no agent");
   });
 });

@@ -1,11 +1,15 @@
+import hashlib
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 
 import pytest
 
+from imbue.minds.desktop_client.workspace_ssh import AUTHORIZED_KEYS_CHANGED_MARKER
+from imbue.minds.desktop_client.workspace_ssh import AUTHORIZED_KEYS_LOCK_PATH
 from imbue.minds.desktop_client.workspace_ssh import SshGrantError
 from imbue.minds.desktop_client.workspace_ssh import build_authorized_keys_line
+from imbue.minds.desktop_client.workspace_ssh import build_authorized_keys_write_script
 from imbue.minds.desktop_client.workspace_ssh import compose_pruned_authorized_keys
 from imbue.minds.desktop_client.workspace_ssh import prune_expired_grant_lines
 
@@ -192,3 +196,17 @@ def test_prune_expired_grant_lines_drops_grant_with_naive_expiry() -> None:
 
     assert "requester=old" not in pruned
     assert "requester=new" in pruned
+
+
+def test_write_script_holds_the_lock_and_writes_only_over_the_body_it_was_composed_from() -> None:
+    existing = "ssh-ed25519 AAAA owner@laptop\n"
+    script = build_authorized_keys_write_script(existing, existing + "ssh-ed25519 BBBB minds-ssh-grant\n")
+
+    assert script.startswith(f"set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; flock {AUTHORIZED_KEYS_LOCK_PATH} sh -c ")
+    assert hashlib.sha256(existing.encode()).hexdigest() in script
+    # The outer ``set -e`` stops at ``sh -c``; the guarded script sets its own so a failed write is not masked.
+    assert "sh -c 'set -e; current=$(" in script
+    assert f"echo {AUTHORIZED_KEYS_CHANGED_MARKER} >&2; exit 75" in script
+    assert "chmod 600 ~/.ssh/authorized_keys" in script
+    # An absent file reads as empty, so the digest of "" is what the first grant expects.
+    assert hashlib.sha256(b"").hexdigest() in build_authorized_keys_write_script("", "ssh-ed25519 BBBB x\n")
