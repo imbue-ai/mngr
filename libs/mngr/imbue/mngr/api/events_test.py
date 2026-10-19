@@ -290,6 +290,30 @@ def test_resolve_events_target_finds_agent_by_instance_key_address(
     assert "instance log content" in content
 
 
+def test_resolve_events_target_reads_an_agent_named_by_its_ids_and_provider_without_discovery(
+    temp_mngr_ctx: MngrContext,
+    local_provider,
+) -> None:
+    """``ID@HOST-ID.PROVIDER`` (what a create's ``created`` event reports) resolves straight to the events.
+
+    No agent record is written here, so discovery could not find this agent: the
+    target comes from the ids alone.
+    """
+    per_host_dir = local_provider.host_dir
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
+    agent_id = AgentId.generate()
+    agent_events_dir = per_host_dir / "agents" / str(agent_id) / "events"
+    agent_events_dir.mkdir(parents=True, exist_ok=True)
+    (agent_events_dir / "output.log").write_text("by-ids log content 51733\n")
+
+    target = resolve_events_target(
+        AgentAddress(agent=agent_id, host=HostAddress(host=host.id, provider=local_provider.name)), temp_mngr_ctx
+    )
+
+    assert target.host_id == host.id
+    assert read_event_content(target, "output.log") == "by-ids log content 51733\n"
+
+
 def test_resolve_events_target_finds_host(
     temp_mngr_ctx: MngrContext,
     local_provider,

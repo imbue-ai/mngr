@@ -177,7 +177,10 @@ CommandHelpMetadata(
 - Agents: `NAME`, `NAME@HOST`, or `NAME@HOST.PROVIDER`.
 - Hosts: `@HOST`, `@HOST.PROVIDER`, or a bare `host-...` ID.
 
-Bare names without `@` are always interpreted as agent names.
+Bare names without `@` are always interpreted as agent names. An agent named by
+its ids and its provider (`agent-...@host-....PROVIDER`, as `mngr create --format
+jsonl` reports them in its `created` event) is read without discovery, which on a
+machine with many containers and providers takes seconds.
 
 Streams all events from all sources in date-sorted order. Use --source
 or positional SOURCES arguments to restrict which event sources to include.

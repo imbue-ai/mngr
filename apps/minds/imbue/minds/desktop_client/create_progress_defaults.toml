@@ -32,8 +32,8 @@ default_step_seconds = 10
 "bootstrap.sync_venv" = 20
 "checkout_branch" = 2
 "clone_repo" = 15
-"creating_host" = 420
-"mngr_create" = 540
+"creating_host" = 840
+"mngr_create" = 900
 "provisioning" = 15
 "setting_up_host" = 30
 "starting_agent" = 5
@@ -45,7 +45,7 @@ default_step_seconds = 10
 "vps.wait_agent_ssh" = 5
 "vps.wait_bootstrap" = 60
 "vps.wait_ssh" = 20
-"wait_for_ready" = 60
+"wait_for_ready" = 90
 
 ["create:AZURE"]
 "bootstrap.configure_git" = 1
@@ -58,8 +58,8 @@ default_step_seconds = 10
 "bootstrap.sync_venv" = 20
 "checkout_branch" = 2
 "clone_repo" = 15
-"creating_host" = 480
-"mngr_create" = 600
+"creating_host" = 640
+"mngr_create" = 700
 "provisioning" = 15
 "setting_up_host" = 30
 "starting_agent" = 5
@@ -71,7 +71,7 @@ default_step_seconds = 10
 "vps.wait_agent_ssh" = 5
 "vps.wait_bootstrap" = 60
 "vps.wait_ssh" = 20
-"wait_for_ready" = 60
+"wait_for_ready" = 45
 
 ["create:DOCKER"]
 "bootstrap.configure_git" = 1
@@ -147,8 +147,8 @@ default_step_seconds = 10
 "bootstrap.sync_venv" = 20
 "checkout_branch" = 2
 "clone_repo" = 15
-"creating_host" = 420
-"mngr_create" = 540
+"creating_host" = 1040
+"mngr_create" = 1100
 "provisioning" = 15
 "setting_up_host" = 30
 "starting_agent" = 5
@@ -160,7 +160,7 @@ default_step_seconds = 10
 "vps.wait_agent_ssh" = 5
 "vps.wait_bootstrap" = 60
 "vps.wait_ssh" = 20
-"wait_for_ready" = 60
+"wait_for_ready" = 90
 
 ["create:IMBUE_CLOUD"]
 "bootstrap.configure_git" = 1

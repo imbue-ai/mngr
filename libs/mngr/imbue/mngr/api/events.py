@@ -212,6 +212,27 @@ def resolve_events_target(
 
 
 def _resolve_agent_events_target(address: AgentAddress, mngr_ctx: MngrContext) -> EventsTarget:
+    # An address that names the agent, its host and its provider by id
+    # (``agent-...@host-....docker``, as a create's ``created`` event reports
+    # them) needs no discovery, which on a machine with many containers and
+    # providers costs seconds a caller following a short boot does not have.
+    if (
+        isinstance(address.agent, AgentId)
+        and address.host is not None
+        and isinstance(address.host.host, HostId)
+        and address.host.provider is not None
+    ):
+        with log_span("Getting events access for agent {} by its ids", address.agent):
+            direct_target = try_build_events_target_for_agent(
+                mngr_ctx=mngr_ctx,
+                agent_id=address.agent,
+                agent_name=str(address.agent),
+                host_id=address.host.host,
+                provider_name=address.host.provider,
+            )
+        if direct_target is not None:
+            return direct_target
+        logger.debug("The host of {} is not readable by its ids; resolving it through discovery", address)
     host_ref, agent_ref = find_one_agent(address, mngr_ctx)
     with log_span("Getting events access for agent {}", agent_ref.agent_name):
         target = try_build_events_target_for_agent(
