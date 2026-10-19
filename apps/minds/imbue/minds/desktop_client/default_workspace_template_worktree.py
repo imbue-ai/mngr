@@ -23,6 +23,10 @@ from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from pydantic import Field
+
+from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.pure import pure
 
 # This file lives at apps/minds/imbue/minds/desktop_client/default_workspace_template_worktree.py, so
 # parents[5] hops up over desktop_client, minds, imbue, minds, apps to the repo
@@ -33,6 +37,32 @@ DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE: Final[Path] = (
 )
 _DEFAULT_WORKSPACE_TEMPLATE_REMOTE: Final[str] = "https://github.com/imbue-ai/default-workspace-template.git"
 _DEFAULT_WORKSPACE_TEMPLATE_FALLBACK_BRANCH: Final[str] = "main"
+_DEFAULT_WORKSPACE_TEMPLATE_NAME: Final[str] = "default-workspace-template"
+
+
+class MaterializedTemplateWorktree(FrozenModel):
+    """A materialized DEFAULT_WORKSPACE_TEMPLATE working tree, and which tree it came from.
+
+    ``ref`` and ``commit`` are the run's template *coordinate*: which tree built the
+    workspace, which the paired branch's name alone does not say.
+    """
+
+    path: Path = Field(description="Where the working tree was materialized")
+    ref: str = Field(
+        description="DEFAULT_WORKSPACE_TEMPLATE branch the tree came from, or its commit when the tree is detached"
+    )
+    commit: str = Field(description="Commit the tree was taken from, before the pytest opt-in commit added on top")
+
+
+@pure
+def template_configuration_identity(ref: str) -> str:
+    """The identity a run reports for the DEFAULT_WORKSPACE_TEMPLATE tree it built from.
+
+    One comparable string, because what the flake reconciler needs is to group a
+    cluster's occurrences by the test input they carried: two runs are independent
+    reproductions of each other only when this matches.
+    """
+    return f"{_DEFAULT_WORKSPACE_TEMPLATE_NAME}@{ref}"
 
 
 def _current_mngr_branch() -> str | None:
@@ -94,6 +124,12 @@ def _default_workspace_template_remote_has_branch(branch: str) -> bool:
     return bool(result.stdout.strip())
 
 
+def _read_materialized_worktree(worktree: Path, ref: str | None) -> MaterializedTemplateWorktree:
+    """Describe an existing template tree by its checked-out branch, else by its commit."""
+    commit = _read_git(worktree, ["rev-parse", "HEAD"])
+    return MaterializedTemplateWorktree(path=worktree, ref=ref if ref is not None else commit, commit=commit)
+
+
 def current_worktree_branch(worktree: Path) -> str | None:
     """Return the checked-out branch name of ``worktree``, or None if unknown."""
     result = subprocess.run(
@@ -114,6 +150,11 @@ def _run_git(repo: Path, args: list[str]) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, timeout=120)
 
 
+def _read_git(repo: Path, args: list[str]) -> str:
+    result = subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, timeout=120)
+    return result.stdout.strip()
+
+
 def write_pytest_config_opt_in(settings_path: Path) -> None:
     """Prepend ``is_allowed_in_pytest = true`` to a throwaway DEFAULT_WORKSPACE_TEMPLATE ``settings.toml``.
 
@@ -132,7 +173,7 @@ def materialize_paired_default_workspace_template_worktree(
     destination: Path = DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE,
     *,
     mngr_branch: str | None = None,
-) -> Path:
+) -> MaterializedTemplateWorktree:
     """Materialize a paired-branch DEFAULT_WORKSPACE_TEMPLATE working tree at ``destination`` if absent.
 
     Clones the paired DEFAULT_WORKSPACE_TEMPLATE branch (``mngr_branch`` or :func:`_current_mngr_branch`
@@ -145,10 +186,14 @@ def materialize_paired_default_workspace_template_worktree(
     worktree is never clobbered, and re-runs are idempotent. Runs only where git
     works; genuine failures (clone / commit) propagate loudly rather than silently
     falling back to the released DEFAULT_WORKSPACE_TEMPLATE tag.
+
+    Returns the tree's coordinate along with its path, so the caller can report which
+    template tree built the workspace. A tree that was already present is read back
+    rather than assumed, since nothing here chose it.
     """
     if destination.exists():
         logger.info("DEFAULT_WORKSPACE_TEMPLATE worktree already present at {}; leaving it untouched", destination)
-        return destination
+        return _read_materialized_worktree(destination, ref=current_worktree_branch(destination))
 
     mngr_branch = mngr_branch if mngr_branch is not None else _current_mngr_branch()
     if mngr_branch is not None and _default_workspace_template_remote_has_branch(mngr_branch):
@@ -190,6 +235,9 @@ def materialize_paired_default_workspace_template_worktree(
         text=True,
         timeout=300,
     )
+    # Read before the opt-in commit below moves HEAD off the cloned commit. ``--depth 1``
+    # from a branch gives no other record of which commit that branch pointed at.
+    cloned_commit = _read_git(destination, ["rev-parse", "HEAD"])
     write_pytest_config_opt_in(destination / ".mngr" / "settings.toml")
     _run_git(destination, ["add", "-A"])
     _run_git(
@@ -209,4 +257,4 @@ def materialize_paired_default_workspace_template_worktree(
     # FETCH_HEAD`` (run in this clone) is a no-op that keeps the opt-in.
     # Fetching from ``.`` is local-only.
     _run_git(destination, ["fetch", "--no-tags", ".", "HEAD"])
-    return destination
+    return MaterializedTemplateWorktree(path=destination, ref=default_workspace_template_ref, commit=cloned_commit)
