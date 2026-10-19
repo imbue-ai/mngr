@@ -1,6 +1,7 @@
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Final
 from typing import cast
@@ -37,13 +38,19 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.registry import resolve_backend_and_config
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import delete_git_branch
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
 from imbue.mngr.utils.git_utils import remove_worktree
+from imbue.mngr.utils.progress import ProgressReporterInterface
+from imbue.mngr.utils.progress import ProgressStep
+from imbue.mngr.utils.progress import command_step_id
+from imbue.mngr.utils.progress import summarize_command_for_label
 
 _MAX_HOST_NAME_GENERATION_ATTEMPTS: Final[int] = 100
 _MAX_HOST_NAME_CONFLICT_RETRIES: Final[int] = 3
@@ -227,23 +234,18 @@ def create(
         mngr_ctx, target_host, agent_options, create_work_dir
     )
 
+    # Announce the phases this create will run before any of them starts, so a
+    # JSONL consumer can weigh its whole bar from the first event.
+    is_new_host = isinstance(target_host, NewHostOptions)
+    progress = mngr_ctx.progress_reporter
+    progress.announce_plan(plan_create_steps(is_new_host=is_new_host, create_work_dir=create_work_dir), None)
+
     # Run agent-type-specific preflight checks before creating the host.
     # This lets agent types fail fast on configuration errors (e.g. missing
     # gitignore entries) before expensive operations like host creation.
     agent_type = agent_options.agent_type
     resolved = resolve_agent_type(agent_type, mngr_ctx.config)
     agent_class = cast(type[AgentInterface], resolved.agent_class)
-    with log_span("Running preflight checks for agent type {}", agent_type):
-        agent_class.preflight_check(
-            source_host=source_location.host,
-            source_path=source_location.path,
-            agent_options=agent_options,
-            agent_config=resolved.agent_config,
-            mngr_ctx=mngr_ctx,
-        )
-
-    # Determine which provider to use and get the host
-    is_new_host = isinstance(target_host, NewHostOptions)
     # Resolve the provider that owns a newly-created host so we can tear it down
     # if the rest of the create fails (None when adopting an existing host).
     # Bootstrap first so backends with one-time bootstrap (Modal's per-user
@@ -252,10 +254,24 @@ def create(
     # to actually create the host; bootstrap is idempotent, so doing it here too
     # is cheap.
     new_host_provider: ProviderInstanceInterface | None = None
-    if isinstance(target_host, NewHostOptions):
-        bootstrap_backend_for_host_creation(target_host.provider, mngr_ctx)
-        new_host_provider = get_provider_instance(target_host.provider, mngr_ctx)
-    with log_span("Resolving target host"):
+    with progress.step(CreatePhase.PREPARING.step_id, _CREATE_PHASE_LABELS[CreatePhase.PREPARING]):
+        with log_span("Running preflight checks for agent type {}", agent_type):
+            agent_class.preflight_check(
+                source_host=source_location.host,
+                source_path=source_location.path,
+                agent_options=agent_options,
+                agent_config=resolved.agent_config,
+                mngr_ctx=mngr_ctx,
+            )
+        if isinstance(target_host, NewHostOptions):
+            bootstrap_backend_for_host_creation(target_host.provider, mngr_ctx)
+            new_host_provider = get_provider_instance(target_host.provider, mngr_ctx)
+    creating_host_step = (
+        progress.step(CreatePhase.CREATING_HOST.step_id, _CREATE_PHASE_LABELS[CreatePhase.CREATING_HOST])
+        if is_new_host
+        else nullcontext()
+    )
+    with log_span("Resolving target host"), creating_host_step:
         host = resolve_target_host(target_host, mngr_ctx)
 
     # Wrap everything from here through the return in a single destroy-on-failure
@@ -268,28 +284,31 @@ def create(
     with destroy_new_host_on_create_failure(host, new_host_provider):
         # Notify plugins that a new host was created (only for new hosts)
         if is_new_host:
-            # Write the host's env vars first, before any hook or command runs,
-            # so an env-var-write failure also tears the new host down. This is
-            # the new host's first post-create step (``target_host`` is a
-            # ``NewHostOptions`` here, so ``.environment`` is available).
-            _write_host_env_vars(host, target_host.environment)
+            with progress.step(CreatePhase.SETTING_UP_HOST.step_id, _CREATE_PHASE_LABELS[CreatePhase.SETTING_UP_HOST]):
+                # Write the host's env vars first, before any hook or command runs,
+                # so an env-var-write failure also tears the new host down. This is
+                # the new host's first post-create step (``target_host`` is a
+                # ``NewHostOptions`` here, so ``.environment`` is available).
+                _write_host_env_vars(host, target_host.environment)
 
-            with log_span("Calling on_host_created hooks"):
-                mngr_ctx.pm.hook.on_host_created(host=host, mngr_ctx=mngr_ctx)
+                with log_span("Calling on_host_created hooks"):
+                    mngr_ctx.pm.hook.on_host_created(host=host, mngr_ctx=mngr_ctx)
 
-            # Run post-host-create commands synchronously. The host is fully
-            # online (sshd/exec ready) but no agent work_dir has been touched
-            # yet, so this is the safe window for an image to do first-boot
-            # setup (e.g. seed a volume from an in-image bake) that any
-            # subsequent exec depends on.
-            _run_post_host_create_commands(host, target_host.provisioning.post_host_create_commands)
+                # Run post-host-create commands synchronously. The host is fully
+                # online (sshd/exec ready) but no agent work_dir has been touched
+                # yet, so this is the safe window for an image to do first-boot
+                # setup (e.g. seed a volume from an in-image bake) that any
+                # subsequent exec depends on.
+                _run_post_host_create_commands(host, target_host.provisioning.post_host_create_commands, progress)
 
-            # Run post-host-create commands on the outer machine (the underlying
-            # VM/daemon host). This is the only create-time hook that targets the
-            # outer rather than the host/container itself -- e.g. installing a
-            # VM-level systemd unit. Skipped (with a warning) for providers that
-            # expose no outer host.
-            _run_post_host_create_outer_commands(host, target_host.provisioning.post_host_create_outer_commands)
+                # Run post-host-create commands on the outer machine (the underlying
+                # VM/daemon host). This is the only create-time hook that targets the
+                # outer rather than the host/container itself -- e.g. installing a
+                # VM-level systemd unit. Skipped (with a warning) for providers that
+                # expose no outer host.
+                _run_post_host_create_outer_commands(
+                    host, target_host.provisioning.post_host_create_outer_commands, progress
+                )
 
         # ``host.pre_baked_agent_id`` (default None on the base Host class,
         # populated by providers whose ``create_host`` returns a host with a
@@ -331,15 +350,18 @@ def create(
 
             # Create the agent's work_dir on the host
             if create_work_dir:
-                with log_span("Calling on_before_initial_file_copy hooks"):
-                    mngr_ctx.pm.hook.on_before_initial_file_copy(agent_options=agent_options, host=host)
-                with log_span("Creating agent work directory from source {}", source_location.path):
-                    work_dir_result = host.create_agent_work_dir(
-                        source_location.host, source_location.path, agent_options
-                    )
-                    work_dir_path = work_dir_result.path
-                    created_branch_name = work_dir_result.created_branch_name
-                    checked_out_branch_name = work_dir_result.checked_out_branch_name
+                with progress.step(
+                    CreatePhase.TRANSFERRING_PROJECT.step_id, _CREATE_PHASE_LABELS[CreatePhase.TRANSFERRING_PROJECT]
+                ):
+                    with log_span("Calling on_before_initial_file_copy hooks"):
+                        mngr_ctx.pm.hook.on_before_initial_file_copy(agent_options=agent_options, host=host)
+                    with log_span("Creating agent work directory from source {}", source_location.path):
+                        work_dir_result = host.create_agent_work_dir(
+                            source_location.host, source_location.path, agent_options
+                        )
+                        work_dir_path = work_dir_result.path
+                        created_branch_name = work_dir_result.created_branch_name
+                        checked_out_branch_name = work_dir_result.checked_out_branch_name
             else:
                 # Work dir was already created (e.g. by CLI's early copy).
                 # Use target_path if set (it should contain the actual work_dir path),
@@ -365,92 +387,96 @@ def create(
                             agent_options=agent_options, host=host, work_dir_path=work_dir_path
                         )
 
-                # Create the agent state (registers the agent with the host)
-                with log_span("Creating agent state in work directory {}", work_dir_path):
-                    agent = host.create_agent_state(
-                        work_dir_path,
-                        agent_options,
-                        created_branch_name=created_branch_name,
-                        checked_out_branch_name=checked_out_branch_name,
-                    )
-
-                # Run provisioning for the agent (hooks, dependency installation, etc.)
-                with log_span("Calling on_before_provisioning hooks"):
-                    mngr_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
-                with log_span("Provisioning agent {}", agent.name):
-                    try:
-                        host.provision_agent(agent, agent_options, mngr_ctx)
-                    except ConcurrencyExceptionGroup as group:
-                        # provision_agent runs its body inside a concurrency group, which
-                        # re-raises any body exception wrapped in a ConcurrencyExceptionGroup
-                        # (and flattens a nested group's single leaf up to this level). Surface
-                        # a single expected error -- e.g. a settings-narrowing ConfigParseError
-                        # raised while building settings.json -- cleanly rather than as an
-                        # "Unexpected error" with a full traceback.
-                        if group.only_exception_is_instance_of(MngrError):
-                            raise group.get_only_exception() from group
-                        raise
-                with log_span("Calling on_after_provisioning hooks"):
-                    mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
-
-                # Deliver the initial message (if any) and start the agent.
-                #
-                # Interactive agents do the ready-signal dance and send the message
-                # via the tmux pane after the agent is up. Headless agents cannot
-                # receive messages that way: they communicate via stdout/stdin
-                # pipes, so wait_for_ready_signal / send_message both raise. For
-                # those we stage the message on disk first (the agent's command
-                # cats the file at startup) and then just start the process.
-                initial_message = agent.get_initial_message()
-                if isinstance(agent, StreamingHeadlessAgentMixin):
-                    if initial_message is not None:
-                        agent.stage_initial_message(initial_message)
-                    logger.info("Starting agent {} ...", agent.name)
-                    host.start_agents([agent.id])
-                else:
-                    # Start the agent and wait for its readiness signal BEFORE returning,
-                    # whether or not there is an initial message to send. Waiting even in
-                    # the no-message case means callers -- including the chat UI, which
-                    # always creates with no initial message -- only ever see the agent
-                    # once it can actually accept input. Otherwise a no-message create
-                    # returns the instant the process spawns, which for a slow-booting
-                    # harness (pi writes its session + model-state files several seconds
-                    # after launch) surfaces a live-looking agent that cannot yet take a
-                    # message. wait_for_ready_signal is the same per-harness check the
-                    # message path uses (claude/codex poll for the composer prompt in the
-                    # pane; pi waits for its session-started sentinel file); its base
-                    # implementation just runs start_action, so a plain command agent that
-                    # does not override it starts exactly as before, with no wait.
-                    # Raises AgentStartError if the agent doesn't signal readiness in time.
-                    logger.info("Starting agent {} ...", agent.name)
-                    timeout = (
-                        agent_options.ready_timeout_seconds
-                        if agent_options.ready_timeout_seconds is not None
-                        else mngr_ctx.config.agent_ready_timeout
-                    )
-                    try:
-                        agent.wait_for_ready_signal(
-                            is_readiness_awaited=True,
-                            start_action=lambda: host.start_agents([agent.id]),
-                            timeout=timeout,
+                with progress.step(CreatePhase.PROVISIONING.step_id, _CREATE_PHASE_LABELS[CreatePhase.PROVISIONING]):
+                    # Create the agent state (registers the agent with the host)
+                    with log_span("Creating agent state in work directory {}", work_dir_path):
+                        agent = host.create_agent_state(
+                            work_dir_path,
+                            agent_options,
+                            created_branch_name=created_branch_name,
+                            checked_out_branch_name=checked_out_branch_name,
                         )
-                    except AgentStartError:
-                        # The agent process is already running and may well finish booting
-                        # after the budget -- without a teardown it would linger as a
-                        # registered, running agent while this create reports failure
-                        # (and a chat UI showing the failure would later flip to a live
-                        # chat when the zombie surfaces). A failed create must leave
-                        # nothing behind. destroy_agent is best-effort aggregate; if it
-                        # cannot clean up, its CleanupFailedGroup propagates chained to
-                        # this readiness error.
-                        logger.warning(
-                            "Agent {} did not signal readiness within {}s; tearing it down", agent.name, timeout
+
+                    # Run provisioning for the agent (hooks, dependency installation, etc.)
+                    with log_span("Calling on_before_provisioning hooks"):
+                        mngr_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
+                    with log_span("Provisioning agent {}", agent.name):
+                        try:
+                            host.provision_agent(agent, agent_options, mngr_ctx)
+                        except ConcurrencyExceptionGroup as group:
+                            # provision_agent runs its body inside a concurrency group, which
+                            # re-raises any body exception wrapped in a ConcurrencyExceptionGroup
+                            # (and flattens a nested group's single leaf up to this level). Surface
+                            # a single expected error -- e.g. a settings-narrowing ConfigParseError
+                            # raised while building settings.json -- cleanly rather than as an
+                            # "Unexpected error" with a full traceback.
+                            if group.only_exception_is_instance_of(MngrError):
+                                raise group.get_only_exception() from group
+                            raise
+                    with log_span("Calling on_after_provisioning hooks"):
+                        mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
+
+                with progress.step(
+                    CreatePhase.STARTING_AGENT.step_id, _CREATE_PHASE_LABELS[CreatePhase.STARTING_AGENT]
+                ):
+                    # Deliver the initial message (if any) and start the agent.
+                    #
+                    # Interactive agents do the ready-signal dance and send the message
+                    # via the tmux pane after the agent is up. Headless agents cannot
+                    # receive messages that way: they communicate via stdout/stdin
+                    # pipes, so wait_for_ready_signal / send_message both raise. For
+                    # those we stage the message on disk first (the agent's command
+                    # cats the file at startup) and then just start the process.
+                    initial_message = agent.get_initial_message()
+                    if isinstance(agent, StreamingHeadlessAgentMixin):
+                        if initial_message is not None:
+                            agent.stage_initial_message(initial_message)
+                        logger.info("Starting agent {} ...", agent.name)
+                        host.start_agents([agent.id])
+                    else:
+                        # Start the agent and wait for its readiness signal BEFORE returning,
+                        # whether or not there is an initial message to send. Waiting even in
+                        # the no-message case means callers -- including the chat UI, which
+                        # always creates with no initial message -- only ever see the agent
+                        # once it can actually accept input. Otherwise a no-message create
+                        # returns the instant the process spawns, which for a slow-booting
+                        # harness (pi writes its session + model-state files several seconds
+                        # after launch) surfaces a live-looking agent that cannot yet take a
+                        # message. wait_for_ready_signal is the same per-harness check the
+                        # message path uses (claude/codex poll for the composer prompt in the
+                        # pane; pi waits for its session-started sentinel file); its base
+                        # implementation just runs start_action, so a plain command agent that
+                        # does not override it starts exactly as before, with no wait.
+                        # Raises AgentStartError if the agent doesn't signal readiness in time.
+                        logger.info("Starting agent {} ...", agent.name)
+                        timeout = (
+                            agent_options.ready_timeout_seconds
+                            if agent_options.ready_timeout_seconds is not None
+                            else mngr_ctx.config.agent_ready_timeout
                         )
-                        host.destroy_agent(agent)
-                        raise
-                    if initial_message is not None:
-                        logger.info("Sending initial message...")
-                        send_message_with_resend_guidance(agent, initial_message, "created and started")
+                        try:
+                            agent.wait_for_ready_signal(
+                                is_readiness_awaited=True,
+                                start_action=lambda: host.start_agents([agent.id]),
+                                timeout=timeout,
+                            )
+                        except AgentStartError:
+                            # The agent process is already running and may well finish booting
+                            # after the budget -- without a teardown it would linger as a
+                            # registered, running agent while this create reports failure
+                            # (and a chat UI showing the failure would later flip to a live
+                            # chat when the zombie surfaces). A failed create must leave
+                            # nothing behind. destroy_agent is best-effort aggregate; if it
+                            # cannot clean up, its CleanupFailedGroup propagates chained to
+                            # this readiness error.
+                            logger.warning(
+                                "Agent {} did not signal readiness within {}s; tearing it down", agent.name, timeout
+                            )
+                            host.destroy_agent(agent)
+                            raise
+                        if initial_message is not None:
+                            logger.info("Sending initial message...")
+                            send_message_with_resend_guidance(agent, initial_message, "created and started")
 
                 # Build and return the result
                 result = CreateAgentResult(agent=agent, host=host)
@@ -469,30 +495,62 @@ def create(
         return result
 
 
+# The captions the skeleton phases carry on the wire; a consumer may restate
+# them, but a phase it has never seen still arrives with something to show.
+_CREATE_PHASE_LABELS: Final[dict[CreatePhase, str]] = {
+    CreatePhase.PREPARING: "Preparing",
+    CreatePhase.CREATING_HOST: "Creating the host",
+    CreatePhase.SETTING_UP_HOST: "Setting up the host",
+    CreatePhase.TRANSFERRING_PROJECT: "Transferring the project",
+    CreatePhase.PROVISIONING: "Provisioning the agent",
+    CreatePhase.STARTING_AGENT: "Starting the agent",
+}
+
+
+def plan_create_steps(*, is_new_host: bool, create_work_dir: bool) -> tuple[ProgressStep, ...]:
+    """The skeleton phases this create will run, in order, for its plan announcement."""
+    phases = [CreatePhase.PREPARING]
+    if is_new_host:
+        phases.extend((CreatePhase.CREATING_HOST, CreatePhase.SETTING_UP_HOST))
+    if create_work_dir:
+        phases.append(CreatePhase.TRANSFERRING_PROJECT)
+    phases.extend((CreatePhase.PROVISIONING, CreatePhase.STARTING_AGENT))
+    return tuple(ProgressStep(step_id=phase.step_id, label=_CREATE_PHASE_LABELS[phase]) for phase in phases)
+
+
 def _run_commands_on_host(
     executor: OuterHostInterface,
     commands: tuple[CommandString, ...],
     *,
     label: str,
+    progress: ProgressReporterInterface,
+    step_prefix: str,
 ) -> None:
     """Run a sequence of commands in order on ``executor``, aborting on the first failure.
 
     Each command runs via ``executor.execute_idempotent_command``; a non-zero
     exit raises ``MngrError`` (which aborts the create). Output goes through the
     standard host exec plumbing so the user sees what ran. ``label`` is woven
-    into the log spans and error message to identify the hook that failed.
+    into the log spans and error message to identify the hook that failed, and
+    each command is reported as its own progress step under ``step_prefix``.
     """
+    setting_up_host = CreatePhase.SETTING_UP_HOST.step_id
     with log_span("Running {} commands", label, count=len(commands)):
-        for cmd in commands:
-            with log_span("{}: {}", label, cmd):
-                result = executor.execute_idempotent_command(cmd)
-                if not result.success:
-                    raise MngrError(f"{label} command failed: {cmd}\nstdout: {result.stdout}\nstderr: {result.stderr}")
+        for idx, cmd in enumerate(commands):
+            step_id = command_step_id(ProgressStepId(f"{setting_up_host}.{step_prefix}"), idx)
+            with progress.step(step_id, summarize_command_for_label(cmd), setting_up_host):
+                with log_span("{}: {}", label, cmd):
+                    result = executor.execute_idempotent_command(cmd)
+                    if not result.success:
+                        raise MngrError(
+                            f"{label} command failed: {cmd}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+                        )
 
 
 def _run_post_host_create_commands(
     host: OnlineHostInterface,
     commands: tuple[CommandString, ...],
+    progress: ProgressReporterInterface,
 ) -> None:
     """Run the configured post-host-create commands on a freshly-created host.
 
@@ -502,12 +560,13 @@ def _run_post_host_create_commands(
     """
     if not commands:
         return
-    _run_commands_on_host(host, commands, label="post-host-create")
+    _run_commands_on_host(host, commands, label="post-host-create", progress=progress, step_prefix="inner")
 
 
 def _run_post_host_create_outer_commands(
     host: OnlineHostInterface,
     commands: tuple[CommandString, ...],
+    progress: ProgressReporterInterface,
 ) -> None:
     """Run the configured post-host-create commands on the host's outer machine.
 
@@ -528,7 +587,7 @@ def _run_post_host_create_outer_commands(
                 f"setting, or use a provider with an accessible outer host (e.g. docker over ssh://, "
                 f"a VPS-backed provider, or imbue_cloud)."
             )
-        _run_commands_on_host(outer, commands, label="post-host-create outer")
+        _run_commands_on_host(outer, commands, label="post-host-create outer", progress=progress, step_prefix="outer")
 
 
 def _write_host_env_vars(

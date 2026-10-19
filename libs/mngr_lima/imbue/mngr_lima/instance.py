@@ -48,11 +48,13 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
@@ -94,7 +96,9 @@ from imbue.mngr_lima.lima_yaml import load_user_lima_yaml
 from imbue.mngr_lima.lima_yaml import merge_lima_yaml
 from imbue.mngr_lima.lima_yaml import parse_build_args_for_yaml_path
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
+from imbue.mngr_lima.limactl import LIMA_START_VM_STEP
 from imbue.mngr_lima.limactl import LimaSshConfig
+from imbue.mngr_lima.limactl import LimaStartProgressCallback
 from imbue.mngr_lima.limactl import is_transient_lima_download_error
 from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
 from imbue.mngr_lima.limactl import limactl_delete
@@ -581,14 +585,20 @@ sudo poweroff
             before_sleep=_DeleteInstanceBeforeRetry(cg=self.mngr_ctx.concurrency_group, instance_name=instance_name),
             reraise=True,
         )
-        retryer(
-            limactl_start_new,
-            self.mngr_ctx.concurrency_group,
-            instance_name,
-            yaml_path,
-            start_args=start_args,
-            timeout=self.config.vm_start_timeout_seconds,
-        )
+        with self.mngr_ctx.progress_reporter.step(
+            LIMA_START_VM_STEP, "Starting the virtual machine", CreatePhase.CREATING_HOST.step_id
+        ):
+            retryer(
+                limactl_start_new,
+                self.mngr_ctx.concurrency_group,
+                instance_name,
+                yaml_path,
+                start_args=start_args,
+                timeout=self.config.vm_start_timeout_seconds,
+                on_output=LimaStartProgressCallback(
+                    cg=self.mngr_ctx.concurrency_group, reporter=self.mngr_ctx.progress_reporter
+                ),
+            )
 
     def _save_failed_host_record(
         self,
@@ -647,7 +657,14 @@ sudo poweroff
         could not run the command at all (e.g. it cannot reach the instance),
         which aborts creation via the caller's error handling.
         """
-        with log_span("Waiting for cloud-init to complete in {}", instance_name):
+        with (
+            self.mngr_ctx.progress_reporter.step(
+                ProgressStepId("lima.wait_cloud_init"),
+                "Waiting for the machine to finish booting",
+                CreatePhase.CREATING_HOST.step_id,
+            ),
+            log_span("Waiting for cloud-init to complete in {}", instance_name),
+        ):
             limactl_shell(
                 self.mngr_ctx.concurrency_group,
                 instance_name,
@@ -890,7 +907,12 @@ sudo poweroff
             ssh_config = self._get_ssh_config(instance_name)
 
             # Wait for SSH to be ready
-            with log_span("Waiting for SSH to be ready..."):
+            with (
+                self.mngr_ctx.progress_reporter.step(
+                    ProgressStepId("lima.wait_ssh"), "Waiting for the machine's SSH", CreatePhase.CREATING_HOST.step_id
+                ),
+                log_span("Waiting for SSH to be ready..."),
+            ):
                 wait_for_sshd(ssh_config.hostname, ssh_config.port, self.config.ssh_connect_timeout)
 
             # Create the Host object

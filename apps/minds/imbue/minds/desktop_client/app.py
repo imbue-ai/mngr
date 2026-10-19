@@ -51,6 +51,7 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
+from imbue.minds.desktop_client.connection_operations import ConnectionOperationRegistry
 from imbue.minds.desktop_client.connections.account_lifecycle import CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE
 from imbue.minds.desktop_client.connections.account_lifecycle import account_panel_state
 from imbue.minds.desktop_client.connections.account_lifecycle import has_live_create_on_account
@@ -70,6 +71,7 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptRow
 from imbue.minds.desktop_client.create_attempt_rows import derive_create_attempt_rows
+from imbue.minds.desktop_client.create_progress_history import make_progress_history_store
 from imbue.minds.desktop_client.data_types import BackupAccessState
 from imbue.minds.desktop_client.data_types import CloudRowKeyState
 from imbue.minds.desktop_client.data_types import RemoteWorkspaceKind
@@ -2759,6 +2761,9 @@ def create_desktop_client(
         imbue_cloud_cli=imbue_cloud_cli,
         notification_dispatcher=notification_dispatcher,
         api_v1_paths=paths,
+        connection_operations=ConnectionOperationRegistry(
+            progress_history=None if paths is None else make_progress_history_store(paths.data_dir)
+        ),
         minds_config=minds_config,
         client_env_config=client_env_config,
         envelope_stream_consumer=envelope_stream_consumer,

@@ -65,7 +65,6 @@ describe("CreatingPage across a route change", () => {
         workspace_name: `workspace-${createAttemptId}`,
         provider_label: "",
         is_remote: false,
-        expected_duration_seconds: 60,
         request: {
           display_name: `workspace-${createAttemptId}`,
           launch_mode: "LIMA",

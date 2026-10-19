@@ -10,12 +10,14 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import Iterator
 from typing import Mapping
 from typing import ParamSpec
 from typing import Sequence
@@ -85,6 +87,7 @@ from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import DiscoveredHostSize
@@ -93,6 +96,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
@@ -115,9 +119,13 @@ from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_com
 from imbue.mngr.providers.ssh_host_setup import build_start_volume_sync_command
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
+from imbue.mngr.utils.docker_build_progress import count_dockerfile_instructions
 from imbue.mngr.utils.ssh import build_ssh_connect_command
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
+from imbue.mngr_modal.build_progress import MODAL_BUILD_STEP
+from imbue.mngr_modal.build_progress import ModalBuildOutputWatcher
+from imbue.mngr_modal.build_progress import ModalBuildProgressParser
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.constants import MODAL_HOST_ACCESS_MANIFEST
 from imbue.mngr_modal.constants import MODAL_HOST_KEY_NAME
@@ -507,6 +515,10 @@ def check_host_name_is_unique(
             continue
 
         raise HostNameConflictError(provider_name, name)
+
+
+# Bound on waiting for the build watcher's final drain after a build ends.
+_BUILD_WATCHER_JOIN_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
 class ModalProviderInstance(BaseProviderInstance):
@@ -1391,7 +1403,14 @@ class ModalProviderInstance(BaseProviderInstance):
                 add_host_to_known_hosts(self._known_hosts_path, ssh_host, ssh_port, host_public_key, host_id=host_id)
 
             # Wait for sshd to be ready
-            with info_span("Waiting for sshd to be ready..."):
+            with (
+                self.mngr_ctx.progress_reporter.step(
+                    ProgressStepId("modal.wait_ssh"),
+                    "Waiting for the sandbox's SSH",
+                    CreatePhase.CREATING_HOST.step_id,
+                ),
+                info_span("Waiting for sshd to be ready..."),
+            ):
                 self._wait_for_sshd(ssh_host, ssh_port, host_id, self.config.ssh_connect_timeout)
 
             with log_span("Executing post-ssh operations"):
@@ -1682,6 +1701,27 @@ log "=== Shutdown script completed ==="
         Raises ModalProxyAuthError if Modal credentials are not configured.
         """
         return self.modal_app.app
+
+    @contextmanager
+    def _watch_build_output(self, dockerfile: Path | None, captured_length_before_build: int) -> Iterator[None]:
+        """Feed the build's captured output to the step-count parser on a side thread while the build runs."""
+        total_steps = count_dockerfile_instructions(dockerfile.read_text()) if dockerfile is not None else None
+        watcher = ModalBuildOutputWatcher(
+            read_captured_output=self.get_captured_output,
+            parser=ModalBuildProgressParser(reporter=self.mngr_ctx.progress_reporter, total_steps=total_steps),
+            start_offset=captured_length_before_build,
+        )
+        thread = start_mngr_thread(
+            concurrency_group=self.mngr_ctx.concurrency_group,
+            target=watcher.run_until_stopped,
+            name="modal-build-progress",
+            is_checked=False,
+        )
+        try:
+            yield
+        finally:
+            watcher.stop()
+            thread.join(_BUILD_WATCHER_JOIN_TIMEOUT_SECONDS)
 
     def get_captured_output(self) -> str:
         """Get all captured Modal output for this provider instance.
@@ -2044,7 +2084,13 @@ log "=== Shutdown script completed ==="
                 build_attempt = _ImageBuildAttempt(
                     image=modal_image, captured_length_before_build=len(self.get_captured_output())
                 )
-                with log_span("Building Modal image"):
+                with (
+                    self.mngr_ctx.progress_reporter.step(
+                        MODAL_BUILD_STEP, "Building the image", CreatePhase.CREATING_HOST.step_id
+                    ),
+                    log_span("Building Modal image"),
+                    self._watch_build_output(dockerfile_path, build_attempt.captured_length_before_build),
+                ):
                     modal_image.build(app)
 
             # Build volume mounts from build args

@@ -33,12 +33,16 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
+from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.progress import NullProgressReporter
+from imbue.mngr.utils.progress import ProgressReporterInterface
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_KEY
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_VALUE
 from imbue.mngr_azure.config import DEFAULT_IMAGE_OFFER
@@ -254,6 +258,10 @@ def _shape_from_sku_capabilities(
     )
 
 
+# The ``mngr azure prepare`` step whose progress the resource-provider registration counts toward.
+AZURE_NETWORK_STEP: Final[ProgressStepId] = ProgressStepId("azure.network")
+
+
 class AzureVpsClient(VpsClientInterface):
     """Azure VM client implementing the VPS provider interface via the azure-mgmt SDK.
 
@@ -278,6 +286,11 @@ class AzureVpsClient(VpsClientInterface):
     # Typed ``Any`` because azure.core.credentials.TokenCredential is a Protocol,
     # which pydantic's arbitrary_types_allowed validation cannot accept.
     credential: Any = Field(frozen=True, description="DefaultAzureCredential (or compatible) for the mgmt clients")
+    progress_reporter: ProgressReporterInterface = Field(
+        default_factory=NullProgressReporter,
+        frozen=True,
+        description="Where the operator prepare path reports its resource-provider registrations",
+    )
     subscription_id: str = Field(frozen=True, description="Azure subscription this client targets")
     region: str = Field(frozen=True, description="Azure region / location this client targets")
     resource_group: str = Field(default="mngr", description="Resource group holding all mngr infrastructure and VMs")
@@ -391,16 +404,19 @@ class AzureVpsClient(VpsClientInterface):
         asynchronous, so each is kicked off and then polled until its
         ``registration_state`` is ``Registered`` (already-registered providers
         return immediately). Bounded by ``_PROVIDER_REGISTRATION_TIMEOUT_SECONDS``.
+        Each provider that is ready counts as one unit of the network step's
+        progress, since on a fresh subscription this wait is most of ``prepare``.
         """
-        for namespace in _REQUIRED_RESOURCE_PROVIDERS:
+        total = len(_REQUIRED_RESOURCE_PROVIDERS)
+        for idx, namespace in enumerate(_REQUIRED_RESOURCE_PROVIDERS):
             with self._translate_azure_errors():
                 provider = self._resource().providers.get(namespace)
-            if provider.registration_state == "Registered":
-                continue
-            logger.info("Registering Azure resource provider {} ...", namespace)
-            with self._translate_azure_errors():
-                self._resource().providers.register(namespace)
-            self._wait_for_provider_registered(namespace)
+            if provider.registration_state != "Registered":
+                logger.info("Registering Azure resource provider {} ...", namespace)
+                with self._translate_azure_errors():
+                    self._resource().providers.register(namespace)
+                self._wait_for_provider_registered(namespace)
+            self.progress_reporter.advance_step(AZURE_NETWORK_STEP, idx + 1, total)
 
     def _is_provider_registered(self, namespace: str) -> bool:
         with self._translate_azure_errors():
@@ -1248,3 +1264,8 @@ class AzureVpsClient(VpsClientInterface):
         """Drop the in-memory key entry. Tolerant of an absent key (fresh-process delete)."""
         self._ssh_public_keys_by_id.pop(key_id, None)
         logger.debug("Dropped in-memory SSH public key {}", key_id)
+
+
+def with_progress_reporter(client: AzureVpsClient, reporter: ProgressReporterInterface) -> AzureVpsClient:
+    """A copy of ``client`` that reports its prepare steps through ``reporter``."""
+    return client.model_copy_update(to_update(client.field_ref().progress_reporter, reporter))

@@ -1,0 +1,1 @@
+`mngr gcp prepare --format jsonl` now announces its two steps (`gcp.firewall`, `gcp.state_bucket`) as a plan and reports each one starting and completing, so a caller driving it from a UI can show real progress while the firewall rule and state bucket are set up.

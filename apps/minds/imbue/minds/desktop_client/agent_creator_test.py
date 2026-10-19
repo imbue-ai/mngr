@@ -15,6 +15,8 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from http.server import BaseHTTPRequestHandler
@@ -37,6 +39,7 @@ from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import ORPHANED_SCRATCH_CLONE_AGE_SECONDS
 from imbue.minds.desktop_client.agent_creator import SCRATCH_CLONE_DIR_PREFIX
+from imbue.minds.desktop_client.agent_creator import _BootstrapProgressTail
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
@@ -63,6 +66,7 @@ from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clon
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
+from imbue.minds.desktop_client.create_progress import OperationProgressTracker
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
@@ -97,7 +101,13 @@ from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
+from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.progress import ProgressEvent
+from imbue.mngr.utils.progress import ProgressEventKind
+from imbue.mngr.utils.progress import ProgressStep
+from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 
@@ -186,6 +196,26 @@ def test_create_event_capture_records_error_class_from_jsonl_error_event() -> No
     )
     assert capture.error_class == "FastPathUnavailableError"
     assert capture.canonical_agent_id is None
+
+
+def test_create_event_capture_consumes_progress_lines_and_forwards_everything_else() -> None:
+    """Progress reports feed the bar and stay out of the human log; ordinary lines and other events still reach it."""
+    forwarded: list[tuple[str, bool]] = []
+    progress: list[ProgressEvent] = []
+    capture = _CreateEventCapture(
+        inner_on_output=lambda line, is_stdout: forwarded.append((line, is_stdout)), on_progress=progress.append
+    )
+
+    capture('{"event": "progress", "kind": "started", "step": "creating_host", "label": "Creating the host"}', True)
+    capture("Building the image...", False)
+    capture('{"event": "created", "agent_id": "agent-b40593cc326a41cd832e3dc5c3d951de", "host_id": "host-xyz"}', True)
+
+    assert [(event.kind, str(event.step_id)) for event in progress] == [(ProgressEventKind.STARTED, "creating_host")]
+    assert forwarded == [
+        ("Building the image...", False),
+        ('{"event": "created", "agent_id": "agent-b40593cc326a41cd832e3dc5c3d951de", "host_id": "host-xyz"}', True),
+    ]
+    assert capture.canonical_agent_id == AgentId("agent-b40593cc326a41cd832e3dc5c3d951de")
 
 
 def test_create_event_capture_still_records_created_event() -> None:
@@ -1555,6 +1585,40 @@ def test_build_redirect_url_uses_https_scheme(tmp_path) -> None:
     assert url == f"https://localhost:8421/goto/{agent_id}/"
 
 
+def test_wait_for_workspace_ready_follows_the_bootstrap_events_from_the_latest_one_on(tmp_path: Path) -> None:
+    """The wait tails the boot's events with one follow that replays at most one earlier event.
+
+    The template's events file spans every boot of the workspace, so an adopted
+    pool host's opens with the bake's own; a follow that replayed it would read
+    that finished boot as the live one.
+    """
+    calls_path = tmp_path / "mngr-calls.log"
+    calls_path.write_text("")
+    fake_mngr = tmp_path / "fake-mngr"
+    fake_mngr.write_text(
+        f'#!/bin/bash\necho "$@" >> "{calls_path}"\nif [ "$1" = "event" ]; then exec sleep 130006; fi\nexit 0\n'
+    )
+    fake_mngr.chmod(0o755)
+    tracker = OperationProgressTracker(expected_seconds_by_step_id={}, default_expected_seconds=10.0)
+    aid = AgentId.generate()
+    # A few not-ready probes keep the wait open long enough for the follow to have started.
+    with scripted_workspace_probe_server(not_ready_count=10) as port:
+        creator = _make_test_creator(
+            tmp_path,
+            mngr_forward_port=port,
+            preauth_cookie="any-preauth",
+            timeout_seconds=5.0,
+            poll_interval_seconds=0.02,
+            probe_timeout_seconds=0.5,
+            mngr_binary=str(fake_mngr),
+        )
+        creator._wait_for_workspace_ready(
+            aid, CreateAttemptLogSink(), creator.workspace_ready_timeout_seconds, tracker
+        )
+
+    assert calls_path.read_text().splitlines() == [f"event {aid} bootstrap --follow --tail 1"]
+
+
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
     """If the probe times out, we still return so the caller can publish the redirect."""
     with scripted_workspace_probe_server(not_ready_count=10**6) as port:
@@ -2421,3 +2485,74 @@ def test_build_mngr_create_command_keeps_a_repo_path_with_spaces_whole_through_m
     tokens = [token for value in build_arg_values for token in shlex.split(value)]
     assert f"repo_url={repo_path}" in tokens
     assert "repo_branch_or_tag=it's-a-branch" in tokens
+
+
+@contextmanager
+def _bootstrap_tail(command: tuple[str, ...]) -> Iterator[_BootstrapProgressTail]:
+    """An unstarted tail of ``command`` under the ready step, with a fresh tracker, inside its own concurrency group."""
+    tracker = OperationProgressTracker(expected_seconds_by_step_id={}, default_expected_seconds=10.0)
+    with ConcurrencyGroup(name=f"bootstrap-tail-{uuid4().hex}") as cg:
+        yield _BootstrapProgressTail(
+            command=command, concurrency_group=cg, tracker=tracker, parent_step_id="wait_for_ready"
+        )
+
+
+def test_bootstrap_progress_tail_feeds_the_followed_events_into_the_tracker_until_stopped() -> None:
+    """The tail runs one follow command for the whole wait and nests what it prints under the ready step."""
+    line = (
+        '{"timestamp": "2026-10-18T01:30:00.000000000Z", "type": "bootstrap_step_started", "event_id": "boot-1", '
+        '"source": "bootstrap", "step": "sync_venv", "label": "Installing packages"}'
+    )
+    with _bootstrap_tail(("sh", "-c", f"echo '{line}'; sleep 130003")) as tail:
+        tail.tracker.announce_plan([ProgressStep(step_id=ProgressStepId("wait_for_ready"), label="Waiting")], None)
+        tail.tracker.start_step("wait_for_ready", "Waiting", None, None)
+        tail.start()
+        wait_for(
+            lambda: tail.tracker.snapshot().current_label == "Installing packages",
+            timeout=10.0,
+            error_message="the followed event never reached the tracker",
+        )
+        tail.stop()
+        assert tail.process is None
+
+
+def test_bootstrap_progress_tail_stop_outlives_a_follow_that_ignores_sigterm() -> None:
+    """Stopping the tail never raises out of the readiness wait: a follow deaf to SIGTERM is killed after its grace."""
+    with _bootstrap_tail(("sh", "-c", "trap '' TERM; echo started; sleep 130005")) as tail:
+        tail.start()
+        process = tail.process
+        assert process is not None
+        # The shell prints "started" only after installing the trap; a stop sent
+        # earlier would hit a shell that still dies on SIGTERM and skip the kill path.
+        wait_for(lambda: "started" in process.read_stdout(), timeout=10.0, error_message="the follow never started")
+
+        tail.stop()
+
+        assert tail.process is None
+        wait_for(process.is_finished, timeout=10.0, error_message="the follow outlived its stop")
+
+
+def test_bootstrap_progress_tail_reports_a_follow_that_exited_on_its_own() -> None:
+    """A follow that dies before the wait ends (mngr refused it) is said in the log, with its stderr, not lost."""
+    with (
+        capture_log_warnings() as warnings,
+        _bootstrap_tail(("sh", "-c", "echo 'no such agent 48217' >&2; exit 3")) as tail,
+    ):
+        tail.start()
+        process = tail.process
+        assert process is not None
+        wait_for(process.is_finished, timeout=10.0, error_message="the follow never exited")
+
+        tail.stop()
+
+    assert tail.process is None
+    assert len(warnings) == 1
+    assert "exited early with code 3" in warnings[0]
+    assert "no such agent 48217" in warnings[0]
+
+
+def test_bootstrap_progress_tail_tolerates_a_command_that_cannot_start() -> None:
+    with _bootstrap_tail((f"/nonexistent/mngr-{uuid4().hex}", "event")) as tail:
+        tail.start()
+        tail.stop()
+    assert tail.tracker.snapshot().current_label == ""

@@ -155,6 +155,7 @@ from imbue.minds.desktop_client.connection_operations import ConnectionOperation
 from imbue.minds.desktop_client.connection_operations import ConnectionOperationKind
 from imbue.minds.desktop_client.connection_operations import ConnectionOperationRegistry
 from imbue.minds.desktop_client.connection_operations import ConnectionOperationStatus
+from imbue.minds.desktop_client.connection_operations import MODAL_CHECK_STEP
 from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
 from imbue.minds.desktop_client.connections.data_types import AwsPlacement
 from imbue.minds.desktop_client.connections.data_types import AzurePlacement
@@ -183,6 +184,8 @@ from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
 from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
+from imbue.minds.desktop_client.create_progress import OperationProgressTracker
+from imbue.minds.desktop_client.create_progress import TrackerEventSink
 from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.host_names import normalize_host_name_slug
@@ -285,6 +288,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import InvalidName
+from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 # Cap for a short blocking ``mngr`` command run via ``_run_mngr_blocking``
@@ -1920,6 +1924,7 @@ def _handle_create_operation_status(operation_id: str) -> CreateOperationStatusR
         # private/nonexistent GitHub repo); the creating page reveals static
         # guidance for kinds it knows about.
         error_kind=str(info.error_kind) if info.error_kind is not None else None,
+        progress=info.progress,
     )
 
 
@@ -3926,6 +3931,7 @@ def _validate_connection_credentials(
     instance_name: str,
     parent_cg: ConcurrencyGroup | None,
     on_output: OutputCallback,
+    tracker: OperationProgressTracker,
 ) -> None:
     """The first privileged call against the pasted credentials; raises ``MngrCommandError`` when they are unusable.
 
@@ -3933,25 +3939,42 @@ def _validate_connection_credentials(
     the freshly-written instance; Modal has no prepare, so one listing on the
     instance stands in (a bad token fails it as not authorized). Every line the
     command prints goes to ``on_output``, which is how the dialog shows what the
-    cloud is doing while the user waits.
+    cloud is doing while the user waits, and the prepare's own progress stream
+    drives ``tracker``, which is how the dialog's bar moves.
     """
+    on_progress = TrackerEventSink(tracker=tracker)
     match parsed.backend:
         case ConnectionBackend.AWS:
-            run_mngr_aws_prepare(parsed.region, provider_name=instance_name, on_output=on_output, parent_cg=parent_cg)
+            run_mngr_aws_prepare(
+                parsed.region,
+                provider_name=instance_name,
+                on_output=on_output,
+                parent_cg=parent_cg,
+                on_progress=on_progress,
+            )
         case ConnectionBackend.GCP | ConnectionBackend.AZURE:
             # gcp/azure prepare read placement + credentials from the connection
             # block itself, so only --provider is passed.
             run_mngr_provider_prepare(
-                mngr_backend_name(parsed.backend), instance_name, on_output=on_output, parent_cg=parent_cg
+                mngr_backend_name(parsed.backend),
+                instance_name,
+                on_output=on_output,
+                parent_cg=parent_cg,
+                on_progress=on_progress,
             )
         case ConnectionBackend.MODAL:
+            # Modal's check is one listing, so it is the one step of its bar.
+            modal_check = ProgressStep(step_id=MODAL_CHECK_STEP, label="Checking the token with Modal")
+            tracker.announce_plan([modal_check], None)
+            tracker.start_step(str(modal_check.step_id), modal_check.label, None, None)
             run_mngr_modal_connection_check(instance_name, on_output=on_output, parent_cg=parent_cg)
+            tracker.complete_step(str(modal_check.step_id))
         case _ as unreachable:
             assert_never(unreachable)
 
 
 class _StderrOnlyOutput(MutableModel):
-    """An output callback that forwards stderr lines only: a Modal listing's stdout is JSON, not progress."""
+    """An output callback that forwards stderr lines only: the subprocess's stdout is machine output, not narrative."""
 
     sink: CreateAttemptLogSink = Field(frozen=True, description="The operation log the stderr lines land in")
 
@@ -3960,11 +3983,16 @@ class _StderrOnlyOutput(MutableModel):
             make_log_callback(self.sink)(line, is_stdout)
 
 
-def _connection_log_callback(backend: ConnectionBackend, sink: CreateAttemptLogSink) -> OutputCallback:
-    """The prepare's output, line by line, into the operation's log; Modal's stdout (a JSON listing) is noise."""
-    if backend is ConnectionBackend.MODAL:
-        return _StderrOnlyOutput(sink=sink)
-    return make_log_callback(sink)
+def _connection_log_callback(sink: CreateAttemptLogSink) -> OutputCallback:
+    """The credential check's stderr, line by line, into the operation's log.
+
+    Its stdout is machine protocol, not log: a prepare runs with ``--format
+    jsonl``, so stdout carries its progress events (consumed upstream, where they
+    drive the bar) and its terminal ``prepared`` or ``error`` record, and Modal's
+    check prints a JSON listing. What mngr says about the work as it goes is
+    logged to stderr, and that is what the dialog shows.
+    """
+    return _StderrOnlyOutput(sink=sink)
 
 
 class _ConnectionWorkerFailureHandler(MutableModel):
@@ -4057,7 +4085,11 @@ def _run_connection_registration(
     try:
         try:
             _validate_connection_credentials(
-                parsed, instance_name, parent_cg, _connection_log_callback(parsed.backend, sink)
+                parsed,
+                instance_name,
+                parent_cg,
+                _connection_log_callback(sink),
+                registry.progress_tracker(instance_name),
             )
         except MngrCommandError as exc:
             logger.warning("Rejected a connection's credentials: {}", exc)
@@ -4178,7 +4210,7 @@ def _handle_create_cloud_account() -> tuple[OperationHandleResponse, int] | Resp
         return _json_error("Cloud connections are not configured in this app instance.", 503)
     registry = state.connection_operations
     try:
-        sink = registry.begin(instance_name, ConnectionOperationKind.ADD)
+        sink = registry.begin(instance_name, ConnectionOperationKind.ADD, mngr_backend_name(parsed.backend))
     except ConnectionOperationInProgressError as exc:
         # A fresh id never collides; this guards the registry's own invariant.
         _discard_connection(
@@ -4276,7 +4308,11 @@ def _run_connection_update(
     try:
         try:
             _validate_connection_credentials(
-                parsed, instance_name, parent_cg, _connection_log_callback(parsed.backend, sink)
+                parsed,
+                instance_name,
+                parent_cg,
+                _connection_log_callback(sink),
+                registry.progress_tracker(instance_name),
             )
         except MngrCommandError as exc:
             logger.warning("Rejected a connection's credentials: {}", exc)
@@ -4415,7 +4451,7 @@ def _handle_update_cloud_account(account_name: str) -> tuple[OperationHandleResp
         )
         return _json_error("Cloud connections are not configured in this app instance.", 503)
     try:
-        sink = registry.begin(account_name, ConnectionOperationKind.UPDATE)
+        sink = registry.begin(account_name, ConnectionOperationKind.UPDATE, mngr_backend_name(parsed.backend))
     except ConnectionOperationInProgressError:
         # An operation that began between the check above and the store write.
         _settle_connection_update(
@@ -4471,6 +4507,7 @@ def _handle_cloud_account_operation_status(operation_id: str) -> CloudAccountOpe
         error=failure.error if failure is not None else None,
         code=failure.code if failure is not None else None,
         status_code=failure.status_code if failure is not None else None,
+        progress=get_state().connection_operations.progress_snapshot(operation_id),
     )
 
 

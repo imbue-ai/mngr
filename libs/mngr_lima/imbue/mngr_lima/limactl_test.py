@@ -1,13 +1,19 @@
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.utils.progress import ProgressEvent
+from imbue.mngr.utils.progress import ProgressEventSinkReporter
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaInstanceNameTooLongError
+from imbue.mngr_lima.limactl import LIMA_START_VM_STEP
 from imbue.mngr_lima.limactl import LimaSshConfig
+from imbue.mngr_lima.limactl import LimaStartProgressCallback
 from imbue.mngr_lima.limactl import _LIMA_SOCKET_PATH_OVERHEAD
 from imbue.mngr_lima.limactl import _UNIX_PATH_MAX
 from imbue.mngr_lima.limactl import _strip_ssh_config_quotes
@@ -243,3 +249,27 @@ def test_limactl_disk_list_parses_one_disk_per_line(
     disks = limactl_disk_list(temp_mngr_ctx.concurrency_group)
 
     assert [(disk["name"], disk["size"]) for disk in disks] == [("a-data", 1073741824), ("b-data", 2147483648)]
+
+
+def test_lima_start_progress_callback_reports_the_requirement_counter_once_per_change() -> None:
+    events: list[ProgressEvent] = []
+    with ConcurrencyGroup(name=f"lima-progress-{uuid4().hex}") as cg:
+        callback = LimaStartProgressCallback(cg=cg, reporter=ProgressEventSinkReporter(emit=events.append))
+
+        callback('level=info msg="Waiting for the essential requirement 1 of 5: \\"ssh\\""', False)
+        callback('level=info msg="Waiting for the essential requirement 1 of 5: \\"ssh\\""', False)
+        callback('level=info msg="Waiting for the essential requirement 3 of 5: \\"user session\\""', False)
+        callback('level=info msg="Waiting for the optional requirement 1 of 2: \\"systemd\\""', False)
+        callback('level=info msg="Waiting for the optional requirement 2 of 2: \\"containerd\\""', False)
+        callback('level=info msg="Waiting for the final requirement 1 of 1: \\"boot scripts\\""', False)
+        callback('level=info msg="READY. Run `limactl shell x` to open the shell."', False)
+
+    # Each kind numbers its requirements from 1; the reported counter sums them
+    # so it keeps climbing across kinds instead of restarting.
+    assert [(event.step_id, event.completed, event.total) for event in events] == [
+        (LIMA_START_VM_STEP, 0, 5),
+        (LIMA_START_VM_STEP, 2, 5),
+        (LIMA_START_VM_STEP, 5, 7),
+        (LIMA_START_VM_STEP, 6, 7),
+        (LIMA_START_VM_STEP, 7, 8),
+    ]

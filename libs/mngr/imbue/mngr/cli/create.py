@@ -2061,7 +2061,25 @@ of being connected to.
 When the source and the agent are on the same host (local or a single remote
 provider host), mngr creates a git worktree that shares objects with the source
 repository. When they are on different hosts, the repo is transferred by
-pushing all local branches and tags via git. Use --transfer to override the default.""",
+pushing all local branches and tags via git. Use --transfer to override the default.
+
+With --format jsonl, the create streams its progress on stdout ahead of the final
+`created` event, one `{"event": "progress", ...}` line per report: a `plan` naming
+the phases the create will run (`preparing`, `creating_host`, `setting_up_host`,
+`transferring_project`, `provisioning`, `starting_agent`; phases that do not apply
+are left out), then `started`, `advanced` (with `completed` and `total` for a step
+that counts its inner units, such as Dockerfile stages), `completed` (with
+`elapsed_seconds`) and `skipped` (a step whose work was already done, such as a
+cached Dockerfile stage: behind the create like a completed step, but not a
+measurement of it) per step. Providers report finer steps under the phase that
+contains them, with ids namespaced by backend (`docker.build`, `vps.wait_active`,
+`lima.start_vm`, `modal.build`, `imbue_cloud.lease`), and an image build reports
+each Dockerfile stage as a step under it, named by its instruction
+(`docker.build.run_bash_system_3f9a1c`: the same instruction keeps its id when
+stages are added around it) plus `docker.build.export` for the image export; every
+`started` carries a human `label`, so a caller can caption a step it has never
+seen. Step ids are stable across releases; a failed step is never reported
+completed, the `error` event follows instead.""",
     examples=(
         ("Create an agent locally in a new git worktree (default)", "mngr create my-agent"),
         ("Create an agent in a new Docker container", "mngr create my-agent@.docker"),

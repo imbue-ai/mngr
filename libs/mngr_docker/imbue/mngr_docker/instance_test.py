@@ -1,5 +1,6 @@
 import hashlib
 import json
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from ipaddress import IPv4Address
@@ -1296,6 +1297,7 @@ class _BuildTimingOutDockerProvider(DockerProviderInstance):
         args: list[str],
         timeout: float = 300,
         executable: DockerBuilder = DockerBuilder.DOCKER,
+        on_build_line: Callable[[str], None] | None = None,
     ) -> FinishedProcess:
         raise ProcessTimeoutError(
             command=tuple([executable.value.lower()] + args),

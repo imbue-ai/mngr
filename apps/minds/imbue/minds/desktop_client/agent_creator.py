@@ -23,6 +23,8 @@ from datetime import datetime
 from datetime import timezone
 from enum import auto
 from pathlib import Path
+from subprocess import TimeoutExpired
+from typing import Any
 from typing import Final
 from typing import assert_never
 from urllib.parse import urlsplit
@@ -42,6 +44,8 @@ from tenacity import stop_after_delay
 from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
@@ -53,6 +57,13 @@ from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NA
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
 from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
+from imbue.minds.desktop_client.create_progress import OperationProgressSnapshot
+from imbue.minds.desktop_client.create_progress import OperationProgressTracker
+from imbue.minds.desktop_client.create_progress import TrackerEventSink
+from imbue.minds.desktop_client.create_progress import apply_bootstrap_event_lines
+from imbue.minds.desktop_client.create_progress_history import ProgressHistoryStore
+from imbue.minds.desktop_client.create_progress_history import create_scope
+from imbue.minds.desktop_client.create_progress_history import make_progress_history_store
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.data_types import WorkspaceProbeOutcome
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -105,7 +116,11 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
+from imbue.mngr.utils.progress import ProgressEvent
+from imbue.mngr.utils.progress import ProgressStep
+from imbue.mngr.utils.progress import parse_progress_event
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
@@ -433,6 +448,9 @@ class AgentCreateAttemptInfo(FrozenModel):
             "Machine-readable classification of the failure, set alongside ``error`` when the "
             "failure is recognized (see ``classify_create_attempt_error``); ``None`` otherwise"
         ),
+    )
+    progress: OperationProgressSnapshot | None = Field(
+        default=None, description="The attempt's progress as of this snapshot, once the attempt is tracked"
     )
 
 
@@ -918,6 +936,97 @@ _PREBAKED_IMAGE_PROGRESS_LOG_STEP_BYTES: Final[int] = 500 * 1000 * 1000
 # the startup reconcile's).
 _DEAD_CREATE_ATTEMPT_HOST_LIST_TIMEOUT_SECONDS: Final[float] = 120.0
 _DEAD_CREATE_ATTEMPT_HOST_DESTROY_TIMEOUT_SECONDS: Final[float] = 300.0
+
+
+# The desktop's own steps around the ``mngr create`` call, as the progress bar plans them.
+_CLONE_STEP: Final[ProgressStepId] = ProgressStepId("clone_repo")
+_CHECKOUT_STEP: Final[ProgressStepId] = ProgressStepId("checkout_branch")
+_MNGR_CREATE_STEP: Final[ProgressStepId] = ProgressStepId("mngr_create")
+_READY_STEP: Final[ProgressStepId] = ProgressStepId("wait_for_ready")
+_DESKTOP_STEP_LABELS: Final[dict[ProgressStepId, str]] = {
+    _CLONE_STEP: "Fetching the workspace template",
+    _CHECKOUT_STEP: "Checking out the branch",
+    _MNGR_CREATE_STEP: "Creating the workspace",
+    _READY_STEP: "Waiting for the workspace to boot",
+}
+# How long the bootstrap tail gets to exit on SIGTERM before it is killed, and the
+# bound on stopping it once the readiness wait ends; the stop must outlast the
+# grace, or terminating the tail raises while the kill is still pending.
+_BOOTSTRAP_TAIL_SIGTERM_GRACE_SECONDS: Final[float] = 1.0
+_BOOTSTRAP_TAIL_STOP_SECONDS: Final[float] = 5.0
+
+
+@pure
+def _bootstrap_follow_command(mngr_binary: str, agent_id: AgentId) -> tuple[str, ...]:
+    """The ``mngr event`` command that follows the booting workspace's bootstrap events, from the latest one on.
+
+    The template's bootstrap appends to its events file on every boot and nothing
+    clears it between boots, so an adopted pool host's file opens with the bake's
+    own boot, every step of it already completed. A plain follow would replay that
+    and the bar would read the whole boot as done before it began; ``--tail 1``
+    replays at most one earlier event (the earlier boot's ``bootstrap_completed``,
+    which the reader ignores) and follows from there. When the live boot is
+    already under way, its earlier steps are not shown or learned.
+    """
+    return (mngr_binary, "event", str(agent_id), "bootstrap", "--follow", "--tail", "1")
+
+
+class _BootstrapProgressTail(MutableModel):
+    """Follows a booting workspace's bootstrap events into the ready step's progress for as long as the wait runs.
+
+    One ``mngr event`` follow subprocess (see :func:`_bootstrap_follow_command`)
+    for the whole wait, the way the desktop's other agent-side streams are
+    consumed, so a remote workspace is read over one connection rather than one
+    per poll. The template's bootstrap writes one event per step it runs; a
+    template that writes none leaves the ready step a single timed step. Nothing
+    here can fail the create: a tail that cannot start, or that ends before the
+    wait does, is logged, and the wait goes on without it.
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    command: tuple[str, ...] = Field(frozen=True, description="The follow command, the mngr binary first")
+    concurrency_group: ConcurrencyGroup = Field(frozen=True, description="The group the subprocess runs under")
+    tracker: OperationProgressTracker = Field(frozen=True, description="Where the bootstrap steps land")
+    parent_step_id: str = Field(frozen=True, description="The step the bootstrap steps nest under")
+    process: RunningProcess | None = Field(default=None, description="The follow subprocess while it runs")
+
+    def start(self) -> None:
+        try:
+            self.process = self.concurrency_group.run_process_in_background(
+                list(self.command),
+                is_checked_by_group=False,
+                on_output=self._on_output,
+                shutdown_timeout_sec=_BOOTSTRAP_TAIL_SIGTERM_GRACE_SECONDS,
+            )
+        except ConcurrencyGroupError as exc:
+            logger.warning("Could not follow the bootstrap events ({}); the boot wait shows no finer steps", exc)
+
+    def stop(self) -> None:
+        process = self.process
+        if process is None:
+            return
+        self.process = None
+        if process.is_finished():
+            # The follow is meant to outlive the wait; one that ended on its own
+            # failed (the agent could not be resolved, mngr refused), and would
+            # otherwise leave no trace beyond a bar with no bootstrap steps.
+            logger.warning(
+                "The bootstrap event tail exited early with code {}; the boot wait showed no finer steps. stderr: {}",
+                process.returncode,
+                process.read_stderr().strip(),
+            )
+            return
+        try:
+            process.terminate(force_kill_seconds=_BOOTSTRAP_TAIL_STOP_SECONDS)
+        except (TimeoutExpired, OSError, ConcurrencyGroupError) as exc:
+            logger.warning("Could not stop the bootstrap event tail ({}); it is left to the process group", exc)
+
+    def _on_output(self, line: str, is_stdout: bool) -> None:
+        if is_stdout:
+            apply_bootstrap_event_lines(self.tracker, [line], self.parent_step_id)
+        else:
+            logger.debug("bootstrap event tail: {}", line.rstrip())
 
 
 class _PrebakedImageProgressReporter(MutableModel):
@@ -1433,17 +1542,36 @@ def resolve_template_version(
     return latest
 
 
-class _CreateEventCapture(MutableModel):
-    """Forwards each child-process line to ``on_output`` while sniffing for ``mngr create``'s JSONL events.
+@pure
+def _parse_jsonl_event(line: str) -> dict[str, Any] | None:
+    """The JSON object a stdout line carries when it is one of mngr's JSONL event records, else None."""
+    stripped = line.strip()
+    if not stripped or not stripped.startswith("{"):
+        return None
+    try:
+        event = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return event if isinstance(event, dict) else None
 
-    ``mngr create --format jsonl`` writes structured event records to stdout
-    -- the final one being ``{"event": "created", "agent_id": "...", "host_id": "..."}``
-    on success, or ``{"event": "error", "error_class": "...", "message": "..."}``
-    on failure. Each line still goes through to the caller's ``on_output`` so
-    log streaming behaviour is unchanged; this wrapper just records the
-    canonical agent id when it sees the ``created`` event (so the caller can
-    return it without a follow-up ``mngr list`` lookup) and the failure's
-    class and message when it sees the ``error`` event.
+
+class _CreateEventCapture(MutableModel):
+    """Forwards each child-process line to ``on_output`` while sniffing for mngr's JSONL events.
+
+    Fronts the stdout of ``mngr create --format jsonl`` and of the provider
+    ``prepare`` commands a connection setup runs the same way. Both write
+    structured event records to stdout, with ``{"event": "progress", ...}``
+    step reports ahead of the terminal record: ``{"event": "created",
+    "agent_id": "...", "host_id": "..."}`` for a create that succeeded, or
+    ``{"event": "error", "error_class": "...", "message": "..."}`` for either
+    command's failure. The progress lines are consumed here (parsed and handed
+    to ``on_progress``) and kept out of the caller's ``on_output``: they are
+    the machine protocol behind the progress bar, not log. Every other line
+    still goes through to ``on_output`` so log streaming behaviour is
+    unchanged; this wrapper just records the canonical agent id when it sees
+    the ``created`` event (so the create can return it without a follow-up
+    ``mngr list`` lookup) and the failure's class and message when it sees the
+    ``error`` event.
     """
 
     inner_on_output: OutputCallback | None = Field(
@@ -1473,20 +1601,21 @@ class _CreateEventCapture(MutableModel):
             "of the failure. The two are always taken from one event, so they describe the same error."
         ),
     )
+    on_progress: Callable[[ProgressEvent], None] | None = Field(
+        default=None,
+        description="Receives each ``progress`` event mngr streams (its plan and step reports), parsed",
+    )
 
     def __call__(self, line: str, is_stdout: bool) -> None:
+        event = _parse_jsonl_event(line) if is_stdout else None
+        if event is not None and event.get("event") == "progress":
+            progress_event = parse_progress_event(event)
+            if progress_event is not None and self.on_progress is not None:
+                self.on_progress(progress_event)
+            return
         if self.inner_on_output is not None:
             self.inner_on_output(line, is_stdout)
-        if not is_stdout:
-            return
-        stripped = line.strip()
-        if not stripped or not stripped.startswith("{"):
-            return
-        try:
-            event = json.loads(stripped)
-        except json.JSONDecodeError:
-            return
-        if not isinstance(event, dict):
+        if event is None:
             return
         event_type = event.get("event")
         if event_type == "error":
@@ -1533,6 +1662,7 @@ def run_mngr_create(
     create_attempt_id_label: str | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
+    on_progress: Callable[[ProgressEvent], None] | None = None,
 ) -> tuple[AgentId, HostId]:
     """Create an mngr agent via ``mngr create --format jsonl``.
 
@@ -1584,7 +1714,7 @@ def run_mngr_create(
         create_attempt_id_label=create_attempt_id_label,
     )
 
-    capture = _CreateEventCapture(inner_on_output=on_output)
+    capture = _CreateEventCapture(inner_on_output=on_output, on_progress=on_progress)
     cg = _make_child_cg("mngr-create", parent_cg)
     # The Vault fallback for the private-pin credential is an operator convenience:
     # the same opt-in that routes the create form at a local template worktree.
@@ -1672,6 +1802,7 @@ def run_mngr_aws_prepare(
     on_output: OutputCallback | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
+    on_progress: Callable[[ProgressEvent], None] | None = None,
 ) -> None:
     """Ensure the AWS security group for ``region`` exists before an AWS create.
 
@@ -1697,10 +1828,11 @@ def run_mngr_aws_prepare(
     if not region:
         raise MngrCommandError("AWS mode requires a region")
     _run_mngr_prepare_command(
-        [MNGR_BINARY, "aws", "prepare", "--provider", provider_name, "--region", region],
+        [MNGR_BINARY, "aws", "prepare", "--provider", provider_name, "--region", region, "--format", "jsonl"],
         f"aws prepare for region {region}",
         on_output,
         parent_cg,
+        on_progress,
     )
 
 
@@ -1710,6 +1842,7 @@ def run_mngr_provider_prepare(
     on_output: OutputCallback | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
+    on_progress: Callable[[ProgressEvent], None] | None = None,
 ) -> None:
     """Run ``mngr <backend> prepare --provider <provider_name>`` (gcp / azure).
 
@@ -1720,10 +1853,11 @@ def run_mngr_provider_prepare(
     config. Idempotent like the AWS prepare; failures raise ``MngrCommandError``.
     """
     _run_mngr_prepare_command(
-        [MNGR_BINARY, backend, "prepare", "--provider", provider_name],
+        [MNGR_BINARY, backend, "prepare", "--provider", provider_name, "--format", "jsonl"],
         f"{backend} prepare for provider {provider_name}",
         on_output,
         parent_cg,
+        on_progress,
     )
 
 
@@ -1744,6 +1878,7 @@ def run_mngr_modal_connection_check(
         f"modal connection check for provider {provider_name}",
         on_output,
         parent_cg,
+        None,
     )
 
 
@@ -1752,6 +1887,7 @@ def _run_mngr_prepare_command(
     description: str,
     on_output: OutputCallback | None,
     parent_cg: ConcurrencyGroup | None,
+    on_progress: Callable[[ProgressEvent], None] | None,
 ) -> None:
     """Shared runner for the per-provider ``mngr <backend> prepare`` subprocess."""
     logger.info("Running: {}", " ".join(command))
@@ -1760,7 +1896,7 @@ def _run_mngr_prepare_command(
         result = cg.run_process_to_completion(
             command=command,
             is_checked_after=False,
-            on_output=on_output,
+            on_output=_CreateEventCapture(inner_on_output=on_output, on_progress=on_progress),
         )
     if result.returncode != 0:
         raise MngrCommandError(
@@ -1785,6 +1921,8 @@ class _MngrCreateAttemptParams(FrozenModel):
     host_name: HostName
     display_name: str
     on_output: OutputCallback
+    # Receives mngr's parsed progress events, nested by the caller under its own create step.
+    on_progress: Callable[[ProgressEvent], None]
     latchkey_env: Mapping[str, str] | None
     # The owning account's user id (names the imbue_cloud account instance), or None for a private workspace.
     account_id: str | None
@@ -1853,6 +1991,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         prebaked_lima_image_raw_path=params.prebaked_lima_image_raw_path,
         create_attempt_id_label=params.create_attempt_id_label,
         parent_cg=params.parent_cg,
+        on_progress=params.on_progress,
     )
 
 
@@ -2072,8 +2211,13 @@ class AgentCreator(MutableModel):
     # workspace), so a signout can wait for a create that will associate with it.
     _account_ids: dict[str, str] = PrivateAttr(default_factory=dict)
     _log_sinks: dict[str, CreateAttemptLogSink] = PrivateAttr(default_factory=dict)
+    _progress_trackers: dict[str, OperationProgressTracker] = PrivateAttr(default_factory=dict)
+    _progress_history: ProgressHistoryStore = PrivateAttr()
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    def model_post_init(self, __context: object) -> None:
+        self._progress_history = make_progress_history_store(self.paths.data_dir)
 
     def start_create_attempt(
         self,
@@ -2180,6 +2324,7 @@ class AgentCreator(MutableModel):
             logger.debug("Could not resolve a provider instance for create attempt {}: {}", create_attempt_id, e)
             provider_instance_name = ""
 
+        progress_tracker = self._new_create_progress_tracker(launch_mode, is_branch_checked_out=bool(effective_branch))
         with self._lock:
             # Check-and-register under one lock hold so two concurrent
             # same-name creates cannot both pass the guard.
@@ -2196,6 +2341,7 @@ class AgentCreator(MutableModel):
             self._provider_instance_names[str(create_attempt_id)] = provider_instance_name
             self._account_ids[str(create_attempt_id)] = account_id
             self._log_sinks[str(create_attempt_id)] = log_sink
+            self._progress_trackers[str(create_attempt_id)] = progress_tracker
 
         # Persist the pending-create-attempt record BEFORE spawning anything: from
         # here on, a crash or quit can no longer orphan the create silently.
@@ -2464,6 +2610,7 @@ class AgentCreator(MutableModel):
             redirect_url=self._redirect_urls.get(cid_str),
             error=self._errors.get(cid_str),
             error_kind=self._error_kinds.get(cid_str),
+            progress=tracker.snapshot() if (tracker := self._progress_trackers.get(cid_str)) is not None else None,
         )
 
     def list_create_attempt_infos(self) -> list[AgentCreateAttemptInfo]:
@@ -2495,6 +2642,7 @@ class AgentCreator(MutableModel):
                 self._provider_instance_names,
                 self._account_ids,
                 self._log_sinks,
+                self._progress_trackers,
             ):
                 tracked.pop(cid_str, None)
         self._notify_create_attempts_changed()
@@ -2503,6 +2651,22 @@ class AgentCreator(MutableModel):
     def _notify_create_attempts_changed(self) -> None:
         if self.on_create_attempts_changed is not None:
             self.on_create_attempts_changed()
+
+    def _new_create_progress_tracker(
+        self, launch_mode: LaunchMode, *, is_branch_checked_out: bool
+    ) -> OperationProgressTracker:
+        """A tracker weighted by what creates on ``launch_mode`` have taken here, with the desktop's own steps planned."""
+        tracker = self._progress_history.expected_durations(create_scope(launch_mode)).new_tracker()
+        planned = [_CLONE_STEP, *([_CHECKOUT_STEP] if is_branch_checked_out else []), _MNGR_CREATE_STEP, _READY_STEP]
+        tracker.announce_plan(
+            [ProgressStep(step_id=step_id, label=_DESKTOP_STEP_LABELS[step_id]) for step_id in planned], None
+        )
+        return tracker
+
+    def _record_progress_durations(self, launch_mode: LaunchMode, tracker: OperationProgressTracker) -> None:
+        self._progress_history.record(
+            create_scope(launch_mode), tracker.drain_durations(), tracker.drain_skipped_step_ids()
+        )
 
     def get_log_sink(self, create_attempt_id: CreateAttemptId) -> CreateAttemptLogSink | None:
         """Get the replayable log sink for a tracked create attempt, or None if not tracked."""
@@ -2546,6 +2710,8 @@ class AgentCreator(MutableModel):
         """
         cid_str = str(create_attempt_id)
         emit_log = make_log_callback(log_sink)
+        with self._lock:
+            tracker = self._progress_trackers[cid_str]
         workspace_dir: Path | None = None
         # Bound the moment the scratch root is created, NOT alongside
         # workspace_dir: in the worktree branch the clone and the rsync over it
@@ -2577,6 +2743,7 @@ class AgentCreator(MutableModel):
                 # launch-mode-aware via ``_STATUS_TEXT_IMBUE_CLOUD``.
                 with self._lock:
                     self._statuses[cid_str] = AgentCreateAttemptStatus.CLONING_REPO
+                tracker.start_step(_CLONE_STEP, _DESKTOP_STEP_LABELS[_CLONE_STEP], None, None)
 
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
@@ -2657,6 +2824,7 @@ class AgentCreator(MutableModel):
                 if branch:
                     with self._lock:
                         self._statuses[cid_str] = AgentCreateAttemptStatus.CHECKING_OUT_BRANCH
+                    tracker.start_step(_CHECKOUT_STEP, _DESKTOP_STEP_LABELS[_CHECKOUT_STEP], None, None)
                     log_sink.put("[Imbue Studio] Checking out branch '{}'...".format(branch))
                     # Scratch clones were just fetched into, so FETCH_HEAD is the
                     # requested ref; a plain local directory has no such fetch, and
@@ -2678,6 +2846,7 @@ class AgentCreator(MutableModel):
 
                 with self._lock:
                     self._statuses[cid_str] = AgentCreateAttemptStatus.CREATING_WORKSPACE
+                tracker.start_step(_MNGR_CREATE_STEP, _DESKTOP_STEP_LABELS[_MNGR_CREATE_STEP], None, None)
 
                 # Pre-create the shared latchkey gateway password and a
                 # per-host permissions-override JWT before invoking
@@ -2767,6 +2936,7 @@ class AgentCreator(MutableModel):
                     host_name=parsed_host,
                     display_name=display_name or str(parsed_host),
                     on_output=emit_log,
+                    on_progress=TrackerEventSink(tracker=tracker, default_parent_id=str(_MNGR_CREATE_STEP)),
                     latchkey_env=latchkey_setup.env,
                     account_id=account_id or None,
                     repo_source=repo_source,
@@ -2863,6 +3033,7 @@ class AgentCreator(MutableModel):
                 # page rather than spinning forever (PR 1471 part 1).
                 with self._lock:
                     self._statuses[cid_str] = AgentCreateAttemptStatus.WAITING_FOR_READY
+                tracker.start_step(_READY_STEP, _DESKTOP_STEP_LABELS[_READY_STEP], None, None)
                 # A Lima create with no pre-baked image builds the workspace
                 # inside the VM, which routinely outlives the standard window;
                 # give it the build-in-VM window instead. While the wait runs,
@@ -2883,7 +3054,7 @@ class AgentCreator(MutableModel):
                     canonical_id, ProbeGracePurpose.CREATE_ATTEMPT, time.monotonic() + ready_timeout_seconds
                 )
                 try:
-                    self._wait_for_workspace_ready(canonical_id, log_sink, ready_timeout_seconds)
+                    self._wait_for_workspace_ready(canonical_id, log_sink, ready_timeout_seconds, tracker)
                 finally:
                     self.system_interface_health_tracker.end_probe_grace(
                         canonical_id, ProbeGracePurpose.CREATE_ATTEMPT
@@ -2905,6 +3076,8 @@ class AgentCreator(MutableModel):
                 # publication so any downstream consumer (e.g.
                 # ``OnCreatedCallback``, which records the workspace<->account
                 # association) can rely on the canonical id.
+                tracker.complete_all()
+                self._record_progress_durations(launch_mode, tracker)
                 with self._lock:
                     self._statuses[cid_str] = AgentCreateAttemptStatus.DONE
                     self._redirect_urls[cid_str] = redirect_url
@@ -2946,6 +3119,8 @@ class AgentCreator(MutableModel):
         ) as e:
             logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
             log_sink.put("[Imbue Studio] ERROR: {}".format(e))
+            # The steps that did finish measured something real; only they are kept.
+            self._record_progress_durations(launch_mode, tracker)
             error_kind = classify_create_attempt_error(repo_source, e)
             # Snapshot the failure (and the create attempt log's tail) into the
             # pending-create-attempt record BEFORE publishing the in-memory
@@ -3191,6 +3366,7 @@ class AgentCreator(MutableModel):
         # The readiness window for this create: ``workspace_ready_timeout_seconds``
         # normally, or the longer build-in-VM window for an imageless Lima create.
         timeout_seconds: float,
+        tracker: OperationProgressTracker | None = None,
     ) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.
 
@@ -3213,6 +3389,28 @@ class AgentCreator(MutableModel):
 
         deadline = time.monotonic() + timeout_seconds
         log_sink.put("[Imbue Studio] Waiting for system interface to be ready...")
+        bootstrap_tail = (
+            _BootstrapProgressTail(
+                command=_bootstrap_follow_command(self.mngr_binary, agent_id),
+                concurrency_group=self.root_concurrency_group,
+                tracker=tracker,
+                parent_step_id=str(_READY_STEP),
+            )
+            if tracker is not None
+            else None
+        )
+        if bootstrap_tail is not None:
+            bootstrap_tail.start()
+        try:
+            self._probe_until_ready(agent_id, log_sink, deadline, timeout_seconds)
+        finally:
+            if bootstrap_tail is not None:
+                bootstrap_tail.stop()
+
+    def _probe_until_ready(
+        self, agent_id: AgentId, log_sink: CreateAttemptLogSink, deadline: float, timeout_seconds: float
+    ) -> None:
+        """The readiness loop proper: probe the system interface until it answers 200 or the deadline passes."""
         last_outcome: WorkspaceProbeOutcome | None = None
         attempt = 0
         with make_workspace_probe_client(

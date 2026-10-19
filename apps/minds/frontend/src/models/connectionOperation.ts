@@ -8,6 +8,8 @@
  */
 import type { CloudAccountOption } from "./create";
 import type { EventSourceLike, LifecycleDeps } from "./backups";
+import type { OperationProgress } from "./progress";
+import { progressOf } from "./progress";
 
 export const CONNECTION_OPERATION_POLL_MS = 1000;
 
@@ -18,6 +20,7 @@ export interface ConnectionOperationStatus {
   error?: string | null;
   code?: string | null;
   status_code?: number | null;
+  progress?: OperationProgress | null;
 }
 
 export interface ConnectionOperationHooks {
@@ -25,6 +28,8 @@ export interface ConnectionOperationHooks {
   onDone(account: CloudAccountOption): void;
   /** The failure body as the synchronous route used to answer it: `error`, and `code` when one applies. */
   onFailed(failure: Record<string, unknown>): void;
+  /** The operation's progress as the poll carried it, every poll that carries one. */
+  onProgress(progress: OperationProgress): void;
 }
 
 export function connectionOperationStatusUrl(operationId: string): string {
@@ -75,6 +80,8 @@ export class ConnectionOperationWatcher {
       this.scheduleNextPoll();
       return;
     }
+    const progress = progressOf(data);
+    if (progress !== null) this.hooks.onProgress(progress);
     if (data.status === "DONE" && data.account) {
       this.stop();
       this.hooks.onDone(data.account);

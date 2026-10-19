@@ -18,6 +18,7 @@ override the resolved config, which in turn overrides class defaults.
 """
 
 from typing import Any
+from typing import Final
 
 import click
 from click_option_group import optgroup
@@ -31,6 +32,8 @@ from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProgressStepId
+from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr_gcp.client import FirewallPrepareResult
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
@@ -315,6 +318,13 @@ def _output_cleanup_result(
     )
 
 
+# The steps ``mngr gcp prepare`` reports, in order.
+_GCP_PREPARE_STEPS: Final[tuple[ProgressStep, ...]] = (
+    ProgressStep(step_id=ProgressStepId("gcp.firewall"), label="Opening SSH access in the firewall"),
+    ProgressStep(step_id=ProgressStepId("gcp.state_bucket"), label="Creating the state bucket"),
+)
+
+
 @click.group(name="gcp")
 def gcp_cli_group() -> None:
     """GCP-provider operator commands (one-time setup)."""
@@ -420,7 +430,10 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         # ``MngrError`` subclasses, so they propagate with their specific type
         # intact rather than being flattened.
         raise GcpCredentialsError(str(e)) from e
-    result = client.ensure_firewall()
+    progress = mngr_ctx.progress_reporter
+    progress.announce_plan(_GCP_PREPARE_STEPS, None)
+    with progress.step(_GCP_PREPARE_STEPS[0].step_id, _GCP_PREPARE_STEPS[0].label):
+        result = client.ensure_firewall()
     # GCS state bucket: backs the offline ``host_dir`` mirror written at ``mngr
     # stop``. Created here so the runtime create/stop paths can attach to it with
     # no extra bucket-management permissions. A storage permission or API failure
@@ -428,7 +441,8 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # offline-host_dir feature's only backing store; a firewall-only prepare would leave offline host_dir
     # unavailable). Offline host_dir is the operator's own write path (no managed
     # identity needed), so prepare sets up only the firewall + bucket.
-    state_bucket_name, was_bucket_created = _ensure_state_bucket(base, client)
+    with progress.step(_GCP_PREPARE_STEPS[1].step_id, _GCP_PREPARE_STEPS[1].label):
+        state_bucket_name, was_bucket_created = _ensure_state_bucket(base, client)
     _output_prepare_result(
         result,
         client.firewall_name,

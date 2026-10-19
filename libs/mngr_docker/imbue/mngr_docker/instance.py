@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -32,6 +33,7 @@ from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import HostRecordUnreadableError
@@ -63,6 +65,7 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import DockerCpuCount
@@ -71,6 +74,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import LogLevel
+from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
@@ -96,6 +100,7 @@ from imbue.mngr.providers.ssh_utils import per_host_key_dir
 from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
 from imbue.mngr.providers.ssh_utils import resolve_per_host_host_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.docker_build_progress import DockerBuildProgressParser
 from imbue.mngr_docker.config import DockerProviderConfig
 from imbue.mngr_docker.config import LOCAL_DOCKER_SSH_HOST
 from imbue.mngr_docker.config import format_docker_publish_address
@@ -397,6 +402,23 @@ def _recorded_host_dir_override(host_record: HostRecord) -> Path | None:
     if host_record.config is None or host_record.config.host_dir is None:
         return None
     return Path(host_record.config.host_dir)
+
+
+_DOCKER_BUILD_STEP: Final[ProgressStepId] = ProgressStepId("docker.build")
+
+
+class _LoggedBuildOutput(MutableModel):
+    """The docker subprocess output callback: logs each line, then hands it to the build watcher when one is set."""
+
+    log_line: Callable[[str, bool], None] = Field(frozen=True, description="Logs the line at BUILD level")
+    watch_line: Callable[[str], None] | None = Field(
+        default=None, frozen=True, description="Parses the line for stage progress, when a build is being watched"
+    )
+
+    def __call__(self, line: str, is_stdout: bool) -> None:
+        self.log_line(line, is_stdout)
+        if self.watch_line is not None:
+            self.watch_line(line)
 
 
 class DockerProviderInstance(BaseProviderInstance):
@@ -849,7 +871,12 @@ class DockerProviderInstance(BaseProviderInstance):
         with log_span("Adding host to known_hosts", ssh_host=ssh_host, ssh_port=ssh_port):
             add_host_to_known_hosts(self._known_hosts_path, ssh_host, ssh_port, host_public_key, host_id=host_id)
 
-        with log_span("Waiting for sshd to be ready..."):
+        with (
+            self.mngr_ctx.progress_reporter.step(
+                ProgressStepId("docker.wait_ssh"), "Waiting for the container's SSH", CreatePhase.CREATING_HOST.step_id
+            ),
+            log_span("Waiting for sshd to be ready..."),
+        ):
             self._wait_for_sshd(ssh_host, ssh_port)
 
         pyinfra_host = self._create_pyinfra_host(ssh_host, ssh_port, private_key_path)
@@ -995,20 +1022,26 @@ kill -TERM 1
         return env
 
     def _run_docker_creation_command(
-        self, args: list[str], timeout: float = 300, executable: DockerBuilder = DockerBuilder.DOCKER
+        self,
+        args: list[str],
+        timeout: float = 300,
+        executable: DockerBuilder = DockerBuilder.DOCKER,
+        on_build_line: Callable[[str], None] | None = None,
     ) -> FinishedProcess:
         """Run a docker-compatible CLI command and return the result.
 
         `executable` defaults to DOCKER; pass DEPOT to use the depot.dev remote
-        builder (only valid for build subcommands).
+        builder (only valid for build subcommands). ``on_build_line`` sees every
+        output line after it is logged, so a build can be watched for progress.
         """
+
         # Defer the success/timeout/non-zero distinction to FinishedProcess.check(), which
         # raises ProcessTimeoutError on timeout instead of a generic ProcessError.
         result = self.mngr_ctx.concurrency_group.run_process_to_completion(
             [executable.value.lower()] + args,
             timeout=timeout,
             env=self._docker_env(),
-            on_output=self._log_docker_creation_command_output,
+            on_output=_LoggedBuildOutput(log_line=self._log_docker_creation_command_output, watch_line=on_build_line),
             is_checked_after=False,
         )
         result.check()
@@ -1048,9 +1081,12 @@ kill -TERM 1
         extra_args = ["--load"] if builder is DockerBuilder.DEPOT else []
         args = ["build", *extra_args, "-t", tag, *build_args]
         timeout_seconds = self.config.build_timeout_seconds
+        stage_parser = DockerBuildProgressParser(reporter=self.mngr_ctx.progress_reporter, step_id=_DOCKER_BUILD_STEP)
         with log_span("Running {} build with {} args", builder.value.lower(), len(build_args)):
             try:
-                self._run_docker_creation_command(args, timeout=timeout_seconds, executable=builder)
+                self._run_docker_creation_command(
+                    args, timeout=timeout_seconds, executable=builder, on_build_line=stage_parser.feed_line
+                )
             except ProcessTimeoutError as e:
                 raise DockerBuildTimeoutError(provider_name=self.name, timeout_seconds=timeout_seconds) from e
         return tag
@@ -1522,18 +1558,23 @@ kill -TERM 1
                 "your project's dependencies for faster startup.",
             )
 
+        progress = self.mngr_ctx.progress_reporter
+        creating_host = CreatePhase.CREATING_HOST.step_id
         try:
             if build_args:
                 # Build image from user-provided build args / Dockerfile
                 build_tag = self._build_image_tag(host_id)
-                image_name = self._build_image(build_args, build_tag)
+                with progress.step(_DOCKER_BUILD_STEP, "Building the image", creating_host):
+                    image_name = self._build_image(build_args, build_tag)
             elif is_using_default:
                 # Build from the mngr default Dockerfile so packages are pre-installed
                 build_tag = self._build_image_tag(host_id)
-                image_name = self._build_default_image(build_tag)
+                with progress.step(_DOCKER_BUILD_STEP, "Building the image", creating_host):
+                    image_name = self._build_default_image(build_tag)
             else:
                 # User specified an image (via --image or config default_image); pull it
-                image_name = self._pull_image(base_image)
+                with progress.step(ProgressStepId("docker.pull"), "Pulling the image", creating_host):
+                    image_name = self._pull_image(base_image)
 
             labels = build_container_labels(host_id, name, str(self.name), tags)
 
@@ -1550,7 +1591,10 @@ kill -TERM 1
             if self.config.is_host_volume_created:
                 self._ensure_host_volume_dir(host_id)
 
-            with log_span("Creating Docker container", container_name=container_name):
+            with (
+                progress.step(ProgressStepId("docker.start_container"), "Starting the container", creating_host),
+                log_span("Creating Docker container", container_name=container_name),
+            ):
                 container = self._run_container(
                     image=image_name,
                     container_name=container_name,

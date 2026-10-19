@@ -52,7 +52,6 @@ from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
 from imbue.minds.desktop_client.connections.primitives import is_local_profile_supported_for_backend
 from imbue.minds.desktop_client.connections.primitives import is_region_pinned_for_backend
 from imbue.minds.desktop_client.connections.primitives import mngr_backend_name
-from imbue.minds.desktop_client.create_status import expected_create_attempt_duration_seconds
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.destroying import DestroyingRecord
 from imbue.minds.desktop_client.destroying import DestroyingStatus
@@ -271,7 +270,6 @@ class LiveCreateAttemptDetail(FrozenModel):
     workspace_name: str = Field(description="Display name for the header")
     provider_label: str = Field(description="Friendly compute-provider label")
     is_remote: bool = Field(description="Whether the machine runs in the cloud")
-    expected_duration_seconds: float = Field(description="Expected create duration for the progress bar's easing")
     request: CreateAttemptRequestSummary = Field(description="The settings the attempt was submitted with")
 
 
@@ -650,7 +648,6 @@ def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
             workspace_name=request_summary.display_name,
             provider_label=friendly_provider_label(record.provider_instance_name if record else None),
             is_remote=info.launch_mode is LaunchMode.IMBUE_CLOUD,
-            expected_duration_seconds=expected_create_attempt_duration_seconds(info.launch_mode),
             request=request_summary,
         )
         return _json_response(CreateAttemptDetailResponse(kind="live", live=live))

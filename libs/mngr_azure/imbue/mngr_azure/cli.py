@@ -20,6 +20,7 @@ override the resolved config, which in turn overrides class defaults.
 """
 
 from typing import Any
+from typing import Final
 
 import click
 from azure.core.exceptions import AzureError
@@ -32,8 +33,12 @@ from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProgressStepId
+from imbue.mngr.utils.progress import ProgressStep
+from imbue.mngr_azure.client import AZURE_NETWORK_STEP
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
 from imbue.mngr_azure.client import AzureVpsClient
+from imbue.mngr_azure.client import with_progress_reporter
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureProviderError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
@@ -301,6 +306,16 @@ def _output_cleanup_result(
     )
 
 
+# The steps ``mngr azure prepare`` reports, in order. The network step is the
+# slow one on a new subscription (resource-provider registration), and the
+# client counts the providers it registers under it.
+_AZURE_PREPARE_STEPS: Final[tuple[ProgressStep, ...]] = (
+    ProgressStep(step_id=AZURE_NETWORK_STEP, label="Setting up the network and SSH access"),
+    ProgressStep(step_id=ProgressStepId("azure.role"), label="Creating the idle-shutdown role"),
+    ProgressStep(step_id=ProgressStepId("azure.state_storage"), label="Creating the state storage account"),
+)
+
+
 @click.group(name="azure")
 def azure_cli_group() -> None:
     """Azure-provider operator commands (one-time setup, teardown)."""
@@ -368,7 +383,10 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # explicit values, use them verbatim. Mirrors ``mngr aws prepare``.
     effective_cidrs = opts.allowed_ssh_cidrs or base.allowed_ssh_cidrs
     try:
-        client = _build_operator_client(base, opts.subscription_id, opts.region, opts.resource_group, effective_cidrs)
+        client = with_progress_reporter(
+            _build_operator_client(base, opts.subscription_id, opts.region, opts.resource_group, effective_cidrs),
+            mngr_ctx.progress_reporter,
+        )
     except AzureError as e:
         # ``AzureError`` (the azure SDK base) is not an ``MngrError``, so wrap it
         # into one for a clean CLI message. The no-subscription case raised by
@@ -382,19 +400,24 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # failures (quota, auth, conflicting NSG, etc.); let it propagate with its
     # specific type. (allowed_ssh_cidrs is fail-open, so an empty list no longer
     # raises here -- it creates a no-ingress NSG with a warning.)
-    result = client.ensure_network()
+    progress = mngr_ctx.progress_reporter
+    progress.announce_plan(_AZURE_PREPARE_STEPS, None)
+    with progress.step(_AZURE_PREPARE_STEPS[0].step_id, _AZURE_PREPARE_STEPS[0].label):
+        result = client.ensure_network()
     # Best-effort: create the least-privilege custom role that lets each VM's
     # managed identity deallocate itself on idle (true cost parity). Returns None
     # (after a clear warning) when the operator lacks roleDefinitions/write -- idle
     # self-deallocate is then disabled but `mngr stop`/`start` still work, so this
     # never fails prepare.
-    client.ensure_self_deallocate_role()
+    with progress.step(_AZURE_PREPARE_STEPS[1].step_id, _AZURE_PREPARE_STEPS[1].label):
+        client.ensure_self_deallocate_role()
     # Required: create the state storage account + container that hold the full
     # host record and per-agent records (so a deallocated VM's state is readable
     # offline). A missing storage permission or API failure raises (the bucket is
     # prepare's primary job; a network-only prepare would leave offline host state
     # unavailable).
-    state_account_name, was_bucket_created = _ensure_state_bucket(_build_state_bucket(base, client))
+    with progress.step(_AZURE_PREPARE_STEPS[2].step_id, _AZURE_PREPARE_STEPS[2].label):
+        state_account_name, was_bucket_created = _ensure_state_bucket(_build_state_bucket(base, client))
     # Offline host_dir needs no managed identity: it is captured operator-side at
     # `mngr stop` (mngr reads host_dir off the box and uploads it with the
     # operator's own creds), so prepare sets up only the network + state account.

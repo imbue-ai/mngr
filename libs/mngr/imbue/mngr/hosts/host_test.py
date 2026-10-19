@@ -47,8 +47,10 @@ from pyinfra.api.command import StringCommand
 from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessTimeoutError
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
@@ -119,6 +121,9 @@ from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.command_logging import commands_kept_out_of_logs
+from imbue.mngr.utils.progress import ProgressEvent
+from imbue.mngr.utils.progress import ProgressEventKind
+from imbue.mngr.utils.progress import ProgressEventSinkReporter
 from imbue.mngr.utils.testing import HostSubclassT
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import get_cleanup_failures
@@ -4625,6 +4630,37 @@ def test_host_provision_agent_with_extra_provision_commands(
 
     assert marker_file.exists()
     assert "provisioned" in marker_file.read_text()
+
+
+def test_host_provision_agent_never_reports_a_failed_extra_provision_command_completed(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    events: list[ProgressEvent] = []
+    mngr_ctx = temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().progress_reporter, ProgressEventSinkReporter(emit=events.append))
+    )
+    options = CreateAgentOptions(
+        name=AgentName("failing-provision-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        provisioning=AgentProvisioningOptions(extra_provision_commands=("true", "exit 3")),
+    )
+    agent = local_host.create_agent_state(temp_work_dir, options)
+
+    with pytest.raises(ConcurrencyExceptionGroup) as raised:
+        local_host.provision_agent(agent, options, mngr_ctx)
+
+    assert raised.value.only_exception_is_instance_of(MngrError)
+    assert "Extra provision command failed: exit 3" in str(raised.value.get_only_exception())
+
+    assert [(event.kind, str(event.step_id)) for event in events] == [
+        (ProgressEventKind.STARTED, "provisioning.command_0"),
+        (ProgressEventKind.COMPLETED, "provisioning.command_0"),
+        (ProgressEventKind.STARTED, "provisioning.command_1"),
+    ]
 
 
 def test_host_provision_agent_with_create_directories(

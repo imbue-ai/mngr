@@ -1,0 +1,1 @@
+The imbue_cloud provider reports its create steps through mngr's structured progress stream (`--format jsonl`): `imbue_cloud.lease` for the pool-host lease, then `imbue_cloud.adopt` on the fast path or `imbue_cloud.rebuild` on the slow path (under which the shared VPS machinery reports the rebuild's own steps), all under the create's `creating_host` phase.

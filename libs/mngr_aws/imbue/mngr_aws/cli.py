@@ -17,6 +17,7 @@ command that produces a Debian + Docker + deps-baked AMI to skip the
 """
 
 from typing import Any
+from typing import Final
 
 import click
 from botocore.exceptions import BotoCoreError
@@ -29,6 +30,8 @@ from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProgressStepId
+from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.client import SecurityGroupPrepareResult
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
@@ -303,6 +306,13 @@ def _output_cleanup_result(
     )
 
 
+# The steps ``mngr aws prepare`` reports, in order.
+_AWS_PREPARE_STEPS: Final[tuple[ProgressStep, ...]] = (
+    ProgressStep(step_id=ProgressStepId("aws.security_group"), label="Opening SSH access in the security group"),
+    ProgressStep(step_id=ProgressStepId("aws.state_bucket"), label="Creating the state bucket"),
+)
+
+
 @click.group(name="aws")
 def aws_cli_group() -> None:
     """AWS-provider operator commands (one-time setup, future AMI tooling)."""
@@ -383,11 +393,15 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         # bad ``AWS_PROFILE``). Mirrors the pair caught by
         # ``AwsProviderBackend.build_provider_instance``.
         raise click.ClickException(str(e)) from e
-    result = client.ensure_security_group()
+    progress = mngr_ctx.progress_reporter
+    progress.announce_plan(_AWS_PREPARE_STEPS, None)
+    with progress.step(_AWS_PREPARE_STEPS[0].step_id, _AWS_PREPARE_STEPS[0].label):
+        result = client.ensure_security_group()
     # Required bucket setup: a missing S3/STS permission or API failure raises
     # (the bucket is prepare's primary job; a SG-only prepare would leave offline
     # host state unavailable).
-    state_bucket_name, was_bucket_created = _ensure_state_bucket(base, opts.region)
+    with progress.step(_AWS_PREPARE_STEPS[1].step_id, _AWS_PREPARE_STEPS[1].label):
+        state_bucket_name, was_bucket_created = _ensure_state_bucket(base, opts.region)
     # Offline host_dir needs no IAM identity: it is captured operator-side at
     # `mngr stop` (mngr reads host_dir off the box and uploads it with the
     # operator's creds), so prepare sets up only the security group + bucket.

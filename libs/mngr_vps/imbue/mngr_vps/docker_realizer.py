@@ -14,8 +14,10 @@ from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import LogLevel
+from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_listing
@@ -24,6 +26,7 @@ from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_com
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import load_or_create_per_host_client_keypair
 from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
+from imbue.mngr.utils.docker_build_progress import DockerBuildProgressParser
 from imbue.mngr_vps.container_setup import CONTAINER_ENTRYPOINT_CMD
 from imbue.mngr_vps.container_setup import HOME_SUBPATH
 from imbue.mngr_vps.container_setup import HOST_DIR_SUBPATH
@@ -312,14 +315,20 @@ class DockerRealizer(SnapshotCapableRealizer):
         git_depth: int | None,
     ) -> str:
         """Build a Docker image on the VPS from the provided build args."""
-        return build_image_on_outer_from_build_args(
-            outer,
-            self.mngr_ctx.concurrency_group,
-            host_id=host_id,
-            docker_build_args=docker_build_args,
-            git_depth=git_depth,
-            builder=self.config.builder,
-        )
+        build_step = ProgressStepId("vps.build_image")
+        stage_parser = DockerBuildProgressParser(reporter=self.mngr_ctx.progress_reporter, step_id=build_step)
+        with self.mngr_ctx.progress_reporter.step(
+            build_step, "Building the image on the machine", CreatePhase.CREATING_HOST.step_id
+        ):
+            return build_image_on_outer_from_build_args(
+                outer,
+                self.mngr_ctx.concurrency_group,
+                host_id=host_id,
+                docker_build_args=docker_build_args,
+                git_depth=git_depth,
+                builder=self.config.builder,
+                on_build_line=stage_parser.feed_line,
+            )
 
     def realize_placement(self, outer: OuterHostInterface, ctx: RealizePlacementContext) -> RealizedPlacement:
         host_id = ctx.host_id
@@ -354,7 +363,14 @@ class DockerRealizer(SnapshotCapableRealizer):
             image = self._build_image_on_vps(outer, host_id, image, ctx.docker_build_args, ctx.git_depth)
         else:
             logger.log(LogLevel.BUILD.value, "Pulling Docker image {} on VPS...", image, source="vps")
-            with log_span("Pulling Docker image on VPS"):
+            with (
+                self.mngr_ctx.progress_reporter.step(
+                    ProgressStepId("vps.pull_image"),
+                    "Pulling the image on the machine",
+                    CreatePhase.CREATING_HOST.step_id,
+                ),
+                log_span("Pulling Docker image on VPS"),
+            ):
                 pull_image(outer, image, timeout_seconds=300.0)
 
         container_name = f"{self.mngr_ctx.config.prefix}{ctx.name}"
@@ -367,7 +383,12 @@ class DockerRealizer(SnapshotCapableRealizer):
         }
         logger.log(LogLevel.BUILD.value, "Starting Docker container on VPS...", source="vps")
         snapshots_dir_on_outer = self.config.btrfs_mount_path / "snapshots"
-        with log_span("Starting Docker container"):
+        with (
+            self.mngr_ctx.progress_reporter.step(
+                ProgressStepId("vps.start_container"), "Starting the container", CreatePhase.CREATING_HOST.step_id
+            ),
+            log_span("Starting Docker container"),
+        ):
             container_id = run_container(
                 outer,
                 image=image,

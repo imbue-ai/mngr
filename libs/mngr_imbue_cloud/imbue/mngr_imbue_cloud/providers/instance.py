@@ -95,12 +95,14 @@ from imbue.mngr.interfaces.provider_instance import discover_hosts_within_per_ho
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
@@ -120,6 +122,7 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.file_utils import read_json_dict
 from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr.utils.progress import NestedProgressReporter
 from imbue.mngr.utils.ssh import build_ssh_connect_command
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
@@ -535,6 +538,10 @@ class _OuterListingSession(MutableModel):
         """The outer, for one listing at a time: a full poll's read and a re-read of the same host serialize here."""
         with self._listing_lock:
             yield self.outer
+
+
+_LEASE_STEP: Final[ProgressStepId] = ProgressStepId("imbue_cloud.lease")
+_REBUILD_STEP: Final[ProgressStepId] = ProgressStepId("imbue_cloud.rebuild")
 
 
 class ImbueCloudProvider(BaseProviderInstance):
@@ -2036,7 +2043,10 @@ class ImbueCloudProvider(BaseProviderInstance):
         back to the slow path.
         """
         logger.info("imbue_cloud[{}] FAST PATH: leasing exact-attribute pool host for {!r}", self.name, str(name))
+        progress = self.mngr_ctx.progress_reporter
+        creating_host = CreatePhase.CREATING_HOST.step_id
         tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
+        progress.start_step(_LEASE_STEP, "Reserving a cloud machine", creating_host, None)
         try:
             lease_result = self.client.lease_host(
                 token,
@@ -2050,10 +2060,14 @@ class ImbueCloudProvider(BaseProviderInstance):
             raise FastPathUnavailableError(
                 f"No pool host exactly matches the requested attributes for the fast (adopt) path: {exc}"
             ) from exc
+        progress.complete_step(_LEASE_STEP)
         self.reset_caches()
 
         host_id = HostId(lease_result.host_id)
-        with self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "fast-path setup"):
+        with (
+            self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "fast-path setup"),
+            progress.step(ProgressStepId("imbue_cloud.adopt"), "Connecting to the machine", creating_host),
+        ):
             # Install the keypair inside the guard: the connector has already
             # marked the host leased, so a failure here (e.g. an OSError while
             # moving the key files) must still release the lease.
@@ -2139,7 +2153,10 @@ class ImbueCloudProvider(BaseProviderInstance):
             relaxed_attributes.to_request_dict(),
             str(name),
         )
+        progress = self.mngr_ctx.progress_reporter
+        creating_host = CreatePhase.CREATING_HOST.step_id
         tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
+        progress.start_step(_LEASE_STEP, "Reserving a cloud machine", creating_host, None)
         try:
             # The region constraint is NOT relaxed: the hard requirement still
             # applies to the rebuilt host.
@@ -2155,10 +2172,14 @@ class ImbueCloudProvider(BaseProviderInstance):
             # there is nothing to release. Surface the pool-exhausted signal.
             self._discard_pending_keypair(tmp_private_key, tmp_public_key)
             raise
+        progress.complete_step(_LEASE_STEP)
         self.reset_caches()
 
         host_id = HostId(lease_result.host_id)
-        with self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "slow-path rebuild"):
+        with (
+            self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "slow-path rebuild"),
+            progress.step(_REBUILD_STEP, "Rebuilding the machine", creating_host),
+        ):
             # Install the keypair inside the guard: the connector has already
             # marked the host leased, so a failure here (e.g. an OSError while
             # moving the key files) must still release the lease.
@@ -2239,12 +2260,24 @@ class ImbueCloudProvider(BaseProviderInstance):
         # one. Detected by the lease's container port differing from the standard
         # publish port -- true only for slices (forwarded ports), never OVH VPSes.
         is_slice = lease_result.container_ssh_port != self.config.container_ssh_port
+        # The VPS machinery reports its steps under the create's ``creating_host``
+        # phase; here they are the rebuild's own, so they nest under the rebuild step.
+        delegated_ctx = self.mngr_ctx.model_copy_update(
+            to_update(
+                self.mngr_ctx.field_ref().progress_reporter,
+                NestedProgressReporter(
+                    inner=self.mngr_ctx.progress_reporter,
+                    outer_parent_id=CreatePhase.CREATING_HOST.step_id,
+                    nested_parent_id=_REBUILD_STEP,
+                ),
+            )
+        )
         delegated_provider: VpsProvider = (
             build_slice_rebuild_provider(
-                name=self.name, config=self.config, mngr_ctx=self.mngr_ctx, lease_result=lease_result
+                name=self.name, config=self.config, mngr_ctx=delegated_ctx, lease_result=lease_result
             )
             if is_slice
-            else build_delegated_vps_provider(name=self.name, config=self.config, mngr_ctx=self.mngr_ctx)
+            else build_delegated_vps_provider(name=self.name, config=self.config, mngr_ctx=delegated_ctx)
         )
         # The VPS root host key (port 22 for OVH; the box-forwarded VM-root port
         # for a slice) feeds the rebuilt host's record AND is pinned in the

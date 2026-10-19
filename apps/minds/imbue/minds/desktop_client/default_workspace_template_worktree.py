@@ -114,7 +114,7 @@ def _run_git(repo: Path, args: list[str]) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, timeout=120)
 
 
-def _write_pytest_config_opt_in(settings_path: Path) -> None:
+def write_pytest_config_opt_in(settings_path: Path) -> None:
     """Prepend ``is_allowed_in_pytest = true`` to a throwaway DEFAULT_WORKSPACE_TEMPLATE ``settings.toml``.
 
     mngr's config guard refuses to load a project config under
@@ -190,7 +190,7 @@ def materialize_paired_default_workspace_template_worktree(
         text=True,
         timeout=300,
     )
-    _write_pytest_config_opt_in(destination / ".mngr" / "settings.toml")
+    write_pytest_config_opt_in(destination / ".mngr" / "settings.toml")
     _run_git(destination, ["add", "-A"])
     _run_git(
         destination,

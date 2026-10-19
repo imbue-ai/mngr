@@ -23,6 +23,7 @@ from pydantic import RootModel
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.connections.data_types import DEFAULT_CREDENTIAL_SOURCE_NAME
 from imbue.minds.desktop_client.connections.primitives import MODAL_SANDBOX_TIMEOUT_SECONDS_MAX
+from imbue.minds.desktop_client.create_progress import OperationProgressSnapshot
 from imbue.minds.desktop_client.data_types import ShareGatewayState
 from imbue.minds.desktop_client.data_types import ShareRemovalOutcome
 from imbue.minds.desktop_client.data_types import SharedWorkspaceRecordState
@@ -101,6 +102,10 @@ class CreateOperationStatusResponse(FrozenModel):
             "Machine-readable failure classification (e.g. GITHUB_AUTH_REQUIRED), set when the "
             "failure is recognized; the creating page gates extra static guidance on it"
         ),
+    )
+    progress: OperationProgressSnapshot | None = Field(
+        default=None,
+        description="The attempt's progress (percent, rate, remaining time, step list), once it is tracked",
     )
 
 
@@ -752,6 +757,9 @@ class CloudAccountOperationStatusResponse(FrozenModel):
     status_code: int | None = Field(
         default=None,
         description="The HTTP status the registration would have answered with before it ran in the background",
+    )
+    progress: OperationProgressSnapshot | None = Field(
+        default=None, description="The operation's progress (percent, rate, remaining time, step list)"
     )
 
 

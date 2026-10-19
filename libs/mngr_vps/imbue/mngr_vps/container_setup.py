@@ -15,11 +15,13 @@ from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -1297,6 +1299,23 @@ def emit_docker_build_output(line: str) -> None:
         logger.log(LogLevel.BUILD.value, "{}", stripped, source="docker")
 
 
+class _LoggedBuildOutput(MutableModel):
+    """A line sink that logs each build line and then hands it to the build watcher."""
+
+    watch_line: Callable[[str], None] = Field(frozen=True, description="Parses the line for stage progress")
+
+    def __call__(self, line: str) -> None:
+        emit_docker_build_output(line)
+        self.watch_line(line)
+
+
+def _log_and_watch_build_output(on_build_line: Callable[[str], None] | None) -> Callable[[str], None]:
+    """A line sink that logs each build line and then hands it to ``on_build_line`` when one is given."""
+    if on_build_line is None:
+        return emit_docker_build_output
+    return _LoggedBuildOutput(watch_line=on_build_line)
+
+
 def resolve_dockerfile_paths(
     docker_build_args: Sequence[str],
     remote_build_dir: str,
@@ -1529,6 +1548,7 @@ def build_image_on_outer_from_build_args(
     git_depth: int | None,
     builder: DockerBuilder,
     build_timeout_seconds: float = 600.0,
+    on_build_line: Callable[[str], None] | None = None,
 ) -> str:
     """Build a Docker image on the outer from the provided build args. Returns the image tag.
 
@@ -1614,7 +1634,7 @@ def build_image_on_outer_from_build_args(
                     build_context_path=remote_build_dir,
                     docker_build_args=tuple(resolved_build_args),
                     timeout_seconds=build_timeout_seconds,
-                    on_output=emit_docker_build_output,
+                    on_output=_log_and_watch_build_output(on_build_line),
                     builder=builder,
                 )
         else:
@@ -1629,7 +1649,7 @@ def build_image_on_outer_from_build_args(
                     build_context_path=remote_build_dir,
                     docker_build_args=tuple(docker_build_args),
                     timeout_seconds=build_timeout_seconds,
-                    on_output=emit_docker_build_output,
+                    on_output=_log_and_watch_build_output(on_build_line),
                     builder=builder,
                 )
         logger.log(LogLevel.BUILD.value, "Docker image built successfully", source="docker")

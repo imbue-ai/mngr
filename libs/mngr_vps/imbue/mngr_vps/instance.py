@@ -71,6 +71,7 @@ from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import DiscoveredHostSize
@@ -80,6 +81,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import LogLevel
+from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -1006,7 +1008,14 @@ class VpsProvider(BaseProviderInstance):
         # override ``_wait_for_container_sshd`` to wait on a dynamically
         # forwarded port (the imbue_cloud slice provider does this).
         logger.log(LogLevel.BUILD.value, "Waiting for agent SSH to be ready...", source="vps")
-        with log_span("Waiting for agent SSH"):
+        with (
+            self.mngr_ctx.progress_reporter.step(
+                ProgressStepId("vps.wait_agent_ssh"),
+                "Waiting for the container's SSH",
+                CreatePhase.CREATING_HOST.step_id,
+            ),
+            log_span("Waiting for agent SSH"),
+        ):
             self._wait_for_container_sshd(vps_ip, host_id)
         logger.log(LogLevel.BUILD.value, "Agent SSH ready", source="vps")
 
@@ -1186,7 +1195,12 @@ class VpsProvider(BaseProviderInstance):
             parsed.plan,
             source="vps",
         )
-        with log_span("Creating VPS instance"):
+        with (
+            self.mngr_ctx.progress_reporter.step(
+                ProgressStepId("vps.create_instance"), "Creating the machine", CreatePhase.CREATING_HOST.step_id
+            ),
+            log_span("Creating VPS instance"),
+        ):
             vps_tags = build_vps_tags(
                 host_id, self.name, os.environ.get("MNGR_VPS_EXTRA_TAGS", ""), self.config.isolation
             )
@@ -1218,8 +1232,13 @@ class VpsProvider(BaseProviderInstance):
         self, host_id: HostId, vps_instance_id: VpsInstanceId, vps_host_public_key: str
     ) -> str:
         """Wait for a just-created VPS to boot, pin its host key, and wait for its bootstrap; returns its IP."""
+        progress = self.mngr_ctx.progress_reporter
+        creating_host = CreatePhase.CREATING_HOST.step_id
         logger.log(LogLevel.BUILD.value, "Waiting for VPS to become active...", source="vps")
-        with log_span("Waiting for VPS to become active"):
+        with (
+            progress.step(ProgressStepId("vps.wait_active"), "Waiting for the machine to boot", creating_host),
+            log_span("Waiting for VPS to become active"),
+        ):
             vps_ip = self.vps_client.wait_for_instance_active(
                 vps_instance_id,
                 timeout_seconds=self.config.instance_boot_timeout,
@@ -1235,7 +1254,10 @@ class VpsProvider(BaseProviderInstance):
         )
 
         logger.log(LogLevel.BUILD.value, "Waiting for SSH to be ready on VPS...", source="vps")
-        with log_span("Waiting for VPS SSH"):
+        with (
+            progress.step(ProgressStepId("vps.wait_ssh"), "Waiting for the machine's SSH", creating_host),
+            log_span("Waiting for VPS SSH"),
+        ):
             self._wait_for_sshd_on_vps(vps_ip, timeout_seconds=self.config.ssh_connect_timeout)
 
         # Backends that install the host key after sshd starts (GCP's
@@ -1250,7 +1272,10 @@ class VpsProvider(BaseProviderInstance):
         logger.log(
             LogLevel.BUILD.value, "Waiting for host bootstrap to complete (Docker installation)...", source="vps"
         )
-        with log_span("Waiting for host bootstrap (Docker install)"):
+        with (
+            progress.step(ProgressStepId("vps.wait_bootstrap"), "Installing Docker on the machine", creating_host),
+            log_span("Waiting for host bootstrap (Docker install)"),
+        ):
             with self._make_outer_for_vps_ip(vps_ip, host_id) as outer:
                 self._wait_for_cloud_init(outer, timeout_seconds=self.config.docker_install_timeout)
         logger.log(LogLevel.BUILD.value, "Host bootstrap complete, Docker is ready", source="vps")

@@ -219,6 +219,52 @@ class LifecycleHook(UpperCaseStrEnum):
     POST_ATTACH = auto()
 
 
+class CreatePhase(UpperCaseStrEnum):
+    """The skeleton phases of ``mngr create``, in the order they run.
+
+    Each phase is reported as a progress step whose id is the lowercase member
+    name (``creating_host``); providers report their own finer steps under the
+    phase that contains them, with ids namespaced by backend (``docker.build``).
+    Phases that do not apply to a given create (an existing host needs no
+    ``CREATING_HOST``) are left out of the announced plan rather than reported
+    as instantly complete.
+    """
+
+    PREPARING = auto()
+    CREATING_HOST = auto()
+    SETTING_UP_HOST = auto()
+    TRANSFERRING_PROJECT = auto()
+    PROVISIONING = auto()
+    STARTING_AGENT = auto()
+
+    @property
+    def step_id(self) -> "ProgressStepId":
+        return ProgressStepId(self.value.lower())
+
+
+class InvalidProgressStepIdError(ValueError):
+    pass
+
+
+_PROGRESS_STEP_ID_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$")
+
+
+class ProgressStepId(NonEmptyStr):
+    """Identifier of one progress step: dotted lowercase words such as ``creating_host`` or ``docker.build``.
+
+    Consumers key learned durations and captions by this id, so it must be
+    stable across releases for the same unit of work; the human label that
+    accompanies it in every progress event is free to change.
+    """
+
+    def __new__(cls, value: str) -> Self:
+        if _PROGRESS_STEP_ID_RE.match(value) is None:
+            raise InvalidProgressStepIdError(
+                f"{cls.__name__} must be dotted lowercase words such as 'docker.build': '{value}'"
+            )
+        return super().__new__(cls, value)
+
+
 class OutputFormat(UpperCaseStrEnum):
     """Output format mode."""
 

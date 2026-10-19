@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { jsonResponse } from "../testing";
-import { MindLivenessTracker, hostNameFormatError, progressForElapsed, submitCreateRequest } from "./create";
+import { MindLivenessTracker, hostNameFormatError, submitCreateRequest } from "./create";
 import { OnboardingProgress } from "./onboarding";
 
 describe("hostNameFormatError", () => {
@@ -15,21 +15,6 @@ describe("hostNameFormatError", () => {
     expect(hostNameFormatError("a$b")).toBe("Use only letters, numbers, dashes, and underscores.");
     expect(hostNameFormatError("-ab")).toBe("Can't start with a dash or underscore.");
     expect(hostNameFormatError("ab_")).toBe("Can't end with a dash or underscore.");
-  });
-});
-
-describe("progressForElapsed", () => {
-  it("eases to 80 percent over the expected duration then crawls asymptotically", () => {
-    expect(progressForElapsed(0, 60)).toBe(0);
-    expect(progressForElapsed(30, 60)).toBeCloseTo(40);
-    expect(progressForElapsed(60, 60)).toBeCloseTo(80);
-    const late = progressForElapsed(600, 60);
-    expect(late).toBeGreaterThan(95);
-    expect(late).toBeLessThan(100);
-  });
-
-  it("falls back to a sane default when the expected duration is zero", () => {
-    expect(progressForElapsed(30, 0)).toBeCloseTo(40);
   });
 });
 
