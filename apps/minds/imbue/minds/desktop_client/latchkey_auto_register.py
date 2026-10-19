@@ -18,6 +18,14 @@ checked there. The push runs off the resolver's callback thread (which must
 stay non-blocking) and is coalesced per host, so a burst of registrations costs
 one round trip that carries the latest snapshot.
 
+A push for a host whose machine is not provisioned yet is held, not dropped,
+and retried on later resolver changes once it is -- the same deferral the
+registration itself gets. On a brand-new remote workspace the registration
+beats the provisioning pass that gives the machine its key: the host file
+lands when ``mngr create`` returns, the key seconds later, and a push made in
+between finds no machine to carry to. Dropping it would leave the gateway on
+the deny-all default it was seeded with, refusing the workspace's own agent
+until something else pushed the policy.
 """
 
 import threading
@@ -36,6 +44,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
@@ -97,6 +106,10 @@ class LatchkeyAutoRegister(MutableModel):
     # carried by the next iteration rather than by a second, racing thread.
     _hosts_awaiting_push: dict[HostId, AgentId] = PrivateAttr(default_factory=dict)
     _hosts_being_pushed: set[HostId] = PrivateAttr(default_factory=set)
+    # Hosts whose changed file found no machine to go to yet, each with the
+    # agent the push is addressed by; re-scheduled on a later resolver change
+    # once the machine has been provisioned. Guarded by ``_push_lock``.
+    _hosts_awaiting_machine: dict[HostId, AgentId] = PrivateAttr(default_factory=dict)
     _push_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def start(self) -> None:
@@ -111,9 +124,36 @@ class LatchkeyAutoRegister(MutableModel):
         self._on_change()
 
     def _on_change(self) -> None:
-        """Resolver change callback: register any newly-discovered agents."""
+        """Resolver change callback: register any newly-discovered agents, and retry the pushes held for a machine."""
         for host_id, agent_id in self._collect_unprocessed_pairs():
             self._handle_pair(host_id, agent_id)
+        for host_id, agent_id in self._collect_hosts_whose_machine_appeared():
+            self._schedule_push(host_id, agent_id)
+
+    def _collect_hosts_whose_machine_appeared(self) -> list[tuple[HostId, AgentId]]:
+        """The held pushes whose host now has a machine of its own.
+
+        One ``stat`` of the host's machine key per held host per resolver
+        change, like the deferred registrations' ``stat`` of the host file --
+        and, like those, paid for as long as the host has no machine: a local
+        host never gets one, so its held push is never carried, which is the
+        right outcome for a host whose gateway reads the file here.
+        """
+        with self._push_lock:
+            held = list(self._hosts_awaiting_machine.items())
+        return [(host_id, agent_id) for host_id, agent_id in held if self._has_machine(host_id)]
+
+    def _has_machine(self, host_id: HostId) -> bool:
+        """Whether ``host_id`` has a machine a push could go to (see ``has_machine_of_its_own``).
+
+        A key record that cannot be read counts as a machine: the push then
+        fails against the same record and reports it, rather than being held
+        in silence for a machine that may well be there.
+        """
+        try:
+            return has_machine_of_its_own(self.latchkey.plugin_data_dir, host_id)
+        except LatchkeyStoreError:
+            return True
 
     def _collect_unprocessed_pairs(self) -> list[tuple[HostId, AgentId]]:
         """Return discovered ``(host_id, agent_id)`` pairs not yet processed.
@@ -201,6 +241,7 @@ class LatchkeyAutoRegister(MutableModel):
     def _schedule_push(self, host_id: HostId, agent_id: AgentId) -> None:
         """Mark ``host_id``'s file as changed and make sure a worker will carry it over."""
         with self._push_lock:
+            self._hosts_awaiting_machine.pop(host_id, None)
             self._hosts_awaiting_push[host_id] = agent_id
             if host_id in self._hosts_being_pushed:
                 return
@@ -218,6 +259,11 @@ class LatchkeyAutoRegister(MutableModel):
         Each push reads the canonical file at push time, so the last one to run
         carries everything registered up to then.
 
+        A host with no machine yet keeps its change held (see
+        :meth:`_collect_hosts_whose_machine_appeared`) rather than pushing
+        into nothing: the push would be reported done while the machine, once
+        provisioned, enforced the default it was seeded with instead.
+
         A machine that will not take a push is logged as an error and not
         retried here. There is no user waiting on an auto-registration to tell,
         and the registration does *not* heal itself later: the machine owns the
@@ -226,6 +272,14 @@ class LatchkeyAutoRegister(MutableModel):
         register-agent`` once the machine is reachable again.
         """
         while (agent_id := self._claim_pending_push(host_id)) is not None:
+            if not self._has_machine(host_id):
+                with self._push_lock:
+                    self._hosts_awaiting_machine[host_id] = agent_id
+                logger.debug(
+                    "Holding the latchkey permissions push for host {} until it has a machine to carry them to",
+                    host_id,
+                )
+                continue
             try:
                 self.push_permissions_to_machine(str(agent_id))
             except MachineOperationError as e:

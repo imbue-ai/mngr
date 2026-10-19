@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
@@ -23,6 +24,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
@@ -53,6 +55,11 @@ def _read_allowed_anyof(plugin_data_dir: Path, host_id: HostId) -> list[dict[str
     """Return the ``anyOf`` allow-list for ``host_id`` from its permissions file."""
     config = json.loads(permissions_path_for_host(plugin_data_dir, host_id).read_text())
     return config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"]
+
+
+def _provision_machine(latchkey: Latchkey, host_id: HostId) -> None:
+    """Record a machine key for ``host_id``, as the provisioning pass does once the host's gateway is wired."""
+    store_machine_encryption_key(latchkey.plugin_data_dir, host_id, SecretStr("machine-key-7c1d"))
 
 
 def _build_auto_register(
@@ -313,6 +320,7 @@ def test_pushes_the_host_policy_to_its_machine_after_a_registration_changes_it(
     new_agent = AgentId.generate()
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _provision_machine(latchkey, host_id)
     _push_agents(resolver, _make_discovered(host_id, new_agent))
     recorder = _PushRecorder()
 
@@ -341,6 +349,7 @@ def test_does_not_push_when_the_registration_changed_nothing(
     agent_id = AgentId.generate()
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, agent_id)
+    _provision_machine(latchkey, host_id)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
     recorder = _PushRecorder()
 
@@ -374,6 +383,7 @@ def test_a_refused_push_is_logged_and_does_not_stop_later_pushes_for_the_host(
     second_agent = AgentId.generate()
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _provision_machine(latchkey, host_id)
     _push_agents(resolver, _make_discovered(host_id, first_agent))
     recorder = _PushRecorder(failing_workspace_agent_ids=frozenset({str(first_agent)}))
 
@@ -389,3 +399,68 @@ def test_a_refused_push_is_logged_and_does_not_stop_later_pushes_for_the_host(
 
     _wait_for_pushes(recorder, 2)
     assert recorder.pushed_workspace_agent_ids == [str(first_agent), str(second_agent)]
+
+
+def test_a_registration_made_before_the_machine_is_provisioned_is_pushed_once_it_is(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """A push that finds no machine yet is held, and carried on a later resolver change once there is one.
+
+    The order a new remote workspace actually creates: the host file (and the
+    registration into it) lands when ``mngr create`` returns, and the
+    provisioning pass records the machine's key seconds later. A push dropped
+    in between would leave the gateway enforcing the deny-all default it was
+    seeded with, refusing the workspace's own agent.
+    """
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _push_agents(resolver, _make_discovered(host_id, agent_id))
+    recorder = _PushRecorder()
+
+    LatchkeyAutoRegister(
+        backend_resolver=resolver,
+        latchkey=latchkey,
+        push_permissions_to_machine=recorder.push,
+        concurrency_group=root_concurrency_group,
+    ).start()
+    # A change before the machine exists carries nothing, and does not drop the push either.
+    _push_agents(resolver, _make_discovered(host_id, agent_id))
+    assert recorder.pushed_workspace_agent_ids == []
+
+    _provision_machine(latchkey, host_id)
+    _push_agents(resolver, _make_discovered(host_id, agent_id))
+
+    _wait_for_pushes(recorder, 1)
+    assert recorder.pushed_workspace_agent_ids == [str(agent_id)]
+    # The held push is consumed: later changes do not push it again.
+    _push_agents(resolver, _make_discovered(host_id, agent_id))
+    assert recorder.pushed_workspace_agent_ids == [str(agent_id)]
+
+
+def test_a_registration_on_a_host_with_no_machine_is_never_pushed(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """A local host's gateway reads the file here, so the held push for it is never carried anywhere."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _push_agents(resolver, _make_discovered(host_id, agent_id))
+    recorder = _PushRecorder()
+
+    LatchkeyAutoRegister(
+        backend_resolver=resolver,
+        latchkey=latchkey,
+        push_permissions_to_machine=recorder.push,
+        concurrency_group=root_concurrency_group,
+    ).start()
+    _push_agents(resolver, _make_discovered(host_id, agent_id))
+    _push_agents(resolver, _make_discovered(host_id, agent_id))
+
+    assert recorder.pushed_workspace_agent_ids == []
