@@ -69,7 +69,7 @@ def _template_checkout(tmp_path: Path) -> Path:
     """A throwaway template checkout that opts into running under pytest."""
     source = os.environ.get(_TEMPLATE_DIR_ENV_VAR, "")
     if not source:
-        return materialize_paired_default_workspace_template_worktree()
+        return materialize_paired_default_workspace_template_worktree().path
     destination = tmp_path / "template"
     subprocess.run(
         ["git", "clone", "-q", f"file://{Path(source).resolve()}", str(destination)],
