@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderCredentialSourceMissingError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
@@ -117,6 +119,29 @@ def test_build_provider_instance_raises_provider_unavailable_without_subscriptio
         AzureProviderBackend.build_provider_instance(
             name=ProviderInstanceName("azure"), config=config, mngr_ctx=temp_mngr_ctx
         )
+
+
+def test_build_provider_instance_reports_a_missing_az_login_as_a_missing_credential_source(
+    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A block that leans on this machine's az login, where nobody has run `az login`, is the retryable auth error."""
+    # A stand-in `az` that answers the way the real CLI does before `az login`, so the
+    # credential is unavailable without a network call (and PATH keeps every other tool).
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    az_stub = stub_bin / "az"
+    az_stub.write_text("#!/bin/sh\necho \"ERROR: Please run 'az login' to setup account.\" >&2\nexit 1\n")
+    az_stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub_bin}:{os.environ['PATH']}")
+    config = AzureProviderConfig(subscription_id="sub-123", tenant_id="tenant-1", use_azure_cli_login=True)
+
+    with pytest.raises(ProviderCredentialSourceMissingError) as exc_info:
+        AzureProviderBackend.build_provider_instance(
+            name=ProviderInstanceName("azure_abc"), config=config, mngr_ctx=temp_mngr_ctx
+        )
+
+    assert exc_info.value.short_remediation == "run `az login --tenant tenant-1` (with the `az` CLI installed)"
+    assert exc_info.value.short_reason == "Azure CLI login is not set up on this machine"
 
 
 def test_unavailable_error_help_text_is_azure_curated_not_start_docker(

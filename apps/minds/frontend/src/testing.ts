@@ -15,6 +15,7 @@ import type {
 import { createAppQueryClient } from "./models/queryClient";
 import type { SettingsOverview } from "./models/settings";
 import type { SharePanelModelOptions } from "./models/sharePanel";
+import type { SharedWorkspaceRow } from "./models/sharedWorkspaces";
 
 /** Render a component to its root vnode by instantiating the closure and
  * calling view() directly -- the inner-app idiom of testing render logic
@@ -148,12 +149,33 @@ export function secondAccountEntry(): UiAccountEntry {
   });
 }
 
+/** One shared-workspaces page row: an active share of a workspace this device runs. */
+export function sharedWorkspaceRow(
+  overrides: Partial<SharedWorkspaceRow> = {},
+): SharedWorkspaceRow {
+  return {
+    host_id: "host-" + "a".repeat(32),
+    workspace_id: "agent-live",
+    account_email: "alice@example.com",
+    display_name: "alpha",
+    workspace_domain: "abc.owner.us1.shares.example",
+    device_label: "This device",
+    share_state: "active",
+    record_state: "active",
+    created_display: "2026-09-01",
+    last_seen_display: "Connected now",
+    is_likely_leaked: false,
+    is_hosted_here: true,
+    ...overrides,
+  };
+}
+
 /** The connection backends as the server tables them: three with a pinned region, Modal placed per create. */
 export const CONNECTION_BACKEND_OPTIONS: readonly ConnectionBackendOption[] = [
-  { name: "aws", label: "AWS", is_region_pinned: true },
-  { name: "gcp", label: "GCP", is_region_pinned: true },
-  { name: "azure", label: "Azure", is_region_pinned: true },
-  { name: "modal", label: "Modal", is_region_pinned: false },
+  { name: "aws", label: "AWS", is_region_pinned: true, is_local_profile_supported: true },
+  { name: "gcp", label: "GCP", is_region_pinned: true, is_local_profile_supported: false },
+  { name: "azure", label: "Azure", is_region_pinned: true, is_local_profile_supported: true },
+  { name: "modal", label: "Modal", is_region_pinned: false, is_local_profile_supported: true },
 ];
 
 /** A create-form defaults payload with accountEntry's account as the default and Imbue Cloud selected. */

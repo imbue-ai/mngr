@@ -50,6 +50,8 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
+from imbue.minds.desktop_client.api_models import AccountShareRemovedResponse
+from imbue.minds.desktop_client.api_models import AccountSharesResponse
 from imbue.minds.desktop_client.api_models import AccountsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationReadRequest
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
@@ -167,6 +169,10 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("GET", "/api/v1/app/version"): _RouteModels(response_model=AppVersionResponse),
     ("GET", "/api/v1/workspaces"): _RouteModels(response_model=WorkspaceListResponse),
     ("GET", "/api/v1/accounts"): _RouteModels(response_model=AccountsResponse),
+    ("GET", "/api/v1/account-shares/{account_id}"): _RouteModels(response_model=AccountSharesResponse),
+    ("DELETE", "/api/v1/account-shares/{account_id}/{host_id}"): _RouteModels(
+        response_model=AccountShareRemovedResponse
+    ),
     ("GET", "/api/v1/timezone"): _RouteModels(response_model=TimezoneResponse),
     ("POST", "/api/v1/workspaces"): _RouteModels(
         request_model=CreateWorkspaceRequest, response_model=OperationHandleResponse, success_status=202

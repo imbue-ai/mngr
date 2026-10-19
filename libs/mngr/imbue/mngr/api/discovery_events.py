@@ -184,6 +184,13 @@ class DiscoveryError(FrozenModel):
     traceback_text: str | None = Field(
         default=None, description="Formatted traceback of the exception, when one was available"
     )
+    # A provider that cannot be reached for want of credentials knows the command that
+    # fixes it (``ProviderUnavailableError.short_remediation``); carrying it here lets a
+    # consumer show the fix without parsing the message. Optional so replayed snapshots
+    # written before this field existed still parse.
+    remediation: str | None = Field(
+        default=None, description="The concise next step the provider named for this error, when it named one"
+    )
 
 
 class FullDiscoverySnapshotEvent(EventEnvelope):

@@ -183,9 +183,14 @@ export class NotificationGestures {
     m.route.set(`/workspace/${workspaceAgentId}`, { chat: chatAgentId });
   }
 
-  /** The system-event gesture: the workspace's backups page, or the accounts
-   * page (where the backup quota lives) for an account-level event. */
-  openSystemEvent(workspaceAgentId: string): void {
+  /** The system-event gesture: the route the event names, else the workspace's
+   * backups page, or the accounts page (where the backup quota lives) for an
+   * account-level event. */
+  openSystemEvent(workspaceAgentId: string, linkPath = ""): void {
+    if (linkPath !== "") {
+      m.route.set(linkPath);
+      return;
+    }
     if (workspaceAgentId === "") {
       m.route.set("/accounts");
       return;
@@ -501,7 +506,10 @@ export class NotificationsUiController {
         );
         return;
       case "system_event":
-        this.gestures.openSystemEvent(entry.workspace_agent_id);
+        this.gestures.openSystemEvent(
+          entry.workspace_agent_id,
+          entry.link_path ?? "",
+        );
         return;
     }
   }

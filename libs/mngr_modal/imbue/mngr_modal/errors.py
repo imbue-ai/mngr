@@ -49,6 +49,16 @@ class ModalConfigError(ModalMngrError, ValueError):
     """Raised when a ModalProviderConfig combines mutually-incompatible options."""
 
 
+class ModalProfileNotFoundError(ModalConfigError):
+    """The ``modal_profile`` a block names is not in this machine's ``~/.modal.toml`` (or holds no token)."""
+
+    short_remediation: str
+
+    def __init__(self, message: str, short_remediation: str) -> None:
+        self.short_remediation = short_remediation
+        super().__init__(message)
+
+
 class ModalHostKeyMissingError(ModalMngrError):
     """Raised when no client key that opens a sandbox is on disk.
 

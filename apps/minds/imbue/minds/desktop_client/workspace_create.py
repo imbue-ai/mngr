@@ -45,6 +45,8 @@ from imbue.minds.desktop_client.region_preference import known_regions_for_provi
 from imbue.minds.desktop_client.region_preference import modal_region_choices
 from imbue.minds.desktop_client.region_preference import resolve_default_region
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.shared_workspaces import SHARED_WORKSPACES_PAGE_PATH
+from imbue.minds.desktop_client.sharing_handler import ShareQuotaExceededError
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import enable_web_access_for_workspace
 from imbue.minds.desktop_client.state import get_state
@@ -390,9 +392,12 @@ class WebAccessEnabler(MutableModel):
                 identity_cache=self.identity_cache,
                 forward_identity=self.forward_identity,
             )
+        except ShareQuotaExceededError as exc:
+            logger.warning("Could not enable web access for {}: {}", agent_id, exc)
+            self._notify_sharing_not_enabled(agent_id, str(exc), link_path=SHARED_WORKSPACES_PAGE_PATH)
         except SharingError as exc:
             logger.warning("Could not enable web access for {}: {}", agent_id, exc)
-            self._notify_sharing_not_enabled(agent_id, str(exc))
+            self._notify_sharing_not_enabled(agent_id, str(exc), link_path="")
         except Exception as exc:
             # Best-effort side effect: any unexpected failure (a bug, a
             # transport error the share flow did not wrap into SharingError)
@@ -401,7 +406,7 @@ class WebAccessEnabler(MutableModel):
             # that worker and skip the create's remaining steps (region
             # persistence). The user can still enable sharing from settings.
             logger.opt(exception=exc).error("Unexpected error enabling web access for {}", agent_id)
-            self._notify_sharing_not_enabled(agent_id, "an unexpected error; see the logs")
+            self._notify_sharing_not_enabled(agent_id, "an unexpected error; see the logs", link_path="")
         finally:
             # Mirror the sharing PUT handler: the share state may have changed
             # even on failure (the connector create can succeed before the
@@ -410,18 +415,24 @@ class WebAccessEnabler(MutableModel):
             # the new state immediately rather than at TTL expiry.
             self.active_share_cache.invalidate(str(host_id))
 
-    def _notify_sharing_not_enabled(self, agent_id: AgentId, detail: str) -> None:
+    def _notify_sharing_not_enabled(self, agent_id: AgentId, detail: str, link_path: str) -> None:
         if self.notification_feed is None:
             return
         workspace_name = self.backend_resolver.get_workspace_name(agent_id) or str(agent_id)[:8]
         accent = self.backend_resolver.get_workspace_color(agent_id) or DEFAULT_WORKSPACE_COLOR
+        remedy = (
+            "Review your shared workspaces to free a slot, then turn sharing on from the workspace's Share panel."
+            if link_path
+            else "Turn sharing on from the workspace's Share panel to try again."
+        )
         self.notification_feed.append_system_event(
             SystemEventCard(
                 title="Sharing was not enabled",
-                body=f"{detail.rstrip('.')}. Turn sharing on from the workspace's Share panel to try again.",
+                body=f"{detail.rstrip('.')}. {remedy}",
                 workspace_agent_id=str(agent_id),
                 workspace_name=workspace_name,
                 workspace_accent=accent,
+                link_path=link_path,
             )
         )
 

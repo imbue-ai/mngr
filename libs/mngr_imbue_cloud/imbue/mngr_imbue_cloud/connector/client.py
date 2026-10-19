@@ -1792,6 +1792,22 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         return self._check(response, ImbueCloudAccountError)
 
+    def admin_run_share_retirement_sweep(self, admin_api_key: SecretStr, dry_run: bool) -> dict[str, Any]:
+        """Run one share retirement sweep pass on demand (operator tool + deployment tests).
+
+        ``dry_run`` lists every active share with the verdict it would get
+        (``live``, ``retired``, ``unmatched``) and retires nothing.
+        """
+        response = self._send(
+            "POST",
+            self._url("/admin/sweep/share-retirement"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(admin_api_key),
+            params={"dry_run": "1"} if dry_run else None,
+            timeout=ADMIN_SWEEP_TIMEOUT_SECONDS,
+        )
+        return self._check(response, ImbueCloudAccountError)
+
     def admin_run_lease_record_sweep(
         self, admin_api_key: SecretStr, dry_run: bool, grace_seconds: float | None
     ) -> dict[str, Any]:
@@ -2259,6 +2275,11 @@ def _parse_share_info(body: dict[str, Any], state: str) -> ShareInfo:
         relays=relay_logins,
         relay_token=SecretStr(relay_token) if relay_token else None,
         last_tunnel_login_at=body.get("last_tunnel_login_at"),
+        last_seen_at=body.get("last_seen_at"),
+        created_at=body.get("created_at"),
+        updated_at=body.get("updated_at"),
+        entry_label=body.get("entry_label"),
+        share_label=body.get("share_label"),
         cert_not_after=body.get("cert_not_after"),
         chrome_origin=str(raw_chrome_origin) if raw_chrome_origin else None,
         needs_reshare=body.get("needs_reshare") is True,

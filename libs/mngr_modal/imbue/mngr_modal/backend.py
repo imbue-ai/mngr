@@ -22,6 +22,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderCredentialSourceMissingError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -32,7 +33,10 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
+from imbue.mngr_modal.config import modal_config_path
+from imbue.mngr_modal.config import read_modal_profile_token
 from imbue.mngr_modal.errors import ModalConfigError
+from imbue.mngr_modal.errors import ModalProfileNotFoundError
 from imbue.mngr_modal.instance import ModalProviderApp
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.plugin import MODAL_BACKEND_NAME
@@ -278,6 +282,13 @@ def app_registry_key(app_name: str, credential_identity: str | None) -> str:
     return f"{app_name}@{credential_identity}"
 
 
+def _credential_identity_of(modal_interface: ModalInterface, config: ModalProviderConfig) -> str | None:
+    """The public token id a provider instance's Modal calls authenticate with, or None for the SDK default."""
+    if isinstance(modal_interface, DirectModalInterface):
+        return modal_interface.token_id
+    return config.token_id
+
+
 class ModalProviderBackend(ProviderBackendInterface):
     """Backend for creating Modal sandbox provider instances.
 
@@ -475,13 +486,19 @@ class ModalProviderBackend(ProviderBackendInterface):
         return MODAL_START_ARGS_HELP
 
     @staticmethod
-    def _resolve_modal_interface(config: ProviderInstanceConfig) -> ModalInterface:
+    def _resolve_modal_interface(name: ProviderInstanceName, config: ProviderInstanceConfig) -> ModalInterface:
         """Validate ``config`` is a ``ModalProviderConfig`` and pick the matching ``ModalInterface``.
 
         Shared by ``build_provider_instance`` and ``bootstrap_for_host_creation``; both call
         sites need the same isinstance guard and the same ``match config.mode`` dispatch.
         Factoring it out keeps the per-mode dispatch in exactly one place so adding a new
         ``ModalMode`` variant only needs editing here.
+
+        A ``modal_profile`` is resolved here, on every construction, from this machine's
+        ``~/.modal.toml`` into the same token pair an explicit ``token_id`` /
+        ``token_secret`` would carry; a profile the machine lacks raises
+        ``ProviderCredentialSourceMissingError`` so discovery keeps re-checking until
+        ``modal token new --profile <name>`` has run.
         """
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
@@ -495,7 +512,26 @@ class ModalProviderBackend(ProviderBackendInterface):
                         "token_id and token_secret must be set together: a Modal token is the pair, and one "
                         "half alone would silently fall back to the SDK's own credential resolution"
                     )
-                return DirectModalInterface(token_id=config.token_id, token_secret=config.token_secret)
+                if config.modal_profile is None:
+                    return DirectModalInterface(token_id=config.token_id, token_secret=config.token_secret)
+                if config.token_id is not None:
+                    raise ModalConfigError(
+                        "modal_profile and token_id / token_secret are mutually exclusive: an instance "
+                        "authenticates either through the named profile or through its own token, never both"
+                    )
+                try:
+                    profile_token = read_modal_profile_token(config.modal_profile, modal_config_path())
+                except ModalProfileNotFoundError as e:
+                    raise ProviderCredentialSourceMissingError(
+                        name,
+                        reason=str(e),
+                        short_remediation=e.short_remediation,
+                        short_reason=f"Modal profile {config.modal_profile!r} is not set up on this machine",
+                        user_help_text=(
+                            f"{e}\nSet it up on this machine, or edit the connection to use another credential."
+                        ),
+                    ) from e
+                return DirectModalInterface(token_id=profile_token.token_id, token_secret=profile_token.token_secret)
             case ModalMode.PROXIED:
                 # Not implemented: Modal is imbue-internal + sandboxes are ephemeral (~1 day), so it
                 # isn't offered for public/keyless use -- anyone running it authenticates directly (DIRECT).
@@ -520,7 +556,7 @@ class ModalProviderBackend(ProviderBackendInterface):
         which creates the environment if missing; the subsequent
         ``build_provider_instance`` call then succeeds normally.
         """
-        modal_interface = ModalProviderBackend._resolve_modal_interface(config)
+        modal_interface = ModalProviderBackend._resolve_modal_interface(name, config)
         return ModalProviderBackend._construct_modal_provider(
             name, config, mngr_ctx, modal_interface, is_environment_creation_allowed=False
         )
@@ -544,7 +580,7 @@ class ModalProviderBackend(ProviderBackendInterface):
         ``build_provider_instance`` call in the create path reuses the cached
         app via ``_get_or_create_app``.
         """
-        modal_interface = ModalProviderBackend._resolve_modal_interface(config)
+        modal_interface = ModalProviderBackend._resolve_modal_interface(name, config)
         ModalProviderBackend._construct_modal_provider(
             name, config, mngr_ctx, modal_interface, is_environment_creation_allowed=True
         )
@@ -577,7 +613,10 @@ class ModalProviderBackend(ProviderBackendInterface):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
 
         environment_name, app_name, host_dir = ModalProviderBackend._derive_modal_names(name, config, mngr_ctx)
-        registry_key = app_registry_key(app_name, config.token_id)
+        # The token that opened the app qualifies its registry entry, whether the block
+        # carries it or a profile supplied it.
+        credential_identity = _credential_identity_of(modal_interface, config)
+        registry_key = app_registry_key(app_name, credential_identity)
 
         # Create the ModalProviderApp that manages the Modal app and its resources
         try:
@@ -587,7 +626,7 @@ class ModalProviderBackend(ProviderBackendInterface):
                 config.is_persistent,
                 modal_interface,
                 is_environment_creation_allowed=is_environment_creation_allowed,
-                credential_identity=config.token_id,
+                credential_identity=credential_identity,
             )
             volume = ModalProviderBackend.get_volume_for_app(registry_key, modal_interface)
 

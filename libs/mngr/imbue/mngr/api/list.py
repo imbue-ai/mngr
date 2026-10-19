@@ -419,6 +419,7 @@ def _build_provider_snapshot_state(
                 message=error_info.message,
                 provider_name=error_info.provider_name,
                 traceback_text=error_info.traceback_text,
+                remediation=error_info.short_remediation,
             )
 
     candidate_names = list_provider_names_to_load(mngr_ctx)

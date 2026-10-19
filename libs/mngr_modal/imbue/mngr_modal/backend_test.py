@@ -7,6 +7,7 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderCredentialSourceMissingError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
@@ -85,7 +86,7 @@ def test_get_files_for_deploy_includes_non_key_files(temp_mngr_ctx: MngrContext,
 
 def test_resolve_modal_interface_direct_uses_sdk() -> None:
     """DIRECT mode resolves to the SDK-backed interface."""
-    iface = ModalProviderBackend._resolve_modal_interface(ModalProviderConfig())
+    iface = ModalProviderBackend._resolve_modal_interface(ProviderInstanceName("modal"), ModalProviderConfig())
     assert isinstance(iface, DirectModalInterface)
 
 
@@ -93,7 +94,7 @@ def test_resolve_modal_interface_proxied_is_not_implemented() -> None:
     """PROXIED is intentionally not implemented (Modal is imbue-internal; auth directly via DIRECT)."""
     config = ModalProviderConfig(mode=ModalMode.PROXIED)
     with pytest.raises(NotImplementedError):
-        ModalProviderBackend._resolve_modal_interface(config)
+        ModalProviderBackend._resolve_modal_interface(ProviderInstanceName("modal"), config)
 
 
 # Construction against an unreachable Modal
@@ -223,7 +224,7 @@ def test_bootstrapping_for_host_creation_surfaces_an_unreachable_modal(
 def test_resolve_modal_interface_threads_the_instance_tokens_into_the_sdk_boundary() -> None:
     """A DIRECT instance with its own token authenticates through that token, not the SDK default."""
     config = ModalProviderConfig(token_id="ak-instance", token_secret=SecretStr("as-instance"))
-    iface = ModalProviderBackend._resolve_modal_interface(config)
+    iface = ModalProviderBackend._resolve_modal_interface(ProviderInstanceName("modal"), config)
     assert isinstance(iface, DirectModalInterface)
     assert iface.token_id == "ak-instance"
     assert iface.token_secret is not None
@@ -238,7 +239,63 @@ def test_resolve_modal_interface_threads_the_instance_tokens_into_the_sdk_bounda
 def test_resolve_modal_interface_rejects_half_a_token_on_the_merged_config(config: ModalProviderConfig) -> None:
     """Half a token would silently fall back to the SDK's own credentials, so it is a config error."""
     with pytest.raises(ModalConfigError, match="token_id and token_secret must be set together"):
-        ModalProviderBackend._resolve_modal_interface(config)
+        ModalProviderBackend._resolve_modal_interface(ProviderInstanceName("modal"), config)
+
+
+def test_resolve_modal_interface_reads_a_named_profiles_token_from_the_modal_config_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A block naming a profile authenticates with that profile's token, read fresh from ~/.modal.toml."""
+    config_path = tmp_path / "modal.toml"
+    config_path.write_text(
+        '[default]\ntoken_id = "ak-default"\ntoken_secret = "as-default"\nactive = true\n\n'
+        '[work]\ntoken_id = "ak-work"\ntoken_secret = "as-work"\n'
+    )
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(config_path))
+    # The SDK's own resolution would take these; the profile must win over them.
+    monkeypatch.setenv("MODAL_TOKEN_ID", "ak-env")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "as-env")
+
+    iface = ModalProviderBackend._resolve_modal_interface(
+        ProviderInstanceName("modal"), ModalProviderConfig(modal_profile="work")
+    )
+
+    assert isinstance(iface, DirectModalInterface)
+    assert iface.token_id == "ak-work"
+    assert iface.token_secret is not None
+    assert iface.token_secret.get_secret_value() == "as-work"
+
+
+@pytest.mark.parametrize(
+    ("file_text", "expected_reason"),
+    [
+        (None, "does not exist"),
+        ('[default]\ntoken_id = "ak"\ntoken_secret = "as"\n', "holds a token_id / token_secret pair under that name"),
+        ('[work]\ntoken_id = "ak-work"\n', "holds a token_id / token_secret pair under that name"),
+    ],
+    ids=["no-file", "no-section", "no-secret"],
+)
+def test_resolve_modal_interface_reports_a_missing_profile_as_a_missing_credential_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, file_text: str | None, expected_reason: str
+) -> None:
+    config_path = tmp_path / "modal.toml"
+    if file_text is not None:
+        config_path.write_text(file_text)
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(config_path))
+
+    with pytest.raises(ProviderCredentialSourceMissingError, match=expected_reason) as exc_info:
+        ModalProviderBackend._resolve_modal_interface(
+            ProviderInstanceName("work_modal"), ModalProviderConfig(modal_profile="work")
+        )
+
+    assert exc_info.value.short_remediation == "run `modal token new --profile work`"
+    assert exc_info.value.provider_name == ProviderInstanceName("work_modal")
+
+
+def test_resolve_modal_interface_rejects_a_profile_combined_with_an_explicit_token() -> None:
+    config = ModalProviderConfig(modal_profile="work", token_id="ak-x", token_secret=SecretStr("as-x"))
+    with pytest.raises(ModalConfigError, match="mutually exclusive"):
+        ModalProviderBackend._resolve_modal_interface(ProviderInstanceName("modal"), config)
 
 
 def test_app_registry_key_qualifies_the_app_name_by_the_credentials_that_opened_it() -> None:

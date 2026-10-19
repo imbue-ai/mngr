@@ -8,11 +8,18 @@ See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
-Credentials are resolved via Azure's `DefaultAzureCredential`; they are not configurable in `mngr.toml`. Any of the following works:
+Credentials are resolved via Azure's `DefaultAzureCredential` by default. Any of the following works:
 
 - `az login` (developer laptop) — uses your Azure CLI session
 - Service principal env vars: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET` (CI)
 - A managed identity (when running on an Azure VM / Container App)
+
+A provider instance can instead name its own credential source, so several instances can point at different Azure accounts from one process:
+
+- `use_azure_cli_login = true` with `tenant_id` and `subscription_id` authenticates through this machine's `az login` for exactly that tenant and subscription (an `AzureCliCredential`, never `DefaultAzureCredential`, so `AZURE_CLIENT_*` variables and managed identities are not consulted); the block carries no secret. It needs the `az` CLI on PATH. A machine without that login reports the provider as awaiting its credential source (`ProviderCredentialSourceMissingError`), which discovery keeps re-checking until `az login --tenant <tenant>` has run.
+- `client_id` + `tenant_id` + `client_secret` use a service principal directly.
+
+The two are mutually exclusive.
 
 The subscription is resolved automatically from your `az` login, so after `az login` (and optionally `az account set --subscription <id>`), `--provider azure` works with no config at all. Resolution order: `providers.azure.subscription_id` > `AZURE_SUBSCRIPTION_ID` env var > the Azure CLI's active subscription.
 

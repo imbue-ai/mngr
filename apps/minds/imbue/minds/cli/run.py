@@ -26,6 +26,7 @@ import tempfile
 import threading
 import webbrowser
 from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -69,6 +70,7 @@ from imbue.minds.desktop_client.app_record import parse_launch_command_from_envi
 from imbue.minds.desktop_client.app_record import remove_app_record
 from imbue.minds.desktop_client.app_record import write_app_record
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.backup_reaper import make_quota_evictor
@@ -119,6 +121,7 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.shared_workspaces import clear_materials_of_shares_retired_elsewhere
 from imbue.minds.desktop_client.startup_reconcile import PendingCreateAttemptDiscoverySweep
 from imbue.minds.desktop_client.startup_reconcile import StartupHostReconciler
 from imbue.minds.desktop_client.state import get_state
@@ -817,6 +820,9 @@ def run(
         session_store=session_store,
         resolver=backend_resolver,
         forward_identity=forward_identity,
+        on_shares_retired_elsewhere=lambda no_longer_shared: _clear_shares_retired_elsewhere(
+            no_longer_shared, imbue_cloud_cli, session_store, backend_resolver
+        ),
         # Newly-materialized SSH material (a cloud workspace unlocked/synced
         # from another install) and a refreshed account session are picked up
         # lazily by discovery; bouncing the observe child makes the workspace
@@ -1054,6 +1060,19 @@ def run(
             serve_desktop_client(app, get_state(app), host=host, port=port, api_socket_path=socket_location.path)
     finally:
         remove_app_record(record_path)
+
+
+def _clear_shares_retired_elsewhere(
+    no_longer_shared_by_user_id: Mapping[str, Sequence[str]],
+    imbue_cloud_cli: ImbueCloudCli,
+    session_store: MultiAccountSessionStore,
+    backend_resolver: BackendResolverInterface,
+) -> None:
+    cleared = clear_materials_of_shares_retired_elsewhere(
+        no_longer_shared_by_user_id, imbue_cloud_cli, session_store, backend_resolver
+    )
+    if cleared:
+        logger.info("Cleared the share materials of {} workspace(s) whose share was retired elsewhere", len(cleared))
 
 
 def _resolve_backup_quota_evictor(

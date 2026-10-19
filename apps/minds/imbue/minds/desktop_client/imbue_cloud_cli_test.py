@@ -721,3 +721,69 @@ def test_sync_document_push_raises_the_typed_conflict_with_the_stored_row() -> N
     argv = caller.recorded_calls[0].argv
     assert argv[:5] == ("imbue_cloud", "sync", "documents", "push", "--account")
     assert "--input-file" in argv
+
+
+def test_resize_machine_passes_the_targets_and_parses_the_recorded_sizes() -> None:
+    payload = {
+        "host_db_id": "row-1",
+        "host_id": "host-" + "a" * 32,
+        "host_name": "sunny",
+        "status": "running",
+        "memory_units": 8,
+        "target_memory_units": 16,
+        "disk_gb": 28,
+        "target_disk_gb": 56,
+        "is_restart_needed_to_apply": True,
+        "note": "The new size applies at the machine's next restart (stop it and start it again).",
+    }
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(payload)))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    recorded = cli.resize_machine("owner@example.com", "host-" + "a" * 32, target_memory_units=16, target_disk_gb=56)
+
+    assert recorded.target_memory_units == 16
+    assert recorded.target_disk_gb == 56
+    assert recorded.is_restart_needed_to_apply is True
+    assert caller.calls[0] == [
+        "imbue_cloud",
+        "machines",
+        "resize",
+        "host-" + "a" * 32,
+        "--units",
+        "16",
+        "--disk-gb",
+        "56",
+        "--account",
+        "owner@example.com",
+    ]
+
+
+def test_resize_machine_sends_only_the_dimension_asked_for() -> None:
+    payload = {"host_db_id": "row-1", "host_id": "host-" + "a" * 32, "host_name": "sunny", "status": "stopped"}
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(payload)))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    cli.resize_machine("owner@example.com", "host-" + "a" * 32, target_memory_units=None, target_disk_gb=56)
+
+    assert "--units" not in caller.calls[0]
+    assert caller.calls[0][4:6] == ["--disk-gb", "56"]
+
+
+def test_resize_machine_raises_the_typed_quota_error_on_the_connectors_structured_refusal() -> None:
+    stderr = json.dumps(
+        {
+            "error": "Quota exceeded: active machine units limit is 16 (currently 8)",
+            "error_class": "ImbueCloudQuotaExceededError",
+            "code": "quota_exceeded",
+            "entitlement": "max_active_machine_units",
+            "limit": 16,
+            "current": 8,
+        }
+    )
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stdout="", stderr=stderr))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    with pytest.raises(ImbueCloudQuotaExceededCliError) as exc_info:
+        cli.resize_machine("owner@example.com", "host-" + "a" * 32, target_memory_units=32, target_disk_gb=None)
+
+    assert "active machine units limit is 16" in str(exc_info.value)

@@ -33,6 +33,7 @@ from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderCredentialSourceMissingError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderNotAuthorizedError
@@ -58,6 +59,13 @@ from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 # wakes it -- so this is a liveness backstop rather than a poll interval; a
 # short value would only burn idle wakeups (which cost ~3x under gVisor).
 _SHUTDOWN_CHECK_INTERVAL_SECONDS: Final[float] = 3600.0
+
+# How often a provider whose credential source is missing on this machine (an AWS
+# profile, an Azure CLI login, a Modal profile the block names) is re-checked. The
+# user sets the login up outside mngr, so nothing restarts the process when it
+# appears; a check is one construction attempt, so this stays well above the
+# ordinary poll cadence without making the wait after `aws configure` feel long.
+CREDENTIAL_SOURCE_RETRY_INTERVAL_SECONDS: Final[float] = 120.0
 
 
 def _utc_now() -> datetime:
@@ -223,6 +231,9 @@ class _ProviderDiscoveryPoller(MutableModel):
     _is_construction_failing: bool = PrivateAttr(default=False)
     # Set when the provider reports missing credentials, which no retry can fix.
     _is_ended_pending_credentials: bool = PrivateAttr(default=False)
+    # Set while the provider's named credential source is absent from this machine;
+    # the poller then re-checks on the slow CREDENTIAL_SOURCE_RETRY_INTERVAL_SECONDS cadence.
+    _is_awaiting_credential_source: bool = PrivateAttr(default=False)
 
     @property
     def _discovered_provider(self) -> DiscoveredProvider:
@@ -321,9 +332,34 @@ class _ProviderDiscoveryPoller(MutableModel):
         by returning, never by raising: ``run``'s exit reads a live exception as a
         crashed poller and would take the whole process down over one provider's
         missing API key.
+
+        ``ProviderCredentialSourceMissingError`` is the exception to that exception:
+        the block names a login this machine does not have yet (an AWS profile, an
+        Azure CLI login, a Modal profile), and the user installs it outside mngr with
+        nothing restarting this process. Its snapshot is emitted and the poller keeps
+        checking, on the slow ``CREDENTIAL_SOURCE_RETRY_INTERVAL_SECONDS`` cadence,
+        so the provider recovers on its own once the login exists.
         """
         try:
             provider = get_provider_instance(self.provider_name, self.mngr_ctx)
+        except ProviderCredentialSourceMissingError as e:
+            if self._is_awaiting_credential_source:
+                logger.debug(
+                    "Provider {} still awaits its credential source; re-emitting its snapshot: {}",
+                    self.provider_name,
+                    e,
+                )
+            else:
+                logger.warning(
+                    "Provider {} names a credential source this machine does not have ({}); "
+                    "emitting its snapshot and re-checking every {:.0f}s",
+                    self.provider_name,
+                    e,
+                    CREDENTIAL_SOURCE_RETRY_INTERVAL_SECONDS,
+                )
+            self._emit_construction_skip_snapshot(started_at, e, is_empty=False)
+            self._is_awaiting_credential_source = True
+            return None
         except ProviderNotAuthorizedError as e:
             logger.warning(
                 "Provider {} is not authorized ({}); emitting its snapshot and ending its discovery poller",
@@ -338,8 +374,12 @@ class _ProviderDiscoveryPoller(MutableModel):
             self._log_construction_skip(e, is_empty=is_empty)
             self._emit_construction_skip_snapshot(started_at, e, is_empty=is_empty)
             self._is_construction_failing = True
+            # Whatever failed now, it is no longer the missing login, so the ordinary
+            # poll cadence applies again.
+            self._is_awaiting_credential_source = False
             return None
         self._is_construction_failing = False
+        self._is_awaiting_credential_source = False
         return provider
 
     def _log_construction_skip(self, exc: BaseException, is_empty: bool) -> None:
@@ -380,6 +420,7 @@ class _ProviderDiscoveryPoller(MutableModel):
                 type_name=type(exc).__name__,
                 message=str(exc),
                 provider_name=self.provider_name,
+                remediation=_remediation_of(exc),
             )
         )
         write_provider_discovery_snapshot(
@@ -436,6 +477,7 @@ class _ProviderDiscoveryPoller(MutableModel):
             message=str(cause),
             provider_name=self.provider_name,
             traceback_text=format_exception_traceback(cause),
+            remediation=_remediation_of(cause),
         )
         write_provider_discovery_snapshot(
             self.mngr_ctx.config,
@@ -574,7 +616,10 @@ class _ProviderDiscoveryPoller(MutableModel):
         Returns normally when the provider turns out to need credentials the user
         has not supplied. That is the one condition polling cannot resolve, and it
         belongs to one provider, so it ends one poller and leaves every other
-        provider (and this process) running.
+        provider (and this process) running. A block naming a login this machine
+        lacks (``ProviderCredentialSourceMissingError``) is the exception: the user
+        installs that login outside mngr, so the poller stays alive and re-checks on
+        the slow ``CREDENTIAL_SOURCE_RETRY_INTERVAL_SECONDS`` cadence instead.
         """
         with mngr_executor(
             parent_cg=self.mngr_ctx.concurrency_group,
@@ -601,6 +646,15 @@ class _ProviderDiscoveryPoller(MutableModel):
                     logger.warning("Provider {} discovery poll failed (continuing): {}", self.provider_name, e)
                 if self._is_ended_pending_credentials:
                     return
+                if self._is_awaiting_credential_source:
+                    # No provider was built, so there is nothing to re-read meanwhile; the
+                    # slow cadence never shortens an already slower poll interval.
+                    stop_event.wait(
+                        timeout=max(
+                            CREDENTIAL_SOURCE_RETRY_INTERVAL_SECONDS, self.config.discovery_poll_interval_seconds
+                        )
+                    )
+                    continue
                 self._wait_for_next_poll_rereading_known_hosts(stop_event)
 
     def _wait_for_next_poll_rereading_known_hosts(self, stop_event: threading.Event) -> None:
@@ -626,6 +680,12 @@ class _ProviderDiscoveryPoller(MutableModel):
                 self.reread_known_hosts_and_emit()
             except (OSError, MngrError) as e:
                 logger.warning("Provider {} host re-read pass failed (continuing): {}", self.provider_name, e)
+
+
+@pure
+def _remediation_of(exc: BaseException) -> str | None:
+    """The concise fix a provider named for its own failure, for errors that carry one."""
+    return exc.short_remediation if isinstance(exc, ProviderUnavailableError) else None
 
 
 def _wait_for_future(future: Future[BoundedProviderDiscoveryResult], timeout_seconds: float) -> bool:

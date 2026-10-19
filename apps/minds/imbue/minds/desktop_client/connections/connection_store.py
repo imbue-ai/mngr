@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -33,12 +34,15 @@ from imbue.minds.desktop_client import dek_store
 from imbue.minds.desktop_client.connections.data_types import CONNECTION_STATE_ACTIVE
 from imbue.minds.desktop_client.connections.data_types import CONNECTION_STATE_DELETED
 from imbue.minds.desktop_client.connections.data_types import ConnectionAvailability
+from imbue.minds.desktop_client.connections.data_types import ConnectionCredentialSource
 from imbue.minds.desktop_client.connections.data_types import ConnectionCredentials
 from imbue.minds.desktop_client.connections.data_types import ConnectionMetadata
 from imbue.minds.desktop_client.connections.data_types import ConnectionPullOutcome
 from imbue.minds.desktop_client.connections.data_types import ConnectionReplicaRecord
 from imbue.minds.desktop_client.connections.data_types import ConnectionView
 from imbue.minds.desktop_client.connections.data_types import connection_record_from_wire
+from imbue.minds.desktop_client.connections.data_types import credential_source_name
+from imbue.minds.desktop_client.connections.data_types import credential_source_of_raw_metadata
 from imbue.minds.desktop_client.connections.data_types import parse_connection_backend
 from imbue.minds.desktop_client.connections.primitives import CONNECTION_DOCUMENT_KIND
 from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
@@ -124,6 +128,28 @@ def _credentials_from_raw(raw: Mapping[str, Any], doc_id: str) -> ConnectionCred
         # The failing values are the credentials themselves, so only the shape of the failure is loggable.
         logger.warning("Malformed credentials payload for connection {}: {} field(s) invalid", doc_id, e.error_count())
         return None
+
+
+def _plaintext_payload_for(
+    credential_source: ConnectionCredentialSource, credentials: ConnectionCredentials | None
+) -> dict[str, object] | None:
+    """The payload a connection stores for its credential source; None (no payload) for a local profile.
+
+    Raises ``WorkspaceSyncError`` when the two disagree, since a pasted
+    connection without keys would materialize nothing and a local-profile one
+    with keys would sync a secret the design says it never carries.
+    """
+    match credential_source:
+        case ConnectionCredentialSource.PASTED:
+            if credentials is None:
+                raise WorkspaceSyncError("a pasted-credentials connection needs its credentials")
+            return credentials.to_plaintext_dict()
+        case ConnectionCredentialSource.LOCAL_PROFILE:
+            if credentials is not None:
+                raise WorkspaceSyncError("a local-profile connection carries no credentials payload")
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _check_no_update_in_progress(record: ConnectionReplicaRecord) -> None:
@@ -371,6 +397,14 @@ class ConnectionStore(MutableModel):
     ) -> ConnectionAvailability:
         if is_connection_metadata_too_new(record) or is_backend_unknown:
             return ConnectionAvailability.READ_ONLY
+        credential_source = credential_source_of_raw_metadata(record.metadata)
+        if credential_source is None:
+            # A source this app does not know was written by a newer app.
+            return ConnectionAvailability.READ_ONLY
+        if credential_source is ConnectionCredentialSource.LOCAL_PROFILE:
+            # Nothing is encrypted: the block names a login on this machine, and whether
+            # that login exists here is discovery's verdict, not the replica's.
+            return ConnectionAvailability.AVAILABLE
         if user_id == LOCAL_PROFILE_USER_ID:
             if record.payload is None:
                 return ConnectionAvailability.NO_CREDENTIALS
@@ -421,6 +455,7 @@ class ConnectionStore(MutableModel):
             placement=dict(metadata.placement),
             owner_user_id=user_id,
             availability=self._availability_for_backend_known(user_id, record, is_backend_unknown=is_backend_unknown),
+            credential_source=metadata.credential_source,
         )
 
     def list_views(self, user_id: str) -> list[ConnectionView]:
@@ -481,14 +516,16 @@ class ConnectionStore(MutableModel):
         alias: str,
         identifier: str,
         placement: Mapping[str, Any],
-        credentials: ConnectionCredentials,
+        credentials: ConnectionCredentials | None,
+        credential_source: ConnectionCredentialSource = ConnectionCredentialSource.PASTED,
     ) -> ConnectionReplicaRecord:
         """Store a new connection locally (dirty for an account; final for the local profile).
 
         The caller pushes an account-owned connection with :meth:`push_connection`
         once the credentials have been validated. Raises
         ``ConnectionRequiresMasterPasswordError`` when the owning account is
-        locked here or has no master password.
+        locked here or has no master password (for a local-profile connection
+        too, so the owner rule the panel shows stays one rule).
         """
         metadata = ConnectionMetadata(
             connection_format=SUPPORTED_CONNECTION_FORMAT,
@@ -497,8 +534,9 @@ class ConnectionStore(MutableModel):
             identifier=identifier,
             placement=dict(placement),
             created_on_device_label=self.device_label,
+            credential_source=credential_source_name(credential_source),
         )
-        plaintext = credentials.to_plaintext_dict()
+        plaintext = _plaintext_payload_for(credential_source, credentials)
         if owner_user_id == LOCAL_PROFILE_USER_ID:
             record = ConnectionReplicaRecord(
                 doc_id=str(connection_id),
@@ -516,7 +554,7 @@ class ConnectionStore(MutableModel):
             record = ConnectionReplicaRecord(
                 doc_id=str(connection_id),
                 metadata=metadata.model_dump(mode="json"),
-                encrypted_payload=_encode_encrypted_payload(dek, plaintext),
+                encrypted_payload=_encode_encrypted_payload(dek, plaintext) if plaintext is not None else None,
                 is_dirty=True,
             )
         with self._lock:
@@ -530,17 +568,25 @@ class ConnectionStore(MutableModel):
         doc_id: str,
         alias: str,
         identifier: str,
-        credentials: ConnectionCredentials,
+        credentials: ConnectionCredentials | None,
+        credential_source: ConnectionCredentialSource = ConnectionCredentialSource.PASTED,
+        # The connection's placement as it must read after the update (the caller keeps the pinned
+        # region and the Azure resource group, and swaps the profile fields); None keeps it as it is.
+        placement: Mapping[str, Any] | None = None,
     ) -> ConnectionReplicaRecord:
-        """Replace a connection's credentials (and alias) in place, keeping its id, instance, backend, and placement.
+        """Replace a connection's credentials (and alias) in place, keeping its id, instance, and backend.
 
-        The row is stored dirty with ``validation_rollback`` set to the previous
-        row, which this returns: until the caller clears it (the credentials
-        validated and, for an account owner, pushed) or restores it, no sync
-        pass pushes the row or overwrites it from the server. Keys this app
-        does not know are carried through the metadata; the revision is kept.
+        The credential source may change (pasted keys to a local profile or
+        back), so the placement's profile fields change with it while the
+        pinned region stays. The row is stored dirty with ``validation_rollback``
+        set to the previous row, which this returns: until the caller clears it
+        (the credentials validated and, for an account owner, pushed) or
+        restores it, no sync pass pushes the row or overwrites it from the
+        server. Keys this app does not know are carried through the metadata;
+        the revision is kept.
         Raises ``ConnectionNotFoundError`` for an unknown id or a tombstone,
-        ``ConnectionTooNewError`` for a row a newer app wrote,
+        ``ConnectionTooNewError`` for a row a newer app wrote (a format or a
+        credential source this app does not know),
         ``ConnectionUpdateInProgressError`` for a row another update is still
         validating, and ``ConnectionRequiresMasterPasswordError`` when the
         owning account cannot encrypt here.
@@ -550,11 +596,20 @@ class ConnectionStore(MutableModel):
             existing = self._records_by_user_id.get(owner_user_id, {}).get(doc_id)
         if existing is None or existing.state != CONNECTION_STATE_ACTIVE:
             raise ConnectionNotFoundError(f"No active connection {doc_id} for owner {owner_user_id[:8]}")
-        if is_connection_metadata_too_new(existing):
+        # A credential source this app does not know was written by a newer app too; the
+        # row is read-only here, like one whose format is too new.
+        if is_connection_metadata_too_new(existing) or credential_source_of_raw_metadata(existing.metadata) is None:
             raise ConnectionTooNewError(CONNECTION_TOO_NEW_MESSAGE)
         _check_no_update_in_progress(existing)
-        metadata = {**existing.metadata, "alias": alias, "identifier": identifier}
-        plaintext = credentials.to_plaintext_dict()
+        metadata = {
+            **existing.metadata,
+            "alias": alias,
+            "identifier": identifier,
+            "credential_source": credential_source_name(credential_source),
+        }
+        if placement is not None:
+            metadata["placement"] = dict(placement)
+        plaintext = _plaintext_payload_for(credential_source, credentials)
         if owner_user_id == LOCAL_PROFILE_USER_ID:
             updated = existing.model_copy_update(
                 to_update(existing.field_ref().metadata, metadata),
@@ -570,7 +625,10 @@ class ConnectionStore(MutableModel):
                 )
             updated = existing.model_copy_update(
                 to_update(existing.field_ref().metadata, metadata),
-                to_update(existing.field_ref().encrypted_payload, _encode_encrypted_payload(dek, plaintext)),
+                to_update(
+                    existing.field_ref().encrypted_payload,
+                    _encode_encrypted_payload(dek, plaintext) if plaintext is not None else None,
+                ),
                 to_update(existing.field_ref().is_dirty, True),
                 to_update(existing.field_ref().validation_rollback, existing),
             )
@@ -653,8 +711,10 @@ class ConnectionStore(MutableModel):
             raise WorkspaceSyncError("connection sync is not configured (no imbue_cloud CLI)")
         if is_connection_metadata_too_new(record):
             raise ConnectionTooNewError(CONNECTION_TOO_NEW_MESSAGE)
-        # A tombstone sends an explicit null so the server clears the blob; an
-        # active row always carries its blob (this device wrote it).
+        # The payload key is always sent: a pasted row carries its blob, while a
+        # tombstone and a local-profile row send an explicit null so the server
+        # clears any blob it holds (an update that switched a connection from
+        # pasted keys to a local profile must not leave the old secret stored).
         wire = record.to_wire(CONNECTION_DOCUMENT_KIND, record.revision + 1, is_payload_included=True)
         try:
             stored = self.cli.sync_document_push(account_email, wire)
@@ -787,14 +847,17 @@ class ConnectionStore(MutableModel):
         for record in self.list_active_connections(user_id):
             if is_connection_metadata_too_new(record) or record.validation_rollback is not None:
                 continue
-            raw = self._raw_credentials(user_id, record)
-            if raw is None:
-                continue
-            # The typed parse gates on a supported, well-formed payload; the raw
-            # dict is what moves, so keys a newer client added survive.
-            credentials = _credentials_from_raw(raw, record.doc_id)
-            if credentials is None:
-                continue
+            if credential_source_of_raw_metadata(record.metadata) is ConnectionCredentialSource.LOCAL_PROFILE:
+                # Nothing to decrypt: the row moves as it is, so its instance survives the scrub too.
+                raw = None
+            else:
+                raw = self._raw_credentials(user_id, record)
+                if raw is None:
+                    continue
+                # The typed parse gates on a supported, well-formed payload; the raw
+                # dict is what moves, so keys a newer client added survive.
+                if _credentials_from_raw(raw, record.doc_id) is None:
+                    continue
             local_record = ConnectionReplicaRecord(
                 doc_id=record.doc_id,
                 metadata=dict(record.metadata),

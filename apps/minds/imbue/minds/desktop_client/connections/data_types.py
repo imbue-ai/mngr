@@ -16,6 +16,38 @@ CONNECTION_STATE_ACTIVE = "active"
 CONNECTION_STATE_DELETED = "deleted"
 
 
+class ConnectionCredentialSource(UpperCaseStrEnum):
+    """Where a connection's credentials come from.
+
+    PASTED connections carry their keys in the encrypted payload (plaintext for
+    the local profile). LOCAL_PROFILE connections carry no secret at all: the
+    block names a login installed on the machine that materializes it (an AWS
+    named profile, an Azure CLI login, a Modal profile), so the payload is empty
+    and the profile's name travels in the plaintext placement.
+    """
+
+    PASTED = auto()
+    LOCAL_PROFILE = auto()
+
+
+@pure
+def credential_source_name(source: ConnectionCredentialSource) -> str:
+    """The lowercase wire spelling of a credential source (``pasted`` / ``local_profile``)."""
+    return source.value.lower()
+
+
+@pure
+def credential_source_from_name(name: str) -> ConnectionCredentialSource | None:
+    """The inverse of :func:`credential_source_name`: the typed source, or None for one this app does not know."""
+    try:
+        return ConnectionCredentialSource(name.upper())
+    except ValueError:
+        return None
+
+
+DEFAULT_CREDENTIAL_SOURCE_NAME = credential_source_name(ConnectionCredentialSource.PASTED)
+
+
 class AwsPlacement(FrozenModel):
     """Placement defaults for an AWS connection."""
 
@@ -23,6 +55,10 @@ class AwsPlacement(FrozenModel):
 
     default_region: str = Field(description="EC2 region new machines land in")
     default_instance_type: str = Field(description="EC2 instance type new machines use")
+    aws_profile: str | None = Field(
+        default=None,
+        description="The ~/.aws/config profile a local-profile connection authenticates with; None for pasted keys",
+    )
 
 
 class GcpPlacement(FrozenModel):
@@ -42,6 +78,14 @@ class AzurePlacement(FrozenModel):
     default_region: str = Field(description="Azure region new machines land in")
     default_vm_size: str = Field(description="Azure VM size new machines use")
     resource_group: str = Field(description="The mngr-owned resource group holding every machine of this connection")
+    tenant_id: str | None = Field(
+        default=None,
+        description="The Entra tenant a local-profile connection's az login is used for; None for a pasted principal",
+    )
+    subscription_id: str | None = Field(
+        default=None,
+        description="The subscription a local-profile connection's az login is used for; None for a pasted principal",
+    )
 
 
 class ModalPlacement(FrozenModel):
@@ -55,6 +99,10 @@ class ModalPlacement(FrozenModel):
             "The Modal block's user_id (so the environment name) when the connection named one at registration; "
             "None derives it from the connection id. This-device-only connections only."
         ),
+    )
+    modal_profile: str | None = Field(
+        default=None,
+        description="The ~/.modal.toml profile a local-profile connection authenticates with; None for a pasted token",
     )
 
 
@@ -74,12 +122,32 @@ class ConnectionMetadata(FrozenModel):
     identifier: str = Field(default="", description="Masked, display-safe credential hint; never a secret")
     placement: dict[str, Any] = Field(default_factory=dict, description="Backend-specific placement defaults")
     created_on_device_label: str = Field(default="", description="Hostname of the device that added it")
+    credential_source: str = Field(
+        default=DEFAULT_CREDENTIAL_SOURCE_NAME,
+        description=(
+            "Where the credentials come from: 'pasted' (keys in the payload) or 'local_profile' (no payload; the "
+            "placement names a login installed on each device). An unknown value is read-only, never dropped."
+        ),
+    )
 
 
 @pure
 def parse_connection_backend(metadata: ConnectionMetadata) -> ConnectionBackend | None:
     """The typed backend of a connection, or None when this app does not know the backend."""
     return connection_backend_from_name(metadata.backend)
+
+
+@pure
+def parse_credential_source(metadata: ConnectionMetadata) -> ConnectionCredentialSource | None:
+    """The typed credential source of a connection, or None when a newer app wrote one this app does not know."""
+    return credential_source_from_name(metadata.credential_source)
+
+
+@pure
+def credential_source_of_raw_metadata(raw_metadata: Mapping[str, Any]) -> ConnectionCredentialSource | None:
+    """The credential source a raw metadata object names (``pasted`` when it names none), or None for an unknown one."""
+    raw = raw_metadata.get("credential_source", DEFAULT_CREDENTIAL_SOURCE_NAME)
+    return credential_source_from_name(str(raw))
 
 
 class ConnectionCredentials(FrozenModel):
@@ -196,6 +264,10 @@ class ConnectionView(FrozenModel):
     placement: dict[str, Any] = Field(default_factory=dict, description="Backend-specific placement defaults")
     owner_user_id: str = Field(description="The owning account's user id, or 'local' for the local profile")
     availability: ConnectionAvailability = Field(description="Whether the credentials are usable here")
+    credential_source: str = Field(
+        default=DEFAULT_CREDENTIAL_SOURCE_NAME,
+        description="'pasted' or 'local_profile' (or a name this app does not know)",
+    )
 
     @property
     def region(self) -> str:

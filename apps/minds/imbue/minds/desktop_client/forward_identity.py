@@ -160,12 +160,24 @@ class ForwardIdentityPublisher(MutableModel):
         if self.on_shared_workspaces_changed is not None:
             self.on_shared_workspaces_changed()
 
-    def apply_sync_results(self, shared_agent_ids_by_user_id: Mapping[str, Iterable[str]]) -> None:
-        """Replace the shared set of every account listed (the ones whose records pull reached the connector)."""
+    def apply_sync_results(self, shared_agent_ids_by_user_id: Mapping[str, Iterable[str]]) -> dict[str, list[str]]:
+        """Replace the shared set of every account listed (the ones whose records pull reached the connector).
+
+        Returns, per listed account, the workspaces that were shared before
+        this pass and are not any more: shares retired somewhere else (another
+        device's unpublish, the connector's own retirement), which a device
+        hosting such a workspace has to act on.
+        """
+        no_longer_shared_by_user_id: dict[str, list[str]] = {}
         with self._lock:
             for user_id, agent_ids in shared_agent_ids_by_user_id.items():
-                self._shared_agent_ids_by_user_id[user_id] = set(agent_ids)
+                shared_now = set(agent_ids)
+                dropped = sorted(self._shared_agent_ids_by_user_id.get(user_id, set()) - shared_now)
+                if dropped:
+                    no_longer_shared_by_user_id[user_id] = dropped
+                self._shared_agent_ids_by_user_id[user_id] = shared_now
         self.rebuild()
+        return no_longer_shared_by_user_id
 
     def rebuild(self) -> None:
         """Write the file from the signed-in accounts' sessions (dropping accounts no longer signed in).

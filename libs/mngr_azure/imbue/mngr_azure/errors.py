@@ -19,6 +19,14 @@ class AzureSubscriptionError(AzureProviderError, ValueError):
     """
 
 
+class AzureCredentialConfigError(AzureProviderError, ValueError):
+    """The block's credential settings contradict each other or are incomplete (see ``use_azure_cli_login``).
+
+    Inherits ``ValueError`` for the same backend-catch reason as
+    ``AzureSubscriptionError``.
+    """
+
+
 class InvalidAzureIdentifierError(AzureProviderError, ValueError):
     """A coerced Azure VM resource name failed its validity check.
 

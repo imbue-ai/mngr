@@ -3,11 +3,14 @@ import threading
 from pathlib import Path
 
 import pytest
+from azure.identity import AzureCliCredential
 from azure.identity import DefaultAzureCredential
+from pydantic import SecretStr
 from pydantic import ValidationError
 
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.config import read_az_cli_default_subscription
+from imbue.mngr_azure.errors import AzureCredentialConfigError
 
 
 def _write_az_profile(config_dir: Path, subscriptions: list[dict[str, object]]) -> None:
@@ -138,6 +141,40 @@ def test_get_subscription_id_raises_when_unresolvable(monkeypatch: pytest.Monkey
 def test_get_credential_returns_default_azure_credential() -> None:
     config = AzureProviderConfig(subscription_id="sub-123")
     assert isinstance(config.get_credential(), DefaultAzureCredential)
+
+
+def test_get_credential_pins_the_az_login_to_the_blocks_tenant_and_subscription() -> None:
+    config = AzureProviderConfig(subscription_id="sub-123", tenant_id="tenant-1", use_azure_cli_login=True)
+
+    credential = config.get_credential()
+
+    assert isinstance(credential, AzureCliCredential)
+    assert credential.tenant_id == "tenant-1"
+    assert credential.subscription == "sub-123"
+
+
+@pytest.mark.parametrize(
+    ("config", "expected_message"),
+    [
+        (
+            AzureProviderConfig(
+                subscription_id="sub-123", tenant_id="tenant-1", use_azure_cli_login=True, client_secret=SecretStr("s")
+            ),
+            "mutually exclusive",
+        ),
+        (
+            AzureProviderConfig(subscription_id="sub-123", use_azure_cli_login=True),
+            "needs tenant_id and subscription_id",
+        ),
+        (AzureProviderConfig(tenant_id="tenant-1", use_azure_cli_login=True), "needs tenant_id and subscription_id"),
+    ],
+    ids=["with-secret", "no-tenant", "no-subscription"],
+)
+def test_get_credential_refuses_an_incomplete_or_contradictory_az_login_block(
+    config: AzureProviderConfig, expected_message: str
+) -> None:
+    with pytest.raises(AzureCredentialConfigError, match=expected_message):
+        config.get_credential()
 
 
 def test_resolve_state_storage_account_name_derives_valid_name() -> None:

@@ -623,7 +623,8 @@ describe("the General settings group's Machine size section", () => {
   ): m.Children {
     h.draw(agentId, "general");
     const model = h.models.get(agentId);
-    if (model === undefined) throw new Error("the machine's model was not built");
+    if (model === undefined)
+      throw new Error("the machine's model was not built");
     model.machineSize = size;
     return h.draw(agentId, "general");
   }
@@ -645,19 +646,57 @@ describe("the General settings group's Machine size section", () => {
     const field = sizeFields(section).find(
       (vnode) => attrsOf(vnode).dimension === dimension,
     );
-    if (field === undefined) throw new Error(`no ${dimension} field to type into`);
+    if (field === undefined)
+      throw new Error(`no ${dimension} field to type into`);
     (attrsOf(field).oninput as (text: string) => void)(value);
   }
 
-  it("is left out until a size is known, and read-only for a machine that cannot be resized", () => {
+  it("says the size is being read, not reported, or not readable before it is known, and shows it read-only for a machine that cannot be resized", () => {
     const h = harness();
 
-    expect(machineSizeSection(drawWithSize(h, UNBACKED, null))).toBeUndefined();
+    const reading = machineSizeSection(drawWithSize(h, UNBACKED, null));
+    if (reading === undefined) throw new Error("the section was not drawn");
+    expect(allText(reading)).toContain("Reading the machine's size");
+
+    const model = h.models.get(UNBACKED);
+    if (model === undefined)
+      throw new Error("the machine's model was not built");
+    model.machineSizeState = "unavailable";
+    const unreported = machineSizeSection(h.draw(UNBACKED, "general"));
+    if (unreported === undefined) throw new Error("the section was not drawn");
+    expect(allText(unreported)).toContain("does not report its size");
+
+    // A read that failed is not a machine without a size.
+    model.machineSizeState = "load_failed";
+    const unread = machineSizeSection(h.draw(UNBACKED, "general"));
+    if (unread === undefined) throw new Error("the section was not drawn");
+    expect(allText(unread)).toContain("could not be read");
+    expect(allText(unread)).not.toContain("does not report its size");
 
     const section = machineSizeSection(drawWithSize(h, UNBACKED, RECORDED));
     if (section === undefined) throw new Error("the section was not drawn");
     expect(allText(section)).toContain("4 CPUs · 8 GB RAM");
+    expect(allText(section)).not.toContain("Reading the machine's size");
     expect(sizeFields(section)).toEqual([]);
+    expect(pressableWithLabel(section, "Apply and restart")).toBeUndefined();
+  });
+
+  it("shows the size with a loading state in place of the controls until the resize offer is read", () => {
+    const section = machineSizeSection(
+      drawWithSize(harness(), UNBACKED, {
+        ...RECORDED,
+        cpu_count: null,
+        disk_gb: 28,
+        is_resize_offer_pending: true,
+      }),
+    );
+    if (section === undefined) throw new Error("the section was not drawn");
+
+    expect(allText(section)).toContain("8 GB RAM · 28 GB disk");
+    expect(allText(section)).toContain(
+      "Checking whether this machine's size can be changed",
+    );
+    expect(pressableWithLabel(section, "Save size")).toBeUndefined();
     expect(pressableWithLabel(section, "Apply and restart")).toBeUndefined();
   });
 
@@ -685,11 +724,11 @@ describe("the General settings group's Machine size section", () => {
     const docker = machineSizeSection(
       drawWithSize(h, UNBACKED, { ...RECORDED, is_resizable: true }),
     );
-    if (docker === undefined) throw new Error("the docker section was not drawn");
-    expect(sizeFields(docker).map((field) => attrsOf(field).dimension)).toEqual([
-      "cpu_count",
-      "memory_gb",
-    ]);
+    if (docker === undefined)
+      throw new Error("the docker section was not drawn");
+    expect(sizeFields(docker).map((field) => attrsOf(field).dimension)).toEqual(
+      ["cpu_count", "memory_gb"],
+    );
     expect(pressableWithLabel(docker, "Apply and restart")).toBeDefined();
 
     const lima = machineSizeSection(
@@ -737,10 +776,228 @@ describe("the General settings group's Machine size section", () => {
       `/api/v1/workspaces/${UNBACKED}/machine-size`,
       `/ui/api/workspaces/${UNBACKED}/machine-size`,
     ]);
-    expect(allText(after)).toContain("The machine is restarting to apply it.");
+    expect(allText(after)).toContain(
+      "The machine is restarting to apply the new size.",
+    );
+    // No second resize while the restart runs.
+    const apply = pressableWithLabel(after, "Apply and restart");
+    expect(apply === undefined ? undefined : attrsOf(apply).disabled).toBe(
+      true,
+    );
     const memoryField = sizeFields(after).find(
       (field) => attrsOf(field).dimension === "memory_gb",
     );
-    expect(memoryField === undefined ? undefined : attrsOf(memoryField).value).toBe("16");
+    expect(
+      memoryField === undefined ? undefined : attrsOf(memoryField).value,
+    ).toBe("16");
+  });
+
+  const CLOUD: WorkspaceMachineSizeData = {
+    ...RECORDED,
+    cpu_count: null,
+    disk_gb: 28,
+    is_resizable: true,
+    is_disk_resizable: true,
+    is_running: true,
+    is_transitioning: false,
+    memory_choices_gb: [8, 16, 24, 32],
+    is_memory_capped_by_plan: true,
+    plan_memory_limit_gb: 40,
+    other_machines_memory_gb: 8,
+    max_disk_gb: 200,
+    plan_disk_limit_gb: 280,
+    other_machines_disk_gb: 28,
+  };
+
+  /** The RAM select of a drawn section, rendered through its component. */
+  function memorySelect(section: AnyVnode): AnyVnode {
+    const select = collectVnodes(renderDeep(section) as m.Children).find(
+      (vnode) => vnode.tag === "select" && attrsOf(vnode).name === "memory_gb",
+    );
+    if (select === undefined) throw new Error("the RAM select was not drawn");
+    return select;
+  }
+
+  it("offers an Imbue Cloud machine the RAM sizes its plan allows, a bounded disk, and no CPUs", () => {
+    const section = machineSizeSection(
+      drawWithSize(harness(), UNBACKED, CLOUD),
+    );
+    if (section === undefined) throw new Error("the section was not drawn");
+
+    expect(allText(section)).toContain("8 GB RAM · 28 GB disk");
+    const options = collectVnodes(memorySelect(section)).filter(
+      (vnode) => vnode.tag === "option",
+    );
+    expect(options.map((option) => attrsOf(option).value)).toEqual([
+      "8",
+      "16",
+      "24",
+      "32",
+    ]);
+    expect(allText(options[options.length - 1])).toBe("32 GB (plan limit)");
+    expect(
+      sizeFields(section).map((field) => attrsOf(field).dimension),
+    ).toEqual(["disk_gb"]);
+    const disk = sizeFields(section)[0];
+    expect(attrsOf(disk).min).toBe("28");
+    expect(attrsOf(disk).max).toBe("200");
+    expect(pressableWithLabel(section, "Save size")).toBeDefined();
+    expect(pressableWithLabel(section, "Apply and restart")).toBeUndefined();
+    expect(allText(section)).toContain(
+      "Your plan allows 40 GB of RAM across running machines",
+    );
+    expect(allText(section)).toContain("other running machines use 8 GB");
+    expect(allText(section)).toContain("The disk can grow to 200 GB");
+
+    // The quota leaves no disk headroom: the bound is floored at the current disk.
+    const full = machineSizeSection(
+      drawWithSize(harness(), UNBACKED, { ...CLOUD, max_disk_gb: 28 }),
+    );
+    if (full === undefined) throw new Error("the section was not drawn");
+    expect(allText(full)).toContain(
+      "The plan leaves no room to grow the disk.",
+    );
+    expect(allText(full)).not.toContain("can grow to");
+  });
+
+  it("offers a running Imbue Cloud machine with a pending size a restart, and a stopped one only a note", () => {
+    const h = harness();
+    const pending = {
+      ...CLOUD,
+      target_memory_gb: 16,
+      is_restart_needed_to_apply: true,
+    };
+
+    const running = machineSizeSection(drawWithSize(h, UNBACKED, pending));
+    if (running === undefined)
+      throw new Error("the running section was not drawn");
+    expect(allText(running)).toContain(
+      "A new size is pending (16 GB RAM · 28 GB disk)",
+    );
+    expect(allText(running)).toContain("backs up the machine's disks first");
+    expect(pressableWithLabel(running, "Restart now")).toBeDefined();
+
+    const stopped = machineSizeSection(
+      drawWithSize(h, BACKED, { ...pending, is_running: false }),
+    );
+    if (stopped === undefined)
+      throw new Error("the stopped section was not drawn");
+    expect(pressableWithLabel(stopped, "Restart now")).toBeUndefined();
+    expect(allText(stopped)).toContain(
+      "Restart this workspace's machine to apply it.",
+    );
+  });
+
+  it("holds the Imbue Cloud controls while the machine is starting or stopping", () => {
+    const section = machineSizeSection(
+      drawWithSize(harness(), UNBACKED, {
+        ...CLOUD,
+        is_running: false,
+        is_transitioning: true,
+      }),
+    );
+    if (section === undefined) throw new Error("the section was not drawn");
+
+    expect(allText(section)).toContain("starting or stopping");
+    const save = pressableWithLabel(section, "Save size");
+    expect(save === undefined ? undefined : attrsOf(save).disabled).toBe(true);
+    expect(attrsOf(memorySelect(section)).disabled).toBe(true);
+  });
+
+  it("saves a picked Imbue Cloud size without a restart, then offers the restart", async () => {
+    const posted: unknown[] = [];
+    let recorded: WorkspaceMachineSizeData = CLOUD;
+    const h = harness((url, init) => {
+      if (url.startsWith("/api/v1/")) {
+        posted.push(JSON.parse(String(init?.body)));
+        recorded = {
+          ...CLOUD,
+          target_memory_gb: 16,
+          is_restart_needed_to_apply: true,
+        };
+        return Promise.resolve(
+          jsonResponse({ is_restart_dispatched: false, operation_id: null }),
+        );
+      }
+      return Promise.resolve(jsonResponse(recorded));
+    });
+    const section = machineSizeSection(drawWithSize(h, UNBACKED, CLOUD));
+    if (section === undefined) throw new Error("the section was not drawn");
+
+    const onchange = attrsOf(memorySelect(section)).onchange as (
+      event: Event,
+    ) => void;
+    onchange({ target: { value: "16" } } as unknown as Event);
+    const picked = machineSizeSection(h.draw(UNBACKED, "general"));
+    if (picked === undefined) throw new Error("the section was not redrawn");
+    press(picked, "Save size");
+    await settleDispatch();
+    const after = machineSizeSection(h.draw(UNBACKED, "general"));
+    if (after === undefined) throw new Error("the section was not redrawn");
+
+    expect(posted).toEqual([{ memory_gb: 16 }]);
+    expect(h.requests).toEqual([
+      `/api/v1/workspaces/${UNBACKED}/machine-size`,
+      `/ui/api/workspaces/${UNBACKED}/machine-size`,
+    ]);
+    // The pending size is the one notice about it; no second "saved" line.
+    expect(allText(after)).toContain(
+      "A new size is pending (16 GB RAM · 28 GB disk)",
+    );
+    expect(
+      collectVnodes(after).find(
+        (vnode) => attrsOf(vnode).id === "machine-resize-notice",
+      ),
+    ).toBeUndefined();
+    expect(pressableWithLabel(after, "Restart now")).toBeDefined();
+  });
+
+  it("says the machine is restarting, offers no second restart, and holds the controls", () => {
+    const h = harness();
+    const pending = {
+      ...CLOUD,
+      target_memory_gb: 16,
+      is_restart_needed_to_apply: true,
+    };
+
+    // Dispatched from this page: the connector still reports the machine
+    // running with its size pending, which must not offer the restart again.
+    drawWithSize(h, UNBACKED, pending);
+    const model = h.models.get(UNBACKED);
+    if (model === undefined)
+      throw new Error("the machine's model was not built");
+    model.isRestartDispatched = true;
+    const dispatched = machineSizeSection(h.draw(UNBACKED, "general"));
+    if (dispatched === undefined) throw new Error("the section was not drawn");
+    expect(allText(dispatched)).toContain(
+      "The machine is restarting to apply the new size (16 GB RAM · 28 GB disk)",
+    );
+    expect(allText(dispatched)).not.toContain("A new size is pending");
+    expect(pressableWithLabel(dispatched, "Restart now")).toBeUndefined();
+    const save = pressableWithLabel(dispatched, "Save size");
+    expect(save === undefined ? undefined : attrsOf(save).disabled).toBe(true);
+
+    // Reported by the app (a restart under way from anywhere, or the page reopened mid-restart).
+    const reported = machineSizeSection(
+      drawWithSize(h, BACKED, { ...pending, is_restart_in_progress: true }),
+    );
+    if (reported === undefined) throw new Error("the section was not drawn");
+    expect(allText(reported)).toContain("The machine is restarting");
+    expect(pressableWithLabel(reported, "Restart now")).toBeUndefined();
+
+    // A recovery the app reports with no size pending and nothing dispatched
+    // from this page (a stopped machine's start, the recovery card's restart)
+    // is not applying a size: the section only waits it out.
+    const plain = machineSizeSection(
+      drawWithSize(h, BACKED, { ...CLOUD, is_restart_in_progress: true }),
+    );
+    if (plain === undefined) throw new Error("the section was not drawn");
+    expect(allText(plain)).toContain("The machine is starting or restarting");
+    expect(allText(plain)).not.toContain("apply the new size");
+    expect(allText(plain)).not.toContain("backs up");
+    const plainSave = pressableWithLabel(plain, "Save size");
+    expect(
+      plainSave === undefined ? undefined : attrsOf(plainSave).disabled,
+    ).toBe(true);
   });
 });

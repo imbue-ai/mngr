@@ -21,6 +21,7 @@ from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.provider_discovery_stream import CREDENTIAL_SOURCE_RETRY_INTERVAL_SECONDS
 from imbue.mngr.api.provider_discovery_stream import _ProviderDiscoveryPoller
 from imbue.mngr.api.provider_discovery_stream import _compute_host_read_delta
 from imbue.mngr.api.provider_discovery_stream import _discover_one_provider
@@ -29,6 +30,7 @@ from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.provider_config_registry import _provider_config_registry
+from imbue.mngr.errors import ProviderCredentialSourceMissingError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -52,6 +54,7 @@ from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.thread_cleanup import _MngrExecutor
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -225,6 +228,48 @@ class _EmptyAtConstructionBackend(ProviderBackendInterface):
     ) -> ProviderInstanceInterface:
         del config, mngr_ctx
         raise ProviderEmptyError(provider_name=name, reason="simulated empty backend from test")
+
+
+_CREDENTIAL_SOURCE_MISSING_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName(
+    "credential-source-missing-at-construction"
+)
+
+
+class _CredentialSourceMissingAtConstructionBackend(ProviderBackendInterface):
+    """Backend whose block names a login this machine lacks; the login may appear later."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _CREDENTIAL_SOURCE_MISSING_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend that reports a missing credential source at construction time"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        del config, mngr_ctx
+        raise ProviderCredentialSourceMissingError(
+            provider_name=name,
+            reason="simulated profile missing from test",
+            short_remediation="run `aws configure --profile simulated`",
+        )
 
 
 class _UnauthorizedAtConstructionBackend(ProviderBackendInterface):
@@ -530,6 +575,41 @@ def test_an_unauthorized_provider_ends_only_its_own_poller(temp_mngr_ctx: MngrCo
     assert snapshots[0].error is not None
     assert snapshots[0].error.type_name == "ProviderNotAuthorizedError"
     assert snapshots[0].provider is not None
+
+
+@pytest.mark.allow_warnings(match="credential source")
+def test_a_provider_awaiting_its_credential_source_keeps_polling_slowly_and_names_the_fix(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A block naming a login this machine lacks is re-checked rather than written off.
+
+    The user installs the login outside mngr (``aws configure``, ``az login``,
+    ``modal token new``) with nothing restarting this process, so the poller must
+    stay alive to notice it; and the snapshot carries the command that fixes it.
+    """
+    stop_event = threading.Event()
+    with _registered_backend(_CredentialSourceMissingAtConstructionBackend) as provider_name:
+        poller = _ProviderDiscoveryPoller(
+            provider_name=provider_name, mngr_ctx=temp_mngr_ctx, config=_generous_config()
+        )
+        runner = threading.Thread(target=poller.run, args=(stop_event,), daemon=True)
+        runner.start()
+        try:
+            wait_for(lambda: len(_read_snapshots(temp_mngr_ctx)) >= 1, timeout=10.0)
+            # Unlike missing pasted keys, the poller is still waiting for its next check.
+            assert runner.is_alive()
+            assert CREDENTIAL_SOURCE_RETRY_INTERVAL_SECONDS >= _generous_config().discovery_poll_interval_seconds
+        finally:
+            stop_event.set()
+            runner.join(timeout=10.0)
+        assert not runner.is_alive()
+
+    (snapshot,) = _read_snapshots(temp_mngr_ctx)
+    assert snapshot.provider_name == provider_name
+    assert snapshot.error is not None
+    assert snapshot.error.type_name == "ProviderCredentialSourceMissingError"
+    assert snapshot.error.remediation == "run `aws configure --profile simulated`"
+    assert snapshot.provider is not None
 
 
 def test_poller_emits_host_ssh_info_events_from_discovery_result(

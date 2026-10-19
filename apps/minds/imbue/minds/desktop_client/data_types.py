@@ -71,6 +71,26 @@ class ShareGatewayState(LowerCaseStrEnum):
     HALTED = auto()
 
 
+class SharedWorkspaceRecordState(LowerCaseStrEnum):
+    """What the account's workspace records say about a share's workspace (lowercase wire values)."""
+
+    # The workspace's record is active: the share is of a workspace that exists.
+    ACTIVE = auto()
+    # The workspace was destroyed; its share should have been retired with it.
+    DESTROYED = auto()
+    # No record names the share's workspace or host: nothing can retire it but its owner.
+    MISSING = auto()
+
+
+class ShareRemovalOutcome(LowerCaseStrEnum):
+    """How a share was removed from the shared-workspaces page (lowercase wire values)."""
+
+    # The workspace runs on this device, so it was unpublished: materials cleared, then the share deleted.
+    STOPPED_SHARING = auto()
+    # The share alone was deleted at the connector (the workspace is elsewhere, or gone).
+    REMOVED = auto()
+
+
 class RemoteWorkspaceTile(FrozenModel):
     """A workspace known only from a synced record (not in local discovery), for the landing list."""
 

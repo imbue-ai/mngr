@@ -205,6 +205,7 @@ from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.errors import ProviderCredentialSourceMissingError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
@@ -1186,7 +1187,11 @@ def _connection_entry(
             status, error = ConnectionPanelStatus.READ_ONLY, None
         case ConnectionAvailability.AVAILABLE:
             error = error_by_name.get(view.instance_name)
-            if error is not None:
+            if error is not None and error.type_name == ProviderCredentialSourceMissingError.__name__:
+                # The login the connection names is not on this machine: not a broken
+                # provider, a setup step, so the row says which and how to do it.
+                status = ConnectionPanelStatus.PROFILE_MISSING
+            elif error is not None:
                 status = ConnectionPanelStatus.ERROR
             elif view.instance_name in backend_by_name:
                 status = ConnectionPanelStatus.OK
@@ -1205,6 +1210,8 @@ def _connection_entry(
         status=status,
         error_type=error.type_name if error is not None else None,
         error_message=error.message if error is not None else None,
+        remediation=error.remediation if error is not None else None,
+        credential_source=view.credential_source,
         workspace_count=workspace_count,
     )
 

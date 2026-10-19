@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 
 import boto3
 import pytest
@@ -15,6 +16,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderCredentialSourceMissingError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -857,6 +859,77 @@ def test_build_provider_instance_raises_unavailable_when_credentials_missing(
 
     with pytest.raises(ProviderUnavailableError):
         AwsProviderBackend.build_provider_instance(name=name, config=config, mngr_ctx=temp_mngr_ctx)
+
+
+@pytest.mark.parametrize(
+    ("config_text", "expected_remediation", "expected_short_reason"),
+    [
+        (
+            "[profile other]\nregion = us-east-1\n",
+            "run `aws configure --profile laptop` (or `aws configure sso`)",
+            "'laptop' is not set up on this machine",
+        ),
+        # The token cache under the isolated HOME is empty, so the profile's SSO login reads as expired.
+        (
+            "[profile laptop]\nsso_start_url = https://example.awsapps.com/start\nsso_region = us-east-1\n"
+            "sso_account_id = 123456789012\nsso_role_name = Admin\n",
+            "run `aws sso login --profile laptop`",
+            "'laptop' has no current single-sign-on login on this machine",
+        ),
+    ],
+    ids=["missing-profile", "expired-sso-login"],
+)
+def test_build_provider_instance_reports_a_login_missing_here_as_a_missing_credential_source(
+    monkeypatch: pytest.MonkeyPatch,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    config_text: str,
+    expected_remediation: str,
+    expected_short_reason: str,
+) -> None:
+    """A block naming a login this machine lacks is the retryable auth error, with the fix attached.
+
+    Both a missing profile and a missing or expired SSO login are fixed outside
+    mngr, so discovery must keep re-checking rather than end the poller.
+    """
+    clear_aws_env(monkeypatch)
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    (tmp_path / "config").write_text(config_text, encoding="utf-8")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, aws_profile="laptop")
+
+    with pytest.raises(ProviderCredentialSourceMissingError) as exc_info:
+        AwsProviderBackend.build_provider_instance(
+            name=ProviderInstanceName("aws-test"), config=config, mngr_ctx=temp_mngr_ctx
+        )
+
+    assert exc_info.value.short_remediation == expected_remediation
+    assert exc_info.value.short_reason is not None
+    assert expected_short_reason in exc_info.value.short_reason
+
+
+def test_build_provider_instance_keeps_a_refused_profiles_own_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """A profile mngr refuses (mfa_serial) is reported as such, not as credentials that were never configured."""
+    clear_aws_env(monkeypatch)
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    (tmp_path / "config").write_text("[profile guarded]\nmfa_serial = arn:aws:iam::1:mfa/me\n", encoding="utf-8")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, aws_profile="guarded")
+
+    with pytest.raises(ProviderUnavailableError) as exc_info:
+        AwsProviderBackend.build_provider_instance(
+            name=ProviderInstanceName("aws-test"), config=config, mngr_ctx=temp_mngr_ctx
+        )
+
+    assert not isinstance(exc_info.value, ProviderCredentialSourceMissingError)
+    assert "mfa_serial" in str(exc_info.value)
+    assert exc_info.value.short_remediation == "use a profile without mfa_serial (an SSO profile, or static keys)"
 
 
 def test_build_provider_instance_does_not_touch_ami_resolution(

@@ -57,6 +57,16 @@ token_id = "ak-..."
 token_secret = "as-..."
 ```
 
+Or it can name a profile of this machine's `~/.modal.toml` (written by `modal token new --profile work`), so the block carries no secret at all:
+
+```toml
+[providers.work_modal]
+backend = "modal"
+modal_profile = "work"
+```
+
+The profile is read from the file (at `MODAL_CONFIG_PATH`, else `~/.modal.toml`) every time the provider is built, not through the Modal SDK, which loads the file once at import; so a long-lived `mngr observe` picks a newly created profile up on its next check. A profile missing on this machine reports the provider as awaiting its credential source (`ProviderCredentialSourceMissingError`, with `modal token new --profile work` as the fix) rather than ending its discovery poller. The chosen profile's own `server_url` is not honored: the SDK's active profile decides it. `modal_profile` and `token_id` / `token_secret` are mutually exclusive.
+
 `token_id` and `token_secret` must be set together, though not necessarily in the same config layer (the secret can come from `settings.local.toml` or the environment while the id sits in `settings.toml`). They apply to `DIRECT` mode and are used for every Modal call the instance makes (sandboxes, apps, volumes, the `modal` CLI invocations for environment creation and deploys). Like every provider setting they can also come from the environment, without touching the SDK's own variables: `MNGR__PROVIDERS__WORK_MODAL__TOKEN_ID` / `MNGR__PROVIDERS__WORK_MODAL__TOKEN_SECRET` (the provider instance name, upper-cased, in place of `WORK_MODAL`; env-var segments allow only letters, digits and underscores, so an instance that should be configurable this way needs a name like `work_modal` rather than `work-modal`). An environment layer for a named instance also sets `MNGR__PROVIDERS__WORK_MODAL__BACKEND=modal`, since a layer that names no backend resolves it from the instance name.
 
 ## SSH key material

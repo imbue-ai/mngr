@@ -76,7 +76,7 @@ from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.primitives import DeviceId
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import PROVIDER_AUTHORIZATION_ERROR_TYPE_NAMES
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
@@ -1480,17 +1480,18 @@ class WorkspaceRecordStore(MutableModel):
         Mirrors the tombstone pass's caution: only a complete discovery
         snapshot whose failures cannot be hiding this workspace can prove
         absence -- a failed poll proves nothing, so its associations must
-        survive for a later pass. Unconfigured providers
-        (``ProviderNotAuthorizedError``) do not block: a provider with no
-        credentials on this device errors on *every* poll, so treating it as
-        a failed poll would keep a gone workspace's association in limbo
+        survive for a later pass. Unconfigured providers (the authorization
+        errors, a missing credential source included) do not block: a provider
+        with no credentials on this device errors on *every* poll, so treating
+        it as a failed poll would keep a gone workspace's association in limbo
         forever. (A legacy association names no provider, so filtering by
         error type is the closest available per-provider scoping.)
         """
         if not resolver.has_completed_initial_discovery():
             return False
         is_any_provider_poll_failed = any(
-            error.type_name != ProviderNotAuthorizedError.__name__ for error in resolver.get_provider_errors().values()
+            error.type_name not in PROVIDER_AUTHORIZATION_ERROR_TYPE_NAMES
+            for error in resolver.get_provider_errors().values()
         )
         if is_any_provider_poll_failed:
             return False

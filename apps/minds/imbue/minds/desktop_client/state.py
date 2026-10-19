@@ -347,6 +347,11 @@ class DesktopClientState(MutableModel):
         ),
     )
 
+    def invalidate_sharing_caches(self, host_id: str) -> None:
+        """Drop the readiness poll's cached share lookup and gateway verdict for one machine."""
+        self.active_share_cache.invalidate(host_id)
+        self.gateway_status_cache.invalidate(host_id)
+
 
 def set_state(app: Flask, state: DesktopClientState) -> None:
     """Stash the desktop-client state on the Flask app's extensions mapping."""

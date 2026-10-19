@@ -1051,6 +1051,32 @@ describe("SharePanelModel publishing", () => {
     expect(model.publishWrite).toEqual({
       state: "failed",
       message: expect.stringContaining("the connector refused the share"),
+      remedyPath: "",
+    });
+  });
+
+  it("points a full-quota refusal at the shared-workspaces page", async () => {
+    const { model } = makeSharePanel((url, init) => {
+      if (init?.method === "PUT")
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            error: "Shared workspace limit reached (50 of 50).",
+            code: "quota_exceeded",
+            shared_workspaces_path: "/workspaces/shared",
+          },
+        };
+      return okResult(sharingResponse({ enabled: false, url: null }));
+    });
+    await model.load();
+
+    await model.publish();
+
+    expect(model.publishWrite).toEqual({
+      state: "failed",
+      message: expect.stringContaining("limit reached"),
+      remedyPath: "/workspaces/shared",
     });
   });
 
@@ -1088,6 +1114,7 @@ describe("SharePanelModel publishing", () => {
     expect(model.publishWrite).toEqual({
       state: "failed",
       message: expect.stringContaining("relay unreachable"),
+      remedyPath: "",
     });
   });
 

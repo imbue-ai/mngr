@@ -341,6 +341,23 @@ class ShareInfo(WireModel):
         default=None, description="Opaque per-share relay token; returned once at share-enable"
     )
     last_tunnel_login_at: str | None = Field(default=None, description="Last relay tunnel Login stamp (any relay)")
+    last_seen_at: str | None = Field(
+        default=None,
+        description=(
+            "When the workspace's tunnel last proved itself alive (a relay Login or heartbeat, stamped at most "
+            "once per fifteen minutes); None for a share not seen since the connector started recording it, or "
+            "against a connector that predates the field"
+        ),
+    )
+    created_at: str | None = Field(default=None, description="When the share row was created (connector timestamp)")
+    updated_at: str | None = Field(default=None, description="When the share row last changed (connector timestamp)")
+    entry_label: str | None = Field(
+        default=None,
+        description="The workspace's shell-service origin label the hosted chrome enters at; None until recorded",
+    )
+    share_label: str | None = Field(
+        default=None, description="The minted leading label of a workspace-keyed share's domain; None on a legacy row"
+    )
     cert_not_after: str | None = Field(default=None, description="Expiry of the newest issued certificate")
     chrome_origin: str | None = Field(
         default=None,
@@ -555,6 +572,13 @@ class AccountUsageInfo(WireModel):
         description=(
             "Data-disk GB currently counted against max_total_machine_disk_gb (running + stopped "
             "machines); None against an older connector."
+        ),
+    )
+    shared_workspaces: int | None = Field(
+        default=None,
+        description=(
+            "Active shares currently counted against max_shared_workspaces (a share of a destroyed or "
+            "missing workspace counts until it is retired); None against an older connector."
         ),
     )
 

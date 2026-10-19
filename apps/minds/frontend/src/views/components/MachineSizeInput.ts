@@ -8,6 +8,9 @@ export interface MachineSizeInputAttrs {
   value: string;
   isInvalid?: boolean;
   disabled?: boolean;
+  /** The smallest and largest value the field accepts; "1" and unbounded by default. */
+  min?: string;
+  max?: string;
   oninput: (text: string) => void;
 }
 
@@ -19,15 +22,29 @@ export interface MachineSizeInputAttrs {
 export function MachineSizeInput(): m.Component<MachineSizeInputAttrs> {
   return {
     view(vnode) {
-      const { dimension, label, value, isInvalid = false, disabled = false, oninput } = vnode.attrs;
+      const {
+        dimension,
+        label,
+        value,
+        isInvalid = false,
+        disabled = false,
+        min = "1",
+        max,
+        oninput,
+      } = vnode.attrs;
       const id = `machine-size-${dimension}`;
       return m("div", { class: "flex items-center gap-2" }, [
-        m(FormLabel, { target: id, inline: true, extra: "type-helper text-secondary" }, label),
+        m(
+          FormLabel,
+          { target: id, inline: true, extra: "type-helper text-secondary" },
+          label,
+        ),
         m(TextInput, {
           id,
           name: dimension,
           type: "number",
-          min: "1",
+          min,
+          max,
           step: "1",
           inputmode: "numeric",
           value,

@@ -56,6 +56,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import backup_update as backup_update_module
@@ -85,6 +86,8 @@ from imbue.minds.desktop_client.api_auth import json_error as _json_error
 from imbue.minds.desktop_client.api_auth import json_field_error as _json_field_error
 from imbue.minds.desktop_client.api_auth import json_response as _json_response
 from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
+from imbue.minds.desktop_client.api_models import AccountShareRemovedResponse
+from imbue.minds.desktop_client.api_models import AccountSharesResponse
 from imbue.minds.desktop_client.api_models import AccountSummary
 from imbue.minds.desktop_client.api_models import AccountsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationReadRequest
@@ -112,6 +115,8 @@ from imbue.minds.desktop_client.api_models import InvitationOutcomeEntryResponse
 from imbue.minds.desktop_client.api_models import InvitationOutcomesResponse
 from imbue.minds.desktop_client.api_models import InvitationResultResponse
 from imbue.minds.desktop_client.api_models import InviteGranteeRequest
+from imbue.minds.desktop_client.api_models import LocalCredentialProfileResponse
+from imbue.minds.desktop_client.api_models import LocalCredentialProfilesResponse
 from imbue.minds.desktop_client.api_models import MachineSharingRequest
 from imbue.minds.desktop_client.api_models import MachineSharingResponse
 from imbue.minds.desktop_client.api_models import MachineSizeChangeRequest
@@ -153,17 +158,23 @@ from imbue.minds.desktop_client.connection_operations import ConnectionOperation
 from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
 from imbue.minds.desktop_client.connections.data_types import AwsPlacement
 from imbue.minds.desktop_client.connections.data_types import AzurePlacement
+from imbue.minds.desktop_client.connections.data_types import ConnectionCredentialSource
 from imbue.minds.desktop_client.connections.data_types import ConnectionCredentials
 from imbue.minds.desktop_client.connections.data_types import ConnectionView
 from imbue.minds.desktop_client.connections.data_types import GcpPlacement
 from imbue.minds.desktop_client.connections.data_types import ModalPlacement
 from imbue.minds.desktop_client.connections.data_types import ProviderMaterializationOutcome
+from imbue.minds.desktop_client.connections.data_types import credential_source_from_name
+from imbue.minds.desktop_client.connections.data_types import credential_source_name
+from imbue.minds.desktop_client.connections.local_profiles import list_local_credential_profiles
 from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
 from imbue.minds.desktop_client.connections.primitives import ConnectionId
+from imbue.minds.desktop_client.connections.primitives import IMBUE_CLOUD_PROVIDER_NAME_PREFIX
 from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.connections.primitives import MODAL_USER_ID_RE
 from imbue.minds.desktop_client.connections.primitives import azure_resource_group_for_connection
 from imbue.minds.desktop_client.connections.primitives import connection_backend_from_name
+from imbue.minds.desktop_client.connections.primitives import is_local_profile_supported_for_backend
 from imbue.minds.desktop_client.connections.primitives import is_region_pinned_for_backend
 from imbue.minds.desktop_client.connections.primitives import mngr_backend_name
 from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
@@ -177,7 +188,11 @@ from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.host_names import normalize_host_name_slug
 from imbue.minds.desktop_client.host_names import resolve_create_host_name
 from imbue.minds.desktop_client.host_timezone import read_host_timezone
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import MACHINES_RESIZE_COMMAND_REPR
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
 from imbue.minds.desktop_client.labeled_hosts import find_host_by_create_attempt_id_label
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
@@ -190,10 +205,15 @@ from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_streaming_response
+from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_grant_validation import GrantRefusal
 from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
+from imbue.minds.desktop_client.shared_workspaces import SHARED_WORKSPACES_PAGE_PATH
+from imbue.minds.desktop_client.shared_workspaces import list_account_shared_workspaces
+from imbue.minds.desktop_client.shared_workspaces import remove_account_share
 from imbue.minds.desktop_client.sharing_handler import GrantsRefusedError
+from imbue.minds.desktop_client.sharing_handler import ShareQuotaExceededError
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import get_active_share_cached
 from imbue.minds.desktop_client.sharing_handler import get_share_gateway_status_cached
@@ -209,6 +229,7 @@ from imbue.minds.desktop_client.sharing_handler import send_mobile_access_link_f
 from imbue.minds.desktop_client.sharing_handler import unpublish_workspace
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_api_inbox import build_agent_message_card
@@ -425,6 +446,77 @@ def _handle_list_accounts() -> AccountsResponse:
         else ()
     )
     return AccountsResponse(accounts=accounts)
+
+
+def _signed_in_account_or_none(account_id: str) -> AccountSession | None:
+    session_store = get_state().session_store
+    return session_store.get_session(account_id) if session_store is not None else None
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(AccountSharesResponse))
+def _handle_list_account_shares(account_id: str) -> AccountSharesResponse | Response:
+    """List the shares one signed-in account holds, each joined to the account's workspace records.
+
+    The shared-workspaces page: every active share (the ones counted against
+    ``max_shared_workspaces``) plus any suspended one, each joined to the
+    account's workspace records for the workspace's name and device, when its
+    tunnel was last alive, and whether it looks leaked (its workspace is
+    destroyed or unknown). Slow: one connector round trip. Lives in its own
+    ``account-shares`` namespace rather than under ``/accounts`` because the
+    gateway's ``minds-accounts-read`` permission covers the whole
+    ``/api/v1/accounts`` subtree, and an account's share inventory is more
+    than that permission (listing the signed-in accounts) lets an agent see.
+    """
+    state = get_state()
+    account = _signed_in_account_or_none(account_id)
+    if account is None or state.session_store is None:
+        return _json_error(f"No signed-in account {account_id}", 404)
+    if state.imbue_cloud_cli is None:
+        return _json_error("Imbue Cloud is not configured on this app.", 503)
+    try:
+        rows = list_account_shared_workspaces(
+            str(account.email),
+            str(account.user_id),
+            state.imbue_cloud_cli,
+            state.session_store,
+            state.backend_resolver,
+        )
+    except SharingError as exc:
+        return _json_error(str(exc), 502)
+    return AccountSharesResponse(account_id=str(account.user_id), email=str(account.email), rows=tuple(rows))
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(AccountShareRemovedResponse))
+def _handle_remove_account_share(account_id: str, host_id: str) -> AccountShareRemovedResponse | Response:
+    """Free one share's slot: unpublish the workspace when this device runs it, else delete the share.
+
+    Idempotent (a share already gone answers ``removed``). The workspace's
+    grants document stays where it is, as an unpublish leaves it.
+    """
+    state = get_state()
+    account = _signed_in_account_or_none(account_id)
+    if account is None or state.session_store is None:
+        return _json_error(f"No signed-in account {account_id}", 404)
+    if state.imbue_cloud_cli is None:
+        return _json_error("Imbue Cloud is not configured on this app.", 503)
+    try:
+        with state.machine_sharing_locks.get_lock(host_id):
+            try:
+                outcome = remove_account_share(
+                    str(account.email),
+                    host_id,
+                    state.imbue_cloud_cli,
+                    state.session_store,
+                    state.backend_resolver,
+                    state.forward_identity,
+                )
+            finally:
+                state.invalidate_sharing_caches(host_id)
+    except SharingError as exc:
+        return _json_error(str(exc), 502)
+    return AccountShareRemovedResponse(host_id=host_id, outcome=outcome)
 
 
 @require_api_or_cookie_auth
@@ -1635,20 +1727,26 @@ _MACHINE_RESIZE_TIMEOUT_SECONDS: Final[float] = 60.0
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=MachineSizeChangeRequest, resp=json_response_model(MachineSizeChangeResponse))
 def _handle_workspace_machine_size_change(agent_id: str) -> MachineSizeChangeResponse | Response:
-    """Change the size of a workspace's machine, and restart it so the size takes effect.
+    """Change the size of a workspace's machine: a local one restarts to apply it, an Imbue Cloud one is only recorded.
 
     Body: ``{cpu_count?, memory_gb?, disk_gb?}``, each a whole number; a
     dimension left out keeps its current value. Only the providers whose
     substrate can change size after creation take this -- local docker
-    (CPUs, memory) and lima (CPUs, memory, and the data disk, which only
-    grows); every other machine is refused with a 409. The provider's own
-    resize command (``mngr docker resize`` / ``mngr lima resize``) records
-    and applies the size, and a running machine is then restarted through
-    the same host recovery the restart route dispatches (``operation_id``
-    in the answer, to poll like a restart); a stopped machine is left
-    stopped, its recorded size applying on its next start. Refused with a
-    409 while another operation runs on the workspace, and with a 502
-    carrying mngr's own words when the provider refuses the size.
+    (CPUs, memory), lima (CPUs, memory, and the data disk, which only
+    grows), and Imbue Cloud (memory and the grow-only data disk); every
+    other machine is refused with a 409. A local provider's own resize
+    command (``mngr docker resize`` / ``mngr lima resize``) records and
+    applies the size, and a running machine is then restarted through the
+    same host recovery the restart route dispatches (``operation_id`` in
+    the answer, to poll like a restart); a stopped machine is left stopped,
+    its recorded size applying on its next start. An Imbue Cloud machine's
+    size is only recorded on the connector (``mngr imbue_cloud machines
+    resize``), never followed by a restart: the restart that applies it
+    stops the machine and backs up its disks first, so the user chooses
+    when to take it (the restart route). Refused with a 409 while another
+    operation runs on the workspace, with a 502 carrying mngr's own words
+    when the provider refuses the size, and with a 409 quoting the quota
+    when an Imbue Cloud account cannot hold the size right now.
     """
     parsed_id = AgentId(agent_id)
     state = get_state()
@@ -1657,7 +1755,10 @@ def _handle_workspace_machine_size_change(agent_id: str) -> MachineSizeChangeRes
         return _json_error(f"Unknown workspace {agent_id}", 404)
     info = backend_resolver.get_agent_display_info(parsed_id)
     provider_name = info.provider_name if info is not None else None
-    if info is None or provider_name is None or not is_machine_resizable_provider(provider_name):
+    if info is None or provider_name is None:
+        return _json_error("This workspace's machine cannot be resized after it was created.", 409)
+    is_imbue_cloud_machine = provider_name.startswith(IMBUE_CLOUD_PROVIDER_NAME_PREFIX)
+    if not is_imbue_cloud_machine and not is_machine_resizable_provider(provider_name):
         return _json_error("This workspace's machine cannot be resized after it was created.", 409)
     try:
         host_id = HostId(info.host_id)
@@ -1665,6 +1766,8 @@ def _handle_workspace_machine_size_change(agent_id: str) -> MachineSizeChangeRes
         return _json_error(f"Cannot resolve a host to resize for {agent_id}", 409)
 
     body = request.get_json(silent=True, force=True) or {}
+    if is_imbue_cloud_machine:
+        return _record_imbue_cloud_machine_size(parsed_id, host_id, body, state)
     is_disk_resizable = is_machine_disk_resizable_provider(provider_name)
     selection = MachineSizeSelection(
         cpu_count=body.get("cpu_count"),
@@ -1700,6 +1803,60 @@ def _handle_workspace_machine_size_change(agent_id: str) -> MachineSizeChangeRes
     if refusal is not None:
         return refusal
     return MachineSizeChangeResponse(is_restart_dispatched=True, operation_id=str(parsed_id))
+
+
+def _record_imbue_cloud_machine_size(
+    parsed_id: AgentId, host_id: HostId, body: Mapping[str, Any], state: DesktopClientState
+) -> MachineSizeChangeResponse | Response:
+    """Record ``body``'s RAM and disk on the connector for the leased machine at ``host_id``; never restarts it.
+
+    One unit of the connector's size is one GB of RAM. The plugin validates
+    the allowed-size set and the grow-only disk, and the connector checks the
+    account's quotas; either refusal is quoted back (a quota refusal as a
+    409, since the size is fine but the account cannot hold it right now).
+    """
+    selection = MachineSizeSelection(memory_gb=body.get("memory_gb"), disk_gb=body.get("disk_gb"))
+    if selection.is_empty:
+        return _json_error("Nothing to resize: pass memory_gb or disk_gb.", 400)
+    session_store = state.session_store
+    account = session_store.get_account_for_workspace(str(parsed_id)) if session_store is not None else None
+    imbue_cloud_cli: ImbueCloudCli | None = state.imbue_cloud_cli
+    if account is None or imbue_cloud_cli is None:
+        return _json_error("This workspace is not linked to a signed-in Imbue Cloud account.", 409)
+    registry = state.workspace_operation_registry
+    existing_operation = registry.get(parsed_id)
+    if existing_operation is not None and existing_operation.status == WorkspaceOperationStatus.RUNNING:
+        return _operation_conflict_error(existing_operation)
+    try:
+        recorded = imbue_cloud_cli.resize_machine(
+            str(account.email),
+            str(host_id),
+            target_memory_units=selection.memory_gb,
+            target_disk_gb=selection.disk_gb,
+        )
+    except ImbueCloudQuotaExceededCliError as exc:
+        logger.info("Resizing the machine of {} was refused by the account's quota: {}", parsed_id, exc)
+        return _json_error(f"Your plan cannot hold this size right now: {_imbue_cloud_refusal_text(exc)}", 409)
+    except ImbueCloudCliError as exc:
+        logger.warning("Resizing the machine of {} failed: {}", parsed_id, exc)
+        return _json_error(f"The machine's provider refused the new size: {_imbue_cloud_refusal_text(exc)}", 502)
+    logger.info(
+        "Recorded a new machine size for {} on Imbue Cloud (units target={}, disk target={})",
+        parsed_id,
+        recorded.target_memory_units,
+        recorded.target_disk_gb,
+    )
+    return MachineSizeChangeResponse(is_restart_dispatched=False, operation_id=None)
+
+
+@pure
+def _imbue_cloud_refusal_text(exc: ImbueCloudCliError) -> str:
+    """The plugin's own sentence from a wrapped ``machines resize`` failure, without the prefix the wrapper adds."""
+    message = str(exc)
+    for prefix in (f"{MACHINES_RESIZE_COMMAND_REPR} failed: ", f"{MACHINES_RESIZE_COMMAND_REPR}: "):
+        if message.startswith(prefix):
+            return message.removeprefix(prefix)
+    return message
 
 
 def _resize_machine_through_provider_or_refusal(
@@ -3138,17 +3295,11 @@ def _machine_sharing_get_core(host_id: str) -> MachineSharingResponse | Response
     except SharingError as exc:
         # A failed repair may still have moved the share on the connector, so
         # the readiness poll must not keep serving the old domain from its cache.
-        _invalidate_sharing_caches(state, host_id)
+        state.invalidate_sharing_caches(host_id)
         return _json_error(str(exc), 502)
     if document.get("migrated_domain_from") is not None:
-        _invalidate_sharing_caches(state, host_id)
+        state.invalidate_sharing_caches(host_id)
     return _sharing_document_to_response(document)
-
-
-def _invalidate_sharing_caches(state: DesktopClientState, host_id: str) -> None:
-    """Drop the readiness poll's cached share lookup and gateway verdict for one machine."""
-    state.active_share_cache.invalidate(host_id)
-    state.gateway_status_cache.invalidate(host_id)
 
 
 # CLEANUP: retire the host-keyed /machines/<host_id>/sharing routes below once
@@ -3174,10 +3325,24 @@ def _publish_workspace_core(host_id: str) -> MachineSharingResponse | Response:
                 # The share state may have changed even on failure (the
                 # connector create can succeed before the injection fails), so
                 # the readiness poll must not keep serving a stale lookup.
-                _invalidate_sharing_caches(state, host_id)
+                state.invalidate_sharing_caches(host_id)
+    except ShareQuotaExceededError as exc:
+        return _share_quota_exceeded_response(exc)
     except SharingError as exc:
         return _json_error(str(exc), 502)
     return _sharing_document_to_response(document)
+
+
+def _share_quota_exceeded_response(exc: ShareQuotaExceededError) -> Response:
+    """The publish refusal a full share quota earns: 403 with the code the share panel links from.
+
+    The remedy is on the shared-workspaces page (a leaked share holds the
+    slot), so the body names it rather than inviting a retry.
+    """
+    return _json_response(
+        {"error": str(exc), "code": "quota_exceeded", "shared_workspaces_path": SHARED_WORKSPACES_PAGE_PATH},
+        status_code=403,
+    )
 
 
 def _save_grants_core(host_id: str, grants: SharingGrantsDocument) -> MachineSharingResponse | Response:
@@ -3220,9 +3385,11 @@ def _machine_sharing_put_core(host_id: str) -> MachineSharingResponse | Response
                 # The share state may have changed even on failure (the
                 # connector create can succeed before the injection fails), so
                 # the readiness poll must not keep serving a stale lookup.
-                _invalidate_sharing_caches(state, host_id)
+                state.invalidate_sharing_caches(host_id)
     except GrantsRefusedError as exc:
         return _grant_refusal_response(exc.refusals)
+    except ShareQuotaExceededError as exc:
+        return _share_quota_exceeded_response(exc)
     except SharingError as exc:
         return _json_error(str(exc), 502)
     return _sharing_document_to_response(document)
@@ -3257,7 +3424,7 @@ def _unpublish_workspace_core(host_id: str) -> MachineSharingResponse | Response
                     state.forward_identity,
                 )
             finally:
-                _invalidate_sharing_caches(state, host_id)
+                state.invalidate_sharing_caches(host_id)
     except SharingError as exc:
         return _json_error(str(exc), 502)
     return _sharing_document_to_response(document)
@@ -3354,6 +3521,7 @@ def _cloud_account_summary(view: ConnectionView) -> CloudAccountSummary:
         identifier=view.identifier,
         owner_user_id=view.owner_user_id,
         is_region_pinned=backend is not None and is_region_pinned_for_backend(backend),
+        credential_source=view.credential_source,
     )
 
 
@@ -3368,8 +3536,93 @@ class _ParsedConnectionRequest(FrozenModel):
     backend: ConnectionBackend
     region: str
     identifier: str
-    credentials: ConnectionCredentials
+    # None for a local-profile connection, whose block names a login instead of carrying keys.
+    credentials: ConnectionCredentials | None
+    credential_source: ConnectionCredentialSource = ConnectionCredentialSource.PASTED
+    # The placement fields a local-profile connection carries (aws_profile; the Azure
+    # tenant_id and subscription_id; modal_profile), empty for pasted keys.
+    profile_placement: dict[str, str] = Field(default_factory=dict)
     modal_user_id: str | None = None
+
+
+def _parse_credential_source(
+    body: Mapping[str, Any], backend: ConnectionBackend
+) -> ConnectionCredentialSource | Response:
+    """The body's credential source (pasted when absent); 400 for an unknown one or a backend without a local form."""
+    raw = body.get("credential_source")
+    if raw is None or str(raw).strip() == "":
+        return ConnectionCredentialSource.PASTED
+    source = credential_source_from_name(str(raw).strip())
+    if source is None:
+        supported = ", ".join(credential_source_name(candidate) for candidate in ConnectionCredentialSource)
+        return _json_field_error(f"Credential source {raw!r} is not supported ({supported}).", "credential_source")
+    if source is ConnectionCredentialSource.LOCAL_PROFILE and not is_local_profile_supported_for_backend(backend):
+        return _json_field_error(
+            f"A {mngr_backend_name(backend)} connection cannot use a local profile; paste its credentials.",
+            "credential_source",
+        )
+    return source
+
+
+def _parse_aws_profile_request(body: Mapping[str, Any], region: str) -> _ParsedConnectionRequest | Response:
+    aws_profile = str(body.get("aws_profile", "")).strip()
+    if not aws_profile:
+        return _json_field_error("The name of an AWS profile from ~/.aws/config is required.", "aws_profile")
+    return _ParsedConnectionRequest(
+        backend=ConnectionBackend.AWS,
+        region=region,
+        identifier=f"profile {aws_profile}",
+        credentials=None,
+        credential_source=ConnectionCredentialSource.LOCAL_PROFILE,
+        profile_placement={"aws_profile": aws_profile},
+    )
+
+
+def _parse_azure_cli_login_request(body: Mapping[str, Any], region: str) -> _ParsedConnectionRequest | Response:
+    subscription_id = str(body.get("azure_subscription_id", "")).strip()
+    tenant_id = str(body.get("azure_tenant_id", "")).strip()
+    if not (subscription_id and tenant_id):
+        return _json_field_error(
+            "The subscription id and tenant id of the az login to use are both required.", "azure_subscription_id"
+        )
+    return _ParsedConnectionRequest(
+        backend=ConnectionBackend.AZURE,
+        region=region,
+        identifier=f"subscription {_masked_identifier(subscription_id)}",
+        credentials=None,
+        credential_source=ConnectionCredentialSource.LOCAL_PROFILE,
+        profile_placement={"tenant_id": tenant_id, "subscription_id": subscription_id},
+    )
+
+
+def _parse_modal_user_id(body: Mapping[str, Any]) -> str | None | Response:
+    """The body's optional ``modal_user_id`` (the Modal environment), None when absent; a 400 for a malformed one."""
+    raw_modal_user_id = body.get("modal_user_id")
+    modal_user_id = str(raw_modal_user_id).strip() if raw_modal_user_id is not None else ""
+    if modal_user_id and MODAL_USER_ID_RE.match(modal_user_id) is None:
+        return _json_field_error(
+            "modal_user_id must be 1-48 characters of letters, digits, '_' or '-', starting with a letter or digit.",
+            "modal_user_id",
+        )
+    return modal_user_id or None
+
+
+def _parse_modal_profile_request(body: Mapping[str, Any]) -> _ParsedConnectionRequest | Response:
+    modal_profile = str(body.get("modal_profile", "")).strip()
+    if not modal_profile:
+        return _json_field_error("The name of a Modal profile from ~/.modal.toml is required.", "modal_profile")
+    modal_user_id = _parse_modal_user_id(body)
+    if isinstance(modal_user_id, Response):
+        return modal_user_id
+    return _ParsedConnectionRequest(
+        backend=ConnectionBackend.MODAL,
+        region="",
+        identifier=f"profile {modal_profile}",
+        credentials=None,
+        credential_source=ConnectionCredentialSource.LOCAL_PROFILE,
+        profile_placement={"modal_profile": modal_profile},
+        modal_user_id=modal_user_id,
+    )
 
 
 def _parse_connection_backend(raw_backend: object) -> ConnectionBackend | Response:
@@ -3452,19 +3705,15 @@ def _parse_modal_connection_request(body: Mapping[str, Any]) -> _ParsedConnectio
     token_secret = str(body.get("modal_token_secret", "")).strip()
     if not token_id or not token_secret:
         return _json_field_error("A Modal token id and token secret are required.", "modal_token_id")
-    raw_modal_user_id = body.get("modal_user_id")
-    modal_user_id = str(raw_modal_user_id).strip() if raw_modal_user_id is not None else ""
-    if modal_user_id and MODAL_USER_ID_RE.match(modal_user_id) is None:
-        return _json_field_error(
-            "modal_user_id must be 1-48 characters of letters, digits, '_' or '-', starting with a letter or digit.",
-            "modal_user_id",
-        )
+    modal_user_id = _parse_modal_user_id(body)
+    if isinstance(modal_user_id, Response):
+        return modal_user_id
     return _ParsedConnectionRequest(
         backend=ConnectionBackend.MODAL,
         region="",
         identifier=_masked_identifier(token_id),
         credentials=ConnectionCredentials(token_id=token_id, token_secret=SecretStr(token_secret)),
-        modal_user_id=modal_user_id or None,
+        modal_user_id=modal_user_id,
     )
 
 
@@ -3482,7 +3731,22 @@ def _parse_connection_request(body: Mapping[str, Any]) -> _ParsedConnectionReque
 def _parse_connection_credentials(
     backend: ConnectionBackend, body: Mapping[str, Any], region: str
 ) -> _ParsedConnectionRequest | Response:
-    """Validate the backend's credential fields; a 400 response names the offending field."""
+    """Validate the backend's credential fields (pasted keys, or the local login named); a 400 names the offending field."""
+    source = _parse_credential_source(body, backend)
+    if isinstance(source, Response):
+        return source
+    if source is ConnectionCredentialSource.LOCAL_PROFILE:
+        match backend:
+            case ConnectionBackend.AWS:
+                return _parse_aws_profile_request(body, region)
+            case ConnectionBackend.AZURE:
+                return _parse_azure_cli_login_request(body, region)
+            case ConnectionBackend.MODAL:
+                return _parse_modal_profile_request(body)
+            case ConnectionBackend.GCP:
+                return _json_field_error("A gcp connection cannot use a local profile.", "credential_source")
+            case _ as unreachable:
+                assert_never(unreachable)
     match backend:
         case ConnectionBackend.AWS:
             return _parse_aws_connection_request(body, region)
@@ -3497,12 +3761,19 @@ def _parse_connection_credentials(
 
 
 def _placement_for_connection(parsed: _ParsedConnectionRequest, connection_id: ConnectionId) -> dict[str, Any]:
-    """The backend's placement defaults for the connection metadata, in the shape the materializer reads back."""
+    """The backend's placement defaults for the connection metadata, in the shape the materializer reads back.
+
+    A local-profile connection's login (``aws_profile``, the Azure ``tenant_id``
+    and ``subscription_id``, ``modal_profile``) rides the placement, since it is
+    not a secret and a locked device must still be able to render it.
+    """
     match parsed.backend:
         case ConnectionBackend.AWS:
             return AwsPlacement(
-                default_region=parsed.region, default_instance_type=DEFAULT_AWS_INSTANCE_TYPE
-            ).model_dump()
+                default_region=parsed.region,
+                default_instance_type=DEFAULT_AWS_INSTANCE_TYPE,
+                aws_profile=parsed.profile_placement.get("aws_profile"),
+            ).model_dump(exclude_none=True)
         case ConnectionBackend.GCP:
             # GCE is zonal: the form's "region" value for GCP is a zone.
             return GcpPlacement(default_zone=parsed.region, default_machine_type=DEFAULT_GCP_MACHINE_TYPE).model_dump()
@@ -3514,11 +3785,37 @@ def _placement_for_connection(parsed: _ParsedConnectionRequest, connection_id: C
                 default_region=parsed.region,
                 default_vm_size=DEFAULT_AZURE_VM_SIZE,
                 resource_group=azure_resource_group_for_connection(connection_id, parsed.region),
-            ).model_dump()
+                tenant_id=parsed.profile_placement.get("tenant_id"),
+                subscription_id=parsed.profile_placement.get("subscription_id"),
+            ).model_dump(exclude_none=True)
         case ConnectionBackend.MODAL:
-            return ModalPlacement(user_id=parsed.modal_user_id).model_dump()
+            return ModalPlacement(
+                user_id=parsed.modal_user_id, modal_profile=parsed.profile_placement.get("modal_profile")
+            ).model_dump(exclude_none=True)
         case _ as unreachable:
             assert_never(unreachable)
+
+
+# The placement keys that name a local-profile connection's login, per backend; an
+# update that switches credential source swaps exactly these and keeps the rest.
+_PROFILE_PLACEMENT_KEYS_BY_BACKEND: Final[Mapping[ConnectionBackend, tuple[str, ...]]] = {
+    ConnectionBackend.AWS: ("aws_profile",),
+    ConnectionBackend.GCP: (),
+    ConnectionBackend.AZURE: ("tenant_id", "subscription_id"),
+    ConnectionBackend.MODAL: ("modal_profile",),
+}
+
+
+@pure
+def _updated_placement(existing_placement: Mapping[str, Any], parsed: _ParsedConnectionRequest) -> dict[str, Any]:
+    """The connection's placement after an update: the pinned fields as they were, the login fields as the body names them."""
+    placement = {
+        key: value
+        for key, value in existing_placement.items()
+        if key not in _PROFILE_PLACEMENT_KEYS_BY_BACKEND[parsed.backend]
+    }
+    placement.update(parsed.profile_placement)
+    return placement
 
 
 # The ``code`` values the connection routes answer with, so the add-connection
@@ -3856,6 +4153,7 @@ def _handle_create_cloud_account() -> tuple[OperationHandleResponse, int] | Resp
             identifier=parsed.identifier,
             placement=_placement_for_connection(parsed, connection_id),
             credentials=parsed.credentials,
+            credential_source=parsed.credential_source,
         )
     except ConnectionRequiresMasterPasswordError as exc:
         return _json_error(str(exc), 409, CONNECTION_ERROR_CODE_MASTER_PASSWORD_REQUIRED)
@@ -4091,7 +4389,13 @@ def _handle_update_cloud_account(account_name: str) -> tuple[OperationHandleResp
 
     try:
         connection_store.update_connection(
-            owner_user_id, record.doc_id, alias=alias, identifier=parsed.identifier, credentials=parsed.credentials
+            owner_user_id,
+            record.doc_id,
+            alias=alias,
+            identifier=parsed.identifier,
+            credentials=parsed.credentials,
+            credential_source=parsed.credential_source,
+            placement=_updated_placement(view.placement, parsed),
         )
     except ConnectionRequiresMasterPasswordError as exc:
         return _json_error(str(exc), 409, CONNECTION_ERROR_CODE_MASTER_PASSWORD_REQUIRED)
@@ -4179,6 +4483,48 @@ def _handle_cloud_account_operation_logs(operation_id: str) -> Response:
     return make_streaming_response(
         _stream_create_operation_logs(log_sink), media_type="text/event-stream", headers=_SSE_HEADERS
     )
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(LocalCredentialProfilesResponse))
+def _handle_list_local_credential_profiles() -> LocalCredentialProfilesResponse | Response:
+    """List the logins on this machine a connection of ``?backend=`` can name (read from the tools' own files)."""
+    backend = _parse_connection_backend(request.args.get("backend"))
+    if isinstance(backend, Response):
+        return backend
+    profiles = list_local_credential_profiles(backend)
+    return LocalCredentialProfilesResponse(
+        backend=mngr_backend_name(backend),
+        profiles=tuple(
+            LocalCredentialProfileResponse(
+                name=profile.name,
+                label=profile.label,
+                region=profile.region,
+                tenant_id=profile.tenant_id,
+                subscription_id=profile.subscription_id,
+                unusable_reason=profile.unusable_reason,
+            )
+            for profile in profiles
+        ),
+    )
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(OkResponse))
+def _handle_recheck_cloud_account(account_name: str) -> OkResponse | Response:
+    """Re-check a connection now by bouncing discovery (the "Check now" button after a login was set up outside the app).
+
+    Discovery re-checks a provider whose local login is missing on its own slow
+    cadence; this is the user saying the login exists now. The bounce restarts
+    the observe producer for every provider, which is the one lever there is.
+    """
+    connection_store = _configured_connection_store()
+    if isinstance(connection_store, Response):
+        return connection_store
+    if connection_store.find_active_connection_by_instance_name(account_name) is None:
+        return _json_error(f"Unknown cloud account {account_name!r}.", 404)
+    bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
+    return OkResponse(ok=True)
 
 
 @require_api_or_cookie_auth
@@ -4636,9 +4982,27 @@ def create_api_v1_blueprint() -> Blueprint:
         methods=["DELETE"],
     )
 
+    # Account shares (the shared-workspaces page). Its own namespace, like
+    # workspace-sharing: no agent verb maps it, so agents stay deny-all at the
+    # gateway, while the ``minds-accounts-read`` grant stays the account list.
+    blueprint.add_url_rule("/account-shares/<account_id>", view_func=_handle_list_account_shares, methods=["GET"])
+    blueprint.add_url_rule(
+        "/account-shares/<account_id>/<host_id>", view_func=_handle_remove_account_share, methods=["DELETE"]
+    )
+
     # Desktop namespace (cookie-or-bearer; no agent verb, so deny-all at the gateway).
     # Cloud connections (pasted credentials + validation).
     blueprint.add_url_rule("/desktop/cloud-accounts", view_func=_handle_create_cloud_account, methods=["POST"])
+    blueprint.add_url_rule(
+        "/desktop/cloud-accounts/local-profiles",
+        view_func=_handle_list_local_credential_profiles,
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/desktop/cloud-accounts/<account_name>/recheck",
+        view_func=_handle_recheck_cloud_account,
+        methods=["POST"],
+    )
     blueprint.add_url_rule(
         "/desktop/cloud-accounts/<account_name>",
         view_func=_handle_update_cloud_account,

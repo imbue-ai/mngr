@@ -816,4 +816,15 @@ describe("NotificationGestures.openChat and .openSystemEvent", () => {
     );
     expect(routeSet).toHaveBeenNthCalledWith(2, "/accounts");
   });
+
+  it("lands an event that names its own route there", () => {
+    const gestures = new NotificationGestures(
+      gestureContext({ toAgentScopedId: () => "agent-aa11" }),
+    );
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    gestures.openSystemEvent("host-bb22", "/workspaces/shared");
+    expect(routeSet).toHaveBeenCalledWith("/workspaces/shared");
+  });
 });

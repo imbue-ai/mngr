@@ -2024,6 +2024,11 @@ def test_list_shares_parses_rows(monkeypatch: pytest.MonkeyPatch) -> None:
                         "workspace_domain": _SHARE_DOMAIN,
                         "region": "us1",
                         "state": "inactive",
+                        "created_at": "2026-09-01 10:00:00+00:00",
+                        "updated_at": "2026-09-02 10:00:00+00:00",
+                        "last_seen_at": "2026-09-02 09:59:00+00:00",
+                        "entry_label": "system-interface-ab12",
+                        "share_label": "c" * 32,
                     }
                 ]
             },
@@ -2037,6 +2042,11 @@ def test_list_shares_parses_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert items[0].host_id == _SHARE_HOST_ID
     assert items[0].state == "inactive"
     assert items[0].needs_reshare is False
+    assert items[0].created_at == "2026-09-01 10:00:00+00:00"
+    assert items[0].updated_at == "2026-09-02 10:00:00+00:00"
+    assert items[0].last_seen_at == "2026-09-02 09:59:00+00:00"
+    assert items[0].entry_label == "system-interface-ab12"
+    assert items[0].share_label == "c" * 32
 
 
 def test_list_shares_parses_the_needs_reshare_flag_per_row(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2444,6 +2454,26 @@ def test_admin_release_workspace_posts_with_admin_key_and_returns_the_status(mon
 
     assert status == "released"
     assert seen["path"] == "/admin/workspaces/00000000-0000-0000-0000-000000000043/release"
+    assert seen["auth"] == "Bearer adminkey"
+
+
+def test_admin_run_share_retirement_sweep_passes_dry_run_as_a_query_param(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["query"] = dict(request.url.params)
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"status": "completed", "result": {"is_dry_run": True, "candidates": []}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    rehearsed = client.admin_run_share_retirement_sweep(SecretStr("adminkey"), dry_run=True)
+    swept = client.admin_run_share_retirement_sweep(SecretStr("adminkey"), dry_run=False)
+
+    assert rehearsed["result"]["is_dry_run"] is True
+    assert swept["status"] == "completed"
+    assert seen["path"] == "/admin/sweep/share-retirement"
+    assert seen["query"] == {}
     assert seen["auth"] == "Bearer adminkey"
 
 

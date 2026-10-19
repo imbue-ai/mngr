@@ -81,6 +81,28 @@ Note this is the *local* session with the desktop client itself. *Imbue account*
     page becomes the record-backed detail view: retry + discard for an interrupted
     create attempt, persisted error + log tail + dismiss for a failed one
 
+`/api/v1/account-shares/<account_id>` (GET, cookie or bearer auth):
+    the shared-workspaces page's rows for one signed-in account: every active share (the ones counted
+    against ``max_shared_workspaces``) plus any suspended one, which holds no slot but is listed so its
+    owner can see and remove it (inactive rows are history and are left out), each
+    joined to the account's workspace records by workspace id (a legacy host-keyed share through the
+    host it names) for the workspace's name and device, with ``record_state`` (``active``,
+    ``destroyed``, ``missing``), when the share was created, when its tunnel was last alive
+    (``last_seen_display``, from the connector's heartbeat stamp), ``is_likely_leaked`` (the record is
+    destroyed or missing) and ``is_hosted_here`` (this device runs the workspace). One connector round
+    trip; 404 for an account not signed in here, 503 when Imbue Cloud is not configured on this app, 502
+    when the connector cannot be read. Lives in its own ``account-shares`` namespace (like
+    ``workspace-sharing``) rather than under ``/api/v1/accounts`` because the gateway's
+    ``minds-accounts-read`` permission covers the whole ``/api/v1/accounts`` subtree, and an account's
+    share inventory is more than that permission (listing the signed-in accounts) lets an agent see;
+    no agent verb maps the namespace, so agents deny-all at the gateway.
+
+`/api/v1/account-shares/<account_id>/<host_id>` (DELETE):
+    frees the share's slot: a workspace this device runs for that account is unpublished (``share.env`` cleared, then
+    the share deleted; the grants document stays), answering ``outcome: stopped_sharing``; otherwise
+    the share alone is deleted at the connector, ``outcome: removed``. Idempotent: a share already
+    gone answers ``removed``. The same 404, 503 and 502 answers as the GET.
+
 `/api/v1/desktop/cloud-accounts` (POST, cookie or bearer auth):
     registers a cloud connection: body carries the backend (aws / gcp / azure / modal), an alias,
     the credentials, the region for the pinned backends, and the owner (an account's user id, or
@@ -100,6 +122,26 @@ Note this is the *local* session with the desktop client itself. *Imbue account*
     ``connection_in_use`` (409), ``connection_removed_elsewhere`` (409, PUT), ``credentials_rejected``
     (502), ``sync_failed`` (502), ``account_listing_failed`` (503).
 
+    Instead of pasted keys, a connection may name a login installed on each device that uses it
+    (``credential_source: "local_profile"``): an AWS profile (``aws_profile``), the tenant and
+    subscription of an ``az login`` (``azure_tenant_id``, ``azure_subscription_id``), or a Modal
+    profile (``modal_profile``); GCP has no such form (400). The login rides the connection's
+    plaintext placement, the document carries no payload, and the provider block names the login
+    instead of keys, so nothing secret is stored or synced. The same validation runs. A device
+    without that login sees the connection as ``PROFILE_MISSING`` in the providers panel, with the
+    command that sets it up; discovery re-checks it every two minutes on its own.
+
+`/api/v1/desktop/cloud-accounts/local-profiles?backend=<aws|azure|modal>` (GET):
+    the logins on this machine a connection of that backend can name, read from the tools' own
+    files (``~/.aws/config`` and ``~/.aws/credentials``, ``azureProfile.json``, ``~/.modal.toml``):
+    ``name``, ``label``, the AWS profile's ``region``, the Azure subscription's ``tenant_id`` and
+    ``subscription_id``, and an ``unusable_reason`` for a login the app cannot use (an AWS profile
+    with an ``mfa_serial``).
+
+`/api/v1/desktop/cloud-accounts/<instance>/recheck` (POST):
+    re-checks a connection now by bouncing discovery: the providers panel's "Check now" button
+    after a login was set up outside the app. 404 for an unknown connection.
+
 `/api/v1/desktop/cloud-accounts/operations/<instance>` (GET):
     the state of a registration or update: ``status`` (RUNNING, DONE, FAILED), ``is_done``, the
     ``account`` once done, and on failure the ``error``, its ``code`` and the ``status_code`` the
@@ -109,8 +151,10 @@ Note this is the *local* session with the desktop client itself. *Imbue account*
 
 `/api/v1/desktop/cloud-accounts/<instance>` (PUT):
     replaces a connection's credentials (and optionally its alias) in place, keeping its id, instance
-    name, owner, backend, and placement: the body carries the backend (which must be the connection's
-    own, 400 otherwise) and every one of that backend's credential fields. The route answers 202 with
+    name, owner, backend, and pinned placement: the body carries the backend (which must be the connection's
+    own, 400 otherwise) and every one of that backend's credential fields, or ``credential_source:
+    "local_profile"`` with the login to name, so a connection may switch between pasted keys and a local
+    login either way. The route answers 202 with
     an operation handle (``kind`` ``connection_update``) once the new row and block exist; the worker
     validates the new credentials the way the add route does and, for an account owner, pushes the
     document. On a failure the previous credentials come back and the status read reports 502, or 409

@@ -212,6 +212,7 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
   }
   if (path === "/workspaces/destroyed")
     return pageContext("Recently destroyed");
+  if (path === "/workspaces/shared") return pageContext("Shared workspaces");
   if (path === "/consent") return pageContext("Consent");
   if (path === "/start") {
     return { kind: "start", workspaceAnyId: null, activeTab: null, pageLabel: "" };

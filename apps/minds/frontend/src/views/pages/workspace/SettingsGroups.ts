@@ -15,7 +15,7 @@ import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
 import { routeLinkAttrs } from "../../components/route-link";
 import { CopyField, SectionHeader } from "../../components/Layout";
-import { TextInput } from "../../components/FormControls";
+import { FormLabel, Select, TextInput } from "../../components/FormControls";
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
 import type {
   SettingsGroup,
@@ -24,10 +24,18 @@ import type {
 } from "../../../models/workspaceOptions";
 import {
   formatPendingMachineSize,
+  isMachineSizePickedFromChoices,
+  minimumMachineDiskGb,
   normalizeWorkspaceColorHex,
 } from "../../../models/workspaceOptions";
-import type { MachineSizeDimension, MachineSizeDraft } from "../../../models/machineSize";
-import { formatMachineSizeNumbers, machineSizeDraftFor } from "../../../models/machineSize";
+import type {
+  MachineSizeDimension,
+  MachineSizeDraft,
+} from "../../../models/machineSize";
+import {
+  formatMachineSizeNumbers,
+  machineSizeDraftFor,
+} from "../../../models/machineSize";
 import { MachineSizeInput } from "../../components/MachineSizeInput";
 import {
   devOverridePrefill,
@@ -696,34 +704,179 @@ function renderGeneralGroup(
   ]);
 }
 
-/** The machine's size: what its provider recorded, plus, for a local docker or
- * lima machine, the fields and the action that change it (the machine is
- * restarted to apply the change), and for an Imbue Cloud machine a passive
- * restart-to-apply note when a resize is pending. Hidden entirely (null)
- * until the lazy size fetch succeeds. */
+const SIZE_NOT_REPORTED = "This machine does not report its size.";
+const SIZE_NOT_READ = "The machine's size could not be read.";
+
+/** The machine's size: what its provider recorded, plus, for a resizable
+ * machine, the fields and the action that change it (a local docker or lima
+ * machine is restarted to apply the change; an Imbue Cloud machine's size is
+ * saved for its next restart, which the status notice offers), or a passive
+ * restart-to-apply note when a size is pending on a machine the page cannot
+ * resize. Always drawn, so the page says where the size stands (being read,
+ * not reported, or known) rather than leaving a gap. */
 function renderMachineSizeSection(
   model: WorkspaceOptionsModel,
   local: SettingsGroupsLocalState,
 ): m.Children {
-  const size = model.machineSize;
-  if (size === null || !size.is_available) return null;
-  const currentLabel = formatMachineSizeNumbers(size);
-  if (!currentLabel) return null;
-  const pendingLabel = formatPendingMachineSize(size);
   return [
     m(SectionHeader, "Machine size"),
-    m("div", { id: "machine-size-section", class: "mb-8" }, [
-      m("p", { class: "type-body text-secondary" }, currentLabel),
-      pendingLabel
-        ? m(
-            Notice,
-            { variant: "info" },
-            `A new size is pending (${pendingLabel}). Restart this workspace's machine to apply it.`,
-          )
-        : null,
-      size.is_resizable ? renderMachineResize(model, local) : null,
-    ]),
+    m(
+      "div",
+      { id: "machine-size-section", class: "mb-8" },
+      renderMachineSizeBody(model, local),
+    ),
   ];
+}
+
+function renderMachineSizeBody(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+): m.Children {
+  const size = model.machineSize;
+  if (size === null) {
+    switch (model.machineSizeState) {
+      case "loading":
+        return m(
+          "p",
+          {
+            id: "machine-size-loading",
+            class: "type-body text-secondary flex items-center gap-2",
+          },
+          [m(Spinner, { size: "sm" }), "Reading the machine's size…"],
+        );
+      case "load_failed":
+        return m(
+          "p",
+          { id: "machine-size-load-failed", class: "type-body text-secondary" },
+          SIZE_NOT_READ,
+        );
+      default:
+        return m(
+          "p",
+          { id: "machine-size-unavailable", class: "type-body text-secondary" },
+          SIZE_NOT_REPORTED,
+        );
+    }
+  }
+  return [
+    m(
+      "p",
+      { class: "type-body text-secondary" },
+      formatMachineSizeNumbers(size) || SIZE_NOT_REPORTED,
+    ),
+    renderMachineSizeStatus(model, size),
+    renderMachineSizeControls(model, local, size),
+  ];
+}
+
+/** The size controls, a loading state while whether they are offered is
+ * still being read, or nothing for a machine this page cannot resize. */
+function renderMachineSizeControls(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+  size: WorkspaceMachineSizeData,
+): m.Children {
+  if (size.is_resize_offer_pending === true || model.isResizeOfferLoading) {
+    return m(
+      "p",
+      {
+        id: "machine-size-offer-loading",
+        class: "type-helper text-tertiary mt-2 flex items-center gap-2",
+      },
+      [
+        m(Spinner, { size: "sm" }),
+        "Checking whether this machine's size can be changed…",
+      ],
+    );
+  }
+  if (!size.is_resizable) return null;
+  return isMachineSizePickedFromChoices(size)
+    ? renderMachineResizeFromChoices(model, local, size)
+    : renderMachineResize(model, local);
+}
+
+/** The one notice about a size in flux, in order of what matters most: the
+ * restart under way (and so not to be asked for again), the size waiting for a
+ * restart (with the restart itself when this page can ask for it: a running
+ * Imbue Cloud machine whose size the page changes), or what the last change
+ * did when nothing else on the page says it. */
+function renderMachineSizeStatus(
+  model: WorkspaceOptionsModel,
+  size: WorkspaceMachineSizeData,
+): m.Children {
+  const pendingLabel = formatPendingMachineSize(size);
+  if (model.isRestartInProgress) {
+    return m(
+      Notice,
+      { variant: "info", id: "machine-size-restarting" },
+      m("div", { class: "flex items-center gap-3" }, [
+        m(Spinner, { size: "sm" }),
+        m("span", machineRestartingText(model, size, pendingLabel)),
+      ]),
+    );
+  }
+  if (!pendingLabel) {
+    return model.resizeNotice
+      ? m(
+          Notice,
+          { variant: "info", id: "machine-resize-notice" },
+          model.resizeNotice,
+        )
+      : null;
+  }
+  const isRestartOffered =
+    size.is_resizable &&
+    isMachineSizePickedFromChoices(size) &&
+    size.is_running === true;
+  if (!isRestartOffered) {
+    return m(
+      Notice,
+      { variant: "info" },
+      `A new size is pending (${pendingLabel}). Restart this workspace's machine to apply it.`,
+    );
+  }
+  return m(Notice, { variant: "info", id: "machine-size-pending" }, [
+    m("div", { class: "flex items-center justify-between gap-3 flex-wrap" }, [
+      m(
+        "span",
+        `A new size is pending (${pendingLabel}). Restarting the machine applies it: the restart backs up ` +
+          "the machine's disks first, so it can take a while.",
+      ),
+      m(
+        Button,
+        {
+          variant: "secondary",
+          id: "machine-size-restart-btn",
+          disabled: model.isRestartBusy || model.isResizeBusy,
+          onclick: () => {
+            void model.restartMachineToApplySize();
+          },
+        },
+        model.isRestartBusy ? m(Spinner, { size: "sm" }) : "Restart now",
+      ),
+    ]),
+  ]);
+}
+
+/** What the running restart is doing: applying a new size when this page asked
+ * for the restart or a size is pending, else the plain start or restart the
+ * app reports (a stopped machine's start, the recovery card's restart), which
+ * the section only waits out. */
+function machineRestartingText(
+  model: WorkspaceOptionsModel,
+  size: WorkspaceMachineSizeData,
+  pendingLabel: string,
+): string {
+  if (!model.isRestartDispatched && !pendingLabel) {
+    return size.is_resizable
+      ? "The machine is starting or restarting; its size can be changed once that finishes."
+      : "The machine is starting or restarting.";
+  }
+  const applying = pendingLabel ? ` (${pendingLabel})` : "";
+  return isMachineSizePickedFromChoices(size)
+    ? `The machine is restarting to apply the new size${applying}. The restart backs up ` +
+        "the machine's disks first, so it can take a few minutes."
+    : `The machine is restarting to apply the new size${applying}.`;
 }
 
 /** The resize fields as typed for this machine, or its current size until they are edited. */
@@ -732,7 +885,10 @@ function currentSizeDraft(
   local: SettingsGroupsLocalState,
   size: WorkspaceMachineSizeData,
 ): MachineSizeDraft {
-  return forMachine(local.sizeDraft, model.agentId)?.draft ?? machineSizeDraftFor(size);
+  return (
+    forMachine(local.sizeDraft, model.agentId)?.draft ??
+    machineSizeDraftFor(size)
+  );
 }
 
 /** One resize field, keyed to the machine it is typed for. */
@@ -742,15 +898,24 @@ function machineResizeField(
   size: WorkspaceMachineSizeData,
   dimension: MachineSizeDimension,
   label: string,
+  bounds: { min?: string; max?: string; disabled?: boolean } = {},
 ): m.Children {
   const draft = currentSizeDraft(model, local, size);
   return m(MachineSizeInput, {
     dimension,
     label,
     value: draft[dimension],
-    disabled: model.isResizeBusy,
+    disabled:
+      model.isResizeBusy ||
+      model.isRestartInProgress ||
+      bounds.disabled === true,
+    min: bounds.min,
+    max: bounds.max,
     oninput: (text: string) => {
-      local.sizeDraft = { agentId: model.agentId, draft: { ...draft, [dimension]: text } };
+      local.sizeDraft = {
+        agentId: model.agentId,
+        draft: { ...draft, [dimension]: text },
+      };
     },
   });
 }
@@ -773,13 +938,15 @@ function renderMachineResize(
     m("div", { class: "flex flex-wrap items-center gap-3" }, [
       machineResizeField(model, local, size, "cpu_count", "CPUs"),
       machineResizeField(model, local, size, "memory_gb", "GB RAM"),
-      size.is_disk_resizable ? machineResizeField(model, local, size, "disk_gb", "GB disk") : null,
+      size.is_disk_resizable
+        ? machineResizeField(model, local, size, "disk_gb", "GB disk")
+        : null,
       m(
         Button,
         {
           variant: "secondary",
           id: "machine-resize-btn",
-          disabled: model.isResizeBusy,
+          disabled: model.isResizeBusy || model.isRestartInProgress,
           // The draft is kept on success: it is the size that was recorded,
           // which discovery reports back only on its next pass.
           onclick: () => {
@@ -789,17 +956,167 @@ function renderMachineResize(
         model.isResizeBusy ? m(Spinner, { size: "sm" }) : "Apply and restart",
       ),
     ]),
-    model.resizeErrorMessage
+    renderMachineResizeError(model),
+  ]);
+}
+
+/** What the plan leaves for this machine: the RAM its other running machines
+ * use against the plan's quota, and the same for disk. */
+function machineSizePlanLine(size: WorkspaceMachineSizeData): string {
+  const parts: string[] = [];
+  if (
+    size.plan_memory_limit_gb !== null &&
+    size.plan_memory_limit_gb !== undefined
+  ) {
+    const others = size.other_machines_memory_gb ?? 0;
+    parts.push(
+      `Your plan allows ${size.plan_memory_limit_gb} GB of RAM across running machines` +
+        (others > 0
+          ? `, of which other running machines use ${others} GB.`
+          : "."),
+    );
+  }
+  if (size.max_disk_gb !== null && size.max_disk_gb !== undefined) {
+    parts.push(
+      size.max_disk_gb > minimumMachineDiskGb(size)
+        ? `The disk can grow to ${size.max_disk_gb} GB.`
+        : "The plan leaves no room to grow the disk.",
+    );
+  }
+  return parts.join(" ");
+}
+
+/** The RAM field of a machine sized from choices: a select over the sizes
+ * the plan allows, the largest marked when the plan (not the fleet) caps it,
+ * keyed to the machine it is picked for. */
+function machineMemoryChoiceField(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+  size: WorkspaceMachineSizeData,
+  isDisabled: boolean,
+): m.Children {
+  const draft = currentSizeDraft(model, local, size);
+  const choices = size.memory_choices_gb ?? [];
+  const largestChoice = choices[choices.length - 1];
+  const memoryId = "machine-size-memory_gb";
+  return m("div", { class: "flex items-center gap-2" }, [
+    m(
+      FormLabel,
+      {
+        target: memoryId,
+        inline: true,
+        extra: "type-helper text-secondary",
+      },
+      "GB RAM",
+    ),
+    m(
+      Select,
+      {
+        id: memoryId,
+        name: "memory_gb",
+        width: "w-40",
+        value: draft.memory_gb,
+        disabled: isDisabled,
+        onchange: (event: Event) => {
+          local.sizeDraft = {
+            agentId: model.agentId,
+            draft: {
+              ...draft,
+              memory_gb: (event.target as HTMLSelectElement).value,
+            },
+          };
+        },
+      },
+      choices.map((gb) =>
+        m(
+          "option",
+          { value: String(gb), selected: String(gb) === draft.memory_gb },
+          gb === largestChoice && size.is_memory_capped_by_plan
+            ? `${gb} GB (plan limit)`
+            : `${gb} GB`,
+        ),
+      ),
+    ),
+  ]);
+}
+
+/** The Imbue Cloud resize: RAM picked from the sizes the plan allows, a
+ * grow-only disk, and the save that records the size for the next restart. */
+function renderMachineResizeFromChoices(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+  size: WorkspaceMachineSizeData,
+): m.Children {
+  const isTransitioning = size.is_transitioning === true;
+  const isDisabled =
+    model.isResizeBusy ||
+    model.isRestartBusy ||
+    model.isRestartInProgress ||
+    isTransitioning;
+  return m("div", { id: "machine-resize", class: "mt-3" }, [
+    m(
+      "p",
+      { class: "type-helper text-tertiary mb-2" },
+      "Pick the RAM, and optionally grow the disk (it never shrinks), then save. CPUs scale with the RAM. " +
+        "The new size takes effect the next time the machine restarts.",
+    ),
+    isTransitioning
       ? m(
           "p",
-          { id: "machine-resize-error", class: "type-helper text-important mt-2", role: "alert" },
-          model.resizeErrorMessage,
+          {
+            id: "machine-resize-wait",
+            class: "type-helper text-secondary mb-2",
+          },
+          "The machine is starting or stopping; its size can be changed once that finishes.",
         )
       : null,
-    model.resizeNotice
-      ? m(Notice, { variant: "info", extra: "mt-2", id: "machine-resize-notice" }, model.resizeNotice)
-      : null,
+    m("div", { class: "flex flex-wrap items-center gap-3" }, [
+      machineMemoryChoiceField(model, local, size, isDisabled),
+      size.is_disk_resizable
+        ? machineResizeField(model, local, size, "disk_gb", "GB disk", {
+            min: String(minimumMachineDiskGb(size)),
+            max:
+              size.max_disk_gb === null || size.max_disk_gb === undefined
+                ? undefined
+                : String(size.max_disk_gb),
+            disabled: isDisabled,
+          })
+        : null,
+      m(
+        Button,
+        {
+          variant: "secondary",
+          id: "machine-resize-btn",
+          disabled: isDisabled,
+          onclick: () => {
+            void model.resizeMachine(currentSizeDraft(model, local, size));
+          },
+        },
+        model.isResizeBusy ? m(Spinner, { size: "sm" }) : "Save size",
+      ),
+    ]),
+    m(
+      "p",
+      { id: "machine-size-plan-line", class: "type-helper text-tertiary mt-2" },
+      machineSizePlanLine(size),
+    ),
+    renderMachineResizeError(model),
   ]);
+}
+
+/** The last resize's or restart's refusal, under either form. */
+function renderMachineResizeError(model: WorkspaceOptionsModel): m.Children {
+  return model.resizeErrorMessage
+    ? m(
+        "p",
+        {
+          id: "machine-resize-error",
+          class: "type-helper text-important mt-2",
+          role: "alert",
+        },
+        model.resizeErrorMessage,
+      )
+    : null;
 }
 
 function commitHexDraft(

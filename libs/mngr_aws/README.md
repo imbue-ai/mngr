@@ -8,12 +8,19 @@ See `mngr_vps` for the base architecture and shared infrastructure.
 
 ## Setup
 
-Credentials are resolved via boto3's default chain; they are not configurable in `mngr.toml`. Any of the following works:
+Credentials are resolved via boto3's default chain by default. Any of the following works:
 
 - Environment: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and optional `AWS_SESSION_TOKEN`)
 - Named profile: `AWS_PROFILE=my-profile`
 - `~/.aws/credentials` / `~/.aws/config`
 - IAM instance profile (when running on EC2)
+
+A provider instance can instead name its own credential source, so several instances can point at different AWS accounts from one process (an environment variable such as `AWS_PROFILE` would apply to all of them):
+
+- `aws_profile = "work"` authenticates through that named profile of this machine's `~/.aws/config` and `~/.aws/credentials`; the block itself carries no key material. The profile's credentials are resolved when the provider is built, so a profile that is missing on this machine or whose single-sign-on login is missing or expired (`ProviderCredentialSourceMissingError`, which discovery keeps re-checking until `aws configure --profile work` or `aws sso login --profile work` has run), or a profile with an `mfa_serial` (refused: it would prompt on stdin) is reported up front. The connection's `default_region` applies, not the profile's own region.
+- `aws_access_key_id` + `aws_secret_access_key` (and optionally `aws_session_token`) hand pasted keys straight to boto3.
+
+The two are mutually exclusive.
 
 ```toml
 [providers.aws]
@@ -99,6 +106,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `aws_access_key_id` | `None` | Explicit AWS access key id. When set together with aws_secret_access_key, these are passed directly to boto3 and take precedence over the ambient credential chain. Used by the Imbue Studio bring-your-own-account paste flow. Leave unset to use the ambient chain. |
 | `aws_secret_access_key` | `None` | Explicit AWS secret access key. See aws_access_key_id. |
 | `aws_session_token` | `None` | Optional AWS session token, for temporary (STS/SSO) credentials. Only used when aws_access_key_id / aws_secret_access_key are set. |
+| `aws_profile` | `None` | Name of a profile in this machine's ~/.aws/config (and ~/.aws/credentials) to authenticate with, so the block carries no key material. Mutually exclusive with aws_access_key_id / aws_secret_access_key. The profile's own region is ignored (default_region applies), and a profile with an mfa_serial is refused because it would prompt on stdin. Leave unset to use the ambient chain. |
 | `root_disk_size_gb` | `30` | Size of the VM's root disk in GB (the EBS root volume on AWS, the boot disk on GCP, the OS managed disk on Azure). With container isolation the agent's data lives on a loop file carved from this disk minus `outer_disk_reserved_gb`. |
 | `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound CIDR blocks allowed on tcp/22 and the container SSH port in the security group / NSG / firewall rule the provider's `prepare` command creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to restrict to your own, or () for no ingress (no rule is created, so the instance is unreachable from outside its network). A warning is logged when the effective range is 0.0.0.0/0 or empty. Replaced, not merged, across config layers. |
 | `associate_public_ip` | `true` | Assign a public IPv4 address to the instance. Required for the current mngr-from-developer-laptop SSH access model. For a more secure deployment, set to False and run mngr from a bastion inside the network. |

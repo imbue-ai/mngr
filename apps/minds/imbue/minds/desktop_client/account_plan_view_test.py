@@ -12,6 +12,7 @@ def _account_info() -> dict[str, object]:
             "max_total_bucket_bytes": 50 * 1024**3,
             "monthly_llm_spend_usd": 0.0,
             "max_active_synced_workspaces": 200,
+            "max_shared_workspaces": 50,
         },
         "usage": {
             "remote_workspaces": 1,
@@ -20,6 +21,7 @@ def _account_info() -> dict[str, object]:
             "llm_spend_usd_this_period": 12.345,
             "llm_budget_resets_at": "2026-08-01T00:00:00Z",
             "active_synced_workspaces": 4,
+            "shared_workspaces": 3,
         },
     }
 
@@ -43,6 +45,19 @@ def test_build_account_plan_view_maps_every_quota_row() -> None:
     assert rows_by_label["AI spend (Imbue Cloud)"]["used"] == "$12.35"
     assert rows_by_label["AI spend (Imbue Cloud)"]["limit"] == "$0.00 / month"
     assert rows_by_label["Synced workspaces"]["used"] == "4"
+    assert rows_by_label["Shared workspaces"]["used"] == "3"
+    assert rows_by_label["Shared workspaces"]["limit"] == "50"
+    assert view["is_sharing_workspaces"] is True
+
+
+def test_build_account_plan_view_offers_the_shared_workspaces_link_only_while_a_share_is_held() -> None:
+    none_shared = _account_info()
+    none_shared["usage"] = {"remote_workspaces": 1, "shared_workspaces": 0}
+    assert build_account_plan_view(none_shared)["is_sharing_workspaces"] is False
+    # An older connector reports no count at all; nothing to review then either.
+    older_connector = _account_info()
+    older_connector["usage"] = {"remote_workspaces": 1}
+    assert build_account_plan_view(older_connector)["is_sharing_workspaces"] is False
 
 
 def test_build_account_plan_view_shows_the_free_plan_as_limited() -> None:

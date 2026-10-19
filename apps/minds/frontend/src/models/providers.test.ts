@@ -3,6 +3,7 @@ import type { UiAccountProvidersEntry, UiConnectionEntry } from "../generated/ui
 import {
   ProvidersStore,
   accountSectionTitleFor,
+  connectionDetailFor,
   connectionLaunchLabel,
   connectionStatusChipFor,
   editControlFor,
@@ -103,6 +104,33 @@ describe("row decisions", () => {
     expect(connectionStatusChipFor("UNLISTED").tone).toBe("muted");
     expect(connectionStatusChipFor("READ_ONLY").label).toBe("Needs a newer app");
     expect(connectionStatusChipFor("NO_CREDENTIALS").label).toBe("No credentials");
+    expect(connectionStatusChipFor("PROFILE_MISSING")).toEqual({ label: "Set up on this device", tone: "warn" });
+  });
+
+  it("tells a missing login's setup step apart from a provider error, and names the fix for both", () => {
+    expect(
+      connectionDetailFor({
+        status: "PROFILE_MISSING",
+        error_type: "ProviderCredentialSourceMissingError",
+        error_message: "AWS profile 'work' is not configured on this machine",
+        remediation: "run `aws configure --profile work`",
+      }),
+    ).toBe(
+      "This connection uses a login that is not set up on this device. To use it here, run `aws configure " +
+        "--profile work`, then check again.",
+    );
+    expect(
+      connectionDetailFor({
+        status: "ERROR",
+        error_type: "ProviderNotAuthorizedError",
+        error_message: "expired",
+        remediation: "run `aws sso login --profile work`",
+      }),
+    ).toBe("ProviderNotAuthorizedError: expired (fix: run `aws sso login --profile work`)");
+    expect(connectionDetailFor({ status: "ERROR", error_type: "E", error_message: "boom", remediation: null })).toBe(
+      "E: boom",
+    );
+    expect(connectionDetailFor({ status: "OK", error_type: null, error_message: null, remediation: null })).toBe("");
   });
 
   it("disables Remove while machines use the connection or a newer app owns it", () => {
@@ -132,6 +160,10 @@ describe("row decisions", () => {
       tooltip: "Enter your master password to edit this connection",
     });
     expect(editControlFor({ status: "NO_CREDENTIALS" }).isEnabled).toBe(false);
+    expect(editControlFor({ status: "PROFILE_MISSING" })).toEqual({
+      isEnabled: true,
+      tooltip: "Use another login or paste keys instead",
+    });
     expect(editControlFor({ status: "READ_ONLY" }).tooltip).toBe(
       "This connection was added by a newer version of the app.",
     );

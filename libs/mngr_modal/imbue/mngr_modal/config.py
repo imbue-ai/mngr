@@ -1,15 +1,21 @@
+import os
+import tomllib
 from enum import auto
 from pathlib import Path
+from typing import Any
+from typing import Final
 
 from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import UserId
+from imbue.mngr_modal.errors import ModalProfileNotFoundError
 
 
 class ModalMode(UpperCaseStrEnum):
@@ -52,6 +58,16 @@ class ModalProviderConfig(ProviderInstanceConfig):
             "Modal token secret paired with token_id (DIRECT mode); after the config layers merge, both must be "
             "set or both unset (the two may come from different layers, e.g. the secret from the environment). "
             "Override via MNGR__PROVIDERS__<NAME>__TOKEN_SECRET."
+        ),
+    )
+    modal_profile: str | None = Field(
+        default=None,
+        description=(
+            "Name of a profile section in this machine's ~/.modal.toml (written by `modal token new --profile "
+            "<name>`) whose token this instance authenticates with (DIRECT mode), so the block carries no "
+            "secret. Mutually exclusive with token_id / token_secret. The profile is read when the provider is "
+            "built, so a profile added later is picked up by the next check; a missing profile reports the "
+            "provider as awaiting its credential source."
         ),
     )
     user_id: UserId | None = Field(
@@ -160,3 +176,81 @@ class ModalProviderConfig(ProviderInstanceConfig):
             "When False (default), sandboxes use Modal's default gVisor runtime."
         ),
     )
+
+
+# Modal's own location for its profiles file, and the variable the SDK honors to move it.
+_MODAL_CONFIG_PATH_ENV_VAR: Final[str] = "MODAL_CONFIG_PATH"
+_DEFAULT_MODAL_CONFIG_PATH: Final[Path] = Path("~/.modal.toml")
+
+
+class ModalProfileToken(FrozenModel):
+    """The token pair one ``~/.modal.toml`` profile section holds."""
+
+    token_id: str = Field(description="The profile's token id")
+    token_secret: SecretStr = Field(description="The profile's token secret")
+
+
+def modal_config_path() -> Path:
+    """Where this machine keeps its Modal profiles: ``MODAL_CONFIG_PATH`` when set, else ``~/.modal.toml``."""
+    raw = os.environ.get(_MODAL_CONFIG_PATH_ENV_VAR)
+    return Path(raw).expanduser() if raw else _DEFAULT_MODAL_CONFIG_PATH.expanduser()
+
+
+def read_modal_profiles(config_path: Path) -> dict[str, ModalProfileToken]:
+    """Every section of a Modal profiles file that holds a token pair, by name, in file order.
+
+    Read here rather than through the Modal SDK, which loads the file once at
+    import: a long-lived ``mngr observe`` must see a profile created after it
+    started, on the check that follows ``modal token new --profile <name>``.
+    ``FileNotFoundError`` and ``OSError`` / ``tomllib.TOMLDecodeError`` propagate,
+    since callers differ on what they mean (a listing shows nothing; a block
+    naming a profile reports it missing).
+    """
+    raw = tomllib.loads(config_path.read_text())
+    profiles: dict[str, ModalProfileToken] = {}
+    for name, section in raw.items():
+        token = _token_of_profile_section(section)
+        if token is not None:
+            profiles[name] = token
+    return profiles
+
+
+def _token_of_profile_section(section: Any) -> ModalProfileToken | None:
+    """The token pair a profile section holds, or None when it is not a section with both keys set."""
+    if not isinstance(section, dict):
+        return None
+    token_id = section.get("token_id")
+    token_secret = section.get("token_secret")
+    if not isinstance(token_id, str) or not token_id or not isinstance(token_secret, str) or not token_secret:
+        return None
+    return ModalProfileToken(token_id=token_id, token_secret=SecretStr(token_secret))
+
+
+def read_modal_profile_token(profile_name: str, config_path: Path) -> ModalProfileToken:
+    """The token pair of one named profile in a Modal profiles file.
+
+    Raises ``ModalProfileNotFoundError`` when the file is absent or unreadable
+    or when no section of it holds a token pair under that name, since none of
+    those leaves a usable profile.
+    """
+    remediation = f"run `modal token new --profile {profile_name}`"
+    try:
+        profiles = read_modal_profiles(config_path)
+    except FileNotFoundError as e:
+        raise ModalProfileNotFoundError(
+            f"Modal profile {profile_name!r} is not configured on this machine ({config_path} does not exist).",
+            short_remediation=remediation,
+        ) from e
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise ModalProfileNotFoundError(
+            f"Modal profile {profile_name!r} cannot be read from {config_path}: {e}",
+            short_remediation=remediation,
+        ) from e
+    token = profiles.get(profile_name)
+    if token is None:
+        raise ModalProfileNotFoundError(
+            f"Modal profile {profile_name!r} is not configured on this machine (no section of {config_path} "
+            "holds a token_id / token_secret pair under that name).",
+            short_remediation=remediation,
+        )
+    return token

@@ -7,15 +7,17 @@ From the perspective of `[pyinfra](https://pyinfra.com/)` (the tool we suggest f
 A default provider instance is automatically created for each registered backend (e.g., `local`, and `docker` once the `imbue-mngr-docker` plugin is installed), but you can also define your own in your `mngr` settings:
 
 ```toml
+# Two AWS accounts, each authenticating through a named profile from ~/.aws/config
+# (no key material in this file; see the aws plugin's README for the other options).
 [providers.my-aws-prod]
 backend = "aws"
-region = "us-east-1"
-profile = "production"
+default_region = "us-east-1"
+aws_profile = "production"
 
 [providers.my-aws-dev]
 backend = "aws"
-region = "us-west-2"
-profile = "development"
+default_region = "us-west-2"
+aws_profile = "development"
 
 [providers.remote-docker]
 backend = "docker"

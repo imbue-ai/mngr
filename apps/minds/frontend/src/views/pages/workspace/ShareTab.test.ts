@@ -250,6 +250,50 @@ describe("ShareTab publish widget", () => {
     );
   });
 
+  /** A loaded panel whose publish the backend refuses with `body`. */
+  async function refusingPanel(status: number, body: unknown): Promise<SharePanelModel> {
+    const share = await readyPanel(
+      {},
+      {
+        fetchJson: (_url: string, init?: RequestInit) =>
+          init?.method === "PUT"
+            ? Promise.resolve({ ok: false, status, body })
+            : Promise.resolve({
+                ok: true,
+                status: 200,
+                body: {
+                  enabled: false,
+                  url: null,
+                  grants: {
+                    workspace: { emails: [], email_domains: [] },
+                    services: {},
+                  },
+                },
+              }),
+      },
+    );
+    await share.publish();
+    return share;
+  }
+
+  it("links a full-quota refusal to the shared-workspaces page, and an ordinary one to nothing", async () => {
+    const quota = await refusingPanel(403, {
+      error: "Shared workspace limit reached (50 of 50).",
+      code: "quota_exceeded",
+      shared_workspaces_path: "/workspaces/shared",
+    });
+    const quotaError = byId(renderTab(quota), "ws-share-publish-error");
+    expect(allText(quotaError)).toContain("limit reached");
+    const remedy = byId(quotaError, "ws-share-publish-remedy") as AnyVnode;
+    expect(attrsOf(remedy).href).toBe("/workspaces/shared");
+    expect(allText(remedy)).toBe("Review shared workspaces");
+
+    const plain = await refusingPanel(502, { error: "relay down" });
+    const plainError = byId(renderTab(plain), "ws-share-publish-error");
+    expect(allText(plainError)).toContain("relay down");
+    expect(byId(plainError, "ws-share-publish-remedy")).toBeUndefined();
+  });
+
   it("spins the wait in the switch's knob while a toggle is in flight, without dimming it", async () => {
     const share = await readyPanel(
       {},

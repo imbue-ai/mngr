@@ -323,6 +323,11 @@ class MachineSizeCliInfo(WireModel):
 
 _MACHINES_LISTING_ADAPTER: Final = TypeAdapter(list[MachineSizeCliInfo])
 
+# The command repr `resize_machine` raises its failures under: every message
+# of a wrapped `mngr imbue_cloud machines resize` failure starts with it (as
+# "<repr>: ..." for a typed refusal, "<repr> failed: ..." for a plain one).
+MACHINES_RESIZE_COMMAND_REPR: Final[str] = "machines resize"
+
 
 class LiteLLMKeyMaterial(WireModel):
     """Result of `mngr imbue_cloud keys litellm create`."""
@@ -361,6 +366,15 @@ class ShareCliInfo(WireModel):
     relays: tuple[ShareCliRelayLogin, ...] = ()
     relay_token: SecretStr | None = None
     last_tunnel_login_at: str | None = None
+    # When the workspace's tunnel last proved itself alive (a relay Login or
+    # heartbeat, stamped at most once per fifteen minutes); the shared-
+    # workspaces page tells a live share from a leaked one by it. None for a
+    # share never seen, or against a connector that predates the stamp.
+    last_seen_at: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    entry_label: str | None = None
+    share_label: str | None = None
     cert_not_after: str | None = None
     # The tier's hosted web-chrome origin, stamped into share.env as
     # SHARE_CHROME_ORIGIN; None against a connector that predates the field or
@@ -782,8 +796,7 @@ class ImbueCloudCli(MutableModel):
         """The machine's sizes for one leased host (by mngr host id, row id, or name), or None when unknown.
 
         None covers both "no such machine" and any CLI failure: the settings
-        surface renders the size read-only and simply omits it when it cannot
-        be fetched.
+        surface then says the machine's size could not be read.
         """
         result = self._run(
             ["machines", "show", machine_ref, "--account", account],
@@ -800,6 +813,30 @@ class ImbueCloudCli(MutableModel):
         body = _parse_stdout_json(result.stdout, "machines show")
         if not isinstance(body, dict):
             return None
+        return MachineSizeCliInfo.model_validate(body)
+
+    def resize_machine(
+        self,
+        account: str,
+        machine_ref: str,
+        target_memory_units: int | None,
+        target_disk_gb: int | None,
+    ) -> MachineSizeCliInfo:
+        """Record a resize for one leased machine (``mngr imbue_cloud machines resize``), applied at its next restart.
+
+        Returns the connector's recorded sizes. A quota refusal raises
+        :class:`ImbueCloudQuotaExceededCliError`; any other refusal (a size
+        outside the allowed set, a disk shrink, a machine mid-start) raises
+        :class:`ImbueCloudCliError` carrying the plugin's own words.
+        """
+        args = ["machines", "resize", machine_ref]
+        if target_memory_units is not None:
+            args.extend(["--units", str(target_memory_units)])
+        if target_disk_gb is not None:
+            args.extend(["--disk-gb", str(target_disk_gb)])
+        args.extend(["--account", account])
+        result = self._run(args, cg_name="imbue-cloud-machines-resize")
+        body = self._expect_success(result, MACHINES_RESIZE_COMMAND_REPR)
         return MachineSizeCliInfo.model_validate(body)
 
     def list_machines(self, account: str) -> list[MachineSizeCliInfo]:

@@ -5,6 +5,7 @@ from pathlib import Path
 import boto3
 import pytest
 from moto import mock_aws
+from pydantic import SecretStr
 from pydantic import ValidationError
 
 from imbue.mngr.config.data_types import ScalarTuple
@@ -12,6 +13,11 @@ from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.boto_config import IMDS_CREDENTIAL_PROVIDER_NAME
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
+from imbue.mngr_aws.config import AwsConfigError
+from imbue.mngr_aws.config import AwsProfileCredentialsError
+from imbue.mngr_aws.config import AwsProfileNotFoundError
+from imbue.mngr_aws.config import AwsProfileSsoLoginError
+from imbue.mngr_aws.config import AwsProfileUnsupportedError
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import pick_ami_architecture
 from imbue.mngr_aws.config import pick_newest_ami_id
@@ -29,6 +35,33 @@ def write_default_credentials_file(directory: Path) -> Path:
         encoding="utf-8",
     )
     return creds_path
+
+
+def write_named_profiles(directory: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point boto3 at a config/credentials pair holding three named profiles.
+
+    ``team`` is a plain static-key profile, ``guarded`` demands an MFA code,
+    ``sso`` is a single-sign-on profile whose token cache (under the isolated
+    HOME) is empty, so its login reads as expired, and ``chained`` assumes a
+    role from a source profile that does not exist.
+    """
+    (directory / "config").write_text(
+        "[profile team]\nregion = eu-west-1\n\n"
+        "[profile guarded]\nmfa_serial = arn:aws:iam::123456789012:mfa/alice\n\n"
+        "[profile sso]\nsso_start_url = https://example.awsapps.com/start\nsso_region = us-east-1\n"
+        "sso_account_id = 123456789012\nsso_role_name = Admin\n\n"
+        "[profile chained]\nrole_arn = arn:aws:iam::123456789012:role/Deploy\nsource_profile = nope\n",
+        encoding="utf-8",
+    )
+    (directory / "credentials").write_text(
+        "[team]\naws_access_key_id = AKIATEAM\naws_secret_access_key = team-secret\n\n"
+        "[guarded]\naws_access_key_id = AKIAGUARD\naws_secret_access_key = guard-secret\n",
+        encoding="utf-8",
+    )
+    clear_aws_env(monkeypatch)
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(directory / "config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(directory / "credentials"))
 
 
 def test_default_config_values() -> None:
@@ -72,6 +105,84 @@ def test_get_session_returns_session_with_region(monkeypatch: pytest.MonkeyPatch
     assert session.region_name == "us-west-2"
     creds = session.get_credentials()
     assert creds is not None
+
+
+def test_aws_profile_session_authenticates_with_the_named_profile_not_the_ambient_chain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    write_named_profiles(tmp_path, monkeypatch)
+    # Ambient keys that would win under the default chain.
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAAMBIENT")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ambient-secret")
+    config = AwsProviderConfig(aws_profile="team", default_region="us-west-2")
+
+    session = config.get_session()
+
+    credentials = session.get_credentials()
+    assert credentials is not None
+    assert credentials.get_frozen_credentials().access_key == "AKIATEAM"
+    # The connection's pinned region applies, not the profile's own.
+    assert session.region_name == "us-west-2"
+    assert IMDS_CREDENTIAL_PROVIDER_NAME not in _credential_provider_names(session)
+
+
+def test_aws_profile_missing_on_this_machine_names_the_profile_and_the_fix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    write_named_profiles(tmp_path, monkeypatch)
+    config = AwsProviderConfig(aws_profile="nope")
+
+    with pytest.raises(AwsProfileNotFoundError, match="'nope' is not configured on this machine") as exc_info:
+        config.get_session()
+
+    assert exc_info.value.short_remediation == "run `aws configure --profile nope` (or `aws configure sso`)"
+
+
+def test_aws_profile_with_an_mfa_prompt_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    write_named_profiles(tmp_path, monkeypatch)
+    config = AwsProviderConfig(aws_profile="guarded")
+
+    with pytest.raises(AwsProfileUnsupportedError, match="mfa_serial") as exc_info:
+        config.get_session()
+
+    assert exc_info.value.short_remediation == "use a profile without mfa_serial (an SSO profile, or static keys)"
+
+
+def test_aws_profile_with_an_expired_sso_login_points_at_sso_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    write_named_profiles(tmp_path, monkeypatch)
+    config = AwsProviderConfig(aws_profile="sso")
+
+    with pytest.raises(AwsProfileSsoLoginError, match="single-sign-on login .* is missing or expired") as exc_info:
+        config.get_session()
+
+    assert exc_info.value.short_remediation == "run `aws sso login --profile sso`"
+
+
+def test_aws_profile_whose_own_configuration_is_broken_keeps_botocores_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """botocore raises a profile's configuration errors from get_credentials() itself; they are typed too."""
+    write_named_profiles(tmp_path, monkeypatch)
+    config = AwsProviderConfig(aws_profile="chained")
+
+    with pytest.raises(AwsProfileCredentialsError, match='source_profile "nope"') as exc_info:
+        config.get_session()
+
+    assert exc_info.value.short_remediation == "check the profile with `aws sts get-caller-identity --profile chained`"
+
+
+def test_aws_profile_and_pasted_keys_are_mutually_exclusive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    write_named_profiles(tmp_path, monkeypatch)
+    config = AwsProviderConfig(
+        aws_profile="team", aws_access_key_id=SecretStr("AKIAPASTED"), aws_secret_access_key=SecretStr("pasted")
+    )
+
+    with pytest.raises(AwsConfigError, match="mutually exclusive") as exc_info:
+        config.get_session()
+
+    assert exc_info.value.short_remediation == "keep either aws_profile or the pasted keys on the block, not both"
 
 
 def _credential_provider_names(session: boto3.Session) -> list[str]:

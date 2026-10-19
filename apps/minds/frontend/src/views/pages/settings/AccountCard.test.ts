@@ -32,6 +32,7 @@ function modelOnPlan(planName: string): AccountsDetailModel {
     usage_rows: [],
     is_over_storage_quota: false,
     is_at_bucket_quota: false,
+    is_sharing_workspaces: false,
   };
   state.privacyPolicyUrl = PRIVACY_POLICY_URL;
   return model;
@@ -312,5 +313,24 @@ describe("the email notifications switch", () => {
     expect(collectText(root).join(" ")).toContain(
       "Loading notification settings",
     );
+  });
+});
+
+describe("the shared-workspaces link", () => {
+  it("is offered only while the account holds a share", () => {
+    const model = modelOnPlan("free");
+    const state = model.planStateFor(ACCOUNT.user_id);
+    expect(
+      collectVnodes(mountCard(model)()).some(
+        (node) => attrsOf(node).id === "account-shared-workspaces-link",
+      ),
+    ).toBe(false);
+
+    state.planView = { ...state.planView!, is_sharing_workspaces: true };
+    const link = collectVnodes(mountCard(model)()).find(
+      (node) => attrsOf(node).id === "account-shared-workspaces-link",
+    );
+    expect(link).toBeDefined();
+    expect(attrsOf(link as AnyVnode).href).toBe("/workspaces/shared");
   });
 });

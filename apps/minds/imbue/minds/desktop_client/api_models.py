@@ -21,8 +21,11 @@ from pydantic import Field
 from pydantic import RootModel
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.connections.data_types import DEFAULT_CREDENTIAL_SOURCE_NAME
 from imbue.minds.desktop_client.connections.primitives import MODAL_SANDBOX_TIMEOUT_SECONDS_MAX
 from imbue.minds.desktop_client.data_types import ShareGatewayState
+from imbue.minds.desktop_client.data_types import ShareRemovalOutcome
+from imbue.minds.desktop_client.data_types import SharedWorkspaceRecordState
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
@@ -360,12 +363,18 @@ class CreateWorkspaceRequest(ApiRequestModel):
 class MachineSizeChangeRequest(ApiRequestModel):
     """Body for resizing a workspace's machine; a dimension left out keeps its current value."""
 
-    cpu_count: int | None = Field(default=None, ge=1, description="Whole CPUs to give the machine")
+    cpu_count: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Whole CPUs to give the machine (docker and lima only; an Imbue Cloud machine's CPUs scale with its RAM)"
+        ),
+    )
     memory_gb: int | None = Field(default=None, ge=1, description="Memory in whole GB to give the machine")
     disk_gb: int | None = Field(
         default=None,
         ge=1,
-        description="Data disk in whole GB to grow the machine's disk to (lima only; never shrinks)",
+        description="Data disk in whole GB to grow the machine's disk to (lima and Imbue Cloud only; never shrinks)",
     )
 
 
@@ -374,8 +383,9 @@ class MachineSizeChangeResponse(FrozenModel):
 
     is_restart_dispatched: bool = Field(
         description=(
-            "True when the machine was running and its restart was dispatched to apply the size; False when it "
-            "was stopped, so the recorded size applies on its next start"
+            "True when a local machine was running and its restart was dispatched to apply the size; False when it "
+            "was stopped (the recorded size applies on its next start) or is an Imbue Cloud machine (the size is "
+            "only recorded; the restart that applies it is asked for separately)"
         )
     )
     operation_id: str | None = Field(
@@ -528,6 +538,14 @@ class _CloudAccountCreateBase(ApiRequestModel):
     """Fields shared by every backend's cloud-connection registration."""
 
     alias: str = Field(min_length=1, description="Display name for the connection")
+    credential_source: str | None = Field(
+        default=None,
+        description=(
+            "'pasted' (the default: the backend's keys are in the body) or 'local_profile' (no keys; the body names "
+            "a login installed on this machine: aws_profile, the Azure tenant and subscription of an `az login`, "
+            "or modal_profile). GCP has no local-profile form."
+        ),
+    )
     owner: str | None = Field(
         default=None,
         description=(
@@ -552,6 +570,9 @@ class _AwsCredentialFields(ApiRequestModel):
     backend: Literal["aws"] = Field(description="Cloud backend discriminator")
     aws_access_key_id: str | None = Field(default=None, description="AWS access key id")
     aws_secret_access_key: str | None = Field(default=None, description="AWS secret access key")
+    aws_profile: str | None = Field(
+        default=None, description="The ~/.aws/config profile to authenticate with (credential_source local_profile)"
+    )
 
 
 class _GcpCredentialFields(ApiRequestModel):
@@ -564,7 +585,7 @@ class _GcpCredentialFields(ApiRequestModel):
 
 
 class _AzureCredentialFields(ApiRequestModel):
-    """An Azure service-principal."""
+    """An Azure service-principal, or (credential_source local_profile) the tenant and subscription of an `az login`."""
 
     backend: Literal["azure"] = Field(description="Cloud backend discriminator")
     azure_subscription_id: str | None = Field(default=None, description="Azure subscription id")
@@ -579,6 +600,9 @@ class _ModalCredentialFields(ApiRequestModel):
     backend: Literal["modal"] = Field(description="Cloud backend discriminator")
     modal_token_id: str | None = Field(default=None, description="Modal token id")
     modal_token_secret: str | None = Field(default=None, description="Modal token secret")
+    modal_profile: str | None = Field(
+        default=None, description="The ~/.modal.toml profile to authenticate with (credential_source local_profile)"
+    )
 
 
 class AwsCloudAccountCreateRequest(_PlacedCloudAccountCreateBase, _AwsCredentialFields):
@@ -632,6 +656,10 @@ class _CloudAccountUpdateBase(ApiRequestModel):
     """Fields shared by every backend's in-place credential update: no owner, no region, no backend change."""
 
     alias: str | None = Field(default=None, description="New display name; omitted keeps the current one")
+    credential_source: str | None = Field(
+        default=None,
+        description="'pasted' (default) or 'local_profile'; an update may switch the connection between the two",
+    )
 
 
 class AwsCloudAccountUpdateRequest(_CloudAccountUpdateBase, _AwsCredentialFields):
@@ -681,6 +709,28 @@ class CloudAccountSummary(FrozenModel):
     is_region_pinned: bool = Field(
         description="Whether the backend fixes the region on the connection (aws, gcp, azure)"
     )
+    credential_source: str = Field(
+        default=DEFAULT_CREDENTIAL_SOURCE_NAME,
+        description="'pasted' or 'local_profile': whether the connection names a local login",
+    )
+
+
+class LocalCredentialProfileResponse(FrozenModel):
+    """One login on this machine a local-profile connection can name."""
+
+    name: str = Field(description="What the connection names: the AWS or Modal profile, or the Azure subscription id")
+    label: str = Field(description="Display label")
+    region: str | None = Field(default=None, description="The AWS profile's own region, when it sets one")
+    tenant_id: str | None = Field(default=None, description="The Azure subscription's tenant")
+    subscription_id: str | None = Field(default=None, description="The Azure subscription id")
+    unusable_reason: str = Field(default="", description="Why a connection cannot use this login; empty when it can")
+
+
+class LocalCredentialProfilesResponse(FrozenModel):
+    """The logins on this machine a connection of one backend can name (``GET .../cloud-accounts/local-profiles``)."""
+
+    backend: str = Field(description="The backend the profiles were listed for")
+    profiles: tuple[LocalCredentialProfileResponse, ...] = Field(description="The usable and unusable logins found")
 
 
 class CloudAccountOperationStatusResponse(FrozenModel):
@@ -750,6 +800,42 @@ class AccountsResponse(FrozenModel):
     """The accounts signed in on this device (for associating a workspace with one)."""
 
     accounts: tuple[AccountSummary, ...] = Field(description="All signed-in accounts")
+
+
+class SharedWorkspaceRow(FrozenModel):
+    """One share of an account as the shared-workspaces page shows it."""
+
+    host_id: str = Field(description="The share's host coordinate, the key every share operation takes")
+    workspace_id: str | None = Field(description="The workspace the share is keyed by; None on a legacy row")
+    account_email: str = Field(description="The owning account")
+    display_name: str = Field(description="The workspace's name from its record, else the share's domain")
+    workspace_domain: str = Field(description="The share's domain")
+    device_label: str = Field(description="Where the workspace runs: its record's device, or 'This device'")
+    share_state: str = Field(description="The connector's share state: active, or suspended")
+    record_state: SharedWorkspaceRecordState = Field(description="What the account's records say about the workspace")
+    created_display: str = Field(description="When the share was created (YYYY-MM-DD), '' when unknown")
+    last_seen_display: str = Field(description="When the workspace's tunnel was last alive, in words")
+    is_likely_leaked: bool = Field(
+        description="The workspace is destroyed or unknown: the share holds a slot for nothing"
+    )
+    is_hosted_here: bool = Field(description="This device runs the workspace, so removing is an unpublish")
+
+
+class AccountSharesResponse(FrozenModel):
+    """The shares one signed-in account holds, each joined to the account's workspace records."""
+
+    account_id: str = Field(description="The account the rows belong to")
+    email: str = Field(description="The account's email")
+    rows: tuple[SharedWorkspaceRow, ...] = Field(description="Every slot-holding share, in share-creation order")
+
+
+class AccountShareRemovedResponse(FrozenModel):
+    """What removing one share from the shared-workspaces page did."""
+
+    host_id: str = Field(description="The share's host coordinate")
+    outcome: ShareRemovalOutcome = Field(
+        description="stopped_sharing when the workspace runs here and was unpublished; removed when only the share went"
+    )
 
 
 class AppVersionResponse(FrozenModel):
