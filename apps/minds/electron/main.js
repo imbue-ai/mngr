@@ -85,6 +85,7 @@ const {
 // Right-click (context) menu logic lives in ./context-menu so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const { registerContextMenuFor } = require('./context-menu');
+const { formatGpuProcessGone } = require('./gpu-diagnostics');
 const { createExternalOpener, createLinkRouter, isExternalUrl } = require('./link-routing');
 
 // After the single-web-context collapse each window is ONE BrowserWindow whose
@@ -3581,6 +3582,12 @@ function initiateFullQuit() {
 
 let isQuitSequenceRunning = false;
 let isHeadlessQuit = false;
+// The first SIGTERM/SIGINT this run received (null until one arrives), so a
+// later GPU-process death can be ordered against it.
+let firstTerminationSignal = null;
+// GPU-process deaths seen this run; Chromium aborts the browser once enough of
+// them exhaust its fallback modes.
+let gpuProcessDeathCount = 0;
 // Callers waiting to hear that a quit sequence ended with the app staying up.
 let quitCancelledWaiters = [];
 
@@ -3653,17 +3660,39 @@ async function runQuitSequence() {
 app.whenReady().then(() => {
   for (const signal of ['SIGTERM', 'SIGINT']) {
     process.on(signal, () => {
+      if (firstTerminationSignal === null) firstTerminationSignal = signal;
       // The electron CLI shim forwards each signal it receives, so a process-group
       // signal arrives twice; a second app.quit() would cut the running quit short.
       if (isShuttingDown || isQuitSequenceRunning) {
-        console.log(`[lifecycle] ${signal} received, quit already in progress`);
+        console.log(`[lifecycle] ${signal} received, quit already in progress (uptime=${process.uptime().toFixed(1)}s)`);
         return;
       }
-      console.log(`[lifecycle] ${signal} received, requesting quit`);
+      console.log(`[lifecycle] ${signal} received, requesting quit (uptime=${process.uptime().toFixed(1)}s)`);
       isHeadlessQuit = true;
       app.quit();
     });
   }
+});
+
+// See gpu-diagnostics.js for why every GPU-process death is logged.
+app.on('child-process-gone', (_event, details) => {
+  if (details.type !== 'GPU') return;
+  gpuProcessDeathCount += 1;
+  let featureStatus = null;
+  try {
+    featureStatus = app.getGPUFeatureStatus();
+  } catch (err) {
+    console.error(`[gpu] could not read the GPU feature status: ${err.message || err}`);
+  }
+  console.error(formatGpuProcessGone({
+    reason: details.reason,
+    exitCode: details.exitCode,
+    gpuDeathCount: gpuProcessDeathCount,
+    isShuttingDown,
+    terminationSignal: firstTerminationSignal,
+    uptimeSeconds: process.uptime(),
+    featureStatus,
+  }));
 });
 
 app.on('window-all-closed', () => {

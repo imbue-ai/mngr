@@ -91,6 +91,19 @@ _DEFAULT_MINDS_TIER: Final[str] = "ci-snapshot"
 
 _ELECTRON_BINARY: Final[Path] = _REPO_ROOT / "apps" / "minds" / "node_modules" / ".bin" / "electron"
 _ELECTRON_MAIN_JS: Final[Path] = _REPO_ROOT / "apps" / "minds" / "electron" / "main.js"
+# Set (presence only) on every Electron this harness launches; read by
+# electron/sentry.js, which tags the run's Sentry events with it.
+E2E_HARNESS_MARKER_ENV_VAR: Final[str] = "MINDS_LAUNCHED_BY_E2E_HARNESS"
+# Electron output lines forwarded at info instead of debug: main.js's [gpu] lines
+# and termination-signal lines, Chromium's own "GPU process isn't usable"
+# abort, and the electron launcher's report that the app died by a signal (the
+# launcher exits 1 in that case, so the returncode alone does not say which).
+_ELECTRON_OUTPUT_INFO_MARKERS: Final[tuple[str, ...]] = (
+    "[gpu] ",
+    "GPU process",
+    "[lifecycle] SIG",
+    "exited with signal",
+)
 
 # Per-phase wall-clock budgets. Tight enough to fail with a useful
 # "stuck in <phase>" error before a wrapping suite-level timeout fires.
@@ -291,6 +304,7 @@ def _build_electron_env(workspace_git_url: Path, extra_env: Mapping[str, str] | 
     # the user's dotfolder. MINDS_DATA_HOME gives it one throwaway root per run,
     # which also keeps the container reproducible.
     env.setdefault(MINDS_DATA_HOME_ENV_VAR, str(Path(env.get("HOME", "/root")) / _E2E_DATA_HOME_DIR_NAME))
+    env[E2E_HARNESS_MARKER_ENV_VAR] = "1"
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("ANTHROPIC_BASE_URL", None)
     return env
@@ -299,12 +313,21 @@ def _build_electron_env(workspace_git_url: Path, extra_env: Mapping[str, str] | 
 def _drain_byte_stream_to_loguru(stream: IO[bytes], prefix: str) -> None:
     """Read lines from ``stream`` and forward each non-empty one to loguru.
 
+    Lines carrying one of ``_ELECTRON_OUTPUT_INFO_MARKERS`` go out at info
+    rather than debug, so a run's GPU-process deaths, termination signals and
+    the electron launcher's signal-death report are visible without debug
+    logging.
+
     Module-level so it can be the target of :class:`threading.Thread`
     without tripping the inline-functions ratchet on this file.
     """
     for raw_line in iter(stream.readline, b""):
         line = raw_line.decode("utf-8", errors="replace").rstrip()
-        if line:
+        if not line:
+            continue
+        if any(marker in line for marker in _ELECTRON_OUTPUT_INFO_MARKERS):
+            logger.info("[{}] {}", prefix, line)
+        else:
             logger.debug("[{}] {}", prefix, line)
 
 
@@ -341,16 +364,25 @@ def _terminate_electron_process_tree(process: subprocess.Popen[bytes]) -> None:
     guarantees the whole tree dies; a leftover child would otherwise keep the
     profile's single-instance lock held and wedge the next relaunch.
     """
-    if process.poll() is not None:
+    # Whether Electron was still alive when teardown began, and how it exited,
+    # separates "the app was killed mid-teardown" from "the app had already died
+    # on its own" (e.g. a browser-process abort that made the CDP attach fail).
+    early_returncode = process.poll()
+    if early_returncode is not None:
+        logger.info(
+            "Electron (pid {}) had already exited before teardown (returncode={})", process.pid, early_returncode
+        )
         return
     try:
         process_group_id = os.getpgid(process.pid)
     except ProcessLookupError:
         return
 
+    logger.info("Electron (pid {}) still running at teardown; sending SIGTERM to process group", process.pid)
     _signal_process_group(process_group_id, signal.SIGTERM)
     try:
-        process.wait(timeout=_ELECTRON_SIGTERM_GRACE_SECONDS)
+        returncode = process.wait(timeout=_ELECTRON_SIGTERM_GRACE_SECONDS)
+        logger.info("Electron (pid {}) exited after SIGTERM (returncode={})", process.pid, returncode)
     except subprocess.TimeoutExpired:
         logger.warning(
             "Electron did not exit on SIGTERM within {}s; sending SIGKILL",
@@ -358,7 +390,8 @@ def _terminate_electron_process_tree(process: subprocess.Popen[bytes]) -> None:
         )
         _signal_process_group(process_group_id, signal.SIGKILL)
         try:
-            process.wait(timeout=5)
+            returncode = process.wait(timeout=5)
+            logger.info("Electron (pid {}) exited after SIGKILL (returncode={})", process.pid, returncode)
         except subprocess.TimeoutExpired:
             logger.warning("Electron process group did not exit within 5s of SIGKILL")
 

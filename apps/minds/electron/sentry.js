@@ -27,6 +27,11 @@ const SENTRY_FRONTEND_DSN_PRODUCTION = 'https://70356438f3a945b8e58cb0a6f8773d0a
 const SENTRY_FRONTEND_DSN_STAGING = 'https://b8ce0a0ea4d38de2bda94e5ff6168572@o4504335315501056.ingest.us.sentry.io/4511620045144064';
 const SENTRY_FRONTEND_DSN_DEV = 'https://ddc0f18beba95166b72eacd9d4b48bf0@o4504335315501056.ingest.us.sentry.io/4511620043243520';
 
+// Presence-only env var the e2e harness (imbue/minds/desktop_client/e2e_workspace_runner.py)
+// sets on the Electron it launches. Its events are tagged so they can be told
+// apart from a developer's own install -- both land in the development project.
+const E2E_HARNESS_MARKER_ENV_VAR = 'MINDS_LAUNCHED_BY_E2E_HARNESS';
+
 /**
  * Parse the per-machine user config (`<dataDir>/config.toml`), or return `{}` when
  * the file is absent or unreadable.
@@ -219,6 +224,9 @@ function initSentry(options = {}) {
     },
   });
   Sentry.setTag('git_sha', gitSha);
+  if (process.env[E2E_HARNESS_MARKER_ENV_VAR]) {
+    Sentry.setTag('launched_by', 'e2e_harness');
+  }
   console.log(
     `[sentry] Initialized (environment=${environment}, release=${fixupReleaseId(releaseId)}); ` +
       'automatic reporting gated live by the report_unexpected_errors user setting.'
