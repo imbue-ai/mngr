@@ -275,6 +275,33 @@ export interface MobileAccessLinkResponse {
   sent_at?: string | null;
 }
 
+/** One visiting agent's grant as the workspace reports it (never its key or token). */
+export interface VisitingAgentEntry {
+  agent_id: string;
+  name: string;
+  fingerprint: string;
+  /** "workspace" (every origin, exec authority) or the app names the grant admits. */
+  scope: string | string[];
+  /** Who invited it: `user:<id>` or `agent:<id>`. */
+  granter: string;
+  created_at: string;
+  expires_at: string | null;
+  last_seen_at: string | null;
+}
+
+export interface VisitingAgentsResponse {
+  agents: VisitingAgentEntry[];
+}
+
+/** A minted one-time code and the instruction block to hand the agent. */
+export interface VisitingAgentInviteResponse {
+  code: string;
+  expires_at: string;
+  scope: string | string[];
+  auth_origin: string;
+  instructions: string;
+}
+
 /** The route that resolves a typed address to an account (a 404 means "store an invite"). */
 export const RESOLVE_USER_URL = "/ui/api/users/resolve";
 

@@ -20,7 +20,9 @@ import type {
   InvitationStatusIndicator,
   MobileLinkState,
   SharePanelModel,
+  VisitingAgentInviteState,
 } from "../../../models/sharePanel";
+import type { VisitingAgentEntry } from "../../../models/workspaceOptions";
 import { GRANT_ADD_KINDS, toGrantAddKind } from "../../../models/sharePanel";
 import { formatRelativeAgo } from "../../../models/backups";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
@@ -76,6 +78,22 @@ const ADD_UNKNOWN_TOOLTIP =
 // carries that link and no app's. It is drawn whether or not sharing is on, so
 // a reader learns the feature exists and what switch turns it on.
 const MOBILE_LINK_LABEL = "Email me a Mobile Access Link";
+
+const VISITING_AGENTS_HEADING = "Visiting agents";
+const VISITING_AGENTS_WORKSPACE_SENTENCE =
+  "Invite a coding agent running somewhere else (on your computer, in a cloud " +
+  "agent product, on a collaborator's machine) to work in this workspace with " +
+  "exactly this workspace's access, and nothing more.";
+const VISITING_AGENTS_APP_SENTENCE =
+  "Invite a coding agent running somewhere else to use only this app.";
+const VISITING_AGENT_INVITE_LABEL = "Invite an agent";
+const VISITING_AGENT_COPY_LABEL = "Copy the instructions";
+const VISITING_AGENT_DONE_LABEL = "Done";
+const VISITING_AGENT_REVOKE_LABEL = "Revoke";
+const VISITING_AGENTS_EMPTY = "No agents have been invited.";
+const VISITING_AGENTS_RETRY_LABEL = "Try again";
+const VISITING_AGENT_INSTRUCTIONS_LEAD =
+  "Paste these instructions to the agent. The code works once and expires in fifteen minutes.";
 
 const MOBILE_LINK_OFF_TOOLTIP =
   "Enable sharing and web access to access this link on mobile";
@@ -467,7 +485,11 @@ function renderNavEntry(
         // The space is the text's own: a margin is not one, and a reader would
         // otherwise announce the two names run together.
         share.isDisplayNameAmbiguous(target)
-          ? m("span", { class: "ml-1.5 type-helper text-tertiary" }, ` ${target}`)
+          ? m(
+              "span",
+              { class: "ml-1.5 type-helper text-tertiary" },
+              ` ${target}`,
+            )
           : null,
       ]),
       // An app registers its address when it starts, so one that has never run
@@ -571,6 +593,7 @@ function renderTargetPane(
           ),
         ),
     renderGrantList(share, local),
+    renderVisitingAgentsSection(share, local, target),
   ];
 }
 
@@ -907,7 +930,10 @@ function rowSurfaceClass(share: SharePanelModel, isDomain: boolean): string {
  * cell so an outcome arriving never moves the row, holding the status and, when a re-invite can
  * be requested, an "Invite again" control. The first invitation is automatic, so there is no
  * first "Invite" button here. */
-function renderInvitationStatusIndicator(share: SharePanelModel, grant: Grant): m.Children {
+function renderInvitationStatusIndicator(
+  share: SharePanelModel,
+  grant: Grant,
+): m.Children {
   const target = share.currentTarget;
   const state = share.invitationStatusIndicator(target, grant);
   return m(
@@ -934,10 +960,17 @@ function reinviteButton(share: SharePanelModel, grant: Grant): m.Children {
   );
 }
 
-function indicatorText(classes: string, text: string, tooltip: string | null): m.Children {
+function indicatorText(
+  classes: string,
+  text: string,
+  tooltip: string | null,
+): m.Children {
   return m(
     "span",
-    { class: `min-w-0 truncate ${classes}`, ...(tooltip === null ? {} : { "data-tooltip": tooltip }) },
+    {
+      class: `min-w-0 truncate ${classes}`,
+      ...(tooltip === null ? {} : { "data-tooltip": tooltip }),
+    },
     text,
   );
 }
@@ -952,12 +985,17 @@ function invitationStatusIndicatorContents(
     case "none":
       return null;
     case "inviting":
-      return [m(Spinner, { size: "sm", extra: "shrink-0" }), indicatorText("text-tertiary", "Inviting", null)];
+      return [
+        m(Spinner, { size: "sm", extra: "shrink-0" }),
+        indicatorText("text-tertiary", "Inviting", null),
+      ];
     case "invited":
       return [
         indicatorText(
           "text-tertiary",
-          state.at === null ? "Invited" : `Invited ${formatRelativeAgo(state.at, nowMs)}`,
+          state.at === null
+            ? "Invited"
+            : `Invited ${formatRelativeAgo(state.at, nowMs)}`,
           state.at === null ? null : `Invited ${localeTime(state.at)}`,
         ),
         state.canReinvite ? reinviteButton(share, grant) : null,
@@ -975,13 +1013,18 @@ function invitationStatusIndicatorContents(
     case "joined":
       return indicatorText(
         "text-success",
-        state.firstAt === null ? "Joined" : `Joined ${formatRelativeAgo(state.firstAt, nowMs)}`,
+        state.firstAt === null
+          ? "Joined"
+          : `Joined ${formatRelativeAgo(state.firstAt, nowMs)}`,
         visitsTooltip(state.firstAt, state.lastAt),
       );
   }
 }
 
-function visitsTooltip(firstAt: string | null, lastAt: string | null): string | null {
+function visitsTooltip(
+  firstAt: string | null,
+  lastAt: string | null,
+): string | null {
   const parts: string[] = [];
   if (firstAt !== null) parts.push(`First visited ${localeTime(firstAt)}`);
   if (lastAt !== null) parts.push(`last visited ${localeTime(lastAt)}`);
@@ -1152,7 +1195,12 @@ function renderLinkSection(
                     ? "Copy the link"
                     : `Copy the link to ${targetTitle(share, target)}`,
                 onclick: () => {
-                  void copyLink(share, local, url);
+                  void copyToClipboardWithFlash(
+                    share,
+                    local,
+                    share.currentTarget,
+                    url,
+                  );
                 },
               },
               m(Icon16, { name: isCopied ? "check" : "copy" }),
@@ -1221,25 +1269,287 @@ function renderMobileLinkStatus(state: MobileLinkState): m.Children {
   }
 }
 
-async function copyLink(
+/** Write `text` to the clipboard and flash the check on the control keyed `target`. */
+async function copyToClipboardWithFlash(
   share: SharePanelModel,
   local: ShareTabLocalState,
-  url: string,
+  target: string,
+  text: string,
 ): Promise<void> {
   const clipboard = navigator.clipboard;
-  // The link is on screen and selectable either way, so a clipboard that
+  // The text is on screen and selectable either way, so a clipboard that
   // refuses costs the confirmation and nothing else.
   if (!clipboard) return;
   try {
-    await clipboard.writeText(url);
+    await clipboard.writeText(text);
   } catch {
     return;
   }
-  local.copied = { target: share.currentTarget, atMs: share.nowMs() };
+  local.copied = { target, atMs: share.nowMs() };
   if (local.copyFlashHandle !== null) share.cancel(local.copyFlashHandle);
   local.copyFlashHandle = share.schedule(() => {
     local.copyFlashHandle = null;
     m.redraw();
   }, COPY_FLASH_MS);
   m.redraw();
+}
+
+// --- visiting agents ---
+
+/** The section inviting outside coding agents into the target, and listing those already in. */
+function renderVisitingAgentsSection(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  target: string,
+): m.Children {
+  const isWhole = target === share.wholeService;
+  const inviteState = share.visitingAgentInviteState;
+  return m(
+    "section",
+    {
+      id: "ws-share-agents",
+      class: "mt-6 shrink-0",
+      oncreate: () => void share.ensureVisitingAgentsLoaded(),
+    },
+    [
+      m("p", { class: "type-label text-primary" }, VISITING_AGENTS_HEADING),
+      m(
+        "p",
+        { class: "mt-1 type-helper text-tertiary" },
+        isWhole
+          ? VISITING_AGENTS_WORKSPACE_SENTENCE
+          : VISITING_AGENTS_APP_SENTENCE,
+      ),
+      m("div", { class: "mt-3 flex items-center gap-2" }, [
+        m(
+          Button,
+          {
+            id: "ws-share-agents-invite",
+            variant: "secondary",
+            "aria-disabled":
+              inviteState.state === "minting" ? "true" : undefined,
+            onclick: () => void share.inviteVisitingAgent(target),
+          },
+          [
+            inviteState.state === "minting"
+              ? m(Spinner, { size: "sm", extra: "shrink-0" })
+              : m(Icon16, { name: "user-plus" }),
+            VISITING_AGENT_INVITE_LABEL,
+          ],
+        ),
+        inviteState.state === "refused" && inviteState.target === target
+          ? m(
+              "p",
+              {
+                id: "ws-share-agents-invite-error",
+                class: "type-helper text-important",
+              },
+              inviteState.message,
+            )
+          : null,
+      ]),
+      inviteState.state === "minted" && inviteState.target === target
+        ? renderVisitingAgentInstructions(share, local, inviteState)
+        : null,
+      renderVisitingAgentList(share, isWhole),
+    ],
+  );
+}
+
+function renderVisitingAgentInstructions(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  inviteState: Extract<VisitingAgentInviteState, { state: "minted" }>,
+): m.Children {
+  const { invite } = inviteState;
+  const copied = local.copied;
+  const isCopied =
+    copied !== null &&
+    copied.target === `agent:${invite.code}` &&
+    share.nowMs() - copied.atMs < COPY_FLASH_MS;
+  return m("div", { id: "ws-share-agents-instructions", class: "mt-3" }, [
+    m(
+      "p",
+      { class: "type-helper text-secondary" },
+      VISITING_AGENT_INSTRUCTIONS_LEAD,
+    ),
+    m("textarea", {
+      id: "ws-share-agents-instructions-text",
+      class:
+        "mt-2 w-full h-48 rounded-md border border-default bg-fill-subtle p-2 " +
+        "font-mono type-helper text-primary",
+      readonly: true,
+      "aria-label": "Instructions for the agent",
+      value: invite.instructions,
+    }),
+    m("div", { class: "mt-2 flex items-center gap-2" }, [
+      m(
+        Button,
+        {
+          id: "ws-share-agents-copy",
+          variant: "primary",
+          onclick: () => {
+            void copyToClipboardWithFlash(
+              share,
+              local,
+              `agent:${invite.code}`,
+              invite.instructions,
+            );
+          },
+        },
+        [
+          m(Icon16, { name: isCopied ? "check" : "copy" }),
+          VISITING_AGENT_COPY_LABEL,
+        ],
+      ),
+      m(
+        Button,
+        {
+          id: "ws-share-agents-done",
+          variant: "secondary",
+          onclick: () => share.dismissVisitingAgentInvite(),
+        },
+        VISITING_AGENT_DONE_LABEL,
+      ),
+      m(
+        "span",
+        { class: "type-helper text-tertiary" },
+        `Code ${invite.code}, expires ${localeTime(invite.expires_at)}`,
+      ),
+    ]),
+  ]);
+}
+
+function renderVisitingAgentList(
+  share: SharePanelModel,
+  isWhole: boolean,
+): m.Children {
+  const loadState = share.visitingAgentsLoadState;
+  if (loadState === "idle" || loadState === "loading") {
+    return m(
+      "p",
+      {
+        id: "ws-share-agents-loading",
+        class: "mt-3 flex items-center gap-2 type-helper text-tertiary",
+      },
+      [
+        m(Spinner, { size: "sm", extra: "shrink-0" }),
+        "Reading the visiting agents",
+      ],
+    );
+  }
+  if (loadState === "failed") {
+    // The read runs in the workspace, so a stopped one fails it; the control is
+    // how the list comes back once the workspace runs again.
+    return m(
+      "div",
+      {
+        id: "ws-share-agents-error",
+        class: "mt-3 flex items-center gap-2",
+      },
+      [
+        m(
+          "p",
+          { class: "min-w-0 type-helper text-important" },
+          share.visitingAgentsLoadError ?? "",
+        ),
+        m(
+          Button,
+          {
+            id: "ws-share-agents-retry",
+            variant: "secondary",
+            onclick: () => void share.reloadVisitingAgents(),
+          },
+          VISITING_AGENTS_RETRY_LABEL,
+        ),
+      ],
+    );
+  }
+  // The whole-workspace pane lists every agent; an app pane only those scoped to that app.
+  const agents = share.visitingAgentList.filter(
+    (agent) =>
+      isWhole ||
+      (Array.isArray(agent.scope) && agent.scope.includes(share.currentTarget)),
+  );
+  const revokeError = share.visitingAgentRevokeErrorMessage;
+  return m(
+    "div",
+    { id: "ws-share-agents-list", class: "mt-3 flex flex-col gap-2" },
+    [
+      agents.length === 0
+        ? m("p", { class: "type-helper text-tertiary" }, VISITING_AGENTS_EMPTY)
+        : agents.map((agent) => renderVisitingAgentRow(share, agent)),
+      revokeError === null
+        ? null
+        : m(
+            "p",
+            {
+              id: "ws-share-agents-revoke-error",
+              class: "type-helper text-important",
+            },
+            revokeError,
+          ),
+    ],
+  );
+}
+
+function visitingAgentScopeText(agent: VisitingAgentEntry): string {
+  if (Array.isArray(agent.scope)) return agent.scope.join(", ");
+  return agent.scope === "workspace" ? "whole workspace" : agent.scope;
+}
+
+function visitingAgentGranterText(agent: VisitingAgentEntry): string {
+  return agent.granter.startsWith("agent:")
+    ? "invited by another agent"
+    : "invited by a person";
+}
+
+function renderVisitingAgentRow(
+  share: SharePanelModel,
+  agent: VisitingAgentEntry,
+): m.Children {
+  const isRevoking = share.isRevokingVisitingAgent(agent.agent_id);
+  const lastSeen =
+    agent.last_seen_at === null
+      ? "never connected"
+      : `seen ${formatRelativeAgo(agent.last_seen_at, share.nowMs())}`;
+  return m(
+    "div",
+    {
+      class: `${ROW_CLASS} ${ROW_PERSON_CLASS}`,
+      "data-agent-id": agent.agent_id,
+    },
+    [
+      m(
+        "span",
+        {
+          class: `${ROW_LEAD_CLASS} bg-fill-subtle type-helper font-semibold text-secondary`,
+        },
+        monogram(agent.name),
+      ),
+      m(
+        "span",
+        { class: "min-w-0 flex-1 truncate type-body text-primary" },
+        agent.name,
+      ),
+      m("span", { class: COUNT_BADGE_CLASS }, visitingAgentScopeText(agent)),
+      m(
+        "span",
+        { class: "shrink-0 type-helper text-tertiary" },
+        `${visitingAgentGranterText(agent)}, ${lastSeen}`,
+      ),
+      m(
+        Button,
+        {
+          variant: "secondary",
+          "aria-label": `Revoke ${agent.name}`,
+          "aria-disabled": isRevoking ? "true" : undefined,
+          onclick: () => void share.revokeVisitingAgent(agent.agent_id),
+        },
+        isRevoking
+          ? m(Spinner, { size: "sm", extra: "shrink-0" })
+          : VISITING_AGENT_REVOKE_LABEL,
+      ),
+    ],
+  );
 }

@@ -31,7 +31,6 @@ import itertools
 import json
 import os
 import queue
-import shlex
 import threading
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -133,6 +132,11 @@ from imbue.minds.desktop_client.api_models import SshConnectionResponse
 from imbue.minds.desktop_client.api_models import StopStateContainerResponse
 from imbue.minds.desktop_client.api_models import TimezoneResponse
 from imbue.minds.desktop_client.api_models import UpgradeMergeSummary
+from imbue.minds.desktop_client.api_models import VisitingAgentEntryResponse
+from imbue.minds.desktop_client.api_models import VisitingAgentInviteRequest
+from imbue.minds.desktop_client.api_models import VisitingAgentInviteResponse
+from imbue.minds.desktop_client.api_models import VisitingAgentRevokeResponse
+from imbue.minds.desktop_client.api_models import VisitingAgentsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupCheckResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceGrantsRequest
@@ -204,6 +208,7 @@ from imbue.minds.desktop_client.machine_size import is_machine_resizable_provide
 from imbue.minds.desktop_client.machine_size import machine_size_resize_args
 from imbue.minds.desktop_client.machine_size import narrow_machine_size_to_launch_mode
 from imbue.minds.desktop_client.minds_config import settle_default_account_id
+from imbue.minds.desktop_client.mngr_command import extract_exec_failure_detail
 from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.responses import make_file_response
@@ -218,14 +223,17 @@ from imbue.minds.desktop_client.shared_workspaces import remove_account_share
 from imbue.minds.desktop_client.sharing_handler import GrantsRefusedError
 from imbue.minds.desktop_client.sharing_handler import ShareQuotaExceededError
 from imbue.minds.desktop_client.sharing_handler import SharingError
+from imbue.minds.desktop_client.sharing_handler import get_active_share
 from imbue.minds.desktop_client.sharing_handler import get_active_share_cached
 from imbue.minds.desktop_client.sharing_handler import get_share_gateway_status_cached
 from imbue.minds.desktop_client.sharing_handler import get_sharing
 from imbue.minds.desktop_client.sharing_handler import invite_grantee_for_workspace
 from imbue.minds.desktop_client.sharing_handler import list_invitation_outcomes_for_workspace
+from imbue.minds.desktop_client.sharing_handler import owner_account_for_workspace
 from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
 from imbue.minds.desktop_client.sharing_handler import publish_workspace
 from imbue.minds.desktop_client.sharing_handler import publish_workspace_with_grants
+from imbue.minds.desktop_client.sharing_handler import resolve_agent_for_host
 from imbue.minds.desktop_client.sharing_handler import resolve_share_target_labels_for_host
 from imbue.minds.desktop_client.sharing_handler import save_grants
 from imbue.minds.desktop_client.sharing_handler import send_mobile_access_link_for_workspace
@@ -239,6 +247,14 @@ from imbue.minds.desktop_client.ui_api_inbox import build_agent_message_card
 from imbue.minds.desktop_client.ui_api_inbox import resolve_chat_agent_id
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
+from imbue.minds.desktop_client.visiting_agents import VisitingAgent
+from imbue.minds.desktop_client.visiting_agents import VisitingAgentsError
+from imbue.minds.desktop_client.visiting_agents import VisitingAgentsRefusedError
+from imbue.minds.desktop_client.visiting_agents import VisitingAgentsUnsupportedError
+from imbue.minds.desktop_client.visiting_agents import is_visiting_agent_id
+from imbue.minds.desktop_client.visiting_agents import list_visiting_agents
+from imbue.minds.desktop_client.visiting_agents import mint_visiting_agent_invite
+from imbue.minds.desktop_client.visiting_agents import revoke_visiting_agent
 from imbue.minds.desktop_client.workspace_create import CONNECTION_ONLY_LAUNCH_MODES
 from imbue.minds.desktop_client.workspace_create import ResolvedRegion
 from imbue.minds.desktop_client.workspace_create import available_cloud_account_options
@@ -282,6 +298,7 @@ from imbue.minds.primitives import DEFAULT_GCP_MACHINE_TYPE
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import default_docker_runtime
+from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -2555,6 +2572,8 @@ def _handle_restart_operation_logs(operation_id: str) -> Response:
 
 # SSH access route
 
+_SSH_GRANT_WRITE_ATTEMPTS: Final[int] = 3
+
 
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=EstablishSshRequest, resp=json_response_model(SshConnectionResponse))
@@ -2646,49 +2665,55 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
         "--format",
         "json",
     ]
-    try:
-        read_returncode, read_stdout, read_stderr = _run_mngr_blocking(read_argv, parent_cg)
-    except (OSError, ConcurrencyGroupError) as e:
-        return _json_error(f"Could not read the target's authorized_keys: {e}", 502)
-    if read_returncode != 0:
-        # The response carries a capped copy; log the whole of it here so the
-        # untruncated output survives locally regardless of what the caller sees.
-        logger.warning(
-            "mngr exec failed reading authorized_keys for {} (rc={}); stdout={} stderr={}",
-            parsed_id,
-            read_returncode,
-            read_stdout.strip(),
-            read_stderr.strip(),
-        )
-        return _json_error(
-            f"Could not read the target's authorized_keys: {_describe_mngr_exec_failure(read_stdout, read_stderr)}",
-            502,
-        )
-    try:
-        read_result = json.loads(read_stdout)
-        existing_authorized_keys = str(read_result["results"][0]["stdout"])
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
-        logger.warning("Could not parse the target's authorized_keys read for {}: {}", parsed_id, e)
-        return _json_error(f"Could not parse the target's authorized_keys read: {e}", 502)
+    # The write only lands while the file still reads as it did; another writer
+    # (the share gateway's visiting-agent reconcile) in between means a re-read.
+    for _attempt in range(_SSH_GRANT_WRITE_ATTEMPTS):
+        try:
+            read_returncode, read_stdout, read_stderr = _run_mngr_blocking(read_argv, parent_cg)
+        except (OSError, ConcurrencyGroupError) as e:
+            return _json_error(f"Could not read the target's authorized_keys: {e}", 502)
+        if read_returncode != 0:
+            # The response carries a capped copy; log the whole of it here so the
+            # untruncated output survives locally regardless of what the caller sees.
+            logger.warning(
+                "mngr exec failed reading authorized_keys for {} (rc={}); stdout={} stderr={}",
+                parsed_id,
+                read_returncode,
+                read_stdout.strip(),
+                read_stderr.strip(),
+            )
+            return _json_error(
+                f"Could not read the target's authorized_keys: {_describe_mngr_exec_failure(read_stdout, read_stderr)}",
+                502,
+            )
+        try:
+            read_result = json.loads(read_stdout)
+            existing_authorized_keys = str(read_result["results"][0]["stdout"])
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+            logger.warning("Could not parse the target's authorized_keys read for {}: {}", parsed_id, e)
+            return _json_error(f"Could not parse the target's authorized_keys read: {e}", 502)
 
-    new_authorized_keys = workspace_ssh.compose_pruned_authorized_keys(
-        existing_authorized_keys, authorized_line, requester_workspace_id=requester_workspace_id, now=now
-    )
-    write_script = (
-        "set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; "
-        f"printf '%s' {shlex.quote(new_authorized_keys)} > ~/.ssh/authorized_keys; "
-        "chmod 600 ~/.ssh/authorized_keys"
-    )
-    # Single trailing COMMAND arg (see the read above) -- mngr exec runs it in a
-    # shell. ``--format json`` here is for the failure path only (the write has no
-    # output worth capturing): it puts the per-agent reason somewhere
-    # ``_describe_mngr_exec_failure`` can find it, the same as the read.
-    write_argv = [mngr_binary, "exec", target_address, write_script, "--format", "json"]
-    try:
-        write_returncode, write_stdout, write_stderr = _run_mngr_blocking(write_argv, parent_cg)
-    except (OSError, ConcurrencyGroupError) as e:
-        return _json_error(f"Could not authorize SSH key on the target: {e}", 502)
-    if write_returncode != 0:
+        new_authorized_keys = workspace_ssh.compose_pruned_authorized_keys(
+            existing_authorized_keys, authorized_line, requester_workspace_id=requester_workspace_id, now=now
+        )
+        write_script = workspace_ssh.build_authorized_keys_write_script(existing_authorized_keys, new_authorized_keys)
+        # Single trailing COMMAND arg (see the read above) -- mngr exec runs it in a
+        # shell. ``--format json`` here is for the failure path only (the write has no
+        # output worth capturing): it puts the per-agent reason somewhere
+        # ``_describe_mngr_exec_failure`` can find it, the same as the read.
+        write_argv = [mngr_binary, "exec", target_address, write_script, "--format", "json"]
+        try:
+            write_returncode, write_stdout, write_stderr = _run_mngr_blocking(write_argv, parent_cg)
+        except (OSError, ConcurrencyGroupError) as e:
+            return _json_error(f"Could not authorize SSH key on the target: {e}", 502)
+        if write_returncode == 0:
+            break
+        # A command that exits non-zero rides the envelope's result entry (its stderr
+        # carries the guard's marker); ``failed_agents`` is for an exec that never ran.
+        if workspace_ssh.AUTHORIZED_KEYS_CHANGED_MARKER in (extract_exec_failure_detail(write_stdout) or ""):
+            logger.info("authorized_keys on {} changed since it was read; reading it again", parsed_id)
+            continue
+        write_failure = _describe_mngr_exec_failure(write_stdout, write_stderr)
         logger.warning(
             "mngr exec failed authorizing an SSH key on {} (rc={}); stdout={} stderr={}",
             parsed_id,
@@ -2696,8 +2721,10 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
             write_stdout.strip(),
             write_stderr.strip(),
         )
+        return _json_error(f"Could not authorize SSH key on the target: {write_failure}", 502)
+    else:
         return _json_error(
-            f"Could not authorize SSH key on the target: {_describe_mngr_exec_failure(write_stdout, write_stderr)}",
+            "Could not authorize SSH key on the target: its authorized_keys kept changing while the key was added",
             502,
         )
 
@@ -3270,6 +3297,151 @@ def _handle_workspace_sharing_mobile_access_link(workspace_id: str) -> MobileAcc
     return MobileAccessLinkResponse(
         outcome=result.outcome, recipient_email=result.recipient_email, sent_at=result.sent_at
     )
+
+
+# Visiting agents (specs/studio-agent-access/spec.md): outside coding agents
+# invited into one workspace. Everything is decided and kept inside the
+# workspace by its agent-access CLI; these routes run it over mngr exec with
+# the signed-in account as the granter.
+
+
+VISITING_AGENT_SHARE_NOT_SET_UP_MESSAGE: Final[str] = (
+    "The workspace is published, but its share is not set up inside it, so an agent could not reach it. "
+    "Turn sharing off and on again, then invite the agent."
+)
+
+
+def _visiting_agents_mngr_caller() -> MngrCaller:
+    state = get_state()
+    return state.mngr_caller if state.mngr_caller is not None else get_default_mngr_caller()
+
+
+def _visiting_agents_failure(exc: VisitingAgentsError) -> Response:
+    """The response for a CLI run that failed for a reason other than a refusal."""
+    if isinstance(exc, VisitingAgentsUnsupportedError):
+        return _json_error(str(exc), 409)
+    return _json_error(str(exc), 502)
+
+
+def _visiting_agent_entry(agent: VisitingAgent) -> VisitingAgentEntryResponse:
+    return VisitingAgentEntryResponse.model_validate(agent, from_attributes=True)
+
+
+def _visiting_agents_workspace(workspace_id: str) -> tuple[str, AgentId] | Response:
+    """The ``(host id, agent id)`` a visiting-agent route acts on, or the 404 for a coordinate nothing resolves.
+
+    The coordinate is the workspace id or, as for every sharing route, a legacy
+    ``host-<hex>`` id; the CLI runs through the machine's agent either way.
+    """
+    host_id = _sharing_host_for_workspace(workspace_id)
+    if host_id is None:
+        return _json_error(f"Unknown workspace {workspace_id}", 404)
+    state = get_state()
+    try:
+        agent_id = resolve_agent_for_host(state.backend_resolver, host_id, state.session_store)
+    except SharingError as exc:
+        return _json_error(str(exc), 404)
+    return host_id, agent_id
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(VisitingAgentsResponse))
+def _handle_workspace_visiting_agents_get(workspace_id: str) -> VisitingAgentsResponse | Response:
+    """List the workspace's visiting agents, as its agent-access CLI reports them."""
+    resolved = _visiting_agents_workspace(workspace_id)
+    if isinstance(resolved, Response):
+        return resolved
+    _, parsed_id = resolved
+    try:
+        agents = list_visiting_agents(
+            build_agent_address(parsed_id, get_state().backend_resolver), _visiting_agents_mngr_caller()
+        )
+    except VisitingAgentsError as exc:
+        return _visiting_agents_failure(exc)
+    return VisitingAgentsResponse(agents=tuple(_visiting_agent_entry(agent) for agent in agents))
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(json=VisitingAgentInviteRequest, resp=json_response_model(VisitingAgentInviteResponse))
+def _handle_workspace_visiting_agents_invite(workspace_id: str) -> VisitingAgentInviteResponse | Response:
+    """Mint a one-time code for a visiting agent, publishing the workspace first when it is not published.
+
+    The granter is the account associated with the workspace; publishing needs
+    one too, so a workspace with no account is refused rather than invited into.
+    """
+    resolved = _visiting_agents_workspace(workspace_id)
+    if isinstance(resolved, Response):
+        return resolved
+    host_id, parsed_id = resolved
+    state = get_state()
+    owner = owner_account_for_workspace(state.session_store, parsed_id)
+    if owner is None:
+        return _json_error(
+            "This workspace is not associated with a signed-in account, so nobody can invite an agent", 409
+        )
+    body = VisitingAgentInviteRequest.model_validate(request.get_json(silent=True, force=True) or {})
+
+    # Publishing admits nobody by itself; it is what makes the workspace reachable for the agent to join.
+    if get_active_share(host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store) is None:
+        published = _publish_workspace_core(host_id)
+        if isinstance(published, Response):
+            return published
+
+    try:
+        invite = mint_visiting_agent_invite(
+            build_agent_address(parsed_id, state.backend_resolver),
+            _visiting_agents_mngr_caller(),
+            granter_user_id=str(owner.user_id),
+            scope=body.scope,
+            expires_in_days=body.expires_in_days,
+            name_hint=body.name_hint,
+        )
+    except VisitingAgentsRefusedError as exc:
+        return _json_error(str(exc), 400)
+    except VisitingAgentsError as exc:
+        return _visiting_agents_failure(exc)
+    # The connector can hold a share whose materials never reached the workspace
+    # (the create landed, the injection did not); the CLI then has no auth origin
+    # to put in the instructions, and publishing again is a no-op for that share.
+    if not invite.is_published:
+        return _json_error(VISITING_AGENT_SHARE_NOT_SET_UP_MESSAGE, 502)
+    return VisitingAgentInviteResponse(
+        code=invite.code,
+        expires_at=invite.expires_at,
+        scope=invite.scope if isinstance(invite.scope, str) else list(invite.scope),
+        auth_origin=invite.auth_origin,
+        instructions=invite.instructions,
+    )
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(VisitingAgentRevokeResponse))
+def _handle_workspace_visiting_agent_delete(
+    workspace_id: str, agent_id: str
+) -> VisitingAgentRevokeResponse | Response:
+    """Revoke one visiting agent as the workspace's owner (the owner may revoke any)."""
+    resolved = _visiting_agents_workspace(workspace_id)
+    if isinstance(resolved, Response):
+        return resolved
+    _, parsed_id = resolved
+    if not is_visiting_agent_id(agent_id):
+        return _json_error(f"Not a visiting agent id: {agent_id}", 400)
+    state = get_state()
+    owner = owner_account_for_workspace(state.session_store, parsed_id)
+    if owner is None:
+        return _json_error("This workspace is not associated with a signed-in account", 409)
+    try:
+        revoked = revoke_visiting_agent(
+            build_agent_address(parsed_id, state.backend_resolver),
+            _visiting_agents_mngr_caller(),
+            agent_id=agent_id,
+            revoker_user_id=str(owner.user_id),
+        )
+    except VisitingAgentsRefusedError as exc:
+        return _json_error(str(exc), 404)
+    except VisitingAgentsError as exc:
+        return _visiting_agents_failure(exc)
+    return VisitingAgentRevokeResponse(revoked=revoked)
 
 
 @require_api_or_cookie_auth
@@ -4991,6 +5163,24 @@ def create_api_v1_blueprint() -> Blueprint:
         view_func=_handle_workspace_sharing_mobile_access_link,
         endpoint="workspace_sharing_mobile_access_link",
         methods=["POST"],
+    )
+    blueprint.add_url_rule(
+        "/workspace-sharing/<workspace_id>/agents",
+        view_func=_handle_workspace_visiting_agents_get,
+        endpoint="workspace_visiting_agents_get",
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspace-sharing/<workspace_id>/agents/invites",
+        view_func=_handle_workspace_visiting_agents_invite,
+        endpoint="workspace_visiting_agents_invite",
+        methods=["POST"],
+    )
+    blueprint.add_url_rule(
+        "/workspace-sharing/<workspace_id>/agents/<agent_id>",
+        view_func=_handle_workspace_visiting_agent_delete,
+        endpoint="workspace_visiting_agent_delete",
+        methods=["DELETE"],
     )
 
     # Machine sharing (compat shims for the routes above; agents likewise

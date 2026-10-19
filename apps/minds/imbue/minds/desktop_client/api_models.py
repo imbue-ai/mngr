@@ -528,6 +528,53 @@ class MobileAccessLinkResponse(FrozenModel):
     sent_at: str | None = Field(default=None, description="When the message went out, for a sent outcome")
 
 
+class VisitingAgentInviteRequest(ApiRequestModel):
+    """Body for minting a visiting agent's one-time code: the scope the grant will have, and optional expiry and name."""
+
+    scope: str | list[str] = Field(
+        default="workspace", description="'workspace' (every origin, exec authority) or the app names to admit"
+    )
+    expires_in_days: float | None = Field(
+        default=None, description="Expire the grant after this many days; never when absent"
+    )
+    name_hint: str = Field(default="", description="A suggested name for the agent, shown in the instructions")
+
+
+class VisitingAgentInviteResponse(FrozenModel):
+    """The minted code and the instruction block the inviter hands the agent."""
+
+    code: str = Field(description="The one-time code (valid fifteen minutes, consumed by one join)")
+    expires_at: str = Field(description="When the code expires (ISO 8601)")
+    scope: str | list[str] = Field(description="'workspace', or the app names the grant will admit")
+    auth_origin: str = Field(description="The workspace's auth origin the agent joins at")
+    instructions: str = Field(description="The instruction block to copy to the agent")
+
+
+class VisitingAgentEntryResponse(FrozenModel):
+    """One visiting agent's grant as the workspace reports it."""
+
+    agent_id: str = Field(description="The grant's id (va-<hex>)")
+    name: str = Field(description="The name the agent gave itself")
+    fingerprint: str = Field(description="The SHA256 fingerprint of the agent's key")
+    scope: str | list[str] = Field(description="'workspace', or the app names the grant admits")
+    granter: str = Field(description="Who invited it: user:<id> or agent:<id>")
+    created_at: str = Field(description="When the grant was made (ISO 8601)")
+    expires_at: str | None = Field(default=None, description="When the grant expires, if ever")
+    last_seen_at: str | None = Field(default=None, description="When the agent last made a request, if ever")
+
+
+class VisitingAgentsResponse(FrozenModel):
+    """The workspace's visiting agents."""
+
+    agents: tuple[VisitingAgentEntryResponse, ...] = Field(description="Every unexpired grant")
+
+
+class VisitingAgentRevokeResponse(FrozenModel):
+    """Which visiting agent was revoked."""
+
+    revoked: str = Field(description="The revoked grant's id")
+
+
 class BugReportRequest(ApiRequestModel):
     """Body for submitting a bug report on behalf of an in-workspace agent.
 

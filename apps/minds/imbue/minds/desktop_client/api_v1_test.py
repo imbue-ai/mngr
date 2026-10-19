@@ -36,6 +36,7 @@ from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client import restic_cli
+from imbue.minds.desktop_client import workspace_ssh
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -44,6 +45,7 @@ from imbue.minds.desktop_client.api_v1 import CONNECTION_GONE_DURING_UPDATE_MESS
 from imbue.minds.desktop_client.api_v1 import CREATE_IN_FLIGHT_ON_CONNECTION_MESSAGE
 from imbue.minds.desktop_client.api_v1 import REGISTRATION_IN_FLIGHT_ON_CONNECTION_MESSAGE
 from imbue.minds.desktop_client.api_v1 import UPDATE_IN_FLIGHT_ON_CONNECTION_MESSAGE
+from imbue.minds.desktop_client.api_v1 import _SSH_GRANT_WRITE_ATTEMPTS
 from imbue.minds.desktop_client.api_v1 import _describe_mngr_exec_failure
 from imbue.minds.desktop_client.api_v1 import _drain_backup_summary_rows
 from imbue.minds.desktop_client.api_v1 import _stream_workspace_backup_summaries
@@ -1807,7 +1809,7 @@ def test_establish_ssh_missing_fields_returns_422_with_field_errors(tmp_path: Pa
     assert all(error["message"] for error in errors)
 
 
-def _write_recording_fake_mngr(directory: Path, record_path: Path) -> str:
+def _write_recording_fake_mngr(directory: Path, record_path: Path, changed_write_count: int = 0) -> str:
     """Fake ``mngr`` that records each invocation's argv, then exits 0.
 
     Args are NUL-delimited within an invocation and invocations are separated by
@@ -1820,13 +1822,36 @@ def _write_recording_fake_mngr(directory: Path, record_path: Path) -> str:
     appends a ``Command succeeded on agent ...`` status line to stdout that the
     route must not write back, so the route reads in JSON and extracts the inner
     body. Other invocations (the write, which discards stdout) emit nothing.
+
+    The first ``changed_write_count`` invocations that are not the read fail the
+    way the guarded write script does when the file no longer matches the read
+    it was composed from: exit 75 with ``AUTHORIZED_KEYS_CHANGED_SINCE_READ`` on
+    stderr, which the envelope carries with ``success: false``. Every later
+    write succeeds, so the route's re-read lands.
     """
     directory.mkdir(parents=True, exist_ok=True)
     script = directory / "mngr"
     rec = shlex.quote(str(record_path))
+    changed_writes_seen = shlex.quote(str(directory / "changed_writes_seen"))
     envelope = json.dumps(
         {
             "results": [{"agent": "t", "stdout": "", "stderr": "", "success": True}],
+            "failed_agents": [],
+            "total_executed": 1,
+            "total_failed": 0,
+        }
+    )
+    # A command that exits non-zero stays in ``results`` with its stderr; ``failed_agents`` is for an exec that never ran.
+    changed_envelope = json.dumps(
+        {
+            "results": [
+                {
+                    "agent": "t",
+                    "stdout": "",
+                    "stderr": f"{workspace_ssh.AUTHORIZED_KEYS_CHANGED_MARKER}\n",
+                    "success": False,
+                }
+            ],
             "failed_agents": [],
             "total_executed": 1,
             "total_failed": 0,
@@ -1836,6 +1861,17 @@ def _write_recording_fake_mngr(directory: Path, record_path: Path) -> str:
         "#!/bin/sh\n"
         f'for a in "$@"; do printf \'%s\\0\' "$a" >> {rec}; done\n'
         f"printf '\\036' >> {rec}\n"
+        'case "$3" in\n'
+        "  cat*) ;;\n"
+        "  *)\n"
+        f"    seen=$(cat {changed_writes_seen} 2>/dev/null || echo 0)\n"
+        f'    if [ "$seen" -lt {changed_write_count} ]; then\n'
+        f"      echo $((seen + 1)) > {changed_writes_seen}\n"
+        f"      printf '%s' {shlex.quote(changed_envelope)}\n"
+        "      exit 1\n"
+        "    fi\n"
+        "    ;;\n"
+        "esac\n"
         'for a in "$@"; do\n'
         '  if [ "$a" = "json" ]; then\n'
         f"    printf '%s' {shlex.quote(envelope)}\n"
@@ -1915,6 +1951,69 @@ def test_establish_ssh_passes_command_as_single_mngr_exec_arg(
     assert "authorized_keys" in write_script
     assert "Command succeeded" not in write_script
     assert '"results"' not in write_script
+
+
+def test_establish_ssh_rereads_authorized_keys_when_the_guarded_write_finds_it_changed(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The write holds the file's lock and only lands on the body it was composed from; otherwise read again."""
+    target = AgentId()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(target): {}},
+        ssh_info_by_agent_id={
+            str(target): RemoteSSHInfo(user="root", host="ssh.example.com", port=2222, key_path=Path("/k"))
+        },
+    )
+    record_path = tmp_path / "mngr_argv.bin"
+    fake_mngr = _write_recording_fake_mngr(tmp_path / "bin", record_path, changed_write_count=1)
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group, mngr_binary=fake_mngr)
+
+    response = client.post(
+        f"/api/v1/workspaces/{target}/ssh",
+        headers=_auth_header(),
+        json={
+            "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5TESTKEYMATERIAL",
+            "requester_workspace_id": str(AgentId()),
+        },
+    )
+    assert response.status_code == 200, response.data
+
+    commands = [invocation[2] for invocation in _recorded_mngr_invocations(record_path)]
+    # read, write (refused: the file changed), read again, write (landed)
+    assert [command.startswith("cat ") for command in commands] == [True, False, True, False]
+    assert all(f"flock {workspace_ssh.AUTHORIZED_KEYS_LOCK_PATH} sh -c" in command for command in commands[1::2])
+
+
+def test_establish_ssh_gives_up_when_authorized_keys_keeps_changing(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """Every write finds the file changed: the route re-reads a bounded number of times, then answers 502."""
+    target = AgentId()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(target): {}},
+        ssh_info_by_agent_id={
+            str(target): RemoteSSHInfo(user="root", host="ssh.example.com", port=2222, key_path=Path("/k"))
+        },
+    )
+    record_path = tmp_path / "mngr_argv.bin"
+    fake_mngr = _write_recording_fake_mngr(
+        tmp_path / "bin", record_path, changed_write_count=_SSH_GRANT_WRITE_ATTEMPTS + 1
+    )
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group, mngr_binary=fake_mngr)
+
+    response = client.post(
+        f"/api/v1/workspaces/{target}/ssh",
+        headers=_auth_header(),
+        json={
+            "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5TESTKEYMATERIAL",
+            "requester_workspace_id": str(AgentId()),
+        },
+    )
+    assert response.status_code == 502, response.data
+    assert "kept changing" in json.loads(response.data)["error"]
+
+    commands = [invocation[2] for invocation in _recorded_mngr_invocations(record_path)]
+    assert [command.startswith("cat ") for command in commands] == [True, False] * _SSH_GRANT_WRITE_ATTEMPTS
 
 
 def test_operation_logs_unknown_create_id_returns_404(tmp_path: Path) -> None:
@@ -6344,3 +6443,286 @@ def test_workspace_sharing_mobile_access_link_leaves_an_unshared_workspace_to_im
     assert json.loads(response.data)["error"] == "not_published"
     (call,) = cli.mobile_access_link_calls
     assert call["link"] is None
+
+
+# Visiting agents: the Share panel's routes onto the workspace's agent-access CLI.
+
+
+class _VisitingAgentsCaller(_ShareProbeCaller):
+    """The share probe caller, also answering every ``agent-access`` exec with ``agent_access_answer``."""
+
+    agent_access_answer: str = Field(default="{}", description="The JSON the CLI prints")
+    agent_access_returncode: int = Field(default=0, description="The CLI's exit code")
+    agent_access_stderr: str = Field(default="", description="What the CLI says on stderr when it refuses")
+
+    def call(
+        self,
+        argv: Sequence[str],
+        timeout: float | None = None,
+        env_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> MngrCallResult:
+        if len(argv) > 2 and "agent-access" in argv[2]:
+            super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+            envelope = {
+                "results": [
+                    {
+                        "agent": "system-services",
+                        "stdout": self.agent_access_answer,
+                        "stderr": self.agent_access_stderr,
+                        "success": self.agent_access_returncode == 0,
+                    }
+                ]
+            }
+            return MngrCallResult(
+                returncode=self.agent_access_returncode, stdout=json.dumps(envelope), stderr=self.agent_access_stderr
+            )
+        return super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+
+
+def _visiting_agents_client(
+    tmp_path: Path, agent_id: AgentId, caller: _VisitingAgentsCaller, cli: FakeSharingCli | None = None
+) -> FlaskClient:
+    sharing_cli = cli if cli is not None else _fake_sharing_cli(mngr_caller=caller)
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    store = _associated_session_store(
+        tmp_path, sharing_cli, agent_id, user_id="33333333-3333-3333-3333-333333333333", email="owner@example.com"
+    )
+    return _build_client(
+        tmp_path,
+        resolver,
+        imbue_cloud_cli=sharing_cli,
+        session_store=store,
+        client_env_config=_TEST_CLIENT_ENV_CONFIG,
+        mngr_caller=caller,
+    )
+
+
+def _agent_access_exec_commands(caller: _VisitingAgentsCaller) -> list[str]:
+    """The CLI invocation inside each agent-access exec, without the template-capability check around it."""
+    commands: list[str] = []
+    for call in caller.calls:
+        if len(call) > 2 and "agent-access" in call[2]:
+            assert call[2].startswith("if [ -f system/services/share_gateway/src/share_gateway/agent_cli.py ]; then ")
+            commands.append(call[2].split("; then ", 1)[1].split("; else ", 1)[0])
+    return commands
+
+
+def test_visiting_agents_list_runs_the_workspaces_cli_and_reports_its_agents(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    caller = _VisitingAgentsCaller(
+        is_share_env_present=True,
+        agent_access_answer=json.dumps(
+            {
+                "agents": [
+                    {
+                        "agent_id": "va-" + "1" * 32,
+                        "name": "Josh Claude",
+                        "fingerprint": "SHA256:abc",
+                        "scope": "workspace",
+                        "granter": "user:33333333-3333-3333-3333-333333333333",
+                        "created_at": "2026-10-15T18:00:00+00:00",
+                        "expires_at": None,
+                        "last_seen_at": None,
+                    }
+                ]
+            }
+        ),
+    )
+    client = _visiting_agents_client(tmp_path, agent_id, caller)
+
+    response = client.get(f"/api/v1/workspace-sharing/{agent_id}/agents", headers=_auth_header())
+
+    assert response.status_code == 200, response.data
+    assert json.loads(response.data) == {
+        "agents": [
+            {
+                "agent_id": "va-" + "1" * 32,
+                "name": "Josh Claude",
+                "fingerprint": "SHA256:abc",
+                "scope": "workspace",
+                "granter": "user:33333333-3333-3333-3333-333333333333",
+                "created_at": "2026-10-15T18:00:00+00:00",
+                "expires_at": None,
+                "last_seen_at": None,
+            }
+        ]
+    }
+    assert _agent_access_exec_commands(caller) == ["uv run --no-sync agent-access list --json"]
+
+
+def test_visiting_agents_invite_publishes_an_unpublished_workspace_then_mints_as_the_owner(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    caller = _VisitingAgentsCaller(
+        is_share_env_present=False,
+        agent_access_answer=json.dumps(
+            {
+                "code": "7K3M-QX9A-2PFH",
+                "expires_at": "2026-10-15T18:15:00+00:00",
+                "scope": "workspace",
+                "granter": "user:33333333-3333-3333-3333-333333333333",
+                "auth_origin": "https://auth-x.alpha.example.com",
+                "is_published": True,
+                "instructions": "Join at https://auth-x.alpha.example.com with 7K3M-QX9A-2PFH",
+            }
+        ),
+    )
+    cli = _fake_sharing_cli(mngr_caller=caller)
+    client = _visiting_agents_client(tmp_path, agent_id, caller, cli)
+
+    response = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/agents/invites",
+        headers=_auth_header(),
+        json={"scope": "workspace", "name_hint": "Josh Claude"},
+    )
+
+    assert response.status_code == 200, response.data
+    body = json.loads(response.data)
+    assert body["code"] == "7K3M-QX9A-2PFH" and body["auth_origin"] == "https://auth-x.alpha.example.com"
+    assert "7K3M-QX9A-2PFH" in body["instructions"] and body["scope"] == "workspace"
+    # The workspace was published first (the share was created and its materials written), then the CLI ran.
+    assert len(cli.created_shares) == 1
+    assert caller.is_share_env_present is True
+    assert _agent_access_exec_commands(caller) == [
+        "uv run --no-sync agent-access invite --granter user:33333333-3333-3333-3333-333333333333 "
+        "--scope workspace --name-hint 'Josh Claude' --json"
+    ]
+
+
+def test_visiting_agents_invite_does_not_republish_a_published_workspace_and_passes_an_app_scope(
+    tmp_path: Path,
+) -> None:
+    agent_id = AgentId()
+    caller = _VisitingAgentsCaller(
+        is_share_env_present=True,
+        agent_access_answer=json.dumps(
+            {
+                "code": "C",
+                "expires_at": "2026-10-15T18:15:00+00:00",
+                "scope": ["chat"],
+                "granter": "user:33333333-3333-3333-3333-333333333333",
+                "auth_origin": "https://auth-x.alpha.example.com",
+                "is_published": True,
+                "instructions": "x",
+            }
+        ),
+    )
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=caller)
+    client = _visiting_agents_client(tmp_path, agent_id, caller, cli)
+
+    response = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/agents/invites",
+        headers=_auth_header(),
+        json={"scope": ["chat"], "expires_in_days": 7},
+    )
+
+    assert response.status_code == 200, response.data
+    assert json.loads(response.data)["scope"] == ["chat"]
+    assert cli.created_shares == []
+    assert _agent_access_exec_commands(caller) == [
+        "uv run --no-sync agent-access invite --granter user:33333333-3333-3333-3333-333333333333 "
+        "--scope chat --expires-in-days 7.0 --json"
+    ]
+
+
+def test_visiting_agents_invite_refuses_when_the_share_never_reached_the_workspace(tmp_path: Path) -> None:
+    """The connector holds a share but the workspace has no materials: the CLI's placeholder origin is not handed out."""
+    agent_id = AgentId()
+    caller = _VisitingAgentsCaller(
+        is_share_env_present=False,
+        agent_access_answer=json.dumps(
+            {
+                "code": "C",
+                "expires_at": "2026-10-15T18:15:00+00:00",
+                "scope": "workspace",
+                "granter": "user:33333333-3333-3333-3333-333333333333",
+                "auth_origin": "",
+                "is_published": False,
+                "instructions": "Join at https://<the workspace's address once it is published>",
+            }
+        ),
+    )
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=caller)
+    client = _visiting_agents_client(tmp_path, agent_id, caller, cli)
+
+    response = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/agents/invites", headers=_auth_header(), json={"scope": "workspace"}
+    )
+
+    assert response.status_code == 502, response.data
+    assert "Turn sharing off and on again" in json.loads(response.data)["error"]
+    assert cli.created_shares == []
+
+
+def test_visiting_agents_invite_reports_a_cli_refusal_as_a_bad_request(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    caller = _VisitingAgentsCaller(
+        is_share_env_present=True,
+        agent_access_returncode=2,
+        agent_access_stderr=json.dumps({"error": "not a grantable app: owner-exec", "kind": "refused"}) + "\n",
+    )
+    client = _visiting_agents_client(tmp_path, agent_id, caller)
+
+    response = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/agents/invites", headers=_auth_header(), json={"scope": ["owner-exec"]}
+    )
+
+    assert response.status_code == 400
+    assert "not a grantable app" in json.loads(response.data)["error"]
+
+
+def test_visiting_agents_revoke_runs_the_cli_as_the_owner_and_maps_an_unknown_agent_to_404(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    caller = _VisitingAgentsCaller(
+        is_share_env_present=True, agent_access_answer=json.dumps({"revoked": "va-" + "1" * 32, "name": "x"})
+    )
+    client = _visiting_agents_client(tmp_path, agent_id, caller)
+
+    response = client.delete(f"/api/v1/workspace-sharing/{agent_id}/agents/va-{'1' * 32}", headers=_auth_header())
+
+    assert response.status_code == 200, response.data
+    assert json.loads(response.data) == {"revoked": "va-" + "1" * 32}
+    assert _agent_access_exec_commands(caller) == [
+        f"uv run --no-sync agent-access revoke va-{'1' * 32} --revoker user:33333333-3333-3333-3333-333333333333 "
+        "--owner --json"
+    ]
+
+    caller.agent_access_returncode = 2
+    caller.agent_access_stderr = json.dumps({"error": f"no agent va-{'f' * 32}", "kind": "refused"}) + "\n"
+    missing = client.delete(f"/api/v1/workspace-sharing/{agent_id}/agents/va-{'f' * 32}", headers=_auth_header())
+    assert missing.status_code == 404
+
+    # A value that is not an agent id is refused before anything runs in the workspace.
+    malformed = client.delete(f"/api/v1/workspace-sharing/{agent_id}/agents/--json", headers=_auth_header())
+    assert malformed.status_code == 400
+    assert len(_agent_access_exec_commands(caller)) == 2
+
+
+def test_visiting_agents_on_a_workspace_without_the_cli_answer_409_with_the_update_hint(tmp_path: Path) -> None:
+    """The exec's own capability check answers the CLI's refusal shape with kind ``unsupported``."""
+    agent_id = AgentId()
+    caller = _VisitingAgentsCaller(
+        is_share_env_present=True,
+        agent_access_returncode=3,
+        agent_access_stderr=json.dumps({"error": "predates visiting agents; update it", "kind": "unsupported"}),
+    )
+    client = _visiting_agents_client(tmp_path, agent_id, caller)
+
+    response = client.get(f"/api/v1/workspace-sharing/{agent_id}/agents", headers=_auth_header())
+
+    assert response.status_code == 409, response.data
+    assert "update it" in json.loads(response.data)["error"]
+
+
+def test_visiting_agents_routes_require_auth_and_a_known_workspace(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    caller = _VisitingAgentsCaller(is_share_env_present=True, agent_access_answer=json.dumps({"agents": []}))
+    client = _visiting_agents_client(tmp_path, agent_id, caller)
+    assert client.get(f"/api/v1/workspace-sharing/{agent_id}/agents").status_code == 401
+    assert client.get(f"/api/v1/workspace-sharing/{AgentId()}/agents", headers=_auth_header()).status_code == 404
+    # A legacy machine coordinate resolves to the machine's agent, as on every sharing route; an unknown one is 404.
+    assert client.get(f"/api/v1/workspace-sharing/{_TEST_HOST_ID}/agents", headers=_auth_header()).status_code == 200
+    unknown_host = client.get(f"/api/v1/workspace-sharing/host-{'f' * 32}/agents", headers=_auth_header())
+    assert unknown_host.status_code == 404, unknown_host.data
+    # Only the resolved coordinate reached the workspace's CLI.
+    assert len(_agent_access_exec_commands(caller)) == 1

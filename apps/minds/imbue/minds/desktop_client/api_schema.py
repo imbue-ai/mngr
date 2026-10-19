@@ -85,6 +85,10 @@ from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
 from imbue.minds.desktop_client.api_models import TimezoneResponse
+from imbue.minds.desktop_client.api_models import VisitingAgentInviteRequest
+from imbue.minds.desktop_client.api_models import VisitingAgentInviteResponse
+from imbue.minds.desktop_client.api_models import VisitingAgentRevokeResponse
+from imbue.minds.desktop_client.api_models import VisitingAgentsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupCheckResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceGrantsRequest
@@ -226,6 +230,13 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ),
     ("POST", "/api/v1/workspace-sharing/{workspace_id}/mobile-access-link"): _RouteModels(
         response_model=MobileAccessLinkResponse
+    ),
+    ("GET", "/api/v1/workspace-sharing/{workspace_id}/agents"): _RouteModels(response_model=VisitingAgentsResponse),
+    ("POST", "/api/v1/workspace-sharing/{workspace_id}/agents/invites"): _RouteModels(
+        request_model=VisitingAgentInviteRequest, response_model=VisitingAgentInviteResponse
+    ),
+    ("DELETE", "/api/v1/workspace-sharing/{workspace_id}/agents/{agent_id}"): _RouteModels(
+        response_model=VisitingAgentRevokeResponse
     ),
     ("GET", "/api/v1/machines/{host_id}/sharing"): _RouteModels(response_model=MachineSharingResponse),
     ("PUT", "/api/v1/machines/{host_id}/sharing"): _RouteModels(

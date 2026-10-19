@@ -56,6 +56,13 @@ Each app gets two URLs:
 
 The share panel in the workspace options is authoritative for whether a workspace is published and who may open it.
 
+## Visiting agents
+
+A coding agent running outside the workspace can be invited in the way a person is.
+The Share panel's Visiting agents section mints a one-time code (publishing the workspace first when it is not published) and shows the instruction block to paste to the agent; the agent installs the helper the workspace serves, joins with the code, and from then on works through the workspace's own exec channel with exactly the workspace's access, orienting itself from a primer and skills index the workspace renders live.
+Agents are a grant kind of their own, kept inside the workspace beside the human grants; the panel lists them and revokes them.
+The design is `specs/studio-agent-access/spec.md`; the gateway side is documented in the default-workspace-template's `system/services/share_gateway/README.md`.
+
 ## Workspace sharing
 
 The remote service connector URL comes from the per-tier `client.toml` loaded via `minds run --config-file <path>` (see `apps/minds/docs/deploy/reference/environments.md`). When neither `--config-file` nor `MINDS_CLIENT_CONFIG_PATH` is set, `minds run` loads the in-repo production `client.toml` (and refuses to start only when `MINDS_ROOT_NAME` names another env without saying where that env's config lives). The packaged Electron build passes `--config-file` explicitly from the bundled `client.toml`. Every share request authenticates with the signed-in user's SuperTokens session -- no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client.

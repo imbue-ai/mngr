@@ -398,7 +398,10 @@ def _record_saved_grants(
         forward_identity.mark_shared(str(agent_id), str(owner_account.user_id))
 
 
-def _owner_account_for(session_store: MultiAccountSessionStore | None, agent_id: AgentId) -> AccountSession | None:
+def owner_account_for_workspace(
+    session_store: MultiAccountSessionStore | None, agent_id: AgentId
+) -> AccountSession | None:
+    """The signed-in account associated with the workspace, or None when there is none."""
     return session_store.get_account_for_workspace(str(agent_id)) if session_store is not None else None
 
 
@@ -464,7 +467,7 @@ def publish_workspace(host_id: str, backend_resolver: BackendResolverInterface) 
         service_labels=service_labels,
         identity_cache=state.identity_cache,
         forward_identity=state.forward_identity,
-        owner_account=_owner_account_for(session_store, agent_id),
+        owner_account=owner_account_for_workspace(session_store, agent_id),
         grants=None,
     )
 
@@ -496,7 +499,7 @@ def publish_workspace_with_grants(
         service_labels=resolve_share_target_labels(backend_resolver, agent_id),
         identity_cache=state.identity_cache,
         forward_identity=state.forward_identity,
-        owner_account=_owner_account_for(session_store, agent_id),
+        owner_account=owner_account_for_workspace(session_store, agent_id),
         grants=grants,
     )
 
@@ -876,7 +879,7 @@ def enable_web_access_for_workspace(
         service_labels=service_labels,
         identity_cache=identity_cache,
         forward_identity=forward_identity,
-        owner_account=_owner_account_for(session_store, agent_id),
+        owner_account=owner_account_for_workspace(session_store, agent_id),
         grants=None,
     )
 
@@ -1005,7 +1008,7 @@ def get_sharing(
             service_labels,
             identity_cache,
             forward_identity,
-            _owner_account_for(session_store, agent_id),
+            owner_account_for_workspace(session_store, agent_id),
         )
     try:
         grants_toml_text = read_share_grants_from_agent(
