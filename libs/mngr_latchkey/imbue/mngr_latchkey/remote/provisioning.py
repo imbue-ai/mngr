@@ -113,6 +113,7 @@ from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import stored_machine_gateway_password
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions_format_version
+from imbue.mngr_latchkey.remote._transfer import is_policy_provisioned
 from imbue.mngr_latchkey.remote.credentials import migrate_permissions_and_push
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 
@@ -207,9 +208,10 @@ def provision_remote_gateway(
     ``desktop_gateway_password`` on a machine that has none -- plus the VPS's docker
     bridge address for the gateway to bind (which the container reaches as
     ``host.docker.internal``, so nothing else is wired for it), this plugin's
-    config, and the policy to seed a machine that has none. supervisord keeps
-    the gateway running and restarts it on failure. A machine whose policy the
-    read found has it adopted here afterwards, since another of the user's
+    config, and the policy to seed a machine that has none (or only the
+    rule-less default). supervisord keeps the gateway running and restarts it
+    on failure. A machine whose provisioned policy the read found has it
+    adopted here afterwards, since another of the user's
     computers may have granted something this one has never seen; the policy
     is then brought to the format this build reads and handed back (see
     :func:`~imbue.mngr_latchkey.remote.credentials.migrate_permissions_and_push`),
@@ -290,7 +292,7 @@ def provision_remote_gateway(
         apply_remote_state(host, update, failure_description=f"provision the latchkey gateway of host {host_id}")
     if key_decision.is_decided_here:
         _record_machine_encryption_key(latchkey_directory, host_id, key_decision.key)
-    if state.permissions_json is not None:
+    if seed is None and state.permissions_json is not None:
         adopt_machine_permissions(latchkey_directory, host_id, state.permissions_json)
         adopt_machine_permissions_format_version(latchkey_directory, host_id, state.permissions_format_version)
     _migrate_adopted_permissions_and_push(host, latchkey, host_id, migration_context)
@@ -468,17 +470,20 @@ def _policy_to_seed(latchkey_directory: Path, host_id: HostId, state: RemoteMach
 
     Edits made here are pushed to the machine when they are made
     (:meth:`~imbue.mngr_latchkey.remote.credentials.MachineCredentials.set_permissions`),
-    so this never has to guess which side is newer: a machine that has a policy
-    keeps it (and the caller adopts it, exactly as an ordinary refresh does).
-    The one write toward the machine is the seed: a machine with no policy yet
-    gets this computer's copy, with the format stamp that copy carries -- or
+    so this never has to guess which side is newer: a machine that has a
+    provisioned policy keeps it (and the caller adopts it, exactly as an
+    ordinary refresh does). The one write toward the machine is the seed: a
+    machine with no policy yet -- or with only the rule-less default an
+    earlier pass handed it, which denies everything (see
+    :func:`~imbue.mngr_latchkey.remote._transfer.is_policy_provisioned`) --
+    gets this computer's copy, with the format stamp that copy carries, or
     the restrictive deny-all default, in the format this build writes, so a
     host with no explicit grants still gets a locked-down gateway.
 
     Raises :class:`RemoteGatewayError` if this computer's copy or its stamp
-    cannot be read.
+    cannot be read, or the machine's policy cannot be.
     """
-    if state.permissions_json is not None:
+    if state.permissions_json is not None and is_policy_provisioned(host_id, state.permissions_json):
         return None
     data_dir = plugin_data_dir(latchkey_directory)
     local_path = permissions_path_for_host(data_dir, host_id)

@@ -103,7 +103,8 @@ def fetch_machine_state(
     A machine with no store yet (nothing has ever been connected for it), with
     no policy yet (nothing has provisioned it), or with no desktop egress rules
     file (its gateway has not run since a build that creates one) reports those
-    as ``None`` rather than as an error.
+    as ``None`` rather than as an error. A policy with no rules is reported as
+    it is, but means the same as none (see :func:`is_policy_provisioned`).
 
     The store arrives as the machine holds it and is re-encrypted for the
     desktop here, under the key the machine reports running under -- which a
@@ -155,6 +156,26 @@ def _reencrypt_machine_store_for_desktop(
             )
         except LatchkeyError as e:
             raise RemoteGatewayError(f"Failed to re-encrypt the credentials of host {host_id} here: {e}") from e
+
+
+def is_policy_provisioned(host_id: HostId, permissions_json: str) -> bool:
+    """Whether ``permissions_json`` -- a machine's answer, or this computer's copy -- is a policy something has provisioned.
+
+    A policy with no rules is not one, any more than no file is: a managed
+    host's policy always carries its baseline rules, so a machine answering
+    with none holds the restrictive default a provisioning pass handed it
+    before this computer had a policy for it -- a gateway denying every
+    request, exactly as a gateway with no file at all should not be left
+    permitting every one. Both read as "nothing has provisioned this yet": a
+    copy here is seeded over them rather than erased by them.
+
+    Raises:
+        RemoteGatewayError: when the policy is not one this build can read.
+    """
+    try:
+        return len(load_permissions_from_text(permissions_json).rules) > 0
+    except LatchkeyStoreError as e:
+        raise RemoteGatewayError(f"Host {host_id} has a permissions file this build cannot read: {e}") from e
 
 
 def adopt_machine_credentials(latchkey: Latchkey, host_id: HostId, fetched: FetchedMachineState) -> None:
