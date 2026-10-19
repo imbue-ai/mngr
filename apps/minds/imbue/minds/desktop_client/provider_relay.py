@@ -77,6 +77,9 @@ _WORKSPACE_FORWARD_TIMEOUT_SECONDS: Final[float] = 60.0
 CHAT_SERVICE_NAME: Final[str] = "chat"
 _MAX_DETAIL_CHARS: Final[int] = 300
 _PAGE_CONTENT_SECURITY_POLICY: Final[str] = "default-src 'none'; style-src 'unsafe-inline'"
+# A body the relay reads before answering, so its close is not a reset: a callback a provider sends as a form
+# POST is small; anything larger is left unread.
+_MAX_DRAINED_BODY_BYTES: Final[int] = 64 * 1024
 
 
 class InvalidSignInUrlError(MindError, ValueError):
@@ -334,6 +337,10 @@ class _RelayRequestHandler(BaseHTTPRequestHandler):
         return
 
     def _handle(self) -> None:
+        raw_length = self.headers.get("Content-Length", "")
+        length = int(raw_length) if raw_length.isdecimal() else 0
+        if 0 < length <= _MAX_DRAINED_BODY_BYTES:
+            self.rfile.read(length)
         page = self.relay.answer(self.command, self.path)
         body = render_relay_page(page)
         self.send_response(page.status)

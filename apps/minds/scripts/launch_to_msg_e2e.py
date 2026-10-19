@@ -422,6 +422,9 @@ class _SlackMockHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = urllib.parse.urlparse(self.path).path
         logger.info("[mock] POST {}", path)
+        # Answering with the body still unread would make the close a reset the client
+        # can see instead of the response.
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
         if path == "/api/oauth/v2/access":
             self._send(
                 200,
