@@ -443,6 +443,7 @@ def _handle_agent_ice_servers(agent_id: str) -> IceServersResponse | Response:
         return _json_error(f"Unknown agent {agent_id}", 404)
     empty = IceServersResponse(ice_servers=[], expires_at=None)
     if state.turn_credential_broker is None or state.session_store is None:
+        logger.debug("Answering no relay servers for {}: this app has no relay broker", agent_id)
         return empty
     workspace_agent_id = _workspace_agent_id_for_agent(parsed_id, state.backend_resolver)
     if _is_workspace_network_restricted(workspace_agent_id, state.backend_resolver):
@@ -456,6 +457,7 @@ def _handle_agent_ice_servers(agent_id: str) -> IceServersResponse | Response:
         str(account.user_id), _attributable_host_id(workspace_agent_id, state.backend_resolver)
     )
     if credential is None:
+        logger.debug("Answering no relay servers for {}: the broker has no credential for the account", agent_id)
         return empty
     return IceServersResponse(ice_servers=list(credential.ice_servers), expires_at=credential.expires_at.isoformat())
 

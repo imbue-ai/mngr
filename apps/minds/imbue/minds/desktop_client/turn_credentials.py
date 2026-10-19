@@ -234,16 +234,32 @@ class TurnCredentialBroker(MutableModel):
                 self._credential_by_user_id[user_id] = fresh
                 return fresh
             if cached is not None and cached.expires_at > now:
+                logger.debug(
+                    "Serving account {}'s cached relay credential (expires at {}) since the refresh failed",
+                    user_id,
+                    cached.expires_at.isoformat(),
+                )
                 return cached
             self._credential_by_user_id.pop(user_id, None)
             return None
 
     def _mint_or_none(self, user_id: str, workspace_id: str | None) -> TurnCredential | None:
         try:
-            return self.client.mint_credential(user_id, workspace_id)
+            minted = self.client.mint_credential(user_id, workspace_id)
         except TurnCredentialRefusedError as e:
-            logger.debug("Connector refused a relay credential for account {}: {}", user_id, e)
+            logger.warning(
+                "Connector refused a relay credential for account {} (workspace {}): {}", user_id, workspace_id, e
+            )
             return None
         except TurnCredentialUnavailableError as e:
-            logger.debug("Could not mint a relay credential for account {}: {}", user_id, e)
+            logger.warning(
+                "Could not mint a relay credential for account {} (workspace {}): {}", user_id, workspace_id, e
+            )
             return None
+        logger.debug(
+            "Minted a relay credential for account {} (workspace {}), expiring at {}",
+            user_id,
+            workspace_id,
+            minted.expires_at.isoformat(),
+        )
+        return minted
