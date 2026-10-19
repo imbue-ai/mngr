@@ -41,6 +41,7 @@ from imbue.minds.desktop_client.agent_creator import ORPHANED_SCRATCH_CLONE_AGE_
 from imbue.minds.desktop_client.agent_creator import SCRATCH_CLONE_DIR_PREFIX
 from imbue.minds.desktop_client.agent_creator import _BootstrapProgressTail
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
+from imbue.minds.desktop_client.agent_creator import _bootstrap_follow_command
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_github_https_url
@@ -1585,13 +1586,23 @@ def test_build_redirect_url_uses_https_scheme(tmp_path) -> None:
     assert url == f"https://localhost:8421/goto/{agent_id}/"
 
 
-def test_wait_for_workspace_ready_follows_the_bootstrap_events_from_the_latest_one_on(tmp_path: Path) -> None:
-    """The wait tails the boot's events with one follow that replays at most one earlier event.
+def test_bootstrap_follow_command_names_the_agent_by_its_ids_when_the_create_reported_them() -> None:
+    aid, hid = AgentId.generate(), HostId.generate()
 
-    The template's events file spans every boot of the workspace, so an adopted
-    pool host's opens with the bake's own; a follow that replayed it would read
-    that finished boot as the live one.
-    """
+    assert _bootstrap_follow_command("mngr", aid, hid, "docker") == (
+        "mngr",
+        "event",
+        f"{aid}@{hid}.docker",
+        "bootstrap",
+        "--follow",
+    )
+    # Without a host id or a provider the bare agent id is all there is to go on.
+    assert _bootstrap_follow_command("mngr", aid, None, "docker")[2] == str(aid)
+    assert _bootstrap_follow_command("mngr", aid, hid, "")[2] == str(aid)
+
+
+def test_wait_for_workspace_ready_follows_the_bootstrap_events_by_the_agents_ids(tmp_path: Path) -> None:
+    """The wait tails the boot's events with one follow that names the agent by its ids, so mngr skips discovery."""
     calls_path = tmp_path / "mngr-calls.log"
     calls_path.write_text("")
     fake_mngr = tmp_path / "fake-mngr"
@@ -1612,11 +1623,17 @@ def test_wait_for_workspace_ready_follows_the_bootstrap_events_from_the_latest_o
             probe_timeout_seconds=0.5,
             mngr_binary=str(fake_mngr),
         )
+        hid = HostId.generate()
         creator._wait_for_workspace_ready(
-            aid, CreateAttemptLogSink(), creator.workspace_ready_timeout_seconds, tracker
+            aid,
+            CreateAttemptLogSink(),
+            creator.workspace_ready_timeout_seconds,
+            tracker,
+            host_id=hid,
+            provider_instance_name="docker",
         )
 
-    assert calls_path.read_text().splitlines() == [f"event {aid} bootstrap --follow --tail 1"]
+    assert calls_path.read_text().splitlines() == [f"event {aid}@{hid}.docker bootstrap --follow"]
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:

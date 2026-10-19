@@ -1,4 +1,7 @@
 import json
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 
 import pytest
 
@@ -6,6 +9,7 @@ from imbue.minds.desktop_client.create_progress import ETA_SHORTEN_HOLD_SECONDS
 from imbue.minds.desktop_client.create_progress import OperationProgressTracker
 from imbue.minds.desktop_client.create_progress import ProgressStepStatus
 from imbue.minds.desktop_client.create_progress import apply_bootstrap_event_lines
+from imbue.minds.desktop_client.create_progress import parse_bootstrap_event_timestamp
 from imbue.minds.desktop_client.create_progress import remaining_text_for
 from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.utils.progress import ProgressStep
@@ -277,14 +281,29 @@ def test_a_parent_whose_children_are_all_done_but_still_runs_lengthens_the_estim
     tracker.start_step("stage", "Stage", "build", None)
     clock.now += 90
     tracker.complete_step("stage")
-    # 90s into the build's 100s with nothing running: the build is read like
-    # a step with no counter, so the overrun margin already says 45s.
-    assert tracker.snapshot().remaining_text == "About a minute remaining"
+    # Its only child is done, so only the 10s the child did not account for is left.
+    assert tracker.snapshot().remaining_text == "Almost there..."
 
-    # The export that no stage counts runs on, and the estimate lengthens with it.
+    # Work that no child counts runs on past the build's expectation, and the
+    # estimate lengthens with the overrun instead of ending.
     clock.now += 200
-    assert tracker.snapshot().remaining_text == "About 3 minutes remaining"
+    assert tracker.snapshot().remaining_text == "About 2 minutes remaining"
     assert tracker.snapshot().percent < 100.0
+
+
+def test_children_that_finish_early_leave_their_parent_nearly_done_whatever_it_expected() -> None:
+    clock = _FakeClock()
+    tracker = _tracker(clock, host=400.0, build=390.0, start=5.0)
+    tracker.announce_plan(_plan(("host", "Host")), None)
+    tracker.start_step("host", "Host", None, None)
+    tracker.announce_plan(_plan(("build", "Build"), ("start", "Start")), "host")
+    tracker.start_step("build", "Build", "host", None)
+    # A warm cache finishes the build in a quarter of its expectation.
+    clock.now += 100
+    tracker.complete_step("build")
+
+    # 5s of the pending child plus the 5s the children do not account for; not the 300s the host "has left".
+    assert tracker.snapshot().remaining_text == "Almost there..."
 
 
 def test_a_running_child_decides_its_parents_estimate() -> None:
@@ -346,6 +365,40 @@ _BOOTSTRAP_LINES = [
     '{"timestamp": "2026-10-18T01:30:10.000000000Z", "type": "bootstrap_completed", "event_id": "boot-4", "source": "bootstrap", "step": "supervisord", "label": "Starting the workspace\'s services"}',
     '{"timestamp": "2026-10-18T01:30:10.000000000Z", "type": "bootstrap_something_newer", "event_id": "boot-5", "source": "bootstrap", "step": "later", "label": "Later"}',
 ]
+
+
+def test_bootstrap_event_lines_before_the_create_belong_to_an_earlier_boot_and_are_ignored() -> None:
+    clock = _FakeClock()
+    tracker = _tracker(clock, wait_for_ready=60.0)
+    tracker.announce_plan(_plan(("wait_for_ready", "Waiting")), None)
+    tracker.start_step("wait_for_ready", "Waiting", None, None)
+    # The create began a minute after the events, within the skew allowance, so they are the live boot's.
+    create_started_at = datetime(2026, 10, 18, 1, 31, 0, tzinfo=timezone.utc)
+
+    apply_bootstrap_event_lines(tracker, _BOOTSTRAP_LINES, "wait_for_ready", not_before=create_started_at)
+
+    assert tracker.snapshot().current_label == "Installing scheduled jobs"
+    assert [(duration.step_id, duration.seconds) for duration in tracker.drain_durations()] == [
+        ("bootstrap.sync_venv", 8.75)
+    ]
+    # Past the allowance, every one of those events is an earlier boot's.
+    later = _tracker(clock, wait_for_ready=60.0)
+    later.announce_plan(_plan(("wait_for_ready", "Waiting")), None)
+    later.start_step("wait_for_ready", "Waiting", None, None)
+    apply_bootstrap_event_lines(
+        later, _BOOTSTRAP_LINES, "wait_for_ready", not_before=create_started_at + timedelta(minutes=20)
+    )
+    assert later.snapshot().current_label == "Waiting"
+    assert later.drain_durations() == []
+
+
+def test_parse_bootstrap_event_timestamp_reads_nanosecond_utc_stamps_only() -> None:
+    assert parse_bootstrap_event_timestamp("2026-10-18T01:30:00.123456789Z") == datetime(
+        2026, 10, 18, 1, 30, 0, 123456, tzinfo=timezone.utc
+    )
+    assert parse_bootstrap_event_timestamp("2026-10-18T01:30:00+00:00") is None
+    assert parse_bootstrap_event_timestamp("not a time") is None
+    assert parse_bootstrap_event_timestamp(1760750000) is None
 
 
 def test_bootstrap_event_lines_nest_under_the_wait_step_and_keep_the_bootstrap_timings() -> None:

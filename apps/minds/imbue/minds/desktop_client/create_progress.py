@@ -24,6 +24,9 @@ import time
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from enum import auto
 from typing import Final
 from typing import assert_never
@@ -365,10 +368,12 @@ class OperationProgressTracker(MutableModel):
         """The seconds ``node`` has left, erring long.
 
         A running step with children defers to them, plus whatever of its own
-        expectation the known children do not account for; once no child is
-        running it is read like a step with no counter again, so a gap after
-        the last child (an export the stages do not count) lengthens the
-        estimate instead of ending it.
+        expectation the known children do not account for: children that
+        finished early (a warm build cache) leave only that unaccounted share,
+        not the rest of the parent's own expectation. Once it has run past
+        that expectation with no child running, the overrun margin of the
+        overrun is added, so a gap after the last child lengthens the estimate
+        instead of ending it.
         """
         expected = self._expected(node)
         if node.status is ProgressStepStatus.DONE:
@@ -381,7 +386,7 @@ class OperationProgressTracker(MutableModel):
             from_children = sum(self._remaining(child, now) for child in node.children) + unaccounted
             if any(child.status is ProgressStepStatus.RUNNING for child in node.children):
                 return from_children
-            return max(from_children, _timed_remaining(elapsed, expected))
+            return from_children + _OVERRUN_MARGIN * max(0.0, elapsed - expected)
         if node.total and node.completed:
             left = max(0, node.total - node.completed)
             return max(expected * left / node.total, elapsed * left / node.completed)
@@ -503,13 +508,41 @@ BOOTSTRAP_STEP_COMPLETED_EVENT_TYPE: Final[str] = "bootstrap_step_completed"
 BOOTSTRAP_COMPLETED_EVENT_TYPE: Final[str] = "bootstrap_completed"
 
 
-def apply_bootstrap_event_lines(tracker: OperationProgressTracker, lines: Sequence[str], parent_id: str) -> None:
+# How far behind the desktop's clock a bootstrap event may be stamped and still
+# count as this boot's: the workspace's clock (a VM's, a cloud host's) is not
+# the desktop's. The boots this keeps out (an adopted pool host's bake, a
+# restart before the create) are hours older, so the allowance can be generous.
+BOOTSTRAP_EVENT_CLOCK_SKEW: Final[timedelta] = timedelta(minutes=10)
+
+
+@pure
+def parse_bootstrap_event_timestamp(value: object) -> datetime | None:
+    """The instant a bootstrap event's ``timestamp`` names (nanosecond ISO 8601 in UTC, ``...Z``), or None."""
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return None
+    try:
+        # fromisoformat reads at most six fractional digits; the stamp carries nine.
+        return datetime.fromisoformat(value[:26]).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def apply_bootstrap_event_lines(
+    tracker: OperationProgressTracker, lines: Sequence[str], parent_id: str, not_before: datetime | None = None
+) -> None:
     """Fold the template bootstrap's event lines into the tracker as steps under ``parent_id``.
 
     Lines that are not bootstrap step events (other event types, unreadable
     JSON) are skipped: a template that writes no such events, or writes ones
     this reader does not know, leaves the parent step a single timed step.
+
+    The bootstrap appends to one events file on every boot of the workspace,
+    so a follow of the whole file replays earlier boots (an adopted pool host's
+    bake, a restart); ``not_before`` keeps only the events stamped after it,
+    less the clock skew allowance, so a follow that attaches late still shows
+    and learns every step of the live boot and none of an earlier one.
     """
+    cutoff = None if not_before is None else not_before - BOOTSTRAP_EVENT_CLOCK_SKEW
     for line in lines:
         stripped = line.strip()
         if not stripped:
@@ -521,6 +554,10 @@ def apply_bootstrap_event_lines(tracker: OperationProgressTracker, lines: Sequen
             continue
         if not isinstance(event, Mapping):
             continue
+        if cutoff is not None:
+            stamped_at = parse_bootstrap_event_timestamp(event.get("timestamp"))
+            if stamped_at is not None and stamped_at < cutoff:
+                continue
         event_type = event.get("type")
         step = event.get("step")
         if event_type == BOOTSTRAP_COMPLETED_EVENT_TYPE:

@@ -957,18 +957,19 @@ _BOOTSTRAP_TAIL_STOP_SECONDS: Final[float] = 5.0
 
 
 @pure
-def _bootstrap_follow_command(mngr_binary: str, agent_id: AgentId) -> tuple[str, ...]:
-    """The ``mngr event`` command that follows the booting workspace's bootstrap events, from the latest one on.
+def _bootstrap_follow_command(
+    mngr_binary: str, agent_id: AgentId, host_id: HostId | None, provider_instance_name: str
+) -> tuple[str, ...]:
+    """The ``mngr event`` command that follows the booting workspace's bootstrap events.
 
-    The template's bootstrap appends to its events file on every boot and nothing
-    clears it between boots, so an adopted pool host's file opens with the bake's
-    own boot, every step of it already completed. A plain follow would replay that
-    and the bar would read the whole boot as done before it began; ``--tail 1``
-    replays at most one earlier event (the earlier boot's ``bootstrap_completed``,
-    which the reader ignores) and follows from there. When the live boot is
-    already under way, its earlier steps are not shown or learned.
+    The agent is named by its ids and its provider when the create reported
+    them: that address needs no discovery, which on a machine with many
+    containers and providers takes longer than a Docker boot. The whole file
+    is followed; the reader drops the events of earlier boots by their
+    timestamps (see :func:`apply_bootstrap_event_lines`).
     """
-    return (mngr_binary, "event", str(agent_id), "bootstrap", "--follow", "--tail", "1")
+    target = f"{agent_id}@{host_id}.{provider_instance_name}" if host_id and provider_instance_name else str(agent_id)
+    return (mngr_binary, "event", target, "bootstrap", "--follow")
 
 
 class _BootstrapProgressTail(MutableModel):
@@ -989,6 +990,9 @@ class _BootstrapProgressTail(MutableModel):
     concurrency_group: ConcurrencyGroup = Field(frozen=True, description="The group the subprocess runs under")
     tracker: OperationProgressTracker = Field(frozen=True, description="Where the bootstrap steps land")
     parent_step_id: str = Field(frozen=True, description="The step the bootstrap steps nest under")
+    not_before: datetime | None = Field(
+        default=None, frozen=True, description="Events stamped before this (less clock skew) belong to an earlier boot"
+    )
     process: RunningProcess | None = Field(default=None, description="The follow subprocess while it runs")
 
     def start(self) -> None:
@@ -1024,7 +1028,7 @@ class _BootstrapProgressTail(MutableModel):
 
     def _on_output(self, line: str, is_stdout: bool) -> None:
         if is_stdout:
-            apply_bootstrap_event_lines(self.tracker, [line], self.parent_step_id)
+            apply_bootstrap_event_lines(self.tracker, [line], self.parent_step_id, self.not_before)
         else:
             logger.debug("bootstrap event tail: {}", line.rstrip())
 
@@ -2709,6 +2713,8 @@ class AgentCreator(MutableModel):
         entries).
         """
         cid_str = str(create_attempt_id)
+        # Bootstrap events stamped before this are an earlier boot's (see the ready wait's follow).
+        create_started_at = datetime.now(timezone.utc)
         emit_log = make_log_callback(log_sink)
         with self._lock:
             tracker = self._progress_trackers[cid_str]
@@ -3054,7 +3060,15 @@ class AgentCreator(MutableModel):
                     canonical_id, ProbeGracePurpose.CREATE_ATTEMPT, time.monotonic() + ready_timeout_seconds
                 )
                 try:
-                    self._wait_for_workspace_ready(canonical_id, log_sink, ready_timeout_seconds, tracker)
+                    self._wait_for_workspace_ready(
+                        canonical_id,
+                        log_sink,
+                        ready_timeout_seconds,
+                        tracker,
+                        host_id=canonical_host_id,
+                        provider_instance_name=provider_instance_name,
+                        create_started_at=create_started_at,
+                    )
                 finally:
                     self.system_interface_health_tracker.end_probe_grace(
                         canonical_id, ProbeGracePurpose.CREATE_ATTEMPT
@@ -3367,6 +3381,9 @@ class AgentCreator(MutableModel):
         # normally, or the longer build-in-VM window for an imageless Lima create.
         timeout_seconds: float,
         tracker: OperationProgressTracker | None = None,
+        host_id: HostId | None = None,
+        provider_instance_name: str = "",
+        create_started_at: datetime | None = None,
     ) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.
 
@@ -3391,10 +3408,11 @@ class AgentCreator(MutableModel):
         log_sink.put("[Imbue Studio] Waiting for system interface to be ready...")
         bootstrap_tail = (
             _BootstrapProgressTail(
-                command=_bootstrap_follow_command(self.mngr_binary, agent_id),
+                command=_bootstrap_follow_command(self.mngr_binary, agent_id, host_id, provider_instance_name),
                 concurrency_group=self.root_concurrency_group,
                 tracker=tracker,
                 parent_step_id=str(_READY_STEP),
+                not_before=create_started_at,
             )
             if tracker is not None
             else None
