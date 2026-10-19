@@ -98,6 +98,20 @@ def _wait_for_pushes(recorder: _PushRecorder, expected_count: int) -> None:
     )
 
 
+def _wait_until_push_is_held(auto_register: LatchkeyAutoRegister, host_id: HostId) -> None:
+    """Wait for the push worker to find ``host_id`` without a machine and hold its push."""
+    assert poll_until(lambda: host_id in auto_register._hosts_awaiting_machine, timeout=5.0, poll_interval=0.01), (
+        f"expected the push for host {host_id} to be held for its machine"
+    )
+
+
+def _wait_until_pushes_settle(auto_register: LatchkeyAutoRegister) -> None:
+    """Wait for every push worker to finish; a change schedules its worker synchronously, so none is outstanding after."""
+    assert poll_until(lambda: not auto_register._hosts_being_pushed, timeout=5.0, poll_interval=0.01), (
+        f"expected no push to be running, but hosts {auto_register._hosts_being_pushed} are still being pushed"
+    )
+
+
 @pytest.fixture
 def resolver() -> MngrCliBackendResolver:
     return MngrCliBackendResolver()
@@ -421,24 +435,31 @@ def test_a_registration_made_before_the_machine_is_provisioned_is_pushed_once_it
     _push_agents(resolver, _make_discovered(host_id, agent_id))
     recorder = _PushRecorder()
 
-    LatchkeyAutoRegister(
+    auto_register = LatchkeyAutoRegister(
         backend_resolver=resolver,
         latchkey=latchkey,
         push_permissions_to_machine=recorder.push,
         concurrency_group=root_concurrency_group,
-    ).start()
+    )
+    auto_register.start()
+    _wait_until_push_is_held(auto_register, host_id)
     # A change before the machine exists carries nothing, and does not drop the push either.
     _push_agents(resolver, _make_discovered(host_id, agent_id))
+    _wait_until_pushes_settle(auto_register)
     assert recorder.pushed_workspace_agent_ids == []
+    assert host_id in auto_register._hosts_awaiting_machine
 
     _provision_machine(latchkey, host_id)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
     _wait_for_pushes(recorder, 1)
+    _wait_until_pushes_settle(auto_register)
     assert recorder.pushed_workspace_agent_ids == [str(agent_id)]
     # The held push is consumed: later changes do not push it again.
     _push_agents(resolver, _make_discovered(host_id, agent_id))
+    _wait_until_pushes_settle(auto_register)
     assert recorder.pushed_workspace_agent_ids == [str(agent_id)]
+    assert host_id not in auto_register._hosts_awaiting_machine
 
 
 def test_a_registration_on_a_host_with_no_machine_is_never_pushed(
@@ -454,13 +475,17 @@ def test_a_registration_on_a_host_with_no_machine_is_never_pushed(
     _push_agents(resolver, _make_discovered(host_id, agent_id))
     recorder = _PushRecorder()
 
-    LatchkeyAutoRegister(
+    auto_register = LatchkeyAutoRegister(
         backend_resolver=resolver,
         latchkey=latchkey,
         push_permissions_to_machine=recorder.push,
         concurrency_group=root_concurrency_group,
-    ).start()
+    )
+    auto_register.start()
+    _wait_until_push_is_held(auto_register, host_id)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
     _push_agents(resolver, _make_discovered(host_id, agent_id))
+    _wait_until_pushes_settle(auto_register)
 
     assert recorder.pushed_workspace_agent_ids == []
+    assert host_id in auto_register._hosts_awaiting_machine
