@@ -2319,16 +2319,25 @@ function syncDockIcon({ isWindowAboutToOpen = false } = {}) {
 // icon disappears.
 let tray = null;
 
-// The tray icon the platform draws legibly: a small bitmap, the product icon
-// on production and the dev icon on every other tier (the colored icon is kept
-// as-is rather than made a template, so the two tiers stay tellable apart).
+// The tray icon the platform draws legibly, the product icon on production
+// and a development variant on every other tier. On macOS a single-color
+// template image, which the menu bar tints to match its appearance like every
+// other menu bar item (its @2x sibling loads alongside it, so it is not
+// resized). Elsewhere a small bitmap of the color icon, since a Linux panel has
+// no template tinting.
 function trayIconImage() {
-  const fileName = isProductionTier() ? (process.platform === 'linux' ? 'icon-linux.png' : 'icon.png') : 'icon-dev.png';
+  const isProduction = isProductionTier();
+  const fileName = isMac
+    ? (isProduction ? 'trayTemplate.png' : 'trayDevTemplate.png')
+    : (isProduction ? 'icon-linux.png' : 'icon-dev.png');
   const image = nativeImage.createFromPath(path.join(__dirname, 'assets', fileName));
   if (image.isEmpty()) throw new Error(`could not read the tray icon at ${fileName}`);
-  // The menu bar wants about 18 points; the dock and launcher icons are 512px.
-  const size = isMac ? 18 : 22;
-  return image.resize({ width: size, height: size });
+  if (isMac) {
+    image.setTemplateImage(true);
+    return image;
+  }
+  // The launcher icons are 1024px; a panel wants about 22.
+  return image.resize({ width: 22, height: 22 });
 }
 
 function trayTooltip() {
