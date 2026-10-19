@@ -4943,8 +4943,8 @@ def create_api_v1_blueprint() -> Blueprint:
 
     # Workspace sharing. Desktop-only surface (cookie or API auth); it lives
     # in its own ``workspace-sharing`` namespace -- NOT under ``/workspaces``,
-    # whose tree the latchkey ``minds-workspaces-full`` verb grants wholesale
-    # to agents -- so agents stay deny-all at the gateway.
+    # whose routes the latchkey ``minds-workspaces-*`` verbs grant to agents
+    # -- so agents stay deny-all at the gateway.
     blueprint.add_url_rule(
         "/workspace-sharing/<workspace_id>",
         view_func=_handle_workspace_sharing_get,

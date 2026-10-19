@@ -1,6 +1,6 @@
 ---
 name: imbue-studio
-description: Use whenever Imbue Studio, minds, a workspace, the studio API, or an Imbue account comes up. Explains how to reach Imbue Studio's API from the user's machine or from inside a workspace, how to start the app when it is not running, where the live contract lives, and what an agent must never do with the user's credentials.
+description: Use whenever Imbue Studio, minds, a workspace, the studio API, or an Imbue account comes up. Explains how to reach Imbue Studio's API from the user's machine or from inside a workspace, how to start the app when it is not running, where the live contract lives, which permissions a workspace agent needs and how to ask for them, and what an agent must never do with the user's credentials.
 ---
 
 # Driving Imbue Studio
@@ -84,28 +84,94 @@ They may change without notice; use the versioned routes the schema lists whenev
 
 ## 5. Permissions inside a workspace
 
-Over the gateway, most routes are gated per verb and the user approves each grant.
+Over the socket there is no permission step; you act as the user.
+Over the gateway, no grant is needed for `GET /api/schema`, `GET /api/v1/app/version`, `GET /api/v1/timezone`, or your own agent's notification and report routes.
+Every workspace route is gated per verb, one `minds-workspaces-*` permission each, and the user approves each grant.
 A `403` saying the request was not permitted means you need a grant, not that the route is wrong.
+These are the verbs:
+
+| Verb permission | Covers | Targeted? |
+|---|---|---|
+| `minds-workspaces-read` | list, detail, version, backups (read), operation status and logs | no (all workspaces) |
+| `minds-workspaces-create` | create a new workspace | no |
+| `minds-workspaces-ssh` | establish SSH access | yes |
+| `minds-workspaces-backups-export` | export a backup snapshot | yes |
+| `minds-workspaces-backups-manage` | enable, disable, repoint, or verify backups | yes |
+| `minds-workspaces-destroy` | destroy a workspace | yes |
+| `minds-workspaces-lifecycle` | start / stop the host | yes |
+| `minds-workspaces-update` | update settings (color, account) | yes |
+| `minds-workspaces-recover` | health check, restart, machine resize | yes |
+
+Targeted verbs are granted per workspace, so ask for one workspace at a time.
 File exactly one permission request per tool call, with nothing else in that call and its output untouched, then end your turn and wait for the user's answer before retrying:
 
 ```bash
 latchkey curl -XPOST http://latchkey-self.invalid/permission-requests \
   -H 'Content-Type: application/json' \
-  -d '{"agent_id": "'"${MINDS_CHAT_ID:-$MNGR_AGENT_ID}"'", "type": "workspace", "payload": {"permissions": ["minds-workspaces-read"], "target_workspace_id": null}, "rationale": "I need to list your workspaces to find the one you mentioned."}'
+  -d '{"agent_id": "'"${MINDS_CHAT_ID:-$MNGR_AGENT_ID}"'", "type": "workspace",
+       "payload": {"permissions": ["minds-workspaces-ssh", "minds-workspaces-backups-export"],
+                   "target_workspace_id": "<TARGET_WORKSPACE_AGENT_ID>"},
+       "rationale": "I need SSH and backup-export access to <name> to bring its content into this workspace."}'
 ```
 
-Ask for the smallest set of verbs the task needs, name the target workspace for targeted verbs, and explain why in plain language.
-Over the socket there is no permission step; you act as the user.
+`payload.permissions` lists verbs from the table; `payload.target_workspace_id` names the workspace the targeted verbs act on (null for `read` and `create`, or to ask for a verb across every workspace).
+Ask for the smallest set of verbs the task needs, with a rationale that names the workspace and the goal in plain language; the user sees them as checkboxes per workspace.
 
-## 6. Never
+## 6. Acting on other workspaces from inside one
+
+A workspace is addressed by its agent id; your own is usually `$MNGR_AGENT_ID`.
+
+**Creating a workspace.** `POST /api/v1/workspaces` answers `202`; poll `/api/v1/workspaces/operations/create/<op>` until `is_done`.
+The poll is a read, so ask for `minds-workspaces-read` together with `minds-workspaces-create`.
+When `git_url` is the workspace template, always send `branch`, read from `GET /api/v1/app/version` (its `workspace_template_ref`): the release this app was built against.
+Omitted, the new workspace takes the template's default branch, unreleased code; never send the newest upstream tag, which may be a release this app does not support.
+If the read fails, say so and create nothing.
+From any other repository, send a ref that repository has, or omit `branch` for its default branch.
+
+```bash
+REF=$(latchkey curl http://latchkey-self.invalid/minds-api-proxy/api/v1/app/version | jq -er .workspace_template_ref) || exit 1
+latchkey curl -XPOST http://latchkey-self.invalid/minds-api-proxy/api/v1/workspaces \
+  -H 'Content-Type: application/json' \
+  -d '{"git_url": "<template-repo-url>", "branch": "'"$REF"'"}'
+```
+
+**SSH into another workspace.** Generate a keypair locally; only the public key leaves you, and the grant is time-limited (`expires_at`; re-request to refresh, it does not stack).
+Pass your own workspace id as `requester_workspace_id`: the hub needs it to dedupe your grant and, for a local target, to broker a tunnel back into your container.
+
+```bash
+ssh-keygen -t ed25519 -N '' -f /tmp/mind_key
+CONN=$(latchkey curl -XPOST http://latchkey-self.invalid/minds-api-proxy/api/v1/workspaces/<TARGET_ID>/ssh \
+  -H 'Content-Type: application/json' \
+  -d '{"public_key": "'"$(cat /tmp/mind_key.pub)"'", "requester_workspace_id": "'"$MNGR_AGENT_ID"'"}')
+ssh -i /tmp/mind_key -p "$(echo "$CONN" | jq -r .port)" "$(echo "$CONN" | jq -r .user)@$(echo "$CONN" | jq -r .host)"
+```
+
+A remote target answers with its real address.
+A local (Docker/Lima) target answers `host="127.0.0.1"` and a port reachable from inside your own workspace, so run the `ssh` from there.
+`502` usually means the target (or your own container) is offline; `404` means the workspace id is unknown.
+
+**Exporting a backup.** `GET /api/v1/workspaces/<id>/backups` lists snapshots, even for an offline or destroyed workspace.
+An export is a binary stream; save it under `/var/tmp`, which is disk (an export can run to many GB, and `/tmp` is memory):
+
+```bash
+latchkey curl -o /var/tmp/restore.zip \
+  -XPOST http://latchkey-self.invalid/minds-api-proxy/api/v1/workspaces/<id>/backups/<snapshot_id>/export
+```
+
+**Migrating an old workspace into a fresh one** is a workspace skill's job, not something to improvise from these routes: it has to work out what the user authored, map paths across layouts, re-register apps and scheduled jobs, and recreate past chats.
+When such a skill is present, follow it; from the old workspace, create the fresh one as above and tell the user to open it and ask its agent to migrate.
+If the old workspace cannot be started at all, export its newest snapshot and work through the contents with the user by hand.
+
+## 7. Never
 
 - Never ask for, read, or send the user's credentials, API keys, or master password.
   Sign-ins happen in the user's browser; when a route starts one, hand the user the URL it returns and poll for completion.
-- Never configure backups with user secrets: leave every `backup_*` field unset when creating a workspace, and let the user enable backups in the app.
+- Never configure backups with user secrets: leave every `backup_*` field unset when creating a workspace (the default is `CONFIGURE_LATER`), and let the user enable backups in the app.
 - Never approve or deny your own permission requests, and never try to reach the desktop's cookie-only routes from inside a workspace.
 - Never talk to the user about sockets, gateways, or proxies unless they ask; talk about their workspaces.
+  A connection error from inside a workspace (curl exit 7) usually means the user's computer is offline.
 
-## 7. The layers underneath
+## 8. The layers underneath
 
 Imbue Studio is built on mngr, and the lower layers have their own live help:
 

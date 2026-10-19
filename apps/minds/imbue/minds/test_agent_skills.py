@@ -4,8 +4,10 @@ The skills under ``apps/minds/skills_plugin/`` are exported verbatim into the pu
 ``imbue-ai/imbue-skills`` marketplace. Every API path and every ``mngr <subcommand>``
 they name inside a code span or fenced block must exist: the paths in the OpenAPI
 document the desktop client generates for the transport the example uses, and the
-subcommands on the CLI this checkout builds. A route or command rename then fails
-here, in the pull request that makes it, rather than in an agent's session later.
+subcommands on the CLI this checkout builds. The studio skill's permission-verb table
+must also match the gateway's workspace-verb catalog (``workspace_permissions.json``).
+A route, command, or verb rename then fails here, in the pull request that makes it,
+rather than in an agent's session later.
 """
 
 import re
@@ -26,6 +28,7 @@ from imbue.mngr.utils.agent_skills import code_regions
 from imbue.mngr.utils.agent_skills import mngr_subcommands_referenced
 from imbue.mngr.utils.agent_skills import skill_files
 from imbue.mngr.utils.agent_skills import skill_shape_problems
+from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 SKILLS_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "skills_plugin" / "skills"
 
@@ -44,6 +47,11 @@ _API_PATH: Final[re.Pattern[str]] = re.compile(
 _PLACEHOLDER: Final[re.Pattern[str]] = re.compile(r"<[^/<>]+>|\{[^/{}]+\}")
 # The query-string and trailing-punctuation characters a token may carry past the path.
 _PATH_TRAILERS: Final[str] = ".,;:)"
+# One row of the studio skill's verb table: the permission name and whether the verb is targeted.
+_VERB_TABLE_ROW: Final[re.Pattern[str]] = re.compile(
+    r"^\| `(?P<permission>minds-workspaces-[a-z-]+)` \| [^|]+ \| (?P<targeted>yes|no)\b[^|]*\|$", re.MULTILINE
+)
+_STUDIO_SKILL_NAME: Final[str] = "imbue-studio"
 
 
 def _normalized_path(raw: str) -> str:
@@ -97,7 +105,7 @@ def test_plugin_directory_has_the_published_shape() -> None:
     plugin_dir = SKILLS_DIR.parent
     assert (plugin_dir / ".claude-plugin" / "plugin.json").is_file()
     assert (plugin_dir / "README.md").is_file()
-    assert "imbue-studio" in _skill_ids()
+    assert _STUDIO_SKILL_NAME in _skill_ids()
 
 
 @pytest.mark.parametrize("skill_name", _skill_ids())
@@ -124,3 +132,18 @@ def test_skill_api_paths_exist_in_the_schema_for_their_transport(skill_name: str
         documented = _schema_paths_normalized(_documented_paths(app, transport))
         missing = referenced - documented
         assert not missing, f"{skill_name} names paths the {transport.value} schema does not list: {sorted(missing)}"
+
+
+def _gateway_workspace_verbs() -> dict[str, bool]:
+    """The gateway's workspace verbs by permission name, mapped to whether each is targeted at one workspace."""
+    return {verb.permission: verb.is_targeted for verb in WORKSPACE_VERBS}
+
+
+def test_studio_skill_verb_table_matches_the_gateway_catalog() -> None:
+    markdown = (SKILLS_DIR / _STUDIO_SKILL_NAME / "SKILL.md").read_text(encoding="utf-8")
+    documented = {
+        match.group("permission"): match.group("targeted") == "yes" for match in _VERB_TABLE_ROW.finditer(markdown)
+    }
+    # An empty table would mean the row regex no longer matches the skill's markup.
+    assert documented, "the studio skill's verb table was not found"
+    assert documented == _gateway_workspace_verbs()
