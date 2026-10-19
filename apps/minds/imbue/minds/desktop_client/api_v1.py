@@ -434,6 +434,9 @@ def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
         create_time=info.create_time.isoformat() if info is not None and info.create_time is not None else None,
         original_minds_version=backend_resolver.get_agent_label(agent_id, "original_minds_version"),
         color=backend_resolver.get_workspace_color(agent_id),
+        # Discovery lists only this user's own workspaces: the connector's records
+        # listing is the caller's, and the "shared with you" index has no read side yet.
+        is_owned=True,
     )
 
 
