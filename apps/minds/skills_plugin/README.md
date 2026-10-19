@@ -4,7 +4,7 @@ Claude Code and Codex skills that teach an agent how to drive [Imbue Studio](htt
 
 ## Skills
 
-- `imbue-studio`: how to reach Imbue Studio from wherever the agent is running, how to start the app when it is not running, how to read the live API contract, and what an agent must never do with the user's credentials.
+- `imbue-studio`: how to reach Imbue Studio from wherever the agent is running, how to start the app when it is not running, how to read the live API contract, which permissions a workspace agent needs and how to ask for them, and what an agent must never do with the user's credentials.
 
 Imbue Studio is built on mngr, so install `imbue-mngr-skills` from the same marketplace as well; the studio skill points at `mngr help` and the mngr plugin CLIs rather than repeating them.
 
