@@ -411,3 +411,17 @@ def test_reconcile_runs_gc_scoped_to_lima_and_docker(tmp_path: Path, root_concur
     # Both providers were listed (host-inventory reads).
     assert "list --hosts --provider lima --format json" in calls
     assert "list --hosts --provider docker --format json" in calls
+
+
+def test_reconcile_during_shutdown_returns_without_raising(tmp_path: Path) -> None:
+    mngr_binary, calls_path = _write_fake_mngr(tmp_path, {"lima": [], "docker": []})
+    store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
+
+    with ConcurrencyGroup(name="startup-reconcile-shutdown-test") as concurrency_group:
+        reconciler = _make_reconciler(tmp_path, concurrency_group, mngr_binary, store)
+        concurrency_group.shutdown()
+        # Every mngr launch is refused by the shutting-down group; the reconcile
+        # logs and returns instead of letting the refusal escape its thread.
+        reconciler.reconcile_now()
+
+    assert _read_calls(calls_path) == []

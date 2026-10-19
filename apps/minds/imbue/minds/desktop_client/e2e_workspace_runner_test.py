@@ -1,14 +1,18 @@
+import io
 import re
 from collections.abc import Sequence
+from pathlib import Path
 from typing import cast
 
 import pytest
+from loguru import logger as loguru_logger
 from playwright.sync_api import Browser
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame
 from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from imbue.minds.desktop_client.e2e_workspace_runner import E2E_HARNESS_MARKER_ENV_VAR
 from imbue.minds.desktop_client.e2e_workspace_runner import NEW_CHAT_ROW_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import NEW_TERMINAL_ROW_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import TERMINAL_IFRAME_SELECTOR
@@ -17,7 +21,9 @@ from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceFlowError
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_FIELD_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_INPUT_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_OVERLAY_SELECTOR
+from imbue.minds.desktop_client.e2e_workspace_runner import _build_electron_env
 from imbue.minds.desktop_client.e2e_workspace_runner import _chat_frame
+from imbue.minds.desktop_client.e2e_workspace_runner import _drain_byte_stream_to_loguru
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
 from imbue.minds.desktop_client.e2e_workspace_runner import _wait_for_workspace_ready_or_failure
 from imbue.minds.desktop_client.e2e_workspace_runner import open_terminal_from_launcher
@@ -448,3 +454,32 @@ def test_start_new_chat_raises_when_only_the_welcome_chat_is_open_after_the_pres
     workspace = _FakeLauncherWorkspace(is_launcher_showing=True, existing_chats=[welcome], chat=welcome)
     with pytest.raises(WorkspaceFlowError):
         start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=0)
+
+
+def test_build_electron_env_sets_the_harness_marker(tmp_path: Path) -> None:
+    env = _build_electron_env(tmp_path)
+    assert env[E2E_HARNESS_MARKER_ENV_VAR] == "1"
+
+
+def test_drain_promotes_gpu_and_signal_lines_to_info() -> None:
+    stream = io.BytesIO(
+        b"ordinary chatter\n"
+        b"[gpu] GPU process gone (reason=killed)\n"
+        b"[lifecycle] SIGTERM received, requesting quit (uptime=1.0s)\n"
+        b"/path/to/electron exited with signal SIGTRAP\n"
+        b"\n"
+    )
+    records: list[tuple[str, str]] = []
+    sink_id = loguru_logger.add(
+        lambda msg: records.append((msg.record["level"].name, msg.record["message"])), level="DEBUG"
+    )
+    try:
+        _drain_byte_stream_to_loguru(stream, "electron-err")
+    finally:
+        loguru_logger.remove(sink_id)
+    assert records == [
+        ("DEBUG", "[electron-err] ordinary chatter"),
+        ("INFO", "[electron-err] [gpu] GPU process gone (reason=killed)"),
+        ("INFO", "[electron-err] [lifecycle] SIGTERM received, requesting quit (uptime=1.0s)"),
+        ("INFO", "[electron-err] /path/to/electron exited with signal SIGTRAP"),
+    ]
