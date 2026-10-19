@@ -1,0 +1,1 @@
+`mngr aws prepare --format jsonl` now announces its two steps (`aws.security_group`, `aws.state_bucket`) as a plan and reports each one starting and completing, so a caller driving it from a UI can show real progress while the security group and state bucket are set up.

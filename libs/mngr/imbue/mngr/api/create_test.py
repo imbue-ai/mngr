@@ -16,6 +16,7 @@ from imbue.mngr.api.create import _validate_session_adoption
 from imbue.mngr.api.create import _write_host_env_vars
 from imbue.mngr.api.create import create
 from imbue.mngr.api.create import destroy_new_host_on_create_failure
+from imbue.mngr.api.create import plan_create_steps
 from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.config.agent_class_registry import register_agent_class
@@ -51,6 +52,7 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.plugin_testing import PLACEHOLDER_AGENT_TYPE
+from imbue.mngr.utils.progress import NullProgressReporter
 from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 
@@ -139,7 +141,7 @@ def test_run_post_host_create_commands_no_op_on_empty_tuple(
     temp_host_dir: Path,
 ) -> None:
     """An empty commands tuple is a no-op (no exec, no error)."""
-    _run_post_host_create_commands(local_host, ())
+    _run_post_host_create_commands(local_host, (), NullProgressReporter())
 
 
 def test_run_post_host_create_commands_runs_each_command_in_order(
@@ -156,6 +158,7 @@ def test_run_post_host_create_commands_runs_each_command_in_order(
             CommandString(f"echo second >> {marker}"),
             CommandString(f"echo third >> {marker}"),
         ),
+        NullProgressReporter(),
     )
     assert marker.read_text().splitlines() == ["first", "second", "third"]
 
@@ -174,6 +177,7 @@ def test_run_post_host_create_commands_raises_on_first_failure(
                 CommandString("false"),
                 CommandString(f"echo unreached >> {marker}"),
             ),
+            NullProgressReporter(),
         )
     # The second command must not have executed.
     assert not marker.exists()
@@ -189,7 +193,7 @@ def test_run_post_host_create_outer_commands_no_op_on_empty_tuple(
     temp_host_dir: Path,
 ) -> None:
     """An empty commands tuple is a no-op (the outer is never even opened)."""
-    _run_post_host_create_outer_commands(local_host, ())
+    _run_post_host_create_outer_commands(local_host, (), NullProgressReporter())
 
 
 def test_run_post_host_create_outer_commands_raises_when_no_outer(
@@ -204,7 +208,7 @@ def test_run_post_host_create_outer_commands_raises_when_no_outer(
         assert outer is None
     # The command can never run, so we must raise (not silently skip), and must not run it.
     with pytest.raises(MngrError, match="no outer host"):
-        _run_post_host_create_outer_commands(local_host, (CommandString(f"touch {marker}"),))
+        _run_post_host_create_outer_commands(local_host, (CommandString(f"touch {marker}"),), NullProgressReporter())
     assert not marker.exists()
 
 
@@ -654,3 +658,21 @@ def test_create_on_existing_host_tears_down_agent_when_readiness_wait_fails(
             )
 
     assert host.get_agents() == []
+
+
+def test_plan_create_steps_lists_only_the_phases_that_apply() -> None:
+    full = [str(step.step_id) for step in plan_create_steps(is_new_host=True, create_work_dir=True)]
+    existing_host_in_place = [
+        str(step.step_id) for step in plan_create_steps(is_new_host=False, create_work_dir=False)
+    ]
+
+    assert full == [
+        "preparing",
+        "creating_host",
+        "setting_up_host",
+        "transferring_project",
+        "provisioning",
+        "starting_agent",
+    ]
+    assert existing_host_in_place == ["preparing", "provisioning", "starting_agent"]
+    assert all(step.label for step in plan_create_steps(is_new_host=True, create_work_dir=True))

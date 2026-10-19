@@ -1,0 +1,1 @@
+The Lima provider reports its create steps through mngr's structured progress stream (`--format jsonl`): `lima.start_vm`, `lima.wait_cloud_init`, and `lima.wait_ssh` under the create's `creating_host` phase. The VM start advances through limactl's own "requirement k of n" counter as the guest boots.

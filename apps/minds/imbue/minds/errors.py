@@ -354,3 +354,7 @@ class SnapshotContainerStatesError(MindError):
     """Raised when the container states a snapshot sandbox was resumed into cannot be read."""
 
     ...
+
+
+class ProgressSeedError(MindError, ValueError):
+    """Raised when the shipped create-progress seed table is malformed."""

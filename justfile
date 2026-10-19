@@ -197,6 +197,17 @@ export-image-requirements:
 sync-litellm-prices *args:
     uv run python -m scripts.sync_litellm_prices {{args}}
 
+# Restate the create and connection progress-bar seeds
+# (apps/minds/imbue/minds/desktop_client/create_progress_defaults.toml) from
+# recorded histories: the create_progress events.jsonl files a desktop data dir
+# holds, or the one the create-progress release test exports to
+# .test_output/create_progress/. A seed only moves when the measured median has
+# drifted past the threshold; `create-progress-defaults-sync.yml` runs this on a
+# schedule and opens a PR when one does. Pass `--check` to report drift without writing.
+[group("minds dev")]
+sync-create-progress-defaults *args:
+    uv run python -m scripts.sync_create_progress_defaults {{args}}
+
 # Diffs against the real base branch, so it must run on a real checkout
 # (locally or the GitHub Actions runner), NOT inside an offload sandbox -- the
 # sandbox has no base ref and the check would pass vacuously. Bare `python`

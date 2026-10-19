@@ -7,6 +7,8 @@ import type { AccountPanelState } from "../generated/ui";
 import type { MachineSizeNumbers } from "./machineSize";
 import type { OnboardingProgress } from "./onboarding";
 import { onboardingProgress } from "./onboarding";
+import type { OperationProgress } from "./progress";
+import { progressOf } from "./progress";
 
 // /ui/api/create response shapes (hand-typed: the per-area /ui/api
 // bodies are not part of the generated channel schema yet). Keep in sync
@@ -147,7 +149,6 @@ export interface LiveCreateAttemptDetail {
   workspace_name: string;
   provider_label: string;
   is_remote: boolean;
-  expected_duration_seconds: number;
   request: CreateAttemptRequestSummary;
 }
 
@@ -281,17 +282,6 @@ export function recoveryRoute(
   return `/agents/${encodeURIComponent(agentId)}/recovery?return_to=${encodeURIComponent(returnTo)}${intentParam}`;
 }
 
-// Creating-page progress (port of creating.js's time-eased bar).
-
-export function progressForElapsed(
-  elapsedSeconds: number,
-  expectedDurationSeconds: number,
-): number {
-  const T = expectedDurationSeconds > 0 ? expectedDurationSeconds : 60;
-  if (elapsedSeconds <= T) return 80 * (elapsedSeconds / T);
-  return 80 + 20 * (1 - Math.exp(-(elapsedSeconds - T) / T));
-}
-
 // Optimistic machine Start/Stop tracking (port of the Landing page's
 // pendingMindActionByAgent machinery). The channel's workspaces message
 // carries the authoritative liveness -- including backend-observed
@@ -390,6 +380,7 @@ export interface CreateOperationStatus {
   redirect_url?: string;
   error?: string;
   error_kind?: string;
+  progress?: OperationProgress | null;
 }
 
 export interface CreateAttemptWatcherHooks {
@@ -397,6 +388,8 @@ export interface CreateAttemptWatcherHooks {
   onFailed(error: string, errorKind: string): void;
   onStageText(text: string): void;
   onLogLines(lines: string[]): void;
+  /** The attempt's progress as the poll carried it, every poll that carries one. */
+  onProgress(progress: OperationProgress): void;
 }
 
 export class CreateAttemptWatcher {
@@ -450,6 +443,8 @@ export class CreateAttemptWatcher {
 
   applyStatus(data: CreateOperationStatus | null): void {
     if (this.isStopped || data === null) return;
+    const progress = progressOf(data);
+    if (progress !== null) this.hooks.onProgress(progress);
     if (data.status === "DONE" && data.redirect_url) {
       if (this.pollTimer !== null) clearInterval(this.pollTimer);
       this.pollTimer = null;

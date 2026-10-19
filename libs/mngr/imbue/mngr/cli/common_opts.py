@@ -23,6 +23,7 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
+from imbue.mngr.cli.output_helpers import make_jsonl_progress_reporter
 from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import list_registered_agent_config_types
@@ -315,6 +316,13 @@ def setup_command_context(
         max_log_size_mb=max_log_size_mb,
         extra_builtin_format_names=extra_builtin_format_names,
     )
+
+    # Stream structured progress on stdout for JSONL callers; every other
+    # format keeps the no-op reporter so human output is unchanged.
+    if output_opts.output_format is OutputFormat.JSONL:
+        mngr_ctx = mngr_ctx.model_copy_update(
+            to_update(mngr_ctx.field_ref().progress_reporter, make_jsonl_progress_reporter()),
+        )
 
     # Reject format templates on commands that don't support them
     if output_opts.format_template is not None and not is_format_template_supported:

@@ -1,22 +1,5 @@
-from imbue.minds.desktop_client.create_status import DEFAULT_EXPECTED_CREATE_ATTEMPT_DURATION_SECONDS
-from imbue.minds.desktop_client.create_status import expected_create_attempt_duration_seconds
 from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.primitives import LaunchMode
-
-
-def test_expected_duration_per_launch_mode() -> None:
-    assert expected_create_attempt_duration_seconds(LaunchMode.DOCKER) == 30.0
-    assert expected_create_attempt_duration_seconds(LaunchMode.IMBUE_CLOUD) == 30.0
-    assert expected_create_attempt_duration_seconds(LaunchMode.LIMA) == 600.0
-    assert expected_create_attempt_duration_seconds(LaunchMode.VULTR) == 300.0
-
-
-def test_expected_duration_covers_every_launch_mode() -> None:
-    # Every launch mode must resolve to a positive duration so the progress
-    # bar never divides by zero; unmapped modes fall back to the default.
-    for launch_mode in LaunchMode:
-        assert expected_create_attempt_duration_seconds(launch_mode) > 0
-    assert DEFAULT_EXPECTED_CREATE_ATTEMPT_DURATION_SECONDS == 60.0
 
 
 def test_status_text_for_failed_surfaces_error_message() -> None:

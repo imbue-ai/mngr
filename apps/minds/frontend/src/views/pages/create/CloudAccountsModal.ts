@@ -18,6 +18,7 @@ import type {
 import type { LifecycleDeps } from "../../../models/backups";
 import { browserLifecycleDeps } from "../../../models/backups";
 import { ConnectionOperationWatcher } from "../../../models/connectionOperation";
+import { ProgressDisplay } from "../../../models/progress";
 import type { ConnectionOwnerOption } from "../../../models/providers";
 import { LOCAL_PROFILE_USER_ID } from "../../../models/providers";
 import { normalizeCreateApiError } from "./form-model";
@@ -119,7 +120,8 @@ export class CloudAccountsModalState {
   resultMessage = "";
   isBackShownOnResult = false;
   isPrepareInFlight = false;
-  progressStartedAtMs = 0;
+  /** The bar, fed by the operation's status polls and extrapolated between them. */
+  progress = new ProgressDisplay();
   /** The prepare's output so far, as the operation's log streams it. */
   logLines: string[] = [];
   isLogOpen = false;
@@ -143,6 +145,9 @@ export class CloudAccountsModalState {
       onFailed: (failure) => {
         this.watcher = null;
         this.finishWithFailure(failure);
+      },
+      onProgress: (progress) => {
+        this.progress.apply(progress, Date.now());
       },
     });
     this.watcher.start();
@@ -501,7 +506,7 @@ function submitAccount(
   }
   state.isPrepareInFlight = true;
   state.view = "progress";
-  state.progressStartedAtMs = Date.now();
+  state.progress = new ProgressDisplay();
   state.logLines = [];
   state.isLogOpen = false;
   const target = state.requestTarget();
@@ -638,16 +643,9 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
       const isOnlyLocalOwner = ownerOptions.every(
         (option) => option.userId === LOCAL_PROFILE_USER_ID,
       );
-      const progressPercent = state.isPrepareInFlight
-        ? Math.min(
-            90,
-            90 *
-              (1 -
-                Math.exp(
-                  -((Date.now() - state.progressStartedAtMs) / 1000) / 12,
-                )),
-          )
-        : 100;
+      const progressPercent = state.progress.percentAt(Date.now(), !state.isPrepareInFlight);
+      const remainingText = state.isPrepareInFlight ? state.progress.remainingText() : "";
+      const progressLabel = state.isPrepareInFlight ? state.progress.labelOr("") : "";
       return m(
         Modal,
         {
@@ -1184,9 +1182,15 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
                     id: "ca-bar-fill",
                     class:
                       "h-full rounded-full bg-accent transition-[width] duration-300 ease-out",
-                    style: `width: ${progressPercent.toFixed(0)}%`,
+                    style: `width: ${progressPercent.toFixed(1)}%`,
                   }),
                 ),
+                progressLabel !== ""
+                  ? m("p", { id: "ca-stage", class: "mt-2 type-helper text-secondary" }, progressLabel)
+                  : null,
+                remainingText !== ""
+                  ? m("p", { id: "ca-remaining", class: "type-helper text-tertiary" }, remainingText)
+                  : null,
                 m(
                   "div",
                   { class: "mt-3" },

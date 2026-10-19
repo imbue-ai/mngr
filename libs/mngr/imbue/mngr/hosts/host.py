@@ -99,9 +99,11 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import CreatePhase
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.command_logging import is_command_logging_suppressed
 from imbue.mngr.utils.command_logging import loggable_command
@@ -111,6 +113,8 @@ from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr.utils.name_generator import GENERIC_AGENT_NAME_HINT
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.progress import command_step_id
+from imbue.mngr.utils.progress import summarize_command_for_label
 from imbue.mngr.utils.read_deadline import remaining_read_timeout
 from imbue.mngr.utils.ssh_transport import SSH_CONNECT_HANDSHAKE_RETRY_BACKOFF_SECONDS
 from imbue.mngr.utils.ssh_transport import SSH_CONNECT_HANDSHAKE_RETRY_DEADLINE_SECONDS
@@ -643,6 +647,13 @@ def parse_certified_host_data(data_path: Path, content: str) -> CertifiedHostDat
         return CertifiedHostData(**json.loads(content))
     except ValidationError as e:
         raise HostDataSchemaError(str(data_path), str(e)) from e
+
+
+def _log_provision_command_output(line: str, is_stdout: bool) -> None:
+    """Log one line a provisioning command printed, at BUILD level so it reaches the create's log."""
+    stripped = line.rstrip()
+    if stripped:
+        logger.log(LogLevel.BUILD.value, "{}", stripped, source="provision")
 
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
@@ -3090,12 +3101,22 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 # Build the source prefix for commands (sources host env, then agent env)
                 source_prefix = self.build_source_env_prefix(agent)
 
-                # Run extra provision commands (with env vars sourced)
-                for cmd in provisioning.extra_provision_commands:
-                    result = self.execute_idempotent_command(source_prefix + cmd, cwd=agent.work_dir)
-                    logger.trace("Ran extra provision command: {}", cmd)
-                    if not result.success:
-                        raise MngrError(f"Extra provision command failed: {cmd}\nstderr: {result.stderr}")
+                # Run extra provision commands (with env vars sourced), each as
+                # its own progress step with its output streamed as it arrives:
+                # a template's provisioning (a Lima build of the whole project
+                # toolchain) can run for many minutes, and a counted step per
+                # command is what lets a caller show how far along it is.
+                provisioning_step = CreatePhase.PROVISIONING.step_id
+                for idx, cmd in enumerate(provisioning.extra_provision_commands):
+                    with mngr_ctx.progress_reporter.step(
+                        command_step_id(provisioning_step, idx), summarize_command_for_label(cmd), provisioning_step
+                    ):
+                        result = self.execute_stateful_command(
+                            source_prefix + cmd, cwd=agent.work_dir, on_output=_log_provision_command_output
+                        )
+                        logger.trace("Ran extra provision command: {}", cmd)
+                        if not result.success:
+                            raise MngrError(f"Extra provision command failed: {cmd}\nstderr: {result.stderr}")
 
             # should be done by now
             ensure_shared_libs_thread.join(60.0)

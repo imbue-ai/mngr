@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { EventSourceLike, LifecycleDeps } from "./backups";
 import { ConnectionOperationWatcher, connectionOperationStatusUrl } from "./connectionOperation";
 import type { CloudAccountOption } from "./create";
+import type { OperationProgress } from "./progress";
 
 class FakeEventSource implements EventSourceLike {
   isClosed = false;
@@ -72,14 +73,16 @@ interface Recorded {
   logs: string[];
   done: CloudAccountOption[];
   failed: Record<string, unknown>[];
+  progress: OperationProgress[];
 }
 
 function watch(deps: FakeDeps): { watcher: ConnectionOperationWatcher; recorded: Recorded } {
-  const recorded: Recorded = { logs: [], done: [], failed: [] };
+  const recorded: Recorded = { logs: [], done: [], failed: [], progress: [] };
   const watcher = new ConnectionOperationWatcher(deps, ACCOUNT.name, {
     onLog: (line) => recorded.logs.push(line),
     onDone: (account) => recorded.done.push(account),
     onFailed: (failure) => recorded.failed.push(failure),
+    onProgress: (progress) => recorded.progress.push(progress),
   });
   return { watcher, recorded };
 }
@@ -87,12 +90,24 @@ function watch(deps: FakeDeps): { watcher: ConnectionOperationWatcher; recorded:
 describe("ConnectionOperationWatcher", () => {
   it("streams the prepare's output, keeps polling while running, and hands over the account when done", async () => {
     const deps = new FakeDeps();
-    deps.getResponses = [{ status: "RUNNING", is_done: false }, { status: "DONE", is_done: true, account: ACCOUNT }];
+    const running: OperationProgress = {
+      percent: 40,
+      percent_cap: 60,
+      percent_per_second: 2,
+      remaining_text: "Less than a minute remaining",
+      current_label: "Creating the state bucket",
+      steps: [],
+    };
+    deps.getResponses = [
+      { status: "RUNNING", is_done: false, progress: running },
+      { status: "DONE", is_done: true, account: ACCOUNT },
+    ];
     const { watcher, recorded } = watch(deps);
 
     watcher.start();
     await deps.runScheduled();
     expect(deps.getUrls).toEqual([connectionOperationStatusUrl(ACCOUNT.name)]);
+    expect(recorded.progress).toEqual([running]);
     const [source] = deps.sources;
     source.emit({ log: "Created security group mngr-aws" });
     source.emit({ log: "Prepared AWS security group" });

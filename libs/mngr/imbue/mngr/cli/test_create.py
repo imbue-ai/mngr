@@ -1,9 +1,11 @@
 """Tests for the create CLI command."""
 
+import json
 import os
 import subprocess
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import pluggy
 import pytest
@@ -1444,3 +1446,69 @@ def test_cli_create_from_git_url(
         matching_worktrees = [p for p in worktree_entries if p.name.startswith(f"{agent_name}-")]
         assert matching_worktrees, f"Expected a worktree under {worktrees_dir}, got {worktree_entries}"
         assert (matching_worktrees[0] / "README.md").exists()
+
+
+# Shells out to `uv run mngr create` like the sibling subprocess tests, so the
+# JSONL stream is the one a real caller reads off stdout.
+@pytest.mark.tmux
+@pytest.mark.timeout(30)
+def test_cli_create_jsonl_streams_progress_before_the_created_event(
+    temp_work_dir: Path,
+    temp_host_dir: Path,
+    mngr_test_prefix: str,
+    mngr_test_root_name: str,
+) -> None:
+    agent_name = f"test-progress-{uuid4().hex}"
+    session_name = f"{mngr_test_prefix}{agent_name}"
+    env = os.environ.copy()
+    env["MNGR_HOST_DIR"] = str(temp_host_dir)
+    env["MNGR_PREFIX"] = mngr_test_prefix
+    env["MNGR_ROOT_NAME"] = mngr_test_root_name
+
+    with tmux_session_cleanup(session_name):
+        result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "mngr",
+                "create",
+                "--name",
+                agent_name,
+                "--type",
+                "command",
+                "--source",
+                str(temp_work_dir),
+                "--transfer=none",
+                "--no-connect",
+                "--no-ensure-clean",
+                "--format",
+                "jsonl",
+                "--disable-plugin",
+                "modal",
+                "--disable-plugin",
+                "docker",
+                "--",
+                "sleep",
+                "130002",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+
+    assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
+    events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    kinds = [(event["event"], event.get("kind")) for event in events]
+
+    # The plan comes first and the created event last; every started skeleton
+    # step is completed before the agent is reported created.
+    assert kinds[0] == ("progress", "plan")
+    assert kinds[-1] == ("created", None)
+    planned = [step["step"] for step in events[0]["steps"]]
+    assert planned == ["preparing", "transferring_project", "provisioning", "starting_agent"]
+    started = [event["step"] for event in events if event.get("kind") == "started" and event.get("parent") is None]
+    completed = [event["step"] for event in events if event.get("kind") == "completed" and event["step"] in planned]
+    assert started == planned
+    assert completed == planned
+    assert all("elapsed_seconds" in event for event in events if event.get("kind") == "completed")

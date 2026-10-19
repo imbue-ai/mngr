@@ -15,8 +15,9 @@
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import type { CreateAttemptDetail, CreateAttemptRequestSummary, LiveCreateAttemptDetail } from "../../models/create";
-import { CreateAttemptWatcher, fetchCreateAttemptDetail, progressForElapsed } from "../../models/create";
+import type { CreateAttemptDetail, CreateAttemptRequestSummary } from "../../models/create";
+import { CreateAttemptWatcher, fetchCreateAttemptDetail } from "../../models/create";
+import { ProgressDisplay } from "../../models/progress";
 import {
   INTERRUPTED_LINE,
   READY_LINE,
@@ -51,7 +52,6 @@ import { createFormModal } from "./CreatePage";
 import { TRANSCRIPT_COLUMN_CLASS, agentTurn, answerRow, disclosureList, scrollAnchor, userTurn } from "./start/transcript";
 import { transcriptTurns } from "./StartPage";
 
-const DEFAULT_EXPECTED_DURATION_SECONDS = 60;
 /** How long the ready line is left alone before the wash starts. */
 const READY_HOLD_MS = 900;
 
@@ -59,13 +59,14 @@ interface CreatingState {
   createAttemptId: string;
   detail: CreateAttemptDetail | null;
   watcher: CreateAttemptWatcher | null;
-  startedAtMs: number;
   isDone: boolean;
   isFailed: boolean;
   redirectUrl: string;
   errorText: string;
   errorKind: string;
   stageText: string;
+  /** The bar, fed by the status polls and extrapolated between them. */
+  progress: ProgressDisplay;
   logLines: string[];
   isLogOpen: boolean;
   /** The reading material's sections the reader has opened. */
@@ -139,13 +140,13 @@ function freshState(createAttemptId: string): CreatingState {
     createAttemptId,
     detail: null,
     watcher: null,
-    startedAtMs: Date.now(),
     isDone: false,
     isFailed: false,
     redirectUrl: "",
     errorText: "",
     errorKind: "",
     stageText: "",
+    progress: new ProgressDisplay(),
     logLines: [],
     isLogOpen: false,
     openSectionIds: new Set<string>(),
@@ -259,9 +260,12 @@ export const CreatingPage: m.ClosureComponent = () => {
       onLogLines(lines) {
         state.logLines.push(...lines);
       },
+      onProgress(progress) {
+        state.progress.apply(progress, Date.now());
+      },
     });
     state.watcher.start();
-    // Drive the time-eased progress bar (the poll only redraws every 2s).
+    // Keep the bar moving between polls (the poll only redraws every 2s).
     state.progressTimer = setInterval(() => m.redraw(), 250);
   }
 
@@ -309,10 +313,9 @@ export const CreatingPage: m.ClosureComponent = () => {
     });
   }
 
-  function loadingBox(workspaceName: string, live: LiveCreateAttemptDetail | null, arriveAtMs: number): m.Children {
-    const elapsedSeconds = (Date.now() - state.startedAtMs) / 1000;
-    const expectedDurationSeconds = live?.expected_duration_seconds ?? DEFAULT_EXPECTED_DURATION_SECONDS;
-    const percent = state.isDone ? 100 : Math.min(99.5, progressForElapsed(elapsedSeconds, expectedDurationSeconds));
+  function loadingBox(workspaceName: string, arriveAtMs: number): m.Children {
+    const percent = state.progress.percentAt(Date.now(), state.isDone);
+    const remainingText = state.isDone ? "" : state.progress.remainingText();
     return m(
       "div",
       {
@@ -341,7 +344,14 @@ export const CreatingPage: m.ClosureComponent = () => {
             style: `width: ${percent.toFixed(1)}%`,
           }),
         ),
-        m("p", { id: "stage", class: "mt-2 type-helper text-secondary min-h-5" }, state.stageText),
+        m(
+          "p",
+          { id: "stage", class: "mt-2 type-helper text-secondary min-h-5" },
+          state.isDone ? state.stageText : state.progress.labelOr(state.stageText),
+        ),
+        remainingText !== ""
+          ? m("p", { id: "remaining", class: "type-helper text-tertiary" }, remainingText)
+          : null,
         m(
           "div",
           { class: "mt-1" },
@@ -470,7 +480,7 @@ export const CreatingPage: m.ClosureComponent = () => {
   }
 
   /** A live attempt: the setup line, then either the live failure or the reading material and the loading box (and the ready line). */
-  function liveTurns(live: LiveCreateAttemptDetail | null, workspaceName: string, isInstant: boolean): m.Children[] {
+  function liveTurns(workspaceName: string, isInstant: boolean): m.Children[] {
     const setupAt = isInstant ? 0 : FLOW_THINK_MS;
     const turns: m.Children[] = [agentTurn({ key: "creation-setup", text: SETUP_LINE, startAtMs: setupAt, isInstant })];
     if (state.isFailed) {
@@ -481,7 +491,7 @@ export const CreatingPage: m.ClosureComponent = () => {
     const guideAt = isInstant ? 0 : setupAt + streamDurationMs(SETUP_LINE) + FLOW_OPTIONS_GAP_MS;
     turns.push(setupGuide(guideAt, isInstant));
     const boxAt = isInstant ? 0 : guideAt + FLOW_OPTIONS_GAP_MS * 2;
-    turns.push(loadingBox(workspaceName, live, boxAt));
+    turns.push(loadingBox(workspaceName, boxAt));
     if (state.isDone) {
       turns.push(agentTurn({ key: "creation-ready", text: READY_LINE, startAtMs: FLOW_THINK_MS, class: "type-heading" }));
       turns.push(startOptionsList(startOptionsAtMs()));
@@ -568,7 +578,7 @@ export const CreatingPage: m.ClosureComponent = () => {
     const workspaceName = (detail.kind === "record" ? detail.record?.workspace_name : detail.live?.workspace_name) ?? "";
     const summary = request !== undefined && request !== null ? [summaryTurn(request, isInstant)] : [];
     if (detail.kind === "record" && detail.record !== null) return [...summary, ...recordTurns(detail.record)];
-    return [...summary, ...liveTurns(detail.live, workspaceName, isInstant)];
+    return [...summary, ...liveTurns(workspaceName, isInstant)];
   }
 
   function stopWatching(): void {

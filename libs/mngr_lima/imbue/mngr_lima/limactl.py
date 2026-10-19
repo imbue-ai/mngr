@@ -21,7 +21,9 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LogLevel
+from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.progress import ProgressReporterInterface
 from imbue.mngr_lima.constants import MINIMUM_LIMA_VERSION
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaInstanceNameTooLongError
@@ -86,6 +88,50 @@ class _SerialLogTailerCallback(MutableModel):
                 serial_log = re.sub(r"\*", "", log_pattern)
                 self.tailer_started = True
                 _start_serial_tailer(self.cg, serial_log)
+
+
+# The create step the VM start is reported as; limactl reports its boot as
+# "Waiting for the essential requirement 1 of 5: ..." and then its optional and
+# final requirements, each kind numbered from 1 with its own total, and that
+# counter is the only progress it prints.
+LIMA_START_VM_STEP: Final[ProgressStepId] = ProgressStepId("lima.start_vm")
+_LIMA_REQUIREMENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:(?P<kind>[a-z]+) )?requirement (?P<k>\d+) of (?P<n>\d+)"
+)
+
+
+class LimaStartProgressCallback(_SerialLogTailerCallback):
+    """The limactl start output callback, also reporting its requirement counter as step progress.
+
+    The counter is summed over the requirement kinds limactl waits on in turn,
+    so it keeps climbing across them instead of restarting at each kind.
+    """
+
+    reporter: ProgressReporterInterface = Field(frozen=True, description="Where the requirement counter is reported")
+    met_by_kind: dict[str, int] = Field(
+        default_factory=dict, description="Requirements met so far per kind, in the order the kinds began"
+    )
+    total_by_kind: dict[str, int] = Field(default_factory=dict, description="Requirements in all per kind")
+    last_reported: tuple[int, int] | None = Field(default=None, description="The last (met, total) pair reported")
+
+    def __call__(self, line: str, is_stdout: bool) -> None:
+        super().__call__(line, is_stdout)
+        match = _LIMA_REQUIREMENT_RE.search(line)
+        if match is None:
+            return
+        kind = match.group("kind") or ""
+        if kind not in self.total_by_kind:
+            # limactl moves to a new kind only once every earlier one is met.
+            for earlier_kind, total in self.total_by_kind.items():
+                self.met_by_kind[earlier_kind] = total
+        # Requirement k is being waited on, so k - 1 of this kind's n are met.
+        self.met_by_kind[kind] = max(self.met_by_kind.get(kind, 0), int(match.group("k")) - 1)
+        self.total_by_kind[kind] = int(match.group("n"))
+        reported = (sum(self.met_by_kind.values()), sum(self.total_by_kind.values()))
+        if reported == self.last_reported:
+            return
+        self.last_reported = reported
+        self.reporter.advance_step(LIMA_START_VM_STEP, reported[0], reported[1])
 
 
 def _log_boot_output(line: str, is_stdout: bool) -> None:

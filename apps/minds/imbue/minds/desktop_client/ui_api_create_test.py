@@ -623,7 +623,6 @@ def test_create_attempt_detail_carries_the_request_summary_for_a_live_attempt(
     assert payload["kind"] == "live"
     live = payload["live"]
     assert live["is_remote"] is False
-    assert live["expected_duration_seconds"] > 0
     assert live["workspace_name"] == "Request Summary Test"
     assert live["request"] == {
         "display_name": "Request Summary Test",

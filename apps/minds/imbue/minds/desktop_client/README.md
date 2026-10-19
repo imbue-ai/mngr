@@ -75,7 +75,14 @@ Note this is the *local* session with the desktop client itself. *Imbue account*
 `/creating/{agent_id}` route (requires auth):
     shows a progress page that polls the create operation status and streams the
     create attempt log (the log buffer is replayable, so re-entering the page mid-create
-    replays the history before tailing live)
+    replays the history before tailing live). The status carries a `progress` object
+    (`create_progress.py`): a tree of steps -- the desktop's own (fetching the template,
+    the `mngr create` call, the boot wait), mngr's phases and the provider's sub-steps
+    from the `--format jsonl` progress stream nested under the call, and the template
+    bootstrap's events nested under the wait -- weighted by the durations the device
+    has learned for each step (`create_progress_history.py`, seeded from
+    `create_progress_defaults.toml`), folded into a percent that never moves backwards,
+    a rate the page extrapolates between polls, and a coarse remaining time
     auto-redirects to the agent when the create attempt completes
     when no live create attempt is tracked but a pending-create-attempt record survives, the
     page becomes the record-backed detail view: retry + discard for an interrupted

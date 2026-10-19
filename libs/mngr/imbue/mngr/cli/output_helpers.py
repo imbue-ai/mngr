@@ -13,6 +13,9 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.utils.progress import PROGRESS_EVENT_NAME
+from imbue.mngr.utils.progress import ProgressEvent
+from imbue.mngr.utils.progress import ProgressEventSinkReporter
 
 
 def write_json_line(data: Mapping[str, Any]) -> None:
@@ -127,6 +130,16 @@ def write_event_line(event_type: str, data: Mapping[str, Any]) -> None:
     by every JSONL emitter here (events, info, errors, operator results).
     """
     write_json_line({"event": event_type, **data})
+
+
+def write_progress_event_line(event: ProgressEvent) -> None:
+    """Write one ``{"event": "progress", ...}`` JSONL line for a step report."""
+    write_event_line(PROGRESS_EVENT_NAME, event.to_wire())
+
+
+def make_jsonl_progress_reporter() -> ProgressEventSinkReporter:
+    """The reporter ``--format jsonl`` commands install: every step report becomes a stdout progress line."""
+    return ProgressEventSinkReporter(emit=write_progress_event_line)
 
 
 def emit_info(message: str, output_format: OutputFormat) -> None:
