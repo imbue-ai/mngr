@@ -152,7 +152,12 @@ class LatchkeyAutoRegister(MutableModel):
         """
         try:
             return has_machine_of_its_own(self.latchkey.plugin_data_dir, host_id)
-        except LatchkeyStoreError:
+        except LatchkeyStoreError as e:
+            logger.debug(
+                "Could not read the machine key record of host {}; treating it as a machine so the push reports it: {}",
+                host_id,
+                e,
+            )
             return True
 
     def _collect_unprocessed_pairs(self) -> list[tuple[HostId, AgentId]]:
