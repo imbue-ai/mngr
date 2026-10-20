@@ -538,6 +538,38 @@ def is_run_in_flight(run, agents):
     return not is_agent_ended(find_agent(agents, run["chat_agent_name"]))
 
 
+def pending_dispatched_chat(run, agents, now):
+    """The last dispatch's ``(chat agent name, chat id)`` while its lead may still be on its way to recording
+    its run; None otherwise.
+
+    A new lead records its start and takes the update lease only minutes after its chat is made,
+    so until then the last dispatch is the one sign of it. Only for a short while after the
+    dispatch, so a lead that never records a start cannot hold updates back for good.
+    """
+    dispatch = read_json(LAST_DISPATCH_PATH)
+    if dispatch is None or not dispatch.get("chat_agent_name"):
+        return None
+    dispatched_at = dispatch.get("dispatched_at")
+    if not isinstance(dispatched_at, (int, float)) or isinstance(dispatched_at, bool):
+        return None
+    if now - dispatched_at >= UNLISTED_MARKED_LEAD_GRACE_SECONDS:
+        return None
+    name = str(dispatch["chat_agent_name"])
+    started_at = run_started_at(run)
+    is_run_recorded = (
+        isinstance(run, dict)
+        and run.get("chat_agent_name") == name
+        and started_at is not None
+        and started_at >= dispatched_at
+    )
+    if is_run_recorded:
+        return None
+    listed = find_agent(agents, name) if agents is not None else None
+    if listed is not None and is_agent_ended(listed):
+        return None
+    return name, str(dispatch.get("chat_id") or "")
+
+
 def display_version(ref):
     return re.sub(r"^minds-(?=v\d)", "", ref)
 
@@ -680,7 +712,7 @@ def _create_through_mngr(name, display_name, message, labels, account_args):
     return _create_result(OUTCOME_CREATED, "", name, _created_agent_id(created.stdout))
 
 
-def create_update_chat(schedule_like, started_by, is_auto_open, agents):
+def create_update_chat(schedule_like, started_by, is_auto_open, agents, now):
     """Create the update chat for a pinned target, record the dispatch, and say how it went.
 
     ``schedule_like`` carries ``ceiling``, ``override_ref`` and ``is_backup_configured``.
@@ -711,7 +743,7 @@ def create_update_chat(schedule_like, started_by, is_auto_open, agents):
                 "started_by": started_by,
                 "ceiling": ceiling_ref,
                 "target_ref": target_ref,
-                "dispatched_at": time.time(),
+                "dispatched_at": now,
             },
         )
         log("created update chat %s (%s, target %s)" % (result["chat_agent_name"], started_by, target_ref))
@@ -904,7 +936,7 @@ def tick_schedule(now):
         return
     assert action == "dispatch", action
     schedule["window_seen_open_at"] = window[0] if window is not None else None
-    reason = dispatch_scheduled(schedule, run, agents())
+    reason = dispatch_scheduled(schedule, run, agents(), now)
     if reason is None:
         schedule.update({"marked_at": now, "pending_skip_reason": "", "next_attempt_at": now + REDISPATCH_AFTER_SECONDS})
     else:
@@ -914,15 +946,15 @@ def tick_schedule(now):
     save_schedule_marks(schedule)
 
 
-def dispatch_scheduled(schedule, run, agents):
+def dispatch_scheduled(schedule, run, agents, now):
     """Start the scheduled run, marking ``schedule`` with its chat; the skip reason when it could not start."""
-    if is_run_in_flight(run, agents):
+    if is_run_in_flight(run, agents) or pending_dispatched_chat(run, agents, now) is not None:
         return SKIP_UPDATE_IN_FLIGHT
     if is_update_lease_held(agents):
         return SKIP_LEASE_HELD
     if not is_skill_present():
         return SKIP_DISPATCH_FAILED
-    result = create_update_chat(schedule, STARTED_BY_SCHEDULED, is_auto_open=False, agents=agents)
+    result = create_update_chat(schedule, STARTED_BY_SCHEDULED, is_auto_open=False, agents=agents, now=now)
     if result["outcome"] == OUTCOME_CREATED:
         schedule["marked_chat"] = result["chat_agent_name"]
         return None

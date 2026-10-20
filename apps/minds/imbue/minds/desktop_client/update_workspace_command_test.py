@@ -254,6 +254,35 @@ def test_update_now_adopts_a_run_already_under_way(
     assert staged.chat_creates() == []
 
 
+def test_update_now_adopts_a_chat_dispatched_moments_ago_that_has_not_recorded_its_run_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Its lead takes the lease and records its start only minutes after its chat is made."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    chat_id = "agent-" + "e" * 32
+    staged.write_state(
+        "run.json", {"chat_agent_name": "update-to-minds-v0-8-7", "started_at": _NOW - 86400, "verdict": "UPDATED"}
+    )
+    staged.write_state(
+        "last-dispatch.json",
+        {
+            "chat_agent_name": "update-to-minds-v0-9-0",
+            "chat_id": chat_id,
+            "started_by": "scheduled",
+            "dispatched_at": _NOW - 120,
+        },
+    )
+    staged.set_agents([{"name": "update-to-minds-v0-9-0", "id": chat_id, "state": "RUNNING"}])
+    program = load_update_workspace_program(tmp_path)
+
+    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+
+    result = parse_update_command_result(answer)
+    assert result.outcome is UpdateArmOutcome.ALREADY_RUNNING
+    assert (result.chat_agent_name, result.chat_id) == ("update-to-minds-v0-9-0", chat_id)
+    assert staged.chat_creates() == []
+
+
 @pytest.mark.parametrize(
     ("stderr", "outcome"),
     [

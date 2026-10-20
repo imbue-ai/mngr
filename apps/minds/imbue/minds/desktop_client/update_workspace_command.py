@@ -412,12 +412,22 @@ def mode_now(context):
             )
         )
         return
+    pending = pending_dispatched_chat(run, agents, context["now"])
+    if pending is not None:
+        emit(
+            dict(
+                _create_result(OUTCOME_ALREADY_RUNNING, "An update is already starting in this workspace.", *pending),
+                mode="now",
+            )
+        )
+        return
     fields = {
         "ceiling": _arg(context, "--ceiling"),
         "override_ref": _arg(context, "--override"),
         "is_backup_configured": _arg(context, "--backup-configured", "1") == "1",
     }
-    emit(dict(create_update_chat(fields, STARTED_BY_IMMEDIATE, is_auto_open=True, agents=agents), mode="now"))
+    created = create_update_chat(fields, STARTED_BY_IMMEDIATE, is_auto_open=True, agents=agents, now=context["now"])
+    emit(dict(created, mode="now"))
 
 
 def mode_cancel(context):

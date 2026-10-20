@@ -441,6 +441,28 @@ def test_a_failed_create_is_not_retried_until_its_backoff_has_passed(
     assert schedule is not None and schedule["marked_chat"] == _LEAD
 
 
+def test_a_tick_leaves_alone_a_chat_update_now_made_moments_ago(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    """ "Update now instead" keeps the schedule armed, and the pressed chat records no run for minutes."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("schedule.json", _schedule())
+    staged.write_state(
+        "run.json", {"chat_agent_name": "old", "started_at": _WINDOW_OPENED - 2 * 86400, "verdict": "UPDATED"}
+    )
+    staged.write_state(
+        "last-dispatch.json",
+        {"chat_agent_name": _LEAD, "chat_id": _LEAD_ID, "started_by": "immediate", "dispatched_at": _IN_WINDOW - 60},
+    )
+    staged.set_agents([_agent(_LEAD, "RUNNING", _LEAD_ID)])
+
+    _tick(program, staged, _IN_WINDOW)
+
+    assert staged.chat_creates() == []
+    schedule = staged.read_state("schedule.json")
+    assert schedule is not None and schedule["pending_skip_reason"] == "UPDATE_IN_FLIGHT"
+
+
 def test_a_lead_that_ends_before_recording_a_start_is_not_replaced_every_minute(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:
