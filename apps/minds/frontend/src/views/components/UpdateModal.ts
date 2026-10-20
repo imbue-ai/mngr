@@ -513,14 +513,14 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             );
           }
         }
-        // A run's outcome outlives it and the row wears the badge until it is
-        // cleared; a stall, or an update that never went out, wears a failure
-        // badge too, so it gets the same Dismiss. A failed run's chat is where
-        // it says what it found.
         // A run the cron started opens no window while it runs, so its chat is reached from here.
         if (isRunInFlight(update) && update.activity !== "STARTING" && chatAgentId) {
           actions.push(openChatButton("primary"));
         }
+        // A run's outcome outlives it and the row wears the badge until it is
+        // cleared; a stall, or an update that never went out, wears a failure
+        // badge too, so it gets the same Dismiss. A failed run's chat is where
+        // it says what it found.
         if (updateRunOutcome(update) === "failed" && chatAgentId) actions.push(openChatButton("secondary"));
         const isOutcomeShowing = Boolean(verdict) || update.activity === "STALLED" || Boolean(update.dispatch_failure);
         if (isOutcomeShowing) actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
