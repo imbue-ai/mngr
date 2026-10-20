@@ -535,7 +535,10 @@ export const LandingPage: m.ClosureComponent = () => {
     const version = update.success_note_version ?? "";
     const noteKey = `${entry.id}:${version}`;
     if (!version || state.dismissedNoteKeys.has(noteKey)) return null;
-    const chatAgentId = update.chat_agent_id ?? "";
+    // The note outlives its run: once a newer run starts, the row's chat is that run's.
+    const isNotesRunOnRecord =
+      update.verdict === "UPDATED" || update.verdict === "UPDATED_WITH_REBUILD_ITEMS";
+    const chatAgentId = isNotesRunOnRecord ? (update.chat_agent_id ?? "") : "";
     return m(
       "div",
       { class: "flex items-center gap-2 pl-3 type-helper text-secondary" },

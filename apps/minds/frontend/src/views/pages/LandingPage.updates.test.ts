@@ -181,6 +181,27 @@ describe("a row's way into its run's chat", () => {
     });
   });
 
+  it("leaves the Updated to X note's chat to a newer run's own badge", () => {
+    const { draw } = harness(
+      {
+        [ALPHA]: {
+          ...OUT_OF_DATE_UPDATE,
+          verdict: "STUCK",
+          success_note_version: "minds-v0.4.1",
+          chat_agent_id: "agent-lead-11",
+        },
+      },
+      false,
+    );
+    const root = draw();
+
+    expect(allText(root)).toContain("Updated to v0.4.1.");
+    const openChats = collectVnodes(root).filter((vnode) =>
+      String(attrsOf(vnode).extra ?? "").includes("landing-update-open-chat"),
+    );
+    expect(openChats).toHaveLength(1);
+  });
+
   it("is not offered for an update that never went out", () => {
     const { draw } = harness(
       {
