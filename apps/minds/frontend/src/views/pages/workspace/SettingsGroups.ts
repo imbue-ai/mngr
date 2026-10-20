@@ -423,7 +423,8 @@ function renderUpdatesGroup(
                     : null,
                 ])
               : null,
-            needsSignIn
+            // A press the workspace just refused for want of a sign-in already says so in its own words.
+            needsSignIn && forMachine(local.updateError, agentId) === null
               ? m(
                   "p",
                   { class: "type-helper text-secondary mb-3" },

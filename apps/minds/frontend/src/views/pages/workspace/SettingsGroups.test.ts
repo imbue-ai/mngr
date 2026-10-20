@@ -288,6 +288,23 @@ describe("the Updates settings group's no-backup question", () => {
     );
   });
 
+  it("says once that a refused Update now needs a sign-in", async () => {
+    const refusal = "Sign in to an AI account in this workspace, then try again.";
+    const { draw } = harness(() => Promise.resolve(jsonResponse({ error: refusal }, 409)));
+    press(updatesGroup(draw(BACKED)), "Update now");
+    await settleDispatch();
+    // The refusal also lands on the row, as the next updates frame carries it.
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, needs_sign_in: true } },
+      update_window: "2:00 AM-5:00 AM",
+    });
+
+    const text = allText(updatesGroup(draw(BACKED)));
+    expect(text).toContain(refusal);
+    expect(text).not.toContain("so its update can't start");
+  });
+
   it("quotes the machine's own verdict under the refusal", async () => {
     // The reason a wedged machine gives is the only thing that tells the reader
     // retrying will not help, so it has to survive all the way onto the pane.
