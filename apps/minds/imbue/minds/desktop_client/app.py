@@ -2283,7 +2283,7 @@ class _UpdateRunHostLifecycle(MutableModel):
     flask_app: Flask = Field(frozen=True, description="App whose state carries the channel publisher.")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Resolves the host to act on.")
     tracker: SystemInterfaceHealthTracker = Field(
-        frozen=True, description="The host action's health tracker, which it marks only on a stop."
+        frozen=True, description="The host action's health tracker, whose recovery suppression a successful start clears."
     )
     concurrency_group: ConcurrencyGroup = Field(frozen=True, description="Parent group for the mngr commands.")
     mngr_binary: str = Field(frozen=True, description="mngr executable the start shells out to.")
