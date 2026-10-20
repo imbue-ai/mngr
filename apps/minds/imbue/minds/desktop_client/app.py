@@ -2397,9 +2397,14 @@ def _drop_retired_update_schedules(data_dir: Path) -> None:
     """Remove the app-side schedule records an older build kept; schedules live in each workspace."""
     # CLEANUP: drop this once every install has launched a build that owns no update_schedules dir.
     retired_dir = data_dir / "update_schedules"
-    if retired_dir.is_dir():
-        shutil.rmtree(retired_dir, ignore_errors=True)
-        logger.info("Dropped the retired app-side update schedules at {}", retired_dir)
+    if not retired_dir.is_dir():
+        return
+    try:
+        shutil.rmtree(retired_dir)
+    except OSError as e:
+        logger.warning("Could not drop the retired app-side update schedules at {}: {}", retired_dir, e)
+        return
+    logger.info("Dropped the retired app-side update schedules at {}", retired_dir)
 
 
 def _build_workspace_update_service(
