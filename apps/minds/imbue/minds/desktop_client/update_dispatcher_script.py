@@ -349,6 +349,25 @@ def find_agent(agents, name):
     return None
 
 
+def find_run_lead(agents, run):
+    """The run's lead: by the name its record holds, else by the chat id the last dispatch gave that name.
+
+    Renaming a chat renames its agent, so the record's name can go stale under a live lead; its
+    chat id does not. A chat that moved to a new agent lists its ended predecessor beside it.
+    """
+    name = str(run.get("chat_agent_name") or "")
+    lead = find_agent(agents, name)
+    if lead is not None:
+        return lead
+    dispatch = read_json(LAST_DISPATCH_PATH) or {}
+    chat_id = str(dispatch.get("chat_id") or "") if dispatch.get("chat_agent_name") == name else ""
+    if not chat_id:
+        return None
+    members = [agent for agent in agents if chat_id in (agent.get("id"), chat_id_of(agent))]
+    live = [agent for agent in members if not is_agent_ended(agent)]
+    return (live or members or [None])[0]
+
+
 def is_agent_ended(agent):
     return agent is None or agent.get("state") in ENDED_AGENT_STATES
 
@@ -535,7 +554,7 @@ def is_run_in_flight(run, agents):
         return False
     if agents is None:
         return True
-    return not is_agent_ended(find_agent(agents, run["chat_agent_name"]))
+    return not is_agent_ended(find_run_lead(agents, run))
 
 
 def pending_dispatched_chat(run, agents, now):
@@ -971,7 +990,7 @@ def decide_watchdog_action(run, agents, busy, watchdog_state, now):
     if run.get("apply_phase"):
         # The apply's own recovery owns a run that is landing.
         return "reset"
-    lead = find_agent(agents, run["chat_agent_name"])
+    lead = find_run_lead(agents, run)
     if is_agent_ended(lead):
         return "close_out"
     if run.get("is_holding"):
@@ -1049,7 +1068,7 @@ def release_leases_of(lead):
 def close_out(run, agents):
     """End a run whose lead is gone: record STUCK, stop its worker keeping its branch, release its leases."""
     lead_name = str(run.get("chat_agent_name"))
-    lead = find_agent(agents, lead_name) or {"name": lead_name}
+    lead = find_run_lead(agents, run) or {"name": lead_name}
     if not record_stuck_verdict(run, MESSAGE_PARTS["gone_lead_detail"]):
         return
     worker_name = run.get("worker_agent_name")
@@ -1080,7 +1099,7 @@ def tick_watchdog(now):
         return
     state["idle_ticks"] = int(state.get("idle_ticks") or 0) + 1
     if action == "remind":
-        lead = find_agent(agents, str(run["chat_agent_name"]))
+        lead = find_run_lead(agents, run)
         if lead is not None and send_to_chat(lead, MESSAGE_PARTS["reminder"]):
             state["last_reminded_at"] = now
             log("reminded idle lead %s" % run["chat_agent_name"])

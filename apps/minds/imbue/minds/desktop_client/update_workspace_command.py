@@ -392,7 +392,7 @@ def mode_now(context):
     agents = list_agents()
     run = read_json(RUN_PATH)
     if is_run_in_flight(run, agents):
-        lead = find_agent(agents or [], str(run["chat_agent_name"]))
+        lead = find_run_lead(agents or [], run)
         emit(
             dict(
                 _create_result(

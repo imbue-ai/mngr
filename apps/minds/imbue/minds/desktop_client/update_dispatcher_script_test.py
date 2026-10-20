@@ -14,6 +14,7 @@ from imbue.minds.desktop_client.testing import STAGED_CREATED_CHAT
 from imbue.minds.desktop_client.testing import ScriptedToolAnswer
 from imbue.minds.desktop_client.testing import StagedUpdateWorkspace
 from imbue.minds.desktop_client.testing import load_update_workspace_program
+from imbue.minds.desktop_client.testing import read_update_program_answer
 from imbue.minds.desktop_client.testing import stage_update_workspace
 from imbue.minds.desktop_client.testing import update_program_context
 
@@ -400,6 +401,28 @@ def test_the_watchdog_closes_out_a_run_whose_lead_is_gone(
     assert ["stop", _WORKER] in calls
     closes = [call for call in calls if call[:1] == ["close"]]
     assert [call[1] for call in closes] == ["w-1"]
+
+
+def test_a_run_whose_chat_was_renamed_is_neither_closed_out_nor_counted_as_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Renaming a chat renames its agent; the chat id the last dispatch recorded still names it."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("run.json", {**_OPEN_RUN, "verdict": None})
+    staged.write_state(
+        "last-dispatch.json",
+        {"chat_agent_name": _LEAD, "chat_id": _LEAD_ID, "started_by": "scheduled", "dispatched_at": _IN_WINDOW - 7200},
+    )
+    staged.set_agents([_agent("my-update", "WAITING", _LEAD_ID), _agent(_WORKER, "RUNNING")])
+
+    _tick(program, staged, _IN_WINDOW)
+    program.mode_now(update_program_context(program, staged, ["--ceiling", "minds-v0.9.0"], _IN_WINDOW))
+
+    assert staged.tool_calls("update_self.py") == []
+    assert ["stop", _WORKER] not in staged.recorded_calls()
+    answer = read_update_program_answer(capsys.readouterr().out)
+    assert (answer["outcome"], answer["chat_id"]) == ("ALREADY_RUNNING", _LEAD_ID)
+    assert staged.chat_creates() == []
 
 
 @pytest.mark.witnesses("workspace-updates.idle-agent-reminded")
