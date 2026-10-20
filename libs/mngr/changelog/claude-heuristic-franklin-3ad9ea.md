@@ -1,0 +1,1 @@
+Sending an empty or whitespace-only message to an interactive agent now fails at once with "the message is empty". It used to paste nothing, press Enter on an empty input box, and wait out the full 90-second confirmation window before reporting that the submission was not confirmed. This was what made the first send after a chat moved to another account stall for over a minute.

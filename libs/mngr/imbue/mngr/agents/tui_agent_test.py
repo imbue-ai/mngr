@@ -147,6 +147,21 @@ def test_send_message_selects_relaxed_policy_for_slash_commands() -> None:
     assert agent.built_policies == [SubmissionConfirmationPolicy.RELAXED]
 
 
+@pytest.mark.parametrize("blank_message", ["", "  \n\t "])
+def test_send_message_refuses_blank_message_without_touching_the_pane(blank_message: str) -> None:
+    """A blank message leaves no input to submit, so no evidence could ever confirm it.
+
+    It must fail at once rather than paste nothing, press Enter on an empty input
+    box, and poll out the whole confirmation window.
+    """
+    agent = _make_recording_agent("probe-banner", probes=[_never_confirming_probe()])
+    with pytest.raises(SendMessageError, match="the message is empty"):
+        agent.send_message(blank_message)
+    assert agent.steps == []
+    assert agent.built_policies == []
+    assert cast(ScriptedHost, agent.host).sent_commands == []
+
+
 @pytest.mark.allow_warnings
 def test_send_message_raises_when_strict_confirmation_times_out() -> None:
     """A normal message with probes that never confirm must fail loudly."""

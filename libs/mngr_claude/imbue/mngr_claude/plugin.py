@@ -2467,9 +2467,11 @@ class ClaudeAgent(
 
         An empty baseline makes the poll scan from offset 0, so a transcript
         that first appears mid-window is still searched from its beginning.
+        stderr is redirected before the input so a missing file's error goes
+        there too.
         """
         env_command_prefix = self.host.build_source_env_prefix(self)
-        return f"{env_command_prefix} wc -c < {file_path_expression} 2>/dev/null | tr -d '[:space:]'"
+        return f"{env_command_prefix} wc -c 2>/dev/null < {file_path_expression} | tr -d '[:space:]'"
 
     def _build_content_evidence_probe(
         self, name: str, file_path_expression: str, normalized_probe: str
