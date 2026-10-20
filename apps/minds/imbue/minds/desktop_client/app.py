@@ -2282,9 +2282,11 @@ class _UpdateRunHostLifecycle(MutableModel):
 
     flask_app: Flask = Field(frozen=True, description="App whose state carries the channel publisher.")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Resolves the host to act on.")
-    tracker: SystemInterfaceHealthTracker = Field(frozen=True, description="Told the stop was intentional.")
+    tracker: SystemInterfaceHealthTracker = Field(
+        frozen=True, description="The host action's health tracker, which it marks only on a stop."
+    )
     concurrency_group: ConcurrencyGroup = Field(frozen=True, description="Parent group for the mngr commands.")
-    mngr_binary: str = Field(frozen=True, description="mngr executable both actions shell out to.")
+    mngr_binary: str = Field(frozen=True, description="mngr executable the start shells out to.")
     mngr_host_dir: Path = Field(frozen=True, description="MNGR_HOST_DIR for those mngr calls.")
 
     def start_and_wait(self, agent_id: AgentId) -> MindHostActionOutcome:
@@ -2292,12 +2294,9 @@ class _UpdateRunHostLifecycle(MutableModel):
 
         Synchronous because the dispatch's next step execs into the machine.
         """
-        return self._act(agent_id, MindHostAction.START)
-
-    def _act(self, agent_id: AgentId, action: MindHostAction) -> MindHostActionOutcome:
         return perform_mind_host_action(
             workspace_agent_id=agent_id,
-            action=action,
+            action=MindHostAction.START,
             backend_resolver=self.backend_resolver,
             mngr_binary=self.mngr_binary,
             mngr_host_dir=self.mngr_host_dir,
