@@ -420,6 +420,21 @@ def test_the_watchdog_closes_nothing_out_until_the_verdict_is_recorded(
     assert ["stop", _WORKER] not in staged.recorded_calls()
 
 
+def test_a_tick_keeps_the_log_bounded_even_when_it_logs_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    """Cron appends each tick's stderr to the log, so a quiet tick has to keep the file bounded too."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    log_path = staged.root / "data" / ".state" / "update-apply" / "dispatcher.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("mngr list failed: something long\n" * (program.LOG_MAX_BYTES // 20))
+
+    _tick(program, staged, _IN_WINDOW)
+
+    assert log_path.stat().st_size <= program.LOG_MAX_BYTES
+    assert log_path.read_text().endswith("mngr list failed: something long\n")
+
+
 def test_a_lead_waiting_on_a_background_task_is_not_reminded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:

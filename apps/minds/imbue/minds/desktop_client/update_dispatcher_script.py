@@ -221,18 +221,33 @@ def write_text_if_changed(path, text, mode=None):
     return True
 
 
+def bound_log():
+    """Cut the dispatcher's log back to its newer half once it outgrows LOG_MAX_BYTES.
+
+    Called on every tick as well as every line: cron appends each tick's stderr to the
+    same file, and a tick that only writes stderr never logs a line.
+    """
+    try:
+        if os.path.getsize(LOG_PATH) <= LOG_MAX_BYTES:
+            return
+        with open(LOG_PATH, "rb") as handle:
+            handle.seek(-LOG_MAX_BYTES // 2, os.SEEK_END)
+            tail = handle.read()
+        with open(LOG_PATH, "wb") as handle:
+            handle.write(tail[tail.find(b"\n") + 1 :])
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        sys.stderr.write("could not trim the dispatcher log: %s\n" % exc)
+
+
 def log(message):
     """Append one timestamped line to the dispatcher's log, keeping the log bounded."""
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
-        if os.path.getsize(LOG_PATH) > LOG_MAX_BYTES:
-            with open(LOG_PATH, "rb") as handle:
-                handle.seek(-LOG_MAX_BYTES // 2, os.SEEK_END)
-                tail = handle.read()
-            with open(LOG_PATH, "wb") as handle:
-                handle.write(tail[tail.find(b"\n") + 1 :])
-    except OSError:
-        pass
+    except OSError as exc:
+        sys.stderr.write("could not create %s: %s\n" % (STATE_DIR, exc))
+    bound_log()
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as handle:
@@ -986,6 +1001,7 @@ def tick_watchdog(now):
 
 
 def mode_tick(context):
+    bound_log()
     tick_watchdog(context["now"])
     tick_schedule(context["now"])
 
