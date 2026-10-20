@@ -89,11 +89,10 @@
  *       For ``type=="workspace"`` the payload is
  *         ``{permissions: [<verb>, ...], target_workspace_id: <id>|null}``;
  *       each verb must be one of the ``minds-workspaces`` verb schema
- *       names (read / create / destroy / lifecycle / backups-export /
- *       ssh / update / recover / sharing) and ``target_workspace_id``
- *       (the workspace the targeted
- *       verbs act on) is optional and, when present, must be a valid
- *       agent id. The effect is a self-contained patch (scope + verb
+ *       names the catalog (``workspace_permissions.json``) lists, and
+ *       ``target_workspace_id`` (the workspace the targeted verbs act
+ *       on) is optional and, when present, must be a valid agent id.
+ *       The effect is a self-contained patch (scope + verb
  *       schemas + rule) applied via ``/approve`` like file-sharing;
  *       each selected target becomes a uniquely-named verb schema, so
  *       repeated grants accumulate targets through the schema-by-name
@@ -1349,11 +1348,10 @@ function validateAccountsPayload(payload) {
  * request, shared by the create payload and the approve override body.
  *
  * ``permissions`` is a non-empty array of ``minds-workspaces`` verb names
- * (each validated against the hard-coded verb set). ``target_workspace_id``
- * is the workspace the targeted verbs (destroy / lifecycle / backups-export /
- * ssh / update / recover / sharing) act on; it is optional -- absent or
- * ``null`` denotes a request that
- * only concerns the non-targeted verbs (read / create) or, on approval, an
+ * (each validated against the catalog's verb set). ``target_workspace_id``
+ * is the workspace the targeted verbs (the catalog's ``targeted`` kind) act
+ * on; it is optional -- absent or ``null`` denotes a request that only
+ * concerns the non-targeted verbs (read / create) or, on approval, an
  * "all workspaces" grant. When present it must be a valid agent id.
  *
  * ``objectLabel``, ``fieldPrefix``, and ``extraneousLabel`` shape the error
@@ -1790,8 +1788,7 @@ function workspaceNonTargetedVerbSchema(def) {
  * For each requested verb:
  *  * non-targeted verbs (read / create) emit a broad schema keyed by the verb
  *    name;
- *  * targeted verbs (destroy / lifecycle / backups-export / ssh / update /
- *    recover / sharing) emit, when
+ *  * targeted verbs (the catalog's ``targeted`` kind) emit, when
  *    ``targetWorkspaceId`` is ``null`` (an "all workspaces" grant), a broad
  *    schema keyed by the verb name; otherwise a per-target schema keyed
  *    ``<verb>-<target_id>`` whose path pins the single workspace id.
