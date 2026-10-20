@@ -11,19 +11,24 @@ from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_END_SENTINEL
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_EXIT_SENTINEL
 from imbue.minds.desktop_client.skill_chat import AUTO_OPEN_CHAT_LABELS
 from imbue.minds.desktop_client.skill_chat import AccountBindingState
+from imbue.minds.desktop_client.skill_chat import BARE_CREATE_FACTS_SENTINEL
+from imbue.minds.desktop_client.skill_chat import BareCreateFacts
 from imbue.minds.desktop_client.skill_chat import NEEDS_ACCOUNT_BINDING_SENTINEL
 from imbue.minds.desktop_client.skill_chat import SKIP_CLAUDE_INSTALLATION_CHECK_SETTING
 from imbue.minds.desktop_client.skill_chat import SkillChatLaunchOutcome
 from imbue.minds.desktop_client.skill_chat import USER_CREATED_LABEL
 from imbue.minds.desktop_client.skill_chat import build_account_binding_probe_args
+from imbue.minds.desktop_client.skill_chat import build_bare_create_facts_command
 from imbue.minds.desktop_client.skill_chat import build_create_chat_script_args
 from imbue.minds.desktop_client.skill_chat import build_skill_chat_launch_command
 from imbue.minds.desktop_client.skill_chat import build_skill_chat_mngr_args
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
 from imbue.minds.desktop_client.skill_chat import launch_skill_chat
+from imbue.minds.desktop_client.skill_chat import parse_bare_create_facts
 from imbue.minds.desktop_client.skill_chat import resolve_account_binding
 from imbue.minds.desktop_client.skill_chat import skill_sentinel
 from imbue.minds.desktop_client.testing import account_binding_probe_stdout
+from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import exec_error_stdout
 from imbue.minds.desktop_client.testing import exec_result_stdout
 from imbue.minds.desktop_client.testing import host_offline_exec_result
@@ -100,8 +105,64 @@ def test_the_launch_shell_falls_back_in_the_same_run_when_the_script_has_no_crea
     answer = read_chat_app_answer(_run_launch_command(work_dir, skill_name="update-self", message="/update-self"))
 
     assert answer.fallback is not None
-    assert answer.fallback.stdout.strip() == NEEDS_ACCOUNT_BINDING_SENTINEL
+    assert answer.fallback.stdout.splitlines()[-1] == NEEDS_ACCOUNT_BINDING_SENTINEL
     assert answer.fallback.exit_code == 0
+    assert parse_bare_create_facts(answer.fallback.stdout) == BareCreateFacts(
+        is_local_settings_present=False, is_create_type_named=None, is_resolver_present=True
+    )
+
+
+@pytest.mark.parametrize(
+    ("settings_text", "has_resolver", "facts"),
+    (
+        (
+            None,
+            False,
+            BareCreateFacts(is_local_settings_present=False, is_create_type_named=None, is_resolver_present=False),
+        ),
+        (
+            '[commands.create]\ntype = "claude"\n',
+            False,
+            BareCreateFacts(is_local_settings_present=True, is_create_type_named=True, is_resolver_present=False),
+        ),
+        (
+            '[commands.create]\nlabel = ["account=a1"]\n',
+            True,
+            BareCreateFacts(is_local_settings_present=True, is_create_type_named=False, is_resolver_present=True),
+        ),
+        (
+            "[commands.create\n",
+            False,
+            BareCreateFacts(is_local_settings_present=True, is_create_type_named=None, is_resolver_present=False),
+        ),
+    ),
+    ids=("no-settings", "settings-name-a-type", "settings-name-no-type", "settings-unreadable"),
+)
+def test_the_fallback_reports_what_its_bare_create_depends_on(
+    tmp_path: Path, settings_text: str | None, has_resolver: bool, facts: BareCreateFacts
+) -> None:
+    """Whether a type is named, never which: the facts land in a log forwarded off the machine."""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    if settings_text is not None:
+        (work_dir / ".mngr").mkdir()
+        (work_dir / ".mngr" / "settings.local.toml").write_text(settings_text)
+    if has_resolver:
+        (work_dir / "system" / "scripts").mkdir(parents=True)
+        (work_dir / "system" / "scripts" / "default_account_args.py").write_text("")
+
+    completed = subprocess.run(
+        ["sh", "-c", build_bare_create_facts_command()], cwd=work_dir, capture_output=True, text=True, check=True
+    )
+
+    assert completed.stdout.startswith(BARE_CREATE_FACTS_SENTINEL)
+    assert parse_bare_create_facts(completed.stdout) == facts
+
+
+def test_a_fallback_that_echoed_no_facts_reads_as_unknown_rather_than_absent() -> None:
+    assert parse_bare_create_facts("") == BareCreateFacts(
+        is_local_settings_present=None, is_create_type_named=None, is_resolver_present=None
+    )
 
 
 def test_the_launch_is_one_exec_that_never_boots_a_stopped_workspace() -> None:
@@ -326,15 +387,85 @@ def test_a_failed_legacy_bare_create_carries_the_machines_own_refusal() -> None:
         )
     )
 
-    launch = launch_skill_chat(caller, "agent-1", skill_name="assist", chat_name="x", message="/assist it broke")
+    with capture_error_logs() as errors:
+        launch = launch_skill_chat(caller, "agent-1", skill_name="assist", chat_name="x", message="/assist it broke")
 
     assert launch.outcome is SkillChatLaunchOutcome.SPAWN_FAILED
     assert launch.failure_detail.startswith("Error: Unknown fields in agent_types.opencode")
+    assert len(errors) == 1
+    assert f"resolver binding: {AccountBindingState.UNAVAILABLE}" in errors[0]
     # The unrelated host is the first thing mngr prints and the last thing to blame.
     assert "outer SSH unreachable" not in launch.failure_detail
 
 
+_PRE_COMMAND_REFUSAL = (
+    "Error: Pre-command script(s) failed for 'create':\n"
+    "  Exit code: 1\n"
+    "  Stderr: No provider account is signed in on this machine.\n"
+)
+
+
+def test_a_refused_bare_create_on_a_template_without_the_resolver_spends_no_probe() -> None:
+    """There is no resolver to ask, so the refusal is logged with the facts alone and nothing else is run."""
+    caller = ScriptedMngrCaller(
+        results=(
+            MngrCallResult(
+                returncode=0,
+                stdout=skill_chat_launch_stdout(
+                    "update-self",
+                    script_exit_code=2,
+                    fallback_stdout=f"{BARE_CREATE_FACTS_SENTINEL} local_settings=0 create_type= resolver=0\n",
+                    fallback_exit_code=1,
+                    fallback_stderr=_PRE_COMMAND_REFUSAL,
+                ),
+            ),
+        )
+    )
+
+    with capture_error_logs() as errors:
+        launch = launch_skill_chat(caller, "agent-1", skill_name="update-self", chat_name="x", message="/update-self")
+
+    assert launch.outcome is SkillChatLaunchOutcome.SPAWN_FAILED
+    assert len(caller.calls) == 1
+    assert len(errors) == 1
+    assert "local settings present: False; create type named: None; resolver present: False" in errors[0]
+    assert "resolver binding: None" in errors[0]
+
+
 # CLEANUP: the resolver tests below go with the resolver (see skill_chat.py).
+
+
+def test_a_refused_bare_create_logs_the_workspace_facts_and_the_resolvers_binding() -> None:
+    """A refusal from a workspace whose resolver binds an account is the fallback failing to use it, not no account."""
+    facts_line = f"{BARE_CREATE_FACTS_SENTINEL} local_settings=1 create_type=0 resolver=1\n"
+    caller = ScriptedMngrCaller(
+        results=(
+            MngrCallResult(
+                returncode=0,
+                stdout=skill_chat_launch_stdout(
+                    "update-self",
+                    script_exit_code=2,
+                    script_stderr="message_chat.py: error: unrecognized arguments: --create\n",
+                    fallback_stdout=facts_line,
+                    fallback_exit_code=1,
+                    fallback_stderr=_PRE_COMMAND_REFUSAL,
+                ),
+            ),
+            MngrCallResult(returncode=0, stdout=account_binding_probe_stdout(account_dir="/home/user/acc/a1")),
+        )
+    )
+
+    with capture_error_logs() as errors:
+        launch = launch_skill_chat(caller, "agent-1", skill_name="update-self", chat_name="x", message="/update-self")
+
+    assert launch.outcome is SkillChatLaunchOutcome.SPAWN_FAILED
+    assert launch.failure_detail.startswith("Error: Pre-command script(s) failed for 'create'")
+    assert caller.calls[1] == build_account_binding_probe_args("agent-1")
+    assert len(caller.calls) == 2
+    assert len(errors) == 1
+    assert "chat app gave no verdict: message_chat.py: error: unrecognized arguments: --create" in errors[0]
+    assert "local settings present: True; create type named: False; resolver present: True" in errors[0]
+    assert "resolver binding: BOUND" in errors[0]
 
 
 def test_the_account_probe_asks_the_template_for_the_binding_without_booting_the_machine() -> None:

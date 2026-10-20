@@ -85,7 +85,9 @@ _LOCAL_SETTINGS_PATH: Final[str] = ".mngr/settings.local.toml"
 # ``build_skill_chat_mngr_args``, and ``_spawn_with_bare_create``) together with the launch's
 # branch that chooses between it and a bare create (``NEEDS_ACCOUNT_BINDING_SENTINEL``, its
 # branch in ``_finish_bare_create_fallback``, and the ``_LOCAL_SETTINGS_PATH`` and
-# ``_ACCOUNT_ARGS_SCRIPT`` tests in ``_build_bare_create_fallback_command``), once the release
+# ``_ACCOUNT_ARGS_SCRIPT`` tests in ``_build_bare_create_fallback_command``), and the resolver's
+# part of the refused-create log (``BareCreateFacts.is_resolver_present``, its test in
+# ``build_bare_create_facts_command``, and the probe in ``_finish_bare_create_fallback``), once the release
 # that ships the local settings writer (the first after minds-v0.5.2, which is still a resolver
 # template) has been the minimum updatable template for one release cycle: every workspace
 # then writes ``.mngr/settings.local.toml`` itself, so there is nothing left to ask and nothing
@@ -130,6 +132,20 @@ USER_CREATED_LABEL: Final[str] = "user_created=true"
 
 # Waves the claude version check for this create alone; see the module docstring.
 SKIP_CLAUDE_INSTALLATION_CHECK_SETTING: Final[str] = "agent_types.claude.check_installation=false"
+
+# Opens the line the fallback echoes before it chooses between a bare create and the resolver:
+# what the workspace keeps that the choice, and the create's own defaults, depend on. Read back
+# only for the log of a bare create the workspace refused.
+BARE_CREATE_FACTS_SENTINEL: Final[str] = "MNGR_BARE_CREATE_FACTS"
+
+# Prints 1 when the local settings name a ``[commands.create]`` type and 0 when they do not;
+# prints nothing when they cannot be read (or the workspace's python3 has no ``tomllib``),
+# which reads as unknown. Only whether a type is named, never what it is.
+_CREATE_TYPE_CHECK: Final[str] = (
+    "import sys, tomllib; "
+    'settings = tomllib.load(open(sys.argv[1], "rb")); '
+    'print(1 if settings.get("commands", {}).get("create", {}).get("type") else 0)'
+)
 
 
 def skill_sentinel(skill_name: str, state: str) -> str:
@@ -293,15 +309,65 @@ def build_bare_create_command(*, chat_name: str, message: str, account_args: Seq
     return build_in_workspace_mngr_command(inner_parts)
 
 
+class BareCreateFacts(FrozenModel):
+    """What the workspace kept that its fallback's bare create depended on, as its fallback echoed it."""
+
+    is_local_settings_present: bool | None = Field(
+        description="Whether the workspace has its local settings file; None when the fallback echoed no facts"
+    )
+    is_create_type_named: bool | None = Field(
+        description=(
+            "Whether the local settings name a create type; None when there are none, they were unreadable, "
+            "or the fallback echoed no facts"
+        )
+    )
+    is_resolver_present: bool | None = Field(
+        description="Whether the template has the account resolver script; None when the fallback echoed no facts"
+    )
+
+
+def build_bare_create_facts_command() -> str:
+    """The shell string that echoes :class:`BareCreateFacts` as one :data:`BARE_CREATE_FACTS_SENTINEL` line."""
+    settings = shlex.quote(_LOCAL_SETTINGS_PATH)
+    return (
+        f"mngr_local_settings=0; mngr_create_type=; mngr_resolver=0; "
+        f"if [ -f {settings} ]; then mngr_local_settings=1; "
+        f"mngr_create_type=$(python3 -c {shlex.quote(_CREATE_TYPE_CHECK)} {settings} 2>/dev/null); fi; "
+        f"if [ -f {shlex.quote(_ACCOUNT_ARGS_SCRIPT)} ]; then mngr_resolver=1; fi; "
+        f"echo {BARE_CREATE_FACTS_SENTINEL} local_settings=$mngr_local_settings "
+        f"create_type=$mngr_create_type resolver=$mngr_resolver"
+    )
+
+
+def _parse_fact_flag(value: str | None) -> bool | None:
+    return {"1": True, "0": False}.get(value or "")
+
+
+def parse_bare_create_facts(fallback_stdout: str) -> BareCreateFacts:
+    """The facts the fallback echoed ahead of its create; every field None when it echoed none."""
+    for line in fallback_stdout.splitlines():
+        tokens = line.split()
+        if tokens and tokens[0] == BARE_CREATE_FACTS_SENTINEL:
+            values = dict(token.partition("=")[::2] for token in tokens[1:])
+            return BareCreateFacts(
+                is_local_settings_present=_parse_fact_flag(values.get("local_settings")),
+                is_create_type_named=_parse_fact_flag(values.get("create_type")),
+                is_resolver_present=_parse_fact_flag(values.get("resolver")),
+            )
+    return BareCreateFacts(is_local_settings_present=None, is_create_type_named=None, is_resolver_present=None)
+
+
 def _build_bare_create_fallback_command(*, chat_name: str, message: str) -> str:
     """The launch's fallback: a bare create, unless only the resolver can bind the chat.
 
     A workspace that writes its create defaults binds the chat itself, and one whose template
     has no resolver has one shared config dir that is the authenticated one; everywhere else
-    the fallback says so instead of creating an unbound chat.
+    the fallback says so instead of creating an unbound chat. Either way it first echoes the
+    facts that choice rests on (:class:`BareCreateFacts`), for the log of a refused create.
     """
     bare_create = build_bare_create_command(chat_name=chat_name, message=message, account_args=())
     return (
+        f"{build_bare_create_facts_command()}; "
         f"if [ -f {shlex.quote(_LOCAL_SETTINGS_PATH)} ] || [ ! -f {shlex.quote(_ACCOUNT_ARGS_SCRIPT)} ]; "
         f"then {bare_create}; else echo {NEEDS_ACCOUNT_BINDING_SENTINEL}; fi"
     )
@@ -439,16 +505,35 @@ def _finish_bare_create_fallback(
     if NEEDS_ACCOUNT_BINDING_SENTINEL in fallback.stdout:
         binding = resolve_account_binding(mngr_caller, workspace_address)
         return _spawn_with_bare_create(
-            mngr_caller, workspace_address, chat_name=chat_name, message=message, account_args=binding.create_args
+            mngr_caller,
+            workspace_address,
+            chat_name=chat_name,
+            message=message,
+            account_args=binding.create_args,
+            binding_state=binding.state,
         )
     if fallback.exit_code == 0:
         return SkillChatLaunch(outcome=SkillChatLaunchOutcome.STARTED)
+    facts = parse_bare_create_facts(fallback.stdout)
+    # Whether a refused create was right to refuse turns on whether the workspace has an account
+    # the bare create failed to bind. Only a template with the resolver can answer that, so only
+    # there is the extra exec spent, and only on this failure path.
+    binding_state = (
+        resolve_account_binding(mngr_caller, workspace_address).state if facts.is_resolver_present else None
+    )
     logger.error(
-        "Spawning chat {} in machine {} exited {}: {}",
+        "Spawning chat {} in machine {} exited {}: {}\n"
+        "(chat app gave no verdict: {}; local settings present: {}; create type named: {}; "
+        "resolver present: {}; resolver binding: {})",
         chat_name,
         workspace_address,
         fallback.exit_code,
         fallback.stderr.strip(),
+        answer.log_detail or "no reason given",
+        facts.is_local_settings_present,
+        facts.is_create_type_named,
+        facts.is_resolver_present,
+        binding_state,
     )
     return SkillChatLaunch(
         outcome=SkillChatLaunchOutcome.SPAWN_FAILED, failure_detail=in_workspace_failure_detail(fallback.stderr)
@@ -479,6 +564,7 @@ def _spawn_with_bare_create(
     chat_name: str,
     message: str,
     account_args: Sequence[str],
+    binding_state: AccountBindingState,
 ) -> SkillChatLaunch:
     """Spawn the chat with a bare ``mngr create`` in its own exec and wait for it to finish."""
     args = build_skill_chat_mngr_args(
@@ -487,11 +573,12 @@ def _spawn_with_bare_create(
     result = mngr_caller.call(args, timeout=_SPAWN_TIMEOUT_SECONDS)
     if result.returncode != 0:
         logger.error(
-            "Spawning chat {} in machine {} exited {}: {}",
+            "Spawning chat {} in machine {} exited {}: {}\n(resolver binding: {})",
             chat_name,
             workspace_address,
             result.returncode,
             result.stderr.strip(),
+            binding_state,
         )
         # When no result came back, the stderr is MngrCaller's own account of
         # that -- a timeout's quotes the whole argv, the seed message with it --
