@@ -170,6 +170,9 @@ class UpdateArmOutcome(UpperCaseStrEnum):
     """The workspace's chat app did not answer, and the bare create behind it failed too."""
     CREATE_FAILED = auto()
     """The workspace's chat app answered, but did not create the chat; its words are the detail."""
+    # CLEANUP: drop NO_CRON and TOO_OLD_TO_UPDATE (and the update program's checks that answer them,
+    # ``_readiness_refusal`` and ``is_cron_available``) once ``OLDEST_IN_PLACE_UPDATABLE_VERSION`` is a
+    # release from mid-August 2026 or later, every one of which ships both cron and the update-self skill.
     NO_CRON = auto()
     """The workspace has no cron program, so nothing inside it could start a scheduled run."""
     TOO_OLD_TO_UPDATE = auto()
