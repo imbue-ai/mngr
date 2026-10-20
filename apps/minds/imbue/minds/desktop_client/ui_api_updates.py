@@ -63,6 +63,7 @@ _SCHEDULE_STATUS_BY_OUTCOME: Final[dict[UpdateScheduleOutcome, int]] = {
 
 _CANCEL_FAILURE_MESSAGE: Final[str] = "Couldn't reach this workspace to cancel its scheduled update."
 _SKIP_FAILURE_MESSAGE: Final[str] = "Couldn't reach this workspace to skip its update."
+_DECISION_PENDING_REFUSAL: Final[str] = "This workspace's update is waiting on your decision in its chat."
 
 
 # Refuses anything that could read as a flag or shell text in the chat's seed
@@ -181,6 +182,9 @@ def _resolve_target_request(agent_id: str, *, refusal: str) -> tuple[WorkspaceUp
     if isinstance(resolved, Response):
         return resolved
     service, parsed_id = resolved
+    # As the bulk routes refuse it: a fresh run would set aside the work the decision is about.
+    if service.state_store.get(parsed_id).is_decision_pending:
+        return _error_response(_DECISION_PENDING_REFUSAL, 409)
     body = request.get_json(silent=True, force=True)
     try:
         write = UiUpdateTargetRequest.model_validate(body if isinstance(body, dict) else {})

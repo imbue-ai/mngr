@@ -943,6 +943,23 @@ def test_a_bulk_action_acts_only_on_the_requested_machines_live_state_says_are_b
     assert caller.calls[0][2] == str(stale_id)
 
 
+@pytest.mark.parametrize("route", ("now", "schedule"))
+def test_a_machine_waiting_on_a_decision_is_not_sent_a_fresh_run(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId, route: str
+) -> None:
+    """As the bulk routes refuse it, so does the machine's own route: the SPA's view can be a moment stale."""
+    caller = RecordingMngrCaller(result=_armed())
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
+    _mark_out_of_date(app, agent_id)
+    _end_run_needing_decision(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/{route}", {"target_ref": "minds-v0.4.1"})
+
+    assert response.status_code == 409
+    assert caller.calls == []
+    assert _published(app, agent_id).is_decision_pending
+
+
 def _calls_for(caller: RecordingMngrCaller, agent_id: AgentId) -> list[list[str]]:
     return [call for call in caller.calls if call[2] == str(agent_id)]
 
