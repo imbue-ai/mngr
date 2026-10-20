@@ -36,3 +36,4 @@ def test_emit_event_human_without_message_key_is_silent(capfd: Any) -> None:
 
     captured = capfd.readouterr()
     assert captured.out == ""
+    assert captured.err == ""
