@@ -9,6 +9,7 @@ from pathlib import Path
 
 import boto3
 import pytest
+from botocore.awsrequest import AWSPreparedRequest
 from botocore.stub import ANY
 from botocore.stub import Stubber
 
@@ -97,6 +98,11 @@ def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_seconds: int | None)
     )
 
 
+def _fail_on_real_aws_request(request: AWSPreparedRequest, **kwargs: object) -> None:
+    # pytest.fail raises a BaseException, so no Exception handler between here and the test can swallow it.
+    pytest.fail(f"Unit test sent a real AWS request: {request.method} {request.url}")
+
+
 def _build_stubbed_provider(
     mngr_ctx: MngrContext, *, default_ami_id: str | None = "ami-x"
 ) -> tuple[AwsProvider, Stubber]:
@@ -107,10 +113,15 @@ def _build_stubbed_provider(
     (the tag-based lookup that resolves a stopped instance), or
     ``describe_images`` / ``run_instances`` for the create-path tests. Pass
     ``default_ami_id=None`` to leave the AMI unconfigured so the create path
-    runs the EC2 lookup.
+    runs the EC2 lookup. Any request that reaches the network, from any client
+    built on the provider's session, fails the test.
+
+    The provider has no S3 state bucket, as if ``mngr aws prepare`` had never
+    run, because resolving one calls AWS.
     """
     config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id=default_ami_id, auto_shutdown_seconds=3600)
     session = boto3.Session(aws_access_key_id="AKIATEST", aws_secret_access_key="secret", region_name="us-east-1")
+    session.events.register("before-send", _fail_on_real_aws_request)
     ec2 = session.client("ec2", region_name="us-east-1")
     stubber = Stubber(ec2)
     client = _StubbedAwsVpsClient(
@@ -129,6 +140,7 @@ def _build_stubbed_provider(
         aws_client=client,
         aws_config=config,
     )
+    provider.__dict__["_state_bucket"] = None
     return provider, stubber
 
 
@@ -271,8 +283,6 @@ def test_state_store_raises_when_no_bucket(temp_mngr_ctx: MngrContext) -> None:
     ``state_bucket_backend_test.py``.)
     """
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
-    # No bucket name configured and STS unresolvable => _state_bucket is None.
-    provider.__dict__["_state_bucket"] = None
     with pytest.raises(MngrError, match="mngr aws prepare"):
         _ = provider._state_store
 
@@ -286,7 +296,6 @@ def test_validate_external_store_ready_raises_when_no_bucket(temp_mngr_ctx: Mngr
     anything -- rather than after the instance is already running.
     """
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
-    provider.__dict__["_state_bucket"] = None
     with pytest.raises(MngrError, match="mngr aws prepare"):
         provider._validate_external_store_ready()
 
@@ -309,7 +318,6 @@ def test_persist_agent_data_no_bucket_raises_for_stopped_host(temp_mngr_ctx: Mng
     vanish). No EC2 tag calls are made (the stubber has no queued responses).
     """
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
-    provider.__dict__["_state_bucket"] = None
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     seed_stopped_host_record(provider, host_id)
@@ -331,7 +339,6 @@ def test_list_persisted_agent_data_no_bucket_raises_actionable_error(temp_mngr_c
     silently returning no agents (which would make a stopped host's agents vanish).
     """
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
-    provider.__dict__["_state_bucket"] = None
     host_id = HostId.generate()
     seed_stopped_host_record(provider, host_id)
     with pytest.raises(MngrError, match="mngr aws prepare"):
@@ -341,7 +348,6 @@ def test_list_persisted_agent_data_no_bucket_raises_actionable_error(temp_mngr_c
 def test_to_offline_host_no_bucket_raises_actionable_error(temp_mngr_ctx: MngrContext) -> None:
     """Reconstructing a stopped host's full record with no bucket raises MngrError citing the S3 state bucket."""
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
-    provider.__dict__["_state_bucket"] = None
     host_id = HostId.generate()
     # The base path lists instances (none match) => HostNotFoundError, then the
     # override reads the host record from the (missing) store, which raises.
@@ -366,7 +372,6 @@ def test_discover_surfaces_stopped_instance_but_offline_read_raises_without_buck
     wrapper can attribute the failure to this provider.
     """
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
-    provider.__dict__["_state_bucket"] = None
     host_id = HostId.generate()
     stubber.add_response(
         "describe_instances",
