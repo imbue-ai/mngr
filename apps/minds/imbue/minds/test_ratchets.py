@@ -42,7 +42,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(9), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
+    rc.check_time_sleep(_DIR, snapshot(10))
 
 
 def test_prevent_global_keyword() -> None:

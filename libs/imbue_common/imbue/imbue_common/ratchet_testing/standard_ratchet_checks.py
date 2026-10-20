@@ -107,8 +107,8 @@ def check_while_true(source_dir: Path, max_count: int, excluded_patterns: tuple[
     assert_ratchet(PREVENT_WHILE_TRUE, source_dir, max_count, excluded_patterns)
 
 
-def check_time_sleep(source_dir: Path, max_count: int, excluded_patterns: tuple[str, ...] = ()) -> None:
-    assert_ratchet(PREVENT_TIME_SLEEP, source_dir, max_count, excluded_patterns)
+def check_time_sleep(source_dir: Path, max_count: int) -> None:
+    assert_ratchet(PREVENT_TIME_SLEEP, source_dir, max_count)
 
 
 def check_global_keyword(source_dir: Path, max_count: int) -> None:
