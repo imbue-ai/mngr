@@ -1,12 +1,21 @@
 import importlib.resources
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
+import paramiko
+from loguru import logger
+from paramiko.pkey import UnknownKeyType
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr import resources
+from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import UserId
+from imbue.mngr.providers.ssh_utils import get_ssh_public_key_fingerprint
 
 # Prefix used in shell output to identify warnings that should be shown to the user
 WARNING_PREFIX: Final[str] = "MNGR_WARN:"
@@ -273,6 +282,45 @@ def build_configure_ssh_command(
     ]
 
     return " && ".join(script_lines)
+
+
+def log_client_key_configuration(
+    host_id: HostId,
+    provider_name: ProviderInstanceName,
+    profile_user_id: UserId,
+    client_public_key: str,
+    appended_public_keys: Sequence[str],
+) -> None:
+    """Record the keys a host's ``authorized_keys`` is about to hold.
+
+    ``build_configure_ssh_command`` overwrites the file with the client key and
+    the caller then appends the other entries, so a client still holding a key
+    from neither is locked out from then on. A process that later has its key
+    rejected logs the fingerprint it offered; matching it against this line
+    shows whether a configure from elsewhere replaced it. Appended entries are
+    listed too because some providers authorize the key their consumers use
+    there rather than as the client key.
+    """
+    logger.info(
+        "Configuring host {} to authorize client key {} and {} appended key(s) [{}] (provider {}, profile {}), "
+        "replacing its authorized_keys",
+        host_id,
+        _describe_public_key(client_public_key),
+        len(appended_public_keys),
+        ", ".join(_describe_public_key(public_key) for public_key in appended_public_keys),
+        provider_name,
+        profile_user_id,
+    )
+
+
+def _describe_public_key(public_key: str) -> str:
+    """A public key's fingerprint, or why it has none: a log line must not fail the configure it describes."""
+    try:
+        return get_ssh_public_key_fingerprint(public_key)
+    # Not ``<type> <base64>`` (e.g. a line with options), bad base64, a type
+    # paramiko does not know, and a blob paramiko cannot parse, respectively.
+    except (MngrError, ValueError, UnknownKeyType, paramiko.SSHException) as e:
+        return f"unparseable entry ({type(e).__name__})"
 
 
 @pure

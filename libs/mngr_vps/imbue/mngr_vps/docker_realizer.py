@@ -23,6 +23,7 @@ from imbue.mngr.providers.listing_utils import build_outer_listing_collection_sc
 from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_listing
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
+from imbue.mngr.providers.ssh_host_setup import log_client_key_configuration
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import load_or_create_per_host_client_keypair
 from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
@@ -189,7 +190,7 @@ class DockerRealizer(SnapshotCapableRealizer):
             return subvolume_path / HOME_SUBPATH / host_dir_in_home
         return subvolume_path / HOST_DIR_SUBPATH
 
-    # --- container identity (keys + known_hosts) ---------------------------
+    # container identity (keys + known_hosts)
 
     def _container_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
         # Per host for containers created after per-host client keys landed;
@@ -231,7 +232,7 @@ class DockerRealizer(SnapshotCapableRealizer):
             is_strict_parsing=self.mngr_ctx.config.strict_host_record_parsing,
         )
 
-    # --- discovery / listing ----------------------------------------------
+    # discovery / listing
 
     def find_host_record(self, outer: OuterHostInterface) -> tuple[HostId, VpsHostRecord] | None:
         host_id = _read_host_id_label_from_vps(outer)
@@ -264,7 +265,7 @@ class DockerRealizer(SnapshotCapableRealizer):
     ) -> str:
         return exec_in_container(outer, self._require_container_name(handle), script, timeout_seconds=timeout_seconds)
 
-    # --- placement creation ------------------------------------------------
+    # placement creation
 
     def _setup_container_ssh(
         self,
@@ -282,6 +283,13 @@ class DockerRealizer(SnapshotCapableRealizer):
         # container authorizes per-host material (never the provider-wide pair).
         _container_key_path, container_public_key = self._create_per_host_container_ssh_keypair(host_id)
         container_host_key_path, container_host_public_key = self._container_host_keypair(host_id)
+        log_client_key_configuration(
+            host_id,
+            self.provider_name,
+            self.mngr_ctx.get_profile_user_id(),
+            container_public_key,
+            authorized_keys_entries,
+        )
         setup_container_ssh(
             outer,
             container_name,
@@ -446,7 +454,7 @@ class DockerRealizer(SnapshotCapableRealizer):
             container_ssh_host_public_key=container_host_public_key,
         )
 
-    # --- placement lifecycle ----------------------------------------------
+    # placement lifecycle
 
     def start_activity_watcher(self, outer: OuterHostInterface, handle: PlacementHandle) -> None:
         container_name = self._require_container_name(handle)

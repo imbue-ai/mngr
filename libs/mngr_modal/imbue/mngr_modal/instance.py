@@ -117,6 +117,7 @@ from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_host_setup import build_start_volume_sync_command
+from imbue.mngr.providers.ssh_host_setup import log_client_key_configuration
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
 from imbue.mngr.utils.docker_build_progress import count_dockerfile_instructions
@@ -1388,6 +1389,13 @@ class ModalProviderInstance(BaseProviderInstance):
                 args=(sandbox, host_id, host_name, user_tags, config, host_data, ssh_host, ssh_port, host_public_key),
             )
 
+            log_client_key_configuration(
+                host_id,
+                self.name,
+                self.mngr_ctx.get_profile_user_id(),
+                client_public_key,
+                tuple(authorized_keys or ()),
+            )
             # Start sshd with our host key
             self._start_sshd_in_sandbox(
                 sandbox,

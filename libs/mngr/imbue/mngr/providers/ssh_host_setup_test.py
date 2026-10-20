@@ -12,6 +12,9 @@ from pathlib import Path
 import pytest
 
 import imbue.mngr.resources as mngr_resources
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import UserId
 from imbue.mngr.providers.ssh_host_setup import JOURNALD_DROP_IN_PATH
 from imbue.mngr.providers.ssh_host_setup import JOURNALD_SYSTEM_MAX_USE
 from imbue.mngr.providers.ssh_host_setup import RequiredHostPackage
@@ -30,7 +33,11 @@ from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.providers.ssh_host_setup import build_start_volume_sync_command
 from imbue.mngr.providers.ssh_host_setup import get_user_ssh_dir
 from imbue.mngr.providers.ssh_host_setup import load_resource_script
+from imbue.mngr.providers.ssh_host_setup import log_client_key_configuration
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
+from imbue.mngr.providers.ssh_utils import generate_ssh_keypair
+from imbue.mngr.providers.ssh_utils import get_ssh_public_key_fingerprint
+from imbue.mngr.utils.testing import capture_loguru
 
 
 def test_root_user() -> None:
@@ -603,3 +610,33 @@ def test_cap_journald_command_installs_the_drop_in_and_restarts_only_on_change()
     assert f"SystemMaxUse={JOURNALD_SYSTEM_MAX_USE}" in command
     assert JOURNALD_DROP_IN_PATH in command
     assert command.index("cmp -s") < command.index("systemctl restart systemd-journald")
+
+
+def test_log_client_key_configuration_names_the_host_and_the_key_fingerprint() -> None:
+    _private_key, public_key = generate_ssh_keypair()
+    host_id = HostId()
+    with capture_loguru("INFO") as log_output:
+        log_client_key_configuration(host_id, ProviderInstanceName("docker"), UserId("profile-user"), public_key, ())
+
+    message = log_output.getvalue()
+    assert str(host_id) in message
+    assert get_ssh_public_key_fingerprint(public_key) in message
+    assert "provider docker, profile profile-user" in message
+    assert public_key.split()[1] not in message
+
+
+def test_log_client_key_configuration_lists_appended_keys_and_tolerates_unparseable_ones() -> None:
+    _private_key, public_key = generate_ssh_keypair()
+    _other_private_key, appended_key = generate_ssh_keypair()
+    with capture_loguru("INFO") as log_output:
+        log_client_key_configuration(
+            HostId(),
+            ProviderInstanceName("vps"),
+            UserId("profile-user"),
+            "not-a-key",
+            (appended_key, 'command="true" ' + appended_key),
+        )
+
+    message = log_output.getvalue()
+    assert "client key unparseable entry (MngrError)" in message
+    assert f"2 appended key(s) [{get_ssh_public_key_fingerprint(appended_key)}, unparseable entry (" in message
