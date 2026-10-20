@@ -463,11 +463,7 @@ export function Shell(): m.Component<ShellAttrs> {
                 } else if (band.action?.kind === "update-workspace") {
                   shell.openUpdateModal(agentScoped);
                 } else if (band.action?.kind === "sign-in-for-update") {
-                  // A refusal is said by the modal, which has room for it.
-                  void shell.signInForUpdate(agentScoped).then((result) => {
-                    if (!result.isOk) shell.openUpdateModal(agentScoped);
-                    m.redraw();
-                  });
+                  shell.signInForUpdateOrExplain(agentScoped);
                 } else {
                   shell.openRecoveryModal(agentScoped);
                 }

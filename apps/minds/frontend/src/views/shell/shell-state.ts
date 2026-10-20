@@ -326,6 +326,16 @@ export class ShellState {
     return await this.stores.updates.signIn(agentScoped);
   }
 
+  /** A "Sign in" pressed outside the update modal (a row, the band, a notice):
+   * the sign-in chat, or the modal when it could not open, which has room to
+   * say why. */
+  signInForUpdateOrExplain(anyId: string): void {
+    void this.signInForUpdate(anyId).then((result) => {
+      if (!result.isOk) this.openUpdateModal(anyId);
+      m.redraw();
+    });
+  }
+
   /** Enter a workspace the way its machines-list row does: onto its surface
    * when healthy and running, otherwise onto Recovery (with a start for a
    * stopped container), which returns to the surface. `liveness` is the entry's

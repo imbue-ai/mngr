@@ -520,11 +520,7 @@ export const LandingPage: m.ClosureComponent = () => {
         extra: "landing-update-sign-in",
         onclick: (event: MouseEvent) => {
           event.stopPropagation();
-          const { shell } = getAppContext();
-          void shell.signInForUpdate(agentId).then((result) => {
-            if (!result.isOk) shell.openUpdateModal(agentId);
-            m.redraw();
-          });
+          getAppContext().shell.signInForUpdateOrExplain(agentId);
         },
       },
       "Sign in",

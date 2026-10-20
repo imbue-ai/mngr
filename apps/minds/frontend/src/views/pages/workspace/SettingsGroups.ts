@@ -223,7 +223,10 @@ function outOfDateNotice(agentId: string): m.Children {
             Button,
             {
               variant: "secondary",
-              onclick: () => shell.openUpdateModal(agentId),
+              onclick: () =>
+                payload.action?.kind === "sign-in-for-update"
+                  ? shell.signInForUpdateOrExplain(agentId)
+                  : shell.openUpdateModal(agentId),
             },
             payload.action.label,
           )
