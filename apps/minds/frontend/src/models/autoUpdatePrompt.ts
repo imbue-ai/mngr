@@ -68,8 +68,8 @@ export class AutoUpdatePromptModel {
   /** Read the recorded answer and whether this is a launch into a new app
    * version, once per window. A failed read leaves the prompt down: an offer
    * that may already have been declined is not worth making blind. The next
-   * call reads again, so a backend that was not up yet does not cost the
-   * window its prompt. */
+   * call (the machines list mounting again) reads again, so a backend that was
+   * not up yet costs the window its prompt only until then. */
   load(): Promise<void> {
     this.loading ??= this.readInputs();
     return this.loading;
