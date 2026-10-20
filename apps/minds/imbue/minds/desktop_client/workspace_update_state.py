@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable
 from collections.abc import Mapping
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from typing import Final
 
@@ -237,6 +238,22 @@ class _ScheduleFacts(FrozenModel):
         return reason in (self.record.pending_skip_reason, self.record.last_skip_reason)
 
 
+# A schedule file is stamped by the workspace's clock while the arm runs, before the app records how
+# the arm's exec ended: up to the arm's own timeout earlier, give or take the clocks' skew.
+_ARM_LANDED_MARGIN: Final[timedelta] = timedelta(minutes=10)
+
+
+def _is_landed_arm_of(schedule: UpdateScheduleRecord | None, previous: _ScheduleFacts, run: _RunFacts) -> bool:
+    """Whether ``schedule`` is new to the row and was armed by the attempt whose failure the row records."""
+    if schedule is None or schedule.armed_at is None or run.dispatch_failure is None:
+        return False
+    if previous.record is not None and previous.record.armed_at == schedule.armed_at:
+        return False
+    return (
+        run.dispatch_attempted_at is not None and schedule.armed_at >= run.dispatch_attempted_at - _ARM_LANDED_MARGIN
+    )
+
+
 def _started_by(run: _RunFacts, schedule: _ScheduleFacts) -> UpdateStartedBy | None:
     """How the row's run was started: its record's own word, else the dispatch that created its chat."""
     if run.record.started_by is not None:
@@ -402,18 +419,22 @@ class WorkspaceUpdateStateStore(MutableModel):
 
         A workspace that could not be read (stopped) is recorded with neither: it has no cron to
         run a schedule, so nothing is shown as scheduled there. A read that found an account
-        signed in ends a sign-in refusal the last Schedule or Update now met.
+        signed in ends a sign-in refusal the last Schedule or Update now met, and one that found
+        the schedule an unanswered arm wrote ends that arm's failure.
         """
         facts = _ScheduleFacts(record=schedule, last_dispatch=last_dispatch, is_signed_in=is_signed_in)
         aid_str = str(agent_id)
         with self._lock:
-            is_changed = self._schedule_by_agent.get(aid_str, _ScheduleFacts()) != facts
+            previous = self._schedule_by_agent.get(aid_str, _ScheduleFacts())
+            is_changed = previous != facts
             self._schedule_by_agent[aid_str] = facts
             run = self._run_by_agent.get(aid_str)
             if is_signed_in is True and run is not None and run.is_sign_in_refused:
-                self._run_by_agent[aid_str] = run.model_copy_update(
-                    to_update(run.field_ref().is_sign_in_refused, False)
-                )
+                run = run.model_copy_update(to_update(run.field_ref().is_sign_in_refused, False))
+                self._run_by_agent[aid_str] = run
+                is_changed = True
+            if run is not None and _is_landed_arm_of(schedule, previous, run):
+                self._run_by_agent[aid_str] = run.model_copy_update(to_update(run.field_ref().dispatch_failure, None))
                 is_changed = True
         if is_changed:
             self._fire_on_change()

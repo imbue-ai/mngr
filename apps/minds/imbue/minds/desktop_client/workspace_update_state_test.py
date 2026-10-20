@@ -1133,6 +1133,31 @@ def test_the_row_is_scheduled_exactly_as_the_workspaces_file_says(tmp_path: Path
     assert store.get(agent_id).is_scheduled is False
 
 
+def test_a_read_that_finds_the_schedule_an_unanswered_arm_wrote_drops_that_arms_failure(tmp_path: Path) -> None:
+    store, agent_id = _out_of_date_store(tmp_path)
+    store.record_schedule(agent_id, schedule=None, last_dispatch=None, is_signed_in=None)
+    store.record_skipped_dispatch(agent_id, _UNREACHED_FAILURE)
+
+    store.record_schedule(
+        agent_id,
+        schedule=_schedule_record(armed_at=datetime.now(timezone.utc) - timedelta(minutes=2)),
+        last_dispatch=None,
+        is_signed_in=None,
+    )
+
+    state = store.get(agent_id)
+    assert (state.is_scheduled, state.dispatch_failure) == (True, "")
+
+
+def test_a_schedule_armed_long_before_a_failed_attempt_leaves_that_failure_standing(tmp_path: Path) -> None:
+    store, agent_id = _out_of_date_store(tmp_path)
+    store.record_skipped_dispatch(agent_id, _UNREACHED_FAILURE)
+
+    store.record_schedule(agent_id, schedule=_schedule_record(), last_dispatch=None, is_signed_in=None)
+
+    assert store.get(agent_id).dispatch_failure == _UNREACHED_FAILURE.message
+
+
 @pytest.mark.witnesses("workspace-updates.needs-sign-in", partial="the row state; not the sign-in button")
 def test_a_sign_in_skip_reads_as_needing_sign_in_until_a_read_finds_an_account(tmp_path: Path) -> None:
     store, agent_id = _out_of_date_store(tmp_path)
