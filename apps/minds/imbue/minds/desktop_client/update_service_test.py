@@ -168,7 +168,7 @@ def test_a_verdict_in_the_run_record_ends_the_run_and_re_reads_the_version(
     run = json.dumps(
         {
             "chat_agent_name": "update-x",
-            "started_at": time.time() - 600.0,
+            "started_at": time.time() - 60.0,
             "verdict": "UPDATED",
             "resulting_ref": "minds-v0.4.1",
             "detail": "Landed cleanly.",
@@ -222,8 +222,8 @@ def test_a_landed_update_tells_the_listeners_when_the_run_started_and_ended(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, is_verdict_time_recorded: bool
 ) -> None:
     """The listeners get the record's start, and its own verdict time or the reading's when the record has none."""
-    started_at = time.time() - 2400.0
-    verdict_at = time.time() - 713.0
+    started_at = time.time() - 120.0
+    verdict_at = time.time() - 13.0
     record: dict[str, object] = {
         "chat_agent_name": "update-y",
         "started_at": started_at,
@@ -280,7 +280,7 @@ def test_a_needs_decision_verdict_ends_the_run_with_the_decision_pending_and_its
     detail = "Your dashboard widget has no place in the new layout."
     record: dict[str, object] = {
         "chat_agent_name": "update-d",
-        "started_at": time.time() - 300.0,
+        "started_at": time.time() - 60.0,
         "verdict": verdict.value,
         "detail": detail,
         "verdict_at": time.time(),
@@ -315,6 +315,58 @@ def test_another_runs_record_does_not_close_this_run_out(
     state = service.state_store.get(agent_id)
     assert state.activity is UpdateActivity.RUNNING
     assert state.verdict is None
+
+
+def _probe_reading(chat_agent_name: str, *, started_at: float, verdict: str) -> MngrCallResult:
+    run = json.dumps({"chat_agent_name": chat_agent_name, "started_at": started_at, "verdict": verdict})
+    return MngrCallResult(
+        returncode=0, stdout=update_run_probe_stdout(run=run + "\n", agents=f"{chat_agent_name}\tRUNNING\n")
+    )
+
+
+def test_an_earlier_runs_record_under_the_same_chat_name_does_not_close_this_run_out(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """Update chats are named for their target, so a new run can take the name of an earlier one whose chat was
+    deleted; until the new lead records its own start, the earlier record is still on the workspace."""
+    caller = RecordingMngrCaller(
+        result=_probe_reading(UPDATE_CHAT_NAME, started_at=time.time() - 9000.0, verdict="STUCK")
+    )
+    service = _build_service(tmp_path, root_concurrency_group, caller=caller)
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(service.state_store, agent_id, UPDATE_CHAT_NAME)
+
+    service.poll_in_flight_runs()
+
+    state = service.state_store.get(agent_id)
+    assert state.activity is UpdateActivity.RUNNING
+    assert state.verdict is None
+
+
+def test_a_run_under_way_before_the_press_is_closed_out_by_its_own_verdict(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The run an Update now adopted started before the press, so its record predates the press's claim."""
+    caller = ScriptedMngrCaller(
+        results=(
+            update_command_answer(
+                "ALREADY_RUNNING",
+                "An update is already running in this workspace.",
+                chat_agent_name=UPDATE_CHAT_NAME,
+                chat_id=UPDATE_CHAT_ID,
+            ),
+            _probe_reading(UPDATE_CHAT_NAME, started_at=time.time() - 9000.0, verdict="REFUSED"),
+        )
+    )
+    service = _build_service(tmp_path, root_concurrency_group, caller=caller)
+    agent_id = AgentId.generate()
+    service.dispatch_update(agent_id)
+
+    service.poll_in_flight_runs()
+
+    state = service.state_store.get(agent_id)
+    assert state.activity is UpdateActivity.IDLE
+    assert state.verdict is UpdateVerdict.REFUSED
 
 
 def test_an_apply_sighting_windows_the_apply_before_any_probe_fails(

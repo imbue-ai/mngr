@@ -9,6 +9,7 @@ import shlex
 import threading
 from collections.abc import Callable
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from enum import auto
 from typing import Final
@@ -39,6 +40,7 @@ from imbue.minds.desktop_client.update_status import LANDED_UPDATE_VERDICTS
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateArmOutcome
 from imbue.minds.desktop_client.update_status import UpdateDispatchFailure
+from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.update_workspace_command import UpdateCommandCall
 from imbue.minds.desktop_client.update_workspace_command import UpdateCommandReach
@@ -72,6 +74,11 @@ _WAITING_POLLS_BEFORE_SURFACING: Final[int] = 2
 _POLLED_ACTIVITIES: Final[frozenset[UpdateActivity]] = frozenset(
     {UpdateActivity.RUNNING, UpdateActivity.WAITING, UpdateActivity.APPLYING}
 )
+
+# A run's own record starts after the app's claim, give or take the gap between the laptop's
+# clock and the workspace's; one under the run's chat name that started earlier than this is an
+# earlier run's, whose chat had the same name (update chats are named for their target).
+_EARLIER_RUN_RECORD_MARGIN: Final[timedelta] = timedelta(minutes=5)
 
 # The new chat's page opens with the provider chooser up (the chat app's ``open=providers`` key).
 _SIGN_IN_CHAT_PATH: Final[str] = "/?open=providers"
@@ -220,6 +227,13 @@ def read_workspace_update_facts(
     if call.reach is not UpdateCommandReach.ANSWERED or call.payload is None:
         return None
     return parse_update_workspace_facts(call.payload)
+
+
+def _is_earlier_runs_record(status: UpdateRunStatus, run_started_at: datetime | None) -> bool:
+    """Whether ``status``, under the in-flight run's chat name, started before that run was claimed."""
+    if status.started_at is None or run_started_at is None:
+        return False
+    return status.started_at < run_started_at - _EARLIER_RUN_RECORD_MARGIN
 
 
 def _command_result(call: UpdateCommandCall) -> UpdateCommandResult | None:
@@ -558,7 +572,10 @@ class WorkspaceUpdateService(MutableModel):
         probe = self.apply_window.probe_run(agent_id)
         status = probe.run_status
         is_records_run = (
-            status is not None and bool(state.chat_agent_name) and status.chat_agent_name == state.chat_agent_name
+            status is not None
+            and bool(state.chat_agent_name)
+            and status.chat_agent_name == state.chat_agent_name
+            and not _is_earlier_runs_record(status, state.run_started_at)
         )
         self.state_store.note_chat_agent_id(agent_id, probe.chat_agent_id)
         if is_records_run:

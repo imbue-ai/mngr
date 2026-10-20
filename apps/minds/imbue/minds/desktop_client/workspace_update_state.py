@@ -506,17 +506,17 @@ class WorkspaceUpdateStateStore(MutableModel):
         Taken from STARTING only; the row goes RUNNING under the chat's name, so the poll
         matches the run's own record to it. Returns whether it was taken.
         """
-        return self._adopt_chat(agent_id, chat_agent_name, chat_agent_id, is_claim_target_kept=True)
+        return self._adopt_chat(agent_id, chat_agent_name, chat_agent_id, is_claimed_run=True)
 
     def adopt_run_under_way(self, agent_id: AgentId, *, chat_agent_name: str, chat_agent_id: str) -> bool:
         """The run already under way in the workspace is this row's now, as :meth:`adopt_dispatched_chat` takes it.
 
-        Without the claim's target: that was the press's, and the run under way has its own.
+        Without the claim's target or start: those were the press's, and the run under way has its own.
         """
-        return self._adopt_chat(agent_id, chat_agent_name, chat_agent_id, is_claim_target_kept=False)
+        return self._adopt_chat(agent_id, chat_agent_name, chat_agent_id, is_claimed_run=False)
 
     def _adopt_chat(
-        self, agent_id: AgentId, chat_agent_name: str, chat_agent_id: str, *, is_claim_target_kept: bool
+        self, agent_id: AgentId, chat_agent_name: str, chat_agent_id: str, *, is_claimed_run: bool
     ) -> bool:
         aid_str = str(agent_id)
         with self._lock:
@@ -528,12 +528,16 @@ class WorkspaceUpdateStateStore(MutableModel):
                 to_update(
                     facts.field_ref().record,
                     facts.record.model_copy_update(
-                        to_update(facts.record.field_ref().chat_agent_name, chat_agent_name)
+                        to_update(facts.record.field_ref().chat_agent_name, chat_agent_name),
+                        to_update(
+                            facts.record.field_ref().started_at,
+                            facts.record.started_at if is_claimed_run else None,
+                        ),
                     ),
                 ),
                 to_update(facts.field_ref().chat_agent_id, chat_agent_id),
                 to_update(facts.field_ref().is_sign_in_refused, False),
-                to_update(facts.field_ref().target_override, facts.target_override if is_claim_target_kept else ""),
+                to_update(facts.field_ref().target_override, facts.target_override if is_claimed_run else ""),
             )
         self._fire_on_change()
         return True
