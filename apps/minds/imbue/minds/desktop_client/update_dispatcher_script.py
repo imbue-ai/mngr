@@ -323,8 +323,8 @@ def list_agents():
     """
     listed = run_command(list(MNGR_LIST_ARGV), MNGR_LIST_TIMEOUT_SECONDS, agent_env())
     if listed.returncode != 0:
-        sys.stderr.write("mngr list failed: %s\n" % bounded(listed.stderr or listed.stdout))
-        return None
+        # ``--on-error continue`` still lists every agent it could; the services-agent check below decides.
+        sys.stderr.write("mngr list exited %d: %s\n" % (listed.returncode, bounded(listed.stderr)))
     agents = []
     for line in listed.stdout.splitlines():
         fields = line.split(MNGR_LIST_FIELD_SEPARATOR)

@@ -471,6 +471,20 @@ def test_a_listing_without_the_services_agent_never_closes_a_run_out(
     assert staged.tool_calls("update_self.py") == []
 
 
+def test_a_listing_that_exited_non_zero_still_counts_when_it_lists_the_services_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    """``--on-error continue`` exits non-zero for one provider's failure while still listing every agent it could."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("run.json", {**_OPEN_RUN, "verdict": None})
+    staged.set_agents([_agent(_WORKER, "RUNNING")])
+    monkeypatch.setenv("STUB_EXIT_LIST", "1")
+
+    _tick(program, staged, _IN_WINDOW)
+
+    assert [call[:3] for call in staged.tool_calls("update_self.py")] == [["run-status", "verdict", "STUCK"]]
+
+
 def test_the_watchdog_closes_nothing_out_until_the_verdict_is_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:
