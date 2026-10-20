@@ -2,12 +2,15 @@
 // Deliberately NOT named *.test.ts so vitest does not collect it as a suite.
 
 import m from "mithril";
+import { registerAppContext } from "./app-context";
 import type {
   UiAccountEntry,
   UiAccountsMessage,
   UiNotificationEntry,
+  UiWorkspaceUpdate,
   UiWorkspacesMessage,
 } from "./channel/messages";
+import { createEmptyStores } from "./models/boot";
 import type { BrowserImportResult } from "./models/browserImport";
 import type {
   ConnectionBackendOption,
@@ -17,6 +20,7 @@ import { createAppQueryClient } from "./models/queryClient";
 import type { SettingsOverview } from "./models/settings";
 import type { SharePanelModelOptions } from "./models/sharePanel";
 import type { SharedWorkspaceRow } from "./models/sharedWorkspaces";
+import { ShellState } from "./views/shell/shell-state";
 
 /** Render a component to its root vnode by instantiating the closure and
  * calling view() directly -- the inner-app idiom of testing render logic
@@ -326,6 +330,46 @@ export function jsonResponse(payload: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/** A workspace read as a minor release behind and idle, with backups to fall back on. */
+export const OUT_OF_DATE_UPDATE: UiWorkspaceUpdate = {
+  availability: "OUT_OF_DATE",
+  current_version: "minds-v0.3.9",
+  supported_version: "minds-v0.4.1",
+  is_version_from_label: false,
+  activity: "IDLE",
+  is_backup_configured: true,
+};
+
+/** A shell registered as the app's context, its updates store holding `updates`
+ * as a `workspace_updates` frame would leave it. */
+export function updatesShell(
+  updates: Record<string, UiWorkspaceUpdate>,
+  isAutoUpdateEnabled: boolean,
+): ShellState {
+  const shell = new ShellState(createEmptyStores());
+  registerAppContext({ stores: shell.stores, shell });
+  shell.stores.updates.applyUpdatesMessage({
+    type: "workspace_updates",
+    updates,
+    update_window: "2:00 AM-5:00 AM",
+    is_auto_update_enabled: isAutoUpdateEnabled,
+  });
+  return shell;
+}
+
+/** A `fetch` that answers with `respond` and records every URL it was asked for. */
+export function recordingFetch(
+  respond: (url: string) => Promise<Response> = () =>
+    Promise.resolve(jsonResponse({})),
+): { fetchImpl: (url: string) => Promise<Response>; requests: string[] } {
+  const requests: string[] = [];
+  const fetchImpl = (url: string): Promise<Response> => {
+    requests.push(url);
+    return respond(url);
+  };
+  return { fetchImpl, requests };
 }
 
 /** Run `run` with `globalThis.fetch` swapped for a stub that mimics the

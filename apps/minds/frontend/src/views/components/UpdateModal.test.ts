@@ -1,29 +1,21 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { clearAppContextForTests, registerAppContext } from "../../app-context";
-import { createEmptyStores } from "../../models/boot";
+import { clearAppContextForTests } from "../../app-context";
 import type { UiWorkspaceUpdate } from "../../channel/messages";
-import { ShellState } from "../shell/shell-state";
 import type { AnyVnode } from "../../testing";
 import {
   allText,
   attrsOf,
   collectVnodes,
   jsonResponse,
+  OUT_OF_DATE_UPDATE,
+  recordingFetch,
   settle,
+  updatesShell,
 } from "../../testing";
 import { UpdateModal } from "./UpdateModal";
 
 const AGENT = "agent-" + "c".repeat(8);
-
-const OUT_OF_DATE: UiWorkspaceUpdate = {
-  availability: "OUT_OF_DATE",
-  current_version: "minds-v0.3.9",
-  supported_version: "minds-v0.4.1",
-  is_version_from_label: false,
-  activity: "IDLE",
-  is_backup_configured: true,
-};
 
 interface Harness {
   draw: () => m.Children;
@@ -51,22 +43,12 @@ function press(root: m.Children, label: string): void {
 
 function harness(
   respond: (url: string) => Promise<Response>,
-  update: UiWorkspaceUpdate = OUT_OF_DATE,
+  update: UiWorkspaceUpdate = OUT_OF_DATE_UPDATE,
   isAutoUpdateEnabled = false,
 ): Harness {
-  const shell = new ShellState(createEmptyStores());
-  registerAppContext({ stores: shell.stores, shell });
-  shell.stores.updates.applyUpdatesMessage({
-    type: "workspace_updates",
-    updates: { [AGENT]: update },
-    update_window: "2:00 AM-5:00 AM",
-    is_auto_update_enabled: isAutoUpdateEnabled,
-  });
-  const requests: string[] = [];
-  vi.stubGlobal("fetch", (url: string) => {
-    requests.push(url);
-    return respond(url);
-  });
+  updatesShell({ [AGENT]: update }, isAutoUpdateEnabled);
+  const { fetchImpl, requests } = recordingFetch(respond);
+  vi.stubGlobal("fetch", fetchImpl);
   const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   const onClose = vi.fn();
@@ -163,7 +145,7 @@ describe("the update modal's Update now", () => {
     const { draw, requests, onClose } = harness(
       () => Promise.resolve(jsonResponse({ ok: true })),
       {
-        ...OUT_OF_DATE,
+        ...OUT_OF_DATE_UPDATE,
         dispatch_failure: "Couldn't reach this workspace to start the update.",
         dispatch_failure_detail: "Error: Could not reach host host-1234: connection refused",
       },
@@ -182,7 +164,7 @@ describe("the update modal's Update now", () => {
   it("holds an update that never went out back while a new press is out", () => {
     // The press is the newer question; the old answer beside its spinner would read as its reply.
     const { draw } = harness(() => new Promise<Response>(() => undefined), {
-      ...OUT_OF_DATE,
+      ...OUT_OF_DATE_UPDATE,
       dispatch_failure: "Couldn't reach this workspace to start the update.",
     });
     expect(allText(draw())).toContain("Couldn't reach this workspace to start the update.");
@@ -208,7 +190,7 @@ describe("the update modal's verdict line", () => {
     // detection sweep is still execing into a machine whose services are
     // coming back, so `current_version` still reads the version it moved off.
     const { draw } = harness(() => Promise.resolve(jsonResponse({})), {
-      ...OUT_OF_DATE,
+      ...OUT_OF_DATE_UPDATE,
       verdict: "UPDATED",
       current_version: "minds-v0.3.9",
       success_note_version: "minds-v0.4.1",
@@ -221,7 +203,7 @@ describe("the update modal's verdict line", () => {
 
   it("points a run that ended short at its own chat rather than offering machinery of its own", () => {
     const { draw } = harness(() => Promise.resolve(jsonResponse({})), {
-      ...OUT_OF_DATE,
+      ...OUT_OF_DATE_UPDATE,
       verdict: "NEEDS_RECREATION",
       chat_agent_name: "update-fox",
     });
@@ -237,7 +219,7 @@ describe("the update modal's verdict line", () => {
 
 describe("the update modal over a machine too old to update in place", () => {
   const TOO_OLD: UiWorkspaceUpdate = {
-    ...OUT_OF_DATE,
+    ...OUT_OF_DATE_UPDATE,
     availability: "NEEDS_RECREATION",
     current_version: "minds-v0.3.4",
   };
@@ -273,7 +255,7 @@ describe("the update modal over a machine too old to update in place", () => {
 
 describe("the update modal over a machine behind only by a patch", () => {
   const PATCH: UiWorkspaceUpdate = {
-    ...OUT_OF_DATE,
+    ...OUT_OF_DATE_UPDATE,
     availability: "PATCH_AVAILABLE",
     current_version: "minds-v0.4.0",
   };
@@ -297,7 +279,7 @@ describe("the update modal over a machine behind only by a patch", () => {
 
 describe("the update modal under auto-update", () => {
   const ARMED: UiWorkspaceUpdate = {
-    ...OUT_OF_DATE,
+    ...OUT_OF_DATE_UPDATE,
     is_scheduled: true,
     schedule_window: "1:00 AM-4:00 AM",
     schedule_zone: "",
@@ -344,7 +326,7 @@ describe("the update modal under auto-update", () => {
   });
 
   it("offers no schedule on a machine not armed yet, only updating now", () => {
-    const root = harness(() => Promise.resolve(jsonResponse({})), OUT_OF_DATE, true).draw();
+    const root = harness(() => Promise.resolve(jsonResponse({})), OUT_OF_DATE_UPDATE, true).draw();
     expect(pressableWithLabel(root, "Schedule update")).toBeUndefined();
     const now = pressableWithLabel(root, "Update now");
     expect(now).toBeDefined();
@@ -354,7 +336,7 @@ describe("the update modal under auto-update", () => {
 
 describe("the update modal over a run that needs the user's decision", () => {
   const PENDING: UiWorkspaceUpdate = {
-    ...OUT_OF_DATE,
+    ...OUT_OF_DATE_UPDATE,
     verdict: "NEEDS_DECISION",
     verdict_detail: "Your dashboard widget and the new layout both changed the same file.",
     is_decision_pending: true,
@@ -394,7 +376,7 @@ describe("the update modal over a run that needs the user's decision", () => {
 });
 
 describe("the update modal over a machine that needs a sign-in", () => {
-  const REFUSED: UiWorkspaceUpdate = { ...OUT_OF_DATE, needs_sign_in: true };
+  const REFUSED: UiWorkspaceUpdate = { ...OUT_OF_DATE_UPDATE, needs_sign_in: true };
 
   it("enters the machine before asking it for the sign-in chat", async () => {
     // The chat opens only in a connected frame, so the entry comes first.
@@ -435,7 +417,7 @@ describe("the update modal over a machine that needs a sign-in", () => {
 describe("the update modal over a failed run", () => {
   it("opens the run's chat alongside Dismiss", () => {
     const { draw, routeSet } = harness(() => Promise.resolve(jsonResponse({})), {
-      ...OUT_OF_DATE,
+      ...OUT_OF_DATE_UPDATE,
       verdict: "STUCK",
       chat_agent_id: "agent-lead-2",
       started_by: "SCHEDULED",
