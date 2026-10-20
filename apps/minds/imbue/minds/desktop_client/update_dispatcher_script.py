@@ -159,6 +159,8 @@ SKIP_CLAUDE_INSTALLATION_CHECK_SETTING = "agent_types.claude.check_installation=
 
 # The watchdog reminds an idle lead after this many consecutive idle ticks, and then no more
 # often than every REMINDER_INTERVAL_SECONDS.
+# How long a window waits before trying again after an attempt that can cost something to repeat.
+RETRY_BACKOFF_SECONDS_BY_SKIP = {SKIP_DISPATCH_FAILED: 15 * 60, SKIP_NEEDS_SIGN_IN: 5 * 60}
 IDLE_TICKS_BEFORE_REMINDER = 3
 REMINDER_INTERVAL_SECONDS = 20 * 60
 MAX_NAME_SUFFIX = 20
@@ -312,9 +314,20 @@ def list_agents():
         except ValueError:
             continue
         if isinstance(candidate, dict) and isinstance(candidate.get("agents"), list):
-            return [agent for agent in candidate["agents"] if isinstance(agent, dict)]
+            agents = [agent for agent in candidate["agents"] if isinstance(agent, dict)]
+            # A listing without the workspace's own services agent read the wrong host dir (a cron
+            # environment that did not restore), and would make every agent read as gone.
+            if not any(is_primary_agent(agent) for agent in agents):
+                sys.stderr.write("mngr list did not list this workspace's services agent; ignoring it\n")
+                return None
+            return agents
     sys.stderr.write("mngr list printed no agent listing\n")
     return None
+
+
+def is_primary_agent(agent):
+    labels = agent.get("labels")
+    return agent.get("type") == "main" or (isinstance(labels, dict) and labels.get("is_primary") == "true")
 
 
 def find_agent(agents, name):
@@ -798,6 +811,9 @@ def decide_schedule_action(schedule, run, now, is_marked_lead_gone):
         if not is_start_recorded and is_marked_lead_gone():
             return "dispatch"
         return "note_window"
+    next_attempt_at = schedule.get("next_attempt_at")
+    if isinstance(next_attempt_at, (int, float)) and not isinstance(next_attempt_at, bool) and now < next_attempt_at:
+        return "wait"
     return "dispatch"
 
 
@@ -833,7 +849,13 @@ def tick_schedule(now):
     if action == "record_skip":
         reason = str(schedule.get("pending_skip_reason") or SKIP_WINDOW_CLOSED)
         schedule.update(
-            {"last_skip_reason": reason, "last_skip_at": now, "pending_skip_reason": "", "window_seen_open_at": None}
+            {
+                "last_skip_reason": reason,
+                "last_skip_at": now,
+                "pending_skip_reason": "",
+                "next_attempt_at": None,
+                "window_seen_open_at": None,
+            }
         )
         write_json(SCHEDULE_PATH, schedule)
         log("the update window closed without a start: %s" % reason)
@@ -846,13 +868,17 @@ def tick_schedule(now):
         return
     if action == "nothing":
         return
+    if action == "wait":
+        return
     assert action == "dispatch", action
     schedule["window_seen_open_at"] = window[0] if window is not None else None
     reason = dispatch_scheduled(schedule, run, agents())
     if reason is None:
-        schedule.update({"marked_at": now, "pending_skip_reason": ""})
+        schedule.update({"marked_at": now, "pending_skip_reason": "", "next_attempt_at": None})
     else:
-        schedule["pending_skip_reason"] = reason
+        # A create that failed may have left a chat behind, so it is not retried every minute.
+        backoff = RETRY_BACKOFF_SECONDS_BY_SKIP.get(reason, 0)
+        schedule.update({"pending_skip_reason": reason, "next_attempt_at": now + backoff if backoff else None})
     write_json(SCHEDULE_PATH, schedule)
 
 

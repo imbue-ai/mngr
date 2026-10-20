@@ -343,3 +343,35 @@ def test_the_watchdog_reminds_an_idle_lead_through_its_chat_and_then_waits(
     assert len(messages) == 1
     assert messages[0][1] == _LEAD
     assert "no recorded result yet" in messages[0][3]
+
+
+def test_a_failed_create_is_not_retried_until_its_backoff_has_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    """A create that failed may have left a chat behind; retrying every minute for the whole window would pile them up."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("schedule.json", _schedule())
+    failure = ScriptedChatAppAnswer(status=500, body={"detail": "mngr create exited 1"})
+    with scripted_update_chat_app(staged.root, create_answers=[failure, _CREATED]) as requests:
+        _tick(program, staged, _IN_WINDOW)
+        _tick(program, staged, _IN_WINDOW + 60)
+        _tick(program, staged, _IN_WINDOW + 16 * 60)
+
+    assert len([request for request in requests if request.path == "/api/chats/create"]) == 2
+    schedule = staged.read_state("schedule.json")
+    assert schedule is not None and schedule["marked_chat"] == _LEAD
+
+
+def test_a_listing_without_the_services_agent_never_closes_a_run_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    """Such a listing read the wrong host dir; it is no evidence that the run's agent is gone."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("run.json", {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW})
+    staged.set_agents([], is_services_agent_listed=False)
+
+    with scripted_update_chat_app(staged.root):
+        _tick(program, staged, _IN_WINDOW)
+
+    run = staged.read_state("run.json")
+    assert run is not None and run.get("verdict") is None

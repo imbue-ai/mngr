@@ -1683,8 +1683,11 @@ class StagedUpdateWorkspace(FrozenModel):
     agents_file: Path = Field(description="What the stub ``mngr list`` answers")
     live_cron_dir: Path = Field(description="Stands in for /etc/cron.d")
 
-    def set_agents(self, agents: Sequence[Mapping[str, Any]]) -> None:
-        self.agents_file.write_text(json.dumps([dict(agent) for agent in agents]))
+    def set_agents(self, agents: Sequence[Mapping[str, Any]], *, is_services_agent_listed: bool = True) -> None:
+        """What the stub ``mngr list`` answers: ``agents``, beside the workspace's services agent unless told not to."""
+        services = [{"name": "system-services", "id": "agent-" + "0" * 32, "state": "RUNNING", "type": "main"}]
+        listed = (services if is_services_agent_listed else []) + [dict(agent) for agent in agents]
+        self.agents_file.write_text(json.dumps(listed))
 
     def recorded_calls(self) -> list[list[str]]:
         if not self.calls_log.exists():

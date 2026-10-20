@@ -350,6 +350,7 @@ def mode_arm(context):
         "marked_at": existing.get("marked_at"),
         "window_seen_open_at": existing.get("window_seen_open_at"),
         "pending_skip_reason": "",
+        "next_attempt_at": None,
         "last_skip_reason": "",
         "last_skip_at": None,
     }
