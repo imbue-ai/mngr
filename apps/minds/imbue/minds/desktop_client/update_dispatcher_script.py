@@ -670,25 +670,26 @@ def _create_through_message_chat(base_name, taken_names, display_name, message, 
                 argv += ["--label", "%s=%s" % (key, value)]
             argv += ["--message-file", message_path]
             created = run_command(argv, CHAT_CREATE_TIMEOUT_SECONDS, agent_env())
-            detail = bounded(created.stderr)
+            stderr = created.stderr or ""
+            detail = bounded(stderr)
             if created.returncode == MESSAGE_CHAT_DELIVERED:
                 line = _created_chat_line(created.stdout)
                 return _create_result(OUTCOME_CREATED, "", str(line.get("name") or name), str(line.get("chat_id") or ""))
             if created.returncode == MESSAGE_CHAT_NO_VERDICT:
-                if is_title_passed and "--title" in detail:
+                if is_title_passed and "--title" in stderr:
                     is_title_passed = False
                     continue
                 return None
-            if any(refusal in detail for refusal in SIGN_IN_REFUSALS):
+            if any(refusal in stderr for refusal in SIGN_IN_REFUSALS):
                 return _create_result(OUTCOME_NEEDS_SIGN_IN, detail)
-            if NAME_TAKEN_REFUSAL in detail and len(taken) < len(taken_names) + MAX_NAME_SUFFIX:
+            if NAME_TAKEN_REFUSAL in stderr and len(taken) < len(taken_names) + MAX_NAME_SUFFIX:
                 taken.append(name)
                 name = first_free_name(base_name, taken)
                 continue
-            if STILL_CREATING_REFUSAL in detail:
+            if STILL_CREATING_REFUSAL in stderr:
                 # The create runs on past the chat app's own wait; the chat is on its way.
                 return _create_result(OUTCOME_CREATED, detail, name, "")
-            if "Falling back to `mngr create`" in detail:
+            if "Falling back to `mngr create`" in stderr:
                 return _create_result(OUTCOME_CHAT_APP_UNREACHABLE, detail)
             return _create_result(OUTCOME_CREATE_FAILED, detail)
     finally:

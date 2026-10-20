@@ -295,6 +295,11 @@ def test_update_now_adopts_a_chat_dispatched_moments_ago_that_has_not_recorded_i
             "Falling back to `mngr create`: could not connect to the chat app\nmngr create failed\n",
             UpdateArmOutcome.CHAT_APP_UNREACHABLE,
         ),
+        # The bare create's own output follows the fallback line, and can run long.
+        (
+            "Falling back to `mngr create`: could not connect to the chat app\n" + "mngr create: a log line\n" * 100,
+            UpdateArmOutcome.CHAT_APP_UNREACHABLE,
+        ),
     ],
 )
 def test_a_create_the_chat_app_refused_reads_as_the_refusal_it_was(
@@ -312,7 +317,7 @@ def test_a_create_the_chat_app_refused_reads_as_the_refusal_it_was(
 
     result = parse_update_command_result(answer)
     assert result.outcome is outcome
-    assert result.detail == stderr.strip()
+    assert result.detail == stderr.strip()[-1000:]
     assert staged.read_state("last-dispatch.json") is None
 
 
