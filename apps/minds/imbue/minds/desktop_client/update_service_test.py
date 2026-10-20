@@ -369,6 +369,35 @@ def test_a_run_under_way_before_the_press_is_closed_out_by_its_own_verdict(
     assert state.verdict is UpdateVerdict.REFUSED
 
 
+def test_a_chat_dispatched_moments_ago_is_not_closed_out_by_an_earlier_runs_record_under_its_name(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """An Update now that meets a chat the dispatcher just made adopts it before its lead records its run, while
+    the record under that reused name is still the earlier run's; the dispatch time the answer names tells them
+    apart."""
+    caller = ScriptedMngrCaller(
+        results=(
+            update_command_answer(
+                "ALREADY_RUNNING",
+                "An update is already starting in this workspace.",
+                chat_agent_name=UPDATE_CHAT_NAME,
+                chat_id=UPDATE_CHAT_ID,
+                run_started_at=time.time() - 120.0,
+            ),
+            _probe_reading(UPDATE_CHAT_NAME, started_at=time.time() - 9000.0, verdict="REFUSED"),
+        )
+    )
+    service = _build_service(tmp_path, root_concurrency_group, caller=caller)
+    agent_id = AgentId.generate()
+    service.dispatch_update(agent_id)
+
+    service.poll_in_flight_runs()
+
+    state = service.state_store.get(agent_id)
+    assert state.activity is UpdateActivity.RUNNING
+    assert state.verdict is None
+
+
 def test_an_apply_sighting_windows_the_apply_before_any_probe_fails(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:

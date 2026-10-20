@@ -241,7 +241,7 @@ class UpdateRunStatus(FrozenModel):
         return bool(self.apply_phase)
 
 
-def _parse_epoch(value: object) -> datetime | None:
+def parse_update_epoch(value: object) -> datetime | None:
     """An epoch-seconds field as an aware UTC datetime, or None if it is not one."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
@@ -290,17 +290,17 @@ def parse_update_run_record(raw: object) -> UpdateRunStatus | None:
             logger.warning("Reading an update run record with an unknown verdict {!r} as still running", raw_verdict)
     return UpdateRunStatus(
         chat_agent_name=str(record.get("chat_agent_name") or ""),
-        started_at=_parse_epoch(record.get("started_at")),
+        started_at=parse_update_epoch(record.get("started_at")),
         worker_agent_name=str(record.get("worker_agent_name") or ""),
         is_holding=bool(record.get("is_holding", False)),
         hold_detail=str(record.get("hold_detail") or ""),
         apply_phase=str(record.get("apply_phase") or ""),
-        apply_updated_at=_parse_epoch(record.get("apply_updated_at")),
+        apply_updated_at=parse_update_epoch(record.get("apply_updated_at")),
         verdict=verdict,
         detail=str(record.get("detail") or ""),
         resulting_ref=str(record.get("resulting_ref") or ""),
         in_place_compatible_ref=str(record.get("in_place_compatible_ref") or ""),
-        verdict_at=_parse_epoch(record.get("verdict_at")),
+        verdict_at=parse_update_epoch(record.get("verdict_at")),
         started_by=_parse_started_by(record.get("started_by")),
     )
 
@@ -351,7 +351,7 @@ def parse_update_schedule_record(raw: object) -> UpdateScheduleRecord | None:
         logger.warning("Dropped an update schedule file with no readable window: {!r}", str(raw)[:200])
         return None
     return UpdateScheduleRecord(
-        armed_at=_parse_epoch(record.get("armed_at")),
+        armed_at=parse_update_epoch(record.get("armed_at")),
         ceiling_ref=str(record.get("ceiling") or ""),
         window_start_hour=start_hour,
         window_end_hour=end_hour,
@@ -360,7 +360,7 @@ def parse_update_schedule_record(raw: object) -> UpdateScheduleRecord | None:
         marked_chat_name=str(record.get("marked_chat") or ""),
         pending_skip_reason=str(record.get("pending_skip_reason") or ""),
         last_skip_reason=str(record.get("last_skip_reason") or ""),
-        last_skip_at=_parse_epoch(record.get("last_skip_at")),
+        last_skip_at=parse_update_epoch(record.get("last_skip_at")),
     )
 
 

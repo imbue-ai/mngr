@@ -558,8 +558,8 @@ def is_run_in_flight(run, agents):
 
 
 def pending_dispatched_chat(run, agents, now):
-    """The last dispatch's ``(chat agent name, chat id)`` while its lead may still be on its way to recording
-    its run; None otherwise.
+    """The last dispatch's ``(chat agent name, chat id, dispatched at)`` while its lead may still be on its way
+    to recording its run; None otherwise.
 
     A new lead records its start and takes the update lease only minutes after its chat is made,
     so until then the last dispatch is the one sign of it. Only for a short while after the
@@ -586,7 +586,7 @@ def pending_dispatched_chat(run, agents, now):
     listed = find_agent(agents, name) if agents is not None else None
     if listed is not None and is_agent_ended(listed):
         return None
-    return name, str(dispatch.get("chat_id") or "")
+    return name, str(dispatch.get("chat_id") or ""), float(dispatched_at)
 
 
 def display_version(ref):

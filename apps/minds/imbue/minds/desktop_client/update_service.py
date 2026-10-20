@@ -367,7 +367,10 @@ class WorkspaceUpdateService(MutableModel):
                 # The run under way is the answer to the press: the row reports it from here.
                 if result.chat_agent_name:
                     self.state_store.adopt_run_under_way(
-                        agent_id, chat_agent_name=result.chat_agent_name, chat_agent_id=result.chat_id
+                        agent_id,
+                        chat_agent_name=result.chat_agent_name,
+                        chat_agent_id=result.chat_id,
+                        run_started_at=result.run_started_at,
                     )
                 return UpdateDispatch(outcome=UpdateDispatchOutcome.ALREADY_RUNNING, failure_detail=result.detail)
             case UpdateArmOutcome.NEEDS_SIGN_IN:

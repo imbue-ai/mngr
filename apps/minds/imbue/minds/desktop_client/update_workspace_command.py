@@ -24,6 +24,7 @@ import base64
 import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
+from datetime import datetime
 from enum import auto
 from typing import Final
 
@@ -46,6 +47,7 @@ from imbue.minds.desktop_client.update_status import UpdateArmOutcome
 from imbue.minds.desktop_client.update_status import UpdateLastDispatch
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateScheduleRecord
+from imbue.minds.desktop_client.update_status import parse_update_epoch
 from imbue.minds.desktop_client.update_status import parse_update_last_dispatch
 from imbue.minds.desktop_client.update_status import parse_update_run_record
 from imbue.minds.desktop_client.update_status import parse_update_schedule_record
@@ -108,6 +110,10 @@ class UpdateCommandResult(FrozenModel):
     detail: str = Field(default="", description="The program's one line about it")
     chat_agent_name: str = Field(default="", description="The update chat a CREATED or ALREADY_RUNNING names")
     chat_id: str = Field(default="", description="That chat's id, for opening it; '' when unknown")
+    run_started_at: datetime | None = Field(
+        default=None,
+        description="When an ALREADY_RUNNING run began (its record's start, or its chat's dispatch); None when unsaid",
+    )
     schedule: UpdateScheduleRecord | None = Field(
         default=None, description="The schedule file as the command left it (``arm`` only)"
     )
@@ -230,6 +236,7 @@ def parse_update_command_result(payload: Mapping[str, object]) -> UpdateCommandR
         detail=_payload_str(payload, "detail"),
         chat_agent_name=_payload_str(payload, "chat_agent_name"),
         chat_id=_payload_str(payload, "chat_id"),
+        run_started_at=parse_update_epoch(payload.get("run_started_at")),
         schedule=parse_update_schedule_record(raw_schedule) if raw_schedule is not None else None,
     )
 
@@ -392,6 +399,8 @@ def mode_now(context):
         return
     agents = list_agents()
     run = read_json(RUN_PATH)
+    # An ALREADY_RUNNING answer names when the run it found began, which tells its record apart from an
+    # earlier run's under the same chat name.
     if is_run_in_flight(run, agents):
         lead = find_run_lead(agents or [], run)
         emit(
@@ -403,6 +412,7 @@ def mode_now(context):
                     chat_id_of(lead) if lead else "",
                 ),
                 mode="now",
+                run_started_at=run_started_at(run),
             )
         )
         return
@@ -415,10 +425,14 @@ def mode_now(context):
         return
     pending = pending_dispatched_chat(run, agents, context["now"])
     if pending is not None:
+        name, chat_id, dispatched_at = pending
         emit(
             dict(
-                _create_result(OUTCOME_ALREADY_RUNNING, "An update is already starting in this workspace.", *pending),
+                _create_result(
+                    OUTCOME_ALREADY_RUNNING, "An update is already starting in this workspace.", name, chat_id
+                ),
                 mode="now",
+                run_started_at=dispatched_at,
             )
         )
         return

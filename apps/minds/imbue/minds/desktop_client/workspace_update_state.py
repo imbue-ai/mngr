@@ -535,18 +535,31 @@ class WorkspaceUpdateStateStore(MutableModel):
         Taken from STARTING only; the row goes RUNNING under the chat's name, so the poll
         matches the run's own record to it. Returns whether it was taken.
         """
-        return self._adopt_chat(agent_id, chat_agent_name, chat_agent_id, is_claimed_run=True)
+        return self._adopt_chat(agent_id, chat_agent_name, chat_agent_id, is_claimed_run=True, started_at=None)
 
-    def adopt_run_under_way(self, agent_id: AgentId, *, chat_agent_name: str, chat_agent_id: str) -> bool:
+    def adopt_run_under_way(
+        self, agent_id: AgentId, *, chat_agent_name: str, chat_agent_id: str, run_started_at: datetime | None
+    ) -> bool:
         """The run already under way in the workspace is this row's now, as :meth:`adopt_dispatched_chat` takes it.
 
-        Without the claim's target or start: those were the press's, and the run under way has its own.
+        Without the claim's target or start: those were the press's. ``run_started_at`` is when the
+        run under way began, as the workspace said (None when it did not): a record under the same
+        chat name from before it is an earlier run's.
         """
-        return self._adopt_chat(agent_id, chat_agent_name, chat_agent_id, is_claimed_run=False)
+        return self._adopt_chat(
+            agent_id, chat_agent_name, chat_agent_id, is_claimed_run=False, started_at=run_started_at
+        )
 
     def _adopt_chat(
-        self, agent_id: AgentId, chat_agent_name: str, chat_agent_id: str, *, is_claimed_run: bool
+        self,
+        agent_id: AgentId,
+        chat_agent_name: str,
+        chat_agent_id: str,
+        *,
+        is_claimed_run: bool,
+        started_at: datetime | None,
     ) -> bool:
+        """``started_at`` is the run's start for a run under way; a claimed run keeps its claim's."""
         aid_str = str(agent_id)
         with self._lock:
             facts = self._run_by_agent.get(aid_str, _RunFacts())
@@ -560,7 +573,7 @@ class WorkspaceUpdateStateStore(MutableModel):
                         to_update(facts.record.field_ref().chat_agent_name, chat_agent_name),
                         to_update(
                             facts.record.field_ref().started_at,
-                            facts.record.started_at if is_claimed_run else None,
+                            facts.record.started_at if is_claimed_run else started_at,
                         ),
                     ),
                 ),

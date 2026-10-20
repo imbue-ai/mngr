@@ -2,6 +2,8 @@
 
 import json
 import subprocess
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -251,6 +253,7 @@ def test_update_now_adopts_a_run_already_under_way(
     result = parse_update_command_result(answer)
     assert result.outcome is UpdateArmOutcome.ALREADY_RUNNING
     assert (result.chat_agent_name, result.chat_id) == ("update-to-minds-v0-8-7", "agent-" + "d" * 32)
+    assert result.run_started_at == datetime.fromtimestamp(_NOW - 600, tz=timezone.utc)
     assert staged.chat_creates() == []
 
 
@@ -280,6 +283,8 @@ def test_update_now_adopts_a_chat_dispatched_moments_ago_that_has_not_recorded_i
     result = parse_update_command_result(answer)
     assert result.outcome is UpdateArmOutcome.ALREADY_RUNNING
     assert (result.chat_agent_name, result.chat_id) == ("update-to-minds-v0-9-0", chat_id)
+    # The dispatch's time, not the earlier run's start the record still holds.
+    assert result.run_started_at == datetime.fromtimestamp(_NOW - 120, tz=timezone.utc)
     assert staged.chat_creates() == []
 
 
