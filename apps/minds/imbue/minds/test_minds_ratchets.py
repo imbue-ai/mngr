@@ -84,6 +84,9 @@ _ALLOWED_HOST_LIFECYCLE_FILES = (
     # mark to keep in step, and the module holds no desktop-side code that
     # could ever acquire one.
     "backup_workspace_scripts.py",
+    # The same for the update program's own tests: the argv they assert is the `mngr stop` the
+    # program ran inside a staged workspace, which stops the update's worker agent, not a host.
+    "update_dispatcher_script_test.py",
 )
 
 # Both shapes a host lifecycle call takes: a subprocess argv led by the resolved binary,

@@ -439,9 +439,11 @@ class WorkspaceUpdateService(MutableModel):
 
         The sweep re-arms it once the app's ceiling moves to a newer release.
         """
-        if self.minds_config is not None:
+        refusal = self.cancel_schedule(agent_id)
+        # Only once the cancel landed: a workspace still armed would run the update it was told to skip.
+        if refusal is None and self.minds_config is not None:
             self.minds_config.set_skipped_update_target(str(agent_id), self.settings_source.read_ceiling())
-        return self.cancel_schedule(agent_id)
+        return refusal
 
     def open_sign_in_chat(self, agent_id: AgentId) -> bool:
         """Open a new chat window in the workspace with the provider chooser up; whether it opened.

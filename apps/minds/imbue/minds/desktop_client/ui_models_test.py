@@ -233,6 +233,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiWorkspacesMessage",
             "UpdateActivity",
             "UpdateAvailability",
+            "UpdateStartedBy",
             "UpdateUnknownReason",
             "UpdateVerdict",
         ]
