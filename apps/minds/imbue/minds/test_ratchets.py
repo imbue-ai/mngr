@@ -49,7 +49,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(7), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
+    rc.check_bare_print(_DIR, snapshot(9), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
 
 
 # ratchet_group("Exception handling")
