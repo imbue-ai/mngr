@@ -330,8 +330,9 @@ export class ShellState {
    * the sign-in chat, or the modal when it could not open, which has room to
    * say why. */
   signInForUpdateOrExplain(anyId: string): void {
-    void this.signInForUpdate(anyId).then((result) => {
-      if (!result.isOk) this.openUpdateModal(anyId);
+    const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
+    void this.signInForUpdate(agentScoped).then((result) => {
+      if (!result.isOk) this.openUpdateModal(agentScoped);
       m.redraw();
     });
   }
