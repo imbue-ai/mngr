@@ -68,6 +68,27 @@ describe("the auto-update prompt's triggers", () => {
     const { model } = backend(null, true);
     expect(model.triggerFor(false, true)).toBeNull();
   });
+
+  it("reads the answer again on the next load after a read that failed", async () => {
+    let isBackendUp = false;
+    const fetchImpl = (() =>
+      Promise.resolve(
+        isBackendUp
+          ? jsonResponse({ auto_update_prompt_decision: null })
+          : jsonResponse({}, 503),
+      )) as typeof fetch;
+    const model = new AutoUpdatePromptModel(
+      fetchImpl,
+      () => Promise.resolve(true),
+      () => undefined,
+    );
+    await model.load();
+    expect(model.triggerFor(false, false)).toBeNull();
+
+    isBackendUp = true;
+    await model.load();
+    expect(model.triggerFor(false, false)).toBe("app-updated");
+  });
 });
 
 describe("answering the auto-update prompt", () => {
