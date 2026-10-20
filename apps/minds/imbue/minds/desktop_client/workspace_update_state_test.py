@@ -1219,6 +1219,8 @@ def _offered_state(**overrides: object) -> UiWorkspaceUpdate:
         (_offered_state(), AutoUpdatePolicy(is_enabled=True, skipped_target_ref="minds-v0.4.0"), True),
         # A run that failed after its lead's best effort is not retried unwatched.
         (_offered_state(verdict=UpdateVerdict.STUCK, chat_agent_name="update-to-minds-v0-4-1"), _ENABLED, False),
+        # So is one that stalled with no verdict, which every surface reports as failed.
+        (_offered_state(activity=UpdateActivity.STALLED, chat_agent_name="update-to-minds-v0-4-1"), _ENABLED, False),
     ],
 )
 @pytest.mark.witnesses("workspace-updates.arms-behind-workspaces")

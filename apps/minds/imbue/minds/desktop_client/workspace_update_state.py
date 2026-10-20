@@ -783,14 +783,14 @@ def should_auto_arm(
 
     Only a workspace positively read a minor release behind, with nothing armed or running,
     no decision pending, and this release not skipped. A run that failed after its lead's
-    best effort is not re-armed for the same release: a retry needs something to have
-    changed -- a newer ceiling, or the user dismissing the failure.
+    best effort, or stalled without a verdict, is not re-armed for the same release: a retry
+    needs something to have changed -- a newer ceiling, or the user dismissing the failure.
     """
     if not policy.is_enabled or not state.is_update_offered or state.is_scheduled or state.is_run_in_flight:
         return False
     if state.is_decision_pending or policy.skipped_target_ref == ceiling_ref:
         return False
-    if state.verdict in FAILURE_UPDATE_VERDICTS:
+    if state.verdict in FAILURE_UPDATE_VERDICTS or state.activity is UpdateActivity.STALLED:
         is_failure_for_an_older_ceiling = (
             last_dispatch is not None
             and last_dispatch.chat_agent_name == state.chat_agent_name
