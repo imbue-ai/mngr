@@ -1156,6 +1156,17 @@ dependencies = [
 requires-dist = [{ name = "imbue-mngr", editable = "../../../../libs/mngr" }]
 
 [[package]]
+name = "imbue-mngr-autocompact"
+version = "0.1.0"
+source = { editable = "../../../../libs/mngr_autocompact" }
+dependencies = [
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-mngr", editable = "../../../../libs/mngr" }]
+
+[[package]]
 name = "imbue-mngr-aws"
 version = "0.1.4"
 source = { editable = "../../../../libs/mngr_aws" }
@@ -1215,6 +1226,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "imbue-mngr" },
     { name = "overlay" },
+    { name = "rich" },
 ]
 
 [package.metadata]
@@ -1222,6 +1234,7 @@ requires-dist = [
     { name = "anthropic" },
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
     { name = "overlay", editable = "../../../../libs/overlay" },
+    { name = "rich", specifier = ">=13.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -1696,6 +1709,7 @@ dependencies = [
     { name = "imbue-common" },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-antigravity" },
+    { name = "imbue-mngr-autocompact" },
     { name = "imbue-mngr-aws" },
     { name = "imbue-mngr-azure" },
     { name = "imbue-mngr-claude" },
@@ -1745,6 +1759,7 @@ requires-dist = [
     { name = "imbue-common", editable = "../../../../libs/imbue_common" },
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
     { name = "imbue-mngr-antigravity", editable = "../../../../libs/mngr_antigravity" },
+    { name = "imbue-mngr-autocompact", editable = "../../../../libs/mngr_autocompact" },
     { name = "imbue-mngr-aws", editable = "../../../../libs/mngr_aws" },
     { name = "imbue-mngr-azure", editable = "../../../../libs/mngr_azure" },
     { name = "imbue-mngr-claude", editable = "../../../../libs/mngr_claude" },
@@ -1791,6 +1806,7 @@ dependencies = [
     { name = "imbue-common" },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-antigravity" },
+    { name = "imbue-mngr-autocompact" },
     { name = "imbue-mngr-aws" },
     { name = "imbue-mngr-azure" },
     { name = "imbue-mngr-claude" },
@@ -1819,6 +1835,7 @@ requires-dist = [
     { name = "imbue-common", editable = "../../../../libs/imbue_common" },
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
     { name = "imbue-mngr-antigravity", editable = "../../../../libs/mngr_antigravity" },
+    { name = "imbue-mngr-autocompact", editable = "../../../../libs/mngr_autocompact" },
     { name = "imbue-mngr-aws", editable = "../../../../libs/mngr_aws" },
     { name = "imbue-mngr-azure", editable = "../../../../libs/mngr_azure" },
     { name = "imbue-mngr-claude", editable = "../../../../libs/mngr_claude" },
