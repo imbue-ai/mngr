@@ -614,10 +614,10 @@ _TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS: float = 5.0
 def _get_descendant_pids(pid: str) -> list[str]:
     """Recursively get all descendant PIDs of a given process.
 
-    Note: This mirrors Host._get_all_descendant_pids in host.py but uses subprocess
-    directly instead of host.execute_command, since this is used for test cleanup
-    outside of Host (e.g., in fixtures and context managers). The Host version goes
-    through pyinfra which supports both local and SSH execution.
+    Note: This is the test-cleanup counterpart of Host._collect_session_pids in host.py
+    but uses subprocess directly instead of host.execute_command, since this is used for
+    test cleanup outside of Host (e.g., in fixtures and context managers). The Host
+    version goes through pyinfra which supports both local and SSH execution.
 
     The whole walk shares one deadline, for the reason given on
     :func:`_run_with_timeout`: this runs inside the caller's ``pytest-timeout``
