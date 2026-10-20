@@ -314,18 +314,13 @@ class MindsConfig(MutableModel):
         value = skipped.get(agent_id)
         return str(value) if isinstance(value, str) and value else None
 
-    def set_skipped_update_target(self, agent_id: str, target_ref: str | None) -> None:
-        """Record (or, with None, clear) the release the user skipped for this workspace under auto-update."""
+    def set_skipped_update_target(self, agent_id: str, target_ref: str) -> None:
+        """Record the release the user skipped for this workspace under auto-update."""
         with self._lock:
             data = self._read_raw()
             updates = _as_str_keyed_dict(data.get("updates")) or {}
             skipped = _as_str_keyed_dict(updates.get("skipped_targets")) or {}
-            if target_ref is not None:
-                skipped[agent_id] = target_ref
-            elif agent_id in skipped:
-                del skipped[agent_id]
-            else:
-                return
+            skipped[agent_id] = target_ref
             updates["skipped_targets"] = skipped
             data["updates"] = updates
             self._write_raw(data)
