@@ -12,10 +12,12 @@ interface Backend {
 }
 
 /** A model over a backend whose settings payload records `decision`, on a
- * launch that is (or is not) the first into a new app version. */
+ * launch that is (or is not) the first into a new app version; every write
+ * answers `writeAnswer`. */
 function backend(
   decision: AutoUpdatePromptDecision | null,
   isFirstLaunchAfterAppUpdate: boolean,
+  writeAnswer: () => Response = () => jsonResponse({}),
 ): Backend {
   const requests: string[] = [];
   const fetchImpl = ((url: string, init?: RequestInit) => {
@@ -26,7 +28,7 @@ function backend(
       return Promise.resolve(
         jsonResponse({ auto_update_prompt_decision: decision }),
       );
-    return Promise.resolve(jsonResponse({}));
+    return Promise.resolve(writeAnswer());
   }) as typeof fetch;
   const model = new AutoUpdatePromptModel(
     fetchImpl,
@@ -100,18 +102,8 @@ describe("answering the auto-update prompt", () => {
   });
 
   it("keeps the prompt up with the reason when the answer could not be saved", async () => {
-    const requests: string[] = [];
-    const model = new AutoUpdatePromptModel(
-      ((url: string) => {
-        requests.push(url);
-        return Promise.resolve(
-          url === "/ui/api/settings"
-            ? jsonResponse({ auto_update_prompt_decision: null })
-            : jsonResponse({ error: "The settings file is read-only." }, 500),
-        );
-      }) as typeof fetch,
-      () => Promise.resolve(true),
-      () => undefined,
+    const { model } = backend(null, true, () =>
+      jsonResponse({ error: "The settings file is read-only." }, 500),
     );
     await model.load();
     await model.choose("declined");
