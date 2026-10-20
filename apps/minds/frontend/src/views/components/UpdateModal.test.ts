@@ -399,18 +399,19 @@ describe("the update modal over a machine that needs a sign-in", () => {
   it("enters the machine before asking it for the sign-in chat", async () => {
     // The chat opens only in a connected frame, so the entry comes first.
     let answer: ((response: Response) => void) | null = null;
-    const { draw, requests, routeSet, onClose } = harness(
-      () =>
-        new Promise<Response>((resolve) => {
-          answer = resolve;
-        }),
-      REFUSED,
-    );
+    let routeSetsWhenAsked: number | null = null;
+    const { draw, requests, routeSet, onClose } = harness(() => {
+      routeSetsWhenAsked = routeSet.mock.calls.length;
+      return new Promise<Response>((resolve) => {
+        answer = resolve;
+      });
+    }, REFUSED);
 
     press(draw(), "Sign in");
 
     expect(routeSet).toHaveBeenCalledWith(`/workspace/${AGENT}`, {});
     expect(requests).toEqual([`/ui/api/updates/${AGENT}/sign-in`]);
+    expect(routeSetsWhenAsked).toBe(1);
     (answer as unknown as (response: Response) => void)(jsonResponse({}));
     await settleDispatch();
     expect(onClose).toHaveBeenCalledTimes(1);
