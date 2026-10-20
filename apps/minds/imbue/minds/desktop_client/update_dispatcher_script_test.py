@@ -1,5 +1,6 @@
 """The workspace dispatcher: its window, its dispatch decisions, its watchdog, and whole cron ticks."""
 
+import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -9,10 +10,10 @@ from uuid import uuid4
 
 import pytest
 
-from imbue.minds.desktop_client.testing import ScriptedChatAppAnswer
+from imbue.minds.desktop_client.testing import STAGED_CREATED_CHAT
+from imbue.minds.desktop_client.testing import ScriptedToolAnswer
 from imbue.minds.desktop_client.testing import StagedUpdateWorkspace
 from imbue.minds.desktop_client.testing import load_update_workspace_program
-from imbue.minds.desktop_client.testing import scripted_update_chat_app
 from imbue.minds.desktop_client.testing import stage_update_workspace
 from imbue.minds.desktop_client.testing import update_program_context
 
@@ -20,9 +21,6 @@ _LOS_ANGELES = "America/Los_Angeles"
 _LEAD = "update-to-minds-v0-9-0"
 _LEAD_ID = "agent-" + "1" * 32
 _WORKER = "update-self"
-_CREATED = ScriptedChatAppAnswer(
-    status=201, body={"chat_id": "agent-" + "a" * 32, "name": _LEAD, "display_name": "Update to v0.9.0"}
-)
 
 
 def _epoch(iso: str) -> float:
@@ -165,9 +163,10 @@ def test_one_tick_decides_from_the_window_and_the_run_record(
 
 
 def _agent(name: str, state: str, agent_id: str = "") -> dict[str, Any]:
-    return {"name": name, "state": state, "id": agent_id or f"agent-{uuid4().hex}", "labels": {}}
+    return {"name": name, "state": state, "id": agent_id or f"agent-{uuid4().hex}"}
 
 
+_NOTHING_BUSY: tuple[set[str], set[str], set[str]] = (set(), set(), set())
 _OPEN_RUN = {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW, "worker_agent_name": _WORKER}
 
 
@@ -175,19 +174,19 @@ _OPEN_RUN = {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW, "worker_agent_n
     ("run", "agents", "busy", "state", "action"),
     [
         # The lead is gone with no verdict: close the run out.
-        (_OPEN_RUN, [], None, {}, "close_out"),
-        (_OPEN_RUN, [_agent(_LEAD, "DONE")], None, {}, "close_out"),
+        (_OPEN_RUN, [], _NOTHING_BUSY, {}, "close_out"),
+        (_OPEN_RUN, [_agent(_LEAD, "DONE")], _NOTHING_BUSY, {}, "close_out"),
         # A listing that could not be read is no evidence of anything.
-        (_OPEN_RUN, None, None, {}, "nothing"),
+        (_OPEN_RUN, None, _NOTHING_BUSY, {}, "nothing"),
         # The worker is moving: nothing is owed yet.
-        (_OPEN_RUN, [_agent(_LEAD, "WAITING"), _agent(_WORKER, "RUNNING")], None, {}, "reset"),
-        # The lead waits on a background task the chat app reports busy.
-        (_OPEN_RUN, [_agent(_LEAD, "WAITING"), _agent(_WORKER, "WAITING")], {_LEAD: True}, {}, "reset"),
+        (_OPEN_RUN, [_agent(_LEAD, "WAITING"), _agent(_WORKER, "RUNNING")], _NOTHING_BUSY, {}, "reset"),
+        # The lead waits on a background task the workspace reports busy.
+        (_OPEN_RUN, [_agent(_LEAD, "WAITING"), _agent(_WORKER, "WAITING")], ({_LEAD}, set(), set()), {}, "reset"),
         # Both idle, briefly: count it.
         (
             _OPEN_RUN,
             [_agent(_LEAD, "WAITING"), _agent(_WORKER, "WAITING")],
-            {_LEAD: False, _WORKER: False},
+            _NOTHING_BUSY,
             {},
             "count_idle",
         ),
@@ -195,7 +194,7 @@ _OPEN_RUN = {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW, "worker_agent_n
         (
             _OPEN_RUN,
             [_agent(_LEAD, "WAITING")],
-            None,
+            _NOTHING_BUSY,
             {"idle_ticks": 2, "last_reminded_at": 0.0},
             "remind",
         ),
@@ -203,27 +202,31 @@ _OPEN_RUN = {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW, "worker_agent_n
         (
             _OPEN_RUN,
             [_agent(_LEAD, "WAITING")],
-            None,
+            _NOTHING_BUSY,
             {"idle_ticks": 9, "last_reminded_at": _IN_WINDOW - 60},
             "count_idle",
         ),
         # A run that is landing belongs to the apply's own recovery.
-        ({**_OPEN_RUN, "apply_phase": "merged"}, [], None, {}, "reset"),
+        ({**_OPEN_RUN, "apply_phase": "merged"}, [], _NOTHING_BUSY, {}, "reset"),
         # A record holding for the user (an older template's hold) is waiting on purpose.
-        ({**_OPEN_RUN, "is_holding": True}, [_agent(_LEAD, "WAITING")], None, {"idle_ticks": 9}, "reset"),
+        ({**_OPEN_RUN, "is_holding": True}, [_agent(_LEAD, "WAITING")], _NOTHING_BUSY, {"idle_ticks": 9}, "reset"),
         # A run with a verdict owes nothing.
-        ({**_OPEN_RUN, "verdict": "UPDATED"}, [], None, {}, "nothing"),
+        ({**_OPEN_RUN, "verdict": "UPDATED"}, [], _NOTHING_BUSY, {}, "nothing"),
     ],
 )
 def test_the_watchdog_decides_from_the_lead_and_worker_states(
     program: ModuleType,
     run: dict[str, Any],
     agents: list[dict[str, Any]] | None,
-    busy: dict[str, bool] | None,
+    busy: tuple[set[str], set[str], set[str]],
     state: dict[str, Any],
     action: str,
 ) -> None:
     assert program.decide_watchdog_action(run, agents, busy, state, _IN_WINDOW) == action
+
+
+def _creates(staged: StagedUpdateWorkspace) -> list[list[str]]:
+    return [call for call in staged.tool_calls("message_chat.py") if call[:1] == ["--create"]]
 
 
 def _tick(program: ModuleType, staged: StagedUpdateWorkspace, now: float) -> None:
@@ -236,14 +239,14 @@ def test_a_tick_inside_the_window_starts_the_run_once_and_marks_the_file(
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("schedule.json", _schedule())
-    with scripted_update_chat_app(staged.root, create_answers=[_CREATED, _CREATED]) as requests:
-        _tick(program, staged, _IN_WINDOW)
-        staged.set_agents([_agent(_LEAD, "RUNNING", "agent-" + "a" * 32)])
-        _tick(program, staged, _IN_WINDOW + 60)
+    _tick(program, staged, _IN_WINDOW)
+    staged.set_agents([_agent(_LEAD, "RUNNING", "agent-" + "a" * 32)])
+    _tick(program, staged, _IN_WINDOW + 60)
 
-    creates = [request.body for request in requests if request.path == "/api/chats/create"]
+    creates = _creates(staged)
     assert len(creates) == 1
-    assert "labels" in creates[0] and creates[0]["labels"] == {}
+    # A scheduled run surfaces no window of its own.
+    assert "--label" not in creates[0]
     schedule = staged.read_state("schedule.json")
     assert schedule is not None
     assert (schedule["marked_chat"], schedule["marked_at"]) == (_LEAD, _IN_WINDOW)
@@ -315,12 +318,11 @@ def test_the_watchdog_closes_out_a_run_whose_lead_is_gone(
         "---\nid: w-2\nstatus: in_progress\nagent: someone-else\n---\n# updating workspace\n"
     )
 
-    with scripted_update_chat_app(staged.root):
-        _tick(program, staged, _IN_WINDOW)
+    _tick(program, staged, _IN_WINDOW)
 
-    run = staged.read_state("run.json")
-    assert run is not None
-    assert run["verdict"] == "STUCK"
+    assert [call[:6] for call in staged.tool_calls("update_self.py")] == [
+        ["run-status", "verdict", "STUCK", "--chat", _LEAD, "--detail"]
+    ]
     calls = staged.recorded_calls()
     assert ["stop", _WORKER] in calls
     closes = [call for call in calls if call[:1] == ["close"]]
@@ -335,14 +337,13 @@ def test_the_watchdog_reminds_an_idle_lead_through_its_chat_and_then_waits(
     staged.write_state("run.json", {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW})
     staged.set_agents([_agent(_LEAD, "WAITING", _LEAD_ID)])
 
-    with scripted_update_chat_app(staged.root, tracked_agents=[{"name": _LEAD, "is_busy": False}]):
-        for minute in range(5):
-            _tick(program, staged, _IN_WINDOW + 60 * minute)
+    for minute in range(5):
+        _tick(program, staged, _IN_WINDOW + 60 * minute)
 
-    messages = [call for call in staged.recorded_calls() if call[:1] == ["message"]]
+    messages = staged.tool_calls("message_chat.py")
     assert len(messages) == 1
-    assert messages[0][1] == _LEAD
-    assert "no recorded result yet" in messages[0][3]
+    assert messages[0][:2] == [_LEAD_ID, "-m"]
+    assert "no recorded result yet" in messages[0][2]
 
 
 def test_a_failed_create_is_not_retried_until_its_backoff_has_passed(
@@ -351,13 +352,18 @@ def test_a_failed_create_is_not_retried_until_its_backoff_has_passed(
     """A create that failed may have left a chat behind; retrying every minute for the whole window would pile them up."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("schedule.json", _schedule())
-    failure = ScriptedChatAppAnswer(status=500, body={"detail": "mngr create exited 1"})
-    with scripted_update_chat_app(staged.root, create_answers=[failure, _CREATED]) as requests:
-        _tick(program, staged, _IN_WINDOW)
-        _tick(program, staged, _IN_WINDOW + 60)
-        _tick(program, staged, _IN_WINDOW + 16 * 60)
+    staged.script_tool(
+        "system/scripts/message_chat.py",
+        [
+            ScriptedToolAnswer(exit_code=1, stderr="The chat app did not create the chat: mngr create exited 1\n"),
+            ScriptedToolAnswer(stdout=json.dumps(STAGED_CREATED_CHAT) + "\n"),
+        ],
+    )
+    _tick(program, staged, _IN_WINDOW)
+    _tick(program, staged, _IN_WINDOW + 60)
+    _tick(program, staged, _IN_WINDOW + 16 * 60)
 
-    assert len([request for request in requests if request.path == "/api/chats/create"]) == 2
+    assert len(_creates(staged)) == 2
     schedule = staged.read_state("schedule.json")
     assert schedule is not None and schedule["marked_chat"] == _LEAD
 
@@ -370,8 +376,40 @@ def test_a_listing_without_the_services_agent_never_closes_a_run_out(
     staged.write_state("run.json", {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW})
     staged.set_agents([], is_services_agent_listed=False)
 
-    with scripted_update_chat_app(staged.root):
-        _tick(program, staged, _IN_WINDOW)
+    _tick(program, staged, _IN_WINDOW)
 
-    run = staged.read_state("run.json")
-    assert run is not None and run.get("verdict") is None
+    assert staged.tool_calls("update_self.py") == []
+
+
+def test_the_watchdog_closes_nothing_out_until_the_verdict_is_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    """The template's recorder is the run record's one writer; while it fails, the worker and leases are left be."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("run.json", {**_OPEN_RUN, "verdict": None})
+    staged.set_agents([_agent(_WORKER, "RUNNING")])
+    staged.script_tool(
+        ".agents/skills/update-self/scripts/update_self.py", [ScriptedToolAnswer(exit_code=1, stderr="broken\n")]
+    )
+
+    _tick(program, staged, _IN_WINDOW)
+
+    assert len(staged.tool_calls("update_self.py")) == 1
+    assert ["stop", _WORKER] not in staged.recorded_calls()
+
+
+def test_a_lead_waiting_on_a_background_task_is_not_reminded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("run.json", {"chat_agent_name": _LEAD, "started_at": _IN_WINDOW})
+    staged.set_agents([_agent(_LEAD, "WAITING", _LEAD_ID)])
+    staged.script_tool(
+        "system/scripts/background_tasks.py",
+        [ScriptedToolAnswer(stdout=f"{_LEAD_ID}\t{_LEAD_ID}\t{_LEAD}\ttrue\t1\n")],
+    )
+
+    for minute in range(5):
+        _tick(program, staged, _IN_WINDOW + 60 * minute)
+
+    assert staged.tool_calls("message_chat.py") == []

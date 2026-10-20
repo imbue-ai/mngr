@@ -1,5 +1,6 @@
 """The workspace update program's command modes, run in-process against a staged workspace."""
 
+import json
 import subprocess
 from pathlib import Path
 from types import ModuleType
@@ -8,11 +9,11 @@ from typing import Any
 import pytest
 from inline_snapshot import snapshot
 
-from imbue.minds.desktop_client.testing import ScriptedChatAppAnswer
+from imbue.minds.desktop_client.testing import STAGED_CREATED_CHAT
+from imbue.minds.desktop_client.testing import ScriptedToolAnswer
 from imbue.minds.desktop_client.testing import StagedUpdateWorkspace
 from imbue.minds.desktop_client.testing import load_update_workspace_program
 from imbue.minds.desktop_client.testing import read_update_program_answer
-from imbue.minds.desktop_client.testing import scripted_update_chat_app
 from imbue.minds.desktop_client.testing import stage_update_workspace
 from imbue.minds.desktop_client.testing import update_program_context
 from imbue.minds.desktop_client.update_status import UpdateArmOutcome
@@ -30,10 +31,6 @@ _SETTINGS = UpdateWorkspaceSettings(
     window_end_hour=5,
     zone="America/Los_Angeles",
     is_backup_configured=True,
-)
-_CREATED = ScriptedChatAppAnswer(
-    status=201,
-    body={"chat_id": "agent-" + "a" * 32, "name": "update-to-minds-v0-9-0", "display_name": "Update to v0.9.0"},
 )
 
 
@@ -121,25 +118,39 @@ def test_re_arming_keeps_the_chat_the_dispatcher_already_started_this_window(
     assert (rearmed["marked_chat"], rearmed["marked_at"]) == ("update-to-minds-v0-9-0", _NOW - 60)
 
 
+def _flag(argv: list[str], flag: str) -> str | None:
+    return argv[argv.index(flag) + 1] if flag in argv else None
+
+
+def _labels(argv: list[str]) -> list[str]:
+    return [argv[index + 1] for index, token in enumerate(argv) if token == "--label"]
+
+
+def _creates(staged: StagedUpdateWorkspace) -> list[list[str]]:
+    """Every chat the messenger was asked to create; the message text is the last item of each."""
+    return [call for call in staged.tool_calls("message_chat.py") if call[:1] == ["--create"]]
+
+
 @pytest.mark.witnesses("workspace-updates.one-seed-message")
-def test_update_now_creates_the_chat_through_the_chat_app_with_the_pinned_message(
+def test_update_now_creates_the_chat_through_the_templates_messenger_with_the_pinned_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     program = load_update_workspace_program(tmp_path)
-    with scripted_update_chat_app(staged.root, create_answers=[_CREATED]) as requests:
-        answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+
+    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     result = parse_update_command_result(answer)
     assert result.outcome is UpdateArmOutcome.CREATED
-    assert (result.chat_agent_name, result.chat_id) == ("update-to-minds-v0-9-0", "agent-" + "a" * 32)
-    creates = [request.body for request in requests if request.path == "/api/chats/create"]
+    assert (result.chat_agent_name, result.chat_id) == (STAGED_CREATED_CHAT["name"], STAGED_CREATED_CHAT["chat_id"])
+    creates = _creates(staged)
     assert len(creates) == 1
-    assert creates[0]["name"] == "update-to-minds-v0-9-0"
-    assert creates[0]["title"] == "Update to v0.9.0"
-    assert creates[0]["labels"] == {"assist": "true", "auto_open": "true"}
-    assert creates[0]["should_wait"] is True
-    assert creates[0]["message"] == snapshot("""\
+    assert (_flag(creates[0], "--name"), _flag(creates[0], "--title")) == (
+        "update-to-minds-v0-9-0",
+        "Update to v0.9.0",
+    )
+    assert _labels(creates[0]) == ["assist=true", "auto_open=true"]
+    assert creates[0][-1] == snapshot("""\
 /update-self
 
 The Imbue Studio app pinned this update, so do not ask it for its version:
@@ -168,12 +179,15 @@ def test_an_override_without_backups_carries_both_notes_and_names_the_chat_for_t
         zone="America/Los_Angeles",
         is_backup_configured=False,
     )
-    with scripted_update_chat_app(staged.root, create_answers=[_CREATED]) as requests:
-        _run_mode(program, staged, "now", build_now_arguments(settings, "upstream/main"), capsys)
 
-    create = next(request.body for request in requests if request.path == "/api/chats/create")
-    assert (create["name"], create["title"]) == ("update-to-upstream-main", "Update to upstream/main")
-    paragraphs = create["message"].split("\n\n")
+    _run_mode(program, staged, "now", build_now_arguments(settings, "upstream/main"), capsys)
+
+    create = _creates(staged)[0]
+    assert (_flag(create, "--name"), _flag(create, "--title")) == (
+        "update-to-upstream-main",
+        "Update to upstream/main",
+    )
+    paragraphs = create[-1].split("\n\n")
     assert paragraphs[1].startswith("The Imbue Studio app pinned this update")
     assert "- Target: upstream/main\n- Ceiling: minds-v0.9.0" in paragraphs[1]
     assert paragraphs[2].startswith(
@@ -182,20 +196,23 @@ def test_an_override_without_backups_carries_both_notes_and_names_the_chat_for_t
     assert paragraphs[3].startswith("This workspace has no backups configured")
 
 
-def test_a_route_from_before_the_title_is_asked_again_without_it(
+def test_a_messenger_from_before_the_title_is_asked_again_without_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
-    program = load_update_workspace_program(tmp_path)
-    refusal = ScriptedChatAppAnswer(
-        status=400, body={"detail": "1 validation error: title: Extra inputs are not permitted"}
+    staged.script_tool(
+        "system/scripts/message_chat.py",
+        [
+            ScriptedToolAnswer(exit_code=2, stderr="message_chat.py: error: unrecognized arguments: --title\n"),
+            ScriptedToolAnswer(stdout=json.dumps(STAGED_CREATED_CHAT) + "\n"),
+        ],
     )
-    with scripted_update_chat_app(staged.root, create_answers=[refusal, _CREATED]) as requests:
-        answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+    program = load_update_workspace_program(tmp_path)
+
+    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     assert parse_update_command_result(answer).outcome is UpdateArmOutcome.CREATED
-    creates = [request.body for request in requests if request.path == "/api/chats/create"]
-    assert ["title" in create for create in creates] == [True, False]
+    assert ["--title" in create for create in _creates(staged)] == [True, False]
 
 
 def test_a_taken_chat_name_gets_the_next_free_suffix(
@@ -204,12 +221,25 @@ def test_a_taken_chat_name_gets_the_next_free_suffix(
     """Earlier runs' chats stay as history, so a second update to the same release needs its own name."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.set_agents([{"name": "update-to-minds-v0-9-0", "id": "agent-" + "b" * 32, "state": "WAITING"}])
+    staged.script_tool(
+        "system/scripts/message_chat.py",
+        [
+            ScriptedToolAnswer(
+                exit_code=1,
+                stderr="The chat app did not create the chat: "
+                "A chat named 'update-to-minds-v0-9-0-2' already exists; pick another name\n",
+            ),
+            ScriptedToolAnswer(stdout=json.dumps(STAGED_CREATED_CHAT) + "\n"),
+        ],
+    )
     program = load_update_workspace_program(tmp_path)
-    with scripted_update_chat_app(staged.root, create_answers=[_CREATED]) as requests:
-        _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
-    create = next(request.body for request in requests if request.path == "/api/chats/create")
-    assert create["name"] == "update-to-minds-v0-9-0-2"
+    _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+
+    assert [_flag(create, "--name") for create in _creates(staged)] == [
+        "update-to-minds-v0-9-0-2",
+        "update-to-minds-v0-9-0-3",
+    ]
 
 
 def test_update_now_adopts_a_run_already_under_way(
@@ -217,42 +247,54 @@ def test_update_now_adopts_a_run_already_under_way(
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.write_state("run.json", {"chat_agent_name": "update-to-minds-v0-8-7", "started_at": _NOW - 600})
-    staged.set_agents(
-        [{"name": "update-to-minds-v0-8-7", "id": "agent-" + "d" * 32, "state": "RUNNING", "labels": {}}]
-    )
+    staged.set_agents([{"name": "update-to-minds-v0-8-7", "id": "agent-" + "d" * 32, "state": "RUNNING"}])
     program = load_update_workspace_program(tmp_path)
-    with scripted_update_chat_app(staged.root, create_answers=[_CREATED]) as requests:
-        answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+
+    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     result = parse_update_command_result(answer)
     assert result.outcome is UpdateArmOutcome.ALREADY_RUNNING
     assert (result.chat_agent_name, result.chat_id) == ("update-to-minds-v0-8-7", "agent-" + "d" * 32)
-    assert not [request for request in requests if request.path == "/api/chats/create"]
+    assert _creates(staged) == []
 
 
-def test_a_sign_in_refusal_from_the_create_route_reads_as_needs_sign_in(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("stderr", "outcome"),
+    [
+        (
+            "The chat app did not create the chat: Connect an AI provider to start chatting.\n",
+            UpdateArmOutcome.NEEDS_SIGN_IN,
+        ),
+        ("The chat app did not create the chat: mngr create exited 1\n", UpdateArmOutcome.CREATE_FAILED),
+        (
+            "Falling back to `mngr create`: could not connect to the chat app\nmngr create failed\n",
+            UpdateArmOutcome.CHAT_APP_UNREACHABLE,
+        ),
+    ],
+)
+def test_a_create_the_chat_app_refused_reads_as_the_refusal_it_was(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stderr: str,
+    outcome: UpdateArmOutcome,
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.script_tool("system/scripts/message_chat.py", [ScriptedToolAnswer(exit_code=1, stderr=stderr)])
     program = load_update_workspace_program(tmp_path)
-    refusal = ScriptedChatAppAnswer(
-        status=400, body={"detail": "Connect an AI provider to start chatting.", "kind": "no_provider_account"}
-    )
-    with scripted_update_chat_app(staged.root, create_answers=[refusal]):
-        answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
-    assert parse_update_command_result(answer).outcome is UpdateArmOutcome.NEEDS_SIGN_IN
+    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+
+    result = parse_update_command_result(answer)
+    assert result.outcome is outcome
+    assert result.detail == stderr.strip()
     assert staged.read_state("last-dispatch.json") is None
 
 
-def test_a_workspace_with_no_chat_app_gets_a_bare_create_carrying_the_display_name(
+def test_a_workspace_with_no_messenger_gets_a_bare_create_carrying_the_display_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    staged = stage_update_workspace(tmp_path, monkeypatch)
-    registry = staged.root / "data" / ".state" / "apps.toml"
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    # Nothing listens on the discard port, so the connect is refused as on a chat app that is not there.
-    registry.write_text('[[apps]]\nname = "chat"\nurl = "http://127.0.0.1:9"\n')
+    staged = stage_update_workspace(tmp_path, monkeypatch, has_message_chat=False)
     program = load_update_workspace_program(tmp_path)
 
     answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)

@@ -105,7 +105,6 @@ any run that has no verdict yet. It runs from the workspace root, under the work
 ``python3``, with no access to the app's code.
 """
 
-import http.client
 import json
 import os
 import re
@@ -114,7 +113,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.parse
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -144,11 +142,19 @@ LOCAL_SETTINGS_PATH = ".mngr/settings.local.toml"
 ACCOUNT_GATE_SCRIPT = "system/scripts/require_create_account.py"
 ACCOUNT_RESOLVER_SCRIPT = "system/scripts/default_account_args.py"
 TICKETS_DIR_DEFAULT = "data/.tickets"
-APPS_FILE = "data/.state/apps.toml"
-CHAT_APP_NAME = "chat"
-CHAT_APP_FALLBACK_URL = "http://127.0.0.1:8010"
-CREATE_CHAT_PATH = "/api/chats/create"
-TRACKED_AGENTS_PATH = "/api/agents?tracked=true"
+BACKGROUND_TASKS_SCRIPT = "system/scripts/background_tasks.py"
+MNGR_LIST_FIELD_SEPARATOR = "|"
+MNGR_LIST_FIELDS = ("id", "name", "state", "labels.is_primary", "labels.chat_id")
+MNGR_LIST_ARGV = (
+    "mngr",
+    "list",
+    "--provider",
+    "local",
+    "--on-error",
+    "continue",
+    "--format",
+    MNGR_LIST_FIELD_SEPARATOR.join("{%s}" % field for field in MNGR_LIST_FIELDS),
+)
 SCHEMA = 1
 
 ENDED_AGENT_STATES = ("DONE", "STOPPED")
@@ -165,18 +171,13 @@ IDLE_TICKS_BEFORE_REMINDER = 3
 REMINDER_INTERVAL_SECONDS = 20 * 60
 MAX_NAME_SUFFIX = 20
 LOG_MAX_BYTES = 256 * 1024
-CONNECT_TIMEOUT_SECONDS = 3.0
-NOT_READY_RETRY_WINDOW_SECONDS = 30.0
-NOT_FOUND_RETRY_WINDOW_SECONDS = 5.0
+# The chat app's create waits up to 300s for mngr, after up to 30s of not-ready retries.
+CHAT_CREATE_TIMEOUT_SECONDS = 360
 MNGR_LIST_TIMEOUT_SECONDS = 180
 MNGR_CREATE_TIMEOUT_SECONDS = 300
 SHORT_COMMAND_TIMEOUT_SECONDS = 60
 RESOLVER_TIMEOUT_SECONDS = 90
 DETAIL_MAX_CHARS = 1000
-
-class ChatAppUnreachable(Exception):
-    """The connection to the chat app could not be made at all, so nothing reached it."""
-
 
 def read_json(path):
     """The JSON object at ``path``, or None when it is absent, unreadable, or not an object."""
@@ -294,36 +295,27 @@ def agent_env():
 
 
 def list_agents():
-    """Every agent the workspace's mngr lists, as dicts; None when it could not list them."""
-    listed = run_command(
-        ["mngr", "list", "--format", "json", "--provider", "local"], MNGR_LIST_TIMEOUT_SECONDS, agent_env()
-    )
+    """Every agent the workspace's mngr lists, as dicts; None when it could not list them.
+
+    A ``--format`` template scoped to the local provider, as the template's own in-container
+    readers list agents: it answers from local state where ``--format json`` can fail.
+    """
+    listed = run_command(list(MNGR_LIST_ARGV), MNGR_LIST_TIMEOUT_SECONDS, agent_env())
     if listed.returncode != 0:
         sys.stderr.write("mngr list failed: %s\n" % bounded(listed.stderr or listed.stdout))
         return None
-    for line in reversed(listed.stdout.splitlines()):
-        line = line.strip()
-        if not line.startswith("{"):
+    agents = []
+    for line in listed.stdout.splitlines():
+        fields = line.split(MNGR_LIST_FIELD_SEPARATOR)
+        if len(fields) != len(MNGR_LIST_FIELDS) or not fields[1].strip():
             continue
-        try:
-            candidate = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(candidate, dict) and isinstance(candidate.get("agents"), list):
-            agents = [agent for agent in candidate["agents"] if isinstance(agent, dict)]
-            # A listing without the workspace's own services agent read the wrong host dir (a cron
-            # environment that did not restore), and would make every agent read as gone.
-            if not any(is_primary_agent(agent) for agent in agents):
-                sys.stderr.write("mngr list did not list this workspace's services agent; ignoring it\n")
-                return None
-            return agents
-    sys.stderr.write("mngr list printed no agent listing\n")
-    return None
-
-
-def is_primary_agent(agent):
-    labels = agent.get("labels")
-    return agent.get("type") == "main" or (isinstance(labels, dict) and labels.get("is_primary") == "true")
+        agents.append({field: value.strip() for field, value in zip(MNGR_LIST_FIELDS, fields, strict=True)})
+    # A listing without the workspace's own services agent read the wrong host dir (a cron
+    # environment that did not restore), and would make every agent read as gone.
+    if not any(agent.get("labels.is_primary") == "true" for agent in agents):
+        sys.stderr.write("mngr list did not list this workspace's services agent; ignoring it\n")
+        return None
+    return agents
 
 
 def find_agent(agents, name):
@@ -339,93 +331,43 @@ def is_agent_ended(agent):
 
 def chat_id_of(agent):
     """The chat an agent takes messages for: its ``chat_id`` label, else its own id."""
-    labels = agent.get("labels")
-    label = labels.get("chat_id") if isinstance(labels, dict) else None
-    return str(label or agent.get("id") or "")
+    return str(agent.get("labels.chat_id") or agent.get("id") or "")
 
 
-def chat_app_url():
-    try:
-        import tomllib
+def busy_agents():
+    """``(names, ids, chat ids)`` the template's background-task CLI reports busy; empty sets without it.
 
-        with open(APPS_FILE, "rb") as handle:
-            rows = tomllib.load(handle).get("apps", [])
-    except (ImportError, OSError, ValueError):
-        return CHAT_APP_FALLBACK_URL
-    for row in rows:
-        if (
-            isinstance(row, dict)
-            and row.get("name") == CHAT_APP_NAME
-            and isinstance(row.get("url"), str)
-            and row["url"]
-        ):
-            return row["url"].rstrip("/")
-    return CHAT_APP_FALLBACK_URL
-
-
-def chat_app_request(method, path, body=None):
-    """One request to the chat app on loopback, waiting as long as its answer takes.
-
-    Raises ChatAppUnreachable only when the connection itself cannot be made; returns
-    ``(status, parsed body)`` otherwise.
+    An agent the CLI does not report reads by its own state: RUNNING is a turn in flight.
     """
-    parsed = urllib.parse.urlsplit(chat_app_url())
-    connection = http.client.HTTPConnection(
-        parsed.hostname or "127.0.0.1", parsed.port or 80, timeout=CONNECT_TIMEOUT_SECONDS
+    names, agent_ids, chat_ids = set(), set(), set()
+    if not os.path.isfile(BACKGROUND_TASKS_SCRIPT):
+        return names, agent_ids, chat_ids
+    listed = run_command(
+        [sys.executable or "python3", BACKGROUND_TASKS_SCRIPT, "list", "--format", "tsv"],
+        SHORT_COMMAND_TIMEOUT_SECONDS,
+        agent_env(),
     )
-    try:
-        connection.connect()
-    except OSError as exc:
-        raise ChatAppUnreachable("could not connect to the chat app: %s" % exc) from exc
-    try:
-        if connection.sock is not None:
-            connection.sock.settimeout(None)
-        payload = json.dumps(body).encode("utf-8") if body is not None else None
-        headers = {"Content-Type": "application/json"} if payload is not None else {}
-        connection.request(method, path, body=payload, headers=headers)
-        response = connection.getresponse()
-        raw = response.read()
-    finally:
-        connection.close()
-    try:
-        answer = json.loads(raw.decode("utf-8")) if raw else None
-    except ValueError:
-        answer = None
-    return response.status, answer
+    for line in listed.stdout.splitlines() if listed.returncode == 0 else []:
+        fields = [field.strip() for field in line.split("\t")]
+        if len(fields) < 4 or fields[3] != "true":
+            continue
+        if fields[2]:
+            names.add(fields[2])
+        elif fields[1]:
+            agent_ids.add(fields[1])
+        if fields[0]:
+            chat_ids.add(fields[0])
+    return names, agent_ids, chat_ids
 
 
-def answer_detail(status, answer):
-    if isinstance(answer, dict) and isinstance(answer.get("detail"), str):
-        return answer["detail"]
-    return "the chat app answered HTTP %d" % status
-
-
-def busy_by_agent_name():
-    """Whether each agent is busy, as the chat app's tracked listing says; None where it cannot say.
-
-    A chat app from before the listing's ``is_busy`` answers without it, and then the caller
-    falls back to each agent's plain RUNNING state.
-    """
-    try:
-        status, answer = chat_app_request("GET", TRACKED_AGENTS_PATH)
-    except (ChatAppUnreachable, OSError, http.client.HTTPException):
-        return None
-    if status != 200 or not isinstance(answer, dict) or not isinstance(answer.get("agents"), list):
-        return None
-    busy = {}
-    for item in answer["agents"]:
-        if isinstance(item, dict) and isinstance(item.get("name"), str) and isinstance(item.get("is_busy"), bool):
-            busy[item["name"]] = item["is_busy"]
-    return busy or None
-
-
-def is_agent_busy(agent, busy_by_name):
-    """Running, or waiting on a background task; an agent the busy listing does not cover reads by its state."""
+def is_agent_busy(agent, busy):
+    """Running, or waiting on a background task that will resume it."""
     if agent is None or is_agent_ended(agent):
         return False
-    if busy_by_name is not None and agent.get("name") in busy_by_name:
-        return busy_by_name[agent.get("name")]
-    return agent.get("state") == "RUNNING"
+    if agent.get("state") == "RUNNING":
+        return True
+    names, agent_ids, chat_ids = busy
+    return agent.get("name") in names or agent.get("id") in agent_ids or chat_id_of(agent) in chat_ids
 
 
 def is_skill_present():
@@ -583,67 +525,73 @@ def _create_result(outcome, detail="", chat_agent_name="", chat_id=""):
     return {"outcome": outcome, "detail": detail, "chat_agent_name": chat_agent_name, "chat_id": chat_id}
 
 
-def _is_sign_in_refusal(status, answer):
-    if status != 400 or not isinstance(answer, dict):
-        return False
-    detail = str(answer.get("detail") or "")
-    return answer.get("kind") == "no_provider_account" or "no provider accounts exist" in detail
+# Exit statuses of the template's chat messenger: delivered, refused, and no verdict at all
+# (python's own status for a missing script, argparse's for an argument the script lacks).
+MESSAGE_CHAT_DELIVERED = 0
+MESSAGE_CHAT_NO_VERDICT = 2
+SIGN_IN_REFUSALS = ("no provider accounts exist", "Connect an AI provider")
+NAME_TAKEN_REFUSAL = "already exists; pick another name"
+STILL_CREATING_REFUSAL = "is still being created"
 
 
-def _create_through_route(name, display_name, message, labels):
-    """Ask the chat app to create the chat; a result dict, or None when the route cannot take it.
-
-    Retries the answers that mean "not ready yet" (503) and "not here yet" (404) within their
-    windows, a refusal of ``title`` (a route from before it) without the title, and a name
-    collision under the next free name.
-    """
-    body = {
-        "name": name,
-        "title": display_name,
-        "message": message,
-        "labels": dict(labels),
-        "is_installation_check_skipped": True,
-        "should_wait": True,
-    }
-    started = time.monotonic()
-    not_found_since = None
-    taken_names = []
-    while True:
+def _created_chat_line(stdout):
+    """The ``{"chat_id", "name", "display_name"}`` line the messenger prints for a created chat; {} for none."""
+    for line in reversed(stdout.splitlines()):
         try:
-            status, answer = chat_app_request("POST", CREATE_CHAT_PATH, body)
-        except ChatAppUnreachable:
-            return None
-        except (OSError, http.client.HTTPException) as exc:
-            return _create_result(OUTCOME_CREATE_FAILED, "the chat app dropped the create: %s" % exc)
-        detail = answer_detail(status, answer)
-        if 200 <= status < 300:
-            chat_id = str(answer.get("chat_id") or "") if isinstance(answer, dict) else ""
-            created_name = str(answer.get("name") or body["name"]) if isinstance(answer, dict) else body["name"]
-            return _create_result(OUTCOME_CREATED, "", created_name, chat_id)
-        if status == 503 and time.monotonic() - started < NOT_READY_RETRY_WINDOW_SECONDS:
-            time.sleep(1.0)
+            created = json.loads(line)
+        except ValueError:
             continue
-        if status == 404:
-            not_found_since = not_found_since or time.monotonic()
-            if time.monotonic() - not_found_since < NOT_FOUND_RETRY_WINDOW_SECONDS:
-                time.sleep(0.5)
+        if isinstance(created, dict) and "chat_id" in created:
+            return created
+    return {}
+
+
+def _create_through_message_chat(base_name, taken_names, display_name, message, labels):
+    """Ask the workspace's chat app for the chat through the template's own messenger.
+
+    A result dict, or None when no messenger here can create a chat (a template from before
+    the script or its create mode), for the bare create to take over. A messenger from
+    before ``--title`` is asked again without it, and a taken name under the next free one.
+    """
+    if not os.path.isfile(MESSAGE_CHAT_SCRIPT):
+        return None
+    taken = list(taken_names)
+    name = first_free_name(base_name, taken)
+    is_title_passed = True
+    handle, message_path = tempfile.mkstemp(suffix=".md")
+    with os.fdopen(handle, "w", encoding="utf-8") as out:
+        out.write(message)
+    try:
+        while True:
+            argv = [sys.executable or "python3", MESSAGE_CHAT_SCRIPT, "--create", "--name", name]
+            argv += ["--title", display_name] if is_title_passed else []
+            for key, value in labels.items():
+                argv += ["--label", "%s=%s" % (key, value)]
+            argv += ["--message-file", message_path]
+            created = run_command(argv, CHAT_CREATE_TIMEOUT_SECONDS, agent_env())
+            detail = bounded(created.stderr)
+            if created.returncode == MESSAGE_CHAT_DELIVERED:
+                line = _created_chat_line(created.stdout)
+                return _create_result(OUTCOME_CREATED, "", str(line.get("name") or name), str(line.get("chat_id") or ""))
+            if created.returncode == MESSAGE_CHAT_NO_VERDICT:
+                if is_title_passed and "--title" in detail:
+                    is_title_passed = False
+                    continue
+                return None
+            if any(refusal in detail for refusal in SIGN_IN_REFUSALS):
+                return _create_result(OUTCOME_NEEDS_SIGN_IN, detail)
+            if NAME_TAKEN_REFUSAL in detail and len(taken) < len(taken_names) + MAX_NAME_SUFFIX:
+                taken.append(name)
+                name = first_free_name(base_name, taken)
                 continue
-            return None
-        if status == 400 and "title" in body and "title" in detail:
-            del body["title"]
-            continue
-        if status == 400 and "should_wait" in detail:
-            return None
-        if _is_sign_in_refusal(status, answer):
-            return _create_result(OUTCOME_NEEDS_SIGN_IN, detail)
-        if status == 409 and len(taken_names) < MAX_NAME_SUFFIX:
-            taken_names.append(body["name"])
-            body["name"] = first_free_name(name, taken_names)
-            continue
-        if status == 504:
-            # The create is still running past the route's own wait; the chat is on its way.
-            return _create_result(OUTCOME_CREATED, detail, body["name"], "")
-        return _create_result(OUTCOME_CREATE_FAILED, detail)
+            if STILL_CREATING_REFUSAL in detail:
+                # The create runs on past the chat app's own wait; the chat is on its way.
+                return _create_result(OUTCOME_CREATED, detail, name, "")
+            if "Falling back to `mngr create`" in detail:
+                return _create_result(OUTCOME_CHAT_APP_UNREACHABLE, detail)
+            return _create_result(OUTCOME_CREATE_FAILED, detail)
+    finally:
+        os.unlink(message_path)
 
 
 def _created_agent_id(create_stdout):
@@ -658,7 +606,8 @@ def _created_agent_id(create_stdout):
 
 
 def _create_through_mngr(name, display_name, message, labels, account_args):
-    """The fallback for a chat app with no create route: a bare ``mngr create`` from the chat template."""
+    """The fallback for a template whose messenger cannot create a chat: a bare ``mngr create`` from the chat
+    template, which sources the workspace's environment itself when cron runs it."""
     argv = ["mngr", "create", name, "--template", "chat", "--transfer", "none", "--no-connect"]
     argv += ["--label", "user_created=true", "--label", "display_name=" + display_name]
     for key, value in labels.items():
@@ -693,13 +642,14 @@ def create_update_chat(schedule_like, started_by, is_auto_open, agents):
     if not is_signed_in:
         return _create_result(OUTCOME_NEEDS_SIGN_IN, "No AI account is signed in to this workspace.")
     base_name, display_name = update_chat_names(target_ref)
-    name = first_free_name(base_name, [str(agent.get("name") or "") for agent in agents or []])
+    taken_names = [str(agent.get("name") or "") for agent in agents or []]
     message = render_message(
         target_ref, ceiling_ref, bool(override_ref), bool(schedule_like.get("is_backup_configured", True))
     )
     labels = {label: "true" for label in AUTO_OPEN_LABELS} if is_auto_open else {}
-    result = _create_through_route(name, display_name, message, labels)
+    result = _create_through_message_chat(base_name, taken_names, display_name, message, labels)
     if result is None:
+        name = first_free_name(base_name, taken_names)
         result = _create_through_mngr(name, display_name, message, labels, account_args)
     if result["outcome"] == OUTCOME_CREATED:
         write_json(
@@ -885,7 +835,7 @@ def dispatch_scheduled(schedule, run, agents):
     return SKIP_DISPATCH_FAILED
 
 
-def decide_watchdog_action(run, agents, busy_by_name, watchdog_state, now):
+def decide_watchdog_action(run, agents, busy, watchdog_state, now):
     """What the watchdog does about a run with no verdict: ``close_out``, ``remind``, ``count_idle``, ``reset``,
     or ``nothing``."""
     if not isinstance(run, dict) or run_verdict(run) is not None or not run.get("chat_agent_name") or agents is None:
@@ -900,7 +850,7 @@ def decide_watchdog_action(run, agents, busy_by_name, watchdog_state, now):
         return "reset"
     worker_name = run.get("worker_agent_name")
     worker = find_agent(agents, worker_name) if worker_name else None
-    if is_agent_busy(lead, busy_by_name) or is_agent_busy(worker, busy_by_name):
+    if is_agent_busy(lead, busy) or is_agent_busy(worker, busy):
         return "reset"
     idle_ticks = int(watchdog_state.get("idle_ticks") or 0) + 1
     last_reminded_at = float(watchdog_state.get("last_reminded_at") or 0.0)
@@ -932,8 +882,7 @@ def send_to_chat(agent, text):
 
 
 def record_stuck_verdict(run, detail):
-    """Record STUCK on the run through the template's own recorder, writing the record directly where it has none."""
-    lead_name = str(run.get("chat_agent_name"))
+    """Record STUCK on the run through the template's own recorder, the record's one writer; whether it landed."""
     recorded = run_command(
         [
             sys.executable or "python3",
@@ -942,30 +891,16 @@ def record_stuck_verdict(run, detail):
             "verdict",
             "STUCK",
             "--chat",
-            lead_name,
+            str(run.get("chat_agent_name")),
             "--detail",
             detail,
         ],
         SHORT_COMMAND_TIMEOUT_SECONDS,
         agent_env(),
     )
-    if recorded.returncode == 0:
-        return
-    log("the template's run-status recorder failed (%s); writing the verdict directly" % bounded(recorded.stderr))
-    current = read_json(RUN_PATH) or dict(run)
-    now = time.time()
-    current.update(
-        {
-            "verdict": "STUCK",
-            "detail": detail,
-            "verdict_at": now,
-            "updated_at": now,
-            "is_holding": False,
-            "hold_detail": "",
-            "worker_agent_name": None,
-        }
-    )
-    write_json(RUN_PATH, current)
+    if recorded.returncode != 0:
+        log("could not record the gone lead's verdict; trying again next tick: %s" % bounded(recorded.stderr))
+    return recorded.returncode == 0
 
 
 def release_leases_of(lead):
@@ -988,7 +923,8 @@ def close_out(run, agents):
     """End a run whose lead is gone: record STUCK, stop its worker keeping its branch, release its leases."""
     lead_name = str(run.get("chat_agent_name"))
     lead = find_agent(agents, lead_name) or {"name": lead_name}
-    record_stuck_verdict(run, MESSAGE_PARTS["gone_lead_detail"])
+    if not record_stuck_verdict(run, MESSAGE_PARTS["gone_lead_detail"]):
+        return
     worker_name = run.get("worker_agent_name")
     worker = find_agent(agents, worker_name) if worker_name else None
     if worker is not None and not is_agent_ended(worker):
@@ -1004,7 +940,7 @@ def tick_watchdog(now):
         return
     agents = list_agents()
     state = _watchdog_state_for(run)
-    action = decide_watchdog_action(run, agents, busy_by_agent_name() if agents is not None else None, state, now)
+    action = decide_watchdog_action(run, agents, busy_agents() if agents is not None else (set(), set(), set()), state, now)
     if action == "nothing":
         return
     if action == "close_out":

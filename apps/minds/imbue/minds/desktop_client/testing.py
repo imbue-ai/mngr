@@ -1572,92 +1572,12 @@ class HandshakeDrainingWebSocketClient(SimpleWebsocketClient):
         self.connected = self._handle_events()
 
 
-class RecordedChatAppRequest(FrozenModel):
-    """One request the scripted chat app received."""
+class ScriptedToolAnswer(FrozenModel):
+    """One answer a stubbed in-workspace tool gives, in order."""
 
-    method: str = Field(description="The HTTP method")
-    path: str = Field(description="The request path, query included")
-    body: dict[str, Any] = Field(description="The decoded JSON body; {} for none")
-
-
-class ScriptedChatAppAnswer(FrozenModel):
-    """One answer the scripted chat app gives, in order, to the create route."""
-
-    status: int = Field(description="The HTTP status")
-    body: dict[str, Any] = Field(description="The JSON body")
-
-
-class _ScriptedUpdateChatAppHandler(BaseHTTPRequestHandler):
-    """Stands in for a workspace chat app's create route and tracked agent listing."""
-
-    create_answers: list[ScriptedChatAppAnswer] = []
-    tracked_agents: list[dict[str, Any]] | None = None
-    recorded: list[RecordedChatAppRequest] = []
-
-    def _answer(self, status: int, body: dict[str, Any]) -> None:
-        payload = json.dumps(body).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def do_GET(self) -> None:
-        type(self).recorded.append(RecordedChatAppRequest(method="GET", path=self.path, body={}))
-        tracked = type(self).tracked_agents
-        if self.path.startswith("/api/agents") and tracked is not None:
-            self._answer(200, {"agents": tracked})
-        else:
-            self._answer(404, {"detail": "not found"})
-
-    def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length", "0"))
-        body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
-        type(self).recorded.append(RecordedChatAppRequest(method="POST", path=self.path, body=body))
-        answers = type(self).create_answers
-        if self.path == "/api/chats/create" and answers:
-            answer = answers.pop(0)
-            self._answer(answer.status, answer.body)
-        else:
-            self._answer(404, {"detail": "not found"})
-
-    def log_message(self, format: str, *args: object) -> None:
-        del format, args
-
-
-@contextmanager
-def scripted_update_chat_app(
-    workspace: Path,
-    *,
-    create_answers: Sequence[ScriptedChatAppAnswer] = (),
-    tracked_agents: Sequence[Mapping[str, Any]] | None = None,
-) -> Iterator[list[RecordedChatAppRequest]]:
-    """Serve a stand-in chat app for ``workspace`` and register it in the workspace's app registry.
-
-    The create route answers ``create_answers`` in order (404 once they run out); the tracked
-    agent listing answers ``tracked_agents``, or 404 when None, as a chat app from before it does.
-    Yields the live list of recorded requests.
-    """
-    recorded: list[RecordedChatAppRequest] = []
-    handler_cls = type(
-        "_ScopedUpdateChatAppHandler",
-        (_ScriptedUpdateChatAppHandler,),
-        {
-            "create_answers": list(create_answers),
-            "tracked_agents": [dict(agent) for agent in tracked_agents] if tracked_agents is not None else None,
-            "recorded": recorded,
-        },
-    )
-    server = HTTPServer(("127.0.0.1", 0), handler_cls)
-    registry = workspace / "data" / ".state" / "apps.toml"
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    registry.write_text(f'[[apps]]\nname = "chat"\nurl = "http://127.0.0.1:{server.server_address[1]}"\n')
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        yield recorded
-    finally:
-        server.shutdown()
-        server.server_close()
+    exit_code: int = Field(default=0, description="The tool's exit status")
+    stdout: str = Field(default="", description="What it prints on stdout")
+    stderr: str = Field(default="", description="What it prints on stderr")
 
 
 _STUB_MNGR_SOURCE: Final[str] = r"""#!/usr/bin/env python3
@@ -1667,11 +1587,42 @@ with open(os.environ["STUB_CALLS_LOG"], "a") as log:
 command = sys.argv[1] if len(sys.argv) > 1 else ""
 if command == "list":
     with open(os.environ["STUB_AGENTS_FILE"]) as handle:
-        print(json.dumps({"agents": json.load(handle)}))
+        for agent in json.load(handle):
+            fields = (agent["id"], agent["name"], agent["state"], agent.get("is_primary", ""), agent.get("chat_id", ""))
+            print("|".join(fields))
 elif command == "create":
     print(json.dumps({"event": "created", "agent_id": "agent-" + "c" * 32}))
 sys.exit(int(os.environ.get("STUB_EXIT_" + command.upper(), "0")))
 """
+
+# A stand-in for a template script: records its argv (and the text of a --message-file) and
+# answers with the next scripted answer, or the last one once the script runs out.
+_STUB_TOOL_SOURCE: Final[str] = r"""#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+message = ""
+if "--message-file" in argv:
+    with open(argv[argv.index("--message-file") + 1]) as handle:
+        message = handle.read()
+with open(os.environ["STUB_CALLS_LOG"], "a") as log:
+    log.write(json.dumps([os.path.basename(sys.argv[0])] + argv + ([message] if message else [])) + "\n")
+answers_path = sys.argv[0] + ".answers.json"
+with open(answers_path) as handle:
+    answers = json.load(handle)
+answer = answers.pop(0) if len(answers) > 1 else answers[0]
+with open(answers_path, "w") as handle:
+    json.dump(answers, handle)
+sys.stdout.write(answer["stdout"])
+sys.stderr.write(answer["stderr"])
+sys.exit(answer["exit_code"])
+"""
+
+_SERVICES_AGENT: Final[dict[str, str]] = {
+    "id": "agent-" + "0" * 32,
+    "name": "system-services",
+    "state": "RUNNING",
+    "is_primary": "true",
+}
 
 
 class StagedUpdateWorkspace(FrozenModel):
@@ -1683,11 +1634,22 @@ class StagedUpdateWorkspace(FrozenModel):
     agents_file: Path = Field(description="What the stub ``mngr list`` answers")
     live_cron_dir: Path = Field(description="Stands in for /etc/cron.d")
 
-    def set_agents(self, agents: Sequence[Mapping[str, Any]], *, is_services_agent_listed: bool = True) -> None:
-        """What the stub ``mngr list`` answers: ``agents``, beside the workspace's services agent unless told not to."""
-        services = [{"name": "system-services", "id": "agent-" + "0" * 32, "state": "RUNNING", "type": "main"}]
-        listed = (services if is_services_agent_listed else []) + [dict(agent) for agent in agents]
+    def set_agents(self, agents: Sequence[Mapping[str, str]], *, is_services_agent_listed: bool = True) -> None:
+        """What the stub ``mngr list`` answers: ``agents`` (``id``, ``name``, ``state``, optionally ``chat_id``),
+        beside the workspace's services agent unless told not to."""
+        listed = ([_SERVICES_AGENT] if is_services_agent_listed else []) + [dict(agent) for agent in agents]
         self.agents_file.write_text(json.dumps(listed))
+
+    def script_tool(self, relative_path: str, answers: Sequence[ScriptedToolAnswer]) -> None:
+        """Put a stand-in for the template script at ``relative_path`` that answers ``answers`` in order."""
+        path = self.root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_executable(path, _STUB_TOOL_SOURCE)
+        path.with_name(path.name + ".answers.json").write_text(json.dumps([answer.model_dump() for answer in answers]))
+
+    def tool_calls(self, script_name: str) -> list[list[str]]:
+        """The recorded argv of every call to the stubbed template script named ``script_name``."""
+        return [call[1:] for call in self.recorded_calls() if call[:1] == [script_name]]
 
     def recorded_calls(self) -> list[list[str]]:
         if not self.calls_log.exists():
@@ -1709,6 +1671,13 @@ def _write_executable(path: Path, text: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+STAGED_CREATED_CHAT: Final[dict[str, str]] = {
+    "chat_id": "agent-" + "a" * 32,
+    "name": "update-to-minds-v0-9-0",
+    "display_name": "Update to v0.9.0",
+}
+
+
 def stage_update_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1716,10 +1685,13 @@ def stage_update_workspace(
     has_skill: bool = True,
     is_signed_in: bool = True,
     has_cron: bool = True,
+    has_message_chat: bool = True,
 ) -> StagedUpdateWorkspace:
     """Lay out a workspace under ``tmp_path``, cd into it, and put stub tools first on PATH.
 
     The environment reads as ``mngr exec``'s (``MNGR_HOST_DIR`` set), so the program uses it as is.
+    The template's chat messenger (unless ``has_message_chat`` is False) creates every chat it is
+    asked for, and its update-self recorder records every verdict, until a test scripts otherwise.
     """
     root = tmp_path / "workspace"
     (root / ".mngr").mkdir(parents=True)
@@ -1748,6 +1720,13 @@ def stage_update_workspace(
         live_cron_dir=live_cron_dir,
     )
     staged.set_agents([])
+    if has_message_chat:
+        staged.script_tool(
+            "system/scripts/message_chat.py",
+            [ScriptedToolAnswer(stdout=json.dumps(STAGED_CREATED_CHAT) + "\n")],
+        )
+    if has_skill:
+        staged.script_tool(".agents/skills/update-self/scripts/update_self.py", [ScriptedToolAnswer()])
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "host-dir"))
     monkeypatch.setenv("TICKETS_DIR", str(root / "data" / ".tickets"))
