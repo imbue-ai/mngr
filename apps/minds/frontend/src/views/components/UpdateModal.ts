@@ -418,7 +418,10 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
           ),
         );
       } else if (isDecisionPending) {
-        if (chatAgentId) actions.push(openChatButton("primary"));
+        // The decision is made in the run's chat. Without a way into it, Dismiss is the
+        // only way off the badge; with one, dismissing would let a fresh pass set the
+        // kept work aside.
+        actions.push(chatAgentId ? openChatButton("primary") : dismissOutcomeButton(agentId, isBusy, onClose));
       } else {
         if (needsSignIn) {
           actions.push(

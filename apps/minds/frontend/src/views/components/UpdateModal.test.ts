@@ -374,6 +374,14 @@ describe("the update modal over a run that needs the user's decision", () => {
     expect(pressables.map((vnode) => allText(vnode.children).trim()).filter(Boolean)).toEqual(["Open chat"]);
   });
 
+  it("offers Dismiss when the run's chat is unknown, so the badge is never a dead end", () => {
+    const { draw } = harness(() => Promise.resolve(jsonResponse({})), { ...PENDING, chat_agent_id: "" });
+    const pressables = collectVnodes(draw()).filter(
+      (vnode) => typeof attrsOf(vnode).onclick === "function" && vnode.tag !== "div",
+    );
+    expect(pressables.map((vnode) => allText(vnode.children).trim()).filter(Boolean)).toEqual(["Dismiss"]);
+  });
+
   it("lands in the workspace on the run's chat", () => {
     const { draw, routeSet, onClose, requests } = harness(() => Promise.resolve(jsonResponse({})), PENDING);
 
