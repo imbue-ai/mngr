@@ -794,6 +794,33 @@ def decide_schedule_action(schedule, run, now, is_marked_lead_gone):
     return "dispatch"
 
 
+# The schedule fields the dispatcher writes; the rest are the app's. An arm keeps the marks from the
+# file it replaces and starts the others over.
+SCHEDULE_MARK_FIELDS = ("marked_chat", "marked_at", "window_seen_open_at")
+DISPATCHER_SCHEDULE_FIELDS = SCHEDULE_MARK_FIELDS + (
+    "pending_skip_reason",
+    "next_attempt_at",
+    "last_skip_reason",
+    "last_skip_at",
+)
+
+
+def save_schedule_marks(schedule):
+    """Write the dispatcher's fields of ``schedule`` onto the schedule file as it stands now.
+
+    A tick can work for minutes. A cancel that removed the file meanwhile stays cancelled, an arm
+    or refresh that rewrote the app's fields keeps them, and a re-arm keeps only the marks.
+    """
+    current = read_json(SCHEDULE_PATH)
+    if current is None:
+        log("the schedule was cancelled while this tick worked; leaving it cancelled")
+        return
+    is_rearmed = current.get("armed_at") != schedule.get("armed_at")
+    fields = SCHEDULE_MARK_FIELDS if is_rearmed else DISPATCHER_SCHEDULE_FIELDS
+    current.update({key: schedule.get(key) for key in fields})
+    write_json(SCHEDULE_PATH, current)
+
+
 def tick_schedule(now):
     """One minute of an armed schedule: dispatch inside the window, record a skipped window, or retire the file."""
     schedule = read_json(SCHEDULE_PATH)
@@ -820,7 +847,10 @@ def tick_schedule(now):
         now, schedule["window_start_hour"], schedule["window_end_hour"], str(schedule.get("zone") or "")
     )
     if action == "remove":
-        os.remove(SCHEDULE_PATH)
+        try:
+            os.remove(SCHEDULE_PATH)
+        except FileNotFoundError:
+            return
         log("retired the schedule: the run it covers has a verdict (%s)" % run_verdict(run))
         return
     if action == "record_skip":
@@ -834,14 +864,14 @@ def tick_schedule(now):
                 "window_seen_open_at": None,
             }
         )
-        write_json(SCHEDULE_PATH, schedule)
+        save_schedule_marks(schedule)
         log("the update window closed without a start: %s" % reason)
         return
     if action == "note_window":
         seen = window[0] if window is not None else None
         if schedule.get("window_seen_open_at") != seen or schedule.get("pending_skip_reason"):
             schedule.update({"window_seen_open_at": seen, "pending_skip_reason": ""})
-            write_json(SCHEDULE_PATH, schedule)
+            save_schedule_marks(schedule)
         return
     if action == "nothing":
         return
@@ -856,7 +886,7 @@ def tick_schedule(now):
         # A create that failed may have left a chat behind, so it is not retried every minute.
         backoff = RETRY_BACKOFF_SECONDS_BY_SKIP.get(reason, 0)
         schedule.update({"pending_skip_reason": reason, "next_attempt_at": now + backoff if backoff else None})
-    write_json(SCHEDULE_PATH, schedule)
+    save_schedule_marks(schedule)
 
 
 def dispatch_scheduled(schedule, run, agents):

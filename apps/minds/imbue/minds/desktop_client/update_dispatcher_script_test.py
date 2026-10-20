@@ -323,6 +323,45 @@ def test_a_tick_retires_the_schedule_once_its_run_has_a_verdict(
     assert staged.read_state("schedule.json") is None
 
 
+def _messenger_that_first(staged: StagedUpdateWorkspace, change_to_schedule: str, exit_code: int) -> None:
+    """A chat messenger whose create first changes the schedule file, as a command run meanwhile would."""
+    (staged.root / "system" / "scripts" / "message_chat.py").write_text(
+        "import json, os, sys\n"
+        "path = 'data/.state/update-apply/schedule.json'\n"
+        f"{change_to_schedule}\n"
+        f"print(json.dumps({STAGED_CREATED_CHAT!r}))\n"
+        f"sys.exit({exit_code})\n"
+    )
+
+
+def test_a_cancel_that_lands_while_a_tick_creates_the_chat_stays_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    """A failed create would otherwise put the cancelled schedule back, and retry it later in the window."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("schedule.json", _schedule())
+    _messenger_that_first(staged, "os.remove(path)", exit_code=1)
+
+    _tick(program, staged, _IN_WINDOW)
+
+    assert staged.read_state("schedule.json") is None
+
+
+def test_a_refresh_that_lands_while_a_tick_creates_the_chat_keeps_the_apps_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("schedule.json", _schedule())
+    refresh = "s = json.load(open(path)); s['ceiling'] = 'minds-v0.9.1'; json.dump(s, open(path, 'w'))"
+    _messenger_that_first(staged, refresh, exit_code=0)
+
+    _tick(program, staged, _IN_WINDOW)
+
+    schedule = staged.read_state("schedule.json")
+    assert schedule is not None
+    assert (schedule["ceiling"], schedule["marked_chat"]) == ("minds-v0.9.1", _LEAD)
+
+
 @pytest.mark.witnesses("workspace-updates.gone-agent-closed-out")
 def test_the_watchdog_closes_out_a_run_whose_lead_is_gone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
