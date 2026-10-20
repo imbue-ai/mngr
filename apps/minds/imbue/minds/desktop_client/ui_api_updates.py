@@ -242,6 +242,10 @@ def _handle_skip_update(agent_id: str) -> Response:
     refusal = service.skip_update(parsed_id)
     if refusal is not None:
         return _error_response(_SKIP_FAILURE_MESSAGE, 502, refusal.failure_detail)
+    # The skip lives in the app's settings, which no update-state change announces.
+    ui_publisher = get_state().ui_publisher
+    if ui_publisher is not None:
+        ui_publisher.notify_change()
     return _json_response({"ok": True})
 
 
