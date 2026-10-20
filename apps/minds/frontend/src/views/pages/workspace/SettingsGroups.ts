@@ -86,7 +86,7 @@ interface SettingsGroupsLocalState {
   /** The in-flight schedule write, its machine, and its target ref ("" for the default). */
   pendingSchedule: {
     agentId: string;
-    action: "schedule" | "cancel" | "skip" | "sign-in";
+    action: "schedule" | "cancel" | "skip";
     targetRef: string;
   } | null;
   /** The press held for the go-ahead-without-backups confirmation, and its machine. */
@@ -301,7 +301,7 @@ function renderUpdatesGroup(
   }
 
   function writeSchedule(
-    action: "schedule" | "cancel" | "skip" | "sign-in",
+    action: "schedule" | "cancel" | "skip",
     targetRef = "",
   ): void {
     const inFlight = { agentId, action, targetRef };
@@ -312,9 +312,7 @@ function renderUpdatesGroup(
         ? updates.scheduleUpdate(agentId, targetRef)
         : action === "cancel"
           ? updates.cancelSchedule(agentId)
-          : action === "skip"
-            ? updates.skipUpdate(agentId)
-            : shell.signInForUpdate(agentId);
+          : updates.skipUpdate(agentId);
     void call.then((result) => {
       if (local.pendingSchedule === inFlight) local.pendingSchedule = null;
       if (!result.isOk)
@@ -430,11 +428,10 @@ function renderUpdatesGroup(
                       variant: "primary",
                       id: "ws-update-sign-in-btn",
                       disabled: isBusy,
-                      onclick: () => writeSchedule("sign-in"),
+                      // Entering the workspace leaves this pane, so a refusal is explained in the modal.
+                      onclick: () => shell.signInForUpdateOrExplain(agentId),
                     },
-                    pendingSchedule?.action === "sign-in"
-                      ? m(Spinner, { size: "sm" })
-                      : "Sign in",
+                    "Sign in",
                   )
                 : null,
               // Under auto-update the app arms the schedule itself, so the way

@@ -405,6 +405,28 @@ describe("the Updates settings group's specific-version field", () => {
   });
 });
 
+describe("the Updates settings group's sign-in", () => {
+  it("explains a sign-in the machine could not open in the update modal, since the press leaves this pane", async () => {
+    const { draw, requests } = harness(() =>
+      Promise.resolve(
+        jsonResponse({ error: "Couldn't open a chat in this workspace to sign in." }, 502),
+      ),
+    );
+    const { stores, shell } = getAppContext();
+    stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, needs_sign_in: true } },
+      update_window: "2:00 AM-5:00 AM",
+    });
+
+    press(updatesGroup(draw(BACKED)), "Sign in");
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${BACKED}/sign-in`]);
+    expect(shell.openUpdateModalAgentId()).toBe(BACKED);
+  });
+});
+
 describe("the Updates settings group after an update that never went out", () => {
   function recordFailureOnBacked(): void {
     getAppContext().stores.updates.applyUpdatesMessage({
