@@ -148,6 +148,29 @@ def test_an_agent_positively_ended_reads_as_gone(ended_state: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("agent_lines", "liveness", "listed_chat_id"),
+    (
+        ("renamed-update\tRUNNING\tagent-chat-1\t\n", UpdateAgentLiveness.ALIVE, "agent-chat-1"),
+        # A handoff leaves the ended predecessor listed beside the agent the chat moved to.
+        (
+            "renamed-update\tSTOPPED\tagent-chat-1\t\nsuccessor\tRUNNING\tagent-2\tagent-chat-1\n",
+            UpdateAgentLiveness.ALIVE,
+            "agent-chat-1",
+        ),
+        ("renamed-update\tDONE\tagent-chat-1\t\n", UpdateAgentLiveness.GONE, "agent-chat-1"),
+        ("unrelated\tRUNNING\tagent-other\t\n", UpdateAgentLiveness.GONE, ""),
+    ),
+)
+def test_a_lead_whose_chat_was_renamed_is_found_by_its_chat_id(
+    agent_lines: str, liveness: UpdateAgentLiveness, listed_chat_id: str
+) -> None:
+    probe = parse_update_run_probe(update_run_probe_stdout(agents=agent_lines), _CHAT, "agent-chat-1")
+
+    assert probe.agent_liveness is liveness
+    assert probe.chat_agent_id == listed_chat_id
+
+
+@pytest.mark.parametrize(
     ("agent_lines", "is_waiting"),
     (
         (f"{_CHAT}\tWAITING\n", True),

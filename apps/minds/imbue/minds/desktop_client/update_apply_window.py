@@ -212,17 +212,41 @@ class _BusyAgents(FrozenModel):
         )
 
 
-def _listed_agent(listing_lines: list[str], agent_name: str) -> _ListedAgent | None:
-    """``agent_name`` as listed, or None when it is not listed."""
+def _listed_agents(listing_lines: list[str]) -> list[_ListedAgent]:
+    """Every agent the listing names, in its order."""
+    agents: list[_ListedAgent] = []
     for line in listing_lines:
         name, _, rest = line.partition("\t")
-        if name.strip() == agent_name:
-            state, _, rest = rest.partition("\t")
-            agent_id, _, chat_id = rest.partition("\t")
-            return _ListedAgent(
-                name=agent_name, state=state.strip(), agent_id=agent_id.strip(), chat_id=chat_id.strip()
-            )
+        if not name.strip():
+            continue
+        state, _, rest = rest.partition("\t")
+        agent_id, _, chat_id = rest.partition("\t")
+        agents.append(
+            _ListedAgent(name=name.strip(), state=state.strip(), agent_id=agent_id.strip(), chat_id=chat_id.strip())
+        )
+    return agents
+
+
+def _listed_agent(agents: list[_ListedAgent], agent_name: str) -> _ListedAgent | None:
+    """``agent_name`` as listed, or None when it is not listed."""
+    for agent in agents:
+        if agent.name == agent_name:
+            return agent
     return None
+
+
+def _run_lead(agents: list[_ListedAgent], chat_agent_name: str, chat_agent_id: str) -> _ListedAgent | None:
+    """The run's lead: by the name the row holds, else by the chat id the row knows for it.
+
+    Renaming a chat renames its agent, so the row's name can go stale under a live lead; its
+    chat id does not. A chat that moved to a new agent lists its ended predecessor beside it.
+    """
+    lead = _listed_agent(agents, chat_agent_name)
+    if lead is not None or not chat_agent_id:
+        return lead
+    members = [agent for agent in agents if chat_agent_id in (agent.agent_id, agent.chat_id)]
+    live = [agent for agent in members if agent.state not in _ENDED_AGENT_STATES]
+    return (live or members or [None])[0]
 
 
 def _parse_busy_agents(busy_lines: list[str] | None) -> _BusyAgents:
@@ -255,37 +279,34 @@ def _is_idle(agent: _ListedAgent, busy_agents: _BusyAgents) -> bool:
 
 
 def _classify_agent_listing(
-    listing_lines: list[str], chat_agent_name: str, worker_agent_name: str, busy_agents: _BusyAgents
+    agents: list[_ListedAgent], chat_agent: _ListedAgent | None, worker_agent_name: str, busy_agents: _BusyAgents
 ) -> tuple[UpdateAgentLiveness, bool]:
     """The run's chat agent's liveness (and whether the run is WAITING) from the listing.
 
-    With no chat name to look for the answer is UNKNOWN, not GONE: nothing here can be
-    attributed to the run, and GONE would unlock a live run's row. An answered listing
-    that does not carry the name is GONE, since an ended chat stays listed.
+    An answered listing that does not carry the lead is GONE, since an ended chat stays listed.
 
     An idle lead is only "waiting" when it is not busy and its named worker is not moving
     either: the lead sits idle for most of the run while a background worker does the
     merge, or while a command it started in the background runs.
     """
-    stripped = [line.strip() for line in listing_lines if line.strip()]
-    if AGENTS_FAILED_SENTINEL in stripped:
-        return UpdateAgentLiveness.UNKNOWN, False
-    if not chat_agent_name:
-        return UpdateAgentLiveness.UNKNOWN, False
-    chat_agent = _listed_agent(stripped, chat_agent_name)
     if chat_agent is None or chat_agent.state in _ENDED_AGENT_STATES:
         return UpdateAgentLiveness.GONE, False
     if not _is_idle(chat_agent, busy_agents):
         return UpdateAgentLiveness.ALIVE, False
-    worker = _listed_agent(stripped, worker_agent_name) if worker_agent_name else None
+    worker = _listed_agent(agents, worker_agent_name) if worker_agent_name else None
     is_worker_moving = (
         worker is not None and worker.state not in _ENDED_AGENT_STATES and not _is_idle(worker, busy_agents)
     )
     return UpdateAgentLiveness.ALIVE, not is_worker_moving
 
 
-def parse_update_run_probe(stdout: str, chat_agent_name: str) -> UpdateRunProbe:
-    """Classify the probe's output; missing run sentinels mean unanswered, not "no run"."""
+def parse_update_run_probe(stdout: str, chat_agent_name: str, chat_agent_id: str = "") -> UpdateRunProbe:
+    """Classify the probe's output; missing run sentinels mean unanswered, not "no run".
+
+    ``chat_agent_id`` is the run's chat's id as the row knows it ('' for none), which finds a lead
+    whose chat was renamed. With no chat name to look for the liveness is UNKNOWN, not GONE:
+    nothing in the listing can be attributed to the run, and GONE would unlock a live run's row.
+    """
     lines = stdout.splitlines()
     run_lines = _section(lines, RUN_BEGIN_SENTINEL, RUN_END_SENTINEL)
     if run_lines is None:
@@ -296,21 +317,23 @@ def parse_update_run_probe(stdout: str, chat_agent_name: str) -> UpdateRunProbe:
     is_records_run = run_status is not None and bool(chat_agent_name) and run_status.chat_agent_name == chat_agent_name
     worker_agent_name = run_status.worker_agent_name if is_records_run and run_status is not None else ""
     agent_lines = _section(lines, AGENTS_BEGIN_SENTINEL, AGENTS_END_SENTINEL)
-    chat_agent_id = ""
-    if agent_lines is None:
+    listed_chat_agent_id = ""
+    stripped = [line.strip() for line in agent_lines or [] if line.strip()]
+    if agent_lines is None or AGENTS_FAILED_SENTINEL in stripped or not chat_agent_name:
         liveness, is_waiting = UpdateAgentLiveness.UNKNOWN, False
     else:
+        agents = _listed_agents(stripped)
+        lead = _run_lead(agents, chat_agent_name, chat_agent_id)
         busy_agents = _parse_busy_agents(_section(lines, BUSY_BEGIN_SENTINEL, BUSY_END_SENTINEL))
-        liveness, is_waiting = _classify_agent_listing(agent_lines, chat_agent_name, worker_agent_name, busy_agents)
-        listed = _listed_agent([line.strip() for line in agent_lines if line.strip()], chat_agent_name)
-        if listed is not None and chat_agent_name:
-            chat_agent_id = listed.chat_id or listed.agent_id
+        liveness, is_waiting = _classify_agent_listing(agents, lead, worker_agent_name, busy_agents)
+        if lead is not None:
+            listed_chat_agent_id = lead.chat_id or lead.agent_id
     return UpdateRunProbe(
         is_probe_answered=True,
         run_status=run_status,
         agent_liveness=liveness,
         is_agent_waiting=is_waiting,
-        chat_agent_id=chat_agent_id,
+        chat_agent_id=listed_chat_agent_id,
     )
 
 
@@ -440,12 +463,12 @@ class UpdateApplyWindowManager(MutableModel):
 
     def probe_run(self, agent_id: AgentId) -> UpdateRunProbe:
         """Ask the workspace whether an update is still happening in it."""
-        chat_agent_name = self.store.get(agent_id).chat_agent_name
+        state = self.store.get(agent_id)
         result = self.mngr_caller.call(
             build_update_run_probe_args(build_agent_address(agent_id, self.backend_resolver)),
             timeout=_RUN_PROBE_TIMEOUT_SECONDS,
         )
-        probe = parse_update_run_probe(result.stdout, chat_agent_name)
+        probe = parse_update_run_probe(result.stdout, state.chat_agent_name, state.chat_agent_id)
         if not probe.is_probe_answered:
             logger.debug(
                 "Update run probe for {} produced no sentinel (exit {}): {}",
