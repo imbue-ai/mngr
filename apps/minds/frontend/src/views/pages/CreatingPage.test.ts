@@ -157,11 +157,14 @@ describe("CreatingPage across a route change", () => {
   });
 
   /**
-   * A live attempt whose first status poll answers DONE, with the welcome-chat post held open
-   * until the returned `settleSeed` is called. Reduced motion, so the page enters directly
-   * instead of starting the wash, which measures the DOM.
+   * A live attempt whose status polls answer `status` (DONE unless given), with every
+   * welcome-chat post held open until the returned `settleSeed` is called. Reduced motion, so
+   * the page enters directly instead of starting the wash, which measures the DOM.
    */
-  function mountDoneAttempt(createAttemptId: string): {
+  function mountDoneAttempt(
+    createAttemptId: string,
+    status = "DONE",
+  ): {
     page: m.Component;
     entered: string[];
     seedBodies: WelcomeChatBody[];
@@ -187,18 +190,21 @@ describe("CreatingPage across a route change", () => {
       },
     );
     const seedBodies: WelcomeChatBody[] = [];
-    let resolveSeed: (response: Response) => void = () => undefined;
+    const seedResolvers: ((response: Response) => void)[] = [];
     vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
       if (url.endsWith("/welcome-chat")) {
         seedBodies.push(JSON.parse(init?.body as string) as WelcomeChatBody);
         return new Promise<Response>((resolve) => {
-          resolveSeed = resolve;
+          seedResolvers.push(resolve);
         });
       }
       if (url.startsWith("/ui/api/create/attempts/"))
         return Promise.resolve(jsonResponse(liveDetail(createAttemptId)));
       return Promise.resolve(
-        jsonResponse({ status: "DONE", redirect_url: "/goto/agent-0123abcd/" }),
+        jsonResponse({
+          status,
+          redirect_url: status === "DONE" ? "/goto/agent-0123abcd/" : "",
+        }),
       );
     });
     vi.spyOn(m, "redraw").mockImplementation(() => undefined);
@@ -211,7 +217,10 @@ describe("CreatingPage across a route change", () => {
       page,
       entered,
       seedBodies,
-      settleSeed: () => resolveSeed(jsonResponse({ chat_id: "agent-seeded" })),
+      settleSeed: () => {
+        for (const resolve of seedResolvers)
+          resolve(jsonResponse({ chat_id: "agent-seeded" }));
+      },
     };
   }
 
@@ -221,7 +230,9 @@ describe("CreatingPage across a route change", () => {
     const render = (vnode: m.Vnode): m.Vnode =>
       (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
 
-    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
+    // Handed over once the page knows the settings, and again once the attempt is done, which waits on the seed.
+    await vi.waitFor(() => expect(seedBodies).toHaveLength(2));
+    expect(seedBodies[1]).toEqual(seedBodies[0]);
     const turns = seedBodies[0].turns;
     expect(turns[0]).toEqual({
       role: "assistant",
@@ -249,11 +260,30 @@ describe("CreatingPage across a route change", () => {
     const { page, entered, seedBodies, settleSeed } =
       mountDoneAttempt("create-attempt-e");
 
-    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
+    await vi.waitFor(() => expect(seedBodies).toHaveLength(2));
     await vi.advanceTimersByTimeAsync(30_000);
     (page.onremove as () => void).call(page);
     settleSeed();
     await vi.advanceTimersByTimeAsync(0);
+    expect(entered).toEqual([]);
+  });
+
+  it("hands the conversation over while the workspace is still being built, so leaving the page cannot lose it", async () => {
+    const { page, entered, seedBodies } = mountDoneAttempt(
+      "create-attempt-f",
+      "CREATING_WORKSPACE",
+    );
+
+    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
+    const turns = seedBodies[0].turns;
+    expect(turns[0]).toEqual({
+      role: "assistant",
+      text: manifestoOpenerMarkdown(),
+    });
+    expect(turns[turns.length - 1].text).toBe(readyTurnMarkdown());
+    await vi.advanceTimersByTimeAsync(30_000);
+    (page.onremove as () => void).call(page);
+    expect(seedBodies).toHaveLength(1);
     expect(entered).toEqual([]);
   });
 

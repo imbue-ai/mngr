@@ -18,9 +18,10 @@ renders:
   detail: the live in-flight attempt or the record-backed interrupted/failed
   view (both carrying the attempt's persisted request so the page can restate
   the chosen settings after a reload), or "gone".
-- ``POST /ui/api/create/attempts/<create_attempt_id>/welcome-chat`` -- once the
-  attempt is done, hands the onboarding conversation to the new workspace as
-  its first chat (``welcome_chat.py``), answering the chat's id.
+- ``POST /ui/api/create/attempts/<create_attempt_id>/welcome-chat`` -- hands the
+  onboarding conversation to the attempt's workspace as its first chat
+  (``welcome_chat.py``): held while the workspace is built and seeded when it is
+  done, answering the chat's id once it is.
 
 Some small derivations here (suggested color, locked emails, destroy statuses)
 mirror private helpers in ``app.py``; importing them would be circular
@@ -43,7 +44,6 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
-from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.connections.account_lifecycle import account_panel_state
@@ -83,7 +83,6 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_models import AccountPanelState
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatRequest
-from imbue.minds.desktop_client.welcome_chat import seed_welcome_chat
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import CONNECTION_ONLY_LAUNCH_MODES
@@ -110,7 +109,6 @@ from imbue.minds.primitives import DEFAULT_GCP_ZONE
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import default_docker_runtime
-from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 
 RETRY_CONNECTION_REMOVED_REASON: Final[str] = "The connection this attempt used was removed, so it cannot be retried."
@@ -291,7 +289,9 @@ class RecordCreateAttemptDetail(FrozenModel):
 class WelcomeChatResponse(FrozenModel):
     """Response for POST /ui/api/create/attempts/<id>/welcome-chat: the seeded chat's id."""
 
-    chat_id: str = Field(description="The id of the chat the conversation continues in")
+    chat_id: str = Field(
+        description="The id of the chat the conversation continues in; empty while it is held for a workspace being built"
+    )
 
 
 class CreateAttemptDetailResponse(FrozenModel):
@@ -306,8 +306,8 @@ def _unauthenticated_response() -> Response:
     return Response('{"error": "authentication required"}', status=401, mimetype="application/json")
 
 
-def _json_response(model: FrozenModel) -> Response:
-    return Response(model.model_dump_json(), mimetype="application/json")
+def _json_response(model: FrozenModel, status: int = 200) -> Response:
+    return Response(model.model_dump_json(), status=status, mimetype="application/json")
 
 
 def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
@@ -684,13 +684,26 @@ def _done_workspace_agent_id(create_attempt_id: str) -> AgentId | None:
     return None
 
 
-def _handle_seed_welcome_chat(create_attempt_id: str) -> Response:
-    """Hand the onboarding conversation to the finished attempt's workspace as its first chat.
+def _is_attempt_in_flight(create_attempt_id: str) -> bool:
+    """Whether the attempt is still being built by this app: live, and neither done nor failed."""
+    agent_creator = get_state().agent_creator
+    try:
+        parsed_id = CreateAttemptId(create_attempt_id)
+    except InvalidRandomIdError:
+        return False
+    info = agent_creator.get_create_attempt_info(parsed_id) if agent_creator is not None else None
+    return info is not None and info.status not in (AgentCreateAttemptStatus.DONE, AgentCreateAttemptStatus.FAILED)
 
-    The body is a :class:`WelcomeChatRequest`. Answers 200 with the chat's id; 409 while the
-    attempt has no workspace yet (the page posts after DONE, so this is a race or a stale
-    tab), and 502 with the script's own words when the workspace refused or could not be
-    reached, in which case the page enters the workspace without the chat.
+
+def _handle_seed_welcome_chat(create_attempt_id: str) -> Response:
+    """Hand the onboarding conversation to the attempt's workspace as its first chat.
+
+    The body is a :class:`WelcomeChatRequest`. While the attempt is still being built the
+    conversation is held and seeded the moment the attempt finishes, whether or not the page
+    is still open: 202. Once the attempt is done it is seeded now, or the seed already under
+    way is waited on: 200 with the chat's id, or 502 with the script's own words when the
+    workspace refused or could not be reached, in which case the page enters the workspace
+    without the chat. 409 for an attempt that is neither (failed, gone, or unknown).
     """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
@@ -702,13 +715,16 @@ def _handle_seed_welcome_chat(create_attempt_id: str) -> Response:
     except ValidationError as e:
         logger.debug("Rejected a malformed welcome-chat body: {}", e)
         return make_json_error_response("Invalid JSON body", 400)
+    seeder = get_state().welcome_chat_seeder
+    if seeder is None:
+        return make_json_error_response("This app does not seed welcome chats", 503)
     workspace_agent_id = _done_workspace_agent_id(create_attempt_id)
     if workspace_agent_id is None:
-        return make_json_error_response("The workspace is not ready yet", 409)
-    mngr_caller = get_state().mngr_caller or get_default_mngr_caller()
-    outcome = seed_welcome_chat(
-        mngr_caller, build_agent_address(workspace_agent_id, get_state().backend_resolver), welcome_chat
-    )
+        if not _is_attempt_in_flight(create_attempt_id):
+            return make_json_error_response("The attempt has no workspace to seed", 409)
+        seeder.hold(CreateAttemptId(create_attempt_id), welcome_chat)
+        return _json_response(WelcomeChatResponse(chat_id=""), status=202)
+    outcome = seeder.seed(CreateAttemptId(create_attempt_id), workspace_agent_id, welcome_chat)
     if not outcome.is_seeded:
         return make_json_error_response(
             "Couldn't open the welcome chat in the workspace.", 502, detail=outcome.failure_detail

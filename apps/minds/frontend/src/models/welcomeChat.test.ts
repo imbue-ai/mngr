@@ -175,6 +175,15 @@ describe("postWelcomeChat", () => {
     });
   });
 
+  it("answers an empty chat id while the attempt is still being built and the conversation is held", async () => {
+    const chatId = await postWelcomeChat(
+      "attempt-1",
+      { title: "Welcome", turns: [{ role: "user", text: "hi" }] },
+      () => Promise.resolve(jsonResponse({ chat_id: "" }, 202)),
+    );
+    expect(chatId).toBe("");
+  });
+
   it("fails on a refusal, carrying the body's message and the script's verdict, or on an answer without a chat id", async () => {
     await expect(
       postWelcomeChat("attempt-1", { title: "", turns: [] }, () =>

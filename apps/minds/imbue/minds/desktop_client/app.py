@@ -179,6 +179,7 @@ from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
 from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.webdav import create_webdav_app
+from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
@@ -2556,6 +2557,7 @@ def create_desktop_client(
     imbue_cloud_cli: ImbueCloudCli | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: InstallationPaths | None = None,
+    welcome_chat_seeder: WelcomeChatSeeder | None = None,
     minds_config: MindsConfig | None = None,
     client_env_config: ClientEnvConfig | None = None,
     envelope_stream_consumer: EnvelopeStreamConsumer | None = None,
@@ -2758,6 +2760,15 @@ def create_desktop_client(
         backend_resolver=backend_resolver,
         http_client=http_client,
         agent_creator=agent_creator,
+        # The live app shares one seeder with its agent creator's done hook; an app built without one seeds
+        # only when the creation page asks.
+        welcome_chat_seeder=(
+            welcome_chat_seeder
+            if welcome_chat_seeder is not None
+            else WelcomeChatSeeder(
+                mngr_caller=mngr_caller or get_default_mngr_caller(), backend_resolver=backend_resolver
+            )
+        ),
         imbue_cloud_cli=imbue_cloud_cli,
         notification_dispatcher=notification_dispatcher,
         api_v1_paths=paths,

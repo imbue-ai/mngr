@@ -11,6 +11,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
@@ -32,8 +33,12 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
+from imbue.minds.desktop_client.testing import mngr_create_stub_body
+from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
 from imbue.minds.desktop_client.testing import write_dead_destroy_marker
 from imbue.minds.desktop_client.ui_api_create import RETRY_CONNECTION_REMOVED_REASON
+from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
 from imbue.minds.primitives import CreateAttemptId
@@ -813,3 +818,67 @@ def test_the_welcome_chat_refuses_a_body_without_turns_and_reports_a_workspace_t
         "error": "Couldn't open the welcome chat in the workspace.",
         "detail": "Could not seed the welcome chat: could not connect",
     }
+
+
+def test_a_conversation_handed_over_while_the_workspace_is_built_is_seeded_when_it_finishes_without_the_page(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The user may leave the creation page and enter the workspace from the list; it must still open on its chat.
+
+    The page hands the conversation over while the attempt waits for the workspace (the probe's first request
+    stands in for that moment), and nothing asks again: the attempt finishing is what seeds it. A page that does
+    ask afterwards is answered the same chat rather than seeding a second one.
+    """
+    install_stub_mngr_on_path(
+        tmp_path / "fake-bin", monkeypatch, mngr_create_stub_body(_WORKSPACE_AGENT_ID, HostId.generate())
+    )
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout='{"chat_id": "agent-seeded"}\n', is_mngr_output=True)
+    )
+    seeder = WelcomeChatSeeder(mngr_caller=caller, backend_resolver=MngrCliBackendResolver())
+    handed_over: list[int] = []
+    clients: list[FlaskClient] = []
+
+    def hand_over_while_waiting_for_the_workspace() -> None:
+        path = f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat"
+        handed_over.append(clients[0].post(path, json=_welcome_chat_body()).status_code)
+
+    with scripted_workspace_probe_server(
+        not_ready_count=0, on_first_request=hand_over_while_waiting_for_the_workspace
+    ) as port:
+        creator = AgentCreator(
+            paths=InstallationPaths(data_dir=tmp_path / "minds"),
+            root_concurrency_group=root_concurrency_group,
+            system_interface_health_tracker=SystemInterfaceHealthTracker(),
+            mngr_forward_port=port,
+            mngr_forward_preauth_cookie="any-preauth",
+            on_create_attempt_done=seeder.seed_held,
+        )
+        client, _app, _auth_store = build_desktop_client_for_test(
+            tmp_path,
+            is_authenticated=True,
+            agent_creator=creator,
+            paths=InstallationPaths(data_dir=tmp_path / "minds"),
+            root_concurrency_group=root_concurrency_group,
+            welcome_chat_seeder=seeder,
+        )
+        clients.append(client)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        create_attempt_id = creator.start_create_attempt(
+            str(repo), host_name="welcome-held-71003", launch_mode=LaunchMode.DOCKER
+        )
+        assert caller.called_event.wait(timeout=30.0)
+        creator.wait_for_all()
+
+    assert handed_over == [202]
+    (argv,) = caller.calls
+    assert argv[:3] == ["exec", "--agent", str(_WORKSPACE_AGENT_ID)]
+
+    asked_after = client.post(f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat", json=_welcome_chat_body())
+
+    assert asked_after.status_code == 200
+    assert json.loads(asked_after.get_data(as_text=True)) == {"chat_id": "agent-seeded"}
+    assert len(caller.calls) == 1

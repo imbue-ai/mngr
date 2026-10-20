@@ -164,7 +164,11 @@ async function refusalReason(response: Response): Promise<string> {
   return parts.length === 0 ? "" : `: ${parts.join(" -- ")}`;
 }
 
-/** Hand the conversation to the finished attempt's workspace; resolves with the seeded chat's id. */
+/**
+ * Hand the conversation to the attempt's workspace. Resolves with the seeded chat's id once
+ * the attempt is done, or with "" while it is still being built: the desktop client holds the
+ * conversation and seeds it when the attempt finishes.
+ */
 export async function postWelcomeChat(
   createAttemptId: string,
   body: WelcomeChatBody,

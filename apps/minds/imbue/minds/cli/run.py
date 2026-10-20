@@ -129,6 +129,7 @@ from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forwar
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
 from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_defaults_opt_in
@@ -791,6 +792,9 @@ def run(
         PendingCreateAttemptDiscoverySweep(store=pending_create_attempt_store, backend_resolver=backend_resolver)
     )
 
+    # Shared by the agent creator (it seeds a finished attempt's held conversation) and the creation
+    # page's route (it hands the conversation over, and waits on the seed while the page is open).
+    welcome_chat_seeder = WelcomeChatSeeder(mngr_caller=mngr_caller, backend_resolver=backend_resolver)
     agent_creator = AgentCreator(
         paths=paths,
         server_port=port,
@@ -807,6 +811,7 @@ def run(
         # workspace list re-renders its creating/interrupted/failed rows
         # without waiting for a discovery tick.
         on_create_attempts_changed=backend_resolver.notify_change,
+        on_create_attempt_done=welcome_chat_seeder.seed_held,
         backup_quota_evictor_factory=lambda account_email: _resolve_backup_quota_evictor(
             session_store, workspace_record_store, paths, imbue_cloud_cli, account_email
         ),
@@ -920,6 +925,7 @@ def run(
         imbue_cloud_cli=imbue_cloud_cli,
         notification_dispatcher=notification_dispatcher,
         paths=paths,
+        welcome_chat_seeder=welcome_chat_seeder,
         envelope_stream_consumer=consumer,
         session_store=session_store,
         minds_config=minds_config,

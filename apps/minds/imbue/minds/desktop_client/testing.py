@@ -1278,6 +1278,17 @@ def record_sleep_of(sleep_tracker: SleepTracker, clock: CatchUpClock, seconds: f
     sleep_tracker.record_heartbeat()
 
 
+def mngr_create_stub_body(agent_id: AgentId, host_id: HostId) -> str:
+    """Shell lines for a ``mngr`` stub whose ``create`` reports ``agent_id`` on ``host_id``; every other command exits 0.
+
+    The agent creator runs ``mngr create`` through the ``MNGR_BINARY`` constant, so a test installs this with
+    ``install_stub_mngr_on_path`` rather than through the creator's ``mngr_binary`` field (which only the
+    implicit-discard commands use).
+    """
+    created = json.dumps({"event": "created", "agent_id": str(agent_id), "host_id": str(host_id)})
+    return f'if [ "$1" = "create" ]; then echo \'{created}\'; fi\nexit 0'
+
+
 FAKE_WORKSPACE_HOME: Final[str] = "/home/agent"
 
 

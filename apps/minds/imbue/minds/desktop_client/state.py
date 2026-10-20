@@ -63,6 +63,7 @@ from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
+from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
@@ -97,6 +98,11 @@ class DesktopClientState(MutableModel):
     )
     agent_creator: AgentCreator | None = Field(
         default=None, frozen=True, description="In-flight agent create attempt manager"
+    )
+    welcome_chat_seeder: WelcomeChatSeeder | None = Field(
+        default=None,
+        frozen=True,
+        description="Seeds each new workspace's welcome chat once, with or without the creation page",
     )
     imbue_cloud_cli: ImbueCloudCli | None = Field(
         default=None, frozen=True, description="imbue_cloud plugin CLI wrapper"

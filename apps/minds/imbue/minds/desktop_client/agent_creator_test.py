@@ -82,6 +82,7 @@ from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_MNGR_REPO_URL
 from imbue.minds.desktop_client.template_mngr_pin import PUBLIC_MNGR_REPO_URL
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
 from imbue.minds.desktop_client.testing import install_stub_on_path
+from imbue.minds.desktop_client.testing import mngr_create_stub_body
 from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
 from imbue.minds.desktop_client.testing import vault_kv_stub_body
 from imbue.minds.desktop_client.testing import write_template_pyproject_pinning_mngr
@@ -1323,6 +1324,7 @@ def _make_test_creator(
     pending_create_attempt_store: PendingCreateAttemptStore | None = None,
     mngr_binary: str | None = None,
     on_create_attempts_changed: Callable[[], None] | None = None,
+    on_create_attempt_done: Callable[[CreateAttemptId, AgentId], None] | None = None,
 ) -> AgentCreator:
     paths = InstallationPaths(data_dir=tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
@@ -1341,6 +1343,7 @@ def _make_test_creator(
         backup_setup_retry_wait_seconds=backup_setup_retry_wait_seconds,
         pending_create_attempt_store=pending_create_attempt_store,
         on_create_attempts_changed=on_create_attempts_changed,
+        on_create_attempt_done=on_create_attempt_done,
         mngr_binary=mngr_binary if mngr_binary is not None else MNGR_BINARY,
     )
 
@@ -2397,23 +2400,7 @@ def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monke
     ``agent_id`` there shows the workspace row and the creating row side by side.
     """
     aid = AgentId.generate()
-    hid = HostId.generate()
-    # The create command invokes the ``MNGR_BINARY`` constant ("mngr") via PATH,
-    # so the fake rides a PATH shim rather than the ``mngr_binary`` field (which
-    # only the implicit-discard commands use).
-    fake_bin_dir = tmp_path / "fake-bin"
-    fake_bin_dir.mkdir()
-    script_path = fake_bin_dir / "mngr"
-    script_path.write_text(
-        "#!/bin/bash\n"
-        'if [ "$1" = "create" ]; then\n'
-        f'  echo \'{{"event": "created", "agent_id": "{aid}", "host_id": "{hid}"}}\'\n'
-        "  exit 0\n"
-        "fi\n"
-        "exit 0\n"
-    )
-    script_path.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{fake_bin_dir}{os.pathsep}{os.environ['PATH']}")
+    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, mngr_create_stub_body(aid, HostId.generate()))
     # The readiness probe never answers 200, so the create attempt sits in
     # WAITING_FOR_READY for the whole (short) ready window.
     with scripted_workspace_probe_server(not_ready_count=10**6) as port:
@@ -2443,6 +2430,30 @@ def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monke
         assert observed_waiting, "the create attempt never reached WAITING_FOR_READY"
         assert info is not None and info.status is AgentCreateAttemptStatus.DONE
         creator.wait_for_all()
+
+
+def test_a_finished_create_attempt_runs_the_done_hook_with_its_workspace(tmp_path: Path, monkeypatch) -> None:
+    """The welcome chat is seeded from this hook, so it must fire for every attempt that reaches DONE."""
+    aid = AgentId.generate()
+    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, mngr_create_stub_body(aid, HostId.generate()))
+    finished: list[tuple[CreateAttemptId, AgentId]] = []
+    is_finished = threading.Event()
+
+    def on_done(create_attempt_id: CreateAttemptId, agent_id: AgentId) -> None:
+        finished.append((create_attempt_id, agent_id))
+        is_finished.set()
+
+    with scripted_workspace_probe_server(not_ready_count=0) as port:
+        creator = _make_test_creator(
+            tmp_path, mngr_forward_port=port, preauth_cookie="any-preauth", on_create_attempt_done=on_done
+        )
+        create_attempt_id = creator.start_create_attempt(str(_make_fake_repo(tmp_path)), host_name="done-hook-71002")
+        assert is_finished.wait(timeout=30.0)
+        creator.wait_for_all()
+
+    assert finished == [(create_attempt_id, aid)]
+    info = creator.get_create_attempt_info(create_attempt_id)
+    assert info is not None and info.status is AgentCreateAttemptStatus.DONE
 
 
 def test_scratch_clone_roots_are_unique_per_create_attempt() -> None:

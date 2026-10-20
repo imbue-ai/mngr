@@ -121,6 +121,7 @@ from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr.utils.progress import ProgressEvent
 from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr.utils.progress import parse_progress_event
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
@@ -2185,6 +2186,15 @@ class AgentCreator(MutableModel):
             "chrome SSE rebuilds the workspace-list payload without waiting for a discovery tick."
         ),
     )
+    on_create_attempt_done: Callable[[CreateAttemptId, AgentId], None] | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Run on a thread of its own once a create attempt is DONE, with its workspace's agent id. Wired to "
+            "the welcome-chat seeder, which seeds the conversation the creation page handed over even when "
+            "that page has since been left."
+        ),
+    )
     mngr_binary: str = Field(
         default=MNGR_BINARY,
         frozen=True,
@@ -3099,6 +3109,17 @@ class AgentCreator(MutableModel):
 
                 if on_created is not None:
                     on_created(canonical_id, canonical_host_id)
+
+                if self.on_create_attempt_done is not None:
+                    start_mngr_thread(
+                        self.root_concurrency_group,
+                        target=self.on_create_attempt_done,
+                        args=(create_attempt_id, canonical_id),
+                        name=f"create-attempt-done-{create_attempt_id}",
+                        # Like the backup setup below: what it does is not the create, so a failure must not
+                        # poison the root CG.
+                        is_checked=False,
+                    )
 
                 # Configure restic backups asynchronously on a detached
                 # thread: bucket
