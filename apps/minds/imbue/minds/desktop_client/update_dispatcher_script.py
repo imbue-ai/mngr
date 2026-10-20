@@ -178,8 +178,6 @@ class ChatAppUnreachable(Exception):
     """The connection to the chat app could not be made at all, so nothing reached it."""
 
 
-
-
 def read_json(path):
     """The JSON object at ``path``, or None when it is absent, unreadable, or not an object."""
     try:
@@ -295,8 +293,6 @@ def agent_env():
     return dict(env)
 
 
-
-
 def list_agents():
     """Every agent the workspace's mngr lists, as dicts; None when it could not list them."""
     listed = run_command(
@@ -346,8 +342,6 @@ def chat_id_of(agent):
     labels = agent.get("labels")
     label = labels.get("chat_id") if isinstance(labels, dict) else None
     return str(label or agent.get("id") or "")
-
-
 
 
 def chat_app_url():
@@ -432,8 +426,6 @@ def is_agent_busy(agent, busy_by_name):
     if busy_by_name is not None and agent.get("name") in busy_by_name:
         return busy_by_name[agent.get("name")]
     return agent.get("state") == "RUNNING"
-
-
 
 
 def is_skill_present():
@@ -536,8 +528,6 @@ def is_update_lease_held():
     return any(title == UPDATE_LEASE_TITLE for _, title, _, _ in open_update_leases())
 
 
-
-
 def run_verdict(run):
     return run.get("verdict") if isinstance(run, dict) else None
 
@@ -554,8 +544,6 @@ def is_run_in_flight(run, agents):
     if agents is None:
         return True
     return not is_agent_ended(find_agent(agents, run["chat_agent_name"]))
-
-
 
 
 def display_version(ref):
@@ -732,8 +720,6 @@ def create_update_chat(schedule_like, started_by, is_auto_open, agents):
     return result
 
 
-
-
 def _zone(name):
     if ZoneInfo is None or not name:
         return None
@@ -899,8 +885,6 @@ def dispatch_scheduled(schedule, run, agents):
     return SKIP_DISPATCH_FAILED
 
 
-
-
 def decide_watchdog_action(run, agents, busy_by_name, watchdog_state, now):
     """What the watchdog does about a run with no verdict: ``close_out``, ``remind``, ``count_idle``, ``reset``,
     or ``nothing``."""
@@ -1038,8 +1022,6 @@ def tick_watchdog(now):
             state["last_reminded_at"] = now
             log("reminded idle lead %s" % run["chat_agent_name"])
     write_json(WATCHDOG_PATH, state)
-
-
 
 
 def mode_tick(context):
