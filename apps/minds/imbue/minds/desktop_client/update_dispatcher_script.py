@@ -169,6 +169,9 @@ SKIP_CLAUDE_INSTALLATION_CHECK_SETTING = "agent_types.claude.check_installation=
 
 # How long a window waits before trying again after an attempt that can cost something to repeat.
 RETRY_BACKOFF_SECONDS_BY_SKIP = {SKIP_DISPATCH_FAILED: 15 * 60, SKIP_NEEDS_SIGN_IN: 5 * 60}
+# A chat dispatched this window is not replaced sooner than this, however soon its lead ends: a
+# lead that dies at launch would otherwise be replaced every minute.
+REDISPATCH_AFTER_SECONDS = 15 * 60
 # The watchdog reminds an idle lead after this many consecutive idle ticks, and then no more
 # often than every REMINDER_INTERVAL_SECONDS.
 IDLE_TICKS_BEFORE_REMINDER = 3
@@ -763,7 +766,7 @@ def current_window(now, start_hour, end_hour, zone_name):
 
 def decide_schedule_action(schedule, run, now, is_marked_lead_gone):
     """What one tick does about an armed schedule: ``remove``, ``dispatch``, ``record_skip``, ``note_window``,
-    ``wait`` (a failed attempt's backoff has not passed), or ``nothing``.
+    ``wait`` (the backoff after a failed attempt or a fresh dispatch has not passed), or ``nothing``.
 
     ``is_marked_lead_gone`` is a callable, asked only when the answer turns on it.
     """
@@ -795,15 +798,16 @@ def decide_schedule_action(schedule, run, now, is_marked_lead_gone):
     opened_at = window[0]
     if started_at is not None and started_at >= opened_at and started_at >= armed_at:
         return "note_window"
+    next_attempt_at = schedule.get("next_attempt_at")
+    is_held_back = (
+        isinstance(next_attempt_at, (int, float)) and not isinstance(next_attempt_at, bool) and now < next_attempt_at
+    )
     if marked_at is not None and marked_at >= opened_at:
         is_start_recorded = is_marked_run and started_at is not None and started_at >= marked_at
         if not is_start_recorded and is_marked_lead_gone():
-            return "dispatch"
+            return "wait" if is_held_back else "dispatch"
         return "note_window"
-    next_attempt_at = schedule.get("next_attempt_at")
-    if isinstance(next_attempt_at, (int, float)) and not isinstance(next_attempt_at, bool) and now < next_attempt_at:
-        return "wait"
-    return "dispatch"
+    return "wait" if is_held_back else "dispatch"
 
 
 # The schedule fields the dispatcher writes; the rest are the app's. An arm keeps the marks from the
@@ -902,7 +906,7 @@ def tick_schedule(now):
     schedule["window_seen_open_at"] = window[0] if window is not None else None
     reason = dispatch_scheduled(schedule, run, agents())
     if reason is None:
-        schedule.update({"marked_at": now, "pending_skip_reason": "", "next_attempt_at": None})
+        schedule.update({"marked_at": now, "pending_skip_reason": "", "next_attempt_at": now + REDISPATCH_AFTER_SECONDS})
     else:
         # A create that failed may have left a chat behind, so it is not retried every minute.
         backoff = RETRY_BACKOFF_SECONDS_BY_SKIP.get(reason, 0)

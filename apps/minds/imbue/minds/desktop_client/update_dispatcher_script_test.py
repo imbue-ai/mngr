@@ -122,6 +122,14 @@ def _never_gone() -> bool:
         (_schedule(marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60), None, _IN_WINDOW, lambda: True, "dispatch"),
         # The same, with its lead still there: leave it be.
         (_schedule(marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60), None, _IN_WINDOW, lambda: False, "note_window"),
+        # Gone, but dispatched too recently to replace yet.
+        (
+            _schedule(marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60, next_attempt_at=_IN_WINDOW + 60),
+            None,
+            _IN_WINDOW,
+            lambda: True,
+            "wait",
+        ),
         # The run the file dispatched has a verdict, though the file was re-armed after it started: retire it.
         (
             _schedule(armed_at=_WINDOW_OPENED + 120, marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60),
@@ -431,6 +439,22 @@ def test_a_failed_create_is_not_retried_until_its_backoff_has_passed(
     assert len(staged.chat_creates()) == 2
     schedule = staged.read_state("schedule.json")
     assert schedule is not None and schedule["marked_chat"] == _LEAD
+
+
+def test_a_lead_that_ends_before_recording_a_start_is_not_replaced_every_minute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("schedule.json", _schedule())
+    _tick(program, staged, _IN_WINDOW)
+    staged.set_agents([_agent(_LEAD, "DONE")])
+
+    for minute in range(1, 6):
+        _tick(program, staged, _IN_WINDOW + 60 * minute)
+    assert len(staged.chat_creates()) == 1
+
+    _tick(program, staged, _IN_WINDOW + 16 * 60)
+    assert len(staged.chat_creates()) == 2
 
 
 def test_a_chat_the_chat_app_is_still_creating_is_not_dispatched_again_before_it_is_listed(
