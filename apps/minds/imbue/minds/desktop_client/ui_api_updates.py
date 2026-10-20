@@ -62,6 +62,7 @@ _SCHEDULE_STATUS_BY_OUTCOME: Final[dict[UpdateScheduleOutcome, int]] = {
 }
 
 _CANCEL_FAILURE_MESSAGE: Final[str] = "Couldn't reach this workspace to cancel its scheduled update."
+_SKIP_FAILURE_MESSAGE: Final[str] = "Couldn't reach this workspace to skip its update."
 
 
 # Refuses anything that could read as a flag or shell text in the chat's seed
@@ -240,7 +241,7 @@ def _handle_skip_update(agent_id: str) -> Response:
     service, parsed_id = resolved
     refusal = service.skip_update(parsed_id)
     if refusal is not None:
-        return _error_response(_CANCEL_FAILURE_MESSAGE, 502, refusal.failure_detail)
+        return _error_response(_SKIP_FAILURE_MESSAGE, 502, refusal.failure_detail)
     return _json_response({"ok": True})
 
 

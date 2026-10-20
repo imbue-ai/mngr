@@ -710,9 +710,15 @@ def test_cancelling_a_schedule_the_workspace_answered_takes_it_off_the_row(
 
 
 @pytest.mark.witnesses("workspace-updates.cancel-needs-the-workspace")
-@pytest.mark.parametrize("route", ("schedule/cancel", "skip"))
+@pytest.mark.parametrize(
+    ("route", "message"),
+    (
+        ("schedule/cancel", "Couldn't reach this workspace to cancel its scheduled update."),
+        ("skip", "Couldn't reach this workspace to skip its update."),
+    ),
+)
 def test_a_cancel_or_skip_that_cannot_reach_the_workspace_says_so_and_leaves_the_row_scheduled(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId, route: str
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId, route: str, message: str
 ) -> None:
     """The file is still armed in the workspace, so its cron will still start the run."""
     caller = ScriptedMngrCaller(results=(_armed(), _HOST_OFFLINE))
@@ -729,7 +735,7 @@ def test_a_cancel_or_skip_that_cannot_reach_the_workspace_says_so_and_leaves_the
 
     assert response.status_code == 502
     assert response.get_json() == {
-        "error": "Couldn't reach this workspace to cancel its scheduled update.",
+        "error": message,
         "detail": _HOST_OFFLINE_DETAIL,
     }
     published = _published(app, agent_id)
