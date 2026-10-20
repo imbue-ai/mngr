@@ -1235,7 +1235,9 @@ def test_a_scheduled_runs_start_kind_and_chat_come_from_its_dispatch_when_its_re
     assert state.chat_agent_id == "agent-" + "a" * 32
 
 
-def test_a_run_swept_in_after_a_dispatched_one_opens_its_own_chat(tmp_path: Path) -> None:
+# The second is a chat name the earlier run's chat had, taken again once that chat was deleted.
+@pytest.mark.parametrize("swept_chat", ("update-to-minds-v0-4-1", "update-to-minds-v0-4-0"))
+def test_a_run_swept_in_after_a_dispatched_one_opens_its_own_chat(tmp_path: Path, swept_chat: str) -> None:
     """A cron-started run that ended while the app slept replaces the pressed run's row, chat id included."""
     store, agent_id = _out_of_date_store(tmp_path)
     assert store.try_begin_run(agent_id, target_override="")
@@ -1245,7 +1247,7 @@ def test_a_run_swept_in_after_a_dispatched_one_opens_its_own_chat(tmp_path: Path
     store.observe_run_record(
         agent_id,
         _run_record(
-            chat="update-to-minds-v0-4-1",
+            chat=swept_chat,
             started_at=datetime(2026, 8, 27, 3, 0, tzinfo=timezone.utc),
             verdict=UpdateVerdict.STUCK,
         ),
@@ -1254,7 +1256,7 @@ def test_a_run_swept_in_after_a_dispatched_one_opens_its_own_chat(tmp_path: Path
         agent_id,
         schedule=None,
         last_dispatch=UpdateLastDispatch(
-            chat_agent_name="update-to-minds-v0-4-1",
+            chat_agent_name=swept_chat,
             chat_id="agent-scheduled",
             started_by=UpdateStartedBy.SCHEDULED,
             ceiling_ref="minds-v0.4.1",
@@ -1263,7 +1265,7 @@ def test_a_run_swept_in_after_a_dispatched_one_opens_its_own_chat(tmp_path: Path
     )
 
     state = store.get(agent_id)
-    assert state.chat_agent_name == "update-to-minds-v0-4-1"
+    assert state.chat_agent_name == swept_chat
     assert state.chat_agent_id == "agent-scheduled"
 
 
