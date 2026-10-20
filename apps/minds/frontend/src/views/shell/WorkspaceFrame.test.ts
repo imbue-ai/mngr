@@ -3,6 +3,7 @@ import type { WorkspaceLinkHandlingReport } from "../../electron-bridge";
 import type { PermissionResolutionEntry } from "./WorkspaceFrame";
 import {
   FrameLinkHandling,
+  WORKSPACE_FRAME_ALLOW,
   WORKSPACE_ORIGIN_FAMILY,
   buildEmbedHandlers,
   fetchPermissionResolutionEntries,
@@ -40,6 +41,22 @@ describe("WORKSPACE_ORIGIN_FAMILY", () => {
     expect(
       WORKSPACE_ORIGIN_FAMILY.test("agent-abc.localhost.example.com"),
     ).toBe(false);
+  });
+});
+
+describe("WORKSPACE_FRAME_ALLOW", () => {
+  it("delegates the clipboard, fullscreen, and an audio input to every workspace page", () => {
+    const directives = WORKSPACE_FRAME_ALLOW.split(";").map((part) =>
+      part.trim(),
+    );
+    expect(directives).toEqual(
+      expect.arrayContaining([
+        "clipboard-read *",
+        "clipboard-write *",
+        "fullscreen *",
+        "microphone *",
+      ]),
+    );
   });
 });
 
