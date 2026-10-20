@@ -425,6 +425,31 @@ def test_a_failed_create_is_not_retried_until_its_backoff_has_passed(
     assert schedule is not None and schedule["marked_chat"] == _LEAD
 
 
+def test_a_chat_the_chat_app_is_still_creating_is_not_dispatched_again_before_it_is_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("schedule.json", _schedule())
+    staged.script_tool(
+        "system/scripts/message_chat.py",
+        [
+            ScriptedToolAnswer(
+                exit_code=1,
+                stderr=f"The chat app did not create the chat: Chat '{_LEAD}' is still being created; "
+                "its window will show how that ends\n",
+            ),
+            ScriptedToolAnswer(stdout=json.dumps(STAGED_CREATED_CHAT) + "\n"),
+        ],
+    )
+    _tick(program, staged, _IN_WINDOW)
+    _tick(program, staged, _IN_WINDOW + 60)
+    assert len(staged.chat_creates()) == 1
+
+    # Never listed long after its create was answered: that create came to nothing.
+    _tick(program, staged, _IN_WINDOW + 16 * 60)
+    assert len(staged.chat_creates()) == 2
+
+
 def test_a_listing_without_the_services_agent_never_closes_a_run_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:

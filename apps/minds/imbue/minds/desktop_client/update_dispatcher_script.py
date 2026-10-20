@@ -169,6 +169,8 @@ RETRY_BACKOFF_SECONDS_BY_SKIP = {SKIP_DISPATCH_FAILED: 15 * 60, SKIP_NEEDS_SIGN_
 # often than every REMINDER_INTERVAL_SECONDS.
 IDLE_TICKS_BEFORE_REMINDER = 3
 REMINDER_INTERVAL_SECONDS = 20 * 60
+# A marked chat missing from the listing counts as gone only this long after it was marked.
+UNLISTED_MARKED_LEAD_GRACE_SECONDS = 15 * 60
 MAX_NAME_SUFFIX = 20
 LOG_MAX_BYTES = 256 * 1024
 # The chat app's create waits up to 300s for mngr, after up to 30s of not-ready retries.
@@ -840,7 +842,16 @@ def tick_schedule(now):
 
     def is_marked_lead_gone():
         listed = agents()
-        return listed is not None and is_agent_ended(find_agent(listed, str(schedule.get("marked_chat") or "")))
+        if listed is None:
+            return False
+        lead = find_agent(listed, str(schedule.get("marked_chat") or ""))
+        if lead is not None:
+            return is_agent_ended(lead)
+        # A create the chat app answered as still running is not listed until it lands.
+        marked_at = schedule.get("marked_at")
+        if not isinstance(marked_at, (int, float)) or isinstance(marked_at, bool):
+            return True
+        return now - marked_at >= UNLISTED_MARKED_LEAD_GRACE_SECONDS
 
     action = decide_schedule_action(schedule, run, now, is_marked_lead_gone)
     window = current_window(
