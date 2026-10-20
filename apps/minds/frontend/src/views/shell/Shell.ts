@@ -376,6 +376,7 @@ export function Shell(): m.Component<ShellAttrs> {
           : standingUpdateNotice(
               shell.stores.updates.forAgent(agentScoped),
               shell.stores.updates.isUpdating(agentScoped),
+              shell.stores.updates.isAutoUpdateEnabled,
             );
       // The band is where a run reports itself to the reader inside the
       // machine, who cannot see the row badge.
@@ -461,6 +462,12 @@ export function Shell(): m.Component<ShellAttrs> {
                   return;
                 } else if (band.action?.kind === "update-workspace") {
                   shell.openUpdateModal(agentScoped);
+                } else if (band.action?.kind === "sign-in-for-update") {
+                  // A refusal is said by the modal, which has room for it.
+                  void shell.signInForUpdate(agentScoped).then((result) => {
+                    if (!result.isOk) shell.openUpdateModal(agentScoped);
+                    m.redraw();
+                  });
                 } else {
                   shell.openRecoveryModal(agentScoped);
                 }

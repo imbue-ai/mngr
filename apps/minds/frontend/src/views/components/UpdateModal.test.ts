@@ -8,7 +8,6 @@ import type { AnyVnode } from "../../testing";
 import {
   allText,
   attrsOf,
-  byId,
   collectVnodes,
   jsonResponse,
   settle,
@@ -21,6 +20,7 @@ const OUT_OF_DATE: UiWorkspaceUpdate = {
   availability: "OUT_OF_DATE",
   current_version: "minds-v0.3.9",
   supported_version: "minds-v0.4.1",
+  is_version_from_label: false,
   activity: "IDLE",
   is_backup_configured: true,
 };
@@ -52,6 +52,7 @@ function press(root: m.Children, label: string): void {
 function harness(
   respond: (url: string) => Promise<Response>,
   update: UiWorkspaceUpdate = OUT_OF_DATE,
+  isAutoUpdateEnabled = false,
 ): Harness {
   const shell = new ShellState(createEmptyStores());
   registerAppContext({ stores: shell.stores, shell });
@@ -59,6 +60,7 @@ function harness(
     type: "workspace_updates",
     updates: { [AGENT]: update },
     update_window: "2:00 AM-5:00 AM",
+    is_auto_update_enabled: isAutoUpdateEnabled,
   });
   const requests: string[] = [];
   vi.stubGlobal("fetch", (url: string) => {
@@ -293,28 +295,147 @@ describe("the update modal over a machine behind only by a patch", () => {
   });
 });
 
-describe("the update modal over a machine below the security floor", () => {
-  const SECURITY: UiWorkspaceUpdate = {
+describe("the update modal under auto-update", () => {
+  const ARMED: UiWorkspaceUpdate = {
     ...OUT_OF_DATE,
-    availability: "SECURITY_UPDATE",
+    is_scheduled: true,
+    schedule_window: "1:00 AM-4:00 AM",
+    schedule_zone: "",
   };
 
-  function securityDetails(root: m.Children): AnyVnode {
-    const details = byId(root, "security-fix-details");
-    if (details === undefined) throw new Error("no security fix details");
-    return details;
-  }
-
-  it("calls the fix critical, with its explanation shut until the reader opens it", () => {
-    const { draw } = harness(() => Promise.resolve(jsonResponse({})), SECURITY);
+  it("gives the armed window, asks nothing, and offers updating now, skipping, or another version", () => {
+    const { draw } = harness(() => Promise.resolve(jsonResponse({})), ARMED, true);
     const root = draw();
-    expect(allText(root)).toContain("This update includes a critical security fix.");
-    const details = securityDetails(root);
-    expect(allText(attrsOf(details).summary)).toBe("See details");
-    expect(allText(details.children)).toContain("emSign");
-    expect(attrsOf(details).isOpen).toBe(false);
+    const text = allText(root);
 
-    (attrsOf(details).onToggle as () => void)();
-    expect(attrsOf(securityDetails(draw())).isOpen).toBe(true);
+    expect(text).toContain("in the next update window (1:00 AM-4:00 AM). No action is needed.");
+    expect(pressableWithLabel(root, "Update now instead")).toBeDefined();
+    expect(pressableWithLabel(root, "Skip this update")).toBeDefined();
+    expect(pressableWithLabel(root, "Update to a different version")).toBeDefined();
+    // The app arms the schedule itself, so the reader has none to make or cancel.
+    expect(pressableWithLabel(root, "Schedule update")).toBeUndefined();
+    expect(pressableWithLabel(root, "Cancel schedule")).toBeUndefined();
+  });
+
+  it("skips the release through the skip route and closes", async () => {
+    const { draw, requests, onClose } = harness(() => Promise.resolve(jsonResponse({})), ARMED, true);
+
+    press(draw(), "Skip this update");
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${AGENT}/skip`]);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("says why the last window passed without a start, and that the next one will try", () => {
+    const { draw } = harness(
+      () => Promise.resolve(jsonResponse({})),
+      {
+        ...ARMED,
+        last_skip_reason: "Another update flow was working in this workspace during the last update window.",
+      },
+      true,
+    );
+
+    const text = allText(draw());
+    expect(text).toContain(
+      "Another update flow was working in this workspace during the last update window. Studio will try again in the next window.",
+    );
+  });
+
+  it("offers no schedule on a machine not armed yet, only updating now", () => {
+    const root = harness(() => Promise.resolve(jsonResponse({})), OUT_OF_DATE, true).draw();
+    expect(pressableWithLabel(root, "Schedule update")).toBeUndefined();
+    const now = pressableWithLabel(root, "Update now");
+    expect(now).toBeDefined();
+    expect(attrsOf(now as AnyVnode).variant).toBe("primary");
+  });
+});
+
+describe("the update modal over a run that needs the user's decision", () => {
+  const PENDING: UiWorkspaceUpdate = {
+    ...OUT_OF_DATE,
+    verdict: "NEEDS_DECISION",
+    verdict_detail: "Your dashboard widget and the new layout both changed the same file.",
+    is_decision_pending: true,
+    chat_agent_id: "agent-lead-1",
+    chat_agent_name: "update-to-minds-v0-4-1",
+  };
+
+  it("shows the run's own account and only the way into its chat", () => {
+    const { draw } = harness(() => Promise.resolve(jsonResponse({})), PENDING);
+    const root = draw();
+
+    expect(allText(root)).toContain("Your dashboard widget and the new layout both changed the same file.");
+    const pressables = collectVnodes(root).filter(
+      (vnode) => typeof attrsOf(vnode).onclick === "function" && vnode.tag !== "div",
+    );
+    // No Update now, Schedule, version link, or Dismiss beside it.
+    expect(pressables.map((vnode) => allText(vnode.children).trim()).filter(Boolean)).toEqual(["Open chat"]);
+  });
+
+  it("lands in the workspace on the run's chat", () => {
+    const { draw, routeSet, onClose, requests } = harness(() => Promise.resolve(jsonResponse({})), PENDING);
+
+    press(draw(), "Open chat");
+
+    expect(onClose).toHaveBeenCalled();
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${AGENT}`, { chat: "agent-lead-1" });
+    expect(requests).toEqual([]);
+  });
+});
+
+describe("the update modal over a machine that needs a sign-in", () => {
+  const REFUSED: UiWorkspaceUpdate = { ...OUT_OF_DATE, needs_sign_in: true };
+
+  it("enters the machine before asking it for the sign-in chat", async () => {
+    // The chat opens only in a connected frame, so the entry comes first.
+    let answer: ((response: Response) => void) | null = null;
+    const { draw, requests, routeSet, onClose } = harness(
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = resolve;
+        }),
+      REFUSED,
+    );
+
+    press(draw(), "Sign in");
+
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${AGENT}`, {});
+    expect(requests).toEqual([`/ui/api/updates/${AGENT}/sign-in`]);
+    (answer as unknown as (response: Response) => void)(jsonResponse({}));
+    await settleDispatch();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays up to show a sign-in the machine could not open", async () => {
+    const { draw, onClose } = harness(
+      () => Promise.resolve(jsonResponse({ error: "Couldn't open a chat in this workspace." }, 502)),
+      REFUSED,
+      true,
+    );
+
+    press(draw(), "Sign in");
+    await settleDispatch();
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(allText(draw())).toContain("Couldn't open a chat in this workspace.");
+  });
+});
+
+describe("the update modal over a failed run", () => {
+  it("opens the run's chat alongside Dismiss", () => {
+    const { draw, routeSet } = harness(() => Promise.resolve(jsonResponse({})), {
+      ...OUT_OF_DATE,
+      verdict: "STUCK",
+      chat_agent_id: "agent-lead-2",
+      started_by: "SCHEDULED",
+    });
+    const root = draw();
+    expect(pressableWithLabel(root, "Dismiss")).toBeDefined();
+
+    press(root, "Open chat");
+
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${AGENT}`, { chat: "agent-lead-2" });
   });
 });

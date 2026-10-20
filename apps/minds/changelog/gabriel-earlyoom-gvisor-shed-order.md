@@ -1,0 +1,1 @@
+New rollout page `docs/deploy/history/rollouts/earlyoom-gvisor-shed-order.md`: why earlyoom sheds the largest process first under gVisor whatever its priority band, who is affected and who `minds-admin hotpatch-earlyoom` cannot reach, what the hotpatch does, and the survey/canary/sweep procedure for a tier.

@@ -8,8 +8,7 @@
   "main": "electron/main.js",
   "scripts": {
     "prestart": "node scripts/ensure-binaries.js && pnpm run build:ui",
-    "start": "pnpm run start:prebuilt",
-    "start:prebuilt": "MINDS_DISABLE_CRASHPAD=1 electron .",
+    "start": "MINDS_DISABLE_CRASHPAD=1 electron .",
     "build": "node scripts/build.js",
     "build:ui": "pnpm -C frontend install --frozen-lockfile && pnpm -C frontend run generate && pnpm -C frontend run build",
     "dist": "pnpm build && pnpm exec todesktop build",
@@ -21,18 +20,18 @@
     "@todesktop/runtime": "^1.6.0",
     "builder-util-runtime": "9.7.0",
     "electron-updater": "6.8.9",
-    "latchkey": "^3.19.3",
+    "latchkey": "^3.19.0",
     "semver": "^7.6.3",
     "smol-toml": "^1.6.1"
   },
   "devDependencies": {
     "@playwright/test": "1.60.0",
     "@todesktop/cli": "^1.28.1",
-    "electron": "45.0.0",
+    "electron": "40.10.1",
     "playwright": "1.60.0"
   },
   "engines": {
-    "node": "24.22.1",
+    "node": "24.15.0",
     "pnpm": "10.33.4"
   }
 }

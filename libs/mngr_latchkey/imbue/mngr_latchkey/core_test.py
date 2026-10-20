@@ -18,10 +18,8 @@ from loguru import logger
 from paramiko.ssh_exception import NoValidConnectionsError
 from pydantic import Field
 from pydantic import PrivateAttr
-from pyinfra.api.exceptions import ConnectError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.config.data_types import MngrContext
@@ -2361,21 +2359,6 @@ def _raised_from(error: BaseException, cause: BaseException) -> BaseException:
     return error
 
 
-def _raised_while_handling(error: BaseException, handled: BaseException) -> BaseException:
-    """Return ``error`` chained as if it had been ``raise``d inside the ``except`` block that caught ``handled``."""
-    error.__context__ = handled
-    return error
-
-
-def _outer_host_auth_error(paramiko_error: paramiko.AuthenticationException) -> BaseException:
-    """The shape the outer host raises for a paramiko auth failure: pyinfra wraps it implicitly, the host explicitly."""
-    message = f"Authentication error (username=root, key=/tmp/id_ed25519) ({paramiko_error})"
-    connect_error = _raised_while_handling(ConnectError(message), paramiko_error)
-    return _raised_from(
-        HostAuthenticationError(f"Authentication failed when connecting to host: {message}"), connect_error
-    )
-
-
 @pytest.mark.parametrize(
     ("error", "is_transient"),
     [
@@ -2413,33 +2396,7 @@ def _outer_host_auth_error(paramiko_error: paramiko.AuthenticationException) -> 
             True,
             id="wrapped-no-valid-connections",
         ),
-        pytest.param(
-            _outer_host_auth_error(paramiko.AuthenticationException("Authentication timeout.")),
-            True,
-            id="host-authentication-error-from-auth-timeout",
-        ),
         pytest.param(HostAuthenticationError("Authentication failed"), False, id="host-authentication-error"),
-        pytest.param(
-            _outer_host_auth_error(paramiko.AuthenticationException("Authentication failed.")),
-            False,
-            id="host-authentication-error-from-rejected-key",
-        ),
-        pytest.param(
-            _outer_host_auth_error(paramiko.BadAuthenticationType("Bad authentication type", ["password"])),
-            False,
-            id="host-authentication-error-from-bad-auth-type",
-        ),
-        pytest.param(
-            _raised_from(
-                HostAuthenticationError("Authentication failed"),
-                _raised_from(
-                    ConnectError("Authentication error (username=root) (Authentication timeout.)"),
-                    paramiko.AuthenticationException("Authentication timeout."),
-                ),
-            ),
-            True,
-            id="host-authentication-error-from-explicitly-chained-auth-timeout",
-        ),
         pytest.param(SSHTunnelError("No SSH key file", SSHTunnelPhase.LOCAL_SETUP), False, id="tunnel-local-setup"),
         pytest.param(RemoteGatewayError("Malformed permissions file"), False, id="remote-gateway-error-alone"),
         pytest.param(HostNotFoundError(ProviderInstanceName("p"), HostId()), False, id="host-not-found"),
@@ -2525,69 +2482,6 @@ def test_transient_tunnel_failures_report_an_error_only_once_the_streak_reaches_
     info_messages = [message for level, message in captured if level == "INFO" and str(host_id) in message]
     assert len(info_messages) == 2, info_messages
     assert _error_messages_mentioning(captured, host_id) == errors_at_threshold
-
-
-def _desktop_tunnel_streak_report(
-    tmp_path: Path,
-    temp_mngr_ctx: MngrContext,
-    observed_host_states: tuple[HostState, ...],
-    ssh_info_per_attempt: tuple[RemoteSSHInfo, ...],
-) -> str:
-    """Fail the desktop gateway tunnel once per given SSH info, and return the error the streak is reported with."""
-    fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
-    tunnel_manager = _ConfigurableFailureTunnelManager()
-    tunnel_manager._error_to_raise = paramiko.AuthenticationException("Authentication timeout.")
-    agent_id = AgentId()
-    host_id = HostId()
-    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        handler = LatchkeyDiscoveryHandler(
-            latchkey=manager,
-            tunnel_manager=tunnel_manager,
-            concurrency_group=cg,
-            mngr_ctx=temp_mngr_ctx,
-            device=_DEVICE,
-        )
-        for host_state in observed_host_states:
-            handler._observe_host_state(host_id, host_state)
-        with _captured_log_records() as captured:
-            for ssh_info in ssh_info_per_attempt:
-                handler._setup_desktop_gateway_reachability(agent_id, host_id, ssh_info, 41989)
-    errors = [message for level, message in captured if level == "ERROR" and str(agent_id) in message]
-    assert len(errors) == 1, captured
-    return errors[0]
-
-
-def test_a_reported_streak_names_the_ssh_info_fields_that_changed_and_the_host_state_change(
-    tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """A streak whose endpoint moved under it, on a host seen restarting, says both, by field name only."""
-    first_ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=2222, key_path=tmp_path / "k")
-    moved_ssh_info = first_ssh_info.model_copy_update(to_update(first_ssh_info.field_ref().port, 2223))
-
-    report = _desktop_tunnel_streak_report(
-        tmp_path,
-        temp_mngr_ctx,
-        (HostState.STOPPED, HostState.RUNNING),
-        (first_ssh_info,) + (moved_ssh_info,) * (TRANSIENT_FAILURE_REPORT_THRESHOLD - 1),
-    )
-
-    assert "Streak started at 20" in report
-    assert "SSH info changed during the streak: yes (port)" in report
-    assert "host state RUNNING since 20" in report
-    assert "(a change this process saw)" in report
-    assert "agent-host.example" not in report
-
-
-def test_a_reported_streak_on_unchanged_ssh_info_says_so(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
-    ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=2222, key_path=tmp_path / "k")
-
-    report = _desktop_tunnel_streak_report(
-        tmp_path, temp_mngr_ctx, (HostState.RUNNING,), (ssh_info,) * TRANSIENT_FAILURE_REPORT_THRESHOLD
-    )
-
-    assert "SSH info changed during the streak: no" in report
-    assert "(the first report this process saw)" in report
 
 
 def test_an_unreachable_outer_host_is_reported_only_once_the_streak_reaches_the_threshold(

@@ -1,39 +1,24 @@
 // Playwright fixture: launches the installed /Applications/Imbue Studio.app.
 //
-// Note on isolation: the signed bundle's baked-in
-// `resources/pyproject/imbue/minds/config/envs/_bundled/root_name` takes
-// precedence over MINDS_ROOT_NAME from the environment (getMindsRootName in
-// electron/paths.js), so the environment cannot pick the tier. MINDS_DATA_HOME
-// can still relocate the tier's roots; without it, tests run against the
-// user's live state roots for the build's tier. Specs are responsible for
-// cleaning up any workspaces they create (`mngr destroy` or the destroy
-// button) before exiting.
+// Note on isolation: the signed bundle's `getMindsRootName()` reads the
+// baked-in `resources/pyproject/imbue/minds/config/envs/_bundled/root_name`
+// file, which takes precedence over MINDS_ROOT_NAME from the environment
+// (paths.js:148-164). So we cannot isolate state via env var alone for the
+// shipped CEO build. Tests run against the user's live `~/.minds/` state.
+// Specs are responsible for cleaning up any workspaces they create
+// (`mngr destroy` or the destroy button) before exiting.
 //
 // To run cleanly, quit any user-launched Imbue Studio.app first -- Playwright's
 // `electron.launch()` will deadlock-exit silently on Electron's
-// requestSingleInstanceLock if a prior Imbue Studio instance is still alive.
+// requestSingleInstanceLock if a prior Imbue Studio is still alive (we hit this
+// in early iterations: PID 28024 lingered after Cmd-Q).
 
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 const { _electron: electron } = require('playwright');
 const base = require('@playwright/test');
-const { platformRootsFor } = require('../../electron/platform-roots');
 
 const DEFAULT_APP_PATH = '/Applications/Imbue Studio.app/Contents/MacOS/Imbue Studio';
-
-// The logs root of the app at `execPath`. Its bundled root_name, when present,
-// wins over MINDS_ROOT_NAME in picking the tier.
-function appLogsDir(execPath, env) {
-  const rootNameFile = path.join(
-    path.dirname(execPath), '..', 'Resources', 'pyproject', 'imbue', 'minds', 'config', 'envs', '_bundled', 'root_name'
-  );
-  const rootName = fs.existsSync(rootNameFile)
-    ? fs.readFileSync(rootNameFile, 'utf-8').trim()
-    : env.MINDS_ROOT_NAME || 'minds';
-  return platformRootsFor({ rootName, platform: process.platform, homeDir: os.homedir(), dataHome: env.MINDS_DATA_HOME })
-    .logs;
-}
 
 // Each app window is a single web context now (the chrome page, which hosts
 // hub pages, the sandboxed workspace iframe, and the in-DOM modals), so
@@ -89,10 +74,9 @@ const test = base.test.extend({
       );
     }
 
-    const env = { ...process.env, ...mindsAppEnv };
     const app = await electron.launch({
       executablePath: execPath,
-      env,
+      env: { ...process.env, ...mindsAppEnv },
       timeout: 5 * 60 * 1000,
     });
     const output = captureAppOutput(app);
@@ -109,7 +93,7 @@ const test = base.test.extend({
     if (testInfo.status !== 'passed') {
       for (const name of ['minds.log', 'electron.log']) {
         try {
-          const logPath = path.join(appLogsDir(execPath, env), name);
+          const logPath = path.join(process.env.HOME, '.minds', 'logs', name);
           if (fs.existsSync(logPath)) {
             fs.mkdirSync(testInfo.outputDir, { recursive: true });
             const content = fs.readFileSync(logPath, 'utf-8');
@@ -151,7 +135,7 @@ const test = base.test.extend({
     // ephemeral GHA Mac, so a broad minds-scoped pkill is safe.)
     try {
       execSync(
-        'pkill -9 -if "imbue studio(\\.app|/)|mngr latchkey|mngr observe" 2>/dev/null || true',
+        'pkill -9 -if "(imbue ?studio|minds?)\\.app|/\\.minds/|mngr latchkey|mngr observe|(imbue ?studio|minds?)/crashpad" 2>/dev/null || true',
         { stdio: 'ignore', timeout: 10000 },
       );
     } catch (e) {

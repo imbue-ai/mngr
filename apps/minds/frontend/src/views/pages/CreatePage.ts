@@ -41,11 +41,6 @@ import { VerificationWait } from "./create/verification-wait";
 import { renderSwitch, renderSwitchWord } from "../components/Switch";
 import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
 
-/** The advanced view's switch for the creation page's onboarding questions, and the line under it. */
-export const ONBOARDING_QUESTIONS_LABEL = "Use onboarding questions?";
-export const ONBOARDING_QUESTIONS_SENTENCE =
-  "While the workspace is built, the agent asks what you want to build and opens the workspace's first chat on the answer.";
-
 export interface CreatePageAttrs {
   /** `page` (the default) is the routed /create page; `embedded` is the form inside a modal. */
   mode?: "page" | "embedded";
@@ -53,8 +48,6 @@ export interface CreatePageAttrs {
   initialPreset?: PresetName;
   /** Prefill from an interrupted / failed attempt's record (the page reads `?retry=` instead). */
   retryId?: string;
-  /** Open with "Use onboarding questions?" on: the start flow's form answers, whose create is the first. */
-  isOnboardingDrivenByAgent?: boolean;
   /** Embedded mode's outcome: called with the new attempt's operation id instead of routing. */
   onSubmitted?: (operationId: string) => void;
 }
@@ -603,23 +596,6 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
               )
             : null,
         ]),
-        m("div", { id: "onboarding-questions-row" }, [
-          m("div", { class: "flex items-center justify-between gap-3" }, [
-            m(FormLabel, { target: "is_onboarding_driven_by_agent", inline: true }, ONBOARDING_QUESTIONS_LABEL),
-            m("span", { class: "flex shrink-0 items-center gap-2" }, [
-              renderSwitch({
-                id: "is_onboarding_driven_by_agent",
-                isOn: model.isOnboardingDrivenByAgent,
-                label: ONBOARDING_QUESTIONS_LABEL,
-                onFlip: (isOn) => {
-                  model.isOnboardingDrivenByAgent = isOn;
-                },
-              }),
-              renderSwitchWord({ id: "onboarding-questions-word", isOn: model.isOnboardingDrivenByAgent }),
-            ]),
-          ]),
-          m("p", { class: "mt-1 type-helper text-tertiary" }, ONBOARDING_QUESTIONS_SENTENCE),
-        ]),
         regionOptions.length > 0
           ? m("div", { id: "region-row" }, [
               m("div", { class: "flex items-start justify-between gap-3" }, [
@@ -753,7 +729,6 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
       fetchCreateFormDefaults(retryId)
         .then((defaults) => {
           model.applyDefaults(defaults);
-          if (attrs.isOnboardingDrivenByAgent === true) model.isOnboardingDrivenByAgent = true;
           // An embedded caller's opening preset, unless a retry prefill
           // already decided it (a prefill that could not be applied decides nothing).
           if (

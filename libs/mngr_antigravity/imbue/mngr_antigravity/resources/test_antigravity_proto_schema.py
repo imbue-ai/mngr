@@ -14,6 +14,10 @@ It is marked ``release`` (not run in CI, run manually -- see CLAUDE.md) and **re
 hard failure, not a skip. The extractor is run as a subprocess (rather than imported) because it
 lives under the repo-root ``scripts/`` package, which is not on the path for a tests collected
 under ``libs/``; this also exercises the exact command the README documents.
+
+ChatToolCall's fields (``_TOOL_CALL_NAME`` / ``_TOOL_CALL_ARGS``) are deliberately not checked:
+it lives in ``codeium_common.proto``, which protobuf-go registers via the legacy gzip path and
+the extractor does not recover (see the extractor's module docstring).
 """
 
 from __future__ import annotations
@@ -113,10 +117,6 @@ def test_decoder_field_map_matches_installed_antigravity_binary(tmp_path: Path) 
     assert planner["response"] == dat._PLANNER_RESPONSE_TEXT
     assert planner["thinking"] == dat._PLANNER_THINKING
     assert planner["tool_calls"] == dat._PLANNER_TOOL_CALLS
-
-    tool_call = messages["exa.codeium_common_pb.ChatToolCall"]
-    assert tool_call["name"] == dat._TOOL_CALL_NAME
-    assert tool_call["arguments_json"] == dat._TOOL_CALL_ARGS
 
     # ERROR_MESSAGE text is nested: CortexStepErrorMessage.error (f3) -> CortexErrorDetails.
     error_message = messages["exa.cortex_pb.CortexStepErrorMessage"]

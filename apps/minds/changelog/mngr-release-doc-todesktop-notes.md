@@ -1,0 +1,1 @@
+- The app-release runbook's failure modes now cover a ToDesktop Mac build failing at signing or notarization because Apple's developer agreement needs signing (HTTP 403 "A required agreement is missing or has expired"), and how to cancel a ToDesktop build with `scripts/cancel-todesktop-build.sh`, where its credentials come from, and what its `FAILED_PRECONDITION` answer means.

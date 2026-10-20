@@ -21,6 +21,7 @@ import {
   collectVnodes,
   jsonResponse,
   renderDeep,
+  settingsOverview,
   settle,
 } from "../../../testing";
 import { CopyField } from "../../components/Layout";
@@ -36,6 +37,7 @@ const OUT_OF_DATE: UiWorkspaceUpdate = {
   availability: "OUT_OF_DATE",
   current_version: "minds-v0.3.9",
   supported_version: "minds-v0.4.1",
+  is_version_from_label: false,
   activity: "IDLE",
 };
 
@@ -50,6 +52,8 @@ interface Harness {
   requests: string[];
   /** The per-machine model the pane draws against, keyed by agent id. */
   models: Map<string, WorkspaceOptionsModel>;
+  /** The pane's oninit, which reads the app-wide update settings. */
+  init: () => void;
 }
 
 /** The Updates group of one drawn pane; the destroy and unlink dialogs carry a
@@ -179,7 +183,10 @@ function harness(
       vnode,
     );
   }
-  return { draw, requests, models };
+  function init(): void {
+    (instance.oninit as unknown as () => void).call(instance);
+  }
+  return { draw, requests, models, init };
 }
 
 /** A dispatch answers over several promise hops: the request, its body parse,
@@ -998,5 +1005,72 @@ describe("the General settings group's Machine size section", () => {
     expect(
       plainSave === undefined ? undefined : attrsOf(plainSave).disabled,
     ).toBe(true);
+  });
+});
+
+describe("the Updates settings group's app-wide update settings", () => {
+  it("shows the app-wide auto-update setting, and a flip here changes it app-wide", async () => {
+    const bodies: Record<string, string> = {};
+    const { draw, init } = harness((url, init) => {
+      if (init?.body !== undefined) bodies[url] = String(init.body);
+      if (url === "/ui/api/settings") {
+        return Promise.resolve(
+          jsonResponse(settingsOverview({ is_auto_update_enabled: false })),
+        );
+      }
+      if (url === "/ui/api/settings/auto-update") {
+        return Promise.resolve(jsonResponse({ is_enabled: true }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    init();
+    await settleDispatch();
+
+    const toggle = collectVnodes(draw(BACKED)).find(
+      (vnode) => attrsOf(vnode).id === "auto-update-toggle-workspace",
+    );
+    expect(toggle).toBeDefined();
+    expect(attrsOf(toggle as AnyVnode)["aria-checked"]).toBe("false");
+
+    (attrsOf(toggle as AnyVnode).onclick as () => void)();
+    await settleDispatch();
+
+    expect(JSON.parse(bodies["/ui/api/settings/auto-update"])).toEqual({
+      is_enabled: true,
+    });
+    const flipped = collectVnodes(draw(UNBACKED)).find(
+      (vnode) => attrsOf(vnode).id === "auto-update-toggle-workspace",
+    );
+    // One app-wide value, so every machine's pane shows the flip.
+    expect(attrsOf(flipped as AnyVnode)["aria-checked"]).toBe("true");
+  });
+});
+
+describe("the Updates settings group under auto-update", () => {
+  it("offers no schedule of its own, and a skip instead of a cancel for an armed machine", async () => {
+    const { draw, requests } = harness();
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: {
+        [BACKED]: {
+          ...OUT_OF_DATE,
+          is_backup_configured: true,
+          is_scheduled: true,
+        },
+        [UNBACKED]: { ...OUT_OF_DATE, is_backup_configured: false },
+      },
+      update_window: "2:00 AM-5:00 AM",
+      is_auto_update_enabled: true,
+    });
+
+    expect(
+      pressableWithLabel(updatesGroupDeep(draw(UNBACKED)), "Schedule"),
+    ).toBeUndefined();
+    const armed = updatesGroup(draw(BACKED));
+    expect(pressableWithLabel(armed, "Cancel schedule")).toBeUndefined();
+    press(armed, "Skip this update");
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${BACKED}/skip`]);
   });
 });

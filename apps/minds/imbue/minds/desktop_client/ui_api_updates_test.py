@@ -151,6 +151,7 @@ def _mark_out_of_date(app: Flask, agent_id: AgentId) -> None:
         detection=UpdateDetection(availability=UpdateAvailability.OUT_OF_DATE),
         current_version="minds-v0.3.9",
         supported_version="minds-v0.4.1",
+        is_version_from_label=False,
     )
 
 
@@ -160,15 +161,7 @@ def _mark_patch_available(app: Flask, agent_id: AgentId) -> None:
         detection=UpdateDetection(availability=UpdateAvailability.PATCH_AVAILABLE),
         current_version="minds-v0.4.0",
         supported_version="minds-v0.4.1",
-    )
-
-
-def _mark_security_update(app: Flask, agent_id: AgentId) -> None:
-    _service(app).state_store.record_detection(
-        agent_id,
-        detection=UpdateDetection(availability=UpdateAvailability.SECURITY_UPDATE),
-        current_version="minds-v0.9.0-rc.1",
-        supported_version="minds-v0.9.0",
+        is_version_from_label=False,
     )
 
 
@@ -195,6 +188,7 @@ def test_a_machine_with_no_readable_version_is_still_sent_its_update_agent(
         detection=UpdateDetection(availability=UpdateAvailability.UNKNOWN, unknown_reason=unknown_reason),
         current_version="",
         supported_version="minds-v0.4.1",
+        is_version_from_label=False,
     )
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
@@ -252,6 +246,7 @@ def test_a_machine_read_as_having_nothing_to_run_is_refused(
         detection=UpdateDetection(availability=availability),
         current_version="minds-v0.4.1",
         supported_version="minds-v0.4.1",
+        is_version_from_label=False,
     )
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
@@ -273,6 +268,7 @@ def test_an_explicit_ref_dispatches_a_machine_the_gate_would_refuse(
         detection=UpdateDetection(availability=UpdateAvailability.UP_TO_DATE),
         current_version="minds-v0.4.1",
         supported_version="minds-v0.4.1",
+        is_version_from_label=False,
     )
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now", {"target_ref": "minds-v0.5.0"})
@@ -727,40 +723,6 @@ def test_a_bulk_action_passes_over_a_machine_with_only_a_patch_available(
     assert response.get_json()[accepted_key] == [str(stale_id)]
 
 
-@pytest.mark.witnesses("workspace-updates.security-update-prompted", partial="the bulk actions only")
-@pytest.mark.parametrize("bulk_action", ("now", "schedule"))
-def test_a_bulk_action_covers_a_machine_with_a_security_update_however_small_the_gap(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, bulk_action: str
-) -> None:
-    client, app = _build_client(
-        tmp_path, root_concurrency_group, mngr_result=MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT)
-    )
-    security_id = AgentId.generate()
-    patch_id = AgentId.generate()
-    _mark_security_update(app, security_id)
-    _mark_patch_available(app, patch_id)
-
-    response = _post(client, f"/ui/api/updates/bulk/{bulk_action}", {"agent_ids": [str(security_id), str(patch_id)]})
-
-    assert response.status_code == 200
-    accepted_key = "dispatching" if bulk_action == "now" else "scheduled"
-    assert response.get_json()[accepted_key] == [str(security_id)]
-
-
-def test_a_machine_with_a_security_update_is_sent_its_update_agent_when_asked(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
-) -> None:
-    client, app = _build_client(
-        tmp_path, root_concurrency_group, mngr_result=MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT)
-    )
-    _mark_security_update(app, agent_id)
-
-    response = _post(client, f"/ui/api/updates/{agent_id}/now")
-
-    assert response.status_code == 200
-    assert _service(app).state_store.get(agent_id).is_run_in_flight is True
-
-
 def test_bulk_now_answers_with_the_machines_it_accepted_and_passes_over_the_rest(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
@@ -1021,6 +983,7 @@ def test_the_updates_frame_carries_which_side_had_no_version(
         ),
         current_version="minds-v0.3.9",
         supported_version="gabriel/some-branch",
+        is_version_from_label=False,
     )
 
     frame = build_workspace_updates_message(service, update_window=(2, 5))

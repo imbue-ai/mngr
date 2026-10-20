@@ -1,0 +1,1 @@
+Every agent's baseline latchkey permissions now include `minds-api-timezone-read`: a read-only grant for `GET /minds-api-proxy/api/v1/timezone`, mirroring the existing API-schema read grant. Workspace agents can ask the minds desktop client for the user's current IANA timezone (e.g. to run scheduled jobs in the user's local time) without a per-agent permission dialog.

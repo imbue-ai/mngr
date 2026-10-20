@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = "==3.12.13"
 required-markers = [
     "platform_machine == 'arm64' and sys_platform == 'darwin'",
@@ -9,9 +9,6 @@ required-markers = [
 [options]
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P14D"
-
-[options.exclude-newer-package]
-certifi = "2026-10-21T00:00:00Z"
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -435,11 +432,11 @@ wheels = [
 
 [[package]]
 name = "certifi"
-version = "2026.10.19"
+version = "2026.2.25"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a6/bd/1436c50cc46699de0230fbaacc1d1de7bfec413176099949e9d5112e88f2/certifi-2026.10.19.tar.gz", hash = "sha256:035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae", size = 137598, upload-time = "2026-10-20T02:24:16.604Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/af/2d/7bf41579a8986e348fa033a31cdd0e4121114f6bce2457e8876010b092dd/certifi-2026.2.25.tar.gz", hash = "sha256:e887ab5cee78ea814d3472169153c2d12cd43b14bd03329a39a9c6e2e80bfba7", size = 155029, upload-time = "2026-02-25T02:54:17.342Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c4/51/29046e48f693c54e5b7412216d447a1d8362c9653148d98c02cdf65fa733/certifi-2026.10.19-py3-none-any.whl", hash = "sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b", size = 136464, upload-time = "2026-10-20T02:24:15.072Z" },
+    { url = "https://files.pythonhosted.org/packages/9a/3c/c17fb3ca2d9c3acff52e30b309f538586f9f5b9c9cf454f3845fc9af4881/certifi-2026.2.25-py3-none-any.whl", hash = "sha256:027692e4402ad994f1c42e52a4997a9763c646b73e4096e4d5d6db8af1d6f0fa", size = 153684, upload-time = "2026-02-25T02:54:15.766Z" },
 ]
 
 [[package]]
@@ -538,7 +535,7 @@ wheels = [
 
 [[package]]
 name = "concurrency-group"
-version = "0.1.21"
+version = "0.1.20"
 source = { editable = "../../../../libs/concurrency_group" }
 dependencies = [
     { name = "imbue-common" },
@@ -1046,7 +1043,7 @@ wheels = [
 
 [[package]]
 name = "imbue-common"
-version = "0.1.21"
+version = "0.1.20"
 source = { editable = "../../../../libs/imbue_common" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -1086,7 +1083,7 @@ provides-extras = ["dev", "testing"]
 
 [[package]]
 name = "imbue-mngr"
-version = "0.3.0"
+version = "0.2.17"
 source = { editable = "../../../../libs/mngr" }
 dependencies = [
     { name = "cel-python" },
@@ -1096,8 +1093,8 @@ dependencies = [
     { name = "coolname" },
     { name = "cryptography" },
     { name = "imbue-common" },
-    { name = "imbue-overlay" },
     { name = "markdown-it-py" },
+    { name = "overlay" },
     { name = "packaging" },
     { name = "paramiko" },
     { name = "pluggy" },
@@ -1126,8 +1123,8 @@ requires-dist = [
     { name = "coolname", specifier = ">=3.0.0" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "imbue-common", editable = "../../../../libs/imbue_common" },
-    { name = "imbue-overlay", editable = "../../../../libs/overlay" },
     { name = "markdown-it-py", specifier = ">=2.2.0" },
+    { name = "overlay", editable = "../../../../libs/overlay" },
     { name = "packaging", specifier = ">=21.0" },
     { name = "paramiko", specifier = "==3.5.1" },
     { name = "pluggy", specifier = ">=1.5.0" },
@@ -1149,7 +1146,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-antigravity"
-version = "0.2.0"
+version = "0.1.8"
 source = { editable = "../../../../libs/mngr_antigravity" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1171,7 +1168,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "../../../../libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-aws"
-version = "0.2.0"
+version = "0.1.4"
 source = { editable = "../../../../libs/mngr_aws" }
 dependencies = [
     { name = "boto3" },
@@ -1192,7 +1189,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-azure"
-version = "0.2.0"
+version = "0.1.1"
 source = { editable = "../../../../libs/mngr_azure" }
 dependencies = [
     { name = "azure-core" },
@@ -1223,12 +1220,12 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-claude"
-version = "0.3.0"
+version = "0.2.17"
 source = { editable = "../../../../libs/mngr_claude" }
 dependencies = [
     { name = "anthropic" },
     { name = "imbue-mngr" },
-    { name = "imbue-overlay" },
+    { name = "overlay" },
     { name = "rich" },
 ]
 
@@ -1236,7 +1233,7 @@ dependencies = [
 requires-dist = [
     { name = "anthropic" },
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
-    { name = "imbue-overlay", editable = "../../../../libs/overlay" },
+    { name = "overlay", editable = "../../../../libs/overlay" },
     { name = "rich", specifier = ">=13.0" },
 ]
 
@@ -1245,7 +1242,7 @@ dev = [{ name = "imbue-mngr-modal", editable = "../../../../libs/mngr_modal" }]
 
 [[package]]
 name = "imbue-mngr-codex"
-version = "0.2.0"
+version = "0.1.4"
 source = { editable = "../../../../libs/mngr_codex" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1283,7 +1280,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-forward"
-version = "0.2.0"
+version = "0.1.6"
 source = { editable = "../../../../libs/mngr_forward" }
 dependencies = [
     { name = "click" },
@@ -1331,7 +1328,7 @@ dev = [{ name = "imbue-mngr-behaviors", editable = "../../../../libs/mngr_behavi
 
 [[package]]
 name = "imbue-mngr-gcp"
-version = "0.2.0"
+version = "0.1.2"
 source = { editable = "../../../../libs/mngr_gcp" }
 dependencies = [
     { name = "concurrency-group" },
@@ -1354,7 +1351,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-imbue-cloud"
-version = "0.3.0"
+version = "0.2.0"
 source = { editable = "../../../../libs/mngr_imbue_cloud" }
 dependencies = [
     { name = "boto3" },
@@ -1399,7 +1396,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-latchkey"
-version = "0.2.0"
+version = "0.1.6"
 source = { editable = "../../../../libs/mngr_latchkey" }
 dependencies = [
     { name = "click" },
@@ -1434,7 +1431,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-lima"
-version = "0.2.0"
+version = "0.1.10"
 source = { editable = "../../../../libs/mngr_lima" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1451,7 +1448,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-modal"
-version = "0.3.0"
+version = "0.2.17"
 source = { editable = "../../../../libs/mngr_modal" }
 dependencies = [
     { name = "dockerfile-parse" },
@@ -1470,7 +1467,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-opencode"
-version = "0.3.0"
+version = "0.2.17"
 source = { editable = "../../../../libs/mngr_opencode" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1481,7 +1478,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "../../../../libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-ovh"
-version = "0.2.0"
+version = "0.1.6"
 source = { editable = "../../../../libs/mngr_ovh" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1498,7 +1495,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-pair"
-version = "0.3.0"
+version = "0.2.17"
 source = { editable = "../../../../libs/mngr_pair" }
 dependencies = [
     { name = "click-option-group" },
@@ -1513,7 +1510,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-pi-coding"
-version = "0.2.0"
+version = "0.1.14"
 source = { editable = "../../../../libs/mngr_pi_coding" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1536,15 +1533,6 @@ requires-dist = [
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
     { name = "tenacity", specifier = ">=8.0" },
 ]
-
-[[package]]
-name = "imbue-overlay"
-version = "0.1.0"
-source = { editable = "../../../../libs/overlay" }
-
-[package.metadata]
-requires-dist = [{ name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" }]
-provides-extras = ["dev"]
 
 [[package]]
 name = "iniconfig"
@@ -1835,9 +1823,9 @@ dependencies = [
     { name = "imbue-mngr-pair" },
     { name = "imbue-mngr-pi-coding" },
     { name = "imbue-mngr-vps" },
-    { name = "imbue-overlay" },
     { name = "minds" },
     { name = "modal-proxy" },
+    { name = "overlay" },
     { name = "resource-guards" },
 ]
 
@@ -1864,9 +1852,9 @@ requires-dist = [
     { name = "imbue-mngr-pair", editable = "../../../../libs/mngr_pair" },
     { name = "imbue-mngr-pi-coding", editable = "../../../../libs/mngr_pi_coding" },
     { name = "imbue-mngr-vps", editable = "../../../../libs/mngr_vps" },
-    { name = "imbue-overlay", editable = "../../../../libs/overlay" },
     { name = "minds", editable = "../../" },
     { name = "modal-proxy", editable = "../../../../libs/modal_proxy" },
+    { name = "overlay", editable = "../../../../libs/overlay" },
     { name = "resource-guards", editable = "../../../../libs/resource_guards" },
 ]
 
@@ -1896,7 +1884,7 @@ wheels = [
 
 [[package]]
 name = "modal-proxy"
-version = "0.2.0"
+version = "0.1.18"
 source = { editable = "../../../../libs/modal_proxy" }
 dependencies = [
     { name = "concurrency-group" },
@@ -2006,6 +1994,15 @@ sdist = { url = "https://files.pythonhosted.org/packages/ee/8b/aa9e2d8b8dfa7c946
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ca/6f/a04e900f465ff3221ccc395522503e2d10e79fa21f2723c8e177aae1e0d1/opentelemetry_api-1.44.0-py3-none-any.whl", hash = "sha256:94b98c893a91b88657eaac1e3ba89618cdb85be6918196705354f34728b2cdef", size = 60018, upload-time = "2026-07-16T15:25:11.657Z" },
 ]
+
+[[package]]
+name = "overlay"
+version = "0.1.0"
+source = { editable = "../../../../libs/overlay" }
+
+[package.metadata]
+requires-dist = [{ name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" }]
+provides-extras = ["dev"]
 
 [[package]]
 name = "ovh"
@@ -2463,7 +2460,7 @@ wheels = [
 
 [[package]]
 name = "resource-guards"
-version = "0.1.9"
+version = "0.1.8"
 source = { editable = "../../../../libs/resource_guards" }
 dependencies = [
     { name = "pluggy" },

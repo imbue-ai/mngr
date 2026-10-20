@@ -1,0 +1,1 @@
+The slow-path home-layout rollout record now points at `minds-admin workspaces start` for starting a stopped workspace without its owner, instead of saying no operator start route exists. The watchdog DB nudge that run used is kept as a record of what was done.

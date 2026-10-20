@@ -261,8 +261,8 @@ class ProviderErrorConnectivityTrigger(MutableModel):
     which) -- a stopped docker daemon errors the same way and says nothing about
     the network.
 
-    Registered on the resolver's change callbacks, which fire on every provider
-    snapshot, so the probe is taken on a worker (it blocks for seconds) and once
+    Registered on the resolver's change callbacks, which fire on every discovery
+    event, so the probe is taken on a worker (it blocks for seconds) and once
     per *episode* rather than once per event. The episode is the set of errored
     network-dependent providers: a provider can stay errored for the life of the
     app for reasons of its own -- a revoked token, a backend outage of its own --

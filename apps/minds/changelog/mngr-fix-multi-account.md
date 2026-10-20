@@ -1,0 +1,3 @@
+Landed the multi-account connector management feature (from `hynek/multiple-accounts`) on top of the current settings architecture.
+
+The Connectors section now lists each service's signed-in accounts with per-account "Disconnect" and a "+ Add account" ephemeral-browser sign-in (see the `hynek-multiple-accounts` entry for the full feature description). Because app-level settings moved into the shared `AppSettingsSections.jinja` component and `static/app_settings.js` (used by both the full `/settings` page and the centered settings modal), the account list and its add/disconnect interactions were ported there, so the feature appears in both surfaces.

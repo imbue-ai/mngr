@@ -1,0 +1,1 @@
+The generated `mngr tmr` CLI reference documents the new `--reducer-branch-suffix` option (suffixes the reducer's branch/agent/host names so a reintegration's pull request does not collide with the original run's reducer branch).

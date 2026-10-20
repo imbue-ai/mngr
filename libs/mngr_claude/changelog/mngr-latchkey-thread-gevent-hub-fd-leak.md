@@ -1,0 +1,1 @@
+Threads this plugin starts on a `ConcurrencyGroup` now go through `start_mngr_thread`, which destroys the thread's gevent Hub when it finishes. A thread that ran a host command used to leave its Hub, and the pipe pair it holds, open for the rest of the process's life. A new `test_prevent_raw_start_new_thread` ratchet keeps raw `start_new_thread` calls out.

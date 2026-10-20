@@ -11,10 +11,7 @@ legacy re-assert timers and redirect latches entirely.
 
 Purely edge-driven by design: there is no periodic re-derive. A producer that
 mutates observable state without firing its change callback is a bug to fix at
-the producer, not to paper over with polling. Passes are spaced at least
-``min_seconds_between_passes`` apart, so a producer firing faster than that
-costs one pass per gap rather than one per fire; a wake inside the gap is
-folded into the next pass, never dropped.
+the producer, not to paper over with polling.
 
 Derivation logic stays where it lives today (``app.py``'s ``_build_*``
 helpers); the publisher receives them as injected callables that must be
@@ -23,9 +20,7 @@ in an app context).
 """
 
 import threading
-import time
 from collections.abc import Callable
-from typing import Final
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -66,20 +61,6 @@ UiOneShotMessage = (
     | UiBringAppToFrontMessage
 )
 
-# The message types a publish pass derives and diffs against the last frame it broadcast.
-_UiDiffedMessage = (
-    UiWorkspacesMessage
-    | UiAccountsMessage
-    | UiProvidersMessage
-    | UiRequestsMessage
-    | UiNotificationsMessage
-    | UiDiscoveryHealthMessage
-    | UiWorkspaceUpdatesMessage
-    | UiEnvironmentMessage
-)
-
-DEFAULT_MIN_SECONDS_BETWEEN_UI_PASSES: Final[float] = 0.1
-
 
 class UiStatePublisher(MutableModel):
     """One background strand deriving + diffing + broadcasting chrome state."""
@@ -94,9 +75,9 @@ class UiStatePublisher(MutableModel):
     derive_providers: Callable[[], UiProvidersMessage] = Field(
         frozen=True, description="Current providers panel state"
     )
-    derive_requests_and_notifications: Callable[[], tuple[UiRequestsMessage, UiNotificationsMessage]] = Field(
-        frozen=True,
-        description="Current inbox summary and notification feed, derived together from one read of the pending set",
+    derive_requests: Callable[[], UiRequestsMessage] = Field(frozen=True, description="Current inbox summary")
+    derive_notifications: Callable[[], UiNotificationsMessage] = Field(
+        frozen=True, description="Current notification feed"
     )
     derive_discovery_health: Callable[[], UiDiscoveryHealthMessage] = Field(
         frozen=True, description="Current discovery pipeline health"
@@ -110,17 +91,11 @@ class UiStatePublisher(MutableModel):
     derive_workspace_updates: Callable[[], UiWorkspaceUpdatesMessage] = Field(
         frozen=True, description="Current per-workspace update state"
     )
-    min_seconds_between_passes: float = Field(
-        default=DEFAULT_MIN_SECONDS_BETWEEN_UI_PASSES,
-        frozen=True,
-        description="Shortest gap between the starts of two background publish passes",
-    )
 
     _wake_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _last_frame_by_type: dict[str, str] = PrivateAttr(default_factory=dict)
     _is_started: bool = PrivateAttr(default=False)
-    _last_pass_started_at_monotonic: float | None = PrivateAttr(default=None)
 
     def start(self, concurrency_group: ConcurrencyGroup) -> None:
         """Start the publish strand. Idempotent."""
@@ -156,13 +131,12 @@ class UiStatePublisher(MutableModel):
 
     def build_snapshot(self) -> UiSnapshot:
         """Derive the complete current state (shared by WS connect and bootstrap JSON)."""
-        requests, notifications = self.derive_requests_and_notifications()
         return UiSnapshot(
             workspaces=self.derive_workspaces(),
             accounts=self.derive_accounts(),
             providers=self.derive_providers(),
-            requests=requests,
-            notifications=notifications,
+            requests=self.derive_requests(),
+            notifications=self.derive_notifications(),
             health=self.derive_health_states(),
             discovery_health=self.derive_discovery_health(),
             workspace_updates=self.derive_workspace_updates(),
@@ -194,51 +168,52 @@ class UiStatePublisher(MutableModel):
 
     def publish_now(self) -> None:
         """One synchronous derive+diff+broadcast pass (also the loop body; exposed for tests)."""
-        derives: tuple[Callable[[], tuple[_UiDiffedMessage, ...]], ...] = (
-            lambda: (self.derive_workspaces(),),
-            lambda: (self.derive_accounts(),),
-            lambda: (self.derive_providers(),),
-            self.derive_requests_and_notifications,
-            lambda: (self.derive_discovery_health(),),
-            lambda: (self.derive_workspace_updates(),),
-            lambda: (self.derive_environment(),),
+        derives: tuple[
+            Callable[
+                [],
+                UiWorkspacesMessage
+                | UiAccountsMessage
+                | UiProvidersMessage
+                | UiRequestsMessage
+                | UiNotificationsMessage
+                | UiDiscoveryHealthMessage
+                | UiWorkspaceUpdatesMessage
+                | UiEnvironmentMessage,
+            ],
+            ...,
+        ] = (
+            self.derive_workspaces,
+            self.derive_accounts,
+            self.derive_providers,
+            self.derive_requests,
+            self.derive_notifications,
+            self.derive_discovery_health,
+            self.derive_workspace_updates,
+            self.derive_environment,
         )
         for derive in derives:
             try:
-                messages = derive()
+                message = derive()
             except (MindError, MngrError, OSError, RuntimeError) as e:
                 # A single failing derive (e.g. a settings file mid-write) must
                 # not stop the other message types from publishing this tick.
                 logger.warning("Skipped one /ui/ws publish tick derive: {}", e)
                 continue
-            for message in messages:
-                frame = message.model_dump_json()
-                if self._last_frame_by_type.get(message.type) != frame:
-                    self._last_frame_by_type[message.type] = frame
-                    self.broadcaster.broadcast(frame)
-
-    def _wait_out_min_gap_since_last_pass(self) -> None:
-        if self._last_pass_started_at_monotonic is None:
-            return
-        remaining_seconds = self._last_pass_started_at_monotonic + self.min_seconds_between_passes - time.monotonic()
-        if remaining_seconds > 0:
-            # Waits on the stop event so a shutdown is not held up by the gap.
-            self._stop_event.wait(remaining_seconds)
+            frame = message.model_dump_json()
+            if self._last_frame_by_type.get(message.type) != frame:
+                self._last_frame_by_type[message.type] = frame
+                self.broadcaster.broadcast(frame)
 
     def _run_publish_loop(self) -> None:
         is_running = True
         while is_running:
             self._wake_event.wait()
-            self._wait_out_min_gap_since_last_pass()
-            # Clear after the gap so every wake that arrived during it is
-            # served by this pass, and BEFORE deriving so a producer firing
-            # mid-derive re-sets the event and the loop runs another pass
-            # rather than losing the wake.
+            # Clear BEFORE deriving so a producer firing mid-derive re-sets the
+            # event and the loop runs another pass rather than losing the wake.
             self._wake_event.clear()
             if self._stop_event.is_set():
                 is_running = False
                 continue
-            self._last_pass_started_at_monotonic = time.monotonic()
             try:
                 self.publish_now()
             except Exception as e:

@@ -1,0 +1,5 @@
+mngr: fix the Modal test-resource cleanup sweep, which had been reaping nothing at all.
+
+`delete_modal_apps_in_environment` and `delete_modal_volumes_in_environment` (in `utils/testing.py`) read the JSON from `modal app list --json` / `modal volume list --json` under the CLI's *display* column headings (`"App ID"`, `"Description"`, `"Name"`) rather than the keys it actually emits (`app_id`, `description`, `state`, `name`). Every lookup returned an empty string, the `if app_id:` / `if volume_name:` guards skipped the body, and no app was ever stopped and no volume ever deleted. Nothing was logged, because nothing failed. The result on the imbue Modal workspace was 26 leaked `mngr_test-*` environments, the oldest from 2026-07-30, several still holding a live `deployed` app.
+
+Both functions now go through a new `utils/modal_cli.py`, which parses those payloads into `ModalAppListing` / `ModalVolumeListing` models. A payload that does not carry the keys we read raises the new `ModalCliOutputError` instead of quietly yielding nothing, so a future Modal CLI rename fails loudly rather than silently turning the sweep back into a no-op.

@@ -67,7 +67,6 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUserNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceRetiredError
-from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspacesPresentError
 from imbue.mngr_imbue_cloud.errors import WorkspaceHasNoStopError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStopKindRouteUnavailableError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
@@ -274,18 +273,6 @@ class ImbueCloudConnectorClient(MutableModel):
         if detail is not None and detail.get("code") == "account_suspended":
             raise ImbueCloudAccountSuspendedError(
                 str(detail.get("message", "This account is suspended. Contact support@imbue.com."))
-            )
-
-    def _raise_if_workspaces_present(self, response: httpx.Response) -> None:
-        """Raise the typed refusal when a 403 carries the connector's ``workspaces_present`` detail."""
-        if response.status_code != 403:
-            return
-        detail = _detail_dict_from_response(response)
-        if detail is not None and detail.get("code") == "workspaces_present":
-            workspace_count = detail.get("workspace_count")
-            raise ImbueCloudWorkspacesPresentError(
-                str(detail.get("message", "The account still holds Imbue Cloud workspaces.")),
-                workspace_count=workspace_count if isinstance(workspace_count, int) else 0,
             )
 
     def _raise_if_auth_upstream_unavailable(self, response: httpx.Response) -> None:
@@ -1606,27 +1593,6 @@ class ImbueCloudConnectorClient(MutableModel):
         """
         return f"/admin/accounts/{quote(email, safe='@')}"
 
-    def _check_admin_account(self, response: httpx.Response, email: str) -> dict[str, Any]:
-        """``_check`` for the email-addressed account routes, with their own answers typed first.
-
-        A 404 is the connector finding no account for the email (a finalized
-        account has no identity left, so it answers this too) and maps to
-        ``ImbueCloudUserNotFoundError``; a 403 ``workspaces_present`` maps to
-        ``ImbueCloudWorkspacesPresentError`` before ``_check`` would read the
-        403 as an authentication failure. FastAPI's bare 404 for a route this
-        connector does not serve stays a connector error, so an old connector
-        never reads as "no such account".
-        """
-        if _is_route_not_served(response):
-            raise ImbueCloudConnectorError(
-                "This connector does not serve this account route yet; redeploy it "
-                "(Imbue-internal: `minds-admin env deploy`)."
-            )
-        if response.status_code == 404:
-            raise ImbueCloudUserNotFoundError(f"No account found for {email}")
-        self._raise_if_workspaces_present(response)
-        return self._check(response, ImbueCloudAccountError)
-
     def admin_get_account(self, admin_api_key: SecretStr, email: str) -> AdminAccountInfo:
         response = self._send(
             "GET",
@@ -1635,7 +1601,7 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(admin_api_key),
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
-        return validate_wire(AdminAccountInfo, self._check_admin_account(response, email))
+        return validate_wire(AdminAccountInfo, self._check(response, ImbueCloudAccountError))
 
     def admin_set_account_plan(self, admin_api_key: SecretStr, email: str, plan: str) -> dict[str, Any]:
         # Always resets to the plan's defaults, so a retried request lands in
@@ -1749,28 +1715,6 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
         return self._check(response, ImbueCloudAccountError)
-
-    def admin_delete_account(self, admin_api_key: SecretStr, email: str) -> dict[str, Any]:
-        """The delete step for the addressed account (idempotent); the reaper finalizes it after the grace period."""
-        response = self._send(
-            "POST",
-            self._url(f"{self._admin_account_path(email)}/delete"),
-            exc_cls=ImbueCloudAccountError,
-            headers=self._bearer(admin_api_key),
-            timeout=KEY_OP_TIMEOUT_SECONDS,
-        )
-        return self._check_admin_account(response, email)
-
-    def admin_finalize_account(self, admin_api_key: SecretStr, email: str) -> dict[str, Any]:
-        """The finalize step, now, for an account already deleted (a 409 ``not_deleted`` otherwise)."""
-        response = self._send(
-            "POST",
-            self._url(f"{self._admin_account_path(email)}/finalize"),
-            exc_cls=ImbueCloudAccountError,
-            headers=self._bearer(admin_api_key),
-            timeout=KEY_OP_TIMEOUT_SECONDS,
-        )
-        return self._check_admin_account(response, email)
 
     def admin_start_workspace(self, admin_api_key: SecretStr, host_db_id: str) -> dict[str, Any]:
         """Operator start of one stopped workspace (idempotent, like the owner start; no quota check)."""

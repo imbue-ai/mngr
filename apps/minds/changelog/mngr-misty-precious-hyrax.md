@@ -1,0 +1,11 @@
+Workspaces created before the 0.8.0 data-folder move can reach latchkey again. Every lima, docker, and Modal workspace created before it carries a latchkey permissions token naming a file under `~/.minds/latchkey/`. The move put that file under `~/Library/Application Support/Imbue Studio/<tier>/latchkey/`, and nothing can reissue a token a workspace already holds. So every latchkey call from those workspaces failed with 400 `Permissions override references missing or invalid file`, including updates, `notify_user`, and permission requests.
+
+- The app now keeps `~/.minds/latchkey` (`~/.minds-<tier>/latchkey` for other tiers) as a symlink to the moved latchkey directory. It is created on every launch that finds it missing or dangling, but only for an install whose data the migration actually moved.
+
+- Installs that already migrated on 0.8.0 are repaired on their next launch, and the token resolves again on the next request with no workspace restart. The symlink also repairs the permission handles that pointed into `~/.minds` by absolute path, and pending permission requests filed before the move.
+
+- If approving a pre-move permission request on 0.8.0 recreated `~/.minds/latchkey` as a partial directory, it is renamed to `~/.minds/latchkey.orphaned-<timestamp>` and the symlink made in its place; a grant approved into it on 0.8.0 has to be approved again. Anything else already there that does not resolve to the moved directory (a full latchkey store, a file, a link to another store) is left untouched and the problem is logged to `electron.log`.
+
+- The launch-to-msg migration fixture now seeds a pre-move latchkey handle and checks that its legacy path still resolves after the upgrade.
+
+- A SIGTERM or SIGINT to the desktop app (as `just minds-stop` and other headless stops send) now quits without the running-workspaces prompt, leaving workspaces running. The app's own handler for them was registered before Electron installed its signal handling during startup, which replaced it, so it never ran: with a local workspace running, the quit went through the interactive prompt and waited on a click that never came. It is now registered once the app is ready, and ignores a signal that arrives while a quit is already under way (the electron CLI shim forwards a process-group signal, so it arrives twice).

@@ -1,6 +1,7 @@
 import os
 import socket
 import struct
+import sys
 from collections.abc import Callable
 from collections.abc import Iterable
 from pathlib import Path
@@ -99,7 +100,7 @@ def test_parse_peer_credentials_rejects_short_buffers() -> None:
 def test_read_peer_credentials_reports_our_own_uid_over_a_socketpair() -> None:
     left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        credentials = read_peer_credentials(right)
+        credentials = read_peer_credentials(right, sys.platform)
     finally:
         left.close()
         right.close()
@@ -112,7 +113,7 @@ def test_read_peer_credentials_raises_when_the_socket_refuses_the_option() -> No
     closed = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     closed.close()
     with pytest.raises(PeerCredentialsError):
-        read_peer_credentials(closed)
+        read_peer_credentials(closed, sys.platform)
 
 
 def test_prepare_socket_path_clears_a_stale_socket_and_creates_a_private_directory(short_tmp_path: Path) -> None:

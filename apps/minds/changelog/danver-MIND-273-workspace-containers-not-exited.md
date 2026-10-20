@@ -1,0 +1,7 @@
+Fixed a flaky CI check in the minds snapshot-resume test suite (MIND-273).
+
+`test_workspace_docker_container_is_present_and_stopped` verifies that the pre-baked snapshot image captured its workspace Docker containers stopped. It used to answer that by reading the live Docker daemon at test time, which is not the same question: the CI test runner reuses one snapshot sandbox for several test batches, so a batch that had already resumed the workspace left those containers running, and the next batch to run this check saw `running` and failed.
+
+The container states dockerd restores from the snapshot are now recorded once per sandbox, just after dockerd first comes up and before any test can start a container, and the check reads that recording. The check no longer depends on which tests ran before it in the same sandbox, and it no longer carries `@pytest.mark.flaky`.
+
+Container states are now typed: `DockerContainerState` is an enum of the seven states the Docker daemon reports (`created`, `running`, `paused`, `restarting`, `removing`, `exited`, `dead`), and the check compares against `DockerContainerState.EXITED` rather than the string `"exited"`. The recording on disk stays Docker's raw wire format and is resolved to the enum when read, so a state Docker adds in future fails only the tests that read the states -- with a message naming the unrecognized value -- instead of the fixture every test in the module needs.

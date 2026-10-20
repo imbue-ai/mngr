@@ -2209,8 +2209,7 @@ describe("SharePanelModel invitations", () => {
     await model.invite(WHOLE, friend.key);
     expect(model.inviteStateFor(friend.key)).toEqual({
       state: "refused",
-      message:
-        "Access granted, but you've reached your invitation email limit for now.",
+      message: "You have reached your invitation limit for now.",
     });
 
     await model.load();

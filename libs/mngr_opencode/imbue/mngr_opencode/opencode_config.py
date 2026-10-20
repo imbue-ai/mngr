@@ -278,9 +278,8 @@ _SCHEMA_KEY: str = "$schema"
 _SCHEMA_URL: str = "https://opencode.ai/config.json"
 _PERMISSION_WILDCARD: str = "*"
 _PERMISSION_ALLOW: str = "allow"
-# ``autoupdate: false`` stops opencode's startup self-update before 1.19.0, keeping the
-# installed (possibly pinned) version; from 1.19.0, which never self-updates, it only turns
-# off the update check and notice.
+# ``autoupdate`` governs opencode's startup self-update; ``false`` disables it so the
+# installed (possibly pinned) version stays put.
 _AUTOUPDATE_KEY: str = "autoupdate"
 
 

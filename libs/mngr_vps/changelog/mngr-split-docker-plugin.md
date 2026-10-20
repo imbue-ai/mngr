@@ -1,0 +1,1 @@
+- Comment-only: a reference to the docker provider's source path now points at its new home in `libs/mngr_docker`.

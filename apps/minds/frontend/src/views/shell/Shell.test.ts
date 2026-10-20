@@ -76,13 +76,16 @@ function updatesStoreStub(
   availability: "UP_TO_DATE" | "OUT_OF_DATE",
   isUpdating = false,
   isApplying = false,
+  isAutoUpdateEnabled = false,
+  fields: Record<string, unknown> = {},
 ) {
-  const update = { availability, activity: isApplying ? "APPLYING" : "IDLE" };
+  const update = { availability, activity: isApplying ? "APPLYING" : "IDLE", ...fields };
   return {
     forAgent: () => update,
     publishedFor: () => update,
     isApplying: () => isApplying,
     isUpdating: () => isUpdating,
+    isAutoUpdateEnabled,
   };
 }
 
@@ -842,6 +845,46 @@ describe("Shell notice band wiring", () => {
     expect(attrsOf(band as AnyVnode).payload).toMatchObject({
       message: expectedMessage,
     });
+  });
+
+  it.each([
+    ["auto-update will arm it", {}, null],
+    [
+      "the user skipped this release",
+      { is_update_skipped: true },
+      "This workspace is running an older version of Imbue Studio.",
+    ],
+    [
+      "it cannot be armed without a sign-in",
+      { needs_sign_in: true },
+      "This workspace can't update until an AI account is signed in to it.",
+    ],
+  ])("under auto-update, a behind machine whose %s gets the band it should", (_name, fields, expectedMessage) => {
+    const { state } = makeShell({
+      stores: {
+        requests: { hasPendingForWorkspace: () => false },
+        workspaces: {
+          toAgentScopedId: (anyId: string) => anyId,
+          entryByAnyId: () => null,
+        },
+        health: {
+          statusFor: () => "healthy",
+          discoveryHealth: "healthy",
+          appEnvironmentCondition: () => "NONE",
+          recoveryKindFor: () => null,
+        },
+        updates: updatesStoreStub("OUT_OF_DATE", false, false, true, fields),
+      },
+    } as unknown as Partial<ShellState>);
+
+    const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#content"));
+
+    const band = collectVnodes(root).find((vnode) => vnode.tag === NoticeBand);
+    if (expectedMessage === null) {
+      expect(band).toBeUndefined();
+    } else {
+      expect(attrsOf(band as AnyVnode).payload).toMatchObject({ message: expectedMessage });
+    }
   });
 
   it("covers a machine whose update is landing with a card nothing dismisses", () => {

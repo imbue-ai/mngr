@@ -28,7 +28,7 @@ def paramiko_ssh_host_factory(
     server_key_dir = tmp_path / "server"
     server_key_dir.mkdir()
     host_key_path, _host_public_key_path = generate_ssh_keypair_with_paramiko(server_key_dir)
-    with in_process_paramiko_sshd(host_key_path, private_key_path, is_auth_held=False) as (port, server):
+    with in_process_paramiko_sshd(host_key_path, private_key_path) as (port, server):
         factory = make_local_ssh_host_factory(
             port, host_key_path, private_key_path, temp_host_dir, temp_mngr_ctx, tmp_path
         )

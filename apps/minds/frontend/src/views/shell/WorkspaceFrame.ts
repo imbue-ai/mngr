@@ -2,7 +2,8 @@
 // cross-origin iframe + the white anti-flash mirror behind it, and the embed
 // contract endpoint.
 //
-// A machine's health is NOT drawn here: the shell owns that, so one band can
+// Faithful port of pages/Chrome.jinja + the frame parts of chrome.js. A
+// machine's health is NOT drawn here: the shell owns that, so one band can
 // speak for whichever condition is actually relevant (a dead discovery
 // consumer outranks the stuck machine it produces) and so the surface
 // shrinks under it instead of being obscured by it.
@@ -12,15 +13,14 @@ import { electronBridge } from "../../electron-bridge";
 import { fetchJson } from "../../models/create";
 import { armProviderRelay, stopProviderRelay } from "../../models/providerRelay";
 import type {
-  ChromeAnchor,
   DetachedWindowEntry,
+  FocusChatSender,
   OpenLinkSender,
   PermissionResolvedSender,
   ReattachWindowSender,
   ShellState,
   TearOutSender,
   WorkspaceFrameHandle,
-  WorkspaceMessageSender,
 } from "./shell-state";
 import type {
   PopoutOpenRequest,
@@ -54,8 +54,6 @@ interface EmbedContractModule {
   TEAR_OUT: string;
   OPEN_LINK: string;
   OPEN_EXTERNAL: string;
-  HIGHLIGHT_CHROME: string;
-  CHROME_ANCHORS: readonly string[];
   REQUEST_ID_PATTERN: RegExp;
   createEmbedderEndpoint(options: {
     getFrameWindow: () => Window | null;
@@ -141,8 +139,6 @@ export interface EmbedHandlerDeps {
   /** Open an external link the workspace handed over outside the app (minds:open-external); null in a chrome that
    * cannot, which then says so in its capabilities and the workspace opens the link itself. */
   openExternalLink: ((url: string) => void) | null;
-  /** Ring one of the chrome's own controls while the workspace's tour talks about it, or clear the ring (null). */
-  highlightChrome: (anchor: ChromeAnchor | null) => void;
   /** The workspace asked to pull one of its windows out (the pull-out-window
    * spec); null in a chrome that cannot, which then never answers with the
    * capability either. */
@@ -241,12 +237,6 @@ export function buildEmbedHandlers(
   if (openExternalLink !== null) {
     handlers[contract.OPEN_EXTERNAL] = (message) => openExternalLink(String(message.url));
   }
-  handlers[contract.HIGHLIGHT_CHROME] = (message) => {
-    // The contract's list is the one source of anchor names; anything else clears the ring.
-    const anchor = message.anchor;
-    const isKnown = typeof anchor === "string" && contract.CHROME_ANCHORS.includes(anchor);
-    deps.highlightChrome(isKnown ? (anchor as ChromeAnchor) : null);
-  };
   const popout = deps.popout;
   if (popout !== null) {
     // The contract validated every field's shape; the fields are re-read
@@ -422,7 +412,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   };
   let snapshotResendTimer: ReturnType<typeof setTimeout> | null = null;
   let permissionResolvedSender: PermissionResolvedSender | null = null;
-  let workspaceMessageSender: WorkspaceMessageSender | null = null;
+  let focusChatSender: FocusChatSender | null = null;
   let reattachWindowSender: ReattachWindowSender | null = null;
   let tearOutSender: TearOutSender | null = null;
   let openLinkSender: OpenLinkSender | null = null;
@@ -460,7 +450,6 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     const isNavigating = frameElement.getAttribute("src") !== expected;
     if (isNavigating) {
       isMountedPageReady = false;
-      shell.highlightedChromeAnchor = null;
       frameElement.src = expected;
     }
     linkHandling.frameArmed(shell.stores.workspaces.toAgentScopedId(workspaceAnyId), isNavigating);
@@ -474,7 +463,6 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   function reloadFrame(shell: ShellState): void {
     if (frameElement === null || armedWorkspaceAnyId === null) return;
     isMountedPageReady = false;
-    shell.highlightedChromeAnchor = null;
     frameElement.src =
       shell.stores.workspaces.workspaceFrameUrl(armedWorkspaceAnyId, armedSoloWindowId, armedIsSoloReopened);
     linkHandling.frameArmed(shell.stores.workspaces.toAgentScopedId(armedWorkspaceAnyId), true);
@@ -538,17 +526,13 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           onWorkspaceReady: (opensLinks) => {
             isMountedPageReady = true;
             linkHandling.pageReady(opensLinks);
-            // A message held while the page was not listening -- a fresh
+            // A chat ask held while the page was not listening -- a fresh
             // mount, or a click from another workspace -- goes now.
-            shell.flushPendingWorkspaceMessage();
+            shell.flushPendingFocusChat();
           },
           openExternalLink: electronBridge.opensExternalLinks
             ? (url) => electronBridge.openExternalLink(url)
             : null,
-          highlightChrome: (anchor) => {
-            shell.highlightedChromeAnchor = anchor;
-            m.redraw();
-          },
           popout: electronBridge.canPopOut
             ? {
                 open: (request) => electronBridge.openPopoutWindow(request),
@@ -595,25 +579,17 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           });
         };
         shell.registerPermissionResolvedSender(permissionResolvedSender);
-        workspaceMessageSender = (workspaceAgentId, message) => {
+        focusChatSender = (workspaceAgentId, chatAgentId) => {
           if (
             shell.stores.workspaces.toAgentScopedId(mountedAnyId()) !==
             workspaceAgentId
           )
             return false;
           if (!isMountedPageReady) return false;
-          switch (message.kind) {
-            case "focus-chat":
-              endpoint?.send(loaded.FOCUS_CHAT, { chatId: message.chatAgentId });
-              return true;
-            case "app-message":
-              // The workspace shell routes the type to the app whose
-              // manifest registers it; the fields ride beside the type.
-              endpoint?.send(message.type, message.fields);
-              return true;
-          }
+          endpoint?.send(loaded.FOCUS_CHAT, { chatId: chatAgentId });
+          return true;
         };
-        shell.registerWorkspaceMessageSender(workspaceMessageSender);
+        shell.registerFocusChatSender(focusChatSender);
         reattachWindowSender = (windowId, frame) => {
           endpoint?.send(loaded.REATTACH_WINDOW, frame === null ? { windowId } : { windowId, frame });
         };
@@ -640,12 +616,6 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           );
         };
         onFrameLoad = () => {
-          // A page the workspace itself reloaded is a fresh page with no tour on it. The load listener is
-          // a DOM one, outside Mithril's redraw, so the ring is redrawn away here.
-          if (shell.highlightedChromeAnchor !== null) {
-            shell.highlightedChromeAnchor = null;
-            m.redraw();
-          }
           sendSnapshot();
           if (snapshotResendTimer !== null) clearTimeout(snapshotResendTimer);
           snapshotResendTimer = setTimeout(sendSnapshot, 2000);
@@ -671,9 +641,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         );
         permissionResolvedSender = null;
       }
-      if (workspaceMessageSender !== null) {
-        vnode.attrs.shell.unregisterWorkspaceMessageSender(workspaceMessageSender);
-        workspaceMessageSender = null;
+      if (focusChatSender !== null) {
+        vnode.attrs.shell.unregisterFocusChatSender(focusChatSender);
+        focusChatSender = null;
       }
       if (reattachWindowSender !== null) {
         vnode.attrs.shell.unregisterReattachWindowSender(reattachWindowSender);
@@ -692,7 +662,6 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       // frame is mounted when a successor already reported its own.
       if (vnode.attrs.shell.workspaceFrame === frameHandle) {
         vnode.attrs.shell.workspaceFrame = null;
-        vnode.attrs.shell.highlightedChromeAnchor = null;
         linkHandling.unmounted();
       }
       frameHandle = null;

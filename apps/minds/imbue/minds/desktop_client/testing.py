@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 import queue
@@ -21,6 +22,7 @@ from datetime import timezone
 from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from typing import Final
 
@@ -45,6 +47,7 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.chat_app import EXIT_SENTINEL
 from imbue.minds.desktop_client.chat_app import FALLBACK_BEGIN_SENTINEL
 from imbue.minds.desktop_client.chat_app import FALLBACK_EXIT_SENTINEL
@@ -95,7 +98,6 @@ from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
-from imbue.minds.desktop_client.ui_publisher import DEFAULT_MIN_SECONDS_BETWEEN_UI_PASSES
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_apply_window import AGENTS_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import AGENTS_END_SENTINEL
@@ -105,9 +107,10 @@ from imbue.minds.desktop_client.update_apply_window import BUSY_END_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_END_SENTINEL
 from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
-from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
+from imbue.minds.desktop_client.update_dispatcher_script import UPDATE_COMMAND_RESULT_MARKER
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.minds.desktop_client.update_workspace_command import UPDATE_WORKSPACE_PROGRAM
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.primitives import DeviceId
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -482,7 +485,6 @@ def _empty_workspaces_message() -> UiWorkspacesMessage:
 def build_ui_state_publisher_for_test(
     derive_workspaces: Callable[[], UiWorkspacesMessage] = _empty_workspaces_message,
     derive_health_states: Callable[[], tuple[UiHealthMessage, ...]] = tuple,
-    min_seconds_between_passes: float = DEFAULT_MIN_SECONDS_BETWEEN_UI_PASSES,
 ) -> tuple[UiStatePublisher, "queue.Queue[str | None]"]:
     """A publisher over a fresh broadcaster, plus the queue one registered window reads.
 
@@ -507,15 +509,12 @@ def build_ui_state_publisher_for_test(
         derive_providers=lambda: UiProvidersMessage(
             accounts=(), device_providers=(), last_event_at=None, last_full_snapshot_at=None
         ),
-        derive_requests_and_notifications=lambda: (
-            UiRequestsMessage(count=0, request_ids=()),
-            UiNotificationsMessage(entries=(), unresolved_count=0),
-        ),
+        derive_requests=lambda: UiRequestsMessage(count=0, request_ids=()),
+        derive_notifications=lambda: UiNotificationsMessage(entries=(), unresolved_count=0),
         derive_discovery_health=lambda: UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
         derive_environment=lambda: UiEnvironmentMessage(state=EnvironmentCondition.NONE),
         derive_health_states=derive_health_states,
         derive_workspace_updates=lambda: UiWorkspaceUpdatesMessage(updates={}, update_window="2:00 AM-5:00 AM"),
-        min_seconds_between_passes=min_seconds_between_passes,
     )
     return publisher, broadcaster.register()
 
@@ -1036,12 +1035,11 @@ def exec_json_envelope(
 def make_update_state_store(
     tmp_path: Path, *, dismissal_store: UpdateDismissalStore | None = None
 ) -> WorkspaceUpdateStateStore:
-    """An update state store over the schedule and dismissal stores under ``tmp_path``.
+    """An update state store over the dismissal store under ``tmp_path``.
 
     A second call on the same ``tmp_path`` reads what the first one wrote, as a relaunched app would.
     """
     return WorkspaceUpdateStateStore(
-        schedule_store=UpdateScheduleStore(records_dir=tmp_path / "update_schedules"),
         dismissal_store=dismissal_store
         if dismissal_store is not None
         else UpdateDismissalStore(records_dir=tmp_path / "update_dismissals"),
@@ -1571,3 +1569,222 @@ class HandshakeDrainingWebSocketClient(SimpleWebsocketClient):
     def handshake(self) -> None:
         super().handshake()
         self.connected = self._handle_events()
+
+
+class RecordedChatAppRequest(FrozenModel):
+    """One request the scripted chat app received."""
+
+    method: str = Field(description="The HTTP method")
+    path: str = Field(description="The request path, query included")
+    body: dict[str, Any] = Field(description="The decoded JSON body; {} for none")
+
+
+class ScriptedChatAppAnswer(FrozenModel):
+    """One answer the scripted chat app gives, in order, to the create route."""
+
+    status: int = Field(description="The HTTP status")
+    body: dict[str, Any] = Field(description="The JSON body")
+
+
+class _ScriptedUpdateChatAppHandler(BaseHTTPRequestHandler):
+    """Stands in for a workspace chat app's create route and tracked agent listing."""
+
+    create_answers: list[ScriptedChatAppAnswer] = []
+    tracked_agents: list[dict[str, Any]] | None = None
+    recorded: list[RecordedChatAppRequest] = []
+
+    def _answer(self, status: int, body: dict[str, Any]) -> None:
+        payload = json.dumps(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self) -> None:
+        type(self).recorded.append(RecordedChatAppRequest(method="GET", path=self.path, body={}))
+        tracked = type(self).tracked_agents
+        if self.path.startswith("/api/agents") and tracked is not None:
+            self._answer(200, {"agents": tracked})
+        else:
+            self._answer(404, {"detail": "not found"})
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        type(self).recorded.append(RecordedChatAppRequest(method="POST", path=self.path, body=body))
+        answers = type(self).create_answers
+        if self.path == "/api/chats/create" and answers:
+            answer = answers.pop(0)
+            self._answer(answer.status, answer.body)
+        else:
+            self._answer(404, {"detail": "not found"})
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+@contextmanager
+def scripted_update_chat_app(
+    workspace: Path,
+    *,
+    create_answers: Sequence[ScriptedChatAppAnswer] = (),
+    tracked_agents: Sequence[Mapping[str, Any]] | None = None,
+) -> Iterator[list[RecordedChatAppRequest]]:
+    """Serve a stand-in chat app for ``workspace`` and register it in the workspace's app registry.
+
+    The create route answers ``create_answers`` in order (404 once they run out); the tracked
+    agent listing answers ``tracked_agents``, or 404 when None, as a chat app from before it does.
+    Yields the live list of recorded requests.
+    """
+    recorded: list[RecordedChatAppRequest] = []
+    handler_cls = type(
+        "_ScopedUpdateChatAppHandler",
+        (_ScriptedUpdateChatAppHandler,),
+        {
+            "create_answers": list(create_answers),
+            "tracked_agents": [dict(agent) for agent in tracked_agents] if tracked_agents is not None else None,
+            "recorded": recorded,
+        },
+    )
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    registry = workspace / "data" / ".state" / "apps.toml"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(f'[[apps]]\nname = "chat"\nurl = "http://127.0.0.1:{server.server_address[1]}"\n')
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield recorded
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+_STUB_MNGR_SOURCE: Final[str] = r"""#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["STUB_CALLS_LOG"], "a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\n")
+command = sys.argv[1] if len(sys.argv) > 1 else ""
+if command == "list":
+    with open(os.environ["STUB_AGENTS_FILE"]) as handle:
+        print(json.dumps({"agents": json.load(handle)}))
+elif command == "create":
+    print(json.dumps({"event": "created", "agent_id": "agent-" + "c" * 32}))
+sys.exit(int(os.environ.get("STUB_EXIT_" + command.upper(), "0")))
+"""
+
+
+class StagedUpdateWorkspace(FrozenModel):
+    """A workspace root on disk, laid out as far as the update program reads it, with stubbed tools on PATH."""
+
+    root: Path = Field(description="The workspace root; the program's cwd")
+    bin_dir: Path = Field(description="Holds the stub mngr, tk and cron")
+    calls_log: Path = Field(description="One JSON argv per line, for every stub mngr and tk call")
+    agents_file: Path = Field(description="What the stub ``mngr list`` answers")
+    live_cron_dir: Path = Field(description="Stands in for /etc/cron.d")
+
+    def set_agents(self, agents: Sequence[Mapping[str, Any]]) -> None:
+        self.agents_file.write_text(json.dumps([dict(agent) for agent in agents]))
+
+    def recorded_calls(self) -> list[list[str]]:
+        if not self.calls_log.exists():
+            return []
+        return [json.loads(line) for line in self.calls_log.read_text().splitlines() if line.strip()]
+
+    def write_state(self, name: str, content: Mapping[str, Any]) -> None:
+        path = self.root / "data" / ".state" / "update-apply" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(content)))
+
+    def read_state(self, name: str) -> dict[str, Any] | None:
+        path = self.root / "data" / ".state" / "update-apply" / name
+        return json.loads(path.read_text()) if path.exists() else None
+
+
+def _write_executable(path: Path, text: str) -> None:
+    path.write_text(text)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def stage_update_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    has_skill: bool = True,
+    is_signed_in: bool = True,
+    has_cron: bool = True,
+) -> StagedUpdateWorkspace:
+    """Lay out a workspace under ``tmp_path``, cd into it, and put stub tools first on PATH.
+
+    The environment reads as ``mngr exec``'s (``MNGR_HOST_DIR`` set), so the program uses it as is.
+    """
+    root = tmp_path / "workspace"
+    (root / ".mngr").mkdir(parents=True)
+    (root / "system" / "scripts").mkdir(parents=True)
+    (root / "system" / "scripts" / "require_create_account.py").write_text("")
+    if has_skill:
+        (root / ".agents" / "skills" / "update-self").mkdir(parents=True)
+        (root / ".agents" / "skills" / "update-self" / "SKILL.md").write_text("# update-self\n")
+    if is_signed_in:
+        (root / ".mngr" / "settings.local.toml").write_text('[commands.create]\ntype = "claude"\n')
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir()
+    _write_executable(bin_dir / "mngr", _STUB_MNGR_SOURCE)
+    _write_executable(bin_dir / "tk", _STUB_MNGR_SOURCE)
+    if has_cron:
+        _write_executable(bin_dir / "cron", "#!/bin/sh\nexit 0\n")
+    live_cron_dir = tmp_path / "etc-cron.d"
+    # A workspace with no cron has no drop-in directory for one either.
+    if has_cron:
+        live_cron_dir.mkdir()
+    staged = StagedUpdateWorkspace(
+        root=root,
+        bin_dir=bin_dir,
+        calls_log=tmp_path / "stub-calls.jsonl",
+        agents_file=tmp_path / "stub-agents.json",
+        live_cron_dir=live_cron_dir,
+    )
+    staged.set_agents([])
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "host-dir"))
+    monkeypatch.setenv("TICKETS_DIR", str(root / "data" / ".tickets"))
+    monkeypatch.setenv("STUB_CALLS_LOG", str(staged.calls_log))
+    monkeypatch.setenv("STUB_AGENTS_FILE", str(staged.agents_file))
+    monkeypatch.chdir(root)
+    return staged
+
+
+def load_update_workspace_program(directory: Path) -> ModuleType:
+    """The workspace update program, written to ``directory`` and loaded as a module of its own."""
+    program_path = directory / "update_workspace_program.py"
+    program_path.write_text(UPDATE_WORKSPACE_PROGRAM)
+    spec = importlib.util.spec_from_file_location(f"update_workspace_program_{uuid.uuid4().hex}", program_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def update_program_context(
+    program: ModuleType, staged: StagedUpdateWorkspace, argv: Sequence[str], now: float
+) -> dict[str, Any]:
+    """The context ``main`` hands a mode, for a run against ``staged`` at ``now``."""
+    return {
+        "argv": list(argv),
+        "program_path": str(Path(program.__file__ or "")),
+        "live_cron_dir": str(staged.live_cron_dir),
+        "now": now,
+    }
+
+
+def read_update_program_answer(captured_stdout: str) -> dict[str, Any]:
+    """The program's one marker-wrapped JSON answer from what it printed."""
+    payload = extract_marker_json(captured_stdout, UPDATE_COMMAND_RESULT_MARKER)
+    assert payload is not None, captured_stdout
+    return dict(payload)
+
+
+def update_command_exec_result(payload: Mapping[str, Any]) -> MngrCallResult:
+    """What ``mngr exec --format jsonl`` answers when the workspace's update program printed ``payload``."""
+    inner_stdout = f"{UPDATE_COMMAND_RESULT_MARKER}{json.dumps({**payload, 'schema': 1})}\n"
+    event = {"event": "exec_result", "agent": "workspace", "stdout": inner_stdout, "stderr": "", "success": True}
+    return MngrCallResult(returncode=0, stdout=json.dumps(event) + "\n", stderr="", is_mngr_output=True)

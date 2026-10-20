@@ -79,7 +79,7 @@ const WORKSPACE_PACKAGES = {
   'concurrency-group':      'libs/concurrency_group',
   'resource-guards':        'libs/resource_guards',
   'modal-proxy':            'libs/modal_proxy',
-  'imbue-overlay':          'libs/overlay',
+  'overlay':                'libs/overlay',
 };
 
 /**

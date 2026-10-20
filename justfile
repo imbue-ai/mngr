@@ -18,7 +18,7 @@ _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # Default mark filter for local unit + integration recipes. Kept out of
 # pyproject addopts because it would collide with offload-modal-acceptance
 # (which runs the opposite filter). A later -m on CLI overrides this.
-_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume and not smoke'"
+_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 # Coverage report flags are passed explicitly here (not via root addopts) so
 # offload CI batches can suppress them -- see the NOTE in root addopts.
@@ -99,8 +99,8 @@ test-apt-mirror-worker:
 test-minds-js:
   # --ignore-scripts: the units load `semver`, read `electron-updater`'s
   # AppUpdater.js off disk, and are otherwise node builtins -- so the packages
-  # are needed but their postinstalls are not, and a plain install fetches
-  # Playwright's browsers, which they never run.
+  # are needed but their postinstalls are not, and a plain install fetches the
+  # Electron binary and Playwright's browsers to run neither.
   cd apps/minds && pnpm install --frozen-lockfile --ignore-scripts && pnpm test:unit
   # `generate` before `check`: src/generated/ is gitignored, so a fresh checkout
   # has no ui.ts and tsc would otherwise fail on the missing import rather than

@@ -1,0 +1,1 @@
+The real-Modal acceptance-test fixtures now ride out transient exhaustion of the shared CI workspace's 100-ephemeral-app cap: provider creation retries on the "reached limit" error at a 15s cadence for up to 4 minutes (the colliding concurrent CI runs' apps drain as their tests finish), instead of failing the whole run. Any other initialization failure remains immediately fatal.

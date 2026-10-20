@@ -1,0 +1,1 @@
+Docs only: the `forward` command doc is updated for service-per-origin forwarding (per-service origins, `/_bridge` entry, embedder CSP), and the `imbue_cloud` command doc replaces the tunnels surface with the new `shares` subcommands.

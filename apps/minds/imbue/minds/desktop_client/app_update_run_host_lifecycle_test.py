@@ -1,4 +1,4 @@
-"""The update run's host lifecycle: which thread each half runs on."""
+"""The update run's host start: it runs on the calling thread."""
 
 import threading
 from pathlib import Path
@@ -25,29 +25,8 @@ class _ThreadRecordingResolver(StaticBackendResolver):
         return None
 
     def wait_for_asking_thread_name(self) -> str:
-        assert self._asked_on.wait(timeout=10.0), "the stop never asked the resolver for the services agent"
+        assert self._asked_on.wait(timeout=10.0), "the start never asked the resolver for the services agent"
         return self._asking_thread_name
-
-
-def test_the_scheduled_run_host_stop_runs_off_the_calling_thread(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    resolver = _ThreadRecordingResolver(url_by_agent_and_service={})
-    _client, app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=False, backend_resolver=resolver
-    )
-    lifecycle = _UpdateRunHostLifecycle(
-        flask_app=app,
-        backend_resolver=resolver,
-        tracker=SystemInterfaceHealthTracker(),
-        concurrency_group=root_concurrency_group,
-        mngr_binary="mngr",
-        mngr_host_dir=tmp_path / "hosts",
-    )
-
-    lifecycle.stop_in_background(AgentId.generate())
-
-    assert resolver.wait_for_asking_thread_name() != threading.current_thread().name
 
 
 def test_the_update_run_host_start_runs_on_the_calling_thread(

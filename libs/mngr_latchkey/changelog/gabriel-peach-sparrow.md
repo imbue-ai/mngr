@@ -1,0 +1,1 @@
+Pending permission requests now record when they were filed. `POST /permission-requests` stamps a `created_at` (ISO-8601 UTC) on the stored record, and `GET /permission-requests` returns it, so a consumer that reconnects later (such as the minds app after a restart) can tell requests that were already waiting from new ones. Records written before this change have no `created_at`.

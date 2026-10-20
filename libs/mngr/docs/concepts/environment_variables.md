@@ -120,7 +120,6 @@ Additionally, the following non-config env vars are recognized:
 - `MNGR_LOAD_ALL_PLUGINS` — when truthy, bypasses normal plugin filtering (used by tooling such as doc generation).
 - `MNGR_USER_ID` — explicit user id (overrides the persisted value in `~/.mngr/profiles/<profile_id>/user_id`).
 - `MNGR_TEST_VERBOSE` — increases test-only logging output.
-- `MNGR_SECRET_ENV_NAMES` — comma-separated names of environment variables that hold credentials. The e2e test fixture replaces every occurrence of their values in a saved transcript with `<redacted NAME>`. CI sets it from `VAULT_SECRET_ENV_NAMES`, which the `use-vault-secrets` action exports with the names it injected; it is unset in local runs, which then redact nothing.
 - `MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE` — debug flag that keeps the host lock file in place after a failed create so the host doesn't idle-shut-down before you can investigate.
 
 ## Agent Runtime Variables

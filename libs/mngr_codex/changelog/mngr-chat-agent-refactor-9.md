@@ -1,0 +1,1 @@
+When mngr cannot press through codex's "Hooks need review" screen at create, it no longer waits the full attach timeout for a TUI that is still on that screen, and no longer logs a second warning saying the screen was cleared. The create goes on as soon as the keypress fails, with the one warning that says the hooks may stay untrusted.

@@ -1,0 +1,11 @@
+Shared-workspace cleanup (issue #1952): a way to see the shares an account holds and retire the leaked ones, which the sharing default of the create form makes worth having.
+
+- A new **Shared workspaces** page (`/workspaces/shared`) lists every share each signed-in account holds that counts toward its shared-workspaces limit, joined to the account's workspace records: the workspace's name and device, when the share was created, when its tunnel was last connected (from the connector's new heartbeat stamp), and whether the workspace still exists. A share whose workspace was destroyed or is unknown is flagged as likely leaked. Each row has a Remove action (an inline confirm) that frees the slot: a workspace this device runs is unpublished (its materials cleared, who may open it kept), any other share is deleted at the connector.
+
+- The account card's plan section gains a "Shared workspaces N of M" usage row and, while the account holds a share, a "Review shared workspaces" link to the page.
+
+- A publish the connector refuses because the share quota is full now answers with a structured `quota_exceeded` code (403) naming the page, and the share panel's error links there; the "Sharing was not enabled" notification card a failed post-create publish leaves also opens the page when the quota was the reason.
+
+- A share removed from another device, or retired by the connector, while the app runs no longer leaves a workspace this device hosts retrying a dead relay token forever: the sync pass that finds the workspace stopped being shared since the previous pass asks the connector to confirm and then clears the workspace's `share.env`. (A retirement that happened while the app was closed is not noticed this way.)
+
+- `GET /api/v1/account-shares/<account_id>` and `DELETE /api/v1/account-shares/<account_id>/<host_id>` back the page (cookie or bearer auth, in a namespace of their own like `workspace-sharing`, which no agent verb maps: the gateway's `minds-accounts-read` permission covers the whole `/api/v1/accounts` subtree, and an account's share inventory is more than that permission lets an agent see). A system-event notification entry may name the route its click opens (`link_path`).

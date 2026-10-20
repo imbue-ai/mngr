@@ -1,0 +1,1 @@
+The direct-subprocess ratchet no longer counts a subscripted type annotation such as `subprocess.Popen[bytes]` as a violation, since an annotation spawns nothing. Calls, references and imports of `subprocess.Popen`, `subprocess.run` and the rest still count, so a project's count can only go down.

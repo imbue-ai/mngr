@@ -1,0 +1,1 @@
+The stable desktop channel moves to minds 0.6.2 (ToDesktop build `260917ohslvgoyj`, rollout 100%), and the stable web channel pins browser creates to `minds-v0.6.2`, which the production pool is baked at on gen-2 boxes in both regions. Every channel now serves 0.6.2.

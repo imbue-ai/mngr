@@ -404,8 +404,8 @@ def test_parse_bootstrap_event_timestamp_reads_nanosecond_utc_stamps_only() -> N
 def test_bootstrap_event_lines_nest_under_the_wait_step_and_keep_the_bootstrap_timings() -> None:
     clock = _FakeClock()
     tracker = _tracker(clock, wait_for_ready=60.0)
-    tracker.announce_plan(_plan(("wait_for_ready", "Almost there")), None)
-    tracker.start_step("wait_for_ready", "Almost there", None, None)
+    tracker.announce_plan(_plan(("wait_for_ready", "Waiting for the workspace to boot")), None)
+    tracker.start_step("wait_for_ready", "Waiting for the workspace to boot", None, None)
 
     apply_bootstrap_event_lines(tracker, _BOOTSTRAP_LINES[:3], "wait_for_ready")
     clock.now += 100

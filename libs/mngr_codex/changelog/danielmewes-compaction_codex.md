@@ -1,0 +1,1 @@
+Implement `HasCompactionMixin` for the Codex CLI agent (`CodexAgent`), enabling context compaction via the Codex app-server's `thread/compact/start` JSON-RPC method, idle duration tracking, cache TTL reporting (30 minutes), and context token inspection from transcript events.

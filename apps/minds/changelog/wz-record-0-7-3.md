@@ -1,0 +1,3 @@
+- Recorded the minds 0.7.3 release in `docs/deploy/history/minds-v0.7.3.md`: the tag pair and the mirror commit the template pins, the cut that spectree 3.0.0 broke and the before/after that proved the fix, both tiers' deploys and bakes with their slice verification, and the alpha promotion.
+
+- Reset `docs/deploy/next_deploy.md` for 0.7.3, and added the check this release earned: the shipped bundle lock is regenerated from scratch at build time, so a committed lockfile does not constrain a build and an unbounded requirement can take a newly published major. It also records that `minds-v0.7.1` and `minds-v0.7.2` are no longer named by any channel, so their unleased rows are retirable.

@@ -1,0 +1,1 @@
+- Promoted minds 0.8.2 to the alpha channels: the desktop channel moves to ToDesktop build `261001kde332ql9` (100%, mac only) and the web channel pins browser creates to `minds-v0.8.2`. Linux stays on 0.7.4, because the 0.8.x `.deb` is still a differently named package (`imbue-studio`) with no `Replaces`/`Conflicts: minds`. Beta and stable stay on 0.7.3, as do their web channels.

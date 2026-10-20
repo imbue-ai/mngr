@@ -11,7 +11,6 @@ from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_export import _export_in_flight
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.backup_reaper import ReapCandidate
-from imbue.minds.desktop_client.backup_reaper import _is_bucket_not_found_error
 from imbue.minds.desktop_client.backup_reaper import bucket_owner_prefix_from_env
 from imbue.minds.desktop_client.backup_reaper import bucket_short_name_from_env
 from imbue.minds.desktop_client.backup_reaper import candidate_bucket_short_name
@@ -59,12 +58,8 @@ class _RecordingReaperCli(FakeImbueCloudCli):
             error.stderr = '{"error": "CloudflareApiError"}'
             raise error
         if name in self.missing_bucket_names:
-            # The shape the real CLI wrapper raises: the plugin's own class name in the
-            # stderr JSON, and the connector's wording (quoted) as the message.
-            error = ImbueCloudCliError(f"bucket destroy: 'Bucket not found: {name}'")
-            error.stderr = (
-                f'{{"error": "\'Bucket not found: {name}\'", "error_class": "ImbueCloudBucketNotFoundError"}}'
-            )
+            error = ImbueCloudCliError("bucket destroy failed")
+            error.stderr = '{"error_class": "R2BucketNotFoundError"}'
             raise error
         self.destroyed_names.append(name)
 
@@ -92,20 +87,6 @@ def _tombstone(
         destroyed_at=destroyed_at,
     )
     record_store.upsert_local_record(user_id, "a@b.com", record)
-
-
-def test_a_missing_bucket_is_recognized_from_the_plugin_cli_error_class() -> None:
-    # What `mngr imbue_cloud bucket destroy` writes to stderr for a bucket the connector no longer
-    # has: its own exception class, not the connector's R2BucketNotFoundError.
-    error = ImbueCloudCliError("bucket destroy: 'Bucket not found: c13b--host-14ab'")
-    error.stderr = (
-        '{\n  "error": "\'Bucket not found: c13b--host-14ab\'",\n  "error_class": "ImbueCloudBucketNotFoundError"\n}'
-    )
-    assert _is_bucket_not_found_error(error) is True
-
-    other = ImbueCloudCliError("bucket destroy failed")
-    other.stderr = '{"error": "upstream timeout", "error_class": "CloudflareApiError"}'
-    assert _is_bucket_not_found_error(other) is False
 
 
 def test_parse_destroyed_at_handles_iso_z_and_garbage() -> None:

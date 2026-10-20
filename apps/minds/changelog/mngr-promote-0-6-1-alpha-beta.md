@@ -1,0 +1,1 @@
+The beta and alpha desktop channels move to minds 0.6.1 (ToDesktop build `260915wjcyd06bp`, rollout 100%), and the beta and alpha web channels pin browser creates to `minds-v0.6.1`, which the production pool is baked at on gen-2 boxes. Stable stays on 0.5.2.

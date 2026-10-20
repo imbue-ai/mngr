@@ -6,7 +6,6 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
-from pydantic import Field
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
@@ -641,30 +640,3 @@ def test_get_state_returns_stop_reason_when_no_shutdown_but_snapshots_exist(
 
     state = host.get_state()
     assert state == HostState.PAUSED
-
-
-class _ReadRecordingLocalVolume(LocalVolume):
-    read_paths: list[str] = Field(default_factory=list)
-
-    def read_file(self, path: str) -> bytes:
-        self.read_paths.append(path)
-        return super().read_file(path)
-
-
-def test_a_zero_byte_tail_read_reports_the_size_without_downloading_the_file(
-    offline_host: OfflineHost, tmp_path: Path
-) -> None:
-    """Sizing a stopped host's event file must not cost a download of the whole file."""
-    events_file = tmp_path / "events" / "services" / "events.jsonl"
-    events_file.parent.mkdir(parents=True)
-    events_file.write_bytes(b'{"event_id": "e1"}\n' * 100)
-    volume = _ReadRecordingLocalVolume(root_path=tmp_path)
-    readable = OfflineHostWithVolume.from_offline_host(offline_host, volume)
-
-    probe = readable.read_file_tail_from_offset(readable.host_dir / "events/services/events.jsonl", 0, 0)
-
-    assert probe.file_size == events_file.stat().st_size
-    assert probe.content == b""
-    assert volume.read_paths == []
-    with pytest.raises(FileNotFoundError):
-        readable.read_file_tail_from_offset(readable.host_dir / "events/services/missing.jsonl", 0, 0)

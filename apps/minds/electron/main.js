@@ -70,6 +70,7 @@ const {
 } = require('./session-persistence');
 const updater = require('./updater');
 const displayZoom = require('./display-zoom');
+const launchVersion = require('./launch-version');
 const { resolveWindowControls, windowControlsSwitch } = require('./window-controls');
 const { removeLegacyNameDirs } = require('./legacy-name-cleanup');
 const { PRODUCT_DISPLAY_NAME } = require('./product-name');
@@ -1119,15 +1120,9 @@ const linkRouter = createLinkRouter({
 // The address is copied either way; the explanation is an in-app toast in
 // the window the click happened in (never a system notification: nothing
 // left the app, and the reader is right there).
-async function notifyOpenFailed(url, wc) {
+function notifyOpenFailed(url, wc) {
   const fallback = linkFallbackFor(url);
-  try {
-    await clipboard.writeText(fallback.clipboardText);
-  } catch (err) {
-    // The toast says the address was copied, so it is not shown when it wasn't.
-    console.warn('[external-link] could not copy the address to the clipboard:', err && err.message);
-    return;
-  }
+  clipboard.writeText(fallback.clipboardText);
   if (!wc || wc.isDestroyed()) return;
   try {
     wc.send('show-toast', { title: fallback.title, body: fallback.body });
@@ -1953,23 +1948,21 @@ async function promptWorkspaceShutdown() {
   console.log('[workspace-shutdown] prompt: running workspaces =', JSON.stringify(running));
   if (running.length === 0) return { proceed: true, stop: false, running: [] };
   const names = running.map((workspace) => workspace.name).join(', ');
-  // No "leave running" choice: the app's latchkey forward (the gateway the
-  // workspaces' agents reach their credentials through) stops with the app,
-  // so a workspace left running would keep using the computer's resources
-  // while its agents can no longer work.
   const { response } = await showQuitPrompt({
-    type: 'warning',
-    buttons: ['Cancel', 'Quit and stop workspaces'],
-    defaultId: 1,
+    type: 'question',
+    buttons: ['Cancel', 'Leave running', 'Shut down all'],
+    defaultId: 2,
     cancelId: 0,
     message: running.length === 1
-      ? 'Quitting will stop the workspace running on this computer'
-      : `Quitting will stop the ${running.length} workspaces running on this computer`,
-    detail: `${names}\n\nStopping them pauses their agents and makes their services inaccessible `
-      + 'until you open Imbue Studio and start them again (your data is preserved).',
+      ? '1 workspace is still running on this computer'
+      : `${running.length} workspaces are still running on this computer`,
+    detail: `${names}\n\nLeaving them running keeps using your computer's resources. `
+      + 'Shutting them down stops their agents and makes their services inaccessible '
+      + '(your data is preserved and you can start them again).',
   });
-  console.log(`[workspace-shutdown] prompt: user chose ${['Cancel', 'Quit and stop workspaces'][response]} (response=${response})`);
+  console.log(`[workspace-shutdown] prompt: user chose ${['Cancel', 'Leave running', 'Shut down all'][response]} (response=${response})`);
   if (response === 0) return { proceed: false, stop: false, running: [] };
+  if (response === 1) return { proceed: true, stop: false, running: [] };
   return { proceed: true, stop: true, running };
 }
 
@@ -2136,7 +2129,14 @@ function registerAppImageDesktopEntry() {
   }
 }
 
+// This launch's version against the previous one's, recorded once at ready
+// (before this session writes any state of its own, which `hasRunBefore` reads).
+let launchVersionChange = { previousVersion: null, isFirstLaunchAfterUpdate: false };
+
 async function onReady() {
+  launchVersionChange = launchVersion.recordLaunchVersion(paths.getStateDir(), app.getVersion(), {
+    hasRunBefore: fs.existsSync(getSessionStatePath()),
+  });
   // Route the links every WebContents the app ever creates opens, by the rule
   // in ./link-routing.
   app.on('web-contents-created', (_event, contents) => {
@@ -2995,6 +2995,8 @@ ipcMain.handle('set-display-zoom', (_event, percent) => {
   return normalized;
 });
 
+ipcMain.handle('get-launch-version-change', () => launchVersionChange);
+
 ipcMain.handle('get-update-state', () => updater.describe());
 
 // Returns what each channel currently serves, for the switch confirmation.
@@ -3553,10 +3555,6 @@ ipcMain.on('open-log-file', () => {
   shell.openPath(logPath);
 });
 
-// Electron opens a dialog given no defaultPath in Downloads rather than where
-// the OS last left it, so the picker carries the last location itself.
-let lastFilePickerDir = null;
-
 ipcMain.handle('show-file-picker', async (event, options) => {
   const bundle = getBundleFromEvent(event);
   const opts = options || {};
@@ -3564,8 +3562,6 @@ ipcMain.handle('show-file-picker', async (event, options) => {
   const dialogOptions = { properties: [property] };
   if (typeof opts.defaultPath === 'string' && opts.defaultPath.length > 0) {
     dialogOptions.defaultPath = opts.defaultPath;
-  } else if (lastFilePickerDir) {
-    dialogOptions.defaultPath = lastFilePickerDir;
   }
   const result = bundle && bundle.window && !bundle.window.isDestroyed()
     ? await dialog.showOpenDialog(bundle.window, dialogOptions)
@@ -3573,7 +3569,6 @@ ipcMain.handle('show-file-picker', async (event, options) => {
   if (result.canceled || !Array.isArray(result.filePaths) || result.filePaths.length === 0) {
     return null;
   }
-  lastFilePickerDir = path.dirname(result.filePaths[0]);
   return result.filePaths[0];
 });
 

@@ -1,0 +1,7 @@
+- An in-place backup restore now brings the workspace's services back the way the workspace's own startup would. It reloads supervisord from the restored files instead of restarting every program it had loaded before, so a service the restored snapshot adds is started, one the snapshot lacks is gone, and a service configured not to start on its own (`autostart=false`, such as the Datalib app before its first use) stays stopped. Such a service is no longer named in the "these services have not come back up" warning.
+
+- If the restored service configuration cannot be read, the restore restarts the services from the configuration in use before the restore and says so in its result, warning that the workspace will not start its services on its next restart until that configuration is fixed. Reloading a configuration supervisord cannot parse would stop supervisord and every service with it.
+
+- The same reload is used when a restore fails after stopping the services, and when the desktop brings the services back after a restore that died without reporting a result.
+
+- This composes with the earlier change that reports only services that were up before the restore: a service is now named in the warning only if it was up when the restore started and is not configured `autostart=false`. A service configured not to start on its own that had been started by hand stays stopped after a restore and is not named.

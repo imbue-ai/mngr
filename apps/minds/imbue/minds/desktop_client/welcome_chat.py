@@ -140,11 +140,9 @@ class WelcomeChatSeeder(MutableModel):
 
     The page hands the conversation over while the workspace is still being built (``hold``),
     and the agent creator's done hook seeds it the moment the attempt finishes (``seed_held``).
-    A page that hands it over again before then (one that asked its onboarding questions and
-    was left with one open, then answered on a later visit) replaces what is held: the latest
-    hand-over is the one seeded. A page still open at that moment asks for the seed itself
-    (``seed``) and waits on the one already running instead of starting a second chat. A seed
-    that failed is not kept, so the next ask runs it again.
+    A page still open at that moment asks for the seed itself (``seed``) and waits on the one
+    already running instead of starting a second chat. A seed that failed is not kept, so the
+    next ask runs it again.
     """
 
     model_config = {"arbitrary_types_allowed": True}
@@ -157,9 +155,9 @@ class WelcomeChatSeeder(MutableModel):
     _seed_by_attempt: dict[CreateAttemptId, Future[WelcomeChatOutcome]] = PrivateAttr(default_factory=dict)
 
     def hold(self, create_attempt_id: CreateAttemptId, welcome_chat: WelcomeChatRequest) -> None:
-        """Keep the attempt's conversation for its seed; the latest one handed over is the one seeded."""
+        """Keep the attempt's conversation for its seed; the first one handed over is the one seeded."""
         with self._lock:
-            self._held_by_attempt[create_attempt_id] = welcome_chat
+            self._held_by_attempt.setdefault(create_attempt_id, welcome_chat)
 
     def is_held(self, create_attempt_id: CreateAttemptId) -> bool:
         with self._lock:

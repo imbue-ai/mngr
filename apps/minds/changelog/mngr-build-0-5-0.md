@@ -1,0 +1,5 @@
+Cut the minds-v0.5.0 release: bumped the app version to 0.5.0 and pinned `FALLBACK_BRANCH` to the `minds-v0.5.0` default-workspace-template tag, shipping everything landed on main since minds-v0.4.4.
+
+This is a minor bump because the workspace itself changed shape. Signing in is now a provider chooser over named provider accounts rather than a single Claude login modal, and a workspace no longer creates a chat at boot -- it opens on its new-tab screen and the first chat is the one you start, on the account you picked. Which harnesses are available follows from which providers you signed in to, rather than from host feature flags. The chat transcript rendering was reworked alongside it.
+
+Outside the workspace: terminal panes no longer steal focus when their websocket reconnects, `mngr list` and the board no longer stall on one slow host (per-host detail reads are now bounded), and accounts with many workspaces no longer time out the out-of-date-machine probe because imbue_cloud discovery runs per-host reads concurrently.

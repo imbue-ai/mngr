@@ -1,0 +1,1 @@
+The slice adoption SSH client (`ParamikoSliceVmAccess`) now enables paramiko transport keepalives on every connection, matching the mngr-wide SSH liveness hardening from the `mngr start` slowness investigation: a silently dead network path surfaces as a transport error instead of hanging an adoption command indefinitely.

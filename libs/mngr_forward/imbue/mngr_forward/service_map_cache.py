@@ -100,7 +100,7 @@ class ServiceMapCache(FrozenModel):
             # Pre-version format: the whole document is the services map.
             # CLEANUP: drop this branch (and its legacy-format tests) once no
             # supported desktop install predates the version-2 cache -- the
-            # cache rewrites on every service change, so any forward that has
+            # cache rewrites on every service event, so any forward that has
             # run this code once holds a versioned file.
             return PersistedServiceMap(
                 services_by_instance=_coerce_instance_map(raw),

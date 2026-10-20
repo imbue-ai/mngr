@@ -82,7 +82,6 @@ from imbue.mngr.providers.mock_provider_test import make_local_volume_provider
 from imbue.mngr.providers.mock_provider_test import make_offline_host_with_volume
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import init_git_repo
-from imbue.mngr.utils.testing import make_command_agent
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import poll_until_file_contains
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
@@ -1599,19 +1598,6 @@ def test_agent_field_generators_waiting_reason_returns_end_of_turn(
     agent_dir.mkdir(parents=True, exist_ok=True)
 
     assert waiting_reason(agent, host) == WaitingReason.END_OF_TURN
-
-
-def test_agent_field_generators_waiting_reason_is_absent_for_an_agent_of_another_type(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """A command agent never writes the active marker, so reading it would say END_OF_TURN; it must say nothing."""
-    result = agent_field_generators()
-    assert result is not None
-    _, generators = result
-
-    agent, host = make_command_agent(local_provider, tmp_path / "command-work")
-
-    assert generators["waiting_reason"](agent, host) is None
 
 
 def test_agent_field_generators_waiting_reason_returns_none_when_active(

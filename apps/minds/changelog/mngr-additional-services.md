@@ -1,0 +1,3 @@
+Agents can now request permission for `claude.ai`, the first of a hardcoded list of *additional* services minds supports beyond latchkey's builtin catalog. It appears and is granted in the permission dialog exactly like a builtin service (Slack, GitHub, ...), exposing a single `everything` permission that grants full access to the `claude.ai` domain.
+
+Because `claude.ai` is a custom, minds-registered service rather than a builtin latchkey one, authenticating it is a manual `latchkey auth set claude-ai -H "..."` (browser sign-in does not apply to registered services); granting the permission and supplying credentials are independent steps. See `docs/latchkey-permissions.md` for details.

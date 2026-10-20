@@ -89,28 +89,22 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
 	&& apt install gh -y
 
 # Install uv (fast Python package manager)
-RUN curl -LsSf https://astral.sh/uv/0.13.4/install.sh | sh && echo 'PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && echo 'PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
 ENV PATH="/root/.local/bin:$PATH"
-
-# The CA bundle is upgraded in a layer of its own because the system-dependency
-# install above can come from a cached layer built before Debian distrusted a
-# compromised root.
-RUN apt-get update && apt-get install -y --only-upgrade ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
 
 # Install claude code (pass CLAUDE_CODE_VERSION as a build arg to pin a specific version).
 # The default must be kept in sync with default-workspace-template's
 # .mngr/settings.toml pin (`[agent_types.claude].version`). The release-test
 # `test_claude_code_version_matches_default_workspace_template_pin` enforces the
 # sync; bump both together when rolling a new claude release.
-ARG CLAUDE_CODE_VERSION="2.1.307"
+ARG CLAUDE_CODE_VERSION="2.1.293"
 RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && ( if [ -n "$CLAUDE_CODE_VERSION" ]; then cat /tmp/install_claude.sh | bash -s "$CLAUDE_CODE_VERSION"; else cat /tmp/install_claude.sh | bash; fi && test -x /root/.local/bin/claude ) || ( cat /tmp/install_claude.sh && exit 1 )
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 # Node.js, pinned to apps/minds/package.json's engines.node. Required by the
 # mngr_latchkey gateway's .mjs extensions (run under node) and by minds Python
 # tests that evaluate apps/minds/todesktop.js via `node -e`.
-ARG NODE_VERSION="24.22.1"
+ARG NODE_VERSION="24.15.0"
 RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
     curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
         "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.gz" \
@@ -159,7 +153,7 @@ ENV UV_LINK_MODE=copy
 # only cargo-installed tool in the image, so the toolchain has no further
 # purpose. If a future tool needs to be cargo-installed, install it in
 # this same RUN before the cleanup line.
-RUN export OFFLOAD_VERSION=0.10.0 \
+RUN export OFFLOAD_VERSION=0.9.14 \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
     && /root/.cargo/bin/cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload \
@@ -176,15 +170,14 @@ WORKDIR /code/mngr/
 #   - Real source tree (offload's exported repo, mngr_schedule's
 #     producer-side-extracted tree, the test_modal_create release
 #     test's unpacked tree, local docker builds).
-#   - .mngr/dev/build/ keyframe directory containing current.tar.gz,
-#     a .checkpoint marker and apps/minds/scripts/git-manifest.json
-#     (typical end-user flow via .mngr/settings.toml's
-#     pre_command_scripts hook + create_templates).
+#   - .mngr/dev/build/ keyframe directory containing only
+#     current.tar.gz + a .checkpoint marker (typical end-user flow via
+#     .mngr/settings.toml's pre_command_scripts hook + create_templates).
 # COPY lands files owned by root:root by default, so no chown is needed.
 COPY . /code/mngr/
 
 # Bootstrap the source tree for the keyframe shape: if the COPY above
-# carried current.tar.gz + a .checkpoint marker (the keyframe
+# only carried current.tar.gz + a .checkpoint marker (the keyframe
 # shape produced by scripts/make_tar_of_repo.sh), extract the tarball
 # inline so the post-COPY RUN below can find the script it's trying
 # to invoke. We delete the tarball + checkpoint afterwards so the

@@ -1,0 +1,216 @@
+// What the machines list says about each workspace's update, and the one
+// click each state offers. The decisions are models/updates.ts's; these prove
+// the rows draw them and that each shortcut lands where it should.
+
+import m from "mithril";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { clearAppContextForTests, registerAppContext } from "../../app-context";
+import type { UiWorkspaceUpdate } from "../../channel/messages";
+import { createEmptyStores } from "../../models/boot";
+import { ShellState } from "../shell/shell-state";
+import type { AnyVnode } from "../../testing";
+import {
+  allText,
+  attrsOf,
+  byId,
+  classTokensOf,
+  collectVnodes,
+  jsonResponse,
+  renderRoot,
+  settle,
+  workspacesMessage,
+} from "../../testing";
+import { LandingPage } from "./LandingPage";
+
+const ALPHA = "agent-aa11";
+const BETA = "agent-cc33";
+
+const OUT_OF_DATE: UiWorkspaceUpdate = {
+  availability: "OUT_OF_DATE",
+  current_version: "minds-v0.3.9",
+  supported_version: "minds-v0.4.1",
+  is_version_from_label: false,
+  activity: "IDLE",
+  is_backup_configured: true,
+};
+
+interface Harness {
+  draw: () => m.Children;
+  requests: string[];
+  routeSet: ReturnType<typeof vi.fn>;
+}
+
+function harness(
+  updates: Record<string, UiWorkspaceUpdate>,
+  isAutoUpdateEnabled: boolean,
+): Harness {
+  const shell = new ShellState(createEmptyStores());
+  registerAppContext({ stores: shell.stores, shell });
+  const base = workspacesMessage();
+  const alpha = base.workspaces[0];
+  shell.stores.workspaces.applyWorkspacesMessage({
+    ...base,
+    workspaces: [
+      alpha,
+      { ...alpha, id: BETA, name: "beta", host_id: "host-dd44" },
+    ],
+  });
+  shell.stores.updates.applyUpdatesMessage({
+    type: "workspace_updates",
+    updates,
+    update_window: "2:00 AM-5:00 AM",
+    is_auto_update_enabled: isAutoUpdateEnabled,
+  });
+  const requests: string[] = [];
+  vi.stubGlobal("fetch", (url: string) => {
+    requests.push(url);
+    return Promise.resolve(jsonResponse({}));
+  });
+  const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+  vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+  // A closure component, called bare as a router mount would with no attrs.
+  const page = LandingPage as unknown as () => m.Component;
+  return { draw: () => renderRoot(page, {}), requests, routeSet };
+}
+
+function updateBadges(root: m.Children): AnyVnode[] {
+  return collectVnodes(root).filter((vnode) =>
+    classTokensOf(vnode).includes("landing-update-badge"),
+  );
+}
+
+function pressable(root: m.Children, extraClass: string): AnyVnode | undefined {
+  return collectVnodes(root).find((vnode) =>
+    String(attrsOf(vnode).extra ?? "").includes(extraClass),
+  );
+}
+
+function press(vnode: AnyVnode | undefined): void {
+  if (vnode === undefined) throw new Error("nothing to press");
+  (attrsOf(vnode).onclick as (event: MouseEvent) => void)({
+    stopPropagation: () => undefined,
+  } as MouseEvent);
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  clearAppContextForTests();
+});
+
+describe("the machines list under auto-update", () => {
+  it("says nothing on behind rows auto-update will arm, and offers no Update all", () => {
+    const { draw } = harness(
+      { [ALPHA]: OUT_OF_DATE, [BETA]: OUT_OF_DATE },
+      true,
+    );
+    const root = draw();
+
+    expect(updateBadges(root)).toEqual([]);
+    expect(byId(root, "landing-bulk-updates")).toBeUndefined();
+  });
+
+  it("offers Update all for the same rows without auto-update", () => {
+    const { draw } = harness(
+      { [ALPHA]: OUT_OF_DATE, [BETA]: OUT_OF_DATE },
+      false,
+    );
+    const root = draw();
+
+    expect(
+      updateBadges(root).map((badge) => attrsOf(badge)["data-update-state"]),
+    ).toEqual(["out-of-date", "out-of-date"]);
+    expect(byId(root, "landing-bulk-updates")).toBeDefined();
+  });
+
+  it("shows an armed row as scheduled, and a skipped one as behind again", () => {
+    const { draw } = harness(
+      {
+        [ALPHA]: { ...OUT_OF_DATE, is_scheduled: true },
+        [BETA]: { ...OUT_OF_DATE, is_update_skipped: true },
+      },
+      true,
+    );
+
+    expect(
+      updateBadges(draw()).map((badge) => allText(badge.children)),
+    ).toEqual(["Update scheduled", "Update available"]);
+  });
+});
+
+describe("a row that needs a sign-in", () => {
+  it("says so and signs in from the row, entering the workspace before asking it", async () => {
+    const { draw, requests, routeSet } = harness(
+      { [ALPHA]: { ...OUT_OF_DATE, needs_sign_in: true } },
+      true,
+    );
+    const root = draw();
+
+    expect(allText(updateBadges(root))).toContain(
+      "Needs sign-in to auto-update",
+    );
+    press(pressable(root, "landing-update-sign-in"));
+    await settle();
+
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${ALPHA}`, {});
+    expect(requests).toEqual([`/ui/api/updates/${ALPHA}/sign-in`]);
+  });
+});
+
+describe("a row's way into its run's chat", () => {
+  it("sits beside a failed run's badge, for a run the user never saw a window for", () => {
+    const { draw, routeSet } = harness(
+      {
+        [ALPHA]: {
+          ...OUT_OF_DATE,
+          verdict: "STUCK",
+          chat_agent_id: "agent-lead-9",
+          started_by: "SCHEDULED",
+        },
+      },
+      true,
+    );
+
+    press(pressable(draw(), "landing-update-open-chat"));
+
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${ALPHA}`, {
+      chat: "agent-lead-9",
+    });
+  });
+
+  it("sits beside the Updated to X note", () => {
+    const { draw, routeSet } = harness(
+      {
+        [ALPHA]: {
+          ...OUT_OF_DATE,
+          availability: "UP_TO_DATE",
+          verdict: "UPDATED",
+          success_note_version: "minds-v0.4.1",
+          chat_agent_id: "agent-lead-10",
+        },
+      },
+      true,
+    );
+    const root = draw();
+
+    expect(allText(root)).toContain("Updated to v0.4.1.");
+    press(pressable(root, "landing-update-open-chat"));
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${ALPHA}`, {
+      chat: "agent-lead-10",
+    });
+  });
+
+  it("is not offered for an update that never went out", () => {
+    const { draw } = harness(
+      {
+        [ALPHA]: {
+          ...OUT_OF_DATE,
+          dispatch_failure: "Couldn't reach this workspace.",
+          chat_agent_id: "agent-old",
+        },
+      },
+      false,
+    );
+    expect(pressable(draw(), "landing-update-open-chat")).toBeUndefined();
+  });
+});

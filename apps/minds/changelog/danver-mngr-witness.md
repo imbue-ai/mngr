@@ -1,0 +1,1 @@
+The minds behavior corpus is witnessed by `mngr witness` instead of `mngr tmr-behaviors`: the project's prompt variant moves from `tmr/behaviors_mapper.j2` to `witness/mapper.j2`, where the new command discovers it, the `tmr-behaviors-minds` just recipe becomes `witness-minds`, and every corpus README's incipit now names the `behaviors` skill.

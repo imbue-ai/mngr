@@ -1,0 +1,1 @@
+Regenerated the `mngr imbue_cloud` command reference (`docs/commands/secondary/imbue_cloud.md`) for the new `mngr imbue_cloud sync documents` subgroup (`pull`, `push`, `delete`) added by the imbue_cloud plugin.

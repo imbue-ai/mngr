@@ -1,0 +1,1 @@
+The antigravity release tests now run on a Mac where agy keeps its login in the keychain. They used to fail during setup looking for an `antigravity-oauth-token` file that agy only writes when there is no OS keyring.

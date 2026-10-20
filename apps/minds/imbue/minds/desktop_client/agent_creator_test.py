@@ -69,7 +69,6 @@ from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
 from imbue.minds.desktop_client.create_progress import OperationProgressTracker
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
-from imbue.minds.desktop_client.imbue_cloud_cli import QUOTA_EXCEEDED_ERROR_CLASS
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -81,7 +80,6 @@ from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_GIT_TOKEN_REMO
 from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_GIT_TOKEN_VAULT_KEY
 from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_MNGR_REPO_URL
 from imbue.minds.desktop_client.template_mngr_pin import PUBLIC_MNGR_REPO_URL
-from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
 from imbue.minds.desktop_client.testing import install_stub_on_path
 from imbue.minds.desktop_client.testing import mngr_create_stub_body
@@ -107,7 +105,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProgressStepId
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
-from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.progress import ProgressEvent
 from imbue.mngr.utils.progress import ProgressEventKind
@@ -115,9 +112,6 @@ from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
-from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.store import permissions_path_for_host
-from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
 # A SuperTokens user id (UUID v4) and a connection instance name, as the create path carries them.
 _USER_ID = "3f2a9c1e-5b7d-4a8e-9c0f-1d2e3f4a5b6c"
@@ -1331,7 +1325,6 @@ def _make_test_creator(
     mngr_binary: str | None = None,
     on_create_attempts_changed: Callable[[], None] | None = None,
     on_create_attempt_done: Callable[[CreateAttemptId, AgentId], None] | None = None,
-    latchkey: Latchkey | None = None,
 ) -> AgentCreator:
     paths = InstallationPaths(data_dir=tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
@@ -1352,7 +1345,6 @@ def _make_test_creator(
         on_create_attempts_changed=on_create_attempts_changed,
         on_create_attempt_done=on_create_attempt_done,
         mngr_binary=mngr_binary if mngr_binary is not None else MNGR_BINARY,
-        latchkey=latchkey,
     )
 
 
@@ -1623,15 +1615,8 @@ def test_wait_for_workspace_ready_follows_the_bootstrap_events_by_the_agents_ids
     fake_mngr.chmod(0o755)
     tracker = OperationProgressTracker(expected_seconds_by_step_id={}, default_expected_seconds=10.0)
     aid = AgentId.generate()
-
-    def _hold_until_the_follow_recorded_its_call() -> None:
-        # The follow starts before the first probe; holding that probe keeps the
-        # ready answer from stopping the follow before it ran.
-        poll_until(lambda: calls_path.read_text() != "", poll_interval=0.01)
-
-    with scripted_workspace_probe_server(
-        not_ready_count=0, on_first_request=_hold_until_the_follow_recorded_its_call
-    ) as port:
+    # A few not-ready probes keep the wait open long enough for the follow to have started.
+    with scripted_workspace_probe_server(not_ready_count=10) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -2447,57 +2432,6 @@ def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monke
         creator.wait_for_all()
 
 
-@pytest.mark.timeout(30)
-def test_create_attempts_change_after_canonical_ids_follows_the_host_permissions_link(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Every notification that publishes the canonical agent id comes after the host permissions file landed.
-
-    Latchkey auto-register defers an agent whose host permissions file is not
-    there yet and retries only on a resolver change; an unchanged agents view
-    is not one. This notification (wired to the resolver's ``notify_change``)
-    is the first change after the link, so firing it before the link would
-    leave a new workspace's own agent unregistered until the next discovery
-    poll.
-    """
-    aid = AgentId.generate()
-    hid = HostId.generate()
-    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, mngr_create_stub_body(aid, hid))
-    latchkey = make_full_fake_latchkey(tmp_path / "latchkey")
-    host_permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, hid)
-    create_attempt_ids: list[CreateAttemptId] = []
-    is_host_file_present_by_canonical_notification: list[bool] = []
-
-    def _on_changed() -> None:
-        if not create_attempt_ids:
-            return
-        info = creator.get_create_attempt_info(create_attempt_ids[0])
-        if info is not None and info.agent_id == aid:
-            is_host_file_present_by_canonical_notification.append(host_permissions_path.is_file())
-
-    with scripted_workspace_probe_server(not_ready_count=0) as port:
-        creator = _make_test_creator(
-            tmp_path,
-            mngr_forward_port=port,
-            preauth_cookie="any-preauth",
-            timeout_seconds=5.0,
-            poll_interval_seconds=0.02,
-            probe_timeout_seconds=0.5,
-            on_create_attempts_changed=_on_changed,
-            latchkey=latchkey,
-        )
-        create_attempt_ids.append(
-            creator.start_create_attempt(str(_make_fake_repo(tmp_path)), host_name="link-order-name-71003")
-        )
-        _wait_until_finished(creator, create_attempt_ids[0])
-        info = creator.get_create_attempt_info(create_attempt_ids[0])
-        assert info is not None and info.status is AgentCreateAttemptStatus.DONE
-        creator.wait_for_all()
-
-    assert is_host_file_present_by_canonical_notification
-    assert all(is_host_file_present_by_canonical_notification), is_host_file_present_by_canonical_notification
-
-
 def test_a_finished_create_attempt_runs_the_done_hook_with_its_workspace(tmp_path: Path, monkeypatch) -> None:
     """The welcome chat is seeded from this hook, so it must fire for every attempt that reaches DONE."""
     aid = AgentId.generate()
@@ -2520,47 +2454,6 @@ def test_a_finished_create_attempt_runs_the_done_hook_with_its_workspace(tmp_pat
     assert finished == [(create_attempt_id, aid)]
     info = creator.get_create_attempt_info(create_attempt_id)
     assert info is not None and info.status is AgentCreateAttemptStatus.DONE
-
-
-@pytest.mark.timeout(30)
-def test_a_quota_refused_create_fails_the_attempt_without_an_error_log(tmp_path: Path, monkeypatch) -> None:
-    """A waitlisted account's refusal is a correct outcome shown on the creating page, not a fault to report.
-
-    ERROR records become error-tracker events, so logging this one there filed an
-    event for every waitlisted person who tried to create a workspace.
-    """
-    refusal = json.dumps(
-        {"event": "error", "error_class": QUOTA_EXCEEDED_ERROR_CLASS, "message": "This account is on the waitlist."}
-    )
-    install_stub_mngr_on_path(
-        tmp_path / "fake-bin", monkeypatch, f'if [ "$1" = "create" ]; then echo \'{refusal}\'; exit 1; fi\nexit 0'
-    )
-    creator = _make_test_creator(tmp_path)
-
-    with capture_error_logs() as error_records:
-        create_attempt_id = creator.start_create_attempt(str(_make_fake_repo(tmp_path)), host_name="waitlist-71003")
-        _wait_until_finished(creator, create_attempt_id)
-        creator.wait_for_all()
-
-    info = creator.get_create_attempt_info(create_attempt_id)
-    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
-    assert info.error == "This account is on the waitlist."
-    assert error_records == []
-
-
-@pytest.mark.timeout(30)
-def test_a_create_failing_for_any_other_reason_still_logs_an_error(tmp_path: Path, monkeypatch) -> None:
-    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, 'if [ "$1" = "create" ]; then exit 1; fi\nexit 0')
-    creator = _make_test_creator(tmp_path)
-
-    with capture_error_logs() as error_records:
-        create_attempt_id = creator.start_create_attempt(str(_make_fake_repo(tmp_path)), host_name="failing-71004")
-        _wait_until_finished(creator, create_attempt_id)
-        creator.wait_for_all()
-
-    info = creator.get_create_attempt_info(create_attempt_id)
-    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
-    assert any("Failed to create agent for create attempt" in record for record in error_records)
 
 
 def test_scratch_clone_roots_are_unique_per_create_attempt() -> None:

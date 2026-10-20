@@ -1,0 +1,1 @@
+The README notes that the workspace's chat is a registered app at its own `chat` origin, like the terminal, since phase 10 of the workspace app model in default-workspace-template runs it as its own program; the forwarder itself is unchanged.

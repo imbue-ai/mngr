@@ -14,14 +14,11 @@
 
 import m from "mithril";
 import type {
-  NotificationDestination,
   UiNotificationEntry,
   UiNotificationsMessage,
 } from "../channel/messages";
 import { electronBridge } from "../electron-bridge";
 import type { NotificationsStore } from "./notifications";
-import type { WorkspaceMessage } from "./workspaceMessage";
-import { workspaceMessageFromDestination } from "./workspaceMessage";
 
 export type NotificationStyle = "cards" | "os" | "both";
 
@@ -89,22 +86,8 @@ export interface NotificationGestureContext {
    * displayed workspace so it stays mounted behind the popup). */
   openInPlace(requestId: string): void;
   currentRoutePath(): string;
-  /** Post a message into the workspace's frame (held until its page is
-   * listening): show one of its chats, or an app's page. */
-  sendWorkspaceMessage(
-    workspaceAgentId: string,
-    message: WorkspaceMessage,
-  ): void;
-}
-
-/** The SPA route an agent message's click hands a desktop window: the chat
- * deep link, or the bare workspace when the message carries a destination
- * (the entry action delivers it once the workspace is up; a `?chat=` would
- * focus the chat on top of it) or comes from a sender that is not a chat. */
-function agentMessageRoute(base: string, entry: UiNotificationEntry): string {
-  const chatAgentId = entry.chat_agent_id ?? "";
-  if (chatAgentId === "" || entry.destination) return base;
-  return `${base}?chat=${encodeURIComponent(chatAgentId)}`;
+  /** Ask the displayed workspace's frame to show one of its chats. */
+  focusChat(workspaceAgentId: string, chatAgentId: string): void;
 }
 
 /** Where a notification's click lands, for every kind. Constructed with the
@@ -181,32 +164,6 @@ export class NotificationGestures {
     m.route.set(`/workspace/${agentScoped}`, { review: requestId });
   }
 
-  /** The agent-message gesture: with a destination, land in the message's
-   * workspace and post the destination's app message into it (the shell
-   * holds it until the workspace's page is listening); otherwise the chat
-   * gesture, or -- for a sender that is not a chat (the workspace's primary
-   * agent), which has no chat to show -- the workspace alone. */
-  openAgentMessage(
-    workspaceAgentId: string,
-    chatAgentId: string,
-    destination: NotificationDestination | null | undefined,
-  ): void {
-    if (workspaceAgentId === "") return;
-    const message =
-      destination === null || destination === undefined
-        ? null
-        : workspaceMessageFromDestination(destination);
-    if (message !== null) {
-      this.openWorkspaceMessage(workspaceAgentId, message);
-      return;
-    }
-    if (chatAgentId === "") {
-      this.openWorkspace(workspaceAgentId);
-      return;
-    }
-    this.openChat(workspaceAgentId, chatAgentId);
-  }
-
   /** The chat gesture: land in the message's workspace and ask it to show the
    * chat. Already looking at that workspace, the ask goes straight to its
    * frame; from anywhere else the ``?chat=`` param rides the navigation and
@@ -217,41 +174,13 @@ export class NotificationGestures {
     if (context !== null) {
       const agentScoped = context.toAgentScopedId(workspaceAgentId);
       if (context.displayedWorkspaceAgentId() === agentScoped) {
-        context.sendWorkspaceMessage(agentScoped, {
-          kind: "focus-chat",
-          chatAgentId,
-        });
+        context.focusChat(agentScoped, chatAgentId);
         return;
       }
       m.route.set(`/workspace/${agentScoped}`, { chat: chatAgentId });
       return;
     }
     m.route.set(`/workspace/${workspaceAgentId}`, { chat: chatAgentId });
-  }
-
-  /** Land in the workspace (unless already there) and post `message` into
-   * it. No param rides the navigation: the shell keeps the message until the
-   * workspace's page announces itself. Unwired, the navigation alone. */
-  private openWorkspaceMessage(
-    workspaceAgentId: string,
-    message: WorkspaceMessage,
-  ): void {
-    const context = this.context;
-    if (context === null) {
-      m.route.set(`/workspace/${workspaceAgentId}`);
-      return;
-    }
-    const agentScoped = context.toAgentScopedId(workspaceAgentId);
-    if (context.displayedWorkspaceAgentId() !== agentScoped)
-      m.route.set(`/workspace/${agentScoped}`);
-    context.sendWorkspaceMessage(agentScoped, message);
-  }
-
-  /** Raise the workspace, and nothing in it; already there, nothing moves. */
-  private openWorkspace(workspaceAgentId: string): void {
-    const agentScoped = this.agentScopedIdOf(workspaceAgentId);
-    if (this.context?.displayedWorkspaceAgentId() === agentScoped) return;
-    m.route.set(`/workspace/${agentScoped}`);
   }
 
   /** The system-event gesture: the route the event names, else the workspace's
@@ -536,7 +465,7 @@ export class NotificationsUiController {
         entry.kind === "permission_request"
           ? `${base}?review=${encodeURIComponent(entry.request_id)}`
           : entry.kind === "agent_message"
-            ? agentMessageRoute(base, entry)
+            ? `${base}?chat=${encodeURIComponent(entry.chat_agent_id ?? "")}`
             : `${base}/backups`;
       const routed = electronBridge.openNotificationInExistingWindow(
         route,
@@ -571,10 +500,9 @@ export class NotificationsUiController {
         this.gestures.openReview(entry.workspace_agent_id, entry.request_id);
         return;
       case "agent_message":
-        this.gestures.openAgentMessage(
+        this.gestures.openChat(
           entry.workspace_agent_id,
           entry.chat_agent_id ?? "",
-          entry.destination,
         );
         return;
       case "system_event":

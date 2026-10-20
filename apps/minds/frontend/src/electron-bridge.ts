@@ -144,6 +144,9 @@ interface MindsNativeSurface {
   // setting shipped lacks them, and the browser build scales with the browser.
   getDisplayZoom?(): Promise<number>;
   setDisplayZoom?(percent: number): Promise<number>;
+  // Which app version the previous launch ran. Optional: a preload from before
+  // it lacks it, and the browser build has no app version of its own.
+  getLaunchVersionChange?(): Promise<LaunchVersionChange>;
   // Release channels. Optional: a preload from before channels shipped lacks
   // them, and the browser build has no binary to update at all.
   getUpdateState?(): Promise<UpdateState>;
@@ -184,6 +187,16 @@ interface MindsNativeSurface {
   reportWorkspaceLinkHandling?(report: WorkspaceLinkHandlingReport | null): void;
   onOpenLink?(callback: (url: string) => void): void;
   openExternalLink?(url: string): void;
+}
+
+/** This launch's app version against the previous launch's, as main recorded
+ * it at startup (electron/launch-version.js). */
+export interface LaunchVersionChange {
+  /** The version the previous launch ran; null on an install's first launch,
+   * and on the first launch of a build that started recording it. */
+  previousVersion: string | null;
+  /** This is the first launch into a new app version. */
+  isFirstLaunchAfterUpdate: boolean;
 }
 
 /** Why the main process could not install the staged update, or null when it is quitting into it. */
@@ -374,6 +387,12 @@ export const electronBridge = {
    * null where the shell cannot scale windows. */
   async setDisplayZoom(percent: number): Promise<number | null> {
     return (await native()?.setDisplayZoom?.(percent)) ?? null;
+  },
+
+  /** Whether this is the first launch into a new app version. False in the
+   * browser, which has no app version of its own to have updated. */
+  async isFirstLaunchAfterAppUpdate(): Promise<boolean> {
+    return (await native()?.getLaunchVersionChange?.())?.isFirstLaunchAfterUpdate ?? false;
   },
 
   /** Null in the browser, and on a desktop build older than release channels. */

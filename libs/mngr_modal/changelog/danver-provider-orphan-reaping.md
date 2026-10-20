@@ -1,0 +1,3 @@
+mngr_modal: correct docstrings in `conftest.py` that described the Modal test-resource cleanup script as the "CI hourly cleanup". There is no cron trigger; the `cleanup_old_modal_test_environments.py` CI job runs on every push to main and every pull request. The docstrings now say so. No behavior change.
+
+Mark `test_host_volume_is_symlinked_and_persists_data` flaky (it failed in CI on a transient Modal `VolumeListFiles` rate limit) and harden the host-volume visibility probes in `test_modal_instance.py`: they now treat `ModalMngrError` as "not yet visible" instead of propagating, since `wait_for` lets probe exceptions abort the poll immediately rather than retrying until the timeout.

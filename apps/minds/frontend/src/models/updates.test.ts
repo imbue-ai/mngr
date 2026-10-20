@@ -4,9 +4,14 @@ import {
   UpdatesStore,
   devOverridePrefill,
   displayVersion,
+  isFailureVerdict,
   isRunInFlight,
   isUpdateDispatchable,
   isUpdateOffered,
+  labelVersionNote,
+  rowUpdateShortcutFor,
+  scheduleSkipLine,
+  scheduledLine,
   standingUpdateNotice,
   updateActivityNotice,
   updateBadgeFor,
@@ -33,6 +38,7 @@ const OUT_OF_DATE = {
   availability: "OUT_OF_DATE" as const,
   current_version: "minds-v0.3.9",
   supported_version: "minds-v0.4.1",
+  is_version_from_label: false,
   activity: "IDLE" as const,
 };
 
@@ -141,13 +147,11 @@ describe("UpdatesStore", () => {
         "agent-unknown": { ...OUT_OF_DATE, availability: "UNKNOWN" },
         "agent-current": { ...OUT_OF_DATE, availability: "UP_TO_DATE" },
         "agent-patch": { ...OUT_OF_DATE, availability: "PATCH_AVAILABLE" },
-        "agent-security": { ...OUT_OF_DATE, availability: "SECURITY_UPDATE" },
-        "agent-security-running": { ...OUT_OF_DATE, availability: "SECURITY_UPDATE", activity: "RUNNING" },
         "agent-running": { ...OUT_OF_DATE, activity: "RUNNING" },
       }),
     );
 
-    expect(store.updatableAgentIds()).toEqual(["agent-stale", "agent-security"]);
+    expect(store.updatableAgentIds()).toEqual(["agent-stale"]);
   });
 
   it("reports a machine mid-apply so the health surfaces can defer to it", () => {
@@ -197,8 +201,7 @@ describe("update state predicates", () => {
 
   it("claims a machine has an update available only when it has read that it does", () => {
     expect(isUpdateOffered(OUT_OF_DATE)).toBe(true);
-    expect(isUpdateOffered({ ...OUT_OF_DATE, availability: "SECURITY_UPDATE" })).toBe(true);
-    for (const availability of ["UP_TO_DATE", "UNKNOWN", "APP_BEHIND", "PATCH_AVAILABLE", "NEEDS_RECREATION"] as const) {
+    for (const availability of ["UP_TO_DATE", "UNKNOWN", "APP_BEHIND"] as const) {
       expect(isUpdateOffered({ ...OUT_OF_DATE, availability })).toBe(false);
     }
   });
@@ -207,13 +210,6 @@ describe("update state predicates", () => {
     expect(standingUpdateNotice(OUT_OF_DATE, false)).toBe("out-of-date");
     expect(standingUpdateNotice(OUT_OF_DATE, true)).toBe("none");
     expect(standingUpdateNotice({ ...OUT_OF_DATE, availability: "UNKNOWN" }, false)).toBe("none");
-  });
-
-  it("says a machine below the security floor has a security update, until its run is in flight", () => {
-    const security = { ...OUT_OF_DATE, current_version: "minds-v0.9.0-rc.1", supported_version: "minds-v0.9.0", availability: "SECURITY_UPDATE" as const };
-    expect(standingUpdateNotice(security, false)).toBe("security-update");
-    expect(standingUpdateNotice(security, true)).toBe("none");
-    expect(isUpdateDispatchable(security)).toBe(true);
   });
 
   it("keeps saying a machine needs recreating: no run can silence a standing fact about it", () => {
@@ -329,14 +325,6 @@ describe("updateBadgeFor", () => {
     expect(badge).toMatchObject({ state: "needs-recreation", tone: "warn", label: "Recreate to update" });
   });
 
-  it("badges a security update more strongly than an ordinary offer, and an armed one as scheduled", () => {
-    const security = { ...OUT_OF_DATE, availability: "SECURITY_UPDATE" as const };
-    expect(updateBadgeFor(security, false)).toMatchObject({ state: "security-update", tone: "error" });
-    expect(updateBadgeFor(OUT_OF_DATE, false)?.tone).toBe("warn");
-    expect(updateBadgeFor({ ...security, is_scheduled: true }, false)?.state).toBe("scheduled");
-    expect(updateBadgeFor({ ...security, activity: "RUNNING" }, true)?.state).toBe("updating");
-  });
-
   it("distinguishes an armed schedule from a standing offer", () => {
     expect(updateBadgeFor(OUT_OF_DATE, false)?.state).toBe("out-of-date");
     expect(updateBadgeFor({ ...OUT_OF_DATE, is_scheduled: true }, false)?.state).toBe("scheduled");
@@ -426,6 +414,20 @@ describe("updateActivityNotice", () => {
   });
 });
 
+describe("labelVersionNote", () => {
+  // A running machine that has never updated itself also falls back to the
+  // label, and there the label is exactly its version.
+  it("offers to start only a machine that is actually stopped", () => {
+    expect(labelVersionNote("STOPPED")).toContain("start it");
+  });
+
+  it("says nothing over a running machine, whose label is the answer", () => {
+    for (const liveness of ["RUNNING", "STARTING", "STOPPING", "UNKNOWN", "", undefined]) {
+      expect(labelVersionNote(liveness)).toBeNull();
+    }
+  });
+});
+
 describe("updateBadgeFor before the backend has read a machine", () => {
   // The map is empty for the first seconds after launch; badging "Version
   // unknown" there states a verdict nobody reached.
@@ -473,5 +475,150 @@ describe("displayVersion", () => {
     expect(displayVersion("upstream/gabriel/some-branch")).toBe("upstream/gabriel/some-branch");
     expect(displayVersion("minds-feature")).toBe("minds-feature");
     expect(displayVersion("")).toBe("");
+  });
+});
+
+describe("auto-update's quiet surfaces", () => {
+  it("says nothing about a behind machine auto-update will arm itself, on the row or the band", () => {
+    // Behind and not armed yet: the next sweep arms it, and saying "Update
+    // available" meanwhile would offer the user a job the app has taken on.
+    expect(updateBadgeFor(OUT_OF_DATE, false, true)).toBeNull();
+    expect(standingUpdateNotice(OUT_OF_DATE, false, true)).toBe("none");
+    // The same machine without auto-update is an offer, as before.
+    expect(updateBadgeFor(OUT_OF_DATE, false, false)?.state).toBe("out-of-date");
+    expect(standingUpdateNotice(OUT_OF_DATE, false, false)).toBe("out-of-date");
+  });
+
+  it("shows an armed machine as scheduled, asking nothing of the reader", () => {
+    const badge = updateBadgeFor({ ...OUT_OF_DATE, is_scheduled: true }, false, true);
+    expect(badge).toMatchObject({ state: "scheduled", tone: "neutral", label: "Update scheduled" });
+  });
+
+  it("puts a skipped machine's out-of-date state back, since auto-update will leave it alone", () => {
+    const skipped = { ...OUT_OF_DATE, is_update_skipped: true };
+    expect(updateBadgeFor(skipped, false, true)?.state).toBe("out-of-date");
+    expect(standingUpdateNotice(skipped, false, true)).toBe("out-of-date");
+  });
+
+  it("says a machine that cannot be armed needs a sign-in, with the way to give it one", () => {
+    const refused = { ...OUT_OF_DATE, needs_sign_in: true };
+    const badge = updateBadgeFor(refused, false, true);
+    expect(badge).toMatchObject({ state: "needs-sign-in", label: "Needs sign-in to auto-update" });
+    expect(rowUpdateShortcutFor(refused, badge)).toBe("sign-in");
+    expect(standingUpdateNotice(refused, false, true)).toBe("needs-sign-in");
+    // A run in flight is the newer news.
+    expect(standingUpdateNotice(refused, true, true)).toBe("none");
+  });
+
+  it("keeps the standing facts auto-update cannot fix: recreation and a landed update's note", () => {
+    const tooOld = { ...OUT_OF_DATE, availability: "NEEDS_RECREATION" as const };
+    expect(updateBadgeFor(tooOld, false, true)?.state).toBe("needs-recreation");
+    expect(standingUpdateNotice(tooOld, false, true)).toBe("needs-recreation");
+    const withNote = { ...OUT_OF_DATE, availability: "UP_TO_DATE" as const, verdict: "UPDATED_WITH_REBUILD_ITEMS" as const };
+    expect(updateBadgeFor(withNote, false, true)?.state).toBe("needs-attention");
+  });
+
+  it("keeps a failed run visible under auto-update", () => {
+    const failed = { ...OUT_OF_DATE, verdict: "STUCK" as const, chat_agent_id: "agent-chat" };
+    expect(updateBadgeFor(failed, false, true)?.state).toBe("failed");
+  });
+});
+
+describe("a run that ended needing the user's decision", () => {
+  const PENDING = {
+    ...OUT_OF_DATE,
+    verdict: "NEEDS_DECISION" as const,
+    is_decision_pending: true,
+    chat_agent_id: "agent-lead",
+  };
+
+  it("is its own state, not a failure", () => {
+    expect(isFailureVerdict("NEEDS_DECISION")).toBe(false);
+    expect(updateRunOutcome(PENDING)).toBe("decision-pending");
+    expect(updateBadgeFor(PENDING, false)).toMatchObject({ state: "decision-pending", tone: "warn" });
+  });
+
+  it("outranks the machine still reading behind, and puts its chat one click from the row", () => {
+    const badge = updateBadgeFor(PENDING, false, true);
+    expect(badge?.state).toBe("decision-pending");
+    expect(rowUpdateShortcutFor(PENDING, badge)).toBe("open-chat");
+  });
+});
+
+describe("rowUpdateShortcutFor", () => {
+  it("opens a failed run's chat, whoever started it", () => {
+    const failed = { ...OUT_OF_DATE, verdict: "STUCK" as const, chat_agent_id: "agent-lead", started_by: "SCHEDULED" as const };
+    expect(rowUpdateShortcutFor(failed, updateBadgeFor(failed, false))).toBe("open-chat");
+  });
+
+  it("offers no chat for an update that never went out, or a run whose chat is unknown", () => {
+    const notStarted = { ...OUT_OF_DATE, dispatch_failure: "Couldn't reach this workspace.", chat_agent_id: "agent-old" };
+    expect(rowUpdateShortcutFor(notStarted, updateBadgeFor(notStarted, false))).toBeNull();
+    const unknownChat = { ...OUT_OF_DATE, verdict: "STUCK" as const };
+    expect(rowUpdateShortcutFor(unknownChat, updateBadgeFor(unknownChat, false))).toBeNull();
+  });
+});
+
+describe("the schedule's lines", () => {
+  const ARMED = {
+    ...OUT_OF_DATE,
+    is_scheduled: true,
+    schedule_window: "1:00 AM-4:00 AM",
+    schedule_zone: "America/Los_Angeles",
+  };
+
+  it("names the window written into the workspace, and its zone only when it is not the reader's", () => {
+    expect(scheduledLine(ARMED, "2:00 AM-5:00 AM", false, "America/Los_Angeles")).toBe(
+      "Scheduled to update in the next update window (1:00 AM-4:00 AM).",
+    );
+    expect(scheduledLine(ARMED, "2:00 AM-5:00 AM", false, "Europe/London")).toContain(
+      "(1:00 AM-4:00 AM, America/Los_Angeles time)",
+    );
+    // A schedule read before the window field existed falls back to the app's.
+    expect(scheduledLine({ ...ARMED, schedule_window: "", schedule_zone: "" }, "2:00 AM-5:00 AM")).toContain(
+      "(2:00 AM-5:00 AM)",
+    );
+  });
+
+  it("names a version the user typed, and says under auto-update that nothing is asked", () => {
+    const line = scheduledLine({ ...ARMED, override_ref: "minds-v0.9.1" }, "", true, "America/Los_Angeles");
+    expect(line).toContain("to v0.9.1");
+    expect(line).toContain("No action is needed.");
+  });
+
+  it("adds the skip line only after a window passed without a start", () => {
+    expect(scheduleSkipLine(ARMED)).toBe("");
+    const skipped = scheduleSkipLine({
+      ...ARMED,
+      last_skip_reason: "No AI account was signed in to this workspace during the last update window.",
+    });
+    expect(skipped.startsWith("No AI account was signed in")).toBe(true);
+    expect(skipped).toContain("try again in the next window");
+  });
+});
+
+describe("UpdatesStore's auto-update and sign-in", () => {
+  it("reads whether auto-update is on from every frame", () => {
+    const store = new UpdatesStore();
+    store.applyUpdatesMessage({ ...message({}), is_auto_update_enabled: true });
+    expect(store.isAutoUpdateEnabled).toBe(true);
+    store.applyUpdatesMessage(message({}));
+    expect(store.isAutoUpdateEnabled).toBe(false);
+  });
+
+  it("keeps a refused sign-in for the next surface to say, until the next ask", async () => {
+    const store = new UpdatesStore();
+    let status = 502;
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(new Response(JSON.stringify({ error: "Couldn't open a chat in this workspace." }), { status })),
+    );
+
+    await store.signIn("agent-a");
+    expect(store.signInFailureFor("agent-a")?.error).toBe("Couldn't open a chat in this workspace.");
+    expect(store.signInFailureFor("agent-b")).toBeNull();
+
+    status = 200;
+    await store.signIn("agent-a");
+    expect(store.signInFailureFor("agent-a")).toBeNull();
   });
 });

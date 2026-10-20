@@ -3559,12 +3559,7 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     lifecycle makes -- so the reason and the state cannot disagree about one agent. The
     block is only consulted while ``active`` is present, since the classifier ignores it
     outside a turn.
-
-    Field generators run for every listed agent whatever its type, so an agent of
-    another type gets no field rather than a verdict read off markers it never writes.
     """
-    if not isinstance(agent, ClaudeAgent):
-        return None
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
     is_active = host.path_exists(agent_dir / "active")
     return classify_waiting_reason(is_active, is_active and agent.is_blocked_on_dialog())

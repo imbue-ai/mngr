@@ -1,0 +1,84 @@
+// The one-time offer to turn on auto-update, over the machines list. Which
+// launch or reading raises it, and what an answer records, is the model's
+// (models/autoUpdatePrompt.ts); this only says it and takes the answer.
+
+import m from "mithril";
+import type {
+  AutoUpdatePromptModel,
+  AutoUpdatePromptTrigger,
+} from "../../models/autoUpdatePrompt";
+import { Button } from "./Button";
+import { Modal } from "./Modal";
+import { Notice } from "./Notice";
+import { Spinner } from "./Spinner";
+
+export interface AutoUpdatePromptModalAttrs {
+  model: AutoUpdatePromptModel;
+  trigger: AutoUpdatePromptTrigger;
+  /** The app's update window, as the machines list shows it. */
+  updateWindow: string;
+}
+
+function openingLine(trigger: AutoUpdatePromptTrigger): string {
+  return trigger === "app-updated"
+    ? "Imbue Studio was just updated, and your workspaces can keep up with it on their own."
+    : "One of your workspaces is running an older version of Imbue Studio.";
+}
+
+export function AutoUpdatePromptModal(): m.Component<AutoUpdatePromptModalAttrs> {
+  return {
+    view(vnode) {
+      const { model, trigger, updateWindow } = vnode.attrs;
+      const windowText = updateWindow ? ` (${updateWindow})` : "";
+      return m(
+        Modal,
+        // Closing without an answer only puts it away for this session.
+        { isOpen: true, onClose: () => model.putAway(), size: "md" },
+        m("div", { class: "flex flex-col gap-4", id: "auto-update-prompt" }, [
+          m(
+            "h2",
+            { class: "type-heading text-primary" },
+            "Update workspaces automatically?",
+          ),
+          m("p", { class: "type-body text-secondary" }, openingLine(trigger)),
+          m(
+            "p",
+            { class: "type-body text-secondary" },
+            `With auto-updates on, Studio schedules each workspace's update for your update window${windowText} ` +
+              "whenever it falls behind. You can turn this off in Settings at any time.",
+          ),
+          m(
+            "p",
+            { class: "type-helper text-tertiary" },
+            "Updating uses tokens and counts against your subscription or API usage.",
+          ),
+          model.error ? m(Notice, { variant: "error" }, model.error) : null,
+          m("div", { class: "flex flex-wrap items-center gap-2 pt-1" }, [
+            m(
+              Button,
+              {
+                variant: "primary",
+                id: "auto-update-prompt-accept",
+                disabled: model.isBusy,
+                onclick: () => void model.choose("accepted"),
+              },
+              model.isBusy
+                ? m(Spinner, { size: "sm" })
+                : "Turn on auto-updates",
+            ),
+            m(
+              Button,
+              {
+                variant: "secondary",
+                id: "auto-update-prompt-decline",
+                disabled: model.isBusy,
+                onclick: () => void model.choose("declined"),
+              },
+              "Not now",
+            ),
+          ]),
+        ]),
+      );
+    },
+  };
+}

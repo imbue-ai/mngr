@@ -1,0 +1,1 @@
+A command that addresses an agent as `AGENT@host-....imbue_cloud_...` now runs the outer-SSH listing of that one leased host instead of every host on the account, so a slow sibling host no longer delays it. A stopped workspace is read from the lifecycle listing with its last-known agents and no SSH, as discovery already did.

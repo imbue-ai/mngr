@@ -46,6 +46,6 @@ Feature: Where to run the first workspace
 
   @existing-workspace-sign-in
   Scenario: Signing in to an existing account leaves the start flow for the home page
-    When the user presses "I have an account (log in)" and signs in
+    When the user presses "I already have a workspace (log in)" and signs in
     Then they land on the home page
     And the start flow is not shown again

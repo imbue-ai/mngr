@@ -28,7 +28,6 @@ from typing import cast
 
 import paramiko
 import pytest
-from paramiko.common import AUTH_FAILED
 from paramiko.common import AUTH_SUCCESSFUL
 from paramiko.common import OPEN_FAILED_CONNECT_FAILED
 from pydantic import PrivateAttr
@@ -38,9 +37,7 @@ from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.imbue_common.suspension import ClockReading
 from imbue.imbue_common.suspension import read_clocks
-from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.utils.polling import poll_until
-from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.primitives import ReverseTunnelSpec
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import ReverseTunnelInfo
@@ -55,7 +52,6 @@ from imbue.mngr_forward.ssh_tunnel import _create_short_path_tmpdir
 from imbue.mngr_forward.ssh_tunnel import _create_ssh_client
 from imbue.mngr_forward.ssh_tunnel import _create_tunnel_listener
 from imbue.mngr_forward.ssh_tunnel import _is_transport_unusable
-from imbue.mngr_forward.ssh_tunnel import _log_authentication_failure
 from imbue.mngr_forward.ssh_tunnel import _open_and_relay
 from imbue.mngr_forward.ssh_tunnel import _resolve_known_hosts_path
 from imbue.mngr_forward.ssh_tunnel import _tunnel_accept_loop
@@ -67,7 +63,7 @@ from imbue.mngr_forward.ssh_tunnel import parse_url_host_port
 # the second in time, and the regression test would stop discriminating.
 _BLOCKED_OPEN_HOLD_SECONDS: Final[float] = 30.0
 
-# Test doubles
+# -- Test doubles ----------------------------------------------------------
 
 
 class FakeChannelFromSocket:
@@ -206,7 +202,7 @@ def _register_reverse_tunnel(
         manager._reverse_tunnel_clients[tunnel_key] = client
 
 
-# parse_url_host_port
+# -- parse_url_host_port ---------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -230,7 +226,7 @@ def test_parse_url_host_port_localhost_normalization() -> None:
     assert port == 80
 
 
-# RemoteSSHInfo
+# -- RemoteSSHInfo ---------------------------------------------------------
 
 
 def test_create_ssh_client_refuses_to_connect_without_a_known_hosts_file(tmp_path: Path) -> None:
@@ -411,7 +407,7 @@ def test_remote_ssh_info_is_frozen() -> None:
         info.user = "other"
 
 
-# ReverseTunnelInfo / ReverseTunnelSpec
+# -- ReverseTunnelInfo / ReverseTunnelSpec ---------------------------------
 
 
 def test_reverse_tunnel_info_defaults_and_optional_agent_id() -> None:
@@ -439,7 +435,10 @@ def test_reverse_tunnel_spec_local_must_be_positive() -> None:
         ReverseTunnelSpec(remote_port=NonNegativeInt(8420), local_port=0)  # ty: ignore[invalid-argument-type]
 
 
-# SSHTunnelManager structural
+# -- SSH connection helpers ------------------------------------------------
+
+
+# -- SSHTunnelManager structural -----------------------------------------
 
 
 def test_ssh_tunnel_manager_cleanup_is_idempotent() -> None:
@@ -497,7 +496,7 @@ def test_ssh_tunnel_manager_health_check_starts_daemon_thread() -> None:
     manager.cleanup()
 
 
-# _check_and_repair_tunnels
+# -- _check_and_repair_tunnels --------------------------------------------
 #
 # These tests call ``_check_and_repair_tunnels`` directly (bypassing the
 # 30-second wait in the health check loop) to exercise the repair logic.
@@ -673,7 +672,7 @@ def test_check_and_repair_tunnels_fires_on_repaired_callback(tmp_path: Path) -> 
     manager.cleanup()
 
 
-# Exponential backoff
+# -- Exponential backoff --------------------------------------------------
 
 
 def test_repair_failure_arms_backoff_and_skips_within_window(tmp_path: Path) -> None:
@@ -788,7 +787,7 @@ def test_a_tunnel_on_a_live_transport_clears_stale_failure_state(tmp_path: Path)
     manager.cleanup()
 
 
-# remove_reverse_tunnels_for_agent
+# -- remove_reverse_tunnels_for_agent -------------------------------------
 
 
 def test_remove_reverse_tunnels_for_agent_drops_only_matching(tmp_path: Path) -> None:
@@ -936,7 +935,7 @@ def test_remove_reverse_tunnel_drops_only_the_named_endpoint(tmp_path: Path) -> 
     manager.cleanup()
 
 
-# setup_reverse_tunnel
+# -- setup_reverse_tunnel -------------------------------------------------
 #
 # These tests inject a FakeSSHClient directly into _connections so that
 # setup_reverse_tunnel can run without making real SSH connections.
@@ -1035,7 +1034,7 @@ def test_setup_reverse_tunnel_registers_per_forward_handler(tmp_path: Path) -> N
     manager.cleanup()
 
 
-# _ForwardedTunnelHandler
+# -- _ForwardedTunnelHandler ----------------------------------------------
 #
 # These exercise the per-forward handler in isolation. The handler receives
 # channels from paramiko and relays them to a specific local port. Two
@@ -1197,7 +1196,7 @@ def test_forwarded_tunnel_handler_closes_channel_on_connect_failure() -> None:
     assert channel.is_closed()
 
 
-# Forward-tunnel channel opening
+# -- Forward-tunnel channel opening ----------------------------------------
 #
 # A transport that has silently gone away keeps reporting ``is_active() ==
 # True``, so the only thing distinguishing it from a healthy one is that
@@ -1841,7 +1840,7 @@ def test_reading_the_refusal_count_does_not_wait_on_a_tunnel_being_established(t
     assert read_count == [1]
 
 
-# Refusal classification against a real sshd
+# -- Refusal classification against a real sshd ----------------------------
 #
 # ``BACKEND_NOT_LISTENING`` rests on one judgement no fake can make for it:
 # whether a real sshd refusing a ``direct-tcpip`` open leaves the transport in
@@ -1876,21 +1875,9 @@ class _InnerPortRefusingServer(paramiko.ServerInterface):
         return OPEN_FAILED_CONNECT_FAILED
 
 
-class _KeyRejectingServer(paramiko.ServerInterface):
-    """An sshd that accepts only public keys and rejects every one it is offered: a key it no longer authorizes."""
-
-    def get_allowed_auths(self, username: str) -> str:
-        return "publickey"
-
-    def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
-        return AUTH_FAILED
-
-
 @contextmanager
-def _loopback_sshd(
-    tmp_path: Path, server: paramiko.ServerInterface
-) -> Iterator[tuple[RemoteSSHInfo, list[paramiko.Transport]]]:
-    """Run an sshd on loopback that authenticates and serves channels as ``server`` decides.
+def _refusing_sshd(tmp_path: Path) -> Iterator[tuple[RemoteSSHInfo, list[paramiko.Transport]]]:
+    """Run an sshd on loopback that refuses every ``direct-tcpip`` open.
 
     Yields the ``RemoteSSHInfo`` that addresses it -- real key material, and a
     known_hosts pinning this server's key, so ``_create_ssh_client`` performs a
@@ -1899,10 +1886,8 @@ def _loopback_sshd(
     host go away mid-test.
     """
     host_key = paramiko.ECDSAKey.generate()
-    # The client key mngr itself generates (Ed25519, OpenSSH container), which is
-    # the last key class paramiko tries a key file as, so a rejection surfaces as
-    # paramiko's own ``AuthenticationException`` rather than a later class's load error.
-    key_path, _public_key_path = save_ssh_keypair(tmp_path, "id_ed25519")
+    key_path = tmp_path / "id_ecdsa"
+    paramiko.ECDSAKey.generate().write_private_key_file(str(key_path))
 
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -1927,10 +1912,10 @@ def _loopback_sshd(
                 return
             transport = paramiko.Transport(connection)
             transport.add_server_key(host_key)
-            transport.start_server(server=server)
+            transport.start_server(server=_InnerPortRefusingServer())
             served.append(transport)
 
-    thread = threading.Thread(target=accept_loop, daemon=True, name="test-loopback-sshd")
+    thread = threading.Thread(target=accept_loop, daemon=True, name="test-refusing-sshd")
     thread.start()
     try:
         yield RemoteSSHInfo(user="root", host="127.0.0.1", port=port, key_path=key_path), served
@@ -1957,7 +1942,7 @@ def test_a_real_sshd_refusing_the_inner_port_counts_a_refusal_and_keeps_the_conn
     accepted socket is closed, precisely so a caller that has observed its own
     failure is guaranteed to see it. A poll here would pass either way.
     """
-    with _loopback_sshd(tmp_path, _InnerPortRefusingServer()) as (ssh_info, _served):
+    with _refusing_sshd(tmp_path) as (ssh_info, _served):
         manager = SSHTunnelManager()
         try:
             socket_path = manager.get_tunnel_socket_path(ssh_info, "127.0.0.1", 8000)
@@ -1984,7 +1969,7 @@ def test_a_real_ssh_host_that_goes_away_counts_no_refusal(tmp_path: Path) -> Non
     a vanished machine would be reported as reachable-with-a-dead-service and
     the restart that fixes it withheld.
     """
-    with _loopback_sshd(tmp_path, _InnerPortRefusingServer()) as (ssh_info, served):
+    with _refusing_sshd(tmp_path) as (ssh_info, served):
         manager = SSHTunnelManager()
         conn_key = f"{ssh_info.host}:{ssh_info.port}"
         try:
@@ -2002,62 +1987,3 @@ def test_a_real_ssh_host_that_goes_away_counts_no_refusal(tmp_path: Path) -> Non
             assert manager.get_backend_refusal_count(ssh_info, "127.0.0.1", 8000) == 0
         finally:
             manager.cleanup()
-
-
-@pytest.mark.timeout(60)
-def test_a_real_sshd_rejecting_the_key_logs_the_offered_key_and_reraises(tmp_path: Path) -> None:
-    """A rejected key is logged with what was offered, then propagates unchanged to the caller.
-
-    Driven against a real handshake so the warning is pinned to the exception
-    paramiko actually raises for a refusal, not one built by hand.
-    """
-    with _loopback_sshd(tmp_path, _KeyRejectingServer()) as (ssh_info, _served):
-        offered_fingerprint = paramiko.Ed25519Key.from_private_key_file(str(ssh_info.key_path)).fingerprint
-        with capture_loguru("WARNING") as log_output:
-            with pytest.raises(paramiko.AuthenticationException):
-                _create_ssh_client(ssh_info)
-
-    warnings = log_output.getvalue().splitlines()
-    assert len(warnings) == 1, warnings
-    assert f"as root on port {ssh_info.port} failed" in warnings[0]
-    assert "AuthenticationException: Authentication failed." in warnings[0]
-    assert f"key {offered_fingerprint} (file modified " in warnings[0]
-    assert str(ssh_info.key_path) not in warnings[0]
-
-
-@pytest.mark.timeout(60)
-def test_a_real_sshd_rejecting_an_ecdsa_key_logs_the_offered_key(tmp_path: Path) -> None:
-    """A rejected key of an earlier key class is still logged, though paramiko re-raises a later class's load error."""
-    with _loopback_sshd(tmp_path, _KeyRejectingServer()) as (ssh_info, _served):
-        ecdsa_key = paramiko.ECDSAKey.generate()
-        ecdsa_key.write_private_key_file(str(ssh_info.key_path))
-        with capture_loguru("WARNING") as log_output:
-            with pytest.raises(paramiko.SSHException):
-                _create_ssh_client(ssh_info)
-
-    warnings = log_output.getvalue().splitlines()
-    assert len(warnings) == 1, warnings
-    assert f"key {ecdsa_key.fingerprint} (file modified " in warnings[0]
-
-
-def test_authentication_failure_log_reports_the_auth_types_the_server_allows() -> None:
-    ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=22, key_path=Path(""))
-    with capture_loguru("WARNING") as log_output:
-        _log_authentication_failure(ssh_info, paramiko.BadAuthenticationType("Bad authentication type", ["password"]))
-
-    warning = log_output.getvalue()
-    assert "offered credentials: the user's own SSH setup (credential-deferring host)" in warning
-    assert "auth types the server allows: password" in warning
-
-
-def test_authentication_failure_log_survives_a_key_file_it_cannot_parse(tmp_path: Path) -> None:
-    key_path = tmp_path / "id_ed25519"
-    key_path.write_text("not a private key\n")
-    ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=22, key_path=key_path)
-    with capture_loguru("WARNING") as log_output:
-        _log_authentication_failure(ssh_info, paramiko.AuthenticationException("Authentication timeout."))
-
-    warning = log_output.getvalue()
-    assert "offered credentials: a key file that could not be read back (" in warning
-    assert "AuthenticationException: Authentication timeout." in warning
-    assert "auth types the server allows: not reported" in warning

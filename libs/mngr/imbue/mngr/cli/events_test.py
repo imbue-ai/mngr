@@ -108,26 +108,6 @@ def test_events_cli_rejects_head_with_follow(
     assert "Cannot use --head with --follow" in result.output
 
 
-@pytest.mark.parametrize(
-    ("arguments", "expected_error"),
-    [
-        (["--latest-by", "service"], "--latest-by takes SOURCE:FIELD"),
-        (["--latest-by", "services:"], "--latest-by takes SOURCE:FIELD"),
-        (["--latest-by", "services:service", "--latest-by", "services:url"], "names source 'services' more than once"),
-        (["--latest-by", "services:service", "--tail", "5"], "Cannot combine --latest-by with --head or --tail"),
-    ],
-)
-def test_events_cli_rejects_an_unusable_latest_by(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    arguments: list[str],
-    expected_error: str,
-) -> None:
-    result = cli_runner.invoke(events, ["my-agent", *arguments], obj=plugin_manager)
-    assert result.exit_code != 0
-    assert expected_error in result.output
-
-
 # Output helper function tests
 
 
@@ -223,39 +203,6 @@ def test_events_cli_reads_a_common_transcript_past_its_stream_header(
     emitted_events = [json.loads(line) for line in result.stdout.splitlines()]
     transcript_event_ids = [e["event_id"] for e in emitted_events if e.get("emitter") == "claude/common_transcript"]
     assert transcript_event_ids == ["u1-user", "a1-assistant", "a1-tool_result-call_1"]
-
-
-def test_events_cli_latest_by_prints_each_services_newest_registration(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    local_provider,
-    temp_mngr_ctx,
-) -> None:
-    """The services stream mngr forward spawns replays one registration per service, not the history."""
-    _, services_dir = create_agent_with_events_dir(
-        local_provider.host_dir, "events-latest-by-test", events_source="services"
-    )
-    registrations = [
-        ("web-1", "2026-01-01T00:00:01Z", "web"),
-        ("chat-1", "2026-01-01T00:00:02Z", "chat"),
-        ("web-2", "2026-01-01T00:00:03Z", "web"),
-        ("web-3", "2026-01-01T00:00:04Z", "web"),
-    ]
-    (services_dir / "events.jsonl").write_text(
-        "".join(
-            json.dumps({"timestamp": timestamp, "event_id": event_id, "source": "services", "service": service}) + "\n"
-            for event_id, timestamp, service in registrations
-        )
-    )
-
-    result = cli_runner.invoke(
-        events,
-        ["events-latest-by-test", "services", "--latest-by", "services:service", "--format", "jsonl"],
-        obj=plugin_manager,
-    )
-
-    assert result.exit_code == 0, result.output
-    assert [json.loads(line)["event_id"] for line in result.stdout.splitlines()] == ["chat-1", "web-3"]
 
 
 def test_events_cli_filters_by_source_positional(

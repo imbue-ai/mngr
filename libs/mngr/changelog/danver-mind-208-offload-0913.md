@@ -1,0 +1,1 @@
+Bumped the offload version baked into `libs/mngr/imbue/mngr/resources/Dockerfile` (`OFFLOAD_VERSION`) from `0.9.12` to `0.9.13`, keeping the in-image `offload apply-diff` binary in lockstep with the CI pin.

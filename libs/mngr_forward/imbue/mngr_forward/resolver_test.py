@@ -290,6 +290,9 @@ def test_initial_discovery_flag() -> None:
     assert resolver.has_completed_initial_discovery() is True
 
 
+# --- last-known service-map cache (fast first-load) -----------------------
+
+
 def test_seeded_entry_not_served_until_agent_is_known() -> None:
     """A seeded service URL is not routable until discovery confirms the agent.
 
@@ -365,31 +368,6 @@ def test_update_services_persists_to_cache(tmp_path: Path) -> None:
         services_by_instance={str(TEST_INSTANCE_1): {"system_interface": "http://127.0.0.1:8000"}},
         label_to_name_by_instance={},
     )
-
-
-def test_update_services_does_not_rewrite_the_cache_for_an_identical_announcement(tmp_path: Path) -> None:
-    """An agent re-announcing the same registrations costs no disk write per announcement.
-
-    Asserted by deleting the cache file after the first write: a spurious
-    persist would recreate it.
-    """
-    cache_path = tmp_path / "service_map.json"
-    resolver = ForwardResolver(
-        strategy=ForwardServiceStrategy(service_name="system_interface"),
-        service_map_cache=ServiceMapCache(cache_path=cache_path),
-    )
-    resolver.add_known_agent(TEST_INSTANCE_1)
-    services = {"system_interface": "http://127.0.0.1:8000"}
-    label_to_name = {"system_interface-cc2xxsft": "system_interface"}
-    resolver.update_services(TEST_INSTANCE_1, services, label_to_name)
-    assert cache_path.exists()
-    cache_path.unlink()
-
-    resolver.update_services(TEST_INSTANCE_1, dict(services), dict(label_to_name))
-    assert not cache_path.exists()
-
-    resolver.update_services(TEST_INSTANCE_1, {**services, "web": "http://127.0.0.1:8083"}, label_to_name)
-    assert cache_path.exists()
 
 
 def test_remove_known_agent_drops_cache_entry(tmp_path: Path) -> None:

@@ -1,6 +1,5 @@
 """Unit tests for the connect CLI command."""
 
-import warnings
 from typing import Callable
 
 import pytest
@@ -10,9 +9,6 @@ from imbue.mngr.cli.agent_selector import filter_agents
 from imbue.mngr.cli.agent_selector import handle_search_key
 from imbue.mngr.cli.connect import ConnectCliOptions
 from imbue.mngr.cli.connect import _check_connect_future_options
-from imbue.mngr.cli.connect import connect
-from imbue.mngr.cli.connect import resolve_agent_address
-from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -25,7 +21,6 @@ from imbue.mngr.utils.testing import make_test_agent_details
 
 def _make_connect_opts(
     agent: AgentAddress | None = None,
-    agent_option: AgentAddress | None = None,
     start: bool = True,
     reconnect: bool = True,
     session_command: str | None = None,
@@ -42,7 +37,6 @@ def _make_connect_opts(
     """Create a ConnectCliOptions with sensible defaults, allowing overrides."""
     return ConnectCliOptions(
         agent=agent,
-        agent_option=agent_option,
         start=start,
         reconnect=reconnect,
         session_command=session_command,
@@ -70,42 +64,6 @@ def test_connect_cli_options_can_be_instantiated() -> None:
     assert opts.agent == address
     assert opts.start is True
     assert opts.reconnect is True
-
-
-def test_connect_parses_the_agent_option_into_its_own_parameter() -> None:
-    """``--agent X`` used to land in the positional's parameter and be overwritten by its None."""
-    ctx = connect.make_context("connect", ["--agent", "my-task@my-host"], resilient_parsing=True)
-
-    assert ctx.params["agent"] is None
-    parsed = ctx.params["agent_option"]
-    assert isinstance(parsed, AgentAddress)
-    assert parsed.agent == AgentName("my-task")
-    assert parsed.host is not None
-
-
-def test_connect_parses_without_a_click_parameter_warning() -> None:
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        connect.make_context("connect", ["my-task"], resilient_parsing=True)
-
-    assert [str(w.message) for w in caught if issubclass(w.category, UserWarning)] == []
-
-
-def test_resolve_agent_address_takes_whichever_form_was_given() -> None:
-    address = AgentAddress(agent=AgentName("my-agent"))
-
-    assert resolve_agent_address(_make_connect_opts(agent=address)) == address
-    assert resolve_agent_address(_make_connect_opts(agent_option=address)) == address
-    assert resolve_agent_address(_make_connect_opts()) is None
-
-
-def test_resolve_agent_address_rejects_both_forms_at_once() -> None:
-    opts = _make_connect_opts(
-        agent=AgentAddress(agent=AgentName("a")), agent_option=AgentAddress(agent=AgentName("b"))
-    )
-
-    with pytest.raises(UserInputError):
-        resolve_agent_address(opts)
 
 
 # =============================================================================

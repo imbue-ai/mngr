@@ -116,12 +116,6 @@ class PendingCreateAttemptStoreError(MindError):
     ...
 
 
-class UpdateScheduleStoreError(MindError):
-    """Raised when a scheduled-update intent cannot be written."""
-
-    ...
-
-
 class UpdateDismissalStoreError(MindError):
     """Raised when an update-row dismissal cannot be written."""
 
@@ -358,13 +352,3 @@ class SnapshotContainerStatesError(MindError):
 
 class ProgressSeedError(MindError, ValueError):
     """Raised when the shipped create-progress seed table is malformed."""
-
-
-class WorkspaceMessageTypeError(MindError, ValueError):
-    """Raised when a workspace message type is not a lowercase ``prefix:kebab-name``, or claims the shell's ``shell:``.
-
-    Subclasses ``ValueError`` so pydantic treats it as a validation failure
-    when raised while validating the field.
-    """
-
-    ...

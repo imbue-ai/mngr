@@ -90,7 +90,6 @@ from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoint_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
-from imbue.mngr.providers.ssh_host_setup import log_client_key_configuration
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
@@ -853,9 +852,6 @@ class DockerProviderInstance(BaseProviderInstance):
         host_dir_str = self._effective_host_dir_str(config)
         host_volume_symlink_target = self._get_host_volume_symlink_target(
             host_id, is_isolated=config.is_isolated_host_volume
-        )
-        log_client_key_configuration(
-            host_id, self.name, self.mngr_ctx.get_profile_user_id(), client_public_key, tuple(authorized_keys or ())
         )
         self._start_sshd_in_container(
             container,

@@ -1,0 +1,1 @@
+Added `is_unreachable_peer_connect_error`, which recognizes an SSH connect that never reached a listening peer -- a refused port, a missing route, or a downed host -- across both shapes paramiko raises it in. Used by the latchkey forward supervisor to decide whether a failed wiring step is worth another cycle before it is reported.

@@ -6,8 +6,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-## [v0.2.0] - 2026-10-22
-
 ### Added
 
 - Added: Bare placement (`isolation=NONE`) — an Azure OS shutdown does not halt compute billing, so the bare agent's idle `shutdown.sh` runs the ARM self-deallocate directly (the same call the container idle watcher uses), keeping the self-deallocate role assignment and skipping the host-side sentinel watcher. Bare release tests added.
@@ -15,10 +13,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Required Azure Blob **state bucket** (private Storage account + container) as the offline store for Azure hosts (replaces the VM tag mirror). A deallocated VM's full host record (config, IP, host keys) plus per-agent records live in the bucket. `mngr azure prepare` creates the account (default name `mngrst<hash>`, overridable via `state_storage_account_name`) and a `mngr-state` container, and grants the operator's own principal the `Storage Blob Data Contributor` role scoped to that account (Azure splits control plane from data plane, so creating the account does not include data-plane blob access). `mngr azure cleanup` deletes it (refuses non-empty unless `--force`).
 - Added: Offline `host_dir` on Azure, on by default (`is_offline_host_dir_enabled`). A deallocated VM's `host_dir` is now readable without SSH. Capture is operator-driven at `mngr stop` (no VM managed identity needed). Set `is_offline_host_dir_enabled = false` to disable.
 - Added: A running bare Azure host is discoverable with the default provider config — a `mngr-isolation` VM tag stamped at create lets discovery resolve placement from the cloud API without SSH, so operations no longer need `-S providers.<name>.isolation=NONE` at connect time.
-- Added: `use_azure_cli_login` (with `tenant_id` and `subscription_id`) authenticates a provider instance through this machine's `az login` instead of a pasted service principal; a missing login raises `ProviderCredentialSourceMissingError`. `imbue.mngr_azure.config` exposes `az_cli_profile_path()` and `read_az_profile_subscriptions()`.
-- Added: Optional service-principal fields `client_id` / `tenant_id` / `client_secret` on `AzureProviderConfig`; when all are set, a `ClientSecretCredential` replaces the default `DefaultAzureCredential`.
-- Added: `mngr azure prepare --format jsonl` reports its steps (`azure.network`, `azure.role`, `azure.state_storage`) as a plan with per-step progress.
-- Added: A VM create refused with `SkuNotAvailable` raises `AzureVmSizeUnavailableError`, naming the size and region and suggesting another size (e.g. `Standard_D2s_v6`), region, or an access request.
 
 ### Changed
 
@@ -26,21 +20,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Azure cleanup refusal when VMs still exist now raises the unified `ManagedResourcesExistError` (previously `AzureProviderError`), matching the message used by the other clouds.
 - Changed: `allowed_ssh_cidrs` is now typed `ScalarStrTuple` (matching AWS), so a higher-precedence config layer that sets it replaces the whole list rather than being flagged as narrowing; the config key and default are unchanged.
 - Changed: Host-side idle-watcher systemd unit renamed from `mngr-azure-idle-watcher` to the shared `mngr-idle-watcher` as the idle-watcher install lifted into the shared `OfflineCapableVpsProvider`.
-- Changed: Hosts are opened with a per-host VM-root client key (`keys/host_keys/<hex>/vps_ssh_key`) instead of the provider-wide `keys/vps_ssh_key`, which existing hosts still fall back to; destroying a deallocated VM removes its local key material.
-- Changed: Default marketplace image is `Debian:debian-13:13-gen2` (was Debian 12).
-- Changed: The backend registers lazily through a new `imbue.mngr_azure.plugin` entry point (was `imbue.mngr_azure.backend`), so plain `mngr` commands no longer import the Azure management SDK; `mngr azure` also loads on demand.
-
-### Deprecated
-
-- Deprecated: `os_disk_size_gb`, replaced by the shared `root_disk_size_gb`; setting both to different values is a config error.
 
 ### Fixed
 
 - Fixed: `mngr start` of a deallocated Azure host now re-mirrors the resumed host record to the Blob state bucket, so offline / `mngr list` reads no longer report a just-resumed Azure VM as STOPPED until the next mirroring write.
 - Fixed: `rename_host` now re-stamps the cheap `mngr-host-name` VM tag (read by offline discovery), so a host renamed and then stopped lists under its new name rather than its old one.
-- Fixed: The plugin failed to import with `azure-mgmt-resource` 26 (`ImportError` on `ResourceManagementClient`), breaking every command that loads mngr plugins; the client now imports from `azure.mgmt.resource.resources`, and `azure-mgmt-network` / `azure-mgmt-resource` are capped below 31 / 26.
-- Fixed: `mngr list` reported Azure hosts as 1 CPU / 1 GB; it now shows the VM size's vCPUs and RAM and the OS disk size.
-- Fixed: Resource-provider registration timeout raised from 180s to 900s, since a fresh subscription's first `Microsoft.Network` registration often exceeds 3 minutes.
 
 ## [v0.1.1] - 2026-06-18
 

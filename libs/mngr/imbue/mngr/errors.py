@@ -284,13 +284,6 @@ class SendFailureKind(StrEnum):
     NOT_READY = "not_ready"
     # There is nothing to talk to -- the pane is gone. Trying again cannot help.
     AGENT_UNREACHABLE = "agent_unreachable"
-    # The agent was not where the caller located it: that host has no such agent, or the host
-    # itself could not be reached. Nothing was typed, so looking the agent up afresh and sending
-    # again is safe.
-    AGENT_NOT_FOUND = "agent_not_found"
-    # The message was typed and Enter sent, but nothing confirmed the agent took it. It may
-    # already be in the agent's input or turn, so sending it again can deliver it twice.
-    SUBMISSION_UNCONFIRMED = "submission_unconfirmed"
     # Unclassified. The default, so an unlabelled failure keeps whatever the client does today.
     UNKNOWN = "unknown"
 
@@ -332,10 +325,10 @@ class AgentNoLongerIdleError(AgentError):
 class MessageDeliveredButBlockedError(SendMessageError):
     """The message was delivered/accepted, but a blocking dialog remained afterward and could not be resolved.
 
-    Distinct from a plain SendMessageError (the message was not delivered, or, with SUBMISSION_UNCONFIRMED,
-    not confirmed delivered): here the input landed (e.g. a slash command was accepted), but the agent is
-    now stuck on an interactive TUI dialog that mngr could not clear. Callers map this to a dedicated exit
-    code so "delivered but now blocked" is distinguishable from "message failed to send".
+    Distinct from a plain SendMessageError (which means the message was NOT delivered): here the input
+    landed (e.g. a slash command was accepted), but the agent is now stuck on an interactive TUI dialog
+    that mngr could not clear. Callers map this to a dedicated exit code so "delivered but now blocked"
+    is distinguishable from "message failed to send".
     """
 
 

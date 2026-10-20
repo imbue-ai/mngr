@@ -1,0 +1,1 @@
+A command that addresses an agent as `AGENT@host-....PROVIDER` on a VPS provider (aws, gcp, azure, ovh, vultr) now finds the host exactly as discovery would, so a pinned `mngr start` of a stopped instance works as it does with a bare agent id. The lookup still reads every VPS, so it is no faster than discovery on these providers.

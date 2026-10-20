@@ -12,9 +12,8 @@
  *            relocatable git distribution), pinned by git-manifest.json and
  *            extracted flat into resources/git/. The self-contained payload
  *            bakes in an empty prefix, so the runtime must export
- *            GIT_EXEC_PATH/GIT_TEMPLATE_DIR/GIT_CONFIG_SYSTEM, plus GIT_SSL_CAINFO
- *            pointing at the app environment's certifi bundle; see
- *            specs/minds-managed-git/concise.md.
+ *            GIT_EXEC_PATH/GIT_TEMPLATE_DIR/GIT_CONFIG_SYSTEM (+GIT_SSL_CAINFO
+ *            on Linux); see specs/minds-managed-git/concise.md.
  *   Windows: SHA256-verified MinGit download from git-for-windows releases.
  */
 
@@ -26,7 +25,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 
-const UV_VERSION = '0.13.4';
+const UV_VERSION = '0.11.15';
 const GIT_FOR_WINDOWS_VERSION = '2.49.0';
 const GIT_FOR_WINDOWS_TAG = `v${GIT_FOR_WINDOWS_VERSION}.windows.1`;
 const RESTIC_VERSION = '0.18.1';
@@ -89,11 +88,11 @@ const CURL_SHIMS_VERSION = 'v0.6.0';
  * extracting or executing any downloaded bytes.
  */
 const EXPECTED_SHA256 = {
-  'uv-aarch64-apple-darwin.tar.gz':     'e0b1d4743ce64c55d9f0f4a444afa6b81125680070ee04e853fcd0f6c1ebf8f1',
-  'uv-x86_64-apple-darwin.tar.gz':      '7be2dcd316122f4b3e5a0a7889f6248266c14425374e105ff7dc9779184603a6',
-  'uv-x86_64-unknown-linux-gnu.tar.gz': '2b428396f12572d4429cf210ca234dd599a33b3af0958a4d5ed569d63e3f344f',
-  'uv-aarch64-unknown-linux-gnu.tar.gz': '1ae72b4718729e2ccc4f1ae2c6d1e531ca8467800e0546e9130b3886023a60ab',
-  'uv-x86_64-pc-windows-msvc.zip':      'ccec7508a07d9933d7cb1261880633efcf1f30d6e6eddab21823f1dae6f23225',
+  'uv-aarch64-apple-darwin.tar.gz':     '7e5b336108f8576eda1939920ca0a805b4a9a3c3d3eb2f6140e38b7092fbe4f3',
+  'uv-x86_64-apple-darwin.tar.gz':      '42bca7cc879d117ed7139a0e26de8cab0b6f033ad439a32144f324d1f8580d8c',
+  'uv-x86_64-unknown-linux-gnu.tar.gz': 'b03e572f010bea94a4a52d42671ba72981e12894f71576181a1d26ff68546da7',
+  'uv-aarch64-unknown-linux-gnu.tar.gz': '21a7dd1a03ea17ac0366887455dab15d215b31dba0870dcd65d3714e22f46c81',
+  'uv-x86_64-pc-windows-msvc.zip':      '04b98d414a9000e25e5e0e7c9f53749e66b790cdaffc582829e6f58c544ee11c',
   'MinGit-2.49.0-64-bit.zip':           '971cdee7c0feaa1e41369c46da88d1000a24e79a6f50191c820100338fb7eca5',
   'restic_0.18.1_darwin_arm64.bz2':     '193fccc8bb4567b498923bc70261e104ff22be88016f0f108b035dad372ab711',
   'restic_0.18.1_darwin_amd64.bz2':     'eb8543ed92ff1ddb67762daebf09f7bea4b0c37d21edb6a910bee3d4f514015f',

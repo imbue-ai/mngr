@@ -121,15 +121,22 @@ def write_vault_kv(
 ) -> None:
     """Write each ``{key: value}`` pair as a single-``value`` leaf under ``path``.
 
-    Each key becomes its own leaf ``path/<key>`` holding ``{"value": <value>}``.
-    The value travels on the subprocess's stdin (``value=-``), never in its
-    argv, so a secret reaches neither the process listing nor the reader
-    thread's name nor a ``ProcessError`` message; it also means a value may
-    begin with the ``@`` sigil that ``vault kv put`` would otherwise read as a
-    file reference.
+    Used by the operator env tooling's generation-id lifecycle to write
+    the tier generation ID. Each key becomes its own leaf ``path/<key>`` holding
+    ``{"value": <value>}``. Refuses to pass any value containing the ``@``
+    sigil since ``vault kv put`` would interpret it as a file-path
+    reference -- callers that need to write such values should add a
+    JSON-stdin variant (see ``scripts/push_vault_from_file.py``).
     """
     _check_vault_binary(vault_binary)
     relative = _relative_kv_path(path)
+    for key, value in values.items():
+        if value.startswith("@"):
+            raise VaultReadError(
+                f"write_vault_kv cannot write the value for {key!r}: it begins with the `@` "
+                "sigil that `vault kv put` interprets as a file-path reference. Use a "
+                "JSON-stdin variant or strip the leading `@`."
+            )
     for key, value in values.items():
         leaf_relative = f"{relative}/{key}"
         command = [
@@ -139,15 +146,9 @@ def write_vault_kv(
             "-format=json",
             f"-mount={_DEFAULT_MOUNT}",
             leaf_relative,
-            f"{_SECRET_VALUE_FIELD}=-",
+            f"{_SECRET_VALUE_FIELD}={value}",
         ]
-        result = _run_vault_command(
-            command,
-            parent=parent_concurrency_group,
-            vault_binary=vault_binary,
-            stdin_bytes=value.encode("utf-8"),
-            name=f"vault kv put {leaf_relative}",
-        )
+        result = _run_vault_command(command, parent=parent_concurrency_group, vault_binary=vault_binary)
         if result.returncode != 0:
             stderr = result.stderr.strip() or result.stdout.strip()
             raise VaultReadError(
@@ -323,16 +324,7 @@ def _vault_concurrency_group(parent: ConcurrencyGroup | None, *, name: str) -> I
         yield cg
 
 
-def _run_vault_command(
-    command: list[str],
-    *,
-    parent: ConcurrencyGroup | None,
-    vault_binary: str,
-    # Bytes handed to the subprocess on stdin, for a value that must stay out of argv.
-    stdin_bytes: bytes | None = None,
-    # A secret-free label for the process; the command itself is used when None.
-    name: str | None = None,
-) -> FinishedProcess:
+def _run_vault_command(command: list[str], *, parent: ConcurrencyGroup | None, vault_binary: str) -> FinishedProcess:
     """Run a single ``vault`` subprocess to completion in its own CG scope, wrapping spawn failures.
 
     Each command gets its own (child or fresh) concurrency group and the
@@ -347,8 +339,6 @@ def _run_vault_command(
                 timeout=_DEFAULT_TIMEOUT_SECONDS,
                 is_checked_after=False,
                 env=_vault_subprocess_env(),
-                stdin_bytes=stdin_bytes,
-                name=name,
             )
     except OSError as exc:
         raise VaultReadError(f"Failed to invoke {vault_binary}: {exc}") from exc

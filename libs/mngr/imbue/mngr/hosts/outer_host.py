@@ -35,7 +35,6 @@ from typing import Mapping
 from uuid import uuid4
 
 from loguru import logger
-from paramiko import AuthenticationException
 from paramiko import Channel
 from paramiko import ChannelException
 from paramiko import SFTPClient
@@ -173,13 +172,6 @@ def _list_directory_local(path: Path, recursive: bool) -> list[VolumeFile]:
     return entries
 
 
-@pure
-def _bounded_tail_read_size(file_size: int, start_byte: int, max_byte_count: int | None) -> int:
-    """How many bytes a tail read from ``start_byte`` returns: to EOF, capped at ``max_byte_count``."""
-    remaining = max(0, file_size - start_byte)
-    return remaining if max_byte_count is None else min(remaining, max_byte_count)
-
-
 def _is_missing_file_sftp_error(error: IOError) -> bool:
     """Whether an SFTP read failed because the remote file does not exist."""
     error_msg = str(error)
@@ -313,47 +305,6 @@ def is_unreachable_peer_connect_error(exception: OSError) -> bool:
     return (
         isinstance(exception, (NoValidConnectionsError, ConnectionRefusedError))
         or exception.errno in _UNREACHABLE_PEER_ERRNOS
-    )
-
-
-def _exception_chain_with_context(exception: BaseException) -> Iterator[BaseException]:
-    """Yield the exception and every exception behind it the way Python's traceback shows them, outermost first.
-
-    Follows an explicit ``__cause__`` and, where there is none, an implicit
-    ``__context__`` (an exception raised while handling another, without
-    ``from``) unless it was suppressed: pyinfra raises its ``ConnectError``
-    inside the ``except`` block that caught paramiko's exception, so that is the
-    only link to it.
-    """
-    yield exception
-    behind = (
-        exception.__cause__
-        if exception.__cause__ is not None or exception.__suppress_context__
-        else exception.__context__
-    )
-    if behind is not None:
-        yield from _exception_chain_with_context(behind)
-
-
-# paramiko raises the same ``AuthenticationException`` both when sshd rejects every
-# key ("Authentication failed.") and when sshd has not answered by ``auth_timeout``
-# (``AuthHandler.wait_for_response``); this message is the only thing telling them apart.
-_PARAMIKO_AUTH_TIMEOUT_MESSAGE: Final[str] = "Authentication timeout."
-
-
-@pure
-def is_ssh_auth_timeout(exception: BaseException) -> bool:
-    """Whether paramiko gave up waiting for sshd to answer authentication somewhere behind this exception.
-
-    ``OuterHost._ensure_connected`` reports every paramiko authentication
-    failure as a ``HostAuthenticationError``, timeouts included, so a caller
-    that needs to tell a slow sshd from a rejected key has to look at paramiko's
-    own exception. Only that exact class counts: its subclasses
-    (``BadAuthenticationType`` and the like) are always a refusal.
-    """
-    return any(
-        type(link) is AuthenticationException and link.args == (_PARAMIKO_AUTH_TIMEOUT_MESSAGE,)
-        for link in _exception_chain_with_context(exception)
     )
 
 
@@ -1444,10 +1395,8 @@ class OuterHost(OuterHostInterface):
             self._get_file(str(path), output, timeout_seconds=remaining_read_timeout(None))
             return output.getvalue()
 
-    def read_file_tail_from_offset(
-        self, path: Path, start_byte: int, max_byte_count: int | None = None
-    ) -> FileTailRead:
-        """Read a file's bytes from ``start_byte`` to EOF (at most ``max_byte_count``), plus the size seen by the same call.
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+        """Read a file's bytes from ``start_byte`` to EOF, plus the size seen by the same call.
 
         Raises FileNotFoundError if the file does not exist. Remote hosts serve
         this with one SFTP channel (stat + ranged read) instead of transferring
@@ -1455,14 +1404,13 @@ class OuterHost(OuterHostInterface):
         """
         if self.is_local:
             file_size = path.stat().st_size
-            read_size = _bounded_tail_read_size(file_size, start_byte, max_byte_count)
-            if read_size == 0:
+            if start_byte >= file_size:
                 return FileTailRead(file_size=file_size, content=b"")
             with path.open("rb") as local_file:
                 local_file.seek(start_byte)
                 # Bounded by the size just stat'd, like the remote path, so a file
                 # being appended to cannot overshoot it.
-                return FileTailRead(file_size=file_size, content=local_file.read(read_size))
+                return FileTailRead(file_size=file_size, content=local_file.read(file_size - start_byte))
         with (
             self._notify_on_connection_error(),
             self._translate_ssh_errors(
@@ -1472,22 +1420,20 @@ class OuterHost(OuterHostInterface):
             ),
         ):
             return self._read_file_tail_from_offset_with_transient_retry(
-                str(path), start_byte, max_byte_count, remaining_read_timeout(None)
+                str(path), start_byte, remaining_read_timeout(None)
             )
 
     @retry_on_transient_ssh_error
     def _read_file_tail_from_offset_with_transient_retry(
-        self, remote_filename: str, start_byte: int, max_byte_count: int | None, timeout_seconds: float | None
+        self, remote_filename: str, start_byte: int, timeout_seconds: float | None
     ) -> FileTailRead:
         self._ensure_connected()
         self._reverify_lock_if_channel_died()
         with self._disconnect_on_transient_ssh_error(f"reading the tail of {remote_filename}"):
-            return self._read_file_tail_from_offset_via_paramiko(
-                remote_filename, start_byte, max_byte_count, timeout_seconds
-            )
+            return self._read_file_tail_from_offset_via_paramiko(remote_filename, start_byte, timeout_seconds)
 
     def _read_file_tail_from_offset_via_paramiko(
-        self, remote_filename: str, start_byte: int, max_byte_count: int | None, timeout_seconds: float | None
+        self, remote_filename: str, start_byte: int, timeout_seconds: float | None
     ) -> FileTailRead:
         """Stat and ranged-read a remote file on a dedicated paramiko SFTP channel."""
         with self._open_sftp_channel(timeout_seconds) as sftp:
@@ -1497,8 +1443,7 @@ class OuterHost(OuterHostInterface):
                 if _is_missing_file_sftp_error(e):
                     raise FileNotFoundError(f"File not found: {remote_filename}") from e
                 raise
-            read_size = _bounded_tail_read_size(file_size, start_byte, max_byte_count)
-            if read_size == 0:
+            if start_byte >= file_size:
                 return FileTailRead(file_size=file_size, content=b"")
             # A rotating file can be unlinked between the stat and the open.
             try:
@@ -1512,8 +1457,9 @@ class OuterHost(OuterHostInterface):
                 # A range larger than one request is pipelined with prefetch, as
                 # ``SFTPClient.getfo`` does; ``prefetch`` queues from the current
                 # position, so the seek bounds it.
+                read_size = file_size - start_byte
                 if read_size > remote_file.MAX_REQUEST_SIZE:
-                    remote_file.prefetch(start_byte + read_size)
+                    remote_file.prefetch(file_size)
                 # One request's worth per read, as ``getfo`` does: paramiko grows a
                 # larger sized read by bytes concatenation, copying the whole buffer
                 # per chunk, which balloons memory on a multi-megabyte range.

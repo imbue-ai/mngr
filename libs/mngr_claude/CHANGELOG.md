@@ -6,26 +6,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed: The claude common transcript dropped messages the user sent while a turn was running, so `mngr transcript` and the ATIF trajectory showed the agent replying to a message nobody had sent; each such message is now recorded as a user step in order.
-
-## [v0.3.0] - 2026-10-22
-
 ### Added
 
 - Added: `update_policy` field on the claude agent type (`AUTO` / `ASK` / `NEVER`, default `NEVER`) governs Claude Code's background auto-updater via `DISABLE_AUTOUPDATER=1`. **Behavior change:** local claude agents now disable the auto-updater by default; previously the per-agent config inherited your `~/.claude.json` `autoUpdates` value. Set `update_policy = "AUTO"` to opt back in. Ignored in shared (`isolate_local_config_dir = false`) mode.
 - Added: `version` field pins a specific Claude Code version.
 - Added: When creating a local claude agent on macOS, if mngr detects you authenticate Claude Code with a claude.ai subscription (OAuth credentials) and config-dir isolation is enabled, it warns that the isolated agent's credentials will go stale and prints the exact command to disable isolation.
 - Added: `auto_disable_questions` field on `ClaudeAgentConfig` — when true, appends `--disallowed-tools AskUserQuestion` so unattended agents can't block on questions (recent Claude Code releases no longer treat AskUserQuestion as a permission prompt, so `auto_allow_permissions` alone no longer covers it). Preserves any existing `--disallowed-tools` in `cli_args`.
-- Added: Send-time dialog handling (`mngr_claude.dialogs`): before a send, mngr dismisses dialogs that Escape closes harmlessly, clears a shell-mode strand, and answers dialogs opted into via the new `sensibly_deal_with_dialogs` setting (nicknames from `SELECTABLE_NICKNAMES`, or `ALL_KNOWN_DIALOGS`) by selecting the option named for each; `ALL_KNOWN_AND_UNKNOWN_DIALOGS` also presses `1` on an unrecognised numbered selector. Anything else refuses the send with an error naming what is in the way. `post_submit_dialog_observe_seconds` (default 2.0) sets how long mngr waits for the pane to change after each key it presses at a dialog.
-- Added: Context compaction support for `mngr autocompact`: idle time and context-token count read from the transcript tail (`ClaudeCompactionTranscriptScanner`), `/compact <instructions>`, and `ClaudeAgent.request_compaction` (bounded message-lock wait, idle re-check).
-- Added: `PreCompact` / `PostCompact` hooks record compaction state in the agent state dir (a `compacting` marker while one runs, `last_compaction.json` after) and emit activity events. New agents only.
-- Added: `output_style` (written as `outputStyle` in the managed settings, validated against `.claude/output-styles/` at provisioning) and `append_system_prompt` (a list joined into one `--append-system-prompt` flag, so `__extend` stacks roles) claude agent settings.
-- Added: Provisioning installs a Chat-context `meta+q` -> `chat:cancel` keybinding in the user-scope `keybindings.json`, never overriding an existing `meta+q` (`ensure_chat_cancel_tap_keybinding`, `is_tap_binding_active`).
-- Added: `mark_claude_agent_idle` clears an agent's `active` / `permissions_waiting` markers and emits an activity event, for clients that interrupt a turn out-of-band.
-- Added: Provisioning seeds `model_state.json` in the agent state dir from the model, effort level and fast mode set in `settings_overrides` (skipped when no model is set).
-- Added: The interactive claude agent's stderr is also copied (via `tee`) to `stderr.log` in the agent state dir, truncated per launch. The pane's shell must now support process substitution (bash/zsh/ksh).
 
 ### Changed
 
@@ -37,35 +23,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr create` no longer requires `.claude/settings.local.json` to be gitignored across the board (now enforced only by the `claude_subagent_proxy` plugin when it actually rewrites the file).
 - Changed: A user-supplied `--settings` in `cli_args` / `agent_args` now passes through to `claude` verbatim. In `use_env_config_dir` mode (which uses a private managed `--settings` file) a user-supplied `--settings` is now rejected at provision with a `UserInputError`.
 - Changed: `mngr message` to a claude agent now confirms submission by finding the message's own content in claude's durable transcripts (both the native session JSONL and mngr's raw `logs/claude_transcript/events.jsonl` copy), instead of the tmux `wait-for` signal — whose latch-on-unconsumed-signal semantics could cause a send to report success for a message that was never submitted. Emoji-only / punctuation messages fall back to observing any new enqueue/user record; slash commands (`/clear`, `/compact`, …) use a relaxed policy that never hard-fails. Existing agents are fully supported without reprovisioning.
-- Changed: The claude common transcript now emits ATIF-shaped `header` / `step` / `observation` records, replacing `user_message` / `assistant_message` / `tool_result`: full-fidelity tool arguments and outputs, thinking as `reasoning_content`, one step per LLM inference (lines grouped by `message.id`), native Task subagents marked `is_sidechain`, compactions as `context_management` system steps, and a per-agent-unique header `event_id`. The newest in-flight inference is held back until complete, so a live reader of the common transcript lags by up to one inference.
-- Changed: Renamed the `auto_dismiss_dialogs` setting to `auto_dismiss_dialogs_at_startup`; the old name is rejected as an unknown field.
-- Changed: `imbue.mngr_claude.stream_json` is now an `anthropic`-free facade over the new `stream_json_impl`, so the SDK loads only when a Claude stream is produced or consumed (cutting `mngr` startup imports). `validate_stream_event`, `classify_stream_event`, `parse_stream_event` and `parse_assistant_message` are typed `Any` on the facade; import them from `stream_json_impl` for precise types.
-- Changed: mngr's seeded Claude config turns off the LSP-plugin install offer (all config modes) and the diff sidebar (`diffSidebarOpen`, isolated config dirs); unattended agents also get `feedbackDrafts` set to `"off"` and `feedbackSurveyRate` to `0`.
-- Changed: `mngr message` with an unrecognized slash command (e.g. `/zzz`) returns in about 2 seconds with a warning that Claude rejected it, instead of waiting out the relaxed window and reporting success.
-- Changed: Message sends spawn far fewer processes (16 to 6, together with the mngr changes).
-- Changed: Lower idle CPU cost of the transcript watchers: `common_transcript.sh` skips conversion when the raw transcript is unchanged, and `stream_transcript.sh` counts all session files in one `wc` per poll and finds a not-yet-written session file with a shell glob instead of running `find` every second.
-- Changed: `imbue-mngr-claude` depends on `imbue-overlay` for config merging (the PyPI name `overlay` is an unrelated project).
-
-### Removed
-
-- Removed: The `DialogIndicator` family, superseded by `mngr_claude.dialogs`.
 
 ### Fixed
 
 - Fixed: In shared mode (`isolate_local_config_dir = false`), `CLAUDE_CONFIG_DIR` is now propagated only when your shell already exported it; left unset otherwise so claude resolves its real `~/.claude.json` (onboarding state, theme, trust, history). A prior fix had forced it to `~/.claude`, which pointed claude at an inner stub file lacking the onboarding state — so every new shared-mode agent re-showed the theme/onboarding screen.
 - Fixed: In shared mode, mngr's hooks are now installed when shared mode is set via the current `isolate_local_config_dir = false` flag (previously they were only installed via the deprecated `use_env_config_dir = true` alias).
-- Fixed: A claude agent stays RUNNING through a turn started by a queued prompt or background-task notification, and through a continuation after another Stop hook blocks the turn end (exit 2); previously it read WAITING while working.
-- Fixed: A claude agent whose turn ended on an API error (usage limit, rate limit, prompt too long) now reports WAITING instead of staying RUNNING forever (`StopFailure` hook); picked up on next provisioning.
-- Fixed: `mngr list` reports a claude agent blocked on a permission dialog or `AskUserQuestion` as WAITING rather than RUNNING, and no longer shows a `plugin.claude.waiting_reason` field on non-claude agents.
-- Fixed: Restart deadlocks from a stale `claude_session_id` ("No conversation found" then "Session ID ... is already in use"): the resume gate checks the exact session file claude resumes, and the launch chain falls back to `--resume <agent-uuid>`. Applies after re-provisioning.
-- Fixed: A `claude` run from inside the agent (e.g. a Bash tool call) no longer fires mngr's hooks against the agent's state, which overwrote `claude_session_id` and cleared the `active` marker mid-turn.
-- Fixed: In conversations with prior turns, whose echoed messages carry the same `❯` glyph as the input box, sends are no longer typed into an open dialog (e.g. `/config`, `/model`, `/theme`) or appended to a past turn; the input box is located by its position at the bottom of the pane.
-- Fixed: `!`-prefixed messages no longer strand the agent in shell mode: `!<command>` runs the command, a bare `!` is inert, the input box's dim hint text is no longer mistaken for typed text, and a human's unsubmitted `!<command>` refuses the send with an actionable error.
-- Fixed: A message sent after a cancelled `/compact` no longer becomes compaction instructions; the leftover `/compact` is cleared from the input box first.
-- Fixed: Background tasks (activity tracking, transcript streaming and conversion, response streaming) keep running after the agent is renamed; older agents pick this up after their next `mngr start`.
-- Fixed: Claude's streaming output reaches the stream buffer in terminals (e.g. on macOS) where Claude draws the content-block marker as U+23FA instead of U+25CF; streaming was silently off there.
-- Fixed: The common transcript no longer contains empty "(no content)" turns from thinking-only messages or fake user turns from slash-command plumbing, and tool results converted in a later pass carry the real tool name instead of "unknown".
-- Fixed: Threads the plugin starts (now via `start_mngr_thread`) no longer leak their gevent Hub and its pipe pair for the life of the process.
 
 ## [v0.2.17] - 2026-06-18
 

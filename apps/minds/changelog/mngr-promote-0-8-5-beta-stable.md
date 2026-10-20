@@ -1,0 +1,1 @@
+- Promote minds 0.8.5 to the beta and stable channels: both desktop channels serve ToDesktop build `2610066k8bzbhej` (mac and Linux, 100%), and browser-created beta and stable workspaces pin to `minds-v0.8.5`. Every channel now serves 0.8.5.

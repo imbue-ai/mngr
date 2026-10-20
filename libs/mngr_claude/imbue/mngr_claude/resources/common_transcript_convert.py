@@ -94,29 +94,6 @@ _COMMAND_PLUMBING_PREFIXES = (
 )
 
 
-_QUEUED_COMMAND_ATTACHMENT_TYPE = "queued_command"
-_QUEUED_PROMPT_MODE = "prompt"
-# Where a queued prompt came from (``origin.kind``). The user's own typing is "human"; an older
-# claude omits the origin. Anything else (another session's message, "peer") is nobody typing here.
-_USER_ORIGIN_KINDS = (None, "human", "auto-continuation")
-_ABSORBED_MID_TURN_REASON = "absorbed_mid_turn"
-
-
-def _is_absorbed_mid_turn(raw: Mapping[str, Any]) -> bool:
-    """Whether a raw line is the queue operation that moved a queued message into the running turn."""
-    return (
-        raw.get("type") == "queue-operation"
-        and raw.get("operation") == "remove"
-        and raw.get("reason") == _ABSORBED_MID_TURN_REASON
-        and _is_non_empty_str(raw.get("commandUuid"))
-        and _is_non_empty_str(raw.get("timestamp"))
-    )
-
-
-def _is_non_empty_str(value: object) -> bool:
-    return isinstance(value, str) and bool(value)
-
-
 def _is_command_plumbing(text: str) -> bool:
     return text.lstrip().startswith(_COMMAND_PLUMBING_PREFIXES)
 
@@ -527,53 +504,9 @@ def _tool_names_by_call_id(records: Sequence[Mapping[str, Any]]) -> dict[str, st
     return names
 
 
-def _mid_turn_user_record(raw: Mapping[str, Any], absorbed_at_by_command: Mapping[str, str]) -> dict[str, Any] | None:
-    """A typed user line standing in for a message the user sent while a turn was running, or None.
-
-    Claude Code adds such a message to the running turn alongside the next tool result and records
-    it only as a ``queued_command`` attachment, never as a user line. Only the ``prompt`` mode
-    carries a message; the ``task-notification`` mode is a background-task notice. The prompt is a
-    string, or a list of content blocks when the user pasted an image. A prompt the user did not type
-    (another session's message) is marked ``isMeta``, so it becomes a system step.
-
-    The attachment is stamped when the message was queued. The stand-in is stamped when the message
-    left the queue for the turn (the ``remove`` queue operation Claude Code writes just before the
-    attachment), so ordering by timestamp places it where the agent received it.
-    """
-    attachment = raw.get("attachment")
-    if not isinstance(attachment, dict) or attachment.get("type") != _QUEUED_COMMAND_ATTACHMENT_TYPE:
-        return None
-    if attachment.get("commandMode") != _QUEUED_PROMPT_MODE:
-        return None
-    prompt = attachment.get("prompt")
-    if not isinstance(prompt, (str, list)) or not _extract_text_content(prompt).strip():
-        return None
-    source_uuid = attachment.get("source_uuid")
-    if not _is_non_empty_str(source_uuid):
-        return None
-    absorbed_at = absorbed_at_by_command.get(source_uuid)
-    if not raw.get("uuid") or absorbed_at is None:
-        return None
-    origin = attachment.get("origin")
-    origin_kind = origin.get("kind") if isinstance(origin, dict) else None
-    is_from_user = not attachment.get("isMeta") and origin_kind in _USER_ORIGIN_KINDS
-    return {
-        "type": "user",
-        "uuid": raw["uuid"],
-        "timestamp": absorbed_at,
-        "isSidechain": _is_sidechain(raw),
-        "isMeta": not is_from_user,
-        "message": {"role": "user", "content": prompt},
-    }
-
-
 def _read_conversation_records(input_file: str) -> list[Mapping[str, Any]]:
-    """Parse the raw transcript into its usable user/assistant records, in file order.
-
-    A message the user sent mid-turn is included as a user record (see ``_mid_turn_user_record``).
-    """
+    """Parse the raw transcript into its usable user/assistant records, in file order."""
     records: list[Mapping[str, Any]] = []
-    absorbed_at_by_command: dict[str, str] = {}
     with open(input_file, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
@@ -584,14 +517,6 @@ def _read_conversation_records(input_file: str) -> list[Mapping[str, Any]]:
             except json.JSONDecodeError:
                 continue
             if not isinstance(raw, dict):
-                continue
-            if _is_absorbed_mid_turn(raw):
-                absorbed_at_by_command[raw["commandUuid"]] = raw["timestamp"]
-                continue
-            if raw.get("type") == "attachment":
-                mid_turn_record = _mid_turn_user_record(raw, absorbed_at_by_command)
-                if mid_turn_record is not None:
-                    records.append(mid_turn_record)
                 continue
             if raw.get("type") not in ("user", "assistant"):
                 # Noise: progress, file-history-snapshot, system, result, etc.

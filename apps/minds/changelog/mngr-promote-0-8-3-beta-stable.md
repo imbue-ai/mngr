@@ -1,0 +1,3 @@
+- Promoted minds 0.8.3 to the beta and stable channels: both desktop channels move to ToDesktop build `2610016vw4mdxi8` (100%, mac only) and both web channels pin browser creates to `minds-v0.8.3`. Linux on beta and stable keeps serving 0.7.3, because the 0.8.x `.deb` is still a differently named package (`imbue-studio`) with no `Replaces`/`Conflicts: minds`.
+
+- `docs/deploy/history/minds-v0.8.3.md` records the headroom bake for the promotion (20 more production rows at `minds-v0.8.3`, all verified) and the promotion itself; `next_deploy.md` drops the staging-rehearsal item, turns the promotion item into the release-notes note about opening each shared workspace's share panel, and adds a production services deploy so the stable mac download fallback goes live.

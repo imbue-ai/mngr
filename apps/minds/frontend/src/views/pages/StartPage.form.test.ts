@@ -44,7 +44,6 @@ describe("the where-to-run links on the live page", () => {
     const modal = openCreateFormModal(view()) as AnyVnode;
     const form = collectVnodes(modal).find((node) => node.tag === CreatePage) as AnyVnode;
     expect(attrsOf(form).initialPreset).toBe(preset);
-    expect(attrsOf(form).isOnboardingDrivenByAgent).toBe(true);
 
     (attrsOf(modal).onClose as () => void)();
     const nodes = collectVnodes(view());

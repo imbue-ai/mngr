@@ -9,8 +9,6 @@ The app's *supported version* is the template release this build is pinned to; a
 
 A workspace is *out of date* only when both versions can be read and the workspace's is on an earlier minor release than the app's; a prerelease belongs to the minor release it precedes.
 A workspace whose version sorts below the app's within the same minor release has a *patch available*: it is never prompted for, and is updated only when the user asks for it.
-A workspace whose version sorts below a fixed *security floor* (`minds-v0.9.0`) has a *security update* when the app's supported version is at or above that floor: it is prompted for however small the gap, ahead of the minor-release rule above.
-The floor is raised only by a release that fixes a security issue, and always sits above the in-place cutoff.
 A workspace whose own version sorts below a fixed cutoff (`minds-v0.3.10`) *needs recreation*: no update can be applied to it in place, and the way forward is a new workspace its work is migrated into.
 Every other case is *unknown*, and the reading names which side had no version.
 Unknown is never a weaker form of out of date.

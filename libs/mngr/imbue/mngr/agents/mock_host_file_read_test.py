@@ -29,11 +29,9 @@ class InMemoryHostFileReader(HostFileReadInterface):
             raise FileNotFoundError(f"File not found: {path}")
         return self.contents_by_path[path]
 
-    def read_file_tail_from_offset(
-        self, path: Path, start_byte: int, max_byte_count: int | None = None
-    ) -> FileTailRead:
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
         content = self.read_file(path)
-        tail = content[start_byte : None if max_byte_count is None else start_byte + max_byte_count]
+        tail = content[start_byte:]
         with self._lock:
             self.content_bytes_read += len(tail)
             self.tail_read_count += 1

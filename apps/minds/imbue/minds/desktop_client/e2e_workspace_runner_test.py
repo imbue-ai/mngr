@@ -22,12 +22,12 @@ from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_FIELD_SELE
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_INPUT_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_OVERLAY_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _build_electron_env
+from imbue.minds.desktop_client.e2e_workspace_runner import _chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import _drain_byte_stream_to_loguru
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
-from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
+from imbue.minds.desktop_client.e2e_workspace_runner import _wait_for_workspace_ready_or_failure
 from imbue.minds.desktop_client.e2e_workspace_runner import open_terminal_from_launcher
 from imbue.minds.desktop_client.e2e_workspace_runner import start_new_chat_from_launcher
-from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_workspace_ready_or_failure
 
 # A workspace-ready URL (matches the agent-subdomain pattern) and a still-pending
 # backend URL (does not), used to drive the waiter's success/failure branches.
@@ -146,7 +146,7 @@ def test_wait_returns_the_content_page_that_reached_the_workspace() -> None:
     creating = _FakeCreatingPage(urls=[_PENDING_URL], is_visible_results=[False], candidate_pages=[workspace])
     # Returns the workspace frame once its agent-subdomain URL is reached (the
     # chrome page that drove the form -- ``creating`` -- stays on /create-ish).
-    result = wait_for_workspace_ready_or_failure(
+    result = _wait_for_workspace_ready_or_failure(
         cast(Browser, creating.browser), cast(Page, creating), timeout_seconds=5
     )
     assert result is cast(Frame, workspace.main_frame)
@@ -161,7 +161,7 @@ def test_wait_returns_for_https_workspace_url() -> None:
     https_ready_url = "https://host-0123456789abcdef0123456789abcdef.localhost:8421/"
     workspace = _FakeContentPage(urls=[https_ready_url])
     creating = _FakeCreatingPage(urls=[_PENDING_URL], is_visible_results=[False], candidate_pages=[workspace])
-    result = wait_for_workspace_ready_or_failure(
+    result = _wait_for_workspace_ready_or_failure(
         cast(Browser, creating.browser), cast(Page, creating), timeout_seconds=5
     )
     assert result is cast(Frame, workspace.main_frame)
@@ -177,7 +177,7 @@ def test_wait_raises_with_surfaced_error_on_failure_view() -> None:
         error_message="unknown or invalid runtime name: runsc",
     )
     with pytest.raises(WorkspaceCreateAttemptFailedError) as exc_info:
-        wait_for_workspace_ready_or_failure(cast(Browser, creating.browser), cast(Page, creating), timeout_seconds=5)
+        _wait_for_workspace_ready_or_failure(cast(Browser, creating.browser), cast(Page, creating), timeout_seconds=5)
     # The surfaced error text rides along so the failure is diagnosable.
     assert "runsc" in str(exc_info.value)
 
@@ -192,7 +192,7 @@ def test_wait_recovers_from_context_destroyed_during_redirect() -> None:
         is_visible_results=[PlaywrightError("Execution context was destroyed")],
         candidate_pages=[workspace],
     )
-    result = wait_for_workspace_ready_or_failure(
+    result = _wait_for_workspace_ready_or_failure(
         cast(Browser, creating.browser), cast(Page, creating), timeout_seconds=5
     )
     assert result is cast(Frame, workspace.main_frame)
@@ -204,7 +204,7 @@ def test_wait_times_out_when_neither_state_reached() -> None:
         urls=[_PENDING_URL], is_visible_results=[False], candidate_pages=[_FakeContentPage(urls=[_PENDING_URL])]
     )
     with pytest.raises(PlaywrightTimeoutError):
-        wait_for_workspace_ready_or_failure(cast(Browser, creating.browser), cast(Page, creating), timeout_seconds=0)
+        _wait_for_workspace_ready_or_failure(cast(Browser, creating.browser), cast(Page, creating), timeout_seconds=0)
 
 
 def test_read_failure_message_returns_trimmed_text() -> None:
@@ -250,7 +250,7 @@ _TERMINAL_PAGE_URL = f"https://terminal-x7k9q2w1.{_WORKSPACE_AGENT_ID}.localhost
 
 
 class _FakeWorkspaceFrame:
-    """The workspace frame: ``chat_frame`` scans the frames under it and polls with ``wait_for_timeout``.
+    """The workspace frame: ``_chat_frame`` scans the frames under it and polls with ``wait_for_timeout``.
 
     ``child_frame_lists`` is consumed one entry per scan; the final entry repeats, so a chat frame
     that attaches after N polls is a list whose later entries include it.
@@ -272,7 +272,7 @@ def test_chat_frame_is_the_child_whose_path_is_the_chat_agent_id() -> None:
     terminal = _FakeFrame(urls=[_TERMINAL_PAGE_URL])
     chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
     workspace = _FakeWorkspaceFrame(child_frame_lists=[[terminal, chat]])
-    assert chat_frame(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
+    assert _chat_frame(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
     assert workspace.wait_for_timeout_calls == 0
 
 
@@ -282,7 +282,7 @@ def test_chat_frame_is_found_under_the_chat_root_the_desktop_frames() -> None:
     chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
     root = _FakeFrame(urls=[f"https://chat-x7k9q2w1.{_WORKSPACE_AGENT_ID}.localhost:8421/"], child_frames=[chat])
     workspace = _FakeWorkspaceFrame(child_frame_lists=[[root]])
-    assert chat_frame(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
+    assert _chat_frame(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
 
 
 def test_chat_frame_polls_until_the_chat_attaches() -> None:
@@ -290,7 +290,7 @@ def test_chat_frame_polls_until_the_chat_attaches() -> None:
     # there on the first scan; the poll runs through Playwright's own wait.
     chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
     workspace = _FakeWorkspaceFrame(child_frame_lists=[[], [chat]])
-    assert chat_frame(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
+    assert _chat_frame(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
     assert workspace.wait_for_timeout_calls == 1
 
 
@@ -299,13 +299,13 @@ def test_chat_frame_ignores_the_agent_id_in_a_host_name() -> None:
     # and its service iframes carry the agent id in their host names, on path ``/``.
     workspace = _FakeWorkspaceFrame(child_frame_lists=[[_FakeFrame(urls=[_WORKSPACE_SHELL_URL])]])
     with pytest.raises(WorkspaceFlowError):
-        chat_frame(cast(Frame, workspace), timeout_seconds=0)
+        _chat_frame(cast(Frame, workspace), timeout_seconds=0)
 
 
 def test_chat_frame_raises_when_no_chat_opens_in_time() -> None:
     workspace = _FakeWorkspaceFrame(child_frame_lists=[[_FakeFrame(urls=[_TERMINAL_PAGE_URL])]])
     with pytest.raises(WorkspaceFlowError):
-        chat_frame(cast(Frame, workspace), timeout_seconds=0)
+        _chat_frame(cast(Frame, workspace), timeout_seconds=0)
 
 
 class _FakeLauncherWorkspace(_FakeWorkspaceFrame):
@@ -415,7 +415,7 @@ def test_start_new_chat_returns_the_chat_the_row_opened_and_not_the_welcome_chat
     chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
     workspace = _FakeLauncherWorkspace(is_launcher_showing=False, existing_chats=[welcome], chat=chat)
     assert start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
-    assert chat_frame(cast(Frame, workspace), timeout_seconds=0) is cast(Frame, welcome)
+    assert _chat_frame(cast(Frame, workspace), timeout_seconds=0) is cast(Frame, welcome)
 
 
 def test_start_new_chat_tells_the_welcome_chat_apart_by_its_id_when_its_url_changes_after_the_press() -> None:
@@ -483,18 +483,3 @@ def test_drain_promotes_gpu_and_signal_lines_to_info() -> None:
         ("INFO", "[electron-err] [lifecycle] SIGTERM received, requesting quit (uptime=1.0s)"),
         ("INFO", "[electron-err] /path/to/electron exited with signal SIGTRAP"),
     ]
-
-
-def test_the_electron_env_prefills_the_template_only_when_one_is_given(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("MINDS_WORKSPACE_GIT_URL", raising=False)
-    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
-
-    with_template = _build_electron_env(Path("/tmp/template"), {"MINDS_DATA_HOME": "/tmp/data-home"})
-    assert with_template["MINDS_WORKSPACE_GIT_URL"] == "/tmp/template"
-    assert with_template["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] == "1"
-    assert with_template["MINDS_DATA_HOME"] == "/tmp/data-home"
-
-    without_template = _build_electron_env(None, {"MINDS_DATA_HOME": "/tmp/data-home"})
-    assert "MINDS_WORKSPACE_GIT_URL" not in without_template
-    assert "MINDS_USE_LOCAL_WORKSPACE_DEFAULTS" not in without_template
-    assert without_template["MNGR_ROOT_NAME"] == "mngr"

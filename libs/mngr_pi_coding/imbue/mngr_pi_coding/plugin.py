@@ -1314,12 +1314,7 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     reason is ``END_OF_TURN`` (the agent is idle). Wired through the same shared
     ``classify_waiting_reason`` the other plugins use, so the single-value result
     is a real extension point if pi ever gains an approval gate.
-
-    Field generators run for every listed agent whatever its type, so an agent of
-    another type gets no field rather than a verdict read off markers it never writes.
     """
-    if not isinstance(agent, PiCodingAgent):
-        return None
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
     is_active = host.path_exists(agent_dir / _ACTIVE_MARKER_NAME)
     return classify_waiting_reason(is_active, is_blocked_on_permission=False)

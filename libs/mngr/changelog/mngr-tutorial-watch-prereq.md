@@ -1,0 +1,5 @@
+The tutorial blocks that use `watch` now name the macOS install, and the tests that run them skip when `watch` is absent instead of failing obscurely.
+
+`watch(1)` is GNU (procps) and macOS does not ship it, so a Mac user following the tutorial got `command not found` from our own instructions. It is not an mngr dependency -- no mngr command runs it -- so it stays out of the dependency registry; the four tutorial blocks that recommend it now say `on macOS: brew install watch`.
+
+On the test side the missing binary was invisible. Each block is wrapped in `|| true`, so `watch: command not found` became an empty capture: `test_list_watch_mode` failed claiming its output lacked "No agents found", and the other three passed while exercising nothing. A `require_binary` helper now fails them up front with a message that names the install. It fails rather than skips deliberately: a skip would leave the suite green if a CI image ever lost the binary, which is the same silent-vacuum this change exists to remove.

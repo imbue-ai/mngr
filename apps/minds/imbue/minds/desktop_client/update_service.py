@@ -1,8 +1,12 @@
-"""Dispatches update runs and closes them out; the one path both the routes and the scheduler use.
+"""Starts, schedules, and closes out update runs; every action is one run of the workspace's update command.
 
-The liveness poll here is the app's only reader of an in-flight run: it moves the row and lands the verdict.
+The workspace owns its schedule: arming writes a file and a cron line into it, and its own
+dispatcher starts the run inside the window, so nothing here waits for a window or holds a
+workspace up for one. The liveness poll here is the app's only reader of an in-flight run: it
+moves the row and lands the verdict.
 """
 
+import shlex
 import threading
 from collections.abc import Callable
 from datetime import datetime
@@ -25,26 +29,29 @@ from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
-from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROBE_SCRIPT
-from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
-from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
-from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.in_workspace_mngr import FAILURE_DETAIL_MAX_CHARS
-from imbue.minds.desktop_client.skill_chat import SkillChatLaunch
-from imbue.minds.desktop_client.skill_chat import SkillChatLaunchOutcome
-from imbue.minds.desktop_client.skill_chat import generate_chat_name
-from imbue.minds.desktop_client.skill_chat import launch_skill_chat
+from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_command
+from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
 from imbue.minds.desktop_client.update_apply_window import UpdateAgentLiveness
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
-from imbue.minds.desktop_client.update_chat import UPDATE_SKILL_NAME
-from imbue.minds.desktop_client.update_chat import build_update_chat_message
-from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
-from imbue.minds.desktop_client.update_scheduler import ScheduledRunConditions
+from imbue.minds.desktop_client.update_status import FAILURE_UPDATE_VERDICTS
 from imbue.minds.desktop_client.update_status import LANDED_UPDATE_VERDICTS
 from imbue.minds.desktop_client.update_status import UpdateActivity
+from imbue.minds.desktop_client.update_status import UpdateArmOutcome
 from imbue.minds.desktop_client.update_status import UpdateDispatchFailure
 from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.minds.desktop_client.update_workspace_command import UpdateCommandCall
+from imbue.minds.desktop_client.update_workspace_command import UpdateCommandReach
+from imbue.minds.desktop_client.update_workspace_command import UpdateCommandResult
+from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceFacts
+from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceSettings
+from imbue.minds.desktop_client.update_workspace_command import arm_update
+from imbue.minds.desktop_client.update_workspace_command import cancel_update_schedule
+from imbue.minds.desktop_client.update_workspace_command import parse_update_command_result
+from imbue.minds.desktop_client.update_workspace_command import parse_update_workspace_facts
+from imbue.minds.desktop_client.update_workspace_command import read_update_facts
+from imbue.minds.desktop_client.update_workspace_command import start_update_now
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostActionOutcome
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDetector
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
@@ -52,10 +59,6 @@ from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostState
-
-_GATE_PROBE_TIMEOUT_SECONDS: Final[float] = 60.0
 
 # One warm ``mngr exec`` per in-flight run per pass; tight enough that a dead
 # agent's row unlocks in seconds rather than at the detection sweep's next wake.
@@ -71,11 +74,15 @@ _POLLED_ACTIVITIES: Final[frozenset[UpdateActivity]] = frozenset(
     {UpdateActivity.RUNNING, UpdateActivity.WAITING, UpdateActivity.APPLYING}
 )
 
-# REFUSED counts: retrying it unwatched tomorrow would just repeat. ALREADY_CURRENT
-# does not: a no-op is the expected outcome for a stale label or an unreadable version.
-_FAILURE_VERDICTS: Final[frozenset[UpdateVerdict]] = frozenset(
-    {UpdateVerdict.STUCK, UpdateVerdict.REFUSED, UpdateVerdict.NEEDS_RECREATION}
-)
+# The new chat's page opens with the provider chooser up (the chat app's ``open=providers`` key).
+_SIGN_IN_CHAT_PATH: Final[str] = "/?open=providers"
+
+# The window opens only once the user's client is connected to the workspace, which the
+# press that asked for it has just navigated into; the workspace's layout CLI refuses until then.
+_SIGN_IN_OPEN_ATTEMPTS: Final[int] = 15
+_SIGN_IN_OPEN_INTERVAL_SECONDS: Final[int] = 2
+_SIGN_IN_OPENED_SENTINEL: Final[str] = "MINDS_SIGN_IN_CHAT_OPENED"
+_SIGN_IN_TIMEOUT_SECONDS: Final[float] = 90.0
 
 
 class UpdateDispatchOutcome(UpperCaseStrEnum):
@@ -83,19 +90,21 @@ class UpdateDispatchOutcome(UpperCaseStrEnum):
 
     DISPATCHED = auto()
     ALREADY_RUNNING = auto()
+    """An update was already under way there; the row now reports that one."""
+    NEEDS_SIGN_IN = auto()
+    """The workspace has no signed-in AI account its update chat could run on."""
     UNSUPPORTED = auto()
     """The workspace predates the update-self skill; there is nothing to run."""
     START_FAILED = auto()
-    """The launch could not reach the workspace, and its host would not start.
-
-    The start's own diagnosis says why when it gave one.
-    """
+    """The command could not reach the workspace, and its host would not start; the start says why."""
     UNREACHABLE = auto()
-    """The launch could not reach the workspace, even after it was started; mngr's account says why when it gave one."""
+    """The command could not reach the workspace, even after it was started."""
     SPAWN_FAILED = auto()
-    """The create did not land, or the launch was cut off partway.
+    """The workspace could not create the update chat; its words say why."""
+    UNCONFIRMED = auto()
+    """The command was cut off in the workspace, so whether the chat was made is unknown.
 
-    The workspace's verdict on the create, or mngr's account of the cut-off, says why when it gave one.
+    A chat that was made records its run, which the sweep adopts.
     """
 
 
@@ -103,6 +112,7 @@ class UpdateDispatchOutcome(UpperCaseStrEnum):
 # and the run slice records it, so the modal says the same thing whether it stayed open.
 DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, str]] = {
     UpdateDispatchOutcome.ALREADY_RUNNING: "An update is already running in this workspace.",
+    UpdateDispatchOutcome.NEEDS_SIGN_IN: "Sign in to an AI account in this workspace, then try again.",
     UpdateDispatchOutcome.UNSUPPORTED: (
         "This workspace is too old to update itself. Ask an agent inside it for help, "
         "or create a new workspace and migrate your work."
@@ -110,6 +120,9 @@ DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, str]] = {
     UpdateDispatchOutcome.START_FAILED: "Couldn't start this workspace to run the update.",
     UpdateDispatchOutcome.UNREACHABLE: "Couldn't reach this workspace to start the update.",
     UpdateDispatchOutcome.SPAWN_FAILED: "Couldn't start the update agent in this workspace.",
+    UpdateDispatchOutcome.UNCONFIRMED: (
+        "Couldn't confirm the update started in this workspace. If it did, it will show here shortly."
+    ),
 }
 
 # Recorded for a dispatch that raised rather than returned: no outcome names what went wrong.
@@ -119,16 +132,12 @@ _DISPATCH_RAISED_FAILURE: Final[UpdateDispatchFailure] = UpdateDispatchFailure(
 
 
 class UpdateDispatch(FrozenModel):
-    """What a dispatch did, and what the machine, mngr, or the host start said when it did not go out.
-
-    A carrier rather than the bare outcome: the enum names what failed, never
-    what was said about it.
-    """
+    """What a dispatch did, and what the workspace, mngr, or the host start said when it did not go out."""
 
     outcome: UpdateDispatchOutcome = Field(description="What the dispatch did")
     failure_detail: str = Field(
         default="",
-        description="What the machine, mngr, or the host start said about a failed dispatch, bounded; '' when "
+        description="What the workspace, mngr, or the host start said about a failed dispatch, bounded; '' when "
         "none said anything, and for every outcome that is not a failure",
     )
 
@@ -140,10 +149,84 @@ class UpdateDispatch(FrozenModel):
         return f"{self.outcome.value}: {self.failure_detail}"
 
 
-class OnUpdateRunFinishedCallback(Protocol):
-    """Told when a run ends; ``is_real_failure`` is a stall or a short-ending verdict."""
+class UpdateScheduleOutcome(UpperCaseStrEnum):
+    """What a call to :meth:`WorkspaceUpdateService.schedule_update` did."""
 
-    def __call__(self, agent_id: AgentId, *, is_real_failure: bool) -> None: ...
+    ARMED = auto()
+    NEEDS_SIGN_IN = auto()
+    NO_CRON = auto()
+    UNSUPPORTED = auto()
+    NOT_RUNNING = auto()
+    """The command could not reach the workspace: a schedule needs it running, through the window too."""
+    UNREACHABLE = auto()
+    """The command reached the workspace but gave no answer."""
+    FAILED = auto()
+
+
+SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME: Final[dict[UpdateScheduleOutcome, str]] = {
+    UpdateScheduleOutcome.NEEDS_SIGN_IN: "Sign in to an AI account in this workspace so it can update itself.",
+    UpdateScheduleOutcome.NO_CRON: "This workspace can't run scheduled updates. Update it now instead.",
+    UpdateScheduleOutcome.UNSUPPORTED: DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.UNSUPPORTED],
+    UpdateScheduleOutcome.NOT_RUNNING: (
+        "This workspace has to be running to schedule its update, and during the update window too. "
+        "Start it and try again."
+    ),
+    UpdateScheduleOutcome.UNREACHABLE: "Couldn't confirm the update was scheduled in this workspace.",
+    UpdateScheduleOutcome.FAILED: "Couldn't schedule the update in this workspace.",
+}
+
+
+class UpdateSchedule(FrozenModel):
+    """What a schedule (or cancel) did, and the workspace's own words when it did not."""
+
+    outcome: UpdateScheduleOutcome = Field(description="What the arm did")
+    failure_detail: str = Field(default="", description="The workspace's or mngr's words about a refusal, bounded")
+
+
+class UpdateSettingsSource(MutableModel):
+    """The app's current update values, as each command carries them into a workspace."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+    read_ceiling: Callable[[], str] = Field(frozen=True, description="The app's template ceiling")
+    read_update_window: Callable[[], tuple[int, int]] = Field(frozen=True, description="The configured window")
+    read_zone: Callable[[], str] = Field(frozen=True, description="The app host's IANA time zone, '' if unknown")
+    paths: InstallationPaths | None = Field(
+        frozen=True, description="Workspace data paths; None when backups are not configurable at all"
+    )
+
+    def is_backup_configured(self, agent_id: AgentId) -> bool:
+        """Whether this workspace has a canonical restic env, i.e. backups to fall back on.
+
+        A presence check only: this rides every update frame, and the env's contents are a password.
+        """
+        return self.paths is not None and has_canonical_env(self.paths, agent_id)
+
+    def settings_for(self, agent_id: AgentId) -> UpdateWorkspaceSettings:
+        window = self.read_update_window()
+        return UpdateWorkspaceSettings(
+            ceiling_ref=self.read_ceiling(),
+            window_start_hour=window[0],
+            window_end_hour=window[1],
+            zone=self.read_zone(),
+            is_backup_configured=self.is_backup_configured(agent_id),
+        )
+
+
+def read_workspace_update_facts(
+    mngr_caller: MngrCaller, workspace_address: str, settings: UpdateWorkspaceSettings
+) -> UpdateWorkspaceFacts | None:
+    """The detection sweep's one read of a workspace's updates; None when it did not answer."""
+    call = read_update_facts(mngr_caller, workspace_address, settings)
+    if call.reach is not UpdateCommandReach.ANSWERED or call.payload is None:
+        return None
+    return parse_update_workspace_facts(call.payload)
+
+
+def _command_result(call: UpdateCommandCall) -> UpdateCommandResult | None:
+    if call.reach is not UpdateCommandReach.ANSWERED or call.payload is None:
+        return None
+    return parse_update_command_result(call.payload)
 
 
 class OnUpdateLandedCallback(Protocol):
@@ -153,44 +236,34 @@ class OnUpdateLandedCallback(Protocol):
 
 
 class WorkspaceUpdateService(MutableModel):
-    """Dispatches updates and closes them out; the routes' and scheduler's shared engine."""
+    """Starts, schedules, and closes out updates; the routes' and the sweep's shared engine."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    state_store: WorkspaceUpdateStateStore = Field(frozen=True, description="Detection + run facts.")
-    schedule_store: UpdateScheduleStore = Field(frozen=True, description="Armed scheduled-update intents.")
+    state_store: WorkspaceUpdateStateStore = Field(frozen=True, description="Detection, run, and schedule facts.")
     detector: WorkspaceUpdateDetector = Field(frozen=True, description="Re-read a version after a run.")
     apply_window: UpdateApplyWindowManager = Field(frozen=True, description="Probes whether a run is still alive.")
     mngr_caller: MngrCaller = Field(frozen=True, description="Runs every in-workspace command.")
-    backend_resolver: BackendResolverInterface = Field(frozen=True, description="Discovery: hosts and their states.")
+    backend_resolver: BackendResolverInterface = Field(frozen=True, description="Places each workspace's host.")
+    settings_source: UpdateSettingsSource = Field(frozen=True, description="The app's current update values.")
+    minds_config: MindsConfig | None = Field(
+        frozen=True, description="Where a skipped release is recorded; None in a build with no settings storage"
+    )
     start_workspace: Callable[[AgentId], MindHostActionOutcome] = Field(
         frozen=True,
         description=(
-            "Brings a workspace's host up when the run's launch could not reach it, returning whether it is "
+            "Brings a workspace's host up when the command could not reach it, returning whether it is "
             "up and why not. The shared host lifecycle action, not a bare ``mngr start``: an update that wakes "
             "a machine the app had stopped must clear its unattended-recovery suppression, or the machine stays "
-            "unrecoverable for the rest of the session."
+            "unrecoverable for the rest of the session. The machine stays up afterwards."
         ),
-    )
-    paths: InstallationPaths | None = Field(
-        default=None, frozen=True, description="Workspace data paths; None when backups are not configurable at all."
     )
     # agent_id_str -> consecutive WAITING polls; only the poll thread touches it.
     _waiting_streak_by_agent: dict[str, int] = PrivateAttr(default_factory=dict)
     _poll_stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _is_polling_started: bool = PrivateAttr(default=False)
-    _on_run_finished_callbacks: list[OnUpdateRunFinishedCallback] = PrivateAttr(default_factory=list)
     _on_update_landed_callbacks: list[OnUpdateLandedCallback] = PrivateAttr(default_factory=list)
     _callbacks_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-
-    def add_on_run_finished_callback(self, callback: OnUpdateRunFinishedCallback) -> None:
-        """Register a callback told when a run ends, however it ended.
-
-        A registration rather than a field because the scheduler that wants it
-        is built FROM this service's bound methods, so it exists only afterwards.
-        """
-        with self._callbacks_lock:
-            self._on_run_finished_callbacks.append(callback)
 
     def add_on_update_landed_callback(self, callback: OnUpdateLandedCallback) -> None:
         """Register a callback told each run whose verdict says it landed an update.
@@ -200,31 +273,34 @@ class WorkspaceUpdateService(MutableModel):
         with self._callbacks_lock:
             self._on_update_landed_callbacks.append(callback)
 
+    def is_backup_configured(self, agent_id: AgentId) -> bool:
+        return self.settings_source.is_backup_configured(agent_id)
+
+    def _address(self, agent_id: AgentId) -> str:
+        return build_agent_address(agent_id, self.backend_resolver)
+
     def dispatch_update(self, agent_id: AgentId, *, target_override: str | None = None) -> UpdateDispatch:
-        """Start an update run in ``agent_id``, returning what happened.
+        """Start an update run in ``agent_id`` now, returning what happened.
 
-        ``target_override`` was confirmed at the app's version field when it was
-        chosen, whether the run goes out now or from a schedule.
-
-        The run slot is claimed before any remote work, so a concurrent dispatch
-        loses rather than starting a second update. Every non-dispatch exit
-        releases it in ``finally``: a row left on STARTING is never polled, so
-        nothing but an app restart could unlock it. The release records why the
-        run never went out, on the row every surface reads: the caller that
-        pressed the button may be gone by the time the answer comes back.
+        ``target_override`` was confirmed at the app's version field when it was chosen. The run
+        slot is claimed before any remote work, so a concurrent dispatch loses rather than starting
+        a second update. Every non-dispatch exit releases it in ``finally``: a row left on STARTING
+        is never polled, so nothing but an app restart could unlock it. The release records why the
+        run never went out, on the row every surface reads: the caller that pressed the button may
+        be gone by the time the answer comes back.
         """
-        chat_name = generate_chat_name(UPDATE_SKILL_NAME)
-        if not self.state_store.try_begin_run(
-            agent_id, chat_agent_name=chat_name, target_override=target_override or ""
-        ):
+        if not self.state_store.try_begin_run(agent_id, target_override=target_override or ""):
             return UpdateDispatch(outcome=UpdateDispatchOutcome.ALREADY_RUNNING)
         dispatch: UpdateDispatch | None = None
         try:
-            dispatch = self._start_claimed_run(agent_id, chat_name, target_override)
+            dispatch = self._start_claimed_run(agent_id, target_override or "")
             return dispatch
         finally:
             if dispatch is None:
                 self.state_store.release_failed_claim(agent_id, _DISPATCH_RAISED_FAILURE)
+            elif dispatch.outcome is UpdateDispatchOutcome.NEEDS_SIGN_IN:
+                # The row's sign-in state is the answer; a failure line beside it would say it twice.
+                self.state_store.release_failed_claim(agent_id, None)
             elif dispatch.outcome is not UpdateDispatchOutcome.DISPATCHED:
                 self.state_store.release_failed_claim(
                     agent_id,
@@ -235,21 +311,17 @@ class WorkspaceUpdateService(MutableModel):
             else:
                 pass
 
-    def _start_claimed_run(self, agent_id: AgentId, chat_name: str, target_override: str | None) -> UpdateDispatch:
+    def _start_claimed_run(self, agent_id: AgentId, override_ref: str) -> UpdateDispatch:
         """Do the work of a dispatch that has already won the run slot.
 
-        The launch is tried against the host as it stands, and the host is started only when
-        the launch could not reach it: a start against a running host costs as much as the
-        launch itself and flips the row through STARTING for nothing. The launch's own reach
-        is the evidence, not discovery's possibly-stale host state.
+        The command is tried against the host as it stands, and the host is started only when
+        the command could not reach it: a start against a running host costs as much as the
+        command itself. The command's own reach is the evidence, not discovery's possibly-stale
+        host state.
         """
-        # Read here rather than carried from the press: a schedule armed days ago is not
-        # evidence about the backups this run is actually about to go without.
-        message = build_update_chat_message(
-            target_override=target_override, is_backup_configured=self.is_backup_configured(agent_id)
-        )
-        launch = self._launch_update_chat(agent_id, chat_name, message)
-        if launch.outcome is SkillChatLaunchOutcome.UNREACHABLE:
+        settings = self.settings_source.settings_for(agent_id)
+        call = start_update_now(self.mngr_caller, self._address(agent_id), settings, override_ref)
+        if call.reach is UpdateCommandReach.NOT_REACHED:
             start = self.start_workspace(agent_id)
             if not start.is_successful:
                 return UpdateDispatch(
@@ -257,93 +329,144 @@ class WorkspaceUpdateService(MutableModel):
                     # Led by its verdict, so the head is the part worth keeping.
                     failure_detail=(start.failure_reason or "")[:FAILURE_DETAIL_MAX_CHARS],
                 )
-            launch = self._launch_update_chat(agent_id, chat_name, message)
-        match launch.outcome:
-            case SkillChatLaunchOutcome.STARTED:
-                self.state_store.set_activity(agent_id, UpdateActivity.RUNNING)
-                return UpdateDispatch(outcome=UpdateDispatchOutcome.DISPATCHED)
-            case SkillChatLaunchOutcome.UNSUPPORTED:
-                return UpdateDispatch(outcome=UpdateDispatchOutcome.UNSUPPORTED)
-            case SkillChatLaunchOutcome.UNREACHABLE:
-                return UpdateDispatch(outcome=UpdateDispatchOutcome.UNREACHABLE, failure_detail=launch.failure_detail)
-            case SkillChatLaunchOutcome.SPAWN_FAILED:
-                return UpdateDispatch(outcome=UpdateDispatchOutcome.SPAWN_FAILED, failure_detail=launch.failure_detail)
+            call = start_update_now(self.mngr_caller, self._address(agent_id), settings, override_ref)
+        match call.reach:
+            case UpdateCommandReach.ANSWERED:
+                result = _command_result(call)
+                assert result is not None
+                return self._dispatch_for_result(agent_id, result)
+            case UpdateCommandReach.NOT_REACHED:
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.UNREACHABLE, failure_detail=call.failure_detail)
+            case UpdateCommandReach.CUT_OFF | UpdateCommandReach.NO_ANSWER:
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.UNCONFIRMED, failure_detail=call.failure_detail)
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def _launch_update_chat(self, agent_id: AgentId, chat_name: str, message: str) -> SkillChatLaunch:
-        # Which account the chat runs on is the workspace's own default; a workspace with none
-        # signed in refuses the create in its own words, which the launch carries back.
-        return launch_skill_chat(
-            self.mngr_caller,
-            build_agent_address(agent_id, self.backend_resolver),
-            skill_name=UPDATE_SKILL_NAME,
-            chat_name=chat_name,
-            message=message,
-        )
+    def _dispatch_for_result(self, agent_id: AgentId, result: UpdateCommandResult) -> UpdateDispatch:
+        match result.outcome:
+            case UpdateArmOutcome.CREATED:
+                self.state_store.adopt_dispatched_chat(
+                    agent_id, chat_agent_name=result.chat_agent_name, chat_agent_id=result.chat_id
+                )
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.DISPATCHED)
+            case UpdateArmOutcome.ALREADY_RUNNING:
+                # The run under way is the answer to the press: the row reports it from here.
+                if result.chat_agent_name:
+                    self.state_store.adopt_dispatched_chat(
+                        agent_id, chat_agent_name=result.chat_agent_name, chat_agent_id=result.chat_id
+                    )
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.ALREADY_RUNNING, failure_detail=result.detail)
+            case UpdateArmOutcome.NEEDS_SIGN_IN:
+                self.state_store.record_sign_in_refusal(agent_id, is_refused=True)
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.NEEDS_SIGN_IN)
+            case UpdateArmOutcome.TOO_OLD_TO_UPDATE:
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.UNSUPPORTED)
+            case (
+                UpdateArmOutcome.CHAT_APP_UNREACHABLE
+                | UpdateArmOutcome.CREATE_FAILED
+                | UpdateArmOutcome.ARMED
+                | UpdateArmOutcome.NO_CRON
+                | None
+            ):
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.SPAWN_FAILED, failure_detail=result.detail)
+            case _ as unreachable:
+                assert_never(unreachable)
 
-    def dispatch_for_scheduler(self, agent_id: AgentId, target_ref: str) -> bool:
-        """The scheduler's dispatch hook: whether the run went out."""
-        dispatch = self.dispatch_update(agent_id, target_override=target_ref or None)
-        if dispatch.outcome is not UpdateDispatchOutcome.DISPATCHED:
-            # The row keeps only the latest refusal; the log keeps every unattended one.
-            logger.info("Scheduled update for {} did not dispatch: {}", agent_id, dispatch.log_description)
-        return dispatch.outcome is UpdateDispatchOutcome.DISPATCHED
+    def schedule_update(self, agent_id: AgentId, *, override_ref: str) -> UpdateSchedule:
+        """Arm ``agent_id``'s update for its next window, through the workspace's own schedule file.
 
-    def is_backup_configured(self, agent_id: AgentId) -> bool:
-        """Whether this workspace has a canonical restic env, i.e. backups to fall back on.
-
-        A presence check only: this rides every update frame, and the env's contents are a password.
+        Never starts a stopped workspace: the dispatcher that starts the run lives in the
+        workspace's cron, so the workspace has to be running during the window anyway.
         """
-        return self.paths is not None and has_canonical_env(self.paths, agent_id)
-
-    def read_conditions(self, agent_id: AgentId) -> ScheduledRunConditions:
-        """Gather the facts one scheduled attempt is decided on."""
-        state = self.state_store.get(agent_id)
-        host_state = self.read_host_state(agent_id)
-        return ScheduledRunConditions(
-            is_offered=state.is_update_dispatchable,
-            is_run_in_flight=state.is_run_in_flight,
-            is_reachable=host_state is not None,
-            # An offline host has nothing running in it, and the gate probe execs
-            # with ``--no-start``, so asking would read as busy.
-            is_quiet=self.is_workspace_quiet(agent_id) if host_state is HostState.RUNNING else True,
+        call = arm_update(
+            self.mngr_caller, self._address(agent_id), self.settings_source.settings_for(agent_id), override_ref
         )
+        result = _command_result(call)
+        if result is None:
+            outcome = (
+                UpdateScheduleOutcome.NOT_RUNNING
+                if call.reach is UpdateCommandReach.NOT_REACHED
+                else UpdateScheduleOutcome.UNREACHABLE
+            )
+            return UpdateSchedule(outcome=outcome, failure_detail=call.failure_detail)
+        match result.outcome:
+            case UpdateArmOutcome.ARMED:
+                if result.schedule is not None:
+                    self.state_store.record_armed_schedule(agent_id, result.schedule)
+                else:
+                    logger.warning("The arm of {} answered ARMED with no schedule file to show", agent_id)
+                self.detector.request_pass()
+                return UpdateSchedule(outcome=UpdateScheduleOutcome.ARMED)
+            case UpdateArmOutcome.NEEDS_SIGN_IN:
+                self.state_store.record_sign_in_refusal(agent_id, is_refused=True)
+                return UpdateSchedule(outcome=UpdateScheduleOutcome.NEEDS_SIGN_IN, failure_detail=result.detail)
+            case UpdateArmOutcome.NO_CRON:
+                return UpdateSchedule(outcome=UpdateScheduleOutcome.NO_CRON, failure_detail=result.detail)
+            case UpdateArmOutcome.TOO_OLD_TO_UPDATE:
+                return UpdateSchedule(outcome=UpdateScheduleOutcome.UNSUPPORTED, failure_detail=result.detail)
+            case (
+                UpdateArmOutcome.CREATED
+                | UpdateArmOutcome.ALREADY_RUNNING
+                | UpdateArmOutcome.CHAT_APP_UNREACHABLE
+                | UpdateArmOutcome.CREATE_FAILED
+                | None
+            ):
+                return UpdateSchedule(outcome=UpdateScheduleOutcome.FAILED, failure_detail=result.detail)
+            case _ as unreachable:
+                assert_never(unreachable)
 
-    def read_host_state(self, agent_id: AgentId) -> HostState | None:
-        """The workspace's host state per discovery, or None when it is unknown to us."""
-        info = self.backend_resolver.get_agent_display_info(agent_id)
-        if info is None or info.host_id is None:
-            return None
-        try:
-            host_id = HostId(info.host_id)
-        except ValueError:
-            # Static / in-memory resolvers report a placeholder host id.
-            return None
-        return self.backend_resolver.get_host_state(host_id)
+    def arm_for_auto_update(self, agent_id: AgentId) -> None:
+        """The sweep's auto-update arm, at the ceiling; its outcome lands on the row as any arm's does."""
+        schedule = self.schedule_update(agent_id, override_ref="")
+        if schedule.outcome is not UpdateScheduleOutcome.ARMED:
+            logger.info("Could not arm the auto-update of {}: {}", agent_id, schedule.outcome.value)
 
-    def is_workspace_quiet(self, agent_id: AgentId) -> bool:
-        """Whether no chats are running in the workspace, per the backup flow's gate probe.
+    def cancel_schedule(self, agent_id: AgentId) -> UpdateSchedule | None:
+        """Delete the workspace's schedule file; None when it landed, else what stopped it."""
+        call = cancel_update_schedule(self.mngr_caller, self._address(agent_id))
+        if call.reach is not UpdateCommandReach.ANSWERED:
+            outcome = (
+                UpdateScheduleOutcome.NOT_RUNNING
+                if call.reach is UpdateCommandReach.NOT_REACHED
+                else UpdateScheduleOutcome.UNREACHABLE
+            )
+            return UpdateSchedule(outcome=outcome, failure_detail=call.failure_detail)
+        self.state_store.clear_schedule(agent_id)
+        return None
 
-        A chat whose agent is idle but busy (it will resume on its own when a background task
-        it started finishes) counts as running. An unanswered probe counts as busy: bouncing
-        the services under a chat is the expensive mistake.
+    def skip_update(self, agent_id: AgentId) -> UpdateSchedule | None:
+        """Skip the current release for this workspace under auto-update: remember it, and cancel its schedule.
+
+        The sweep re-arms it once the app's ceiling moves to a newer release.
         """
-        command = build_workspace_script_command(BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", str(agent_id)))
+        if self.minds_config is not None:
+            self.minds_config.set_skipped_update_target(str(agent_id), self.settings_source.read_ceiling())
+        return self.cancel_schedule(agent_id)
+
+    def open_sign_in_chat(self, agent_id: AgentId) -> bool:
+        """Open a new chat window in the workspace with the provider chooser up; whether it opened.
+
+        Retried inside the workspace while the user's client connects to it.
+        """
+        open_window = build_in_workspace_command(
+            ["uv", "run", "--no-sync", "workspace-layout", "open", "chat", "--path", _SIGN_IN_CHAT_PATH]
+            + ["--if-present", "new"]
+        )
+        script = (
+            f"for attempt in $(seq 1 {_SIGN_IN_OPEN_ATTEMPTS}); do "
+            f"if {open_window}; then echo {_SIGN_IN_OPENED_SENTINEL}; exit 0; fi; "
+            f"sleep {_SIGN_IN_OPEN_INTERVAL_SECONDS}; done; exit 1"
+        )
         result = self.mngr_caller.call(
-            ["exec", "--agent", build_agent_address(agent_id, self.backend_resolver), command, "--no-start"],
-            timeout=_GATE_PROBE_TIMEOUT_SECONDS,
+            ["exec", "--agent", self._address(agent_id), f"bash -c {shlex.quote(script)}", "--no-start"],
+            timeout=_SIGN_IN_TIMEOUT_SECONDS,
         )
-        payload = extract_marker_json(result.stdout, GATE_RESULT_MARKER)
-        if payload is None:
-            logger.info("Could not read the chat gate for {}; treating it as busy", agent_id)
-            return False
-        gate_error = str(payload.get("gate_error") or "")
-        if gate_error:
-            logger.info("The chat gate for {} could not list chats ({}); treating it as busy", agent_id, gate_error)
-            return False
-        running_chats = payload.get("running_chats")
-        return not (isinstance(running_chats, list) and running_chats)
+        is_opened = _SIGN_IN_OPENED_SENTINEL in result.stdout
+        if not is_opened:
+            logger.warning(
+                "Could not open a sign-in chat in {} (exit {}): {}", agent_id, result.returncode, result.stderr.strip()
+            )
+        return is_opened
 
     def handle_verdict(
         self,
@@ -353,7 +476,7 @@ class WorkspaceUpdateService(MutableModel):
         run_started_at: datetime | None,
         verdict_at: datetime | None,
     ) -> None:
-        """Everything the app owes a terminal verdict: re-detect, report, unschedule, tell the listeners if it landed.
+        """Everything the app owes a terminal verdict: re-detect, report, tell the listeners if it landed.
 
         A record whose verdict time is unreadable is dated at this reading, the
         latest the verdict can have landed.
@@ -361,8 +484,7 @@ class WorkspaceUpdateService(MutableModel):
         # The badge is stale the instant an update lands; drop the cached read and sweep now.
         self.detector.invalidate_cached_version(agent_id)
         self.detector.request_pass()
-        is_failure = verdict in _FAILURE_VERDICTS
-        if is_failure:
+        if verdict in FAILURE_UPDATE_VERDICTS:
             # Error level so this reaches Sentry; the run's reasoning stays in the user's chat transcript.
             logger.error(
                 "Update run in machine {} ended {}: resulting={}",
@@ -377,7 +499,6 @@ class WorkspaceUpdateService(MutableModel):
                 verdict.value,
                 resulting_ref or "?",
             )
-        self._close_scheduled_run_out(agent_id, is_real_failure=is_failure)
         if verdict not in LANDED_UPDATE_VERDICTS:
             return
         ended_at = verdict_at if verdict_at is not None else datetime.now(timezone.utc)
@@ -385,13 +506,6 @@ class WorkspaceUpdateService(MutableModel):
             landed_callbacks = list(self._on_update_landed_callbacks)
         for callback in landed_callbacks:
             callback(agent_id, run_started_at=run_started_at, ended_at=ended_at)
-
-    def _close_scheduled_run_out(self, agent_id: AgentId, *, is_real_failure: bool) -> None:
-        """Tell the listeners a run ended (the scheduler stops a machine it started and does not retry a failure unwatched)."""
-        with self._callbacks_lock:
-            callbacks = list(self._on_run_finished_callbacks)
-        for callback in callbacks:
-            callback(agent_id, is_real_failure=is_real_failure)
 
     def poll_in_flight_runs(self) -> None:
         """One pass over every in-flight run, one probe each.
@@ -422,6 +536,7 @@ class WorkspaceUpdateService(MutableModel):
         is_records_run = (
             status is not None and bool(state.chat_agent_name) and status.chat_agent_name == state.chat_agent_name
         )
+        self.state_store.note_chat_agent_id(agent_id, probe.chat_agent_id)
         if is_records_run:
             assert status is not None
             # The run's own record outranks the claim: its start is what the sweep dedups the file by,
@@ -452,8 +567,6 @@ class WorkspaceUpdateService(MutableModel):
             self._waiting_streak_by_agent.pop(aid_str, None)
             if self.state_store.set_activity(agent_id, UpdateActivity.STALLED, only_from=_POLLED_ACTIVITIES):
                 logger.info("The update run in machine {} is gone with no verdict; unlocking the row", agent_id)
-                # A gone agent ends a scheduled run as much as a verdict does.
-                self._close_scheduled_run_out(agent_id, is_real_failure=True)
         elif probe.is_probe_answered and probe.is_agent_waiting:
             streak = self._waiting_streak_by_agent.get(aid_str, 0) + 1
             self._waiting_streak_by_agent[aid_str] = streak

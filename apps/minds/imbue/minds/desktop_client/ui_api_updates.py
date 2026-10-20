@@ -9,8 +9,8 @@ actions claim "update everything that is behind", so they cover only
 import json
 import re
 import threading
+from collections.abc import Callable
 from typing import Final
-from typing import assert_never
 
 from flask import Blueprint
 from flask import Response
@@ -21,42 +21,47 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
+from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
-from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
 from imbue.minds.desktop_client.update_service import DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME
+from imbue.minds.desktop_client.update_service import SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME
 from imbue.minds.desktop_client.update_service import UpdateDispatch
 from imbue.minds.desktop_client.update_service import UpdateDispatchOutcome
+from imbue.minds.desktop_client.update_service import UpdateSchedule
+from imbue.minds.desktop_client.update_service import UpdateScheduleOutcome
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
-from imbue.minds.desktop_client.update_status import UpdateDispatchFailure
-from imbue.minds.desktop_client.update_status import UpdateSkipReason
+from imbue.minds.desktop_client.update_status import format_update_window
 from imbue.minds.errors import MindError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 
-# 409 for a workspace that cannot host the skill, 502 for one we could not
-# reach -- the same split the /assist dispatch makes.
+# 409 for a workspace that cannot run the update as it stands (the user can fix that), 502 for
+# one we could not reach -- the same split the /assist dispatch makes.
 _DISPATCH_STATUS_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, int]] = {
     UpdateDispatchOutcome.DISPATCHED: 200,
     UpdateDispatchOutcome.ALREADY_RUNNING: 409,
+    UpdateDispatchOutcome.NEEDS_SIGN_IN: 409,
     UpdateDispatchOutcome.UNSUPPORTED: 409,
     UpdateDispatchOutcome.START_FAILED: 502,
     UpdateDispatchOutcome.UNREACHABLE: 502,
     UpdateDispatchOutcome.SPAWN_FAILED: 502,
+    UpdateDispatchOutcome.UNCONFIRMED: 502,
 }
 
-# What a bulk-now machine the schedule's gate declined tells the user. Not the
-# window-relative skip messages: this attempt was pressed for, not scheduled.
-_BULK_GATE_SKIP_FAILURE_BY_REASON: Final[dict[UpdateSkipReason, UpdateDispatchFailure]] = {
-    UpdateSkipReason.WORKSPACE_UNREACHABLE: UpdateDispatchFailure(
-        message=DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.UNREACHABLE]
-    ),
-    UpdateSkipReason.CHATS_RUNNING: UpdateDispatchFailure(
-        message="Agents were still working in this workspace, so the update didn't start."
-    ),
+_SCHEDULE_STATUS_BY_OUTCOME: Final[dict[UpdateScheduleOutcome, int]] = {
+    UpdateScheduleOutcome.ARMED: 200,
+    UpdateScheduleOutcome.NEEDS_SIGN_IN: 409,
+    UpdateScheduleOutcome.NO_CRON: 409,
+    UpdateScheduleOutcome.UNSUPPORTED: 409,
+    UpdateScheduleOutcome.NOT_RUNNING: 409,
+    UpdateScheduleOutcome.UNREACHABLE: 502,
+    UpdateScheduleOutcome.FAILED: 502,
 }
+
+_CANCEL_FAILURE_MESSAGE: Final[str] = "Couldn't reach this workspace to cancel its scheduled update."
 
 
 # Refuses anything that could read as a flag or shell text in the chat's seed
@@ -78,30 +83,26 @@ class UiBulkUpdateRequest(FrozenModel):
     agent_ids: tuple[str, ...] = Field(description="Workspaces the action covers")
 
 
-def format_update_window(window: tuple[int, int]) -> str:
-    """Render the configured hour window the way a person reads a clock."""
-    return f"{_format_hour(window[0])}-{_format_hour(window[1])}"
-
-
-def _format_hour(hour: int) -> str:
-    suffix = "AM" if hour < 12 else "PM"
-    display_hour = hour % 12 or 12
-    return f"{display_hour}:00 {suffix}"
-
-
 def build_workspace_updates_message(
-    service: WorkspaceUpdateService, update_window: tuple[int, int]
+    service: WorkspaceUpdateService, update_window: tuple[int, int], minds_config: MindsConfig | None
 ) -> UiWorkspaceUpdatesMessage:
-    """The store's composed state, plus the one per-frame fact it does not hold."""
+    """The store's composed state, plus the per-frame facts it does not hold."""
+    ceiling_ref = service.settings_source.read_ceiling()
+    is_auto_update_enabled = minds_config.get_auto_update_workspaces() if minds_config is not None else False
     return UiWorkspaceUpdatesMessage(
         updates={
             agent_id_str: state.model_copy_update(
                 # The SPA's no-backups confirmation keys on this, so the server never refuses.
-                to_update(state.field_ref().is_backup_configured, service.is_backup_configured(AgentId(agent_id_str)))
+                to_update(state.field_ref().is_backup_configured, service.is_backup_configured(AgentId(agent_id_str))),
+                to_update(
+                    state.field_ref().is_update_skipped,
+                    minds_config is not None and minds_config.get_skipped_update_target(agent_id_str) == ceiling_ref,
+                ),
             )
             for agent_id_str, state in service.state_store.snapshot().items()
         },
         update_window=format_update_window(update_window),
+        is_auto_update_enabled=is_auto_update_enabled,
     )
 
 
@@ -136,13 +137,19 @@ def _dispatch_response(dispatch: UpdateDispatch) -> Response:
 
 
 def _armed_target_ref(service: WorkspaceUpdateService, agent_id: AgentId) -> str:
-    """The version this machine's armed schedule names, or '' when nothing is armed.
+    """The version this machine's armed schedule names, or '' when nothing is armed or it names none.
 
     The only way to clear one is to cancel the schedule: both version-field buttons refuse an empty
     field, so an empty request never means "put this machine back on the default target".
     """
-    record = service.schedule_store.read(agent_id)
-    return record.target_ref if record is not None else ""
+    return service.state_store.get(agent_id).override_ref
+
+
+def _schedule_response(schedule: UpdateSchedule) -> Response:
+    status = _SCHEDULE_STATUS_BY_OUTCOME[schedule.outcome]
+    if status == 200:
+        return _json_response({"ok": True})
+    return _error_response(SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME[schedule.outcome], status, schedule.failure_detail)
 
 
 def _resolve_machine_request(agent_id: str) -> tuple[WorkspaceUpdateService, AgentId] | Response:
@@ -198,7 +205,7 @@ def _handle_update_now(agent_id: str) -> Response:
 
 
 def _handle_schedule_update(agent_id: str) -> Response:
-    """POST /ui/api/updates/<agent_id>/schedule: arm a scheduled update for this machine.
+    """POST /ui/api/updates/<agent_id>/schedule: arm this machine's update through its own schedule file.
 
     A ``target_ref`` is accepted here as on the now route: pressing the version
     field is the confirmation, and scheduling only changes when the run happens.
@@ -207,18 +214,47 @@ def _handle_schedule_update(agent_id: str) -> Response:
     if isinstance(resolved, Response):
         return resolved
     service, parsed_id, target_ref = resolved
-    service.schedule_store.schedule(parsed_id, target_ref=target_ref)
-    service.state_store.clear_dispatch_failure(parsed_id)
-    return _json_response({"ok": True})
+    return _schedule_response(service.schedule_update(parsed_id, override_ref=target_ref))
 
 
 def _handle_cancel_schedule(agent_id: str) -> Response:
-    """POST /ui/api/updates/<agent_id>/schedule/cancel: disarm this machine's scheduled update."""
+    """POST /ui/api/updates/<agent_id>/schedule/cancel: delete this machine's schedule file.
+
+    One that cannot be reached keeps its schedule, and so does its row.
+    """
     resolved = _resolve_machine_request(agent_id)
     if isinstance(resolved, Response):
         return resolved
     service, parsed_id = resolved
-    service.schedule_store.cancel(parsed_id)
+    refusal = service.cancel_schedule(parsed_id)
+    if refusal is not None:
+        return _error_response(_CANCEL_FAILURE_MESSAGE, 502, refusal.failure_detail)
+    return _json_response({"ok": True})
+
+
+def _handle_skip_update(agent_id: str) -> Response:
+    """POST /ui/api/updates/<agent_id>/skip: skip the app's current release for this machine under auto-update."""
+    resolved = _resolve_machine_request(agent_id)
+    if isinstance(resolved, Response):
+        return resolved
+    service, parsed_id = resolved
+    refusal = service.skip_update(parsed_id)
+    if refusal is not None:
+        return _error_response(_CANCEL_FAILURE_MESSAGE, 502, refusal.failure_detail)
+    return _json_response({"ok": True})
+
+
+def _handle_sign_in(agent_id: str) -> Response:
+    """POST /ui/api/updates/<agent_id>/sign-in: open a new chat in the machine with the provider chooser up.
+
+    The press enters the machine first, so the window lands on the screen the user is looking at.
+    """
+    resolved = _resolve_machine_request(agent_id)
+    if isinstance(resolved, Response):
+        return resolved
+    service, parsed_id = resolved
+    if not service.open_sign_in_chat(parsed_id):
+        return _error_response("Couldn't open a chat in this workspace to sign in.", 502)
     return _json_response({"ok": True})
 
 
@@ -263,78 +299,50 @@ def _resolve_bulk_action() -> tuple[WorkspaceUpdateService, list[AgentId]] | Res
 
 
 def _handle_bulk_now() -> Response:
-    """POST /ui/api/updates/bulk/now: dispatch every confirmed out-of-date machine at once.
-
-    Through the schedule's skip gate: "now" changes when the run happens, not
-    what is safe to do to a machine agents are working in.
-    """
+    """POST /ui/api/updates/bulk/now: start every confirmed out-of-date machine's update at once."""
     resolved = _resolve_bulk_action()
     if isinstance(resolved, Response):
         return resolved
     service, eligible = resolved
-    # Off the request thread: each dispatch may be a minutes-long cold boot, and
-    # each outcome reaches the user through its own row anyway.
-    threading.Thread(
-        target=run_bulk_dispatch,
-        args=(service, get_state().update_scheduler, eligible),
-        name="update-bulk-dispatch",
-        daemon=True,
-    ).start()
+    _start_bulk_thread("update-bulk-dispatch", lambda agent_id: _dispatch_one_bulk(service, agent_id), eligible)
     return _json_response({"ok": True, "dispatching": [str(agent_id) for agent_id in eligible]})
 
 
-def run_bulk_dispatch(
-    service: WorkspaceUpdateService, scheduler: UpdateScheduler | None, agent_ids: list[AgentId]
-) -> None:
-    """Body of the thread spawned by the bulk-now route; each machine goes through the schedule's gate."""
-    for agent_id in agent_ids:
-        try:
-            _dispatch_one_bulk(service, scheduler, agent_id)
-        except (MindError, MngrError, OSError, RuntimeError, ValueError) as e:
-            # One failure must not cost the rest of the bulk action; its row reports its own state.
-            logger.warning("Bulk update dispatch for {} failed: {}", agent_id, e)
-
-
-def _dispatch_one_bulk(service: WorkspaceUpdateService, scheduler: UpdateScheduler | None, agent_id: AgentId) -> None:
-    """Run one machine's bulk-now attempt, logging what became of it and recording on its row why it did not go out.
-
-    A dispatch that failed recorded its own reason; only the gate's refusals,
-    which never reach a dispatch, are recorded here.
-    """
-    if scheduler is None:
-        # No scheduler means no gate to apply; dispatch directly rather than do nothing.
-        dispatch = service.dispatch_update(agent_id)
-        logger.info("Bulk update dispatch for {}: {}", agent_id, dispatch.log_description)
-        return
-    skip_reason = scheduler.run_now(agent_id)
-    if skip_reason is None:
-        logger.info("Bulk update dispatch for {} went out", agent_id)
-        return
-    logger.info("Skipped the bulk update for {}: {}", agent_id, skip_reason.value)
-    match skip_reason:
-        case UpdateSkipReason.WORKSPACE_UNREACHABLE | UpdateSkipReason.CHATS_RUNNING:
-            service.state_store.record_skipped_dispatch(agent_id, _BULK_GATE_SKIP_FAILURE_BY_REASON[skip_reason])
-        case (
-            UpdateSkipReason.DISPATCH_FAILED | UpdateSkipReason.UPDATE_IN_FLIGHT | UpdateSkipReason.ALREADY_UP_TO_DATE
-        ):
-            # A failed dispatch recorded its own reason; a run in flight, or nothing to run, is no failure.
-            pass
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
 def _handle_bulk_schedule() -> Response:
-    """POST /ui/api/updates/bulk/schedule: arm a scheduled update for every confirmed out-of-date machine."""
+    """POST /ui/api/updates/bulk/schedule: arm every confirmed out-of-date machine's update."""
     resolved = _resolve_bulk_action()
     if isinstance(resolved, Response):
         return resolved
     service, eligible = resolved
-    for agent_id in eligible:
-        # Re-arming replaces the record, so a machine already pointed at a named
-        # version has to be re-armed at that same version.
-        service.schedule_store.schedule(agent_id, target_ref=_armed_target_ref(service, agent_id))
-        service.state_store.clear_dispatch_failure(agent_id)
+    _start_bulk_thread("update-bulk-schedule", lambda agent_id: _schedule_one_bulk(service, agent_id), eligible)
     return _json_response({"ok": True, "scheduled": [str(agent_id) for agent_id in eligible]})
+
+
+def _start_bulk_thread(name: str, act_on_one: Callable[[AgentId], None], agent_ids: list[AgentId]) -> None:
+    """Act on each machine off the request thread: each is an exec that may be a minutes-long cold boot, and
+    each outcome reaches the user through its own row anyway."""
+    threading.Thread(target=run_bulk_action, args=(act_on_one, agent_ids), name=name, daemon=True).start()
+
+
+def run_bulk_action(act_on_one: Callable[[AgentId], None], agent_ids: list[AgentId]) -> None:
+    """Body of the thread a bulk route spawns: one machine at a time, none of them able to stop the rest."""
+    for agent_id in agent_ids:
+        try:
+            act_on_one(agent_id)
+        except (MindError, MngrError, OSError, RuntimeError, ValueError) as e:
+            # One failure must not cost the rest of the bulk action; its row reports its own state.
+            logger.warning("A bulk update action for {} failed: {}", agent_id, e)
+
+
+def _dispatch_one_bulk(service: WorkspaceUpdateService, agent_id: AgentId) -> None:
+    dispatch = service.dispatch_update(agent_id)
+    logger.info("Bulk update dispatch for {}: {}", agent_id, dispatch.log_description)
+
+
+def _schedule_one_bulk(service: WorkspaceUpdateService, agent_id: AgentId) -> None:
+    # Re-arming rewrites the file, so a machine already pointed at a named version keeps it.
+    schedule = service.schedule_update(agent_id, override_ref=_armed_target_ref(service, agent_id))
+    logger.info("Bulk update schedule for {}: {}", agent_id, schedule.outcome.value)
 
 
 def _handle_dismiss_run_outcome(agent_id: str) -> Response:
@@ -368,6 +376,8 @@ def register_update_routes(blueprint: Blueprint) -> None:
     blueprint.add_url_rule(
         "/api/updates/<agent_id>/schedule/cancel", view_func=_handle_cancel_schedule, methods=["POST"]
     )
+    blueprint.add_url_rule("/api/updates/<agent_id>/skip", view_func=_handle_skip_update, methods=["POST"])
+    blueprint.add_url_rule("/api/updates/<agent_id>/sign-in", view_func=_handle_sign_in, methods=["POST"])
     blueprint.add_url_rule("/api/updates/<agent_id>/dismiss", view_func=_handle_dismiss_run_outcome, methods=["POST"])
     blueprint.add_url_rule("/api/updates/<agent_id>/note/dismiss", view_func=_handle_dismiss_note, methods=["POST"])
     blueprint.add_url_rule("/api/updates/bulk/now", view_func=_handle_bulk_now, methods=["POST"])

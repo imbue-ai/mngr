@@ -24,7 +24,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.connections.data_types import DEFAULT_CREDENTIAL_SOURCE_NAME
 from imbue.minds.desktop_client.connections.primitives import MODAL_SANDBOX_TIMEOUT_SECONDS_MAX
 from imbue.minds.desktop_client.create_progress import OperationProgressSnapshot
-from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.data_types import ShareGatewayState
 from imbue.minds.desktop_client.data_types import ShareRemovalOutcome
 from imbue.minds.desktop_client.data_types import SharedWorkspaceRecordState
@@ -262,31 +261,15 @@ class TimezoneResponse(FrozenModel):
 
 
 class AgentNotificationRequest(ApiRequestModel):
-    """Body for notifying the user from a workspace agent (lands in the app's notification feed)."""
+    """Body for notifying the user from a chat agent (lands in the app's notification feed)."""
 
     message: str = Field(description="Free-text notification body")
-    title: str | None = Field(
-        default=None,
-        description=(
-            "Optional title. From a chat agent it is shown as a prefix on the body; from the workspace's primary "
-            "agent, which is not a chat, it heads the entry in place of the agent's name"
-        ),
-    )
+    title: str | None = Field(default=None, description="Optional title, shown as a prefix on the body")
     watched_by: tuple[str, ...] = Field(
         default=(),
         description=(
             "Ids of the chat page instances showing this chat to a focused reader; non-empty means the "
             "notification is recorded as read and not shown. Absent when the workspace does not know."
-        ),
-    )
-    destination: NotificationDestination | None = Field(
-        default=None,
-        description=(
-            'Where opening the notification lands: a workspace message, ``{"type": "<prefix:kebab-name>", '
-            '...string fields}`` (for example ``{"type": "minds:show-routine", "routine_id": "inbox-digest"}``), '
-            "posted into the workspace frame for the app whose manifest registers the type to show its page. "
-            "The type is lowercase ``prefix:kebab-name`` and never ``shell:``. Absent, the click lands in the "
-            "sending agent's chat (or just raises the workspace when the sender is its primary agent, not a chat)."
         ),
     )
 
@@ -378,13 +361,6 @@ class CreateWorkspaceRequest(ApiRequestModel):
             "and web access' switch would (default off). Requires an account: every row -- "
             "imbue_cloud and local docker/lima alike -- runs the desktop publish flow, which "
             "grants nobody."
-        ),
-    )
-    is_onboarding_driven_by_agent: bool | None = Field(
-        default=None,
-        description=(
-            "Ask the onboarding questions on the creation page while the workspace is built, and close its "
-            "welcome chat on the answer (default off; the first-run start flow turns it on for its creates)"
         ),
     )
 

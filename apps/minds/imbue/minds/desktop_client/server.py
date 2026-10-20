@@ -194,8 +194,6 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
         update_service.detector.stop()
         update_service.stop_run_polling()
         update_service.apply_window.stop()
-    if state.update_scheduler is not None:
-        state.update_scheduler.stop()
     # Terminate the idle pre-warmed mngr process so it doesn't wait out the
     # full shutdown timeout blocked reading its socket for the next request.
     get_default_mngr_caller().stop()
@@ -276,11 +274,6 @@ def serve_desktop_client(
 
     def _handle_exit(signal_number: int, _frame: FrameType | None) -> None:
         logger.info("Received signal {}; beginning graceful shutdown", signal_number)
-        # Before anything else: the `mngr forward` child shares this process's
-        # group, so a group-wide signal can stop it before the teardown below
-        # marks its exit intentional, and its exit report should say so.
-        if state.envelope_stream_consumer is not None:
-            state.envelope_stream_consumer.note_backend_shutdown_began(signal.Signals(signal_number).name)
         # Flip the flag and wake the SSE loops BEFORE stopping the server so
         # their generators return cleanly instead of being cut off mid-stream.
         state.shutdown_event.set()

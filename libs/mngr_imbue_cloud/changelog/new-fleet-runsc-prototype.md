@@ -1,0 +1,19 @@
+Phase 1 of the slice-fleet cutover plan (`blueprint/slice-fleet-cutover/`): hardened, runsc-native gen-2 slices. Stacked on `new-fleet-base`; dev canary only.
+
+- The `mngr-slice@` template unit now runs qemu inside a systemd sandbox (`ProtectSystem=strict` with write access to only the QMP socket dir and the two disk images, `DevicePolicy=closed` with exactly `/dev/kvm` and `/dev/net/tun`, `SystemCallFilter=@system-service ~@privileged @resources`, `MemoryDenyWriteExecute`, `RestrictAddressFamilies=AF_UNIX`, `IPAddressDeny=any`, the `Protect*` set; `systemd-analyze security` 9.2 -> 1.0), and the qemu argv gains `-nodefaults -no-user-config`, `-cpu host,vmx=off,svm=off` (no nested virtualization visible to the guest), `-machine q35,accel=kvm,usb=off,smm=off`, S3/S4 disabled, the cidata ISO as a read-only virtio-blk disk (no SCSI controller / CD-ROM), and the guest console routed to journald (`journalctl -u mngr-slice@N`) instead of an unbounded `run/serial.log`.
+
+- The root helper's `setup` verb pins the unit's `MemoryMax` (guest RAM + the per-VM overhead), `CPUWeight` / `IOWeight` (units-proportional, 100 at the default machine) and `TasksMax` as runtime properties from the slice's env file at every start.
+
+- The gen-2 first-boot script selects the data disk by its `mngr-data` label, else the first blank writable non-root disk -- never "the first non-root disk", which would now pick the read-only cidata disk.
+
+- `SLICE_BOOT_DISK_GIB` drops from 32 to 20 GiB (the image measures ~11 GiB), so the default 850 GB box class holds its RAM's full complement of 14 default machines; every consumer (reserve, budgets, `server list`, the units-valid guard) follows the constant.
+
+- Gen-2 workspace containers run under gVisor from the bake: new `SliceContainerRuntime` (`RUNC` / `RUNSC`) plus the `GEN2_CONTAINER_RUNTIME` / `GEN2_CONTAINER_TMPFS_START_ARGS` constants, and the slow-path rebuild (`build_slice_rebuild_config`) forwards the account's `docker_runtime` and hardening `default_start_args` plus `--tmpfs /run --tmpfs /tmp` onto a gen-2 slice's container (a gen-1 lima guest stays plain runc).
+
+- `DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO` is 4.0 (was 2.0): an 8-unit gen-2 machine on a 16-thread box gets 4 vCPUs, which gVisor's systrap sentry needs; the unit's `CPUWeight` still governs the real share. Applies to newly registered boxes and new carves; existing rows keep their recorded ratio until updated.
+
+- Slice VM clients report `list_instance_observations()` (name, running state, age from the box's clock, one round-trip); the orphan classifiers take those observations and spare running or young rowless VMs and the disks of every VM they keep (`ORPHAN_SLICE_MIN_AGE_SECONDS` = 2 h). The slice provider accepts `slice_host_id` so a bake can name the slice it is about to carve.
+
+- Gen-2 machine memory: the guest boots with `units x 1024 - GUEST_RAM_HOLDBACK_MIB` (512) MiB and the unit's `MemoryMax` is exactly the machine's budget share (`units x 1024 + 512`), so a full box's caps never exceed its RAM; the qcow2 drives use `cache=none,aio=native` so host page cache no longer counts against the cap. An 8-unit machine's container cap follows the guest (about 6.5 GiB), on the slow-path rebuild (`build_slice_rebuild_config`) as well as at bake time.
+
+- Gen-2 slice disks: `GEN2_BOOT_DISK_GIB` = 10 (gen-1 lima keeps `SLICE_BOOT_DISK_GIB` = 20) and a data disk of `DATA_DISK_BASE_GIB` 16 + 3.5 GiB per unit (44 GiB for 8 units). The guest's first boot enables btrfs simple quotas, creates docker's data-root, containerd's root and its overlayfs snapshotter subvolume (in qgroup `1/0`; Docker's image store keeps image and container layers there) on the data disk, and the every-boot grow oneshot limits that group to the filesystem minus a 4 GiB system reserve, so everything the workspace writes shares one quota that a resize grows.

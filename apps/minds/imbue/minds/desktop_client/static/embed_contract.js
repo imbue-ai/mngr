@@ -30,7 +30,7 @@
 // types, or by adding optional fields to an existing type. CONTRACT_VERSION
 // below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "9";
+export const CONTRACT_VERSION = "8";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -103,12 +103,6 @@ export const DETACHED_WINDOWS = "minds:detached-windows";
 // embedder that said `opensExternalLinks` with EMBEDDER_CAPABILITIES or for an
 // external link that embedder handed over with OPEN_LINK.
 export const OPEN_EXTERNAL = "minds:open-external";
-// workspace -> embedder: pulse a ring around one of the chrome's own controls
-// while the workspace's tour talks about it, or clear the ring. Payload:
-// { anchor }, one of CHROME_ANCHORS or null to clear. Fire-and-forget; a
-// chrome that does not know the anchor ignores it, and the tour's words never
-// depend on the ring.
-export const HIGHLIGHT_CHROME = "minds:highlight-chrome";
 
 // embedder -> workspace: the user pressed the close-tab shortcut while this
 // workspace was displayed; close the focused window. Payload: {}.
@@ -169,10 +163,6 @@ export const TEAR_OUT = "minds:tear-out";
 // app registered for it, else back out with OPEN_EXTERNAL). Sent only to a
 // page that announced WORKSPACE_READY with `opensLinks: true`.
 export const OPEN_LINK = "minds:open-link";
-
-// The chrome controls a workspace may ask to have ringed (HIGHLIGHT_CHROME):
-// the workspace switcher, the three workspace tabs, and the help button.
-export const CHROME_ANCHORS = ['workspace-switcher', 'permissions', 'settings', 'share', 'help'];
 
 // Upper bound on entries per message, bounding the work it can demand; the
 // snapshot carries the newest verdicts and older cards fall back to the
@@ -311,9 +301,6 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   },
   [OPEN_EXTERNAL]: function (data) {
     return isLinkUrlValid(data.url);
-  },
-  [HIGHLIGHT_CHROME]: function (data) {
-    return data.anchor === null || CHROME_ANCHORS.indexOf(data.anchor) !== -1;
   },
 };
 

@@ -6,22 +6,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-## [v0.2.0] - 2026-10-22
-
 ### Added
 
 - Added: `anthropic/claude-fable-5` pricing ($10 / $50 per 1M input / output tokens) in the usage pricing table, so token-only usage sources report cost for Claude Fable 5 instead of showing it as unpriced.
-- Added: Pricing for `anthropic/claude-opus-5`, `anthropic/claude-opus-5-5`, `anthropic/claude-sonnet-5-5`, `anthropic/claude-haiku-5-5`, `anthropic/claude-fable-5-1`, `openai/gpt-6-astra` and `openai/gpt-6.1-sol`, so token-only usage on them is priced.
-- Added: Fast-mode pricing: `compute_cost` takes `is_fast_mode`, applying `FAST_MODE_PRICE_MULTIPLIER` (2x) for models in `FAST_MODE_MODELS` and reporting null for others. The default is unchanged.
-
-### Changed
-
-- Changed: Per-token prices live in a committed `model_prices.toml` shipped beside the pricing code instead of inline in `pricing.py`; a zero rate is rejected when the table is read.
-- Changed: New usage archives record identity and copy outcomes in the shared core manifest instead of a separate usage metadata sidecar; legacy archives are still read.
-
-### Fixed
-
-- Fixed: Usage preservation uses mngr's host-aware archive destination, so a cross-host agent identity collision no longer overwrites an existing preserved archive; a preserved `data.json` naming no usable agent is reported instead of silently omitting that agent's spend.
 
 ## [v0.1.6] - 2026-06-18
 

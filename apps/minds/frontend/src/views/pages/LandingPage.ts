@@ -67,7 +67,14 @@ import {
 import { Spinner } from "../components/Spinner";
 import { StatusBadge } from "../components/StatusBadge";
 import type { UpdateBadgeTone } from "../../models/updates";
-import { displayVersion, updateBadgeFor } from "../../models/updates";
+import {
+  displayVersion,
+  isUpdateOffered,
+  rowUpdateShortcutFor,
+  updateBadgeFor,
+} from "../../models/updates";
+import { autoUpdatePrompt } from "../../models/autoUpdatePrompt";
+import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
 
 const BADGE_CLASS =
   "inline-flex items-center px-2 py-0.5 rounded-md type-label";
@@ -444,15 +451,18 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
-  /** The row's update badge, or null when the machine has nothing to say. */
+  /** The row's update badge and the one shortcut beside it, or null when
+   * the machine has nothing to say. */
   function updateBadge(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
+    const published = updates.publishedFor(entry.id);
     const badge = updateBadgeFor(
-      updates.publishedFor(entry.id),
+      published,
       updates.isUpdating(entry.id),
+      updates.isAutoUpdateEnabled,
     );
     if (badge === null) return null;
-    return m(
+    const badgeButton = m(
       "button",
       {
         type: "button",
@@ -473,6 +483,52 @@ export const LandingPage: m.ClosureComponent = () => {
         m(Icon16, { name: "chevron-right", size: "sm", extra: "opacity-70" }),
       ],
     );
+    const shortcut = rowUpdateShortcutFor(published, badge);
+    if (shortcut === null) return badgeButton;
+    return [
+      badgeButton,
+      shortcut === "open-chat"
+        ? openRunChatButton(entry.id, published?.chat_agent_id ?? "")
+        : signInButton(entry.id),
+    ];
+  }
+
+  /** Into the run's chat, wherever the run was started from: a run the
+   * workspace's own schedule started never had a window the user saw. */
+  function openRunChatButton(agentId: string, chatAgentId: string): m.Children {
+    return m(
+      Button,
+      {
+        variant: "ghost",
+        extra: "landing-update-open-chat",
+        onclick: (event: MouseEvent) => {
+          event.stopPropagation();
+          getAppContext().shell.openWorkspaceChat(agentId, chatAgentId);
+        },
+      },
+      "Open chat",
+    );
+  }
+
+  /** Answer an update refused for want of a signed-in AI account. A refusal
+   * is said by the update modal, which has room for it. */
+  function signInButton(agentId: string): m.Children {
+    return m(
+      Button,
+      {
+        variant: "ghost",
+        extra: "landing-update-sign-in",
+        onclick: (event: MouseEvent) => {
+          event.stopPropagation();
+          const { shell } = getAppContext();
+          void shell.signInForUpdate(agentId).then((result) => {
+            if (!result.isOk) shell.openUpdateModal(agentId);
+            m.redraw();
+          });
+        },
+      },
+      "Sign in",
+    );
   }
 
   /** The dismissible "Updated to X" note, whether or not the run was watched.
@@ -483,6 +539,7 @@ export const LandingPage: m.ClosureComponent = () => {
     const version = update.success_note_version ?? "";
     const noteKey = `${entry.id}:${version}`;
     if (!version || state.dismissedNoteKeys.has(noteKey)) return null;
+    const chatAgentId = update.chat_agent_id ?? "";
     return m(
       "div",
       { class: "flex items-center gap-2 pl-3 type-helper text-secondary" },
@@ -493,6 +550,7 @@ export const LandingPage: m.ClosureComponent = () => {
             ? `Updated to ${displayVersion(version)}, with a note for you.`
             : `Updated to ${displayVersion(version)}.`,
         ),
+        chatAgentId ? openRunChatButton(entry.id, chatAgentId) : null,
         m(
           Button,
           {
@@ -546,9 +604,11 @@ export const LandingPage: m.ClosureComponent = () => {
   }
 
   /** The bulk strip, only when more than one machine is out of date: one
-   * machine has its own row action. */
+   * machine has its own row action. Under auto-update the app arms them
+   * itself, so there is nothing to offer in bulk. */
   function bulkUpdateActions(): m.Children {
     const updates = getAppContext().stores.updates;
+    if (updates.isAutoUpdateEnabled) return null;
     const agentIds = updates.updatableAgentIds();
     if (agentIds.length < 2) return null;
     return m(Notice, { extra: "mb-4", id: "landing-bulk-updates" }, [
@@ -1105,8 +1165,28 @@ export const LandingPage: m.ClosureComponent = () => {
     }
   }
 
+  /** The one-time auto-update offer, when it is due. */
+  function autoUpdatePromptModal(): m.Children {
+    const { stores } = getAppContext();
+    const updates = stores.updates;
+    const hasOutOfDateWorkspace = stores.workspaces.workspaces.some((entry) =>
+      isUpdateOffered(updates.forAgent(entry.id)),
+    );
+    const trigger = autoUpdatePrompt.triggerFor(
+      updates.isAutoUpdateEnabled,
+      hasOutOfDateWorkspace,
+    );
+    if (trigger === null) return null;
+    return m(AutoUpdatePromptModal, {
+      model: autoUpdatePrompt,
+      trigger,
+      updateWindow: updates.updateWindow,
+    });
+  }
+
   return {
     oninit() {
+      void autoUpdatePrompt.load();
       loadExtras(state);
       state.unsubscribe = getAppContext().stores.workspaces.onChanged(() =>
         loadExtras(state),
@@ -1346,6 +1426,7 @@ export const LandingPage: m.ClosureComponent = () => {
           // The panel re-renders from the next providers frame (the materializer bounces discovery).
           onAccountAdded: () => m.redraw(),
         }),
+        autoUpdatePromptModal(),
         m("div", { class: "h-20", "aria-hidden": "true" }),
         m(
           "div",

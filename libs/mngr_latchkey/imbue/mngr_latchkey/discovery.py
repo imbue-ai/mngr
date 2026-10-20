@@ -35,8 +35,6 @@ existing tunnel and exit.
 import threading
 import time
 from collections.abc import Iterator
-from datetime import datetime
-from datetime import timezone
 from enum import auto
 from typing import Final
 
@@ -52,7 +50,6 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.imbue_common.primitives import PositiveInt
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.providers import close_provider_instances_for_context
 from imbue.mngr.api.providers import get_provider_instance
@@ -63,7 +60,6 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.outer_host import is_ssh_auth_timeout
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import is_unreachable_peer_connect_error
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -151,60 +147,6 @@ class _TransientFailureStreakKey(FrozenModel):
     step: _RemoteWiringStep = Field(description="The wiring step that keeps failing")
 
 
-class _TransientFailureStreak(FrozenModel):
-    """A run of consecutive transient failures of one host's wiring step, and what is reported with it."""
-
-    length: PositiveInt = Field(description="How many discovery cycles in a row the step has failed")
-    started_at: datetime = Field(description="When the streak's first failure happened")
-    first_ssh_info: RemoteSSHInfo | None = Field(
-        description="The SSH info the streak's first attempt used, or None for a step that is not given one"
-    )
-    changed_ssh_info_fields: frozenset[str] = Field(
-        description="Names of the SSH info fields any later attempt in the streak saw differ from the first's"
-    )
-
-
-class _ObservedHostState(FrozenModel):
-    """The state discovery last reported for a host, and since when this process has seen it in that state."""
-
-    state: HostState | None = Field(description="The last reported state; None when discovery did not report one")
-    since: datetime = Field(description="When this process first saw the host in this state")
-    is_after_change: bool = Field(
-        description="Whether ``since`` is a change from an earlier state, rather than the first report of the host"
-    )
-
-
-@pure
-def _changed_ssh_info_fields(first: RemoteSSHInfo | None, current: RemoteSSHInfo | None) -> frozenset[str]:
-    """Names of the fields that differ between two SSH infos (none when either is absent)."""
-    if first is None or current is None:
-        return frozenset()
-    first_fields = first.model_dump()
-    current_fields = current.model_dump()
-    return frozenset(name for name, value in first_fields.items() if current_fields[name] != value)
-
-
-@pure
-def _advance_transient_failure_streak(
-    previous: _TransientFailureStreak | None, ssh_info: RemoteSSHInfo | None, now: datetime
-) -> _TransientFailureStreak:
-    """The streak after one more transient failure, made with ``ssh_info``: a new one when there was none."""
-    if previous is None:
-        return _TransientFailureStreak(
-            length=PositiveInt(1),
-            started_at=now,
-            first_ssh_info=ssh_info,
-            changed_ssh_info_fields=frozenset(),
-        )
-    return previous.model_copy_update(
-        to_update(previous.field_ref().length, PositiveInt(previous.length + 1)),
-        to_update(
-            previous.field_ref().changed_ssh_info_fields,
-            previous.changed_ssh_info_fields | _changed_ssh_info_fields(previous.first_ssh_info, ssh_info),
-        ),
-    )
-
-
 def _exception_chain(error: BaseException) -> Iterator[BaseException]:
     """Yield the error and every error it was explicitly raised from, outermost first."""
     yield error
@@ -223,17 +165,15 @@ def is_transient_remote_wiring_error(error: BaseException) -> bool:
     never reached the host at all (:func:`is_unreachable_peer_connect_error`),
     which is a host that is booting, restarting or momentarily off this
     machine's network; for a ``HostConnectionError``, which is what those
-    become after the outer host's own retries give up; for a tunnel failure
-    the tunnel layer attributes to the host rather than to this device; and for
-    a ``HostAuthenticationError`` only when sshd never answered authentication
-    in time (:func:`is_ssh_auth_timeout`), which is a slow host rather than a
-    rejected key. Everything else -- trust material missing on this device, a
-    rejected key, a malformed file -- is a failure no amount of retrying fixes,
-    and is reported at once.
+    become after the outer host's own retries give up; and for a tunnel failure
+    the tunnel layer attributes to the host rather than to this device.
+    Everything else -- trust material missing on this device, a rejected key, a
+    malformed file -- is a failure no amount of retrying fixes, and is reported
+    at once.
     """
     for link in _exception_chain(error):
         if isinstance(link, HostAuthenticationError):
-            return is_ssh_auth_timeout(link)
+            return False
         if isinstance(link, HostConnectionError):
             return True
         if isinstance(link, SSHTunnelError):
@@ -243,26 +183,6 @@ def is_transient_remote_wiring_error(error: BaseException) -> bool:
         if isinstance(link, OSError) and is_unreachable_peer_connect_error(link):
             return True
     return False
-
-
-@pure
-def _describe_ssh_info_changes(streak: _TransientFailureStreak) -> str:
-    """Which SSH info fields changed during a streak, by name only (the values can be addresses)."""
-    if streak.first_ssh_info is None:
-        return "n/a (this step is not given SSH info)"
-    if not streak.changed_ssh_info_fields:
-        return "no"
-    return "yes ({})".format(", ".join(sorted(streak.changed_ssh_info_fields)))
-
-
-@pure
-def _describe_observed_host_state(observed: _ObservedHostState | None) -> str:
-    """Since when this process has seen the host in its current state, for a failure streak's report."""
-    if observed is None:
-        return "host state never reported to this process"
-    state_name = "unknown" if observed.state is None else observed.state.value
-    origin = "a change this process saw" if observed.is_after_change else "the first report this process saw"
-    return f"host state {state_name} since {observed.since.isoformat()} ({origin})"
 
 
 @pure
@@ -349,16 +269,10 @@ class LatchkeyDiscoveryHandler(MutableModel):
     _unresolved_route_hosts: set[str] = PrivateAttr(default_factory=set)
     # Same, for hosts whose outer sshd rejected this machine's key.
     _unauthenticated_hosts: set[str] = PrivateAttr(default_factory=set)
-    # The run of discovery cycles in a row each host's wiring step has failed with a
+    # How many discovery cycles in a row each host's wiring step has failed with a
     # transient SSH error. A success deletes the entry. Guarded by
     # ``_remote_hosts_lock``.
-    _transient_failure_streak_by_key: dict[_TransientFailureStreakKey, _TransientFailureStreak] = PrivateAttr(
-        default_factory=dict
-    )
-    # The state discovery last reported for each host, reported with a failure
-    # streak so a streak that began right after a restart can be told from one on
-    # a long-running host. Guarded by ``_remote_hosts_lock``.
-    _observed_host_state_by_host_id: dict[str, _ObservedHostState] = PrivateAttr(default_factory=dict)
+    _transient_failure_streak_by_key: dict[_TransientFailureStreakKey, int] = PrivateAttr(default_factory=dict)
     # When (``time.monotonic``) this computer last announced itself to each
     # host's machine, so the several agents of one host cost one announcement
     # per cycle between them; and the hosts with an announcement in flight, so
@@ -378,8 +292,6 @@ class LatchkeyDiscoveryHandler(MutableModel):
         provider_name: str,
         host_state: HostState | None,
     ) -> None:
-        self._observe_host_state(host_id, host_state)
-
         try:
             host_side_port = self.latchkey.start_gateway(self.concurrency_group)
         except LatchkeyError as e:
@@ -447,15 +359,6 @@ class LatchkeyDiscoveryHandler(MutableModel):
             with self._pending_lock:
                 self._pending_remote_agents.discard(instance_key_str)
             raise
-
-    def _observe_host_state(self, host_id: HostId, host_state: HostState | None) -> None:
-        """Remember the state discovery reported for a host, and when it last changed."""
-        with self._remote_hosts_lock:
-            observed = self._observed_host_state_by_host_id.get(str(host_id))
-            if observed is None or observed.state is not host_state:
-                self._observed_host_state_by_host_id[str(host_id)] = _ObservedHostState(
-                    state=host_state, since=datetime.now(timezone.utc), is_after_change=observed is not None
-                )
 
     def _run_remote_setup(
         self,
@@ -674,7 +577,6 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 _RemoteWiringStep.DESKTOP_GATEWAY_TUNNEL,
                 e,
                 f"set up desktop-side Latchkey reachability for agent {agent_id} (host-side port {host_side_port})",
-                ssh_info,
             )
             return
         self._record_wiring_step_success(host_id, _RemoteWiringStep.DESKTOP_GATEWAY_TUNNEL)
@@ -722,7 +624,6 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 _RemoteWiringStep.DESKTOP_TO_VPS_TUNNEL,
                 e,
                 f"expose the desktop Latchkey gateway on the VPS of host {host_id}",
-                outer_ssh_info,
             )
             return None
         self._record_wiring_step_success(host_id, _RemoteWiringStep.DESKTOP_TO_VPS_TUNNEL)
@@ -763,7 +664,6 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 _RemoteWiringStep.DEVICE_ANNOUNCEMENT,
                 e,
                 f"reach the machine of host {host_id} to announce this computer to it",
-                None,
             )
         finally:
             with self._remote_hosts_lock:
@@ -785,7 +685,6 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 _RemoteWiringStep.DEVICE_ANNOUNCEMENT,
                 e,
                 f"announce this computer to the machine of host {host_id}",
-                None,
             )
 
     def _announce_device(self, outer: OuterHostInterface, host_id: HostId, device_port: int) -> None:
@@ -830,8 +729,6 @@ class LatchkeyDiscoveryHandler(MutableModel):
         error: BaseException,
         # What was being attempted, phrased to follow "Failed to"
         attempt_description: str,
-        # The SSH info the attempt used, for steps that are given one
-        ssh_info: RemoteSSHInfo | None,
     ) -> None:
         """Log a wiring-step failure at a level that reflects whether retrying is expected to fix it.
 
@@ -841,33 +738,20 @@ class LatchkeyDiscoveryHandler(MutableModel):
         ``TRANSIENT_FAILURE_REPORT_THRESHOLD``, when it is reported as an error
         exactly once, traceback included. Retrying continues either way, and a
         later success resets the streak so a new outage reports afresh.
-
-        The report also says when the streak began, whether the SSH info changed
-        during it, and since when the host has been in its reported state, which
-        separate a host that moved or restarted under a running streak from one
-        that kept refusing the same connection all along.
         """
         if not is_transient_remote_wiring_error(error):
             logger.opt(exception=error).error("Failed to {}: {}", attempt_description, error)
             return
         key = _TransientFailureStreakKey(host_id=host_id, step=step)
         with self._remote_hosts_lock:
-            streak = _advance_transient_failure_streak(
-                self._transient_failure_streak_by_key.get(key), ssh_info, datetime.now(timezone.utc)
-            )
-            self._transient_failure_streak_by_key[key] = streak
-            observed_host_state = self._observed_host_state_by_host_id.get(str(host_id))
-        streak_length = streak.length
+            streak_length = self._transient_failure_streak_by_key.get(key, 0) + 1
+            self._transient_failure_streak_by_key[key] = streak_length
         if streak_length == TRANSIENT_FAILURE_REPORT_THRESHOLD:
             logger.opt(exception=error).error(
                 "Failed to {} on {} consecutive discovery cycles with transient SSH errors while the host "
-                "reports as running; still retrying every cycle. Streak started at {}; SSH info changed during "
-                "the streak: {}; {}. Latest: {}",
+                "reports as running; still retrying every cycle. Latest: {}",
                 attempt_description,
                 streak_length,
-                streak.started_at.isoformat(),
-                _describe_ssh_info_changes(streak),
-                _describe_observed_host_state(observed_host_state),
                 error,
             )
         elif streak_length == 1:
@@ -1206,7 +1090,6 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 _RemoteWiringStep.VPS_GATEWAY_PROVISIONING,
                 e,
                 f"provision the VPS-resident Latchkey gateway for agent {agent_id} on host {host_id}",
-                None,
             )
         finally:
             # Release the per-host in-flight guard, and clear the per-agent

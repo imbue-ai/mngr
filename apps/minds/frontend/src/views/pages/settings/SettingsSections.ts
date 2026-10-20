@@ -30,6 +30,7 @@ import { Spinner } from "../../components/Spinner";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
 import { updateInstallingCopy, updateReadyCopy } from "../../shell/UpdateReadyCard";
 import { installTermsOf } from "../../shell/update-ready";
+import { workspaceUpdateSettings } from "./WorkspaceUpdateSettings";
 
 interface SectionsAttrs {
   model: SettingsModel;
@@ -426,84 +427,15 @@ function errorReportingPanel(model: SettingsModel): m.Children {
   ]);
 }
 
-/** Whole hours only: the setting means "while I am asleep". */
-const HOUR_OPTIONS: number[] = Array.from(
-  { length: 24 },
-  (_unused, hour) => hour,
-);
-
-function formatHour(hour: number): string {
-  const suffix = hour < 12 ? "AM" : "PM";
-  return `${hour % 12 || 12}:00 ${suffix}`;
-}
-
-function hourSelect(
-  id: string,
-  value: number,
-  onchange: (hour: number) => void,
-): m.Children {
-  return m(
-    "select",
-    {
-      id,
-      class: "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
-      value: String(value),
-      onchange: (event: Event) =>
-        onchange(Number((event.target as HTMLSelectElement).value)),
-    },
-    HOUR_OPTIONS.map((hour) =>
-      m("option", { value: String(hour) }, formatHour(hour)),
-    ),
-  );
-}
-
-/** The machine-updates half of the Updates panel: the window scheduled machine
- * updates run in. Drawn whatever build this is -- the app-updates half above it
- * is for installed desktop builds, but machines update the same way everywhere. */
+/** The workspace-updates half of the Updates panel: auto-update and the window
+ * scheduled updates start in. Drawn whatever build this is -- the app-updates
+ * half above it is for installed desktop builds, but workspaces update the
+ * same way everywhere. */
 function machineUpdatesSection(model: SettingsModel): m.Children {
-  const overview = model.overview;
-  if (overview === null) return null;
-  const startHour = overview.update_window_start_hour;
-  const endHour = overview.update_window_end_hour;
+  if (model.overview === null) return null;
   return m("div", { class: "mt-8" }, [
     m("h3", { class: "type-heading text-primary mb-2" }, "Workspace updates"),
-    m(
-      "p",
-      { class: "type-body text-secondary mb-3" },
-      "When you schedule an update for a workspace, Imbue Studio runs it inside this window. A workspace that " +
-        "isn't reachable or has agents working in it when the window comes is skipped and tried again " +
-        "in the next one.",
-    ),
-    m("div", { class: "flex items-center gap-2 py-3 border-b border-subtle" }, [
-      m(
-        "label",
-        { class: "type-body text-primary", for: "update-window-start" },
-        "Between",
-      ),
-      hourSelect(
-        "update-window-start",
-        startHour,
-        (hour) => void model.setUpdateWindow(hour, endHour),
-      ),
-      m(
-        "label",
-        { class: "type-body text-primary", for: "update-window-end" },
-        "and",
-      ),
-      hourSelect(
-        "update-window-end",
-        endHour,
-        (hour) => void model.setUpdateWindow(startHour, hour),
-      ),
-      m("span", { class: "type-helper text-tertiary" }, "local time"),
-    ]),
-    model.updateWindowError
-      ? m(
-          "p",
-          { class: "type-helper text-important mt-3", role: "alert" },
-          model.updateWindowError,
-        )
-      : null,
+    workspaceUpdateSettings(model, "app"),
   ]);
 }
 

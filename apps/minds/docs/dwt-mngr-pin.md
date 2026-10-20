@@ -103,9 +103,6 @@ the recipe whenever the mngr branch changes before it merges.
    resolves mngr `HEAD` to its mirror commit, rewrites every pin in
    DEFAULT_WORKSPACE_TEMPLATE (an internal or export pin included), runs `uv lock`
    there, and commits. Position the mngr checkout at the exact commit you want first.
-   The relock runs the uv the template pins (`UV_VERSION` in its
-   `system/scripts/setup_system.sh`) through `uvx`, whatever uv you have, so the
-   lock matches what workspaces and the template's CI write.
 4. Open the DEFAULT_WORKSPACE_TEMPLATE PR; its CI builds against the new pin.
 
 Internal commits are not on the mirror; each mirrored commit carries a

@@ -6,8 +6,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-## [v0.2.0] - 2026-10-22
-
 ### Added
 
 - Added: Bare placement (`isolation=NONE`) — the agent runs directly on the EC2 instance with no Docker container, reached at `vps_ip:22` as root. Idle agent runs `shutdown -P now`, which stops the EC2 instance via `InstanceInitiatedShutdownBehavior`. Bare release tests added.
@@ -15,9 +13,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Required, private, encrypted S3 **state bucket** as the offline store for AWS hosts (replaces the EC2 tag mirror). A stopped instance's full `VpsHostRecord` (config, IP, host keys) plus per-agent records live in the bucket. `mngr aws prepare` creates it (default name `mngr-state-<account_id>-<region>`, overridable via `state_bucket_name`); `mngr aws cleanup` deletes it (refuses non-empty unless `--force`). A missing bucket fails fast with an actionable error pointing at `mngr aws prepare`.
 - Added: Offline `host_dir` on AWS, on by default (new `is_offline_host_dir_enabled` provider config field). A stopped instance's `host_dir` is now readable without SSH, so `mngr event` / `mngr transcript` / `mngr file` work against a paused host. Capture is operator-driven at `mngr stop` (uploads to `s3://<bucket>/hosts/<host_id>/host_dir/` with the operator's own credentials — no instance IAM identity needed).
 - Added: A running bare AWS host is discoverable with the default provider config — a `mngr-isolation` tag stamped at create lets discovery resolve placement from the cloud API without SSH, so operations no longer need `-S providers.<name>.isolation=NONE` at connect time.
-- Added: `aws_profile` authenticates a provider instance through a named `~/.aws/config` profile instead of pasted keys (mutually exclusive with `aws_access_key_id` / `aws_secret_access_key`). A missing profile or expired SSO login raises `ProviderCredentialSourceMissingError` naming the fix; a profile with `mfa_serial` is refused.
-- Added: Optional pasted-credential fields `aws_access_key_id` / `aws_secret_access_key` / `aws_session_token` on `AwsProviderConfig`, taking precedence over the ambient credential chain.
-- Added: `mngr aws prepare --format jsonl` reports its steps (`aws.security_group`, `aws.state_bucket`) as a plan with per-step progress.
 
 ### Changed
 
@@ -27,13 +22,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: AWS missing-credential help text now points at `aws configure` and the rest of the boto3 credential chain instead of generic "start Docker" guidance.
 - Changed: AWS cleanup refusal when instances still exist now raises the unified `ManagedResourcesExistError` so the message matches the other clouds.
 - Changed: Host-side idle-watcher systemd unit renamed from `mngr-aws-idle-watcher` to the shared `mngr-idle-watcher` as the idle-watcher install lifted into the shared `OfflineCapableVpsProvider`.
-- Changed: The default EC2 image is the newest Debian 13 AMI for the instance type's architecture, resolved from EC2 at create time (so Graviton types boot arm64); `DEFAULT_AMI_BY_REGION` and `AwsProviderConfig.get_ami_id_for_region` are removed, `ec2:DescribeInstanceTypes` joins the IAM set, and a failed lookup raises `AwsAmiResolutionError`.
-- Changed: Hosts are opened with a per-host VM-root client key (`keys/host_keys/<hex>/vps_ssh_key`) instead of the provider-wide `keys/vps_ssh_key`, which existing hosts still fall back to; destroying a stopped instance removes its local key material.
-- Changed: The backend registers lazily through a new `imbue.mngr_aws.plugin` entry point, so plain `mngr` commands no longer import the AWS backend or the `mngr aws` CLI.
-
-### Deprecated
-
-- Deprecated: `root_volume_size_gb`, replaced by the shared `root_disk_size_gb`; setting both to different values is a config error.
 
 ### Fixed
 
@@ -42,7 +30,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `mngr rename` now re-stamps the EC2 `Name` identity tag (read by offline discovery), so a renamed-then-stopped host lists under its new name.
 - Fixed: A partial S3 `DeleteObjects` failure (HTTP 200 with per-key failures in the response `Errors` array) now raises instead of being silently dropped, so a failed state/`host_dir` removal can't leave orphaned objects behind.
 - Fixed: `mngr aws prepare` is now idempotent under a concurrent prepare race — a `BucketAlreadyOwnedByYou` is treated as a no-op (mngr still applies the bucket's idempotent hardening config).
-- Fixed: `mngr list` reported AWS hosts as 1 CPU / 1 GB; it now shows the instance type's vCPUs and RAM and the root volume size.
 
 ## [v0.1.4] - 2026-06-18
 

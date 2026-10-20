@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -24,9 +25,7 @@ from pydantic import SecretStr
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.mutable_model import MutableModel
@@ -91,11 +90,11 @@ from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
+from imbue.minds.desktop_client.host_timezone import read_host_timezone
 from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
-from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
@@ -150,7 +149,6 @@ from imbue.minds.desktop_client.ui_api_inbox import displayable_pending_requests
 from imbue.minds.desktop_client.ui_api_inbox import primary_agent_ids_by_workspace_name
 from imbue.minds.desktop_client.ui_api_inbox import workspace_name_for_request
 from imbue.minds.desktop_client.ui_api_updates import build_workspace_updates_message
-from imbue.minds.desktop_client.ui_api_updates import format_update_window
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_login import handle_static_login_page
 from imbue.minds.desktop_client.ui_models import AccountPanelState
@@ -176,9 +174,10 @@ from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
 from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
-from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
-from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
+from imbue.minds.desktop_client.update_service import UpdateSettingsSource
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
+from imbue.minds.desktop_client.update_service import read_workspace_update_facts
+from imbue.minds.desktop_client.update_status import format_update_window
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
@@ -195,6 +194,7 @@ from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDisp
 from imbue.minds.desktop_client.workspace_recovery import is_network_dependent_workspace
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
 from imbue.minds.desktop_client.workspace_recovery import read_device_cannot_connect_verdict
+from imbue.minds.desktop_client.workspace_update_state import AutoUpdatePolicy
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDetector
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.desktop_client.workspace_view_refresh import WorkspaceViewRefresher
@@ -1627,7 +1627,7 @@ def _cloud_row_key_state(
 
 
 def _build_requests_payload(
-    displayable_requests: Sequence[StreamedPermissionRequest],
+    pending_requests: PendingRequestsInterface | None,
     backend_resolver: BackendResolverInterface,
 ) -> dict[str, Any]:
     """Build the pending requests summary pushed over the UI channel.
@@ -1643,15 +1643,16 @@ def _build_requests_payload(
     ``request_ids`` to decide whether to refresh the panel; the count remains
     for the badge.
 
-    Callers pass the :func:`displayable_pending_requests` set, which excludes
-    requests whose host can't be resolved, so the badge count and the
+    Requests whose host can't be resolved are excluded (see
+    :func:`displayable_pending_requests`) so the badge count and the
     rendered cards stay in agreement.
     """
-    request_ids = [req.request_id for req in displayable_requests]
+    pending = displayable_pending_requests(pending_requests, backend_resolver)
+    request_ids = [req.request_id for req in pending]
     primary_ids = primary_agent_ids_by_workspace_name(backend_resolver)
     workspace_ids = {
         primary_id
-        for req in displayable_requests
+        for req in pending
         if (primary_id := primary_ids.get(workspace_name_for_request(req, backend_resolver))) is not None
     }
     return {"count": len(request_ids), "request_ids": request_ids, "workspace_agent_ids": sorted(workspace_ids)}
@@ -2096,26 +2097,17 @@ def _derive_ui_providers_message(app: Flask, backend_resolver: BackendResolverIn
         )
 
 
-def _derive_ui_requests_and_notifications_messages(
+def _derive_ui_requests_message(
     app: Flask,
     backend_resolver: BackendResolverInterface,
-) -> tuple[UiRequestsMessage, UiNotificationsMessage]:
-    """Derive the inbox summary and the notification feed from one read of the pending set.
-
-    Both frames show the same displayable-pending set, so the feed and the
-    badge always agree, and that read is a gateway round-trip, so a publish
-    pass makes it once.
-    """
+) -> UiRequestsMessage:
     with app.app_context():
-        state = get_state()
-        displayable_requests = displayable_pending_requests(state.pending_requests, backend_resolver)
-        payload = _build_requests_payload(displayable_requests, backend_resolver)
-        requests_message = UiRequestsMessage(
+        payload = _build_requests_payload(get_state().pending_requests, backend_resolver)
+        return UiRequestsMessage(
             count=payload["count"],
             request_ids=tuple(payload["request_ids"]),
             workspace_agent_ids=tuple(payload["workspace_agent_ids"]),
         )
-        return requests_message, _reconcile_notification_feed(state, displayable_requests, backend_resolver)
 
 
 # How a recorded response's status becomes a feed outcome. A status outside
@@ -2127,41 +2119,44 @@ _RESOLVED_OUTCOME_BY_RESPONSE_STATUS: Final[dict[str, NotificationOutcome]] = {
 }
 
 
-def _reconcile_notification_feed(
-    state: DesktopClientState,
-    displayable_requests: Sequence[StreamedPermissionRequest],
+def _derive_ui_notifications_message(
+    app: Flask,
     backend_resolver: BackendResolverInterface,
 ) -> UiNotificationsMessage:
-    """Reconcile the notification feed against the displayable pending requests.
+    """Reconcile the notification feed against the current pending-request view.
 
-    Uses the same card derivation as the inbox list, so a feed entry renders
-    exactly like its inbox row.
+    Uses the same displayable-pending set as the requests frame (so the feed
+    and the badge always agree on what exists) and the same card derivation
+    as the inbox list (so a feed entry renders exactly like its inbox row).
     """
-    feed = state.notification_feed
-    if feed is None:
-        return UiNotificationsMessage(entries=(), unresolved_count=0)
-    pending_view = state.pending_requests
-    primary_agent_id_by_ws_name = primary_agent_ids_by_workspace_name(backend_resolver)
-    pending_cards = tuple(
-        build_notification_card(req, state.request_event_handlers, backend_resolver, primary_agent_id_by_ws_name)
-        for req in displayable_requests
-    )
-    responses_by_request_id: dict[str, NotificationOutcome] = {}
-    for response in pending_view.responses() if pending_view is not None else ():
-        outcome = _RESOLVED_OUTCOME_BY_RESPONSE_STATUS.get(response.status)
-        if outcome is not None:
-            responses_by_request_id[response.request_event_id] = outcome
-    return feed.reconcile(
-        pending_cards=pending_cards,
-        responses_by_request_id=responses_by_request_id,
-        # An agent message whose workspace is gone has nowhere to land, so
-        # it leaves the feed -- but dropping it is unrecoverable, so this is
-        # the restorable set (live plus the persisted last-good topology,
-        # both minus hosts observed DESTROYED) rather than the live one: a
-        # partial or failed listing is not evidence that a workspace is
-        # gone, and a flap must not destroy an unread message.
-        known_workspace_agent_ids={str(aid) for aid in backend_resolver.list_restorable_workspace_ids()},
-    )
+    with app.app_context():
+        state = get_state()
+        feed = state.notification_feed
+        if feed is None:
+            return UiNotificationsMessage(entries=(), unresolved_count=0)
+        pending_view = state.pending_requests
+        pending = displayable_pending_requests(pending_view, backend_resolver)
+        primary_agent_id_by_ws_name = primary_agent_ids_by_workspace_name(backend_resolver)
+        pending_cards = tuple(
+            build_notification_card(req, state.request_event_handlers, backend_resolver, primary_agent_id_by_ws_name)
+            for req in pending
+        )
+        responses_by_request_id: dict[str, NotificationOutcome] = {}
+        for response in pending_view.responses() if pending_view is not None else ():
+            outcome = _RESOLVED_OUTCOME_BY_RESPONSE_STATUS.get(response.status)
+            if outcome is not None:
+                responses_by_request_id[response.request_event_id] = outcome
+        return feed.reconcile(
+            pending_cards=pending_cards,
+            responses_by_request_id=responses_by_request_id,
+            # An agent message whose workspace is gone has nowhere to land, so
+            # it leaves the feed -- but dropping it is unrecoverable, so this is
+            # the restorable set (live plus the persisted last-good topology,
+            # both minus hosts observed DESTROYED) rather than the live one: a
+            # partial or failed listing is not evidence that a workspace is
+            # gone, and a flap must not destroy an unread message.
+            known_workspace_agent_ids={str(aid) for aid in backend_resolver.list_restorable_workspace_ids()},
+        )
 
 
 def _derive_ui_discovery_health_message(
@@ -2245,8 +2240,11 @@ class _LegacyUiStateDeriver(MutableModel):
     def derive_providers(self) -> UiProvidersMessage:
         return _derive_ui_providers_message(self.flask_app, self.backend_resolver)
 
-    def derive_requests_and_notifications(self) -> tuple[UiRequestsMessage, UiNotificationsMessage]:
-        return _derive_ui_requests_and_notifications_messages(self.flask_app, self.backend_resolver)
+    def derive_requests(self) -> UiRequestsMessage:
+        return _derive_ui_requests_message(self.flask_app, self.backend_resolver)
+
+    def derive_notifications(self) -> UiNotificationsMessage:
+        return _derive_ui_notifications_message(self.flask_app, self.backend_resolver)
 
     def derive_discovery_health(self) -> UiDiscoveryHealthMessage:
         return _derive_ui_discovery_health_message(self.discovery_health_watchdog)
@@ -2261,7 +2259,7 @@ class _LegacyUiStateDeriver(MutableModel):
         window = self.minds_config.get_update_window() if self.minds_config is not None else DEFAULT_UPDATE_WINDOW
         if self.workspace_update_service is None:
             return UiWorkspaceUpdatesMessage(updates={}, update_window=format_update_window(window))
-        return build_workspace_updates_message(self.workspace_update_service, window)
+        return build_workspace_updates_message(self.workspace_update_service, window, self.minds_config)
 
 
 def _read_default_update_window() -> tuple[int, int]:
@@ -2270,14 +2268,14 @@ def _read_default_update_window() -> tuple[int, int]:
 
 
 class _UpdateRunHostLifecycle(MutableModel):
-    """Brings a machine up for an update run and puts it back down afterwards.
+    """Brings a stopped machine up for an "Update now"; it stays up afterwards.
 
-    Both halves go through :func:`perform_mind_host_action` rather than shelling
-    out to ``mngr`` directly, so an update run leaves the same host-state
-    override and unattended-recovery marks behind as a start or stop the user
-    asked for. A raw ``mngr start`` here would wake a machine the app had
-    stopped without clearing its suppression mark, leaving it excluded from
-    recovery for the rest of the process's life.
+    Goes through :func:`perform_mind_host_action` rather than shelling out to
+    ``mngr`` directly, so an update run leaves the same host-state override and
+    unattended-recovery marks behind as a start the user asked for. A raw
+    ``mngr start`` here would wake a machine the app had stopped without
+    clearing its suppression mark, leaving it excluded from recovery for the
+    rest of the process's life.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
@@ -2295,24 +2293,6 @@ class _UpdateRunHostLifecycle(MutableModel):
         Synchronous because the dispatch's next step execs into the machine.
         """
         return self._act(agent_id, MindHostAction.START)
-
-    def stop_in_background(self, agent_id: AgentId) -> None:
-        """Stop the machine on a one-shot worker.
-
-        The caller is the shared events-reader thread and ``mngr stop --stop-host``
-        can take minutes.
-        """
-        try:
-            self.concurrency_group.start_new_thread(
-                target=self._act,
-                args=(agent_id, MindHostAction.STOP),
-                name=f"scheduled-run-host-stop-{agent_id}",
-                daemon=True,
-                is_checked=False,
-            )
-        # Any of these means the app is shutting down; an escape would kill the events reader.
-        except (OSError, RuntimeError, ConcurrencyGroupError, ConcurrencyExceptionGroup) as exc:
-            logger.warning("Could not start the host stop for {} after its scheduled update: {}", agent_id, exc)
 
     def _act(self, agent_id: AgentId, action: MindHostAction) -> MindHostActionOutcome:
         return perform_mind_host_action(
@@ -2381,17 +2361,6 @@ def start_workspace_update_loops(app: Flask, root_concurrency_group: Concurrency
     service.detector.start()
     service.start_run_polling(root_concurrency_group)
     service.apply_window.start()
-    if state.update_scheduler is not None:
-        state.update_scheduler.start(root_concurrency_group)
-
-
-class WorkspaceUpdateMachinery(FrozenModel):
-    """The update service and the scheduler built from it, assembled together."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    service: WorkspaceUpdateService = Field(description="Dispatches and closes out update runs.")
-    scheduler: UpdateScheduler = Field(description="Runs the armed intents inside the update window.")
 
 
 def _is_recovery_declined_by_an_update(app: Flask, agent_id: AgentId) -> bool:
@@ -2405,7 +2374,35 @@ def _is_recovery_declined_by_an_update(app: Flask, agent_id: AgentId) -> bool:
     return service is not None and service.apply_window.should_decline_recovery_dispatch(agent_id)
 
 
-def _build_workspace_update_machinery(
+def _arm_for_auto_update(app: Flask, agent_id: AgentId) -> None:
+    """The sweep's auto-update arm, through the service read off the app's state.
+
+    Read at call time: the detector that asks is built before the service that arms.
+    """
+    service = get_state(app).workspace_update_service
+    if service is not None:
+        service.arm_for_auto_update(agent_id)
+
+
+def _read_auto_update_policy(minds_config: MindsConfig | None, agent_id: AgentId) -> AutoUpdatePolicy:
+    if minds_config is None:
+        return AutoUpdatePolicy(is_enabled=False, skipped_target_ref="")
+    return AutoUpdatePolicy(
+        is_enabled=minds_config.get_auto_update_workspaces(),
+        skipped_target_ref=minds_config.get_skipped_update_target(str(agent_id)) or "",
+    )
+
+
+def _drop_retired_update_schedules(data_dir: Path) -> None:
+    """Remove the app-side schedule records an older build kept; schedules live in each workspace now."""
+    # CLEANUP: drop this once every install has launched a build that owns no update_schedules dir.
+    retired_dir = data_dir / "update_schedules"
+    if retired_dir.is_dir():
+        shutil.rmtree(retired_dir, ignore_errors=True)
+        logger.info("Dropped the retired app-side update schedules at {}", retired_dir)
+
+
+def _build_workspace_update_service(
     app: Flask,
     backend_resolver: BackendResolverInterface,
     mngr_caller: MngrCaller | None,
@@ -2416,7 +2413,7 @@ def _build_workspace_update_machinery(
     dispatch_recovery: Callable[[AgentId], None] | None,
     mngr_binary: str,
     mngr_host_dir: Path,
-) -> WorkspaceUpdateMachinery | None:
+) -> WorkspaceUpdateService | None:
     """Assemble the update machinery, or None when this build cannot run updates.
 
     Gated as a unit: a build missing any input has no update surface (routes
@@ -2432,9 +2429,8 @@ def _build_workspace_update_machinery(
         or dispatch_recovery is None
     ):
         return None
-    schedule_store = UpdateScheduleStore(records_dir=paths.data_dir / "update_schedules")
+    _drop_retired_update_schedules(paths.data_dir)
     state_store = WorkspaceUpdateStateStore(
-        schedule_store=schedule_store,
         dismissal_store=UpdateDismissalStore(records_dir=paths.data_dir / "update_dismissals"),
     )
     apply_window = UpdateApplyWindowManager(
@@ -2445,14 +2441,26 @@ def _build_workspace_update_machinery(
         concurrency_group=root_concurrency_group,
         dispatch_recovery=dispatch_recovery,
     )
+    settings_source = UpdateSettingsSource(
+        read_ceiling=default_workspace_template_ref,
+        read_update_window=(
+            minds_config.get_update_window if minds_config is not None else _read_default_update_window
+        ),
+        # The same reader the workspace's bootstrap asks for at boot.
+        read_zone=read_host_timezone,
+        paths=paths,
+    )
     detector = WorkspaceUpdateDetector(
         store=state_store,
         backend_resolver=backend_resolver,
         mngr_caller=mngr_caller,
         concurrency_group=root_concurrency_group,
         read_supported_version=default_workspace_template_ref,
-        # The sweep only wants the run-record half of the probe.
-        read_run_record=lambda agent_id: apply_window.probe_run(agent_id).run_status,
+        read_update_facts=lambda agent_id: read_workspace_update_facts(
+            mngr_caller, build_agent_address(agent_id, backend_resolver), settings_source.settings_for(agent_id)
+        ),
+        read_auto_update_policy=lambda agent_id: _read_auto_update_policy(minds_config, agent_id),
+        arm_for_auto_update=lambda agent_id: _arm_for_auto_update(app, agent_id),
     )
     host_lifecycle = _UpdateRunHostLifecycle(
         flask_app=app,
@@ -2462,28 +2470,16 @@ def _build_workspace_update_machinery(
         mngr_binary=mngr_binary,
         mngr_host_dir=mngr_host_dir,
     )
-    service = WorkspaceUpdateService(
+    return WorkspaceUpdateService(
         state_store=state_store,
-        schedule_store=schedule_store,
         detector=detector,
         apply_window=apply_window,
         mngr_caller=mngr_caller,
         backend_resolver=backend_resolver,
-        paths=paths,
+        settings_source=settings_source,
+        minds_config=minds_config,
         start_workspace=host_lifecycle.start_and_wait,
     )
-    scheduler = UpdateScheduler(
-        schedule_store=schedule_store,
-        read_update_window=(
-            minds_config.get_update_window if minds_config is not None else _read_default_update_window
-        ),
-        read_conditions=service.read_conditions,
-        read_host_state=service.read_host_state,
-        dispatch=service.dispatch_for_scheduler,
-        stop_workspace=host_lifecycle.stop_in_background,
-    )
-    service.add_on_run_finished_callback(scheduler.note_run_finished)
-    return WorkspaceUpdateMachinery(service=service, scheduler=scheduler)
 
 
 def _create_ui_state_publisher(
@@ -2517,7 +2513,8 @@ def _create_ui_state_publisher(
         derive_workspaces=deriver.derive_workspaces,
         derive_accounts=deriver.derive_accounts,
         derive_providers=deriver.derive_providers,
-        derive_requests_and_notifications=deriver.derive_requests_and_notifications,
+        derive_requests=deriver.derive_requests,
+        derive_notifications=deriver.derive_notifications,
         derive_discovery_health=deriver.derive_discovery_health,
         derive_environment=deriver.derive_environment,
         derive_health_states=deriver.derive_health_states,
@@ -2688,7 +2685,7 @@ def create_desktop_client(
         if system_interface_health_tracker is not None and root_concurrency_group is not None
         else None
     )
-    workspace_update_machinery = _build_workspace_update_machinery(
+    workspace_update_service = _build_workspace_update_service(
         app=app,
         backend_resolver=backend_resolver,
         mngr_caller=mngr_caller,
@@ -2704,7 +2701,6 @@ def create_desktop_client(
         mngr_binary=mngr_binary,
         mngr_host_dir=resolved_mngr_host_dir,
     )
-    workspace_update_service = workspace_update_machinery.service if workspace_update_machinery is not None else None
     ui_publisher = _create_ui_state_publisher(
         app=app,
         broadcaster=ui_channel_broadcaster,
@@ -2817,7 +2813,6 @@ def create_desktop_client(
         notification_feed=notification_feed,
         workspace_operation_registry=workspace_operation_registry,
         workspace_update_service=workspace_update_service,
-        update_scheduler=(workspace_update_machinery.scheduler if workspace_update_machinery is not None else None),
         identity_cache=identity_cache,
         forward_identity=forward_identity,
     )

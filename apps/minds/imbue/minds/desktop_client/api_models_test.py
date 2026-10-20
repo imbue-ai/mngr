@@ -1,7 +1,6 @@
 import pytest
 from pydantic import ValidationError
 
-from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import AwsCloudAccountCreateRequest
 from imbue.minds.desktop_client.api_models import AzureCloudAccountCreateRequest
 from imbue.minds.desktop_client.api_models import BugReportRequest
@@ -93,43 +92,3 @@ def test_create_workspace_requires_git_url() -> None:
         CreateWorkspaceRequest.model_validate({})
     # All other create fields are optional (the form may omit the advanced ones).
     assert CreateWorkspaceRequest.model_validate({"git_url": "https://example/repo"}).git_url == "https://example/repo"
-
-
-def test_agent_notification_accepts_a_destination_of_a_message_type_and_string_fields() -> None:
-    model = AgentNotificationRequest.model_validate(
-        {"message": "3 new items", "destination": {"type": "minds:show-routine", "routine_id": "inbox-digest"}}
-    )
-
-    assert model.destination is not None
-    assert model.destination.message_type == "minds:show-routine"
-    assert model.destination.fields == {"routine_id": "inbox-digest"}
-    # The wire shape is flat: the type beside the fields.
-    assert model.destination.model_dump(mode="json") == {"type": "minds:show-routine", "routine_id": "inbox-digest"}
-
-
-def test_agent_notification_without_a_destination_lands_in_the_chat() -> None:
-    model = AgentNotificationRequest.model_validate({"message": "all green"})
-
-    assert model.destination is None
-
-
-@pytest.mark.parametrize(
-    "destination",
-    [
-        # Not lowercase prefix:kebab-name.
-        {"type": "Minds:ShowRoutine"},
-        {"type": "show-routine"},
-        {"type": "minds:show routine"},
-        {"type": "minds:"},
-        # The workspace shell's own prefix.
-        {"type": "shell:open"},
-        # No type at all.
-        {"routine_id": "inbox-digest"},
-        # A field that is not a string.
-        {"type": "minds:show-routine", "count": 3},
-        {"type": "minds:show-routine", "nested": {"a": "b"}},
-    ],
-)
-def test_agent_notification_rejects_a_malformed_destination(destination: dict[str, object]) -> None:
-    with pytest.raises(ValidationError):
-        AgentNotificationRequest.model_validate({"message": "hi", "destination": destination})

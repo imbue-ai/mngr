@@ -1,4 +1,3 @@
-import base64
 import fcntl
 import os
 import socket
@@ -556,12 +555,6 @@ def parse_openssh_public_key_blob(public_key: str) -> tuple[str, str]:
     if len(parts) < 2:
         raise MngrError(f"Malformed OpenSSH public key (expected '<type> <base64> [comment]'): {public_key!r}")
     return parts[0], parts[1]
-
-
-def get_ssh_public_key_fingerprint(public_key: str) -> str:
-    """The OpenSSH ``SHA256:...`` fingerprint of a public key line (``<type> <base64> [comment]``)."""
-    key_type, key_blob = parse_openssh_public_key_blob(public_key)
-    return paramiko.PKey.from_type_string(key_type, base64.b64decode(key_blob)).fingerprint
 
 
 def read_served_host_key_or_none(hostname: str, port: int, *, timeout_seconds: float) -> str | None:

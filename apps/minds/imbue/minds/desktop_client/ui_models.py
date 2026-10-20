@@ -33,7 +33,6 @@ from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.connections.data_types import DEFAULT_CREDENTIAL_SOURCE_NAME
-from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.folder_sync import FolderSyncState
@@ -45,6 +44,7 @@ from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
+from imbue.minds.desktop_client.update_status import UpdateStartedBy
 from imbue.minds.desktop_client.update_status import UpdateUnknownReason
 from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.mngr_latchkey.desktop_egress import DesktopEgressMode
@@ -370,18 +370,7 @@ class UiNotificationEntry(FrozenModel):
     body: str = Field(description="Detail line snapshotted at creation; may be empty")
     request_id: str = Field(description="The originating request event id for permission requests; '' otherwise")
     chat_agent_id: str = Field(
-        default="",
-        description=(
-            "Stable chat destination for an agent message (agent id for older chats); '' otherwise, including "
-            "a message from a workspace's primary agent, which is not a chat"
-        ),
-    )
-    destination: NotificationDestination | None = Field(
-        default=None,
-        description=(
-            "For an agent message, the workspace message its click posts into the workspace frame (an app's page "
-            "opens for it) instead of focusing a chat; None lands in the chat, or on the workspace alone"
-        ),
+        default="", description="Stable chat destination for an agent message (agent id for older chats); '' otherwise"
     )
     workspace_agent_id: str = Field(
         description="Origin workspace's agent id; '' when unresolvable or for an account-level system event"
@@ -459,8 +448,7 @@ class UiWorkspaceUpdate(FrozenModel):
     """
 
     availability: UpdateAvailability = Field(
-        description="Up to date / out of date / patch available / security update / unknown / app behind / "
-        "needs recreation"
+        description="Up to date / out of date / unknown / app behind / needs recreation"
     )
     unknown_reason: UpdateUnknownReason | None = Field(
         default=None,
@@ -469,6 +457,10 @@ class UiWorkspaceUpdate(FrozenModel):
     current_version: str = Field(description="The workspace's version, empty when unknown")
     supported_version: str = Field(
         description="The ref this app is pinned to; a branch rather than a minds-v* tag when it imposes no ceiling"
+    )
+    is_version_from_label: bool = Field(
+        description="Whether the version came from the create-time label because the machine's own git "
+        "has not been read this session (it has been unreachable throughout, or every read so far failed)"
     )
     activity: UpdateActivity = Field(description="What an update run is doing right now")
     run_started_at: datetime | None = Field(
@@ -491,11 +483,34 @@ class UiWorkspaceUpdate(FrozenModel):
     in_place_compatible_ref: str = Field(
         default="", description="Newest version still applicable in place, offered alongside a refusal"
     )
-    is_scheduled: bool = Field(default=False, description="Whether a scheduled update is armed")
-    scheduled_target_ref: str = Field(
-        default="", description="The exact ref the armed schedule targets; '' for the skill's default"
+    is_scheduled: bool = Field(
+        default=False, description="Whether the workspace's own schedule file is armed, as its last read said"
     )
-    last_skip_reason: str = Field(default="", description="Why the last scheduled attempt did not run")
+    override_ref: str = Field(
+        default="", description="The exact version the user typed for the armed schedule; '' for the app's ceiling"
+    )
+    schedule_window: str = Field(
+        default="", description="The armed schedule's window as a clock reads it, e.g. '2:00 AM-5:00 AM'; '' when none"
+    )
+    schedule_zone: str = Field(
+        default="", description="The IANA zone the armed schedule's window is read in; '' when none or unknown"
+    )
+    last_skip_reason: str = Field(default="", description="Why the last update window closed without a start")
+    needs_sign_in: bool = Field(
+        default=False,
+        description="Whether an arm or a start was refused, or a window skipped, for want of a signed-in AI account",
+    )
+    is_update_skipped: bool = Field(
+        default=False,
+        description="Whether the user skipped the app's current release for this workspace under auto-update",
+    )
+    is_decision_pending: bool = Field(
+        default=False,
+        description="Whether the last run ended needing the user's decision about something the update cannot keep",
+    )
+    started_by: UpdateStartedBy | None = Field(
+        default=None, description="How the row's run was started; None when unknown"
+    )
     dispatch_failure: str = Field(
         default="",
         description="Why the last update asked for never went out, as a sentence; '' when it went out, or since "
@@ -513,6 +528,9 @@ class UiWorkspaceUpdate(FrozenModel):
         default="",
         description="Name of the run's chat agent; empty when no run has claimed this machine",
     )
+    chat_agent_id: str = Field(
+        default="", description="The run's chat's id, for opening it from the app; '' when unknown"
+    )
     is_backup_configured: bool = Field(
         default=False,
         description="Whether backups exist for this machine (keys the go-ahead-without-backups confirmation)",
@@ -520,9 +538,8 @@ class UiWorkspaceUpdate(FrozenModel):
 
     @property
     def is_update_offered(self) -> bool:
-        """Whether the app has positively read that this workspace is a minor release behind, or below the
-        security floor: the badge, the band, and bulk actions."""
-        return self.availability in (UpdateAvailability.OUT_OF_DATE, UpdateAvailability.SECURITY_UPDATE)
+        """Whether the app has positively read that this workspace is a minor release behind: the badge, the band, and bulk actions."""
+        return self.availability is UpdateAvailability.OUT_OF_DATE
 
     @property
     def is_update_dispatchable(self) -> bool:
@@ -536,7 +553,6 @@ class UiWorkspaceUpdate(FrozenModel):
         """
         return self.availability in (
             UpdateAvailability.OUT_OF_DATE,
-            UpdateAvailability.SECURITY_UPDATE,
             UpdateAvailability.PATCH_AVAILABLE,
             UpdateAvailability.UNKNOWN,
         )
@@ -556,6 +572,9 @@ class UiWorkspaceUpdatesMessage(FrozenModel):
     )
     update_window: str = Field(
         description="Human-readable local window scheduled updates run in, e.g. '2:00 AM-5:00 AM'"
+    )
+    is_auto_update_enabled: bool = Field(
+        default=False, description="Whether the app arms every behind workspace's update itself"
     )
 
 

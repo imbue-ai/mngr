@@ -2,8 +2,6 @@ import json
 import queue
 import threading
 import time
-from collections.abc import Callable
-from typing import Any
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -122,19 +120,6 @@ def test_publish_health_broadcasts_immediately_without_diffing() -> None:
     assert [frame["type"] for frame in frames] == ["health", "health"]
 
 
-def _wait_for_frame(client_queue: "queue.Queue[str | None]", is_wanted: Callable[[dict[str, Any]], bool]) -> bool:
-    """Block on the client queue (no polling) until a frame satisfying ``is_wanted`` arrives, or 5s pass."""
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        try:
-            item = client_queue.get(timeout=max(0.05, deadline - time.monotonic()))
-        except queue.Empty:
-            return False
-        if item is not None and is_wanted(json.loads(item)):
-            return True
-    return False
-
-
 def test_publish_loop_survives_an_unexpected_derive_exception() -> None:
     """The publisher strand is the only source of chrome state, so an
     unexpected exception in one pass must not kill the loop: later wakes must
@@ -159,63 +144,18 @@ def test_publish_loop_survives_an_unexpected_derive_exception() -> None:
         # This wake lands during or after the exploding pass: the loop clears
         # the event BEFORE publishing, so it always yields another pass.
         exploding_publisher.notify_change()
-        # The surviving loop's second pass must broadcast the workspaces frame.
-        is_published = _wait_for_frame(client_queue, lambda frame: frame["type"] == "workspaces")
+        # Block on the client queue (no polling): the surviving loop's second
+        # pass must broadcast the workspaces frame.
+        is_published = False
+        deadline = time.monotonic() + 5.0
+        while not is_published and time.monotonic() < deadline:
+            try:
+                item = client_queue.get(timeout=max(0.05, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            is_published = item is not None and json.loads(item)["type"] == "workspaces"
         exploding_publisher.stop()
     assert is_published
-
-
-def _workspace_entry_named(name: str) -> UiWorkspaceEntry:
-    return UiWorkspaceEntry(id=f"agent-{name}", name=name, accent="#112233")
-
-
-def test_publish_loop_spaces_back_to_back_wakes_by_the_minimum_gap() -> None:
-    """A producer firing again as soon as a pass starts still gets at most one pass per gap."""
-    source = _MutableWorkspaceSource()
-    pass_start_queue: "queue.Queue[float]" = queue.Queue()
-
-    def derive_recording_pass_start() -> UiWorkspacesMessage:
-        pass_start_queue.put(time.monotonic())
-        return source.derive()
-
-    min_gap_seconds = 0.2
-    publisher, _client_queue = build_ui_state_publisher_for_test(
-        derive_recording_pass_start, min_seconds_between_passes=min_gap_seconds
-    )
-    pass_starts: list[float] = []
-    concurrency_group = ConcurrencyGroup(name="test-ui-publisher-gap")
-    with concurrency_group:
-        publisher.start(concurrency_group)
-        for idx in range(4):
-            source.entries = (_workspace_entry_named(f"pass-{idx}"),)
-            publisher.notify_change()
-            pass_starts.append(pass_start_queue.get(timeout=5.0))
-        publisher.stop()
-
-    gaps = [later - earlier for earlier, later in zip(pass_starts, pass_starts[1:], strict=False)]
-    # The gap is enforced between pass starts; the derive runs a hair after
-    # its pass starts, so allow that jitter.
-    assert all(gap >= min_gap_seconds * 0.9 for gap in gaps), gaps
-
-
-def test_publish_loop_publishes_the_last_change_of_a_burst() -> None:
-    """Wakes folded into one pass are not lost: the state after the burst's last change goes out."""
-    source = _MutableWorkspaceSource()
-    publisher, client_queue = build_ui_state_publisher_for_test(source.derive, min_seconds_between_passes=0.3)
-    concurrency_group = ConcurrencyGroup(name="test-ui-publisher-burst")
-    with concurrency_group:
-        publisher.start(concurrency_group)
-        for idx in range(50):
-            source.entries = (_workspace_entry_named(f"burst-{idx}"),)
-            publisher.notify_change()
-        is_last_change_published = _wait_for_frame(
-            client_queue,
-            lambda frame: (
-                frame["type"] == "workspaces" and [entry["name"] for entry in frame["workspaces"]] == ["burst-49"]
-            ),
-        )
-        publisher.stop()
-    assert is_last_change_published
 
 
 def test_replayed_health_frames_say_they_are_a_replay() -> None:

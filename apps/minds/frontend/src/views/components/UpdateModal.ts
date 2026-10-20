@@ -1,7 +1,8 @@
 // The one place a machine's update situation is explained and acted on. Thin
 // on content by design: this owes the reader the two versions, that the run
 // costs an agent's time and credits, and every state that needs more than a
-// badge (unknown-version explainers, app-behind, schedule, verdict).
+// badge (unknown-version explainers, app-behind, schedule, sign-in, decision,
+// verdict).
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
@@ -10,14 +11,15 @@ import {
   displayVersion,
   isFailureVerdict,
   isRecreationRequired,
-  isSecurityUpdate,
   isUpdateDispatchable,
+  labelVersionNote,
   recordedDispatchFailure,
+  scheduleSkipLine,
+  scheduledLine,
   updateActivityNotice,
 } from "../../models/updates";
 import type { UpdateActionResult } from "../../models/updates";
 import { Button } from "./Button";
-import { Collapsible } from "./Collapsible";
 import { Modal, DialogCloseButton } from "./Modal";
 import { machineVerdict } from "./MachineVerdict";
 import { Notice } from "./Notice";
@@ -33,24 +35,13 @@ export interface UpdateModalAttrs {
 
 interface UpdateModalState {
   /** The action in flight, so its button can say so and the rest can't be pressed. */
-  pendingAction: "now" | "schedule" | "cancel" | "dismiss" | null;
+  pendingAction: "now" | "schedule" | "cancel" | "skip" | "sign-in" | "dismiss" | null;
   error: string;
   /** What the machine, mngr, or the host start said, shown under `error` when any said something. */
   errorDetail: string;
   /** Which press is held for the go-ahead-without-backups confirmation. */
   noBackupConfirm: "now" | "schedule" | null;
-  isSecurityDetailsOpen: boolean;
 }
-
-/** What the fix behind the security floor addresses. Rewritten whenever a
- * release raises `SECURITY_FLOOR_VERSION`, since that release's fix is the one
- * every workspace below the floor lacks. */
-const SECURITY_FIX_DETAILS =
-  "Eight intermediate certificates issued under eMudhra's emSign root certificate authority were compromised: " +
-  "anyone can recover their private keys. Software that still trusts them can be tricked into connecting to an " +
-  "impostor posing as any website, which could then read or change what this workspace sends and receives, " +
-  "including credentials. This update moves the workspace's tools and certificate stores to versions that no " +
-  "longer trust them.";
 
 /** Where to go when a run ended without landing: its own chat has the details,
  * and whatever it found, the next step is a conversation with it. */
@@ -83,6 +74,8 @@ function verdictMessage(update: UiWorkspaceUpdate): string {
       return `The update agent found that this update can't be applied to this workspace in place. ${checkInLine(update)}`;
     case "STUCK":
       return `The update couldn't finish and couldn't clean up after itself. ${checkInLine(update)}`;
+    case "NEEDS_DECISION":
+      return "The update stopped short of applying: it can't keep something you built in this workspace. Decide how to go on in its chat.";
     case "REFUSED":
       return update.in_place_compatible_ref
         ? `The update didn't run. ${displayVersion(update.in_place_compatible_ref)} can still be applied to this workspace. ${checkInLine(update)}`
@@ -106,14 +99,6 @@ function modalTitle(update: UiWorkspaceUpdate, workspaceName: string): string {
 /** The slash command the new machine's agent runs to bring this machine's work across. */
 export function migrateCommandFor(workspaceName: string): string {
   return `/migrate-workspace from ${workspaceName}`;
-}
-
-/** What an armed schedule says, shared with the machine's Updates settings
- * group. Window-relative rather than "tonight": the window is configurable to
- * any hours. */
-export function scheduledLine(update: UiWorkspaceUpdate, updateWindow: string): string {
-  const target = update.scheduled_target_ref ? ` to ${displayVersion(update.scheduled_target_ref)}` : "";
-  return `Scheduled to update${target} in the next update window (${updateWindow}).`;
 }
 
 /** One "<label>  <version>" line, shared with the machine's Updates settings group. */
@@ -147,7 +132,6 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
     error: "",
     errorDetail: "",
     noBackupConfirm: null,
-    isSecurityDetailsOpen: false,
   };
 
   function run(
@@ -247,7 +231,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       m(
         "p",
         { class: "type-body text-secondary" },
-        "This workspace is running a version of Imbue Studio too old to update in place, and is missing security fixes. " +
+        "This workspace is running a version of Imbue Studio too old to update in place. " +
           "To get it up to date, create a new workspace and move your work across.",
       ),
       m("ol", { class: "type-helper text-secondary list-decimal pl-5 flex flex-col gap-1" }, [
@@ -293,26 +277,11 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             updateVersionRow("Supported by Imbue Studio", update.supported_version),
           ]),
         );
-        if (isSecurityUpdate(update)) {
-          body.push(
-            m(Notice, { variant: "error" }, [
-              m("p", "This update includes a critical security fix."),
-              m(
-                Collapsible,
-                {
-                  id: "security-fix-details",
-                  isOpen: state.isSecurityDetailsOpen,
-                  onToggle: () => (state.isSecurityDetailsOpen = !state.isSecurityDetailsOpen),
-                  extra: "mt-1",
-                  triggerExtra:
-                    "inline-flex items-center gap-1 type-helper bg-transparent border-0 p-0 text-inherit hover:underline",
-                  panelExtra: "mt-1 type-helper",
-                  summary: m("span", "See details"),
-                },
-                m("p", SECURITY_FIX_DETAILS),
-              ),
-            ]),
-          );
+        const labelNote = update.is_version_from_label
+          ? labelVersionNote(stores.workspaces.entryByAnyId(agentId)?.liveness)
+          : null;
+        if (labelNote !== null) {
+          body.push(m("p", { class: "type-helper text-tertiary" }, labelNote));
         }
       }
 
@@ -330,34 +299,65 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         );
       }
 
+      const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
+      const isScheduled = update.is_scheduled ?? false;
+      const isDecisionPending = update.is_decision_pending ?? false;
+      const needsSignIn = (update.needs_sign_in ?? false) && !isUpdating;
+      const chatAgentId = update.chat_agent_id ?? "";
+
       const verdict = verdictMessage(update);
       if (verdict) {
-        body.push(m(Notice, { variant: isFailureVerdict(update.verdict) ? "error" : "success" }, verdict));
+        const variant = isDecisionPending ? "warn" : isFailureVerdict(update.verdict) ? "error" : "success";
+        body.push(m(Notice, { variant }, verdict));
       }
       if (update.verdict_detail) {
         body.push(m("p", { class: "type-helper text-secondary" }, update.verdict_detail));
       }
 
-      if (update.is_scheduled) {
+      if (isScheduled) {
+        const skipLine = scheduleSkipLine(update);
         body.push(
           m("div", { class: "flex flex-col gap-1" }, [
-            m("p", { class: "type-helper text-secondary" }, scheduledLine(update, updates.updateWindow)),
-            update.last_skip_reason
-              ? m("p", { class: "type-helper text-tertiary" }, `Last attempt: ${update.last_skip_reason}`)
-              : null,
+            m(
+              "p",
+              { class: "type-helper text-secondary" },
+              scheduledLine(update, updates.updateWindow, isAutoUpdateEnabled),
+            ),
+            skipLine ? m("p", { class: "type-helper text-tertiary" }, skipLine) : null,
           ]),
         );
       }
 
-      const isDispatchable = isUpdateDispatchable(update) && !isUpdating;
-      if (isDispatchable) {
-        // Stated once: a fact about what an update is, not a warning on one button.
+      if (needsSignIn) {
         body.push(
           m(
-            "p",
-            { class: "type-helper text-tertiary" },
-            "Updating runs an agent inside this workspace, which uses credits.",
+            Notice,
+            { variant: "warn" },
+            isAutoUpdateEnabled
+              ? "No AI account is signed in to this workspace, so Studio can't update it automatically. " +
+                  "Sign in, and Studio schedules its update again."
+              : "No AI account is signed in to this workspace, so its update can't start. Sign in, then try again.",
           ),
+        );
+      }
+
+      // A pending decision is answered in the run's chat, not by another run.
+      const isDispatchable = isUpdateDispatchable(update) && !isUpdating && !isDecisionPending;
+      if (isDispatchable) {
+        // Stated once: facts about what an update is, not warnings on one button.
+        body.push(
+          m("div", { class: "flex flex-col gap-1" }, [
+            m(
+              "p",
+              { class: "type-helper text-tertiary" },
+              "Updating runs an agent inside this workspace, which uses credits.",
+            ),
+            m(
+              "p",
+              { class: "type-helper text-tertiary" },
+              "Running chats pause for a few minutes while the update is applied, then continue.",
+            ),
+          ]),
         );
         // Naming a different version lives in the machine's settings;
         // ?override=1 lands there with the field open.
@@ -378,10 +378,28 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         );
       }
 
+      const signInFailure = updates.signInFailureFor(agentId);
       const error = state.error
         ? { message: state.error, detail: state.errorDetail }
-        : recordedDispatchFailure(update, isUpdating);
+        : signInFailure !== null && needsSignIn
+          ? { message: signInFailure.error, detail: signInFailure.detail }
+          : recordedDispatchFailure(update, isUpdating);
       if (error.message) body.push(m(Notice, { variant: "error" }, [error.message, machineVerdict(error.detail)]));
+
+      const openChatButton = (variant: "primary" | "secondary"): m.Children =>
+        m(
+          Button,
+          {
+            variant,
+            id: "update-modal-open-chat",
+            disabled: isBusy,
+            onclick: () => {
+              onClose();
+              shell.openWorkspaceChat(agentId, chatAgentId);
+            },
+          },
+          "Open chat",
+        );
 
       const actions: m.Children[] = [];
       if (isRecreationRequired(update)) {
@@ -400,87 +418,132 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             "Create a new workspace",
           ),
         );
-      } else if (isDispatchable) {
-        // Enter the machine BEFORE dispatching: the machine's interface opens
-        // the run's chat tab only for clients connected when the agent appears.
-        // The modal survives this one navigation (see handleRouteChanged). A
-        // plain enterWorkspace: the dispatch starts a stopped machine itself,
-        // and the recovery route's start intent would start it twice.
-        const runNow = (): void => {
-          shell.enterWorkspace(agentId);
-          run("now", () => updates.updateNow(agentId), onClose);
-        };
-        const runSchedule = (): void => run("schedule", () => updates.scheduleUpdate(agentId), () => undefined);
-        if (state.noBackupConfirm !== null) {
-          // The question replaces the action row so there is one way to answer it.
-          const heldPress = state.noBackupConfirm === "now" ? runNow : runSchedule;
-          body.push(
-            noBackupConfirmPrompt({
-              onConfirm: () => {
-                state.noBackupConfirm = null;
-                heldPress();
-              },
-              onCancel: () => {
-                state.noBackupConfirm = null;
-              },
-            }),
-          );
-        } else {
-          // Scheduling is the default: the apply takes services down, and the
-          // update window is when nobody is in the machine.
+      } else if (isDecisionPending) {
+        if (chatAgentId) actions.push(openChatButton("primary"));
+      } else {
+        if (needsSignIn) {
           actions.push(
             m(
               Button,
               {
                 variant: "primary",
+                id: "update-modal-sign-in",
                 disabled: isBusy,
-                onclick: () => {
-                  if (updates.needsNoBackupConfirmation(agentId)) {
-                    state.noBackupConfirm = "schedule";
-                  } else {
-                    runSchedule();
-                  }
-                },
+                onclick: () => run("sign-in", () => shell.signInForUpdate(agentId), onClose),
               },
-              state.pendingAction === "schedule" ? m(Spinner, { size: "sm" }) : "Schedule update",
+              state.pendingAction === "sign-in" ? m(Spinner, { size: "sm" }) : "Sign in",
             ),
           );
+        }
+        if (isDispatchable) {
+          // Enter the machine BEFORE dispatching: the machine's interface opens
+          // the run's chat tab only for clients connected when the agent appears.
+          // The modal survives this one navigation (see handleRouteChanged). A
+          // plain enterWorkspace: the dispatch starts a stopped machine itself,
+          // and the recovery route's start intent would start it twice.
+          const runNow = (): void => {
+            shell.enterWorkspace(agentId);
+            run("now", () => updates.updateNow(agentId), onClose);
+          };
+          const runSchedule = (): void => run("schedule", () => updates.scheduleUpdate(agentId), () => undefined);
+          // Under auto-update the app arms the schedule itself; with one armed
+          // already there is nothing to schedule.
+          const isScheduleOffered = !isAutoUpdateEnabled && !isScheduled;
+          if (state.noBackupConfirm !== null) {
+            // The question replaces the action row so there is one way to answer it.
+            const heldPress = state.noBackupConfirm === "now" ? runNow : runSchedule;
+            body.push(
+              noBackupConfirmPrompt({
+                onConfirm: () => {
+                  state.noBackupConfirm = null;
+                  heldPress();
+                },
+                onCancel: () => {
+                  state.noBackupConfirm = null;
+                },
+              }),
+            );
+          } else {
+            // Scheduling is the default: the apply takes services down, and the
+            // update window is when nobody is in the machine.
+            if (isScheduleOffered) {
+              actions.push(
+                m(
+                  Button,
+                  {
+                    variant: "primary",
+                    disabled: isBusy,
+                    onclick: () => {
+                      if (updates.needsNoBackupConfirmation(agentId)) {
+                        state.noBackupConfirm = "schedule";
+                      } else {
+                        runSchedule();
+                      }
+                    },
+                  },
+                  state.pendingAction === "schedule" ? m(Spinner, { size: "sm" }) : "Schedule update",
+                ),
+              );
+            }
+            actions.push(
+              m(
+                Button,
+                {
+                  variant: isScheduleOffered || needsSignIn ? "secondary" : "primary",
+                  disabled: isBusy,
+                  onclick: () => {
+                    if (updates.needsNoBackupConfirmation(agentId)) {
+                      state.noBackupConfirm = "now";
+                    } else {
+                      runNow();
+                    }
+                  },
+                },
+                state.pendingAction === "now"
+                  ? m(Spinner, { size: "sm" })
+                  : isScheduled
+                    ? "Update now instead"
+                    : "Update now",
+              ),
+            );
+          }
+        }
+        // A run's outcome outlives it and the row wears the badge until it is
+        // cleared; a stall, or an update that never went out, wears a failure
+        // badge too, so it gets the same Dismiss. A failed run's chat is where
+        // it says what it found.
+        const isRunFailed = update.activity === "STALLED" || isFailureVerdict(update.verdict);
+        if (isRunFailed && chatAgentId && !update.dispatch_failure) actions.push(openChatButton("secondary"));
+        const isOutcomeShowing = Boolean(verdict) || update.activity === "STALLED" || Boolean(update.dispatch_failure);
+        if (isOutcomeShowing) actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
+        if (isScheduled && isAutoUpdateEnabled) {
+          // Cancelling would only be re-armed by the next sweep; skipping is the
+          // way to say "not this release".
+          actions.push(
+            m(
+              Button,
+              {
+                variant: "secondary",
+                id: "update-modal-skip",
+                disabled: isBusy,
+                onclick: () => run("skip", () => updates.skipUpdate(agentId), onClose),
+              },
+              state.pendingAction === "skip" ? m(Spinner, { size: "sm" }) : "Skip this update",
+            ),
+          );
+        } else if (isScheduled) {
           actions.push(
             m(
               Button,
               {
                 variant: "secondary",
                 disabled: isBusy,
-                onclick: () => {
-                  if (updates.needsNoBackupConfirmation(agentId)) {
-                    state.noBackupConfirm = "now";
-                  } else {
-                    runNow();
-                  }
-                },
+                onclick: () => run("cancel", () => updates.cancelSchedule(agentId), () => undefined),
               },
-              state.pendingAction === "now" ? m(Spinner, { size: "sm" }) : "Update now",
+              state.pendingAction === "cancel" ? m(Spinner, { size: "sm" }) : "Cancel schedule",
             ),
           );
         }
-      }
-      // A run's outcome outlives it and the row wears the badge until it is
-      // cleared; a stall, or an update that never went out, wears a failure
-      // badge too, so it gets the same Dismiss.
-      const isOutcomeShowing = Boolean(verdict) || update.activity === "STALLED" || Boolean(update.dispatch_failure);
-      if (isOutcomeShowing) actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
-      if (update.is_scheduled) {
-        actions.push(
-          m(
-            Button,
-            {
-              variant: "secondary",
-              disabled: isBusy,
-              onclick: () => run("cancel", () => updates.cancelSchedule(agentId), () => undefined),
-            },
-            state.pendingAction === "cancel" ? m(Spinner, { size: "sm" }) : "Cancel schedule",
-          ),
-        );
       }
 
       return m(

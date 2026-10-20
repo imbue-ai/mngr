@@ -6,7 +6,6 @@ import shlex
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Final
 from typing import assert_never
 
 from loguru import logger
@@ -22,8 +21,6 @@ from imbue.mngr.providers.deploy_utils import MngrInstallMode
 from imbue.mngr.providers.deploy_utils import collect_deploy_files
 from imbue.mngr.providers.deploy_utils import resolve_mngr_install_mode
 from imbue.mngr_recursive.data_types import RecursivePluginConfig
-
-_UV_INSTALL_COMMAND: Final[str] = "curl -LsSf https://astral.sh/uv/0.13.4/install.sh | sh"
 
 
 def _get_remote_home(host: OnlineHostInterface) -> str:
@@ -83,7 +80,7 @@ def _ensure_uv_available(host: OnlineHostInterface) -> None:
         return
 
     with log_span("Installing uv on host"):
-        install_result = host.execute_idempotent_command(_UV_INSTALL_COMMAND)
+        install_result = host.execute_idempotent_command("curl -LsSf https://astral.sh/uv/install.sh | sh")
         if not install_result.success:
             raise MngrError(f"Failed to install uv on host: {install_result.stderr.strip()}")
 

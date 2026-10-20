@@ -1,0 +1,1 @@
+Removed the titlebar back button. It was the chevron that appeared on the "Create a machine" page and on "Recently destroyed"; nothing shows a back arrow in the chrome any more. Named navigation inside a flow (for example "Back to simple configuration" on the create form) is unchanged.

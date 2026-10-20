@@ -6,8 +6,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-## [v0.1.10] - 2026-10-22
-
 ### Added
 
 - Added: Container realizer can run a base image that is already present in the VPS's local Docker daemon, skipping both the build and the pull. Opt-in via a new `allow_local_image` flag on `RealizePlacementContext` (off by default, so OVH / Vultr / AWS behavior is unchanged). Backs the imbue_cloud slice "build once per box, `docker load` per slice" acceleration.
@@ -16,12 +14,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Uniform offline host/agent-state store abstraction (`HostStateStore`) for offline-capable providers, with an object-storage implementation (`BucketHostStateStore`) shared by AWS S3 and Azure Blob. The bucket is required infrastructure: a provider whose bucket has not been provisioned raises an actionable error pointing at its `prepare` command, on the create/label write path as well as on offline reads. Storage errors propagate rather than being swallowed; a malformed record raises rather than being silently dropped.
 - Added: Offline `host_dir` capability as a select-once `HostDirBackend` strategy — a cloud-agnostic, bucket-backed `BucketHostDirBackend` (operator-driven capture at `mngr stop` plus an offline-read volume) or a no-op `NullHostDirBackend` when the feature is off.
 - Added: Agent listings populate `AgentDetails.pid` (the agent's main-process PID in the remote host's PID namespace), extracted from the same already-collected tmux/ps probe data.
-- Added: VPS-backed providers report create steps on mngr's `--format jsonl` progress stream (`vps.create_instance`, `vps.wait_active`, `vps.wait_ssh`, `vps.wait_bootstrap`, `vps.build_image`/`vps.pull_image`, `vps.start_container`, `vps.wait_agent_ssh`), with remote builds advancing per Dockerfile stage.
-- Added: Containers are created with `--add-host host.docker.internal:host-gateway` (`OUTER_HOST_ADD_HOST_ARGS`), so a service bound on the VPS docker bridge is reachable from the container by that name.
-- Added: Remote docker builds on the outer forward env-sourced BuildKit secrets (`--secret ...,env=NAME`), as local builds do.
-- Added: Optional `volume_home_path` config: the unified host volume gets a `home/` subdirectory backing a configurable container home (e.g. `/home/user`), with `host_dir` inside it. Plain-text service logs honor the new `host_log_dir` config.
-- Added: `imbue.mngr_vps.leak_cleanup`, a shared age-based reaper for leaked VPS test instances (`find_old_test_instances`, `destroy_leaked_instances`, `VpsLeakCleanupError`).
-- Added: Public provisioning helpers: `render_gvisor_binary_install_script` / `PINNED_GVISOR_BINARY_INSTALL_SCRIPT` (with `GVISOR_RUNSC_RUNTIME_ARGS`, `GVISOR_RUNSC_BINARY_PATH`), `PINNED_DOCKER_APT_VERSION_CORE` / `PINNED_CONTAINERD_APT_VERSION_CORE`, `build_home_volume_symlink_command` / `HOST_VOLUME_HOME_PATH`, and `RealizePlacementContext.extra_ssh_config_files` for extra container sshd config (e.g. an SSH CA trust).
 
 ### Changed
 
@@ -30,21 +22,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The shared `OfflineCapableVpsProvider` now owns the cloud stop/start lifecycle (`stop_host` pauses the whole instance so a paused agent costs only disk; `start_host` resumes it). Providers supply only the cloud-API hooks (`_pause_cloud_instance` / `_resume_cloud_instance`).
 - Changed: Container hosts self-heal sshd. The agent container's PID-1 entrypoint now restarts sshd on every (re)start once mngr has provisioned a host key, so the container is reachable again after a VM reboot or `docker restart` without waiting for `mngr start`.
 - Changed: Registered the gVisor (runsc) runtime with `--overlay2=none` so a container's writable layer is written through to the persistent overlay2 layer and survives a `docker stop`/`start` or host reboot. Previously runsc used its default per-sandbox overlay, which was recreated on every start, silently losing the injected sshd host key, the `/mngr` host_dir symlink, and provisioning markers — leaving the container unreachable until mngr re-provisioned it.
-- Changed: SSH client keys are per host. Each new host gets its own VPS-root (`vps_ssh_key`) and container (`container_ssh_key`) client keys under `keys/host_keys/<host-uuid-hex>/` (layout published as `VPS_HOST_ACCESS_MANIFEST`); bare placement uses the VPS-root key for the agent. `vps_known_hosts` / `container_known_hosts` are rendered from mngr's host-key pin store, and destroy removes the host's keys and pins. Read paths never create keys (`VpsHostKeyMissingError`); hosts from earlier releases fall back to the legacy provider-wide `keys/vps_ssh_key`. A running VPS whose key is not on this machine is not listed.
-- Changed: Cloud VMs (AWS, GCP, Azure, Vultr, OVH) get container-host hardening: the container's memory is capped at VM RAM minus 1 GiB (re-applied each boot by `mngr-vps-container-memory.service`; an explicit `--memory` wins); under runsc, `/run` and `/tmp` are tmpfs (`/tmp` capped at 1/8 of RAM); sshd is configured via the `/etc/ssh/sshd_config.d/60-mngr.conf` drop-in (higher session limits, key-only auth, `PerSourcePenalties no` where supported); Docker logs, build cache and the journal are bounded; the VM's `/tmp` stays on disk; first-boot `apt-get update` is retried.
-- Changed: Containers run with `--restart=unless-stopped` unless the caller sets a restart policy, so an OOM kill, Docker restart or VM reboot brings them back; an explicit stop (`mngr stop`, idle stop) still leaves them stopped.
-- Changed: Pinned Docker Engine bumped from 29.5.1 to 29.6.2, and `containerd.io` is pinned (2.2.6); both pins install on Debian 13 too.
-- Changed: rsync uploads to a VPS also retry closed-connection failures (`Connection closed by ...`, "connection unexpectedly closed"), via mngr's shared `is_closed_ssh_connection_stderr`.
-- Changed: Live listings' SSH info carries `known_hosts_path`, and the printed `ssh` command pins it (`-o UserKnownHostsFile=... -o StrictHostKeyChecking=yes`).
-- Changed: Clearer errors: remote docker build failures report the exit code and tail stdout and stderr separately; a build with a relative context whose working directory was deleted raises `MngrError` saying so instead of `FileNotFoundError`.
-
-### Deprecated
-
-- Deprecated: Per-cloud root-disk knobs (`root_volume_size_gb` on AWS, `boot_disk_size_gb` on GCP, `os_disk_size_gb` on Azure) in favor of `root_disk_size_gb` on `OfflineCapableVpsProviderConfig` (default 30 GB); setting both to different values raises `VpsConfigError`.
-
-### Removed
-
-- Removed: `PINNED_DOCKER_APT_VERSION` (the fully rendered bookworm version); installs derive the distro suffix from the target's os-release, starting from `PINNED_DOCKER_APT_VERSION_CORE`.
 
 ### Fixed
 
@@ -55,17 +32,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `mngr snapshot delete` on a VPS now actually takes effect — `delete_snapshot` removes the snapshot from the host record (raising `SnapshotNotFoundError` for an unknown id) in addition to removing the docker image. Previously the docker image was removed but `mngr snapshot list` kept showing the deleted snapshot.
 - Fixed: `mngr stop` on a bare host no longer hangs for minutes capturing `host_dir`. A bare `host_dir` holds the agent's full working tree (thousands of small files); per-file uploads now run concurrently across a bounded worker pool, turning a minutes-long stop into seconds.
 - Fixed: Hardened the post-finalize idle-watcher install — a missing host record at `_on_host_finalized` (which runs only after the record has been made durable) now fails `create_host` (raising `HostCreationError`, whose cleanup tears the VPS back down) instead of logging a WARNING and silently shipping a host that can never auto-stop on idle.
-- Fixed: `mngr list` reports the real size of cloud hosts instead of a hardcoded 1 CPU / 1 GB: create records the instance shape (`VpsClientInterface.get_instance_shape`, `VpsHostConfig.shape`), older records fall back to a per-provider plan table or an unknown size, and discovery reports it as `DiscoveredHost.size`.
-- Fixed: A `mngr create` whose boot or bootstrap wait fails destroys the VPS instead of leaking it (unless `MNGR_KEEP_FAILED_HOSTS=1`); if that destroy fails too, it raises `VpsInstanceLeakedError` naming the instance, with the original failure chained.
-- Fixed: A container that died out of band (OOM kill, `docker stop`, VM reboot) lists as `STOPPED` with its agents, and `mngr start <agent>@<host>` revives it, instead of showing `CRASHED` and finding 0 agents.
-- Fixed: Host-record and agent-data writes on the VPS volume are atomic, so concurrent readers never see a torn record; unparseable records are retried, then treated as missing or, with the new `strict_host_record_parsing` flag, raise `HostRecordUnreadableError`.
-- Fixed: rsync to and from a container outer no longer fails with `Host key verification failed` when the host directory path contains a space.
-- Fixed: VPS discovery no longer leaks a gevent Hub per VPS on every poll of a long-running `mngr observe`.
-- Fixed: The outer snapshot helper waits for the btrfs data volume to be mounted before servicing a request, instead of running a request replayed at boot before the mount and permanently failing it; `prepare_btrfs_on_outer` raises `VpsProvisioningError` rather than building a loop file on the root disk when a pre-mounted (symlinked) mount path has nothing mounted yet.
-
-### Security
-
-- Security: The outer btrfs snapshot helper (`snapshot_helper.sh`, run as root on every VPS and slice VM) no longer follows symlinks the agent container can plant in its trigger directory, which gave the container VM-root arbitrary file read and overwrite. Hosts pick up the fix on their next create, start or restore.
 
 ## [v0.1.10] - 2026-06-18
 

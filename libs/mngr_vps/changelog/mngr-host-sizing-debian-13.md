@@ -1,0 +1,8 @@
+The shared sshd tuning applied to every VPS now also writes `PerSourcePenalties no` when the VM's sshd advertises the option (OpenSSH >= 9.8, so every Debian 13 default image). Left on, the penalties lock a source address out for minutes after a few unauthenticated connections, which mngr's own discovery and readiness probes, the imbue_cloud connector's shared egress addresses, and a reconnect burst from the user's laptop all produce. The opt-out is guarded separately from the session-cap block, so a host re-provisioned after the caps were written still receives it, and it is skipped on older sshds that would reject the keyword.
+
+- The Docker Engine and containerd pins carry over to Debian 13 unchanged: the install script derives the apt suffix from the VM's `/etc/os-release`, and the Docker repository serves `5:29.6.2-1~debian.13~trixie` and `2.2.6-1~debian.13~trixie` for amd64 and arm64.
+
+- First-boot host setup retries `apt-get update` (six attempts, ten seconds apart) before installing the base packages. On Azure's Debian 13 image cloud-init reached the host-setup commands before the image's apt mirror resolved, the single `apt-get update` failed, and the whole first boot failed with it (no root key copy, no sshd tuning, no ready marker), so `mngr create` timed out waiting for the host.
+
+- A VPS whose first boot never becomes ready (the instance never turns active, never answers SSH, or never writes the ready marker) is now destroyed by the failed `mngr create` instead of being left running. The instance id was previously only known to the create path once every boot wait had succeeded, so a wait that gave up leaked the VM; `MNGR_KEEP_FAILED_HOSTS=1` still keeps it for debugging.
+

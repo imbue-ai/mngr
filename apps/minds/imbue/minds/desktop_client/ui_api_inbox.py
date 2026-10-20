@@ -2,7 +2,11 @@
 
 The SPA inbox reads a typed card list + per-kind typed detail payloads and
 submits grants/denies to the ``/requests/<id>/grant|deny`` routes in
-``app.py``.
+``app.py`` (the handlers' form contracts are unchanged).
+``_displayable_pending_requests`` deliberately duplicates the same-named
+helper in ``app.py`` (still live there for the titlebar badge count):
+importing it from ``app.py`` would be a circular import (``app`` imports
+``ui_api`` imports this module).
 """
 
 from enum import auto
@@ -19,7 +23,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import CHAT_ID_LABEL
-from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
@@ -264,37 +267,22 @@ def resolve_chat_agent_id(agent_id: AgentId, backend_resolver: BackendResolverIn
 
 def build_agent_message_card(
     agent_id: AgentId,
-    title: str | None,
-    message: str,
+    body: str,
     backend_resolver: BackendResolverInterface,
-    destination: NotificationDestination | None,
 ) -> AgentMessageCard:
-    """Feed-input display fields for a workspace agent's message.
+    """Feed-input display fields for a chat agent's message.
 
-    A chat's message is headed by the chat's name, with the title folded into
-    the body as a prefix. The workspace's primary agent is not a chat and its
-    name (``system-services``) means nothing to the user, so its message is
-    headed by the title when one was given, with the message alone as the
-    body. The sending agent names itself through the resolver; its workspace
-    (the primary agent whose tile the user sees, and whose accent the row
-    wears) is found by workspace name, exactly as a request card resolves the
-    sibling agent that filed it. An agent the resolver does not know keeps the
-    raw id as its name and carries no workspace, so the entry still records
-    the message. The click target is a chat's stable chat id, so a chat that
-    moves to another agent keeps receiving its notifications in the same
-    conversation; the primary agent's messages carry no chat, and a click only
-    raises the workspace (or delivers the destination).
+    The sending agent names itself through the resolver; its workspace (the primary
+    agent whose tile the user sees, and whose accent the row wears) is found
+    by workspace name, exactly as a request card resolves the sibling agent
+    that filed it. An agent the resolver does not know keeps the raw id as its
+    name and carries no workspace, so the entry still records the message.
+    The click target is the agent's stable chat id, so a chat that moves to
+    another agent keeps receiving its notifications in the same conversation.
     """
-    is_sender_a_chat = agent_id not in backend_resolver.list_known_workspace_ids()
-    chat_id = resolve_chat_agent_id(agent_id, backend_resolver) if is_sender_a_chat else ""
+    chat_id = resolve_chat_agent_id(agent_id, backend_resolver)
     info = backend_resolver.get_agent_display_info(agent_id)
-    sender_name = info.agent_name if info is not None else str(agent_id)
-    if is_sender_a_chat or not title:
-        chat_name = sender_name
-        body = f"{title}: {message}" if title else message
-    else:
-        chat_name = title
-        body = message
+    chat_name = info.agent_name if info is not None else str(agent_id)
     workspace_name = backend_resolver.get_workspace_name(agent_id) or ""
     primary_agent_id_str = primary_agent_ids_by_workspace_name(backend_resolver).get(workspace_name)
     accent = (
@@ -309,7 +297,6 @@ def build_agent_message_card(
         workspace_agent_id=primary_agent_id_str or "",
         workspace_name=workspace_name or chat_name,
         workspace_accent=accent,
-        destination=destination,
     )
 
 

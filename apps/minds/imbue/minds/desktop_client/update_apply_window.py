@@ -36,6 +36,7 @@ from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import ProbeGracePurpose
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.update_dispatcher_script import RUN_RECORD_PATH
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
@@ -48,7 +49,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 
 # Written by ``update_self.py run-status``; relative to the work_dir ``mngr exec`` lands in.
-RUN_STATUS_PATH: Final[str] = "data/.state/update-apply/run.json"
+RUN_STATUS_PATH: Final[str] = RUN_RECORD_PATH
 
 # Mirrors ``DEFAULT_RECOVER_GRACE_SECONDS`` in the template's ``update_apply_contract.py``: how long
 # a *dead* apply may go without restamping before the workspace's own recovery rolls it back. This
@@ -116,6 +117,9 @@ class UpdateRunProbe(FrozenModel):
         "busy (no turn in flight and no background task pending), and so did any worker the record names (or that "
         "worker is gone). An agent whose state could not be read reads as running rather than waiting, on the same "
         "bias as the rest",
+    )
+    chat_agent_id: str = Field(
+        default="", description="The run's chat's id as the listing gives it, for opening it; '' when not listed"
     )
 
     @property
@@ -292,16 +296,21 @@ def parse_update_run_probe(stdout: str, chat_agent_name: str) -> UpdateRunProbe:
     is_records_run = run_status is not None and bool(chat_agent_name) and run_status.chat_agent_name == chat_agent_name
     worker_agent_name = run_status.worker_agent_name if is_records_run and run_status is not None else ""
     agent_lines = _section(lines, AGENTS_BEGIN_SENTINEL, AGENTS_END_SENTINEL)
+    chat_agent_id = ""
     if agent_lines is None:
         liveness, is_waiting = UpdateAgentLiveness.UNKNOWN, False
     else:
         busy_agents = _parse_busy_agents(_section(lines, BUSY_BEGIN_SENTINEL, BUSY_END_SENTINEL))
         liveness, is_waiting = _classify_agent_listing(agent_lines, chat_agent_name, worker_agent_name, busy_agents)
+        listed = _listed_agent([line.strip() for line in agent_lines if line.strip()], chat_agent_name)
+        if listed is not None and chat_agent_name:
+            chat_agent_id = listed.chat_id or listed.agent_id
     return UpdateRunProbe(
         is_probe_answered=True,
         run_status=run_status,
         agent_liveness=liveness,
         is_agent_waiting=is_waiting,
+        chat_agent_id=chat_agent_id,
     )
 
 

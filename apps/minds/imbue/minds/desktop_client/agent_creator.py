@@ -945,10 +945,10 @@ _CHECKOUT_STEP: Final[ProgressStepId] = ProgressStepId("checkout_branch")
 _MNGR_CREATE_STEP: Final[ProgressStepId] = ProgressStepId("mngr_create")
 _READY_STEP: Final[ProgressStepId] = ProgressStepId("wait_for_ready")
 _DESKTOP_STEP_LABELS: Final[dict[ProgressStepId, str]] = {
-    _CLONE_STEP: "Getting things ready",
-    _CHECKOUT_STEP: "Building your workspace",
-    _MNGR_CREATE_STEP: "Installing your tools",
-    _READY_STEP: "Almost there",
+    _CLONE_STEP: "Fetching the workspace template",
+    _CHECKOUT_STEP: "Checking out the branch",
+    _MNGR_CREATE_STEP: "Creating the workspace",
+    _READY_STEP: "Waiting for the workspace to boot",
 }
 # How long the bootstrap tail gets to exit on SIGTERM before it is killed, and the
 # bound on stopping it once the readiness wait ends; the stop must outlast the
@@ -2253,7 +2253,6 @@ class AgentCreator(MutableModel):
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
-        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -2379,7 +2378,6 @@ class AgentCreator(MutableModel):
             docker_runtime=docker_runtime,
             original_minds_version=original_minds_version,
             backup_request=backup_request,
-            is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
         )
 
         thread = threading.Thread(
@@ -2516,7 +2514,6 @@ class AgentCreator(MutableModel):
         docker_runtime: DockerRuntime,
         original_minds_version: str,
         backup_request: BackupSetupRequest | None,
-        is_onboarding_driven_by_agent: bool,
     ) -> None:
         """Write the IN_FLIGHT pending-create-attempt record, downgrading store errors to warnings.
 
@@ -2555,7 +2552,6 @@ class AgentCreator(MutableModel):
                     backup_request.backup_provider if backup_request is not None else BackupProvider.CONFIGURE_LATER
                 ),
                 backup_api_key_env=(backup_request.api_key_env_text if backup_request is not None else ""),
-                is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
             ),
         )
         try:
@@ -3000,6 +2996,7 @@ class AgentCreator(MutableModel):
                 # the workspace row and the "Creating..." row show side by side.
                 with self._lock:
                     self._canonical_agent_ids[cid_str] = canonical_id
+                self._notify_create_attempts_changed()
 
                 # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
@@ -3039,11 +3036,6 @@ class AgentCreator(MutableModel):
                             f"canonical path for host {canonical_host_id}; this will be repaired "
                             f"automatically the first time the agent requests a permission. Reason: {link_error}"
                         )
-                # Notified after the link, not before: the latchkey auto-register
-                # retries an agent it deferred for a missing host permissions
-                # file only on a resolver change, and this is the one that
-                # follows the file landing.
-                self._notify_create_attempts_changed()
 
                 log_sink.put("[Imbue Studio] Agent created successfully.")
 
@@ -3160,14 +3152,7 @@ class AgentCreator(MutableModel):
             ValueError,
             OSError,
         ) as e:
-            if isinstance(e, MngrCommandError) and e.error_class == QUOTA_EXCEEDED_ERROR_CLASS:
-                # The account's quota (e.g. the waitlist) refused the create: a
-                # correct, deterministic outcome whose sentence the creating page
-                # shows the person, not a fault for error reporting. The mngr
-                # transcript is still in the create log and the FAILED record.
-                logger.info("Create attempt {} was refused by the account's quota: {}", create_attempt_id, e)
-            else:
-                logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
+            logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
             log_sink.put("[Imbue Studio] ERROR: {}".format(e))
             # The steps that did finish measured something real; only they are kept.
             self._record_progress_durations(launch_mode, tracker)

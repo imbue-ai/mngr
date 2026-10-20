@@ -86,12 +86,6 @@ class PendingCreateAttemptRequest(FrozenModel):
     backup_api_key_env: str = Field(
         default="", description="User-supplied restic env block for API_KEY backups (local-only, like restic.env)"
     )
-    is_onboarding_driven_by_agent: bool = Field(
-        default=False,
-        description="Whether the creation page asks its onboarding questions while this workspace is built "
-        "(the first-run start flow's creates do; a create from the form does only when its "
-        "'Use onboarding questions?' switch is on)",
-    )
 
 
 class PendingCreateAttemptRecord(FrozenModel):

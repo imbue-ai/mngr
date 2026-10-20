@@ -40,7 +40,6 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
-from imbue.mngr.utils.testing import make_command_agent
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_opencode.opencode_config import AGENT_OPENCODE_DB_RELPATH
 from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
@@ -867,14 +866,6 @@ def test_agent_field_generators_exposes_opencode_waiting_reason() -> None:
     assert plugin_name == "opencode"
     assert "waiting_reason" in generators
     assert callable(generators["waiting_reason"])
-
-
-def test_waiting_reason_is_absent_for_an_agent_of_another_type(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    agent, host = make_command_agent(local_provider, tmp_path / "command-work")
-
-    assert _waiting_reason(agent, host) is None
 
 
 def test_waiting_reason_returns_permissions_when_active_and_blocked(opencode_agent: OpenCodeAgent) -> None:

@@ -1,5 +1,5 @@
 [project]
-name = "imbue-overlay"
+name = "overlay"
 version = "0.1.0"
 description = "A total, dependency-free algebra for merging layered configuration dicts"
 readme = "README.md"

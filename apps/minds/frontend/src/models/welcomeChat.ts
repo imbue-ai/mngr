@@ -1,24 +1,15 @@
 // The onboarding conversation as the workspace's first chat. Once a create attempt is
 // done, the creation page hands everything said so far (the manifesto exchange, the
-// questions and their answers, the settings, the setup line, the onboarding questions and
-// their answers, the welcome) to the desktop client, which seeds a chat inside the new
-// workspace with it, so the conversation simply continues there. This module turns the page's transcript into that chat's turns, as
+// questions and their answers, the settings, the setup and ready lines) to the desktop
+// client, which seeds a chat inside the new workspace with it, so the conversation simply
+// continues there. This module turns the page's transcript into that chat's turns, as
 // markdown the chat app renders; the toggles become <details> blocks, which it allows.
 
 import type { CreateAttemptRequestSummary } from "./create";
-import type { BuildAnswerId, PathAnswerId } from "./creationTranscript";
 import {
-  BUILD_ASK,
-  BUILD_CHOICES,
-  DEFAULT_ONBOARDING_INTENT,
-  PATH_ASK,
-  PATH_CHOICES,
   SETUP_LINE,
-  SHOWCASE_APP,
-  choiceLabel,
-  onboardingIntent,
+  SETUP_SECTIONS,
   readyTurnMarkdown,
-  showcaseMarkdown,
   summaryLines,
 } from "./creationTranscript";
 import type {
@@ -128,50 +119,16 @@ export function flowTurns(entries: TranscriptEntry[]): WelcomeChatTurn[] {
   return turns;
 }
 
-/** What the creation page's onboarding questions were answered with: null for a question not (yet) answered. */
-export interface OnboardingAnswers {
-  /** Whether the page asked the questions at all (the attempt's ``is_onboarding_driven_by_agent``). */
-  isDriven: boolean;
-  buildAnswer: BuildAnswerId | null;
-  pathAnswer: PathAnswerId | null;
-}
-
-/** The answers of a page that asked nothing. */
-export const NO_ONBOARDING_ANSWERS: OnboardingAnswers = { isDriven: false, buildAnswer: null, pathAnswer: null };
-
-/**
- * The onboarding questions as the page asked them, each followed by the user's answer when there was one:
- * the first question, and the follow-up for a reader who did not know yet.
- */
-export function onboardingQuestionTurns(answers: OnboardingAnswers): WelcomeChatTurn[] {
-  if (!answers.isDriven) return [];
-  const turns = [assistant(BUILD_ASK)];
-  if (answers.buildAnswer === null) return turns;
-  turns.push(user(choiceLabel(BUILD_CHOICES, answers.buildAnswer)));
-  if (answers.buildAnswer === "yes") return turns;
-  turns.push(assistant(PATH_ASK));
-  if (answers.pathAnswer === null) return turns;
-  turns.push(user(choiceLabel(PATH_CHOICES, answers.pathAnswer)));
-  // The recording the page showed on that answer, so the chat's transcript matches the page's.
-  if (answers.pathAnswer === "examples") turns.push(assistant(showcaseMarkdown(SHOWCASE_APP)));
-  return turns;
-}
-
-/**
- * The creation page's own turns: the settings, the setup line, the onboarding questions with their answers,
- * and the welcome written for where the answers led (the problem welcome when they led nowhere yet).
- */
+/** The creation page's own turns: the settings, the setup line with its reading material, and the ready line with its list. */
 export function creationTurns(
   request: CreateAttemptRequestSummary,
   isCloudPreset: boolean,
-  answers: OnboardingAnswers,
 ): WelcomeChatTurn[] {
-  const intent = onboardingIntent(answers.buildAnswer, answers.pathAnswer) ?? DEFAULT_ONBOARDING_INTENT;
+  const guide = SETUP_SECTIONS.map((section) => disclosureMarkdown(section));
   return [
     user(summaryLines(request, isCloudPreset).join("\n")),
-    assistant(SETUP_LINE),
-    ...onboardingQuestionTurns(answers),
-    assistant(readyTurnMarkdown(intent)),
+    assistant([SETUP_LINE, "", ...guide].join("\n")),
+    assistant(readyTurnMarkdown()),
   ];
 }
 
@@ -181,14 +138,13 @@ export function welcomeChatBody(
   request: CreateAttemptRequestSummary,
   // Whether the create was the start flow's Imbue Cloud answer, which the settings turn restates as that one choice.
   isCloudPreset: boolean,
-  answers: OnboardingAnswers,
 ): WelcomeChatBody {
   return {
     title: WELCOME_CHAT_TITLE,
     turns: [
       ...manifestoTurns(),
       ...flowTurns(entries),
-      ...creationTurns(request, isCloudPreset, answers),
+      ...creationTurns(request, isCloudPreset),
     ],
   };
 }

@@ -13,6 +13,7 @@ from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.latchkey.testing import build_permission_grant_handler
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
+from imbue.minds.desktop_client.minds_config import AutoUpdatePromptDecision
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.mock_sign_in_browser_test import RecordingSignInBrowsers
@@ -73,6 +74,58 @@ def test_update_window_write_round_trips_onto_the_overview(tmp_path: Path) -> No
     assert minds_config.get_update_window() == (23, 3)
     reread = json.loads(client.get("/ui/api/settings").data)
     assert (reread["update_window_start_hour"], reread["update_window_end_hour"]) == (23, 3)
+
+
+def test_auto_update_is_off_until_chosen_and_the_toggle_round_trips(tmp_path: Path) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, minds_config=minds_config
+    )
+    overview = json.loads(client.get("/ui/api/settings").data)
+    assert (overview["is_auto_update_enabled"], overview["auto_update_prompt_decision"]) == (False, None)
+
+    turned_on = client.post("/ui/api/settings/auto-update", json={"is_enabled": True})
+    after_on = json.loads(client.get("/ui/api/settings").data)
+    turned_off = client.post("/ui/api/settings/auto-update", json={"is_enabled": False})
+
+    assert (turned_on.status_code, turned_off.status_code) == (200, 200)
+    assert after_on["is_auto_update_enabled"] is True
+    assert minds_config.get_auto_update_workspaces() is False
+    # The toggle is not the offer's answer: the offer can still be made.
+    assert minds_config.get_auto_update_prompt_decision() is None
+
+
+@pytest.mark.parametrize(
+    ("decision", "is_enabled_after"),
+    [(AutoUpdatePromptDecision.ACCEPTED, True), (AutoUpdatePromptDecision.DECLINED, False)],
+)
+def test_answering_the_auto_update_offer_is_remembered_and_accepting_turns_it_on(
+    tmp_path: Path, decision: AutoUpdatePromptDecision, is_enabled_after: bool
+) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, minds_config=minds_config
+    )
+
+    response = client.post("/ui/api/settings/auto-update-prompt", json={"decision": str(decision)})
+
+    assert response.status_code == 200
+    relaunched = MindsConfig(data_dir=tmp_path / "config")
+    assert relaunched.get_auto_update_prompt_decision() is decision
+    assert relaunched.get_auto_update_workspaces() is is_enabled_after
+    assert json.loads(client.get("/ui/api/settings").data)["auto_update_prompt_decision"] == str(decision)
+
+
+def test_an_unknown_auto_update_answer_is_rejected_without_being_stored(tmp_path: Path) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, minds_config=minds_config
+    )
+
+    response = client.post("/ui/api/settings/auto-update-prompt", json={"decision": "maybe"})
+
+    assert response.status_code == 400
+    assert minds_config.get_auto_update_prompt_decision() is None
 
 
 _FIREFOX = InstalledBrowser(

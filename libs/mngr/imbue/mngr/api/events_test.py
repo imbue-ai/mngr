@@ -22,7 +22,6 @@ from imbue.mngr.api.events import READ_FAILURE_REPROBE_INTERVAL_SECONDS
 from imbue.mngr.api.events import SOURCE_SCAN_INTERVAL_SECONDS
 from imbue.mngr.api.events import TAIL_READ_FAILURES_BEFORE_REPROBE
 from imbue.mngr.api.events import _AllEventsStreamState
-from imbue.mngr.api.events import _EVENT_FILE_READ_CHUNK_BYTES
 from imbue.mngr.api.events import _ONLINE_CHECK_FAILURES_BEFORE_WARNING
 from imbue.mngr.api.events import _TailSourceFailure
 from imbue.mngr.api.events import _build_event_sources_from_grouped_files
@@ -30,15 +29,12 @@ from imbue.mngr.api.events import _build_event_sources_from_listing
 from imbue.mngr.api.events import _check_for_new_archived_events
 from imbue.mngr.api.events import _consume_event_queue
 from imbue.mngr.api.events import _create_source_mismatch_warning
-from imbue.mngr.api.events import _emit_event_once
-from imbue.mngr.api.events import _emit_history
+from imbue.mngr.api.events import _emit_historical_events
 from imbue.mngr.api.events import _handle_online_offline_transition
-from imbue.mngr.api.events import _iter_events_from_file
 from imbue.mngr.api.events import _maybe_emit_source_mismatch_warning
 from imbue.mngr.api.events import _pygtail_offset_file_path
 from imbue.mngr.api.events import _read_remote_source_once
 from imbue.mngr.api.events import _record_from_event_data
-from imbue.mngr.api.events import _rescan_and_start_new_tail_threads
 from imbue.mngr.api.events import _seconds_until_next_housekeeping
 from imbue.mngr.api.events import _sort_rotated_files_oldest_first
 from imbue.mngr.api.events import _start_tail_thread
@@ -46,6 +42,7 @@ from imbue.mngr.api.events import _tail_source_thread
 from imbue.mngr.api.events import discover_event_sources
 from imbue.mngr.api.events import filter_sources_by_name
 from imbue.mngr.api.events import parse_event_line
+from imbue.mngr.api.events import read_all_historical_events
 from imbue.mngr.api.events import read_common_transcript_content
 from imbue.mngr.api.events import read_event_content
 from imbue.mngr.api.events import refresh_events_target
@@ -690,22 +687,39 @@ def test_filter_sources_by_name_exact_match_not_prefix() -> None:
     assert result[0].source_path == "logs"
 
 
-def _history_event_ids(events_dir: Path, local_provider) -> list[str]:
-    """Replay the history under ``events_dir`` (no follow) and return the emitted event ids."""
-    captured: list[str] = []
-    stream_all_events(
-        target=_make_local_host_target(local_provider, events_dir),
-        on_event=lambda event: captured.append(event.event_id),
-        cel_include_filters=[],
-        cel_exclude_filters=[],
-        tail_count=None,
-        head_count=None,
-        is_follow=False,
+def test_read_all_historical_events_merges_and_sorts(tmp_path: Path, local_provider) -> None:
+    """Verify events from multiple sources are merged and sorted by timestamp."""
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+
+    # Source A: events at T=1 and T=3
+    (events_dir / "source_a").mkdir()
+    (events_dir / "source_a" / "events.jsonl").write_text(
+        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"a1","source":"source_a"}\n'
+        '{"timestamp":"2026-01-03T00:00:00Z","event_id":"a3","source":"source_a"}\n'
     )
-    return captured
+
+    # Source B: event at T=2
+    (events_dir / "source_b").mkdir()
+    (events_dir / "source_b" / "events.jsonl").write_text(
+        '{"timestamp":"2026-01-02T00:00:00Z","event_id":"b2","source":"source_b"}\n'
+    )
+
+    target = _make_local_host_target(local_provider, events_dir)
+
+    sources = [
+        EventSourceInfo(source_path="source_a", rotated_files=(), is_current_file_present=True),
+        EventSourceInfo(source_path="source_b", rotated_files=(), is_current_file_present=True),
+    ]
+
+    events, offsets = read_all_historical_events(target, sources, [], [])
+
+    assert [e.event_id for e in events] == ["a1", "b2", "a3"]
+    assert "source_a" in offsets
+    assert "source_b" in offsets
 
 
-def test_history_includes_rotated_files(tmp_path: Path, local_provider) -> None:
+def test_read_all_historical_events_includes_rotated_files(tmp_path: Path, local_provider) -> None:
     events_dir = tmp_path / "events"
     events_dir.mkdir()
 
@@ -717,10 +731,18 @@ def test_history_includes_rotated_files(tmp_path: Path, local_provider) -> None:
         '{"timestamp":"2026-01-01T00:00:00Z","event_id":"new1","source":"src"}\n'
     )
 
-    assert _history_event_ids(events_dir, local_provider) == ["old1", "new1"]
+    target = _make_local_host_target(local_provider, events_dir)
+
+    sources = [
+        EventSourceInfo(source_path="src", rotated_files=("events.jsonl.1",), is_current_file_present=True),
+    ]
+
+    events, _ = read_all_historical_events(target, sources, [], [])
+
+    assert [e.event_id for e in events] == ["old1", "new1"]
 
 
-def test_history_warns_on_mid_file_corruption(tmp_path: Path, local_provider) -> None:
+def test_read_all_historical_events_warns_on_mid_file_corruption(tmp_path: Path, local_provider) -> None:
     events_dir = tmp_path / "events"
     events_dir.mkdir()
     (events_dir / "src").mkdir()
@@ -731,17 +753,21 @@ def test_history_warns_on_mid_file_corruption(tmp_path: Path, local_provider) ->
         "this is not valid json {{{\n"
         '{"timestamp":"2026-01-02T00:00:00Z","event_id":"e2","source":"src"}\n'
     )
+    target = _make_local_host_target(local_provider, events_dir)
+    sources = [EventSourceInfo(source_path="src", rotated_files=(), is_current_file_present=True)]
 
     with capture_loguru(level="WARNING") as log_output:
-        event_ids = _history_event_ids(events_dir, local_provider)
+        events, _ = read_all_historical_events(target, sources, [], [])
 
-    assert event_ids == ["e1", "e2"]
+    assert [e.event_id for e in events] == ["e1", "e2"]
     output = log_output.getvalue()
     assert "Skipped corrupt JSONL line" in output
     assert "this is not valid json" in output
 
 
-def test_history_skips_a_valid_json_line_that_is_not_an_event(tmp_path: Path, local_provider) -> None:
+def test_read_all_historical_events_skips_a_valid_json_line_that_is_not_an_event(
+    tmp_path: Path, local_provider
+) -> None:
     """A line with no timestamp costs that line, not the whole history read.
 
     Raised out of the history read, it would fail ``mngr event`` at startup on every attach.
@@ -754,15 +780,17 @@ def test_history_skips_a_valid_json_line_that_is_not_an_event(tmp_path: Path, lo
         '{"note":"no timestamp"}\n'
         '{"timestamp":"2026-01-02T00:00:00Z","event_id":"e2","source":"src"}\n'
     )
+    target = _make_local_host_target(local_provider, events_dir)
+    sources = [EventSourceInfo(source_path="src", rotated_files=(), is_current_file_present=True)]
 
     with capture_loguru(level="WARNING") as log_output:
-        event_ids = _history_event_ids(events_dir, local_provider)
+        events, _ = read_all_historical_events(target, sources, [], [])
 
-    assert event_ids == ["e1", "e2"]
+    assert [e.event_id for e in events] == ["e1", "e2"]
     assert "no timestamp" in log_output.getvalue()
 
 
-def test_history_silent_when_only_last_line_corrupted(tmp_path: Path, local_provider) -> None:
+def test_read_all_historical_events_silent_when_only_last_line_corrupted(tmp_path: Path, local_provider) -> None:
     events_dir = tmp_path / "events"
     events_dir.mkdir()
     (events_dir / "src").mkdir()
@@ -770,12 +798,42 @@ def test_history_silent_when_only_last_line_corrupted(tmp_path: Path, local_prov
     (events_dir / "src" / "events.jsonl").write_text(
         '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"src"}\nincomplete{'
     )
+    target = _make_local_host_target(local_provider, events_dir)
+    sources = [EventSourceInfo(source_path="src", rotated_files=(), is_current_file_present=True)]
 
     with capture_loguru(level="WARNING") as log_output:
-        event_ids = _history_event_ids(events_dir, local_provider)
+        events, _ = read_all_historical_events(target, sources, [], [])
 
-    assert event_ids == ["e1"]
+    assert [e.event_id for e in events] == ["e1"]
     assert log_output.getvalue() == ""
+
+
+def test_read_all_historical_events_with_cel_filter(tmp_path: Path, local_provider) -> None:
+    """Verify CEL filter is applied to events."""
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+
+    (events_dir / "messages").mkdir()
+    (events_dir / "messages" / "events.jsonl").write_text(
+        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"m1","source":"messages","type":"msg"}\n'
+    )
+    (events_dir / "logs").mkdir()
+    (events_dir / "logs" / "events.jsonl").write_text(
+        '{"timestamp":"2026-01-02T00:00:00Z","event_id":"l1","source":"logs","type":"log"}\n'
+    )
+
+    target = _make_local_host_target(local_provider, events_dir)
+
+    sources = [
+        EventSourceInfo(source_path="messages", rotated_files=(), is_current_file_present=True),
+        EventSourceInfo(source_path="logs", rotated_files=(), is_current_file_present=True),
+    ]
+
+    includes, excludes = compile_cel_filters(['source == "messages"'], [])
+    events, _ = read_all_historical_events(target, sources, includes, excludes)
+
+    assert len(events) == 1
+    assert events[0].event_id == "m1"
 
 
 class _StopStream(Exception):
@@ -975,6 +1033,44 @@ def test_maybe_emit_source_mismatch_warning_emits_once() -> None:
     assert len(emitted) == 1
 
 
+def test_emit_historical_events_applies_head() -> None:
+    events_list = [
+        EventRecord(raw_line="1", timestamp="2026-01-01T00:00:00Z", event_id="e1", source="s", data={}),
+        EventRecord(raw_line="2", timestamp="2026-01-02T00:00:00Z", event_id="e2", source="s", data={}),
+        EventRecord(raw_line="3", timestamp="2026-01-03T00:00:00Z", event_id="e3", source="s", data={}),
+    ]
+    state = _AllEventsStreamState()
+    captured: list[str] = []
+    _emit_historical_events(events_list, state, lambda e: captured.append(e.event_id), head_count=2, tail_count=None)
+    assert captured == ["e1", "e2"]
+
+
+def test_emit_historical_events_applies_tail() -> None:
+    events_list = [
+        EventRecord(raw_line="1", timestamp="2026-01-01T00:00:00Z", event_id="e1", source="s", data={}),
+        EventRecord(raw_line="2", timestamp="2026-01-02T00:00:00Z", event_id="e2", source="s", data={}),
+        EventRecord(raw_line="3", timestamp="2026-01-03T00:00:00Z", event_id="e3", source="s", data={}),
+    ]
+    state = _AllEventsStreamState()
+    captured: list[str] = []
+    _emit_historical_events(events_list, state, lambda e: captured.append(e.event_id), head_count=None, tail_count=2)
+    assert captured == ["e2", "e3"]
+
+
+def test_emit_historical_events_deduplicates() -> None:
+    events_list = [
+        EventRecord(raw_line="1", timestamp="2026-01-01T00:00:00Z", event_id="e1", source="s", data={}),
+        EventRecord(raw_line="2", timestamp="2026-01-02T00:00:00Z", event_id="e2", source="s", data={}),
+    ]
+    state = _AllEventsStreamState()
+    state.emitted_event_ids.add("e1")
+    captured: list[str] = []
+    _emit_historical_events(
+        events_list, state, lambda e: captured.append(e.event_id), head_count=None, tail_count=None
+    )
+    assert captured == ["e2"]
+
+
 def _make_event(event_id: str, timestamp: str, source: str = "test") -> EventRecord:
     """Create a minimal EventRecord for testing."""
     return EventRecord(
@@ -984,6 +1080,16 @@ def _make_event(event_id: str, timestamp: str, source: str = "test") -> EventRec
         source=source,
         data={"event_id": event_id, "timestamp": timestamp},
     )
+
+
+def test_emit_historical_events_emits_all_when_no_limits() -> None:
+    """Without head/tail, all events should be emitted."""
+    state = _AllEventsStreamState()
+    events = [_make_event(f"evt-{i}", f"2025-01-01T00:00:{i:02d}Z") for i in range(3)]
+    emitted: list[EventRecord] = []
+    _emit_historical_events(events, state, emitted.append, head_count=None, tail_count=None)
+
+    assert len(emitted) == 3
 
 
 def test_stream_all_events_tail_mode(tmp_path: Path, local_provider) -> None:
@@ -1361,7 +1467,7 @@ def test_check_for_new_archived_events_finds_newly_rotated_files(tmp_path: Path,
         '{"timestamp":"2026-01-01T00:00:00Z","event_id":"old1","source":"src"}\n'
     )
 
-    new_events = list(_check_for_new_archived_events(target, state))
+    new_events = _check_for_new_archived_events(target, state, [], [])
 
     assert len(new_events) == 1
     assert new_events[0].event_id == "old1"
@@ -1385,7 +1491,7 @@ def test_check_for_new_archived_events_skips_already_known(tmp_path: Path, local
         known_rotated_files={"src": {"events.jsonl.20260101000000000000"}},
     )
 
-    new_events = list(_check_for_new_archived_events(target, state))
+    new_events = _check_for_new_archived_events(target, state, [], [])
     assert new_events == []
 
 
@@ -1789,9 +1895,7 @@ class _ReaderRaisingUnexpectedError(HostFileReadInterface):
     def read_file(self, path: Path) -> bytes:
         raise _UnexpectedReaderError(f"cannot read {path}")
 
-    def read_file_tail_from_offset(
-        self, path: Path, start_byte: int, max_byte_count: int | None = None
-    ) -> FileTailRead:
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
         raise _UnexpectedReaderError(f"cannot read {path}")
 
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
@@ -2072,20 +2176,13 @@ class _InMemoryTailReader(HostFileReadInterface):
 
     content: bytes = b""
     requested_start_bytes: list[int] = Field(default_factory=list)
-    requested_max_byte_counts: list[int | None] = Field(default_factory=list)
 
     def read_file(self, path: Path) -> bytes:
         return self.content
 
-    def read_file_tail_from_offset(
-        self, path: Path, start_byte: int, max_byte_count: int | None = None
-    ) -> FileTailRead:
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
         self.requested_start_bytes.append(start_byte)
-        self.requested_max_byte_counts.append(max_byte_count)
-        return FileTailRead(
-            file_size=len(self.content),
-            content=self.content[start_byte : None if max_byte_count is None else start_byte + max_byte_count],
-        )
+        return FileTailRead(file_size=len(self.content), content=self.content[start_byte:])
 
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         return self.content.decode(encoding)
@@ -2102,13 +2199,6 @@ class _InMemoryTailReader(HostFileReadInterface):
 
 def _event_line(event_id: str, day: int = 1) -> bytes:
     return f'{{"timestamp":"2026-01-{day:02d}T00:00:00Z","event_id":"{event_id}","source":"src"}}\n'.encode("utf-8")
-
-
-def _lines_spanning_more_than_one_read_chunk() -> list[bytes]:
-    """Event lines ``e0000000``, ``e0000001``, ... whose total size exceeds one event-file read chunk."""
-    lines = [_event_line(f"e{idx:07d}") for idx in range(_EVENT_FILE_READ_CHUNK_BYTES // 60 + 1_000)]
-    assert sum(len(line) for line in lines) > _EVENT_FILE_READ_CHUNK_BYTES
-    return lines
 
 
 def _poll_remote_source(
@@ -2216,314 +2306,3 @@ def test_read_remote_source_once_advances_past_valid_json_lines_that_are_not_eve
     assert offset == len(content)
     assert "timestamp" in log_output.getvalue()
     assert "not a JSON object" in log_output.getvalue()
-
-
-@pytest.mark.parametrize("is_sized_by_caller", [True, False])
-def test_a_history_larger_than_one_read_is_parsed_whole_from_bounded_reads(is_sized_by_caller: bool) -> None:
-    """A history bigger than one read chunk comes back complete, with no read ever unbounded.
-
-    Lines straddle the chunk boundaries, so a line split across two reads must be
-    joined rather than parsed as two halves. A file the caller did not size (a rotated
-    file) stops at the size its first read reports.
-    """
-    lines = _lines_spanning_more_than_one_read_chunk()
-    content = b"".join(lines)
-    reader = _InMemoryTailReader(content=content)
-    target = EventsTarget(host=reader, events_path=Path("/events"), display_name="test")
-
-    end_byte = len(content) if is_sized_by_caller else None
-    events = list(_iter_events_from_file(target, "src/events.jsonl", "src", end_byte))
-
-    assert [event.event_id for event in events] == [f"e{idx:07d}" for idx in range(len(lines))]
-    assert len(reader.requested_start_bytes) > 1
-    assert all(
-        max_byte_count is not None and max_byte_count <= _EVENT_FILE_READ_CHUNK_BYTES
-        for max_byte_count in reader.requested_max_byte_counts
-    )
-
-
-def _service_event(event_id: str, timestamp: str, service: str, event_type: str = "service_registered") -> str:
-    return json.dumps(
-        {"timestamp": timestamp, "type": event_type, "event_id": event_id, "source": "services", "service": service}
-    )
-
-
-def test_latest_by_emits_only_the_newest_past_event_per_field_value(tmp_path: Path, local_provider) -> None:
-    """A services history re-announcing the same apps is replayed as each service's latest registration.
-
-    A deregistration is the latest event for its service, so a removed service stays
-    removed; an event without the field is passed through; an older rotated file
-    cannot override a newer registration.
-    """
-    services_dir = tmp_path / "events" / "services"
-    services_dir.mkdir(parents=True)
-    (services_dir / "events.jsonl.20260101000000000000").write_text(
-        _service_event("rotated-web", "2026-01-01T00:00:00Z", "web") + "\n"
-    )
-    current_lines = [_service_event(f"web-{idx}", f"2026-01-02T00:00:{idx:02d}Z", "web") for idx in range(20)] + [
-        _service_event("chat-up", "2026-01-02T00:01:00Z", "chat"),
-        json.dumps({"timestamp": "2026-01-02T00:01:30Z", "type": "note", "event_id": "note", "source": "services"}),
-        _service_event("chat-down", "2026-01-02T00:02:00Z", "chat", event_type="service_deregistered"),
-        _service_event("docs-up", "2026-01-02T00:03:00Z", "docs"),
-    ]
-    (services_dir / "events.jsonl").write_text("\n".join(current_lines) + "\n")
-    target = _make_local_host_target(local_provider, tmp_path / "events")
-    captured: list[str] = []
-
-    stream_all_events(
-        target=target,
-        on_event=lambda event: captured.append(event.event_id),
-        cel_include_filters=[],
-        cel_exclude_filters=[],
-        tail_count=None,
-        head_count=None,
-        is_follow=False,
-        latest_by_field_by_source={"services": "service"},
-    )
-
-    assert captured == ["note", "web-19", "chat-down", "docs-up"]
-
-
-def test_latest_by_leaves_other_sources_unfolded(tmp_path: Path, local_provider) -> None:
-    """A rule names one source: another source's events sharing the field are all emitted."""
-    events_dir = tmp_path / "events"
-    (events_dir / "services").mkdir(parents=True)
-    (events_dir / "requests").mkdir(parents=True)
-    (events_dir / "services" / "events.jsonl").write_text(
-        _service_event("s1", "2026-01-01T00:00:00Z", "web")
-        + "\n"
-        + _service_event("s2", "2026-01-01T00:00:01Z", "web")
-        + "\n"
-    )
-    (events_dir / "requests" / "events.jsonl").write_text(
-        json.dumps({"timestamp": "2026-01-01T00:00:02Z", "event_id": "r1", "source": "requests", "service": "web"})
-        + "\n"
-        + json.dumps({"timestamp": "2026-01-01T00:00:03Z", "event_id": "r2", "source": "requests", "service": "web"})
-        + "\n"
-    )
-    target = _make_local_host_target(local_provider, events_dir)
-    captured: list[str] = []
-
-    stream_all_events(
-        target=target,
-        on_event=lambda event: captured.append(event.event_id),
-        cel_include_filters=[],
-        cel_exclude_filters=[],
-        tail_count=None,
-        head_count=None,
-        is_follow=False,
-        latest_by_field_by_source={"services": "service"},
-    )
-
-    assert sorted(captured) == ["r1", "r2", "s2"]
-
-
-def test_a_reread_of_a_folded_source_replays_nothing_the_fold_accounted_for() -> None:
-    """A follow tail re-reading a folded source from its start emits only events it has not passed by.
-
-    The history fold never emitted the events it dropped, so dropping duplicates by id
-    alone would let a re-read replay all of them. Services timestamps have whole-second
-    precision, so a tie is not proof of a re-read: a new event in the same second as
-    the newest one still goes out, while a dropped event from that second does not.
-    """
-    state = _AllEventsStreamState(latest_by_field_by_source={"services": "service"})
-    emitted: list[str] = []
-    history = [
-        _service_event("web-old", "2026-01-01T00:00:01Z", "web"),
-        _service_event("web-up", "2026-01-01T00:00:02Z", "web"),
-        _service_event("web-down", "2026-01-01T00:00:02Z", "web", event_type="service_deregistered"),
-        _service_event("chat-up", "2026-01-01T00:00:01Z", "chat"),
-    ]
-
-    def emit(line: str) -> None:
-        _emit_event_once(parse_event_line(line, "services"), state, lambda event: emitted.append(event.event_id))
-
-    _emit_history(
-        iter([parse_event_line(line, "services") for line in history]),
-        state,
-        lambda event: emitted.append(event.event_id),
-        cel_include_filters=[],
-        cel_exclude_filters=[],
-        head_count=None,
-        tail_count=None,
-    )
-    assert emitted == ["chat-up", "web-down"]
-
-    for line in history:
-        emit(line)
-    assert emitted == ["chat-up", "web-down"]
-
-    followed = [
-        _service_event("web-up-again", "2026-01-01T00:00:02Z", "web"),
-        _service_event("web-later", "2026-01-01T00:00:03Z", "web"),
-    ]
-    for line in followed + followed:
-        emit(line)
-    assert emitted == ["chat-up", "web-down", "web-up-again", "web-later"]
-    # A long follow of a folded source must not keep an id per event it emits.
-    assert state.emitted_event_ids == set()
-
-
-def test_a_folded_history_offering_events_again_still_emits_each_values_newest_event() -> None:
-    """The rotation guard re-reads a file rotated after the history read it, so the fold sees those events twice.
-
-    A re-offered event is the same event, not a later one at the same time: it must
-    neither hide the kept event nor displace a later event that shares its timestamp.
-    """
-    history = [
-        _service_event("web-up", "2026-01-01T00:00:01Z", "web"),
-        _service_event("web-down", "2026-01-01T00:00:01Z", "web", event_type="service_deregistered"),
-        _service_event("chat-up", "2026-01-01T00:00:02Z", "chat"),
-    ]
-    state = _AllEventsStreamState(latest_by_field_by_source={"services": "service"})
-    emitted: list[str] = []
-
-    _emit_history(
-        iter([parse_event_line(line, "services") for line in history + history]),
-        state,
-        lambda event: emitted.append(event.event_id),
-        cel_include_filters=[],
-        cel_exclude_filters=[],
-        head_count=None,
-        tail_count=None,
-    )
-
-    assert emitted == ["web-down", "chat-up"]
-
-
-class _NoRangedReadReader(_InMemoryTailReader):
-    """A reader like an offline host's volume: every read returns the rest of the file, whatever the cap."""
-
-    def read_file_tail_from_offset(
-        self, path: Path, start_byte: int, max_byte_count: int | None = None
-    ) -> FileTailRead:
-        self.requested_start_bytes.append(start_byte)
-        return FileTailRead(file_size=len(self.content), content=self.content[start_byte:])
-
-
-def test_a_host_without_ranged_reads_is_read_once_and_only_up_to_the_sized_end() -> None:
-    """A host that ignores the cap is read in one piece, and lines appended after sizing are left for the tail."""
-    sized = _event_line("e1") + _event_line("e2", day=2)
-    reader = _NoRangedReadReader(content=sized + _event_line("appended", day=3))
-    target = EventsTarget(host=reader, events_path=Path("/events"), display_name="test")
-
-    events = list(_iter_events_from_file(target, "src/events.jsonl", "src", len(sized)))
-
-    assert [event.event_id for event in events] == ["e1", "e2"]
-    assert reader.requested_start_bytes == [0]
-
-
-def test_a_rotated_file_on_a_host_without_ranged_reads_is_read_once() -> None:
-    """An unsized read takes its end from its one read, rather than reading the whole file once more just to size it.
-
-    The one piece is bigger than a read chunk and is parsed a chunk at a time, so lines
-    straddling the chunk boundaries must still be joined.
-    """
-    lines = _lines_spanning_more_than_one_read_chunk()
-    content = b"".join(lines)
-    reader = _NoRangedReadReader(content=content)
-    target = EventsTarget(host=reader, events_path=Path("/events"), display_name="test")
-
-    events = list(_iter_events_from_file(target, "src/events.jsonl.20260101000000000000", "src", None))
-
-    assert [event.event_id for event in events] == [f"e{idx:07d}" for idx in range(len(lines))]
-    assert reader.requested_start_bytes == [0]
-
-
-class _FailingFromByteReader(_InMemoryTailReader):
-    """Serves the file's first line, then fails every read from ``first_failing_byte`` on, like a dropped connection."""
-
-    first_failing_byte: int = 1
-
-    def read_file_tail_from_offset(
-        self, path: Path, start_byte: int, max_byte_count: int | None = None
-    ) -> FileTailRead:
-        if start_byte >= self.first_failing_byte:
-            raise OSError("connection lost")
-        return FileTailRead(file_size=len(self.content), content=self.content[: self.content.index(b"\n") + 1])
-
-
-@pytest.mark.parametrize(
-    ("first_failing_byte", "expected_event_ids"),
-    [(0, []), (1, ["e1"])],
-)
-def test_a_sized_history_read_failing_short_of_its_end_says_so(
-    first_failing_byte: int, expected_event_ids: list[str]
-) -> None:
-    """The follow tail starts past the unread part, so losing it must not go unreported, even from the first read."""
-    content = _event_line("e1") + _event_line("e2", day=2)
-    target = EventsTarget(
-        host=_FailingFromByteReader(content=content, first_failing_byte=first_failing_byte),
-        events_path=Path("/events"),
-        display_name="test",
-    )
-
-    with capture_loguru(level="WARNING") as log_output:
-        events = list(_iter_events_from_file(target, "src/events.jsonl", "src", len(content)))
-
-    assert [event.event_id for event in events] == expected_event_ids
-    assert "Stopped reading event file 'src/events.jsonl' at byte" in log_output.getvalue()
-
-
-def test_a_source_first_seen_during_follow_has_its_history_folded(tmp_path: Path, local_provider) -> None:
-    """--latest-by folds a source's past events even when the source only appears after the follow started."""
-    services_dir = tmp_path / "events" / "services"
-    services_dir.mkdir(parents=True)
-    (services_dir / "events.jsonl").write_text(
-        "\n".join(
-            [
-                _service_event("web-old", "2026-01-01T00:00:00Z", "web"),
-                json.dumps(
-                    {"timestamp": "2026-01-01T00:00:30Z", "type": "note", "event_id": "note", "source": "services"}
-                ),
-                _service_event("web-new", "2026-01-01T00:01:00Z", "web"),
-            ]
-        )
-        + "\n"
-    )
-    state = _AllEventsStreamState(latest_by_field_by_source={"services": "service"})
-    event_queue: queue_mod.Queue[EventRecord | _TailSourceFailure] = queue_mod.Queue()
-    emitted: list[str] = []
-
-    _rescan_and_start_new_tail_threads(
-        target_holder=[_make_local_host_target(local_provider, tmp_path / "events")],
-        state=state,
-        event_queue=event_queue,
-        on_event=lambda event: emitted.append(event.event_id),
-        cel_include_filters=[],
-        cel_exclude_filters=[],
-        stop_event=threading.Event(),
-        online_event=threading.Event(),
-        read_failure_event=threading.Event(),
-        tail_threads=[],
-        offset_dir_path=None,
-        watch_group=DirectoryWatchGroup(),
-    )
-
-    assert emitted == ["note", "web-new"]
-    assert event_queue.empty()
-
-
-def test_read_remote_source_once_takes_a_large_backlog_in_capped_reads() -> None:
-    """A re-read from the start of a large file is held a piece at a time, yet one poll still delivers all of it.
-
-    The backlog includes a line longer than one piece, which must be read whole rather than stall the follow.
-    """
-    short_lines = _lines_spanning_more_than_one_read_chunk()
-    long_line = json.dumps(
-        {
-            "timestamp": "2026-01-02T00:00:00Z",
-            "event_id": "long",
-            "source": "src",
-            "note": "x" * _EVENT_FILE_READ_CHUNK_BYTES,
-        }
-    ).encode("utf-8")
-    reader = _InMemoryTailReader(content=b"".join(short_lines) + long_line + b"\n" + _event_line("last", day=3))
-    warner = MalformedJsonLineWarner(source_description="test")
-    event_queue: queue_mod.Queue[EventRecord | _TailSourceFailure] = queue_mod.Queue()
-
-    offset, emitted = _poll_remote_source(reader, 0, warner, event_queue)
-
-    assert emitted == [f"e{idx:07d}" for idx in range(len(short_lines))] + ["long", "last"]
-    assert offset == len(reader.content)
-    assert None not in reader.requested_max_byte_counts

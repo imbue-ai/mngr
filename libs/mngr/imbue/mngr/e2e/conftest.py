@@ -12,7 +12,6 @@ import sys
 import tempfile
 import threading
 from collections.abc import Generator
-from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -36,7 +35,6 @@ from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.skitwright.data_types import CommandResult
 from imbue.skitwright.data_types import OutputLine
 from imbue.skitwright.data_types import OutputSource
-from imbue.skitwright.redaction import redact_secret_values
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
 
@@ -61,16 +59,6 @@ def require_binary(binary: str, install_hint: str) -> None:
     while these blocks exercised nothing.
     """
     assert shutil.which(binary) is not None, f"{binary} is not installed ({install_hint})"
-
-
-# Comma-separated names of the environment variables that hold credentials. The
-# workflow that injects the credentials sets it, so the list is whatever was
-# actually injected rather than a guess from variable names. Unset outside CI.
-SECRET_ENV_NAMES_VAR = "MNGR_SECRET_ENV_NAMES"
-
-
-def _secret_env_names(env: Mapping[str, str]) -> list[str]:
-    return [name for name in env.get(SECRET_ENV_NAMES_VAR, "").split(",") if name]
 
 
 def time_bounded(seconds: float, command: str) -> str:
@@ -915,9 +903,7 @@ def e2e(
     # Always keep the directory if the env is being kept (for the destroy script).
     if save_artifacts or keep_env:
         transcript_path = test_output_dir / "transcript.txt"
-        # Local agents inherit this env, so a test that dumps an agent's env
-        # prints the runner's credentials; they must not reach the saved artifact.
-        transcript_path.write_text(redact_secret_values(session.transcript, env, _secret_env_names(env)))
+        transcript_path.write_text(session.transcript)
         # Capture the test's docstring (the scope anchor: the verbatim tutorial
         # block plus crystallized scope) so the detail renderer can show it.
         docstring = inspect.cleandoc(request.node.function.__doc__ or "")

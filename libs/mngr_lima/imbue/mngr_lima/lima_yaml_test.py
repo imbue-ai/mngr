@@ -1,4 +1,3 @@
-import os
 import subprocess
 from pathlib import Path
 
@@ -437,59 +436,6 @@ def test_root_key_block_does_not_corrupt_a_file_lacking_a_trailing_newline(tmp_p
     _run_root_key_block(_root_key_block(_ROOT_KEY), ssh_dir)
 
     assert authorized_keys.read_text().splitlines() == [_FOREIGN_KEY, _ROOT_KEY]
-
-
-_PACKAGE_TOOLS = ("tmux", "git", "jq", "rsync", "curl", "xxd", "flock", "mkfs.btrfs", "growpart")
-
-
-def _run_package_block(tmp_path: Path, apt_get_exit_code: int) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    """Run the package steps on a VM that already has every package; returns the run and its apt-get calls.
-
-    Sliced out of the btrfs-layout script (which probes the most packages), from
-    its apt retry helper on, and run verbatim, with the two absolute paths it probes redirected into
-    ``tmp_path`` and every tool it probes for stubbed as present.
-    """
-    script = _generated_provision_script(None, None)
-    end_marker = 'echo "WARNING: could not upgrade ca-certificates" >&2\nfi\n'
-    block = script[script.index("apt_get_retry() {") : script.index(end_marker) + len(end_marker)]
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    for tool in _PACKAGE_TOOLS:
-        (bin_dir / tool).write_text("#!/bin/sh\n")
-        (bin_dir / tool).chmod(0o755)
-    apt_calls = tmp_path / "apt-calls"
-    (bin_dir / "apt-get").write_text(f'#!/bin/sh\necho "$*" >> "{apt_calls}"\nexit {apt_get_exit_code}\n')
-    (bin_dir / "apt-get").chmod(0o755)
-    sshd = tmp_path / "sshd"
-    sshd.write_text("#!/bin/sh\n")
-    sshd.chmod(0o755)
-    ca_bundle = tmp_path / "ca-certificates.crt"
-    ca_bundle.write_text("bundle\n")
-    block = block.replace("/usr/sbin/sshd", str(sshd)).replace("/etc/ssl/certs/ca-certificates.crt", str(ca_bundle))
-    result = subprocess.run(
-        ["bash", "-c", "set -eu -o pipefail\n" + block + "echo PROVISION_CONTINUED\n"],
-        capture_output=True,
-        text=True,
-        env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
-    )
-    return result, apt_calls.read_text().splitlines() if apt_calls.exists() else []
-
-
-def test_provisioning_upgrades_ca_certificates_even_when_every_package_is_present(tmp_path: Path) -> None:
-    """Provisioning replays on every start, so it keeps an existing VM's CA bundle current."""
-    result, apt_calls = _run_package_block(tmp_path, apt_get_exit_code=0)
-
-    assert result.returncode == 0, result.stderr
-    assert apt_calls == ["update -qq", "install -y -qq --only-upgrade ca-certificates"]
-
-
-def test_provisioning_tries_the_ca_certificates_upgrade_once_and_continues_when_offline(tmp_path: Path) -> None:
-    result, apt_calls = _run_package_block(tmp_path, apt_get_exit_code=100)
-
-    assert result.returncode == 0, result.stderr
-    assert "PROVISION_CONTINUED" in result.stdout
-    assert "could not upgrade ca-certificates" in result.stderr
-    assert apt_calls == ["update -qq"]
 
 
 def test_generate_default_lima_yaml_volume_home_path_symlinks_home_not_host_dir() -> None:

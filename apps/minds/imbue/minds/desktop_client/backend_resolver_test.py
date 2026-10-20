@@ -696,70 +696,6 @@ def test_host_state_override_fires_on_change_on_set_and_clear() -> None:
     assert len(changes) == 2
 
 
-def test_update_services_fires_on_change_only_when_the_registrations_change() -> None:
-    """A workspace re-announcing the same registrations must not wake every listener per announcement."""
-    resolver = MngrCliBackendResolver()
-    agent = AgentId.generate()
-    changes: list[None] = []
-    resolver.add_on_change_callback(lambda: changes.append(None))
-
-    for _ in range(3):
-        resolver.update_services(agent, {"web": "http://localhost:8083"}, {"web": "web-0yiuyl4y"})
-    assert len(changes) == 1
-
-    resolver.update_services(agent, {"web": "http://localhost:8083"}, {"web": "web-0yiuyl4y"}, icons={"web": "<svg/>"})
-    assert len(changes) == 2
-    assert resolver.list_service_icons_for_agent(agent) == {ServiceName("web"): "<svg/>"}
-
-    resolver.update_services(agent, {})
-    resolver.update_services(agent, {})
-    assert len(changes) == 3
-    assert resolver.list_services_for_agent(agent) == ()
-
-
-def test_update_agents_fires_on_change_only_when_the_snapshot_changes() -> None:
-    host = HostId.generate()
-    agent = AgentId.generate()
-    resolver = MngrCliBackendResolver()
-    changes: list[None] = []
-    resolver.add_on_change_callback(lambda: changes.append(None))
-
-    for _ in range(3):
-        resolver.update_agents(
-            ParsedAgentsResult(agent_ids=(agent,), discovered_agents=(_workspace_agent(host, agent),))
-        )
-    assert len(changes) == 1
-
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent, extra_labels={"color": "#123456"}),),
-        )
-    )
-    assert len(changes) == 2
-
-
-def test_an_unchanged_snapshot_that_sweeps_an_override_still_fires_on_change() -> None:
-    """Dropping an override changes what the resolver answers even when discovery reported nothing new."""
-    host = HostId.generate()
-    agent = AgentId.generate()
-    resolver = _resolver_with_host_state(host, agent, HostState.STOPPED)
-    resolver.set_host_state_override(host, HostState.STOPPED)
-    changes: list[None] = []
-    resolver.add_on_change_callback(lambda: changes.append(None))
-
-    for _ in range(2):
-        resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=(agent,),
-                discovered_agents=(_workspace_agent(host, agent),),
-                host_state_by_host_id={str(host): HostState.STOPPED},
-            )
-        )
-
-    assert len(changes) == 1
-
-
 def test_host_state_override_does_not_affect_active_workspace_filtering() -> None:
     """The override only ever holds RUNNING/STOPPED, so it can't change the DESTROYED-only filter."""
     host = HostId.generate()
@@ -933,34 +869,6 @@ def test_forget_providers_leaves_other_instances_hosts_alone(tmp_path: Path) -> 
     resolver.forget_providers({"aws_" + "0" * 32})
 
     assert resolver.get_system_services_agent_id(workspace_agent) == services_agent
-
-
-def test_provider_updates_fire_on_change_only_when_provider_state_changes() -> None:
-    host = HostId.generate()
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    resolver = MngrCliBackendResolver()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(workspace_agent, services_agent),
-            discovered_agents=_pair_snapshot(host, workspace_agent, services_agent),
-        )
-    )
-    changes: list[None] = []
-    resolver.add_on_change_callback(lambda: changes.append(None))
-    docker = ProviderInstanceName("docker")
-    snapshot_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-
-    for _ in range(2):
-        resolver.update_providers(docker, None, None, snapshot_at, clean_snapshot_host_ids=(str(host),))
-    assert len(changes) == 1
-
-    resolver.forget_providers({"aws_" + "0" * 32})
-    assert len(changes) == 1
-
-    resolver.forget_providers({"docker"})
-    assert len(changes) == 2
-    assert resolver.get_last_snapshot_at_for_provider(docker) is None
 
 
 def _primary_system_services_agent(host_id: HostId, agent_id: AgentId) -> DiscoveredAgent:

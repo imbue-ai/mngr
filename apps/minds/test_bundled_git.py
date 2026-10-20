@@ -59,7 +59,6 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
-import certifi
 import httpx
 import pytest
 from cryptography import x509
@@ -149,8 +148,12 @@ def _build_git_environment(git_root: Path, fake_home: Path) -> dict[str, str]:
         "GIT_COMMITTER_EMAIL": _TEST_IDENTITY_EMAIL,
         "GIT_TERMINAL_PROMPT": "0",
     }
-    # The contract points git at the app environment's certifi bundle on every platform.
-    return {**base_environment, "GIT_SSL_CAINFO": certifi.where()}
+    # The Linux payload does not use the system trust store, so the contract
+    # points at the bundled CA file (macOS links the system libcurl instead).
+    linux_only_environment = (
+        {"GIT_SSL_CAINFO": str(git_root / "ssl" / "cacert.pem")} if sys.platform == "linux" else {}
+    )
+    return {**base_environment, **linux_only_environment}
 
 
 def _run_git(

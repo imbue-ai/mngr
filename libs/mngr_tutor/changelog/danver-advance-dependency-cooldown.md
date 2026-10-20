@@ -1,0 +1,1 @@
+urwid 4.0.13 types an alarm callback's user data as optional, because `set_alarm_in`'s `user_data` defaults to None. The lesson runner's check alarm accepts the optional form and checks it; the scheduling site still passes the state.

@@ -1,145 +1,114 @@
 // The creation page's own turns: the user turn that restates the settings a
-// create was submitted with, the agent's setup line, the onboarding questions
-// the page asks while the workspace is built, the welcome that answers them,
-// the one app others have built that the page shows on "See examples", and the
-// failure and interrupted copy.
-// Pure functions over the attempt detail so the page renders the same words
-// whether it was reached from the start flow, the create form, or a reload.
+// create was submitted with, the agent's setup line, and the failure and
+// interrupted copy. Pure functions over the attempt detail so the page renders
+// the same words whether it was reached from the start flow, the create form,
+// or a reload.
 
 import type { CreateAttemptRequestSummary } from "./create";
 import { backupProviderLabel, launchModeLabel } from "./create";
 import { connectionLaunchLabel } from "./providers";
 import { formatMachineSizeNumbers } from "./machineSize";
-import {
-  SHOWCASE_RECORDING_NAMES,
-  onboardingMediaUrl,
-} from "./onboardingMedia";
+import type { DisclosurePoint } from "./startFlow";
 
 export const SETUP_LINE =
-  "We're setting up your workspace now. Once it's ready, just describe what you want to build. Everything you " +
-  "make works right away from any device, and you can share it with your team, family, or friends.";
+  "Setting up your workspace. This takes a minute or two. While you wait, here is what is going on, " +
+  "and what you will be able to do once it is up.";
 
-/** The answers the first question and the follow-up offer, by id: what the page's state and the hand-over carry. */
-export type BuildAnswerId = "not-sure" | "no" | "yes";
-export type PathAnswerId = "examples" | "problem";
-
-/** One answer the page offers to an onboarding question: its button, and the words the user's bubble says. */
-export interface OnboardingChoice<Id extends string> {
-  id: Id;
-  label: string;
-  isEmphasized: boolean;
-}
-
-/** The first question, asked while the workspace is built. */
-export const BUILD_ASK = "Do you know what you want to build in Studio?";
-export const BUILD_CHOICES: OnboardingChoice<BuildAnswerId>[] = [
-  { id: "not-sure", label: "I’m not sure", isEmphasized: false },
-  { id: "no", label: "No", isEmphasized: false },
-  { id: "yes", label: "Yes", isEmphasized: true },
+export const SETUP_SECTIONS: DisclosurePoint[] = [
+  {
+    id: "what",
+    label: "What a workspace is",
+    detail:
+      "A workspace is a private place where you and your agent work together. It holds your files, apps, " +
+      "tools, and the memory you build together. It keeps your work in one place from one conversation to the " +
+      "next, so you don’t have to start over.\n\n" +
+      "When you hand off a task or set a routine, your agent can keep working while you’re away.",
+  },
+  {
+    id: "now",
+    label: "What’s happening right now",
+    detail:
+      "We’re setting up your workspace on its own machine. We’re installing the tools your agent needs to make " +
+      "apps, work with your files and accounts, and keep tasks running while you’re away.\n\n" +
+      "The last step connects your workspace to this app so you can start using it.\n\n" +
+      "Want more detail? The setup log shows each part as it happens.",
+  },
+  {
+    id: "do",
+    label: "What you can do with it",
+    detail:
+      "Start with a problem you want to solve or an app you want to make. Your agent can build tools around the " +
+      "way you work, use the files and accounts you connect, handle a task, or run a routine on a schedule.\n\n" +
+      "You can keep what you make private, invite people to work with you in the same workspace, or share a " +
+      "clean copy they can make their own. Working in the same workspace is like sharing a Google Doc: everyone " +
+      "works in the same place. Sharing a copy gives someone the app without giving them your data.\n\n" +
+      "When your agent needs an account, it’ll ask you to connect it. You can see and remove that access later.",
+  },
+  {
+    id: "data",
+    label: "How your data is handled",
+    detail:
+      "Your workspace keeps its own files, apps, memory, and settings. Imbue never sells that data or uses it to " +
+      "train AI models for other people.\n\n" +
+      "When Imbue Studio uses an outside AI model or connected service, that company’s data rules apply too.\n\n" +
+      "We’re working toward full end-to-end encryption. Once that’s ready, no one but you—not even Imbue—will " +
+      "be able to read what’s in your workspace.\n\n" +
+      "Your workspace is backed up as you use it, much like version history in a document. It’s built to move " +
+      "with you, too. You can download it to your computer or move it to another service without starting " +
+      "over. The work you’ve built stays yours.",
+  },
+  {
+    id: "later",
+    label: "Changing it later",
+    detail:
+      "You can rename your workspace, change its color, and connect or disconnect accounts later in Settings.",
+  },
 ];
+export const READY_LINE = "Your workspace is ready! What do you want to do first?";
 
-/** The follow-up for a reader who does not know yet. */
-export const PATH_ASK =
-  "Do you want to see examples of how other people have used Studio or simply ramble about some problems you have?";
-export const PATH_CHOICES: OnboardingChoice<PathAnswerId>[] = [
-  { id: "examples", label: "See examples", isEmphasized: false },
-  { id: "problem", label: "Describe a problem", isEmphasized: true },
-];
-
-/**
- * The label of the choice called ``id`` among ``choices``: what the user's bubble says for that answer. An id the
- * list lacks is an error: the list is data, which the id type cannot keep in step.
- */
-export function choiceLabel<Id extends string>(choices: OnboardingChoice<Id>[], id: Id): string {
-  const choice = choices.find((candidate) => candidate.id === id);
-  if (choice === undefined) throw new Error(`No onboarding choice is called ${id}`);
-  return choice.label;
-}
-
-/** What the agent says when the questions are answered before the workspace is ready, over the loading box. */
-export const FINISHING_LINE = "Great, let me just finish setting up your workspace...";
-
-/**
- * Where the questions led: the reader knows what to build, wants to describe a problem, or wants to see
- * examples first. The welcome the workspace opens on is written for each.
- */
-export type OnboardingIntent = "build" | "problem" | "examples";
-
-/** The intent the questions settle on (the follow-up's answer names its own), or null while one is still open. */
-export function onboardingIntent(
-  buildAnswer: BuildAnswerId | null,
-  pathAnswer: PathAnswerId | null,
-): OnboardingIntent | null {
-  if (buildAnswer === "yes") return "build";
-  return pathAnswer;
-}
-
-/** The welcome a workspace opens on when the questions were never asked or never answered. */
-export const DEFAULT_ONBOARDING_INTENT: OnboardingIntent = "problem";
-
-/** One app others have built, shown as a recording with a title and a line or two under it. */
-export interface ShowcaseApp {
-  id: string;
+/** One way to start: its title, and the line or two under it. */
+export interface StartOption {
   title: string;
-  description: string;
-  /** The recording's hosted address (models/onboardingMedia.ts). */
-  gifUrl: string;
+  detail: string;
 }
-
-/** The one app the creation page shows a reader who asked to see examples. */
-export const SHOWCASE_APP: ShowcaseApp = {
-  id: "todo-list",
-  title: "To-do list",
-  description: "One list pulled from your email, Slack, and texts, with the next step already drafted for you.",
-  gifUrl: onboardingMediaUrl(SHOWCASE_RECORDING_NAMES.todoList),
-};
-
-/** How long the recording is left to look at before the agent's next turn arrives under it. */
-export const SHOWCASE_READ_MS = 2500;
-
-/** One showcase app as the seeded chat carries it: its title, the recording, and its description. */
-export function showcaseMarkdown(app: ShowcaseApp): string {
-  return [
-    `**${app.title}**`,
-    `![${app.title}](${app.gifUrl})`,
-    app.description,
-  ].join("\n\n");
-}
-
-export const READY_LINE = "You're all set.";
 
 /**
- * What the agent says under the ready line for a reader who wants to describe a problem (and, after the
- * examples, for one who asked to see them): an invitation to complain, with one example to answer in kind.
+ * The ways to start the closing turn offers, in the order they are numbered. They speak in the first person,
+ * unlike the turns before them: the agent the user messages next in the seeded chat is the one offering.
  */
-export const WELCOME_BODY = [
-  "The best way to start is to build something.",
-  "**What’s annoying, overwhelming, or tedious in your digital life?** " +
-    "Work or personal, big or small, go ahead and complain. I’ll help you build something that makes it better.",
-  "*Example: I feel scattered. My todos are in a million different places, and I can never find things when I " +
-    "need them. I want a command center that pulls everything into one place and tells me what to do next.*",
-].join("\n\n");
+export const START_OPTIONS: StartOption[] = [
+  {
+    title: "Make something.",
+    detail:
+      "Tell me about a problem you have, and we can make a solution together. Or tell me something you want to make.",
+  },
+  {
+    title: "Connect your tools.",
+    detail:
+      "Privately connect your email, calendar, Slack, GitHub, or something else you use—I can start syncing with " +
+      "them so you can work with the live information.",
+  },
+  {
+    title: "Take a task off your plate.",
+    detail: "Give me a task. I can figure out how to do it, and can run it when specific triggers happen.",
+  },
+];
 
-/** What the agent says under the ready line for a reader who already knows what to build. */
-export const WELCOME_BODY_BUILD = [
-  "Just tell me what you want to build.",
-  "**Focus on describing the problem — just ramble and provide as much context as you can.**",
-  "*Example: I want a command center that pulls everything into one place and tells me what to do next " +
-    "because my todos are in a million different places, and I can never find things when I need them.*",
-].join("\n\n");
+/** The closing turn's last line, under the numbered options, for a reader who is not sure where to start. */
+export const START_FALLBACK_LINE =
+  "If you’re not sure where to start, I can explain how your workspace works and what you control.";
 
-/** The closing turn as markdown: the ready line as a heading over the welcome written for ``intent``. */
-export function readyTurnMarkdown(intent: OnboardingIntent): string {
-  switch (intent) {
-    case "build":
-      return `## ${READY_LINE}\n\n${WELCOME_BODY_BUILD}`;
-    // A reader who asked for examples saw the recording on the creation page; the welcome is the problem one.
-    case "problem":
-    case "examples":
-      return `## ${READY_LINE}\n\n${WELCOME_BODY}`;
-  }
+/** The closing turn as markdown: the ready line as a heading one level above the numbered option headings. */
+export function readyTurnMarkdown(): string {
+  return [`## ${READY_LINE}`, ...startOptionsMarkdown(), START_FALLBACK_LINE].join("\n\n");
 }
 
+/** The closing turn's options as markdown: a numbered heading per option with its detail under it. */
+export function startOptionsMarkdown(): string[] {
+  return START_OPTIONS.map(
+    (option, index) => `### ${index + 1}. ${option.title}\n\n${option.detail}`,
+  );
+}
 /**
  * What an Imbue Cloud create restates instead of its settings. The cloud
  * preset is not something the reader picked -- the flow chose every one of
@@ -173,24 +142,22 @@ function connectionSummaryLabel(request: CreateAttemptRequestSummary): string {
     : request.cloud_account;
 }
 
-/** The line over the settings in the user's turn. */
-export const SUMMARY_HEADING = "Create a workspace with these settings:";
-
 /**
- * The settings, one per line, in the order the create form asks for them, under SUMMARY_HEADING. Region and
- * machine size are omitted when the mode has none, so a local create does not read as missing something.
- * Empty for the start flow's Imbue Cloud answer, which restates only itself -- see IMBUE_CLOUD_SUMMARY_LINE
- * (choosing Imbue Cloud inside the form still lists everything: there the settings are yours).
+ * The settings, one per line, in the order the create form asks for them.
+ * Region and machine size are omitted when the mode has none, so a local
+ * create does not read as missing something. The start flow's Imbue Cloud
+ * answer restates only itself -- see IMBUE_CLOUD_SUMMARY_LINE. Choosing Imbue
+ * Cloud inside the form still lists everything: there the settings are yours.
  *
  * ``isCloudPreset`` is provenance, which the request itself does not carry --
  * the two submissions are identical on the wire -- so the caller passes what
  * the start flow remembers.
  */
-export function summarySettingLines(
+export function summaryLines(
   request: CreateAttemptRequestSummary,
   isCloudPreset: boolean,
 ): string[] {
-  if (isCloudPreset) return [];
+  if (isCloudPreset) return [IMBUE_CLOUD_SUMMARY_LINE];
   const compute =
     request.cloud_account !== ""
       ? connectionSummaryLabel(request)
@@ -204,16 +171,10 @@ export function summarySettingLines(
     ["Template repository", shortRepository(request.repository)],
     ["Branch", request.branch !== "" ? request.branch : "latest"],
   ];
-  return settings
-    .filter(([, value]) => value !== "")
-    .map(([label, value]) => `${label} — ${value}`);
-}
-
-/** What the settings turn says in full: the heading over its lines, or the Imbue Cloud answer alone. */
-export function summaryLines(
-  request: CreateAttemptRequestSummary,
-  isCloudPreset: boolean,
-): string[] {
-  if (isCloudPreset) return [IMBUE_CLOUD_SUMMARY_LINE];
-  return [SUMMARY_HEADING, ...summarySettingLines(request, isCloudPreset)];
+  return [
+    "Create a workspace with these settings:",
+    ...settings
+      .filter(([, value]) => value !== "")
+      .map(([label, value]) => `${label} — ${value}`),
+  ];
 }

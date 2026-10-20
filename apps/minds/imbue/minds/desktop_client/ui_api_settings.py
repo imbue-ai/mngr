@@ -34,6 +34,7 @@ from imbue.minds.desktop_client.backup_trim import BackupTrimStatus
 from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.minds_config import AutoUpdatePromptDecision
 from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -99,6 +100,12 @@ class UiSettingsOverview(FrozenModel):
     )
     update_window_start_hour: int = Field(description="Local hour scheduled machine updates may start running at")
     update_window_end_hour: int = Field(description="Local hour scheduled machine updates stop running at")
+    is_auto_update_enabled: bool = Field(
+        default=False, description="Whether Imbue Studio arms every behind workspace's update itself"
+    )
+    auto_update_prompt_decision: AutoUpdatePromptDecision | None = Field(
+        default=None, description="How the one-time auto-update offer was answered; None while it never was"
+    )
     sign_in_browsers: tuple[UiSignInBrowserOption, ...] = Field(
         default=(), description="The installed browsers provider sign-ins can open in"
     )
@@ -160,6 +167,18 @@ class UiUpdateWindowWrite(FrozenModel):
 
     start_hour: int = Field(ge=0, le=23, description="Local hour the window opens")
     end_hour: int = Field(ge=0, le=23, description="Local hour the window closes")
+
+
+class UiAutoUpdateWrite(FrozenModel):
+    """Body of the auto-update toggle write."""
+
+    is_enabled: bool = Field(description="Whether Imbue Studio arms every behind workspace's update itself")
+
+
+class UiAutoUpdatePromptWrite(FrozenModel):
+    """Body of the auto-update offer's answer; accepting it also turns auto-update on."""
+
+    decision: AutoUpdatePromptDecision = Field(description="How the user answered the offer")
 
 
 class UiNotificationChannels(FrozenModel):
@@ -317,6 +336,10 @@ def _handle_settings_overview() -> Response:
         notification_prefs=_current_notification_prefs(),
         update_window_start_hour=update_window[0],
         update_window_end_hour=update_window[1],
+        is_auto_update_enabled=minds_config.get_auto_update_workspaces() if minds_config is not None else False,
+        auto_update_prompt_decision=(
+            minds_config.get_auto_update_prompt_decision() if minds_config is not None else None
+        ),
         sign_in_browsers=tuple(
             UiSignInBrowserOption(browser_id=browser.browser_id, label=browser.label) for browser in browsers
         ),
@@ -560,7 +583,64 @@ def _handle_update_window_write() -> Response:
     if write.start_hour == write.end_hour:
         return _error_response("The update window needs a start and end that differ", 400)
     minds_config.set_update_window(write.start_hour, write.end_hour)
+    # Every armed workspace's file carries the window; the sweep rewrites them.
+    _request_update_sweep()
     return _json_response(UiUpdateWindowWrite(start_hour=write.start_hour, end_hour=write.end_hour))
+
+
+def _request_update_sweep() -> None:
+    """Re-read every workspace's updates, and re-send the updates frame, whose auto-update fields just moved."""
+    state = get_state()
+    if state.workspace_update_service is not None:
+        state.workspace_update_service.detector.request_pass()
+    if state.ui_publisher is not None:
+        state.ui_publisher.notify_change()
+
+
+def _read_json_write(model: type[_WriteT]) -> _WriteT | Response:
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return _error_response("Invalid JSON body", 400)
+    try:
+        return model.model_validate(body)
+    except ValidationError as e:
+        logger.debug("Rejected a malformed {} body: {}", model.__name__, e)
+        return _error_response("Invalid JSON body", 400)
+
+
+def _handle_auto_update_write() -> Response:
+    """POST /ui/api/settings/auto-update: turn automatic workspace updates on or off.
+
+    Turning it off leaves the schedules already armed in place.
+    """
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    minds_config = get_state().minds_config
+    if minds_config is None:
+        return _error_response("Settings storage is not configured", 503)
+    write = _read_json_write(UiAutoUpdateWrite)
+    if isinstance(write, Response):
+        return write
+    minds_config.set_auto_update_workspaces(write.is_enabled)
+    _request_update_sweep()
+    return _json_response(UiAutoUpdateWrite(is_enabled=write.is_enabled))
+
+
+def _handle_auto_update_prompt_write() -> Response:
+    """POST /ui/api/settings/auto-update-prompt: record the answer to the one-time offer, so it never returns."""
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    minds_config = get_state().minds_config
+    if minds_config is None:
+        return _error_response("Settings storage is not configured", 503)
+    write = _read_json_write(UiAutoUpdatePromptWrite)
+    if isinstance(write, Response):
+        return write
+    minds_config.set_auto_update_prompt_decision(write.decision)
+    if write.decision is AutoUpdatePromptDecision.ACCEPTED:
+        minds_config.set_auto_update_workspaces(True)
+        _request_update_sweep()
+    return _json_response(UiAutoUpdatePromptWrite(decision=write.decision))
 
 
 def _handle_sign_in_browser_write() -> Response:
@@ -737,6 +817,10 @@ def register_settings_routes(blueprint: Blueprint) -> None:
     blueprint.add_url_rule("/api/settings/notifications", view_func=_handle_notification_prefs_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/notifications/test", view_func=_handle_test_notification, methods=["POST"])
     blueprint.add_url_rule("/api/settings/update-window", view_func=_handle_update_window_write, methods=["POST"])
+    blueprint.add_url_rule("/api/settings/auto-update", view_func=_handle_auto_update_write, methods=["POST"])
+    blueprint.add_url_rule(
+        "/api/settings/auto-update-prompt", view_func=_handle_auto_update_prompt_write, methods=["POST"]
+    )
     blueprint.add_url_rule("/api/settings/sign-in-browser", view_func=_handle_sign_in_browser_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/browser-import", view_func=_handle_browser_import_status)
     blueprint.add_url_rule(

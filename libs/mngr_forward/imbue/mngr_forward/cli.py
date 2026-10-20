@@ -23,10 +23,8 @@ from hypercorn.asyncio import serve as hypercorn_serve
 from hypercorn.config import Config
 from loguru import logger
 from pydantic import Field
-from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroupState
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
@@ -459,66 +457,14 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
     )
 
     ca = load_or_create_local_ca(plugin_state_dir / "ca") if opts.use_http2 else None
-    shutdown_signal_listener = ShutdownSignalListener()
     try:
-        try:
-            _serve_forward_app(app, listen_socket, ca=ca, shutdown_signal_listener=shutdown_signal_listener)
-        finally:
-            listen_socket.close()
-            if stream_manager is not None:
-                stream_manager.stop()
-            tunnel_manager.cleanup()
-            envelope_writer.close()
+        _serve_forward_app(app, listen_socket, ca=ca)
     finally:
-        # Inside a `finally`, `sys.exception()` is the exception propagating
-        # out of the block (None when it completed), so this names the exit
-        # path without catching anything.
-        _log_forward_exit_reason(shutdown_signal_listener.get_received_signal_name(), sys.exception())
-
-
-@pure
-def _exit_status_for_escaping_exception(error: BaseException | None) -> int:
-    """The exit status the process ends with when ``error`` escapes the command (None: the command returned).
-
-    Mirrors click's standalone handling: its own exceptions carry their exit
-    code, ``Abort`` (Ctrl-C) exits 1, and anything else escapes the interpreter
-    as an uncaught exception, which exits 1.
-    """
-    match error:
-        case None:
-            return 0
-        case SystemExit(code=int() as code):
-            return code
-        case SystemExit(code=None):
-            return 0
-        case click.exceptions.Exit() | click.ClickException():
-            return error.exit_code
-        case _:
-            return 1
-
-
-def _log_forward_exit_reason(received_signal_name: str | None, error: BaseException | None) -> None:
-    """Say on stderr why the forward is exiting, so the consumer that relays it can name the exit path.
-
-    Logged above the default console level: the consumer's exit report quotes the last
-    stderr lines, and this is the one that tells a signal-driven graceful stop
-    from a crash, and which status the process is about to exit with.
-    """
-    exit_status = _exit_status_for_escaping_exception(error)
-    if error is None:
-        logger.info(
-            "mngr forward exiting: serve loop returned; shutdown_signal={} exit_status={}",
-            received_signal_name,
-            exit_status,
-        )
-        return
-    logger.warning(
-        "mngr forward exiting: {} escaped the serve loop or its cleanup{}; shutdown_signal={} exit_status={}",
-        type(error).__name__,
-        _format_raising_frame(error),
-        received_signal_name,
-        exit_status,
-    )
+        listen_socket.close()
+        if stream_manager is not None:
+            stream_manager.stop()
+        tunnel_manager.cleanup()
+        envelope_writer.close()
 
 
 # hypercorn has no "off" value for its per-connection request cap (it compares the
@@ -546,7 +492,9 @@ def _build_hypercorn_config(listen_socket: socket.socket, ca: LocalCertificateAu
             chain_pem, server_key_pem = generate_server_credentials(ca)
             ssl_context = build_server_ssl_context(chain_pem, server_key_pem, ca)
         except (ValueError, ssl.SSLError, OSError) as e:
-            # Names TLS/HTTP-2 setup as the failing step, which the escaping exception alone does not.
+            # Naming TLS/HTTP-2 setup explicitly here makes the failure
+            # diagnosable: minds' `wait_for_listening` will otherwise just time
+            # out with no indication that the cert/context was the cause.
             logger.error("mngr forward TLS/HTTP-2 setup failed (cert generation or SSL context): {}", e)
             raise
         config = InMemoryTLSConfig(ssl_context)
@@ -732,75 +680,30 @@ class ServeLoopExceptionReporter(MutableModel):
         )
 
 
-class ShutdownSignalListener(MutableModel):
-    """Stands in for hypercorn's own SIGINT/SIGTERM handlers, remembering which signal stopped the server.
-
-    hypercorn installs equivalent handlers when given no shutdown trigger, but
-    keeps no record of which signal fired, so a graceful stop and a crash look
-    the same from outside. These are installed on the serve loop before it
-    runs -- no later than hypercorn would install its own, at the start of
-    serving -- so a signal during startup still ends in the same graceful
-    shutdown.
-    """
-
-    # Written by the loop's signal callback, read after the loop has stopped.
-    _received_signal_name: str | None = PrivateAttr(default=None)
-    _signal_event: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
-
-    def install(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Register the handlers on ``loop``; must be called on the main thread."""
-        for signal_number in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(signal_number, self.handle_signal, signal_number)
-
-    def handle_signal(self, signal_number: signal.Signals) -> None:
-        """Record the first shutdown signal and release ``wait``."""
-        if self._received_signal_name is None:
-            self._received_signal_name = signal_number.name
-        self._signal_event.set()
-
-    def wait(self) -> Awaitable[bool]:
-        """The hypercorn shutdown trigger: an awaitable that completes once a shutdown signal has arrived."""
-        return self._signal_event.wait()
-
-    def get_received_signal_name(self) -> str | None:
-        """The name of the first shutdown signal received, or None if none was."""
-        return self._received_signal_name
-
-
 def _run_serve_loop(
     app: Any,
     config: Config,
     loop_factory: Callable[[], asyncio.AbstractEventLoop],
-    shutdown_trigger: Callable[..., Awaitable[Any]] | ShutdownSignalListener,
+    shutdown_trigger: Callable[..., Awaitable[Any]] | None,
 ) -> None:
     """Run hypercorn on a loop from ``loop_factory``, reporting what the loop raises one line at a time.
 
-    A ``ShutdownSignalListener`` has its SIGINT/SIGTERM handlers installed on
-    the loop before serving (which requires running on the main thread); tests
-    pass a plain trigger instead so they can stop the server from another
-    thread.
+    ``shutdown_trigger=None`` makes hypercorn install its own SIGINT/SIGTERM
+    handlers (which requires running on the main thread); tests pass an
+    explicit trigger instead so they can stop the server from another thread.
     """
     with asyncio.Runner(loop_factory=loop_factory) as runner:
-        loop = runner.get_loop()
-        loop.set_exception_handler(ServeLoopExceptionReporter().handle)
-        if isinstance(shutdown_trigger, ShutdownSignalListener):
-            shutdown_trigger.install(loop)
-            shutdown_trigger = shutdown_trigger.wait
+        runner.get_loop().set_exception_handler(ServeLoopExceptionReporter().handle)
         runner.run(hypercorn_serve(app, config, shutdown_trigger=shutdown_trigger))
 
 
-def _serve_forward_app(
-    app: Any,
-    listen_socket: socket.socket,
-    ca: LocalCertificateAuthority | None,
-    shutdown_signal_listener: ShutdownSignalListener,
-) -> None:
+def _serve_forward_app(app: Any, listen_socket: socket.socket, ca: LocalCertificateAuthority | None) -> None:
     """Serve the forward app over the already-bound ``listen_socket`` via hypercorn.
 
-    ``shutdown_signal_listener`` handles SIGINT/SIGTERM as a graceful stop --
-    the behaviour a consumer that stops it with SIGTERM relies on -- and records which signal
-    it was. Must run on the main thread so the loop can install those signal
-    handlers.
+    Passes ``shutdown_trigger=None``, which makes hypercorn install its own
+    SIGINT/SIGTERM handlers -- matching the SIGTERM->graceful behaviour
+    minds' ``terminate()`` relies on. Must run on the main thread so the loop can
+    install those signal handlers.
 
     The loop carries two TLS teardown adjustments hypercorn does not expose
     (both matter only with ``--use-http2``): the SSL shutdown wait is bounded to
@@ -809,7 +712,7 @@ def _serve_forward_app(
     tracebacks.
     """
     config = _build_hypercorn_config(listen_socket, ca)
-    _run_serve_loop(app, config, loop_factory=_BoundedSSLShutdownEventLoop, shutdown_trigger=shutdown_signal_listener)
+    _run_serve_loop(app, config, loop_factory=_BoundedSSLShutdownEventLoop, shutdown_trigger=None)
 
 
 def _validate_options(opts: ForwardCliOptions) -> None:
@@ -947,45 +850,25 @@ def _install_sighup_handler(
         logger.debug("Could not install SIGHUP handler: {}", e)
         return
 
-    def _dispatch() -> None:
-        if stream_manager is not None:
-            stream_manager.bounce_observe()
-        else:
-            _resnapshot_no_observe(resolver, reverse_handler, opts)
+    def _watcher() -> None:
+        while True:
+            bounce_event.wait()
+            bounce_event.clear()
+            try:
+                if stream_manager is not None:
+                    stream_manager.bounce_observe()
+                else:
+                    _resnapshot_no_observe(resolver, reverse_handler, opts)
+            except (OSError, RuntimeError) as e:
+                logger.warning("SIGHUP dispatch failed: {}", e)
 
     start_mngr_thread(
         concurrency_group=concurrency_group,
-        target=_watch_for_sighup_bounces,
-        args=(bounce_event, _dispatch, concurrency_group),
+        target=_watcher,
         daemon=True,
         name="mngr-forward-sighup-watcher",
         is_checked=False,
     )
-
-
-_SIGHUP_WATCHER_POLL_SECONDS: Final[float] = 0.5
-
-
-def _watch_for_sighup_bounces(
-    bounce_event: threading.Event,
-    dispatch: Callable[[], None],
-    concurrency_group: ConcurrencyGroup,
-) -> None:
-    """Run ``dispatch`` for each SIGHUP that sets ``bounce_event``, until ``concurrency_group`` stops being active.
-
-    The group joins this thread when it exits (when ``forward()`` returns after
-    a graceful SIGTERM/SIGINT stop) and fails if the thread is still alive after
-    its exit timeout, so the wait is bounded and the loop ends once the group
-    has begun exiting.
-    """
-    while concurrency_group.state == ConcurrencyGroupState.ACTIVE:
-        if not bounce_event.wait(timeout=_SIGHUP_WATCHER_POLL_SECONDS):
-            continue
-        bounce_event.clear()
-        try:
-            dispatch()
-        except (OSError, RuntimeError) as e:
-            logger.warning("SIGHUP dispatch failed: {}", e)
 
 
 def _resnapshot_no_observe(

@@ -11,8 +11,7 @@
 import type { ResendOutcome } from "./emailVerification";
 
 /** The agent speaks first, and names the thing the rest of the exchange is about. */
-export const MANIFESTO_OPENER =
-  "Studio is a new kind of personal computer, built on honest software.";
+export const MANIFESTO_OPENER = "Imbue Studio is honest software.";
 /** The phrase in the opener the exchange is about: italic wherever the opener is drawn. */
 export const MANIFESTO_OPENER_EMPHASIS = "honest software";
 export const MANIFESTO_QUESTION = "Wait.. what is honest software?";
@@ -20,7 +19,7 @@ export const MANIFESTO_HEADING = "Honest Software:";
 
 /**
  * A line behind a chevron toggle, and what opens under it: the manifesto's
- * points.
+ * points, and the creation page's reading material.
  */
 export interface DisclosurePoint {
   id: string;
@@ -33,35 +32,36 @@ export const MANIFESTO_POINTS: DisclosurePoint[] = [
     id: "loyal",
     label: "is 100% loyal to you",
     detail:
-      "It isn’t built to sell you things, keep you hooked, or make money off your attention. Studio answers " +
-      "to you, not to advertisers or big tech companies.",
+      "Your agent works for you and nobody else. It is not tuned to sell you things, keep you scrolling, " +
+      "or serve an advertiser. When your interests and someone else's differ, it takes your side.",
   },
   {
     id: "data",
     label: "never sells your data",
     detail:
-      "Everything stays between you and Studio. We never sell it, show it to advertisers, or use it to train " +
-      "AI for anyone else.",
+      "What you tell your agent stays between you and it. Your conversations, files and memory are never " +
+      "sold, shared with advertisers, or used to train models for other people.",
   },
   {
     id: "transparent",
     label: "is fully transparent",
     detail:
-      "You can always see what Studio is doing and why: what it changed, which apps it connected to, and " +
-      "what it has access to. Nothing happens behind your back.",
+      "You can see what your agent is doing and why: every action it takes, every service it reaches, " +
+      "every permission it uses. There is no hidden behavior and nothing you are not allowed to inspect.",
   },
   {
     id: "secure",
     label: "is safe and secure",
     detail:
-      "Studio can only use the apps and accounts you connect. You can disconnect any of them, anytime.",
+      "Your agent runs in its own workspace, apart from your other data, and only reaches the services you " +
+      "grant it. You decide what it may touch, and you can take a permission back at any time.",
   },
   {
     id: "portable",
     label: "doesn't lock you in",
     detail:
-      "Run Studio on our cloud, your own computer, or a provider you choose, and switch whenever you want " +
-      "without losing a thing. Leave at any time and take everything with you.",
+      "Your workspace is yours. Run it on Imbue Cloud, on your own computer, or on a provider you choose, " +
+      "and move it later without losing anything. Your data leaves with you whenever you want it to.",
   },
 ];
 
@@ -77,12 +77,11 @@ export const REPORTING_ASK = "Is it ok if we report errors to help improve Studi
 /** What the ask does not say, a click away. */
 export const REPORTING_MORE_LABEL = "See more";
 export const REPORTING_MORE_DETAIL =
-  "We want you to know what you're saying yes to. Error reports include details about what went wrong and how " +
-  "your Studio is set up. We try to remove anything personal, but sometimes something identifying, like an email " +
-  "address, gets through. Your privacy matters to us, so we do our best to delete error data within 30 days. If " +
-  "you change your mind, you can turn error reporting on or off in Settings → Error reporting.";
-export const REPORTING_DECLINE_LABEL = "No thanks";
-export const REPORTING_ACCEPT_LABEL = "Yes, send reports";
+  "The reports we collect include diagnostic details about the error and your setup, which can be identifying " +
+  "at times (e.g. an email account). We generally try to anonymize data, and we try to ensure that error data " +
+  "is not retained for more than 30 days. You can change this any time in Settings → Error reporting.";
+export const REPORTING_DECLINE_LABEL = "No";
+export const REPORTING_ACCEPT_LABEL = "Sounds great";
 
 /** The user's bubble rises into place over this long. */
 export const CHAT_BUBBLE_MS = 280;
@@ -200,7 +199,7 @@ const WHERE_TO_RUN_CHOICES: Pick<FlowStep, "choices" | "minorChoices"> = {
   minorChoices: [LOCAL_CHOICE, OWN_CLOUD_CHOICE],
 };
 
-export const EXISTING_LOGIN_LABEL = "I have an account (log in)";
+export const EXISTING_LOGIN_LABEL = "I already have a workspace (log in)";
 export const RESEND_EMAIL_LABEL = "Send the email again";
 export const VERIFIED_LABEL = "I verified it";
 
@@ -213,8 +212,6 @@ const SIGNUP_CHOICE: FlowChoice = {
 };
 
 const SIGNIN_ACK = "Welcome back.";
-/** What the agent says on hearing Use Imbue Cloud with nobody signed in, ahead of asking for the account. */
-const AUTH_ACK = "Great.";
 
 const VERIFIED_CHOICE: FlowChoice = {
   id: "verified",
@@ -227,8 +224,8 @@ const VERIFIED_CHOICE: FlowChoice = {
 export const FLOW: Record<StepId, FlowStep> = {
   run: {
     ask:
-      "Let's set up your workspace. It's a virtual computer that's all yours, where you build apps just by " +
-      "asking. We recommend running it on Imbue Cloud.",
+      "Let's create your first workspace. A workspace is a private place where you and your agent work together. " +
+      "We recommend running it on Imbue Cloud.",
     table: [
       {
         title: "Imbue Cloud",
@@ -237,8 +234,8 @@ export const FLOW: Record<StepId, FlowStep> = {
         points: [
           "30 second setup",
           "Runs even if your computer is off",
-          "Use it from your phone",
-          "Easy to share with others",
+          "Accessible from mobile",
+          "Shareable with other people",
         ],
       },
     ],
@@ -249,7 +246,9 @@ export const FLOW: Record<StepId, FlowStep> = {
   // Imbue account, so the account step is a sign-in for nearly everyone. The
   // quieter create-account button stays for dev and CI runs.
   auth: {
-    ask: "Imbue Cloud needs an Imbue account. Use the email you downloaded Imbue Studio with.",
+    ask:
+      "A cloud workspace runs on our machines, so it needs an Imbue account. " +
+      "Sign in with the account you downloaded Imbue Studio with.",
     choices: [SIGNUP_CHOICE, { id: "signin", label: "Sign in", said: "", ack: SIGNIN_ACK, isEmphasized: true }],
   },
   // The account step when an account is already signed in: the entry's ack
@@ -317,8 +316,8 @@ export function verificationEmailSentNote(email: string, outcome: ResendOutcome)
 }
 
 export const SIGN_IN_INTRO_BY_CHOICE: Record<"signup" | "signin", string> = {
-  signup: "Create an account to run Studio in Imbue Cloud.",
-  signin: "Sign in to run Studio in Imbue Cloud.",
+  signup: "Create an account to run your workspace in Imbue Cloud.",
+  signin: "Sign in to run your workspace in Imbue Cloud.",
 };
 
 /** What your side says once the account step is done. */
@@ -404,7 +403,7 @@ function stepEntry(id: StepId, ack: string): TranscriptEntry {
 
 /** The account step after the cloud answer: asking for an account, or offering to continue as the one signed in. */
 function accountStepEntry(signedInAccount: FlowAccount | null): TranscriptEntry {
-  if (signedInAccount === null) return stepEntry("auth", AUTH_ACK);
+  if (signedInAccount === null) return stepEntry("auth", CLOUD_CHOICE.ack);
   const email = signedInAccount.email;
   return { kind: "step", id: "account", ack: signedInAck(email), answer: null, said: "", email };
 }
@@ -524,7 +523,7 @@ export function landedAccount(
   return accounts.find((account) => !state.knownAccountIds.includes(account.userId)) ?? null;
 }
 
-/** The user pressed the quieter "I have an account (log in)" under the first question. */
+/** The user pressed the quieter "I already have a workspace (log in)" under the first question. */
 export function chooseExistingLogin(state: StartFlowState): StartFlowState {
   return { ...state, pending: "existing-login" };
 }

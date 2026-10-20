@@ -1,1 +1,0 @@
-Gen-2 slice VMs upgrade `ca-certificates` at provisioning (best effort, with retries) instead of only installing it when missing, so a VM built from an older cloud image picks up the fix for the compromised `emSign ECC Root CA - G3` root.

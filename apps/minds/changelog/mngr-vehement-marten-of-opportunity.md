@@ -1,0 +1,1 @@
+When tkinter is unavailable, a desktop notification that falls back to the tkinter toast now logs its "tkinter not available" warning immediately instead of from a background thread, so the warning can no longer surface in an unrelated test.

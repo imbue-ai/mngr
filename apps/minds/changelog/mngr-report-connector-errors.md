@@ -1,0 +1,3 @@
+Carries the Bugsink bring-up's deploy plumbing for minds (the `sentry` service in every tier's `deploy.toml` secrets list, the bugsink/sentry Vault templates, and the bring-up runbooks) via a merge of `mngr/env-tier-sentry`, so that the error-reporting conversion work on this branch can build on it before that branch lands on main.
+
+Adds the `minds_services` deployment test `test_error_reporting.py`: drives the connector's new dev/ci-only `GET /health/reporting-probe` and asserts the `internal_error` response contract including a well-formed, non-empty Bugsink `event_id` -- the end-to-end proof the tier's `sentry` secret plumbing and SDK capture keep working after any deploy change.

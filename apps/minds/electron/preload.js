@@ -139,6 +139,10 @@ contextBridge.exposeInMainWorld('mindsNative', {
   getDisplayZoom: () => ipcRenderer.invoke('get-display-zoom'),
   setDisplayZoom: (percent) => ipcRenderer.invoke('set-display-zoom', percent),
 
+  // Whether this is the first launch into a new app version (the auto-update
+  // prompt's first trigger); recorded by main once at startup.
+  getLaunchVersionChange: () => ipcRenderer.invoke('get-launch-version-change'),
+
   // Release channels. Desktop-only: the web UI has no binary to update, so the
   // Settings section that uses these renders only when mindsNative is present.
   getUpdateState: () => ipcRenderer.invoke('get-update-state'),

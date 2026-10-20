@@ -277,6 +277,8 @@ export function settingsOverview(
     version: "v-one",
     update_window_start_hour: 2,
     update_window_end_hour: 5,
+    is_auto_update_enabled: false,
+    auto_update_prompt_decision: null,
     ...overrides,
   };
 }

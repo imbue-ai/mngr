@@ -90,8 +90,8 @@ def _make_manager(
 
 def _begin_run(store: WorkspaceUpdateStateStore, agent_id: AgentId) -> None:
     """Put a row in flight with the chat name the probe fixtures use."""
-    assert store.try_begin_run(agent_id, chat_agent_name=_CHAT)
-    store.set_activity(agent_id, UpdateActivity.RUNNING)
+    assert store.try_begin_run(agent_id, target_override="")
+    assert store.adopt_dispatched_chat(agent_id, chat_agent_name=_CHAT, chat_agent_id="")
 
 
 def _is_failure_suppressed(tracker: SystemInterfaceHealthTracker, agent_id: AgentId) -> bool:
@@ -651,6 +651,7 @@ def test_a_workspace_reporting_no_run_and_no_agent_is_unlocked(
         detection=UpdateDetection(availability=UpdateAvailability.OUT_OF_DATE),
         current_version="minds-v0.3.9",
         supported_version="minds-v0.4.1",
+        is_version_from_label=False,
     )
     _begin_run(store, agent_id)
 

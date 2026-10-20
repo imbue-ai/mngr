@@ -1,0 +1,1 @@
+Price Claude Opus 5.5 in the Agent SDK's approximate `total_cost_usd`. Model ids are matched by family substring, so `claude-opus-5-5` -- what the `opus` alias resolves to from Claude Code 2.1.280 -- was priced at the Opus 5 rates ($5/$25 per MTok, cache read $0.50) instead of its own ($4/$20, cache read $0.20). It now has its own entry, ahead of the `opus` family match.

@@ -69,7 +69,6 @@ import json
 import os
 import re
 import secrets
-import shlex
 import shutil
 import socket
 import socketserver
@@ -125,11 +124,11 @@ MINDS_APP_PATH = Path(os.environ.get("MINDS_APP_PATH", "/Applications/Imbue Stud
 
 
 def _bundled_root_name() -> str:
-    """The MINDS_ROOT_NAME baked into the app under test, which names its tier.
+    """The MINDS_ROOT_NAME baked into the app under test, which names its data root.
 
-    A staging / dev build writes to its own tier's roots, not production's. Reading
-    the build's own root_name keeps this harness pointed at the app's real data roots
-    instead of stale ones left behind by some other build.
+    A staging / dev build writes to ``~/.minds-<env>``, not ``~/.minds``. Reading the
+    build's own root_name keeps this harness pointed at the app's real data root
+    instead of a stale one left behind by some other build.
     """
     override = os.environ.get("MINDS_ROOT_NAME")
     if override:
@@ -537,19 +536,6 @@ def ensure_brew_curl() -> Path:
     return ensure_brew_curl()
 
 
-def write_curl_with_ca_bundle(curl: Path, ca_bundle: Path) -> Path:
-    """Write a ``curl`` wrapper that runs ``curl`` verifying against ``ca_bundle``.
-
-    The app sets ``CURL_CA_BUNDLE`` to its own certifi bundle on macOS,
-    replacing any the environment passes it, so the bundle is set inside the
-    wrapper, in the process the app's curl router execs."""
-    wrapper = SLACK_MOCK_STATE / "curl-bin" / "curl"
-    wrapper.parent.mkdir(parents=True, exist_ok=True)
-    wrapper.write_text(f'#!/bin/sh\nCURL_CA_BUNDLE={shlex.quote(str(ca_bundle))} exec {shlex.quote(str(curl))} "$@"\n')
-    wrapper.chmod(0o755)
-    return wrapper
-
-
 def patch_etc_hosts() -> None:
     marker = "# slack-mock"
     line = "127.0.0.1 slack.com files.slack.com  " + marker
@@ -657,7 +643,7 @@ def wait_backend_url(since_offset: int = 0) -> str:
 
     deadline = time.time() + LAUNCH_BACKEND_TIMEOUT
     pattern = re.compile(
-        r"Imbue Studio login URL \(one-time use\): "
+        r"(?:Minds|Mind|Imbue Studio) login URL \(one-time use\): "
         r"(http://(?:127\.0\.0\.1|localhost):\d+/login\?one_time_code=[A-Za-z0-9_-]+)"
     )
     while time.time() < deadline:
@@ -719,7 +705,7 @@ def dismiss_consent_if_present(page: Page, *, timeout: float = 8_000) -> bool:
 
     The SPA consent screen (ConsentPage) takes over the page while
     ``error_reporting_consent_given`` is False, which it always is on a wiped
-    state root. It is not once-per-run: it can
+    ~/.minds. It is not once-per-run: it can
     be back on a later ``goto("/")``, and a caller that assumed otherwise spent
     the rest of the run driving a dialog it thought was the home page.
     """
@@ -1276,10 +1262,10 @@ def _create_workspace_and_first_message(
 
     # A fresh workspace opens on the welcome chat the creation page seeded, framed in its own
     # frame at the chat app's origin, with a composer under the seeded turns before any agent
-    # exists. The create flow injects no AI credentials, so in API_KEY mode the composer is
-    # disabled and the provider chooser opens until a sign-in through it gives the chat an
-    # account, and that sign-in launches the chat's first agent; in SUBSCRIPTION mode the synced
-    # Claude credentials are already an account, and the first message sent there launches it.
+    # exists; the first message sent there is what launches the chat's first agent. The create
+    # flow injects no AI credentials, so in API_KEY mode the composer is disabled and the
+    # provider chooser opens until a sign-in through it gives the chat an account; in
+    # SUBSCRIPTION mode the synced Claude credentials are already an account.
     chat = wait_for_chat_frame(workspace, label=label)
     if ai_provider == "API_KEY":
         sign_in_via_provider_chooser(workspace, chat, api_key=anthropic_key, label=label)
@@ -1423,9 +1409,8 @@ def pre_run_sweep() -> None:
         elif stale.exists():
             with contextlib.suppress(OSError):
                 stale.unlink()
-    # Clear slack creds left by a dev run without a reset. Skipped when the store is absent:
-    # clearing creates it and its encryption_key, and a store that exists before the first
-    # launch stops the data migration from moving the legacy latchkey dir there.
+    # Clear slack creds left by a dev run without a reset. Skipped when the store is absent, since
+    # clearing creates it and its key before the first launch migrates the legacy latchkey dir there.
     if LATCHKEY_DIR.exists():
         with contextlib.suppress(Exception):
             latchkey_clear_slack()
@@ -1454,21 +1439,21 @@ def run_e2e() -> int:
     brew_curl = ensure_brew_curl()
     cert = ensure_cert()
     ca_bundle = ensure_combined_cert_bundle(cert)
-    latchkey_curl = write_curl_with_ca_bundle(brew_curl, ca_bundle)
-    logger.info("brew curl: {}; ca_bundle: {}; latchkey curl: {}", brew_curl, ca_bundle, latchkey_curl)
+    logger.info("brew curl: {}; ca_bundle: {}", brew_curl, ca_bundle)
 
     # 1. Launch Imbue Studio.app ourselves with --remote-debugging-port so Playwright
     # can attach via CDP. Use a free port to avoid clashes.
     cdp_port = _free_port()
     env = {
         **os.environ,
-        # latchkey's curl must trust the slack mock's cert, or services_info
-        # reports INVALID, grant() invokes auth_browser, and the request
-        # resolves DENIED. The packaged app replaces ``LATCHKEY_CURL`` with its
-        # curl router, which runs the first ``curl`` on PATH: the wrapper,
-        # whose brew curl (OpenSSL) then verifies against the combined bundle.
-        "LATCHKEY_CURL": str(latchkey_curl),
-        "PATH": f"{latchkey_curl.parent}:" + os.environ.get("PATH", ""),
+        # ``LATCHKEY_CURL`` (read by latchkey's config.ts) pins the curl
+        # binary to brew curl (OpenSSL) so checkApiCredentials never falls
+        # back to /usr/bin/curl (SecureTransport, ignores CURL_CA_BUNDLE).
+        # Otherwise services_info would report INVALID, grant() would
+        # invoke auth_browser, and the request would resolve DENIED.
+        "LATCHKEY_CURL": str(brew_curl),
+        "PATH": f"{brew_curl.parent}:" + os.environ.get("PATH", ""),
+        "CURL_CA_BUNDLE": str(ca_bundle),
     }
     env.pop("ELECTRON_RUN_AS_NODE", None)
     logger.info("launching {} --remote-debugging-port={}", MINDS_APP_PATH, cdp_port)
@@ -1519,7 +1504,7 @@ def run_e2e() -> int:
 
         # The post-login error-reporting consent screen
         # (the SPA ConsentPage, shown while error_reporting_consent_given is False --
-        # always here, since the runner's state root is wiped each run) sits on
+        # always here, since the runner's ~/.minds is wiped each run) sits on
         # the home page until answered. Dismiss it once via Continue; the
         # POST /consent + reload then proceeds home, so the create flow and the
         # later both-tiles home assertion see the home page, not the consent.

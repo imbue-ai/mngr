@@ -14,7 +14,6 @@ from imbue.minds.utils.sentry.core import _MINDS_LOG_ATTACHMENT_GROUPS
 from imbue.minds.utils.sentry.core import _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _external_log_attachment_groups
-from imbue.minds.utils.sentry.core import is_under_pytest
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import resolve_anonymous_user_id
 from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
@@ -307,8 +306,3 @@ def test_collect_external_attachments_tolerates_missing_external_dirs(tmp_path: 
         groups, _callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=logs_folder)
 
     assert set(groups) == {"", "live_logs"}
-
-
-def test_is_under_pytest_reads_the_current_test_variable_pytest_sets() -> None:
-    assert is_under_pytest({"PYTEST_CURRENT_TEST": "apps/minds/x_test.py::test_y (call)"}) is True
-    assert is_under_pytest({"MINDS_ROOT_NAME": "minds-ci-snapshot"}) is False

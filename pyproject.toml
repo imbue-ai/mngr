@@ -22,22 +22,11 @@ dependencies = [
 # surface. scripts/release.py advances it to 2 weeks before each release, and
 # only ever forward. This only buys a detection delay; it can't catch a
 # compromise that stays undetected past the window.
-exclude-newer = "2026-10-08T00:00:00Z"
-# uv below 0.13.4 bundles a root store that still trusts emSign ECC Root CA -
-# G3, which the eMudhra intermediates with recoverable private keys chain to,
-# so an older uv can be MITM'd while fetching packages. Older uv also writes an
-# older revision of uv.lock than the committed one.
-required-version = ">=0.13.4"
-# certifi 2026.10.19 (uploaded 2026-10-20) is the first release without the
-# emSign root above, so it postdates the cutoff. Override just this package rather
-# than advancing the global cutoff, which would adopt every dep's newer
-# releases at once. Mirrors the same override in the private root pyproject.
-# CLEANUP: remove once exclude-newer above reaches 2026-10-21.
-exclude-newer-package = { certifi = "2026-10-21T00:00:00Z" }
+exclude-newer = "2026-09-02T00:00:00Z"
 
 [tool.uv.sources]
 imbue-common = { workspace = true }
-imbue-overlay = { workspace = true }
+overlay = { workspace = true }
 
 [tool.uv.workspace]
 members = ["libs/*", "apps/*"]

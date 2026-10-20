@@ -1,0 +1,1 @@
+Raise the restic no-lock-retry test's timeout from 60s to 180s: the test runs two real restic invocations whose internal retry budget alone is 60 seconds, making the old timeout marginal by construction on slower shared CI runners (it timed out repeatedly on the public mirror's CI).

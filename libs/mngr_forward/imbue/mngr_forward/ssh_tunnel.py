@@ -6,17 +6,13 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime
-from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlparse
 
 import paramiko
-from cryptography.exceptions import UnsupportedAlgorithm
 from loguru import logger
-from paramiko.pkey import UnknownKeyType
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -1086,18 +1082,13 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     # A host with no producer-owned key defers authentication to the user's
     # own SSH setup: let paramiko run its default lookup chain (``~/.ssh/id_*``
     # and the agent) instead of pointing it at an empty key filename.
-    try:
-        client.connect(
-            hostname=ssh_info.host,
-            port=ssh_info.port,
-            username=ssh_info.user,
-            key_filename=None if is_user_config_host else str(ssh_info.key_path),
-            timeout=10.0,
-        )
-    except paramiko.SSHException as e:
-        if _was_rejected_during_authentication(client, e):
-            _log_authentication_failure(ssh_info, e)
-        raise
+    client.connect(
+        hostname=ssh_info.host,
+        port=ssh_info.port,
+        username=ssh_info.user,
+        key_filename=None if is_user_config_host else str(ssh_info.key_path),
+        timeout=10.0,
+    )
 
     # Send periodic keepalives so an idle reverse tunnel is not reaped for
     # inactivity, which would leave the remote sshd's forwarded listener bound
@@ -1108,68 +1099,6 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
         transport.set_keepalive(_SSH_KEEPALIVE_INTERVAL_SECONDS)
 
     return client
-
-
-def _was_rejected_during_authentication(client: paramiko.SSHClient, error: paramiko.SSHException) -> bool:
-    """Whether ``connect`` failed in the authentication phase, after offering credentials the server did not accept.
-
-    paramiko tries a key file as each key class in turn and raises only the
-    last failure, so an RSA or ECDSA key the server rejected surfaces as the
-    later classes' load error rather than as an ``AuthenticationException``.
-    An authentication attempt on a transport that is still unauthenticated
-    identifies the rejection either way.
-    """
-    if isinstance(error, paramiko.AuthenticationException):
-        return True
-    transport = client.get_transport()
-    return transport is not None and transport.auth_handler is not None and not transport.is_authenticated()
-
-
-def _log_authentication_failure(ssh_info: RemoteSSHInfo, error: paramiko.SSHException) -> None:
-    """Record what this device offered to an sshd that would not authenticate it.
-
-    A rejection persists across cycles for very different reasons: the host no
-    longer authorizes the key we hold (compare the fingerprint with the one the
-    host was last configured with), the connection info is stale (the user or
-    port), or the host defers to the user's own SSH setup, which may not exist
-    for this process. The message also distinguishes a refusal ("Authentication
-    failed.") from a server that never answered ("Authentication timeout.").
-    paramiko also tries the agent's keys and ``~/.ssh/id_*`` after the key
-    described here and raises only the last failure, so the error can come from
-    one of those rather than from this key.
-    Only identifiers are logged, never the key path, which can embed a username.
-    """
-    allowed_types = error.allowed_types if isinstance(error, paramiko.BadAuthenticationType) else None
-    logger.warning(
-        "SSH authentication as {} on port {} failed ({}: {}); offered credentials: {}; auth types the server allows: {}",
-        ssh_info.user,
-        ssh_info.port,
-        type(error).__name__,
-        error,
-        _describe_offered_key(ssh_info),
-        "not reported" if allowed_types is None else ", ".join(allowed_types),
-    )
-
-
-def _describe_offered_key(ssh_info: RemoteSSHInfo) -> str:
-    """The fingerprint and modification time of the key this device authenticates with.
-
-    Fingerprinted from the private key, loaded the way paramiko loads it to
-    offer it, in the same form ``log_client_key_configuration`` logs for the
-    public key a host is configured with: a host configured from a ``.pub``
-    that no longer matches the private key shows up as two different
-    fingerprints.
-    """
-    if _is_user_config_host(ssh_info):
-        return "the user's own SSH setup (credential-deferring host)"
-    try:
-        fingerprint = paramiko.PKey.from_path(ssh_info.key_path).fingerprint
-        modified_at = datetime.fromtimestamp(ssh_info.key_path.stat().st_mtime, tz=timezone.utc)
-    # Unreadable, malformed, passphrase-protected, or a key type this paramiko
-    # or ``cryptography`` build does not support.
-    except (OSError, ValueError, TypeError, UnsupportedAlgorithm, UnknownKeyType, paramiko.SSHException) as e:
-        return f"a key file that could not be read back ({type(e).__name__})"
-    return f"key {fingerprint} (file modified {modified_at.isoformat()})"
 
 
 def _create_short_path_tmpdir(prefix: str) -> tempfile.TemporaryDirectory[str]:

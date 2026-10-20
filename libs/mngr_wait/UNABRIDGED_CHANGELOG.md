@@ -4,42 +4,6 @@ Full, unedited changelog entries for the `mngr_wait` project, consolidated night
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-13
-
-The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
-
-## 2026-10-05
-
-Adopted the new repo-wide `raw ConcurrencyGroup.start_new_thread calls` ratchet (`test_prevent_raw_start_new_thread`). It flags production code that calls `ConcurrencyGroup.start_new_thread` directly instead of `start_mngr_thread`, the mngr helper that destroys the thread's gevent Hub when its target returns. No production code change in this project.
-
-## 2026-09-21
-
-Adopted the new repo-wide `raw ConcurrencyGroupExecutor construction` ratchet (`test_prevent_raw_concurrency_group_executor`). It flags production code that builds a `ConcurrencyGroupExecutor` directly instead of using `mngr_executor`, the wrapper that destroys each worker thread's gevent Hub. No production code change in this project.
-
-## 2026-08-26
-
-`mngr wait` now documents a fourth exit code. A TARGET that is an agent or host *id* matching no known target exits 8 (`EXIT_CODE_TARGET_NOT_FOUND`) rather than the generic 1, because the lookups it resolves through gained that code on this branch. A TARGET given as a *name* that matches nothing still exits 1, since a name that matches nothing is as likely a typo as a target that is gone.
-
-## 2026-08-18
-
-# Follow mngr's discovery return type
-
-Updated for mngr's `discover_hosts_and_agents`, which now returns a `DiscoveryOutcome` (hosts and agents, the providers that answered, and the providers that could not be reached) rather than a two-tuple. No behavior change here: this reads the same discovered agents off the outcome.
-
-## 2026-08-03
-
-Merge main into the mithril-refactor stack (relay-based sharing, iframe desktop shell, Mithril SPA). The changes to this project arrive verbatim from main and are described by their original PRs' changelog entries; no project-specific conflict resolution was needed here.
-
-No code changes in this project. This PR lands the mithril-stack rewrite (relay-based sharing, single-iframe Electron shell, mithril SPA) into main; for this project that means only the per-PR changelog entries accumulated on the stack's development branches.
-
-## 2026-08-02
-
-Added the repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (synced into every project's `test_ratchets.py`): Modal images must install from a committed hash-locked requirements export instead of passing bare package names to `pip_install`/`uv_pip_install`. No violations in this project (count 0).
-
-## 2026-07-24
-
-`mngr wait --host` no longer treats `UNAUTHENTICATED` as a terminal host state. It now follows `UNKNOWN` semantics (non-terminal): when a host's access credential is rejected, or the host otherwise cannot be observed, a wait keeps polling rather than settling on that non-evidence. Terminal host states are now just `STOPPED`, `PAUSED`, `CRASHED`, `FAILED`, and `DESTROYED`.
-
 ## 2026-07-01
 
 Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.

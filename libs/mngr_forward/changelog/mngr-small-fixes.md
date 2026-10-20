@@ -1,0 +1,1 @@
+Comment-only: the stream manager's bare-name fallback for `services` events that omit the origin `label` (rows written before minds-v0.3.12 minted `<name>-<rand>` labels) is now marked with a `CLEANUP:` comment stating when the fallback can be removed.

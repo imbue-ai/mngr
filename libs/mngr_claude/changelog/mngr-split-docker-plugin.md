@@ -1,0 +1,1 @@
+- The offline `on_before_host_destroy` test now builds its volume-backed host from mngr's generic mock provider instead of the docker provider, which moved into its own plugin. No behavior change.

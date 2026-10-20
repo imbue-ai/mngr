@@ -1,0 +1,1 @@
+A pulled-out workspace window's popout is sized, and follows the cursor, by the window's size and grab point scaled by the display zoom: the shell measures them in its own CSS pixels, and at 175% the popouts came out 1.75 times too small.

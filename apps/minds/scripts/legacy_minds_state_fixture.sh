@@ -2,13 +2,11 @@
 # Seed a realistic pre-migration ~/.<root_name> tree, and afterwards assert the
 # app moved it onto the canonical roots.
 #
-# Why this exists: an app that finds no legacy dotfolder takes its
-# no-legacy-dir path, so without seeding, a green launch-to-msg run says nothing
-# at all about the migration -- which is the one part of the move that touches a
-# real user's SSH keys and auth sessions.
-#
-# The dotfolder is this fixture's alone: seed replaces whatever an earlier run
-# left there, and verify removes it once checked.
+# Why this exists: mac-runner-reset.sh deletes the legacy dotfolder along with
+# the three canonical roots, so an app launched after a reset finds nothing to
+# migrate and takes its no-legacy-dir path. Without seeding, a green
+# launch-to-msg run says nothing at all about the migration -- which is the one
+# part of the move that touches a real user's SSH keys and auth sessions.
 #
 # Usage:
 #   legacy_minds_state_fixture.sh seed     # after reset + install, before first launch
@@ -58,14 +56,9 @@ LATCHKEY_HANDLE_REL="latchkey/mngr_latchkey/permissions/ci0legacy.json"
 log() { echo "[legacy-fixture] $*"; }
 
 seed() {
-    if [[ -e "$STATE_ROOT" ]]; then
-        echo "ERROR: $STATE_ROOT already exists; seed runs after the reset and before the first launch." >&2
-        exit 1
-    fi
-    # A run that never reached verify leaves its dotfolder behind.
     if [[ -e "$LEGACY_DIR" ]]; then
-        log "removing the $LEGACY_DIR an earlier run left behind"
-        rm -rf "$LEGACY_DIR"
+        echo "ERROR: $LEGACY_DIR already exists; reset should have removed it before seeding." >&2
+        exit 1
     fi
     log "seeding $LEGACY_DIR (tier=$TIER)"
 
@@ -160,10 +153,9 @@ verify() {
 
     [[ -f "$STATE_ROOT/.migrated-from-dotfolder" ]] || fail "no migration marker in $STATE_ROOT"
 
-    echo "--- $LEGACY_DIR ---"
-    find "$LEGACY_DIR" -ls 2>&1 || true
-    rm -rf "$LEGACY_DIR"
     if [[ "$FAILED" -ne 0 ]]; then
+        echo "--- $LEGACY_DIR ---" >&2
+        find "$LEGACY_DIR" 2>&1 | head -40 >&2
         echo "--- $STATE_ROOT ---" >&2
         find "$STATE_ROOT" -maxdepth 3 2>&1 | head -40 >&2
         exit 1

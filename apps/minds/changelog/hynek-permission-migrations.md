@@ -1,0 +1,1 @@
+Updated the machine-operations test double for the new `permissions_format_version` field on `FetchedMachineState` (see the `mngr_latchkey` entry: per-host permissions migrations). No behavior change in minds itself; a remote workspace's Permissions tab now reads a policy the machine holds in an older format only after it has been migrated and handed back to the machine.

@@ -1,0 +1,1 @@
+`ConcurrencyGroup.run_process_in_background` takes `shutdown_timeout_sec`, the grace a process gets between SIGTERM and SIGKILL when it is stopped (30 seconds by default). A caller whose process has nothing worth saving on exit can pass a short grace so that stopping it stays quick on a loaded machine.

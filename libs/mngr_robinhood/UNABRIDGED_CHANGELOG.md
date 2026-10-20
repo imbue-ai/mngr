@@ -4,62 +4,6 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-13
-
-The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that grouped the 54 tests that sat above the file's first header, creating the groups they belong to; moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
-
-## 2026-10-07
-
-Price the Sonnet 5 generation and Haiku 5.5 in the Agent SDK's approximate cost table. Claude Code 2.1.293 resolves the `sonnet` and `haiku` aliases to Claude Sonnet 5.5 and Claude Haiku 5.5, and both matched their bare family entry: `claude-sonnet-5` and `claude-sonnet-5-5` at Sonnet 4 rates ($3/$15 per MTok, 1.5x too high), and `claude-haiku-5-5` at Haiku 4.5 rates ($1/$5, 10x too high). Sonnet 5 and 5.5 now resolve to their own entry at $2/$10 with cache writes at $2.50 and reads at $0.20, and Haiku 5.5 to its own at $0.10/$0.50 with cache writes at $0.125 and reads at $0.01, the rates Claude Code's own model catalog gives them. Haiku 5.5's 5x rate for prompts over 100K tokens is not modelled.
-
-## 2026-10-05
-
-Adopted the new repo-wide `raw ConcurrencyGroup.start_new_thread calls` ratchet (`test_prevent_raw_start_new_thread`). It flags production code that calls `ConcurrencyGroup.start_new_thread` directly instead of `start_mngr_thread`, the mngr helper that destroys the thread's gevent Hub when its target returns. No production code change in this project.
-
-## 2026-10-01
-
-`anthropic` 1.3.0 adds a `toolset_name` field to `ToolUseBlock`, so the `tool_use` blocks robinhood emits in stream-json output now carry `"toolset_name":null`. This is a cosmetic departure from the real `claude` binary's wire shape, alongside the `"caller":null` and `"citations":null` already documented in the `imbue.mngr_claude.stream_json` module docstring.
-
-## 2026-09-30
-
-Removed the 11 comment lines that had accumulated inside `libs/mngr_robinhood/imbue/mngr_robinhood/test_ratchets.py` explaining why individual ratchet counts had been raised.
-
-A ratchet file records counts, not history. The reason a count moved now goes in the commit message and the changelog entry, the reason a particular code site is allowed goes in that module's docstring, and the set of exempt files goes in the `excluded_patterns=(...)` argument -- all places that stay correct as the code changes, which the comments did not.
-
-## 2026-09-24
-
-Price Claude Opus 5.5 in the Agent SDK's approximate `total_cost_usd`. Model ids are matched by family substring, so `claude-opus-5-5` -- what the `opus` alias resolves to from Claude Code 2.1.280 -- was priced at the Opus 5 rates ($5/$25 per MTok, cache read $0.50) instead of its own ($4/$20, cache read $0.20). It now has its own entry, ahead of the `opus` family match.
-
-## 2026-09-21
-
-Adopted the new repo-wide `raw ConcurrencyGroupExecutor construction` ratchet (`test_prevent_raw_concurrency_group_executor`). It flags production code that builds a `ConcurrencyGroupExecutor` directly instead of using `mngr_executor`, the wrapper that destroys each worker thread's gevent Hub. No production code change in this project.
-
-## 2026-09-11
-
-Price Claude Fable 5.1 (`claude-fable-5-1`) in the Agent SDK's per-turn cost estimate. It shares Fable 5's input, output, and cache-write rates but its cache reads cost a quarter as much, so it gets its own entry, matched ahead of the bare `fable` family substring that would otherwise claim it.
-
-## 2026-09-03
-
-The Agent SDK driver's mid-session agent restart now launches the agent through mngr's shared locked start helper (under the host lock, with a bounded lock wait) instead of an unlocked `start_agents` call, so it can no longer race another start of the same agent. The best-effort stop before the relaunch is unchanged.
-
-## 2026-08-31
-
-Added the `rsync` resource mark to the two streaming release tests that invoke rsync without declaring it. The resource guard fails a test that touches a guarded resource it is not marked for, so these could only ever fail once the release suite ran them.
-
-## 2026-08-26
-
-Updated the hardcoded `-S` override in `UNATTENDED_SETTINGS` for the `auto_dismiss_dialogs` → `auto_dismiss_dialogs_at_startup` rename. A `-S` key is a string, so it does not follow a field rename on its own.
-
-## 2026-08-03
-
-Merge main into the mithril-refactor stack (relay-based sharing, iframe desktop shell, Mithril SPA). The changes to this project arrive verbatim from main and are described by their original PRs' changelog entries; no project-specific conflict resolution was needed here.
-
-No code changes in this project. This PR lands the mithril-stack rewrite (relay-based sharing, single-iframe Electron shell, mithril SPA) into main; for this project that means only the per-PR changelog entries accumulated on the stack's development branches.
-
-## 2026-08-02
-
-Added the repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (synced into every project's `test_ratchets.py`): Modal images must install from a committed hash-locked requirements export instead of passing bare package names to `pip_install`/`uv_pip_install`. No violations in this project (count 0).
-
 ## 2026-07-14
 
 Add a Claude Fable family entry ($10 / $50 per 1M input / output tokens, cache write $12.50, cache read $1.00) to the Agent SDK per-model price table, so `ResultMessage.total_cost_usd` is populated for `claude-fable-5` sessions instead of being left unset.

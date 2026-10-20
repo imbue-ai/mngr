@@ -1,0 +1,1 @@
+Comment-only sweep for the default-workspace-template root declutter: the clone-overlay comment in `container_setup.py` now points its example at `system/vendor/mngr/` (the vendored tree's decluttered location). No behavior change.

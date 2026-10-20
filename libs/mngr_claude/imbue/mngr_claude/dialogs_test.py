@@ -18,11 +18,9 @@ from imbue.mngr_claude.dialogs import DialogBlocked
 from imbue.mngr_claude.dialogs import EffortSwitchWarning
 from imbue.mngr_claude.dialogs import EmptyShellMode
 from imbue.mngr_claude.dialogs import GenericBenign
-from imbue.mngr_claude.dialogs import LspPluginInstall
 from imbue.mngr_claude.dialogs import MatchesPattern
 from imbue.mngr_claude.dialogs import ModelSwitchWarning
 from imbue.mngr_claude.dialogs import PendingShellCommand
-from imbue.mngr_claude.dialogs import PluginInstall
 from imbue.mngr_claude.dialogs import SELECTABLE_NICKNAMES
 from imbue.mngr_claude.dialogs import SHELL_MODE_FOOTER_TEXT
 from imbue.mngr_claude.dialogs import SelfClearing
@@ -301,7 +299,7 @@ def test_unrecognized_refuses_after_the_pass_budget() -> None:
     assert pane.keys == ["1", "1", "1", "1"]
 
 
-# Captured from claude 2.1.307 under --dangerously-skip-permissions. Its first option approves
+# Captured from claude 2.1.293 under --dangerously-skip-permissions. Its first option approves
 # the rm, so if this ever stops matching a named class it falls to Unrecognized, whose "1"
 # would run the command the prompt exists to stop.
 _DANGEROUS_RM_PROMPT_PANE = (
@@ -372,62 +370,6 @@ def test_accept_refuses_when_its_option_never_appears() -> None:
     with pytest.raises(DialogBlocked):
         DIALOGS[2].deal_with(pane)
     assert "Enter" not in pane.keys
-
-
-def _plugin_offer_pane(header_lines: tuple[str, ...], options: tuple[str, ...], highlighted_idx: int) -> str:
-    option_lines = [
-        f" {'❯' if idx == highlighted_idx else ' '} {idx + 1}. {option}" for idx, option in enumerate(options)
-    ]
-    return "\n".join((*header_lines, *option_lines)) + "\n"
-
-
-# Both plugin offers laid out from their components in the 2.1.307 source: title, intro, identity
-# rows, question, then the options in the order the component lists them. Neither is a live
-# capture -- each needs a marketplace plugin to recommend.
-_LSP_OFFER_HEADER = (
-    " LSP plugin recommendation",
-    "",
-    " LSP provides code intelligence like go-to-definition and error checking",
-    " Plugin: pyright-lsp",
-    " Marketplace: claude-plugins-official",
-    " Triggered by: .py files",
-    "",
-    " Would you like to install this LSP plugin?",
-)
-_LSP_OFFER_OPTIONS = ("Yes, install", "No, not now", "Never for this plugin", "Disable all LSP recommendations")
-_PLUGIN_OFFER_HEADER = (
-    " Plugin recommendation",
-    "",
-    " The /deploy command suggests installing a plugin.",
-    " Plugin: deploy-tools",
-    " Marketplace: claude-plugins-official",
-    "",
-    " Would you like to install it?",
-)
-_PLUGIN_OFFER_OPTIONS = ("Yes, install", "No", "No, and don't show plugin installation hints again")
-
-
-def test_lsp_plugin_offer_is_declined_without_changing_settings() -> None:
-    frames = [_plugin_offer_pane(_LSP_OFFER_HEADER, _LSP_OFFER_OPTIONS, idx) for idx in (0, 0, 1)] + [_IDLE_PANE]
-    pane = FakePane(frames, accepts=frozenset({"LSP plugin install"}))
-    assert isinstance(classify(frames[0]), LspPluginInstall)
-    deal_with_dialogs(pane)
-    assert pane.keys == ["Down", "Enter"]
-
-
-def test_plugin_offer_is_declined_on_no_rather_than_its_longer_sibling() -> None:
-    """The highlight starts on "No, and don't show plugin installation hints again", which begins with "No".
-
-    Answering there would switch plugin hints off for good; the walk must carry on round to the
-    plain "No". Unknown-dialog answering is on too, because this offer's first option installs.
-    """
-    frames = [_plugin_offer_pane(_PLUGIN_OFFER_HEADER, _PLUGIN_OFFER_OPTIONS, idx) for idx in (2, 2, 0, 1)] + [
-        _IDLE_PANE
-    ]
-    pane = FakePane(frames, accepts=frozenset({"Plugin install", "Unrecognized"}))
-    assert isinstance(classify(frames[0]), PluginInstall)
-    deal_with_dialogs(pane)
-    assert pane.keys == ["Down", "Down", "Enter"]
 
 
 # option predicate
@@ -508,19 +450,6 @@ def test_transcript_quoting_a_footer_is_not_a_dialog() -> None:
     """
     pane = (
         "assistant: press esc to cancel, it said\n"
-        "\n"
-        "────────────────────────────\n"
-        "❯ \n"
-        "────────────────────────────\n"
-        "  ? for shortcuts\n"
-    )
-    assert classify(pane) is None
-
-
-def test_a_reply_asking_whether_to_install_something_is_not_the_plugin_offer() -> None:
-    """The plugin offer's question is a sentence an agent's own reply often ends with."""
-    pane = (
-        "assistant: ripgrep is not installed. Would you like to install it?\n"
         "\n"
         "────────────────────────────\n"
         "❯ \n"

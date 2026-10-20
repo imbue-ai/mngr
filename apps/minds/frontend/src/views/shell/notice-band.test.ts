@@ -286,20 +286,6 @@ describe("noticeBandFor, out of date", () => {
     expect(noticeBandFor("healthy", "healthy", false, { standingUpdateNotice: "out-of-date" })).toBeNull();
   });
 
-  it("bands a machine with a security update more strongly than an ordinary one, with the same way into the modal", () => {
-    const band = noticeBandFor("healthy", "healthy", true, { standingUpdateNotice: "security-update" });
-    expect(band?.key).toBe("workspace-security-update");
-    expect(band?.variant).toBe("error");
-    expect(band?.action?.kind).toBe("update-workspace");
-    // Still a standing condition: a health condition and a run in flight outrank it.
-    expect(noticeBandFor("stuck", "healthy", true, { standingUpdateNotice: "security-update" })?.key).toBe(
-      "workspace-recovering",
-    );
-    expect(
-      noticeBandFor("healthy", "healthy", true, { updateRunPhase: "preparing", standingUpdateNotice: "security-update" })?.key,
-    ).toBe("workspace-update-preparing");
-  });
-
   it("bands a machine too old to update in place with the same way into the modal", () => {
     const band = noticeBandFor("healthy", "healthy", true, { standingUpdateNotice: "needs-recreation" });
     expect(band?.key).toBe("workspace-needs-recreation");
@@ -465,6 +451,22 @@ describe("noticeBandFor, a machine stopped on purpose", () => {
         noticeBandFor("recovering", "healthy", true, { liveness, recoveryKind: "restart", deviceEnvironment: "OFFLINE" }),
       ).toBeNull();
     }
+  });
+});
+
+describe("noticeBandFor's auto-update states", () => {
+  it("offers the sign-in a refused update is waiting on, as a standing condition below a run", () => {
+    const band = noticeBandFor("healthy", "healthy", true, { standingUpdateNotice: "needs-sign-in" });
+    expect(band).toMatchObject({ key: "workspace-needs-sign-in", action: { kind: "sign-in-for-update" } });
+    expect(
+      noticeBandFor("healthy", "healthy", true, { updateRunPhase: "preparing", standingUpdateNotice: "needs-sign-in" })
+        ?.key,
+    ).toBe("workspace-update-preparing");
+  });
+
+  it("says a pending decision is the reader's move, not a failure", () => {
+    const band = noticeBandFor("healthy", "healthy", true, { updateRunOutcome: "decision-pending" });
+    expect(band).toMatchObject({ key: "workspace-update-outcome", variant: "warn", action: { kind: "update-workspace" } });
   });
 });
 

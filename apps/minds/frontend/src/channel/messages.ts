@@ -7,7 +7,6 @@
 // truth for shapes; nothing here adds or changes fields.
 
 import type {
-  NotificationDestination,
   UiAccountEntry,
   UiAccountsMessage,
   UiBootstrap,
@@ -36,7 +35,6 @@ import type {
 } from "../generated/ui";
 
 export type {
-  NotificationDestination,
   UiAccountEntry,
   UiAccountsMessage,
   UiBootstrap,

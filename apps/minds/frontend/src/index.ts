@@ -66,8 +66,8 @@ function main(): void {
     },
     openInPlace: (requestId) => shell.openInbox({ selected: requestId }),
     currentRoutePath: () => shell.currentRoutePath(),
-    sendWorkspaceMessage: (workspaceAgentId, message) =>
-      shell.requestWorkspaceMessage(workspaceAgentId, message),
+    focusChat: (workspaceAgentId, chatAgentId) =>
+      shell.requestFocusChat(workspaceAgentId, chatAgentId),
   });
   const notificationsUi = new NotificationsUiController({
     isFeedOverlayOpen: () => shell.isNotificationsOpen,
@@ -153,7 +153,8 @@ function main(): void {
     },
     onWorkspaceRefresh: (message) => {
       // An in-workspace agent says the interface this view is running is stale.
-      // Every window acts on its own frame -- no main process involvement.
+      // Every window acts on its own frame -- no main process involvement,
+      // unlike the pre-SPA content-view reload.
       shell.reloadWorkspaceFrame(
         message.agent_id,
         message.loaded_before == null ? null : Date.parse(message.loaded_before),

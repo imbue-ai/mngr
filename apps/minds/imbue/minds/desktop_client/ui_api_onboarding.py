@@ -78,7 +78,7 @@ def _handle_consent_answer() -> Response:
 def _handle_onboarding_complete() -> Response:
     """Record that the installation is past the start flow (POST /ui/api/onboarding/complete).
 
-    The SPA posts this when the start flow's "I have an account (log in)" answer
+    The SPA posts this when the start flow's "I already have a workspace (log in)" answer
     signs in, since that path creates nothing (the create front door records the
     same fact for every create attempt on its own). Persisted, so the next launch
     lands on the home page rather than on the start flow again.

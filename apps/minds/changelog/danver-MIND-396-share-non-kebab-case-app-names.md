@@ -1,0 +1,7 @@
+The share panel now lists every app, and calls each one what the workspace calls it.
+
+An app whose registered name was not already a hostname label was dropped from the panel's per-app list, with no row and no explanation: the only way to share it was to share the whole workspace. The rule dated from when a per-app share link was built out of the app's name, so the name had to be DNS-safe. Links have since been built from the app's own origin label (`<name>-<rand>`), which is DNS-safe whatever the app is called, so the rule protected nothing and only hid apps. It is gone, and an app named `my_app` is now a share target like any other.
+
+The panel also shows the name a person reads rather than the identifier underneath it: "File Viewer", not "files". The name travels from the app's manifest through the workspace's services event stream (a change that ships in default-workspace-template), so an older workspace, and an app registered with no manifest at all, still show the registered name. Two apps may be called the same thing; when they are, each shows its own name beside it so the rows can be told apart, and a name nothing collides with stands alone.
+
+The app's registered name remains the identifier everywhere a machine reads one: the key of its share grants, the `?target=` the in-workspace Share button deep-links to, and the origin its link is built from. Nothing about who may open a share changed.

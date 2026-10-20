@@ -6,14 +6,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-## [v0.2.0] - 2026-10-22
-
-### Changed
-
-- Changed: `mngr wait --host` treats `UNAUTHENTICATED` as non-terminal (like `UNKNOWN`) and keeps polling; terminal host states are now `STOPPED`, `PAUSED`, `CRASHED`, `FAILED` and `DESTROYED`.
-
-- Changed: A TARGET agent or host id that matches nothing exits 8 (`EXIT_CODE_TARGET_NOT_FOUND`) instead of 1; an unmatched name still exits 1.
-
 ## [v0.1.14] - 2026-06-18
 
 ## [v0.1.13] - 2026-06-16

@@ -1,0 +1,3 @@
+Fixed Modal host provisioning failing en masse with "accepted connections but could not open sessions after 60.0s" (MIND-204). The sshd session-open readiness probe added in MIND-178 authenticated as the local OS user (paramiko's default) rather than the sandbox's `root` user, so every Modal host timed out at provisioning on machines where those differ (e.g. CI runners) -- turning the daily TMR and Release Tests lanes red from 08-20 onward.
+
+`_wait_for_sshd` now passes the SSH user explicitly, via a shared `DEFAULT_SSH_USER` constant that also backs `_start_sshd_in_sandbox`'s default so the authorized-key user and the probe user cannot drift apart.

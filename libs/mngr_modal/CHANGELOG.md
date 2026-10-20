@@ -6,17 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-## [v0.3.0] - 2026-10-22
-
 ### Added
 
 - Added: `is_vm_runtime_enabled` option under `[providers.modal]` (default false) creates sandboxes on Modal's VM runtime (`experimental_options = {"vm_runtime": True}`) instead of gVisor, giving stronger isolation and broader syscall compatibility (e.g. Docker-in-sandbox state surviving a filesystem snapshot).
 - Added: Agent listings populate `AgentDetails.pid` (the agent's main-process PID in the remote host's PID namespace), extracted from the same already-collected tmux/ps probe data.
-- Added: A Modal provider instance can carry its own credentials, so instances can target different Modal accounts: `token_id`/`token_secret` (set together; also `MNGR__PROVIDERS__<NAME>__TOKEN_ID`/`__TOKEN_SECRET`), or `modal_profile = "<name>"` naming a `~/.modal.toml` profile, re-read on every provider build (a missing profile raises `ProviderCredentialSourceMissingError`). App contexts are keyed per token.
-- Added: `imbue.mngr_modal.config.modal_config_path()` and `read_modal_profiles()` expose the Modal profiles file's location and reader.
-- Added: Create steps are reported on mngr's structured progress stream (`--format jsonl`): `modal.build` (with a step per Dockerfile instruction and the image save) and `modal.wait_ssh`.
-- Added: `discover_hosts` reports each host's recorded size (`DiscoveredHost.size`: the sandbox's CPUs and memory from its host record); a sandbox without a record carries none.
-- Added: The activity watcher, volume sync and shutdown-script logs honor the `host_log_dir` config.
 
 ### Changed
 
@@ -25,36 +18,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Modal provider updated for mngr's new per-provider discovery — implements the bounded `discover_hosts_and_agents_within_timeouts` entry point. Because Modal reads all host and agent state from the state volume in one batched pass, individual host reads are not separately bounded (still bounded by the provider-level discovery error timeout; no host is marked UNKNOWN by this path).
 - Changed: Unauthenticated Modal provider now raises the shared `ProviderNotAuthorizedError` from provider construction; `ModalAuthError` is now a subclass of `ProviderNotAuthorizedError`. Modal raises `ProviderUnavailableError` (was a plain `MngrError`) on unresolvable credentials, with curated help pointing at `uvx modal token set`. Modal auth failures are now reported consistently with the other cloud providers in `mngr list` (one consistent error line and the granular provider-inaccessible exit code) instead of an ad-hoc plugin error.
 - Changed: Modal agent lifecycle detection now targets the agent's primary tmux window by name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index`.
-- Changed: SSH keys are per host, stored per provider instance under `<profile>/providers/modal/<instance>/keys/`: each sandbox gets its own client and sshd host keypair (host key re-injected on every boot, fresh keys for clones, forgotten by `delete_host`), pinned in `keys/known_hosts` by host id; the layout is published as `MODAL_HOST_ACCESS_MANIFEST`. Only `create_host` mints the client key; a host without a per-host one falls back to an operator-installed `keys/modal_ssh_key`, else raises `ModalHostKeyMissingError`. Sandboxes created under the old `providers/modal/` layout are unreachable: destroy and recreate them.
-- Changed: Pinned `modal` SDK bumped from 1.4.3 to 1.5.4; sandboxes run on Modal's V2 Sandbox backend (GPU sandboxes stay on V1), and `start_host` confirms a listed sandbox is alive (`poll()`) before treating it as running.
-- Changed: The backend registers lazily (`LazyProviderBackend` from the SDK-free `imbue.mngr_modal.plugin` entry point), so `mngr` imports the `modal` SDK only when a Modal provider is used.
-- Changed: When Modal streams no output for a failed image build, `mngr create` fetches the failing layer's logs and reports them in the error and the failed host record.
-- Changed: A stalled Modal create logs the step it is blocked on: the snapshot-endpoint deploy (after 60s), the sandbox's first command, the SSH tunnel wait, or host-record volume I/O.
-- Changed: Agent listings report `initial_branch` as the branch the work_dir is actually on (via `read_checked_out_branch`).
-- Changed: Host SSH info in live listings carries `known_hosts_path`, and the displayed `ssh` command adds `-o UserKnownHostsFile=<path> -o StrictHostKeyChecking=yes`.
-- Changed: The Modal test-environment reaper moved from mngr core to `imbue.mngr_modal.modal_cli` and `imbue.mngr_modal.cleanup`; `ModalCliOutputError` moved from `imbue.mngr.errors` into the `ModalMngrError` hierarchy.
-
-### Removed
-
-- Removed: The unused `get_ssh_public_key` accessor.
 
 ### Fixed
 
 - Fixed: `stop_host` no longer silently swallows a failed `sandbox.terminate()` — it now raises `ModalMngrError`, and `destroy_host` records the failure as a cleanup failure so `mngr destroy` reports failure (and exits non-zero) instead of falsely succeeding while the sandbox keeps running (a billing orphan).
 - Fixed: `start_host` now clears `stop_reason` on the persisted host record when it resumes a host from a snapshot. A host that was resumed and then later hard-killed was previously mis-derived as PAUSED/STOPPED instead of CRASHED, so it was never garbage-collected and wrongly showed a Resume control. Mirrors the lima provider's behavior on restart.
 - Fixed: Host lock reporting for Modal hosts now derives status from a real flock held-probe rather than the lock file's presence (the lock file now persists after release).
-- Fixed: Concurrent `mngr create` on Modal no longer fails on, or queues behind redundant runs of, the app's `snapshot_and_shutdown` endpoint deploy: it deploys only when the app lacks this exact source (a source-digest beacon), adopts a concurrent deploy that won, gets the app atomically before deploying, and retries any Modal-side deploy failure within a budget sized to `modal deploy`'s lock wait; an exhausted budget names the app and the repeating failure.
-- Fixed: Transient Modal failures no longer fail unrelated commands: discovery reads retry for up to 60s, and an unreachable or erroring Modal control plane (cancelled, deadline exceeded, unavailable) raises `ProviderUnavailableError`, so multi-provider commands skip Modal and carry on; commands that target Modal still fail, pointing at the network and https://status.modal.com.
-- Fixed: Host bring-up survives Modal killing or ending a new sandbox: the sandbox is probed and replaced (up to three tries) instead of failing `mngr create`/`mngr start`, a step that fails because the sandbox died raises `ModalSandboxDiedMngrError` instead of blaming package installation, and sshd readiness waits until sessions can open ("No existing session").
-- Fixed: `mngr create`, `mngr snapshot create` and `mngr stop`'s pre-termination snapshot no longer fail on SSH banner/readiness errors right after a filesystem snapshot: the snapshot record is written over the already-open connection, which also drops a second SSH connection (~6s) per create.
-- Fixed: Dockerfiles that use an `ARG` (including mngr's default `resources/Dockerfile`) build correctly on Modal: instructions are batched per cached layer with `ARG`s kept in scope, and `-b docker-build-arg=KEY=VALUE` is passed as a real build arg (values containing `"`, `$` or `\` no longer corrupt the Dockerfile). Changing a build arg now rebuilds every layer, and the first build after upgrading misses the existing layer cache.
-- Fixed: Hosts created without an explicit image or Dockerfile no longer become unreachable over SSH (`Error reading SSH protocol banner`): the fallback image is `python:3.12-slim-trixie` instead of `debian_slim()` (bookworm), so workspace setup no longer upgrades sshd across Debian releases under the running daemon.
-- Fixed: The `snapshot_and_shutdown` endpoint waits for the sandbox to actually stop (returning its exit code) instead of reporting success while it keeps running and billing.
-- Fixed: `get_volume_for_host` no longer reports an existing volume as missing when Modal's `VolumeListFiles` rate limit is hit; existence is checked by resolving the volume id.
-- Fixed: `list_snapshots` reads the host record uncached, so it no longer returns an empty list right after a snapshot.
-- Fixed: Every sandbox boot restores `/tmp`'s sticky bit (`1777`), which Modal drops during image builds and snapshots, breaking tools such as codex's app-server.
-- Fixed: Sandbox sshd uses the shared `SSHD_START_OPTIONS` (`ClientAliveInterval 30`, `ClientAliveCountMax 4`), so a silently dead client is reaped in about two minutes instead of ~2h and no longer holds host locks for hours.
-- Fixed: Worker threads and parallel fan-outs (`start_mngr_thread`, `mngr_executor`) destroy their gevent Hub when done instead of leaking it and its pipe pair for the life of the process.
 
 ## [v0.2.17] - 2026-06-18
 

@@ -1,0 +1,9 @@
+- Added `release` + `minds_services` end-to-end tests for the real account-signup flow (`apps/minds/deployment_tests/test_account_signup_e2e.py`), driving `POST /accounts/api/signup` on the live connector rather than the admin `test-signup` bypass. Coverage: a brand-new account receives and clicks through a real verification email via the mail.tm `signup_email` seam (unverified -> verified), the `/accounts/authorize` device handoff refuses to mint a code without both a session and explicit confirmation (loopback-only `redirect_uri`, required PKCE/state, the `?next=` bounce to `/login`), and the hosted `/signup` page renders the Google-vs-email paths per the tier's `/accounts/api/config`.
+
+- Fixed the never-exercised mail.tm verification seam: `MailtmInbox.wait_for_verification_token` filtered inbox subjects on `"verify"`, but the connector's verification email is subject-lined "Email verification instructions" (contains "verification", not "verify"), so the poll would have silently timed out. It now matches the shared `"verif"` prefix.
+
+- Added the `register_signup_user_for_cleanup` deployment-test fixture, which deletes accounts created through the real signup flow (including mail.tm `+<uuid>` addresses that do not match the session sweep's `test-<hex>@example.test` pattern) via the shared env's SuperTokens admin API on teardown.
+
+- The verification test is marked `flaky` and resends after the send cooldown on a missed round: the verification email rides SuperTokens' best-effort hosted service and the SDK swallows send failures (`send-verification` returns `sent:true` regardless), so delivery is not guaranteed. Direct probes confirm it delivers reliably from the connector's Modal workspace, so misses are rare, but a sustained hosted-email outage can still fail the run.
+
+- Documented the real-signup e2e recipe in `apps/minds/deployment_tests/real-signup-e2e-pattern.md` as a template for the account-signup behavioral swarm.

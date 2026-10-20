@@ -6,7 +6,7 @@ from flask import Flask
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import InstallationPaths
-from imbue.minds.desktop_client.app import _build_workspace_update_machinery
+from imbue.minds.desktop_client.app import _build_workspace_update_service
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -53,7 +53,7 @@ def test_the_windows_hand_back_runs_through_the_registered_dispatcher_without_th
         connectivity_detector=detector,
         should_decline_dispatch=lambda _agent_id: True,
     )
-    machinery = _build_workspace_update_machinery(
+    service = _build_workspace_update_service(
         app=Flask(__name__),
         backend_resolver=dispatcher.backend_resolver,
         mngr_caller=RecordingMngrCaller(),
@@ -65,7 +65,7 @@ def test_the_windows_hand_back_runs_through_the_registered_dispatcher_without_th
         mngr_binary="mngr",
         mngr_host_dir=tmp_path / "hosts",
     )
-    assert machinery is not None
+    assert service is not None
     tracker.record_failure(workspace_agent)
     tracker.record_probe_failure(workspace_agent)
     assert tracker.get_health(workspace_agent) is AgentHealth.STUCK
@@ -73,10 +73,35 @@ def test_the_windows_hand_back_runs_through_the_registered_dispatcher_without_th
     dispatcher(workspace_agent)
     assert not dispatcher._owed_agent_ids, "the stuck edge is declined while an apply owns the machine"
 
-    machinery.service.apply_window.dispatch_recovery(workspace_agent)
+    service.apply_window.dispatch_recovery(workspace_agent)
 
     assert poll_until(
         lambda: str(workspace_agent) in dispatcher._owed_agent_ids,
         timeout=_DRAIN_WAIT_SECONDS,
         poll_interval=0.02,
     ), "the hand-back must go ahead past the veto (and be owed, since this device is offline)"
+
+
+def test_building_the_update_service_drops_the_schedules_an_older_build_kept(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """Schedules live in each workspace now; the app-side records would otherwise sit there forever."""
+    retired_dir = tmp_path / "data" / "update_schedules"
+    retired_dir.mkdir(parents=True)
+    (retired_dir / f"{AgentId.generate()}.json").write_text("{}")
+
+    service = _build_workspace_update_service(
+        app=Flask(__name__),
+        backend_resolver=build_resolver_with_system_services(AgentId.generate(), AgentId.generate()),
+        mngr_caller=RecordingMngrCaller(),
+        paths=InstallationPaths(data_dir=tmp_path / "data"),
+        minds_config=None,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        root_concurrency_group=root_concurrency_group,
+        dispatch_recovery=lambda _agent_id: None,
+        mngr_binary="mngr",
+        mngr_host_dir=tmp_path / "hosts",
+    )
+
+    assert service is not None
+    assert not retired_dir.exists()

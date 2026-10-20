@@ -1,0 +1,9 @@
+- Recorded night 3 of the production gen-1 to gen-2 box sweeps (2026-09-21, the remaining hil boxes) in `docs/deploy/next_deploy.md`: the step-0 checks, the four never-leased `available` rows destroyed, and per source box the target, the timings, every migrated workspace with its new port and latchkey detail, the owner-added programs the health probe reported, and each repave.
+
+- Tried to add Gabriel as a production management-plane operator with the public key his dev-tier entry (PR #1185) carries; that key is not a valid WireGuard key (45 characters, `wg` refuses it), so `wireguard sync-peers --tier production` left `wg0` down on the 16 boxes it reached before it was stopped, and the entry was removed again. The dev tier's entry carries the same invalid key.
+
+- Restored operator WireGuard on the 16 production gen-2 boxes the invalid key had taken down, using the runbook's break-glass Modal-sandbox bounce host (a sandbox on the connector's Modal Proxy, so its egress is allowlisted on box `:22`): each box's `wg0.conf` was backed up, the bad `[Peer]` block removed, and `wg-quick@wg0` restarted; a follow-up `sync-peers` converged 31/31 with no restarts. Recorded in `docs/deploy/next_deploy.md`.
+
+- The `[[management_plane.wireguard.operators]]` loader now rejects a `public_key` that is not a WireGuard key (the canonical base64 form of exactly 32 bytes, the same rule `wg` applies) instead of only checking the base64 character set, so a malformed key can no longer be committed and pushed to the fleet. Removed the dev tier's invalid `gabriel` entry (it has to be re-added with a re-derived key).
+
+- Added Gabriel as a management-plane WireGuard operator on the dev (`10.112.0.4`), staging (`10.96.0.3`) and production (`10.64.0.3`) tiers with his corrected key, synced tier by tier with verification between each; recorded in `docs/deploy/next_deploy.md`.

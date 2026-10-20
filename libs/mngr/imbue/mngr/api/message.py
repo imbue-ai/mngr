@@ -2,7 +2,6 @@ from collections.abc import Callable
 from collections.abc import Sequence
 from concurrent.futures import Future
 from threading import Lock
-from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -30,7 +29,6 @@ from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.agent import require_key_chord_agent
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
-from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
@@ -252,7 +250,7 @@ def _process_host_for_messaging(
     on_success: Callable[[str], None] | None,
     on_error: Callable[[str, str], None] | None,
 ) -> None:
-    """Resolve a single host, load the matched agents on it, and send messages concurrently.
+    """Resolve a single host, look up its agents, and send messages concurrently.
 
     This function is run in a thread per host. Within it, per-agent sends are
     parallelized with a nested ConcurrencyGroupExecutor. A host that cannot be reached
@@ -263,25 +261,14 @@ def _process_host_for_messaging(
     host_id = matches[0].host_id
     try:
         host = _resolve_online_host(host_id, provider, is_start_desired=is_start_desired)
-        # Only the matched agents are loaded, so the host's other agents add nothing to a send
-        agent_refs = [
-            DiscoveredAgent(
-                host_id=match.host_id,
-                agent_id=match.agent_id,
-                agent_name=match.agent_name,
-                provider_name=match.provider_name,
-            )
-            for match in matches
-        ]
-        live_agent_by_id = {agent.id: agent for agent in host.load_agents_from_refs(agent_refs)}
+        # Look up live agents on the host that correspond to our matches
+        live_agents = host.get_agents()
     except MngrError as e:
         # No agent on this host was reached, so each of them is a delivery failure.
         # Recorded before the abort check, so an aborted run still reports which agents
         # missed the message -- the raise ends the command either way.
         for match in matches:
-            _record_agent_failure(
-                result, result_lock, str(match.agent_name), str(e), on_error, SendFailureKind.AGENT_NOT_FOUND
-            )
+            _record_agent_failure(result, result_lock, str(match.agent_name), str(e), on_error)
         if error_behavior == ErrorBehavior.ABORT:
             raise
         logger.warning("Error accessing host {}: {}", host_id, e)
@@ -291,17 +278,10 @@ def _process_host_for_messaging(
         agents_to_send: list[AgentInterface] = []
 
         for match in matches:
-            agent = live_agent_by_id.get(match.agent_id)
+            agent = next((a for a in live_agents if a.id == match.agent_id), None)
             if agent is None:
                 exception = AgentNotFoundOnHostError(match.agent_id, host_id)
-                _record_agent_failure(
-                    result,
-                    result_lock,
-                    str(match.agent_name),
-                    str(exception),
-                    on_error,
-                    SendFailureKind.AGENT_NOT_FOUND,
-                )
+                _record_agent_failure(result, result_lock, str(match.agent_name), str(exception), on_error)
                 if error_behavior == ErrorBehavior.ABORT:
                     raise exception
                 continue
@@ -440,8 +420,7 @@ def send_message_with_resend_guidance(agent: AgentInterface, message: str, situa
 
     Used by the create-with-initial-message and resume paths, where a failed
     send would otherwise read as the whole command failing: the agent is up
-    and healthy, only the message did not get through -- or, for an unconfirmed
-    submission, may have, so the advice is to check before resending.
+    and healthy, only the message was not delivered.
     """
     try:
         require_interactive_agent(agent).send_message(message)
@@ -450,23 +429,8 @@ def send_message_with_resend_guidance(agent: AgentInterface, message: str, situa
         # this as "NOT delivered" -- propagate it unchanged so its distinct meaning survives.
         raise
     except SendMessageError as e:
-        match e.kind:
-            case SendFailureKind.SUBMISSION_UNCONFIRMED:
-                guidance = (
-                    f"The agent is up ({situation}), but mngr could not confirm it received the message, "
-                    f"which may already be in its input. Check before resending: mngr connect {agent.name}"
-                )
-            case (
-                SendFailureKind.INPUT_BLOCKED
-                | SendFailureKind.NOT_READY
-                | SendFailureKind.AGENT_UNREACHABLE
-                | SendFailureKind.AGENT_NOT_FOUND
-                | SendFailureKind.UNKNOWN
-            ):
-                guidance = (
-                    f"The agent is up ({situation}), but the message was NOT delivered. "
-                    f"Resend it with: mngr message {agent.name}"
-                )
-            case _ as unreachable:
-                assert_never(unreachable)
-        raise SendMessageError(e.agent_name, f"{e.reason}\n\n{guidance}", e.kind) from e
+        raise SendMessageError(
+            e.agent_name,
+            f"{e.reason}\n\nThe agent is up ({situation}), but the message was NOT delivered. "
+            f"Resend it with: mngr message {agent.name}",
+        ) from e

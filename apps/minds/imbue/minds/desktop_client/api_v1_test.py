@@ -204,7 +204,6 @@ class _RecordingAgentCreator(AgentCreator):
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
-        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         self._last_call = {
             "repo_source": repo_source,
@@ -223,7 +222,6 @@ class _RecordingAgentCreator(AgentCreator):
             "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
             "account_id": account_id,
-            "is_onboarding_driven_by_agent": is_onboarding_driven_by_agent,
             "on_created": on_created,
         }
         return CreateAttemptId()
@@ -478,54 +476,6 @@ def test_reading_a_chat_resolves_messages_filed_by_its_earlier_agent(tmp_path: P
     assert response.status_code == 200
     (entry,) = _feed_entries(app)
     assert entry.is_resolved is True
-
-
-def test_agent_notification_from_the_primary_agent_with_a_destination_opens_an_app_page(tmp_path: Path) -> None:
-    """The routines runner notifies from the workspace's primary agent, which is not a chat, and names a page to land on."""
-    workspace_agent_id = AgentId()
-    client, app = _client_with_chat(tmp_path, workspace_agent_id, AgentId())
-
-    response = client.post(
-        f"/api/v1/agents/{workspace_agent_id}/notifications",
-        json={
-            "message": "3 new items",
-            "title": "Inbox digest",
-            "destination": {"type": "minds:show-routine", "routine_id": "inbox-digest"},
-        },
-        headers=_auth_header(),
-    )
-
-    assert response.status_code == 200
-    (entry,) = _feed_entries(app)
-    assert entry.kind == "agent_message"
-    assert entry.chat_agent_id == ""
-    # Headed by the title, not the primary agent's own name; the message stands alone as the body.
-    assert entry.title == "Inbox digest"
-    assert entry.body == "3 new items"
-    assert entry.workspace_agent_id == str(workspace_agent_id)
-    assert entry.destination is not None
-    assert entry.destination.model_dump(mode="json") == {"type": "minds:show-routine", "routine_id": "inbox-digest"}
-    # Reading the sender's "chat" reads nothing: there is no chat to be read in.
-    read = client.post(f"/api/v1/agents/{workspace_agent_id}/notifications/read", json={}, headers=_auth_header())
-    assert read.status_code == 200
-    (still_unread,) = _feed_entries(app)
-    assert still_unread.is_resolved is False
-
-
-def test_agent_notification_with_a_malformed_destination_is_rejected(tmp_path: Path) -> None:
-    workspace_agent_id = AgentId()
-    chat_agent_id = AgentId()
-    client, app = _client_with_chat(tmp_path, workspace_agent_id, chat_agent_id)
-
-    response = client.post(
-        f"/api/v1/agents/{chat_agent_id}/notifications",
-        json={"message": "hi", "destination": {"type": "shell:open", "path": "/"}},
-        headers=_auth_header(),
-    )
-
-    assert response.status_code == 422
-    assert response.get_json()["errors"][0]["field"] == "destination"
-    assert _feed_entries(app) == ()
 
 
 def test_agent_notification_without_a_message_is_rejected(tmp_path: Path) -> None:
@@ -2357,7 +2307,7 @@ def test_patch_workspace_associate_account_by_email(tmp_path: Path) -> None:
 
 def test_patch_workspace_associate_unknown_account_returns_404(tmp_path: Path) -> None:
     # A value matching no signed-in account is rejected (404) instead of being
-    # silently accepted then garbage-collected.
+    # silently accepted then garbage-collected -- the previous false-success bug.
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     cli = _fake_sharing_cli()
@@ -2375,7 +2325,7 @@ def test_patch_workspace_associate_unknown_account_returns_404(tmp_path: Path) -
 
 def test_get_workspace_surfaces_associated_account(tmp_path: Path) -> None:
     # After association the detail readout exposes account_id + account_email so a
-    # caller can confirm it.
+    # caller can confirm it (previously there was no account field at all).
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     cli = _fake_sharing_cli()
@@ -4403,6 +4353,7 @@ def test_backup_service_update_refuses_a_machine_below_the_in_place_floor(
         detection=UpdateDetection(availability=UpdateAvailability.NEEDS_RECREATION),
         current_version="minds-v0.3.9",
         supported_version="",
+        is_version_from_label=False,
     )
 
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
@@ -5988,7 +5939,6 @@ class _NameConflictAgentCreator(_RecordingAgentCreator):
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
-        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         raise WorkspaceNameInUseError(
             "A machine named 'contended' is already being created. "
@@ -6079,32 +6029,6 @@ def test_create_workspace_threads_account_id_to_start_create_attempt(
 
     assert response.status_code == 202
     assert creator.last_call["account_id"] == "user-77120"
-
-
-def test_create_workspace_threads_the_onboarding_questions_flag_off_unless_the_body_turns_it_on(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-) -> None:
-    # The creation page reads the flag back from the attempt's record, so it must reach the creator;
-    # the form leaves it off, and the start flow's creates (and the form's switch) turn it on.
-    creator = _make_recording_creator(tmp_path, root_concurrency_group)
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
-
-    quiet = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={"git_url": "https://example/repo", "host_name": "quiet-create"},
-    )
-    assert quiet.status_code == 202
-    assert creator.last_call["is_onboarding_driven_by_agent"] is False
-
-    asked = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={"git_url": "https://example/repo", "host_name": "asked-create", "is_onboarding_driven_by_agent": True},
-    )
-    assert asked.status_code == 202
-    assert creator.last_call["is_onboarding_driven_by_agent"] is True
 
 
 def test_create_workspace_marks_onboarding_complete(

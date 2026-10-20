@@ -6,19 +6,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-## [v0.2.0] - 2026-10-22
-
 ### Added
 
 - Added: Claude Fable family pricing ($10 / $50 per 1M input / output tokens, cache write $12.50, cache read $1.00) in the Agent SDK per-model price table, so `ResultMessage.total_cost_usd` is populated for `claude-fable-5` sessions instead of being left unset.
-
-- Added: `claude-fable-5-1` pricing (cache reads a quarter of Fable 5's).
-
-### Fixed
-
-- Fixed: Agent SDK `total_cost_usd` prices Claude Opus 5.5, Sonnet 5 / 5.5 and Haiku 5.5 at their own rates instead of an older family entry's (Haiku 5.5 was 10x too high).
-
-- Fixed: The Agent SDK's mid-session agent restart starts the agent through mngr's shared locked start helper (under the host lock), so it no longer races another start of the same agent.
 
 ## [v0.1.6] - 2026-06-18
 

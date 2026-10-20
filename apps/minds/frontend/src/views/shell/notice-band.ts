@@ -15,7 +15,7 @@ import { MAINTENANCE_MESSAGE, RETIRED_MESSAGE, isMaintenanceHold, isRetiredHold 
 
 /** What an action asks the shell to do. The views bind these; the decision
  * itself stays free of routing and IPC. */
-export type NoticeActionKind = "open-recovery" | "restart-app" | "update-workspace";
+export type NoticeActionKind = "open-recovery" | "restart-app" | "update-workspace" | "sign-in-for-update";
 
 export interface NoticeAction {
   label: string;
@@ -38,7 +38,7 @@ export interface NoticePayload {
     | "workspace-update-waiting"
     | "workspace-update-outcome"
     | "workspace-out-of-date"
-    | "workspace-security-update"
+    | "workspace-needs-sign-in"
     | "workspace-needs-recreation";
   variant: "info" | "warn" | "error";
   message: string;
@@ -295,20 +295,19 @@ function standingNotice(notice: StandingUpdateNotice): NoticePayload | null {
         message: "This workspace is running an older version of Imbue Studio.",
         action: SEE_UPDATE,
       };
-    case "security-update":
-      // Error, not warn: the stronger of the two offers, since what it brings is a security fix.
+    case "needs-sign-in":
       return {
-        key: "workspace-security-update",
-        variant: "error",
-        message: "An update for this workspace is available, which includes a critical security fix.",
-        action: SEE_UPDATE,
+        key: "workspace-needs-sign-in",
+        variant: "warn",
+        message: "This workspace can't update until an AI account is signed in to it.",
+        action: { label: "Sign in", kind: "sign-in-for-update" },
       };
     case "needs-recreation":
       // The same action as out-of-date: the modal behind it carries the steps.
       return {
         key: "workspace-needs-recreation",
         variant: "warn",
-        message: "This workspace is too old to update in place and is missing security fixes.",
+        message: "This workspace is too old to update in place.",
         action: { label: "See how to update", kind: "update-workspace" },
       };
     case "none":
@@ -364,15 +363,17 @@ function updateOutcomeNotice(outcome: UpdateRunOutcome): NoticePayload | null {
   const message =
     outcome === "not-started"
       ? "This workspace's update didn't start."
-      : outcome === "failed"
+      : outcome === "decision-pending"
+        ? "This workspace's update needs your decision in its chat."
+        : outcome === "failed"
         ? "This workspace's update didn't finish."
-        : outcome === "needs-attention"
-          ? "This workspace updated, and the update agent left a note for you."
-          : null;
+          : outcome === "needs-attention"
+            ? "This workspace updated, and the update agent left a note for you."
+            : null;
   if (message === null) return null;
   return {
     key: "workspace-update-outcome",
-    variant: outcome === "needs-attention" ? "info" : "error",
+    variant: outcome === "needs-attention" ? "info" : outcome === "decision-pending" ? "warn" : "error",
     message,
     action: SEE_UPDATE,
   };

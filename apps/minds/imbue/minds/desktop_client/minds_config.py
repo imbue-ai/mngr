@@ -47,6 +47,17 @@ class NotificationStyle(LowerCaseStrEnum):
 DEFAULT_NOTIFICATION_STYLE: Final[NotificationStyle] = NotificationStyle.BOTH
 
 
+class AutoUpdatePromptDecision(LowerCaseStrEnum):
+    """How the user answered the one-time offer to turn on automatic workspace updates.
+
+    The lowercase values are the wire strings the settings API serves and accepts verbatim
+    (and what ``config.toml`` stores).
+    """
+
+    ACCEPTED = auto()
+    DECLINED = auto()
+
+
 def _bool_from_raw(data: dict[str, object], key: str, default: bool) -> bool:
     """Read a top-level boolean out of an already-loaded config dict, or ``default`` when unset/malformed."""
     value = data.get(key)
@@ -256,11 +267,66 @@ class MindsConfig(MutableModel):
 
     def set_update_window(self, start_hour: int, end_hour: int) -> None:
         """Persist the local-clock hours scheduled updates may run in."""
+        self._write_updates_keys({"window_start_hour": start_hour, "window_end_hour": end_hour})
+
+    def _read_updates_table(self) -> dict[str, object]:
+        """The ``[updates]`` table, empty when absent. Must hold ``self._lock``."""
+        return _as_str_keyed_dict(self._read_raw().get("updates")) or {}
+
+    def _write_updates_keys(self, values: dict[str, object]) -> None:
+        """Set keys of the ``[updates]`` table in one read-modify-write."""
         with self._lock:
             data = self._read_raw()
             updates = _as_str_keyed_dict(data.get("updates")) or {}
-            updates["window_start_hour"] = start_hour
-            updates["window_end_hour"] = end_hour
+            updates.update(values)
+            data["updates"] = updates
+            self._write_raw(data)
+
+    def get_auto_update_workspaces(self) -> bool:
+        """Return whether Imbue Studio arms every behind workspace's update itself. Default: False until chosen."""
+        with self._lock:
+            return _bool_from_raw(self._read_updates_table(), "auto_update_workspaces", False)
+
+    def set_auto_update_workspaces(self, is_enabled: bool) -> None:
+        """Persist whether Imbue Studio arms every behind workspace's update itself."""
+        self._write_updates_keys({"auto_update_workspaces": is_enabled})
+
+    def get_auto_update_prompt_decision(self) -> AutoUpdatePromptDecision | None:
+        """Return how the user answered the auto-update offer, or None while it has never been answered."""
+        with self._lock:
+            value = self._read_updates_table().get("auto_update_prompt_decision")
+        if not isinstance(value, str):
+            return None
+        try:
+            return AutoUpdatePromptDecision(value)
+        except ValueError:
+            logger.warning("Ignoring an unknown auto-update prompt decision {!r}", value)
+            return None
+
+    def set_auto_update_prompt_decision(self, decision: AutoUpdatePromptDecision) -> None:
+        """Record how the user answered the auto-update offer, so it is never shown again."""
+        self._write_updates_keys({"auto_update_prompt_decision": str(decision)})
+
+    def get_skipped_update_target(self, agent_id: str) -> str | None:
+        """Return the release the user skipped for this workspace under auto-update, or None."""
+        with self._lock:
+            skipped = _as_str_keyed_dict(self._read_updates_table().get("skipped_targets")) or {}
+        value = skipped.get(agent_id)
+        return str(value) if isinstance(value, str) and value else None
+
+    def set_skipped_update_target(self, agent_id: str, target_ref: str | None) -> None:
+        """Record (or, with None, clear) the release the user skipped for this workspace under auto-update."""
+        with self._lock:
+            data = self._read_raw()
+            updates = _as_str_keyed_dict(data.get("updates")) or {}
+            skipped = _as_str_keyed_dict(updates.get("skipped_targets")) or {}
+            if target_ref is not None:
+                skipped[agent_id] = target_ref
+            elif agent_id in skipped:
+                del skipped[agent_id]
+            else:
+                return
+            updates["skipped_targets"] = skipped
             data["updates"] = updates
             self._write_raw(data)
 
@@ -293,7 +359,7 @@ class MindsConfig(MutableModel):
         """Return whether this installation has been taken past the first-run start flow. Default: False.
 
         Flips to True once the user starts creating a workspace (any surface) or signs in
-        from the start flow's "I have an account (log in)" answer; while False and no workspace
+        from the start flow's "I already have a workspace" answer; while False and no workspace
         exists, a launch lands on the start flow.
         """
         return self._get_bool("is_onboarding_complete", default=False)

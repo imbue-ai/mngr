@@ -1,5 +1,4 @@
 import m from "mithril";
-import type { WorkspaceMessage } from "../../models/workspaceMessage";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyStores } from "../../models/boot";
 import { takePendingHelpLaunch } from "../../models/help";
@@ -64,9 +63,6 @@ afterEach(() => {
   // restoreAllMocks does NOT undo vi.stubGlobal; only unstubAllGlobals does.
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-  // Module-level, and openHelpForAgentAsk reads it: a launch left staged would
-  // turn the next test's push into a replace.
-  takePendingHelpLaunch();
 });
 
 function makeShell(): ShellState {
@@ -288,27 +284,6 @@ describe("ShellState.closeAppOverlay", () => {
     expect(routeSet).toHaveBeenCalledTimes(2);
   });
 
-  it("routes Get help directly to the machine it names, never through history.back()", () => {
-    // history.back() can land on another /help entry, a dismissal that never
-    // visibly lands.
-    const shell = makeShell();
-    const back = vi.fn();
-    vi.stubGlobal("window", { history: { length: 5, back } });
-    const routeSet = vi
-      .spyOn(m.route, "set")
-      .mockImplementation(() => undefined);
-    land(shell, `/help?workspace=${WORKSPACE_ID}`);
-
-    expect(shell.closeAppOverlay()).toBe(true);
-
-    expect(back).not.toHaveBeenCalled();
-    expect(routeSet).toHaveBeenCalledWith(
-      `/workspace/${WORKSPACE_ID}`,
-      undefined,
-      { replace: true },
-    );
-  });
-
   it("still prefers history.back() for an app overlay with no workspace to name (e.g. Get help)", () => {
     const shell = makeShell();
     const back = vi.fn();
@@ -321,26 +296,16 @@ describe("ShellState.closeAppOverlay", () => {
   });
 });
 
-describe("ShellState chat deep link and workspace-message relay", () => {
+describe("ShellState chat deep link and focus-chat relay", () => {
   const flush = () => Promise.resolve();
-  /** Register a sender that records focus-chat asks as [workspace, chat] pairs. */
-  const recordFocusChats = (
-    shell: ShellState,
-    sent: [string, string][],
-    isReady: () => boolean = () => true,
-  ): void => {
-    shell.registerWorkspaceMessageSender((workspaceAgentId, message) => {
-      if (!isReady()) return false;
-      if (message.kind !== "focus-chat") throw new Error(message.kind);
-      sent.push([workspaceAgentId, message.chatAgentId]);
-      return true;
-    });
-  };
 
   it("consumes ?chat= once: strips it by replacement and asks the frame for the chat", async () => {
     const shell = makeShell();
     const sent: [string, string][] = [];
-    recordFocusChats(shell, sent);
+    shell.registerFocusChatSender((workspaceAgentId, chatAgentId) => {
+      sent.push([workspaceAgentId, chatAgentId]);
+      return true;
+    });
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
@@ -364,7 +329,11 @@ describe("ShellState chat deep link and workspace-message relay", () => {
     const shell = makeShell();
     const sent: [string, string][] = [];
     let isFrameReady = false;
-    recordFocusChats(shell, sent, () => isFrameReady);
+    shell.registerFocusChatSender((workspaceAgentId, chatAgentId) => {
+      if (!isFrameReady) return false;
+      sent.push([workspaceAgentId, chatAgentId]);
+      return true;
+    });
     vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
     land(shell, `/workspace/${WORKSPACE_ID}?chat=agent-cc33`);
@@ -372,16 +341,16 @@ describe("ShellState chat deep link and workspace-message relay", () => {
     expect(sent).toEqual([]);
 
     isFrameReady = true;
-    shell.flushPendingWorkspaceMessage();
+    shell.flushPendingFocusChat();
     expect(sent).toEqual([[WORKSPACE_ID, "agent-cc33"]]);
     // Sent once: a second load does not repeat it.
-    shell.flushPendingWorkspaceMessage();
+    shell.flushPendingFocusChat();
     expect(sent).toHaveLength(1);
   });
 
   it("puts the feed overlay away on an in-place ask, which changes no route", () => {
     const shell = makeShell();
-    shell.registerWorkspaceMessageSender(() => true);
+    shell.registerFocusChatSender(() => true);
     shell.openNotifications();
 
     shell.requestFocusChat(WORKSPACE_ID, "agent-cc33");
@@ -389,71 +358,25 @@ describe("ShellState chat deep link and workspace-message relay", () => {
     expect(shell.isNotificationsOpen).toBe(false);
   });
 
-  it("sends an app message (a notification's destination) as the frame posts it, and holds it until the frame is ready", () => {
-    const shell = makeShell();
-    const sent: [string, WorkspaceMessage][] = [];
-    let isFrameReady = false;
-    shell.registerWorkspaceMessageSender((workspaceAgentId, message) => {
-      if (!isFrameReady) return false;
-      sent.push([workspaceAgentId, message]);
-      return true;
-    });
-    const message: WorkspaceMessage = {
-      kind: "app-message",
-      type: "minds:show-routine",
-      fields: { routine_id: "inbox-digest" },
-    };
-
-    shell.requestWorkspaceMessage(WORKSPACE_ID, message);
-    expect(sent).toEqual([]);
-
-    isFrameReady = true;
-    shell.flushPendingWorkspaceMessage();
-    expect(sent).toEqual([[WORKSPACE_ID, message]]);
-    shell.flushPendingWorkspaceMessage();
-    expect(sent).toHaveLength(1);
-  });
-
-  it("holds only the newest unsent message: a later ask replaces an earlier one", () => {
-    const shell = makeShell();
-    shell.requestFocusChat(WORKSPACE_ID, "agent-cc33");
-    shell.requestWorkspaceMessage(WORKSPACE_ID, {
-      kind: "app-message",
-      type: "minds:show-routine",
-      fields: {},
-    });
-    const sent: WorkspaceMessage[] = [];
-    shell.registerWorkspaceMessageSender((_workspaceAgentId, message) => {
-      sent.push(message);
-      return true;
-    });
-
-    shell.flushPendingWorkspaceMessage();
-
-    expect(sent).toEqual([
-      { kind: "app-message", type: "minds:show-routine", fields: {} },
-    ]);
-  });
-
   it("drops a frame's sender on unregister only when it is still the registered one", () => {
     const shell = makeShell();
     const first = (): boolean => true;
     const second = (): boolean => true;
-    shell.registerWorkspaceMessageSender(first);
-    shell.registerWorkspaceMessageSender(second);
-    shell.unregisterWorkspaceMessageSender(first);
+    shell.registerFocusChatSender(first);
+    shell.registerFocusChatSender(second);
+    shell.unregisterFocusChatSender(first);
     // The successor's sender still takes the ask.
     shell.requestFocusChat(WORKSPACE_ID, "agent-cc33");
-    shell.unregisterWorkspaceMessageSender(second);
+    shell.unregisterFocusChatSender(second);
     // With nothing registered the ask is held for the next frame.
     shell.requestFocusChat(WORKSPACE_ID, "agent-dd44");
-    const sent: WorkspaceMessage[] = [];
-    shell.registerWorkspaceMessageSender((_workspaceAgentId, message) => {
-      sent.push(message);
+    const sent: string[] = [];
+    shell.registerFocusChatSender((_workspaceAgentId, chatAgentId) => {
+      sent.push(chatAgentId);
       return true;
     });
-    shell.flushPendingWorkspaceMessage();
-    expect(sent).toEqual([{ kind: "focus-chat", chatAgentId: "agent-dd44" }]);
+    shell.flushPendingFocusChat();
+    expect(sent).toEqual(["agent-dd44"]);
   });
 });
 
@@ -952,37 +875,6 @@ describe("ShellState.openHelpForAgentAsk", () => {
       { workspace: WORKSPACE_ID },
       { replace: true },
     );
-  });
-});
-
-describe("ShellState.openHelpForAgentAsk arriving twice", () => {
-  it("replaces the first ask's /help when the second arrives before it lands", () => {
-    // The route still reads as the machine (m.route.get() trails route.set),
-    // so only the launch still staged says /help is already on its way.
-    const shell = makeShell();
-    land(shell, `/workspace/${WORKSPACE_ID}`);
-    const routeSet = vi
-      .spyOn(m.route, "set")
-      .mockImplementation(() => undefined);
-
-    shell.openHelpForAgentAsk(WORKSPACE_ID, "first diagnosis");
-    shell.openHelpForAgentAsk(WORKSPACE_ID, "second diagnosis");
-
-    expect(routeSet).toHaveBeenNthCalledWith(
-      1,
-      "/help",
-      { workspace: WORKSPACE_ID },
-      undefined,
-    );
-    expect(routeSet).toHaveBeenNthCalledWith(
-      2,
-      "/help",
-      { workspace: WORKSPACE_ID },
-      { replace: true },
-    );
-    expect(takePendingHelpLaunch()).toMatchObject({
-      description: "second diagnosis",
-    });
   });
 });
 
@@ -1597,6 +1489,7 @@ describe("ShellState update modal", () => {
           availability: "OUT_OF_DATE",
           current_version: "minds-v0.3.9",
           supported_version: "minds-v0.4.1",
+          is_version_from_label: false,
           activity,
         },
       },

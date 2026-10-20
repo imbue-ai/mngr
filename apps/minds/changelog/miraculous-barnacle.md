@@ -1,0 +1,5 @@
+Fixed the desktop app dropping window position changes made while the loading ("Starting Minds…") or quitting screens were showing. Both screens are just states of an ordinary window, and two separate code paths were discarding moves:
+
+- On the **quitting screen**, the single authoritative save ran before the takeover flipped in, and every later save was suppressed once the quit had committed -- so a window dragged while "Quitting…" / "Stopping N minds…" was up reverted to its pre-quit position on next launch. The quit sequence now captures window geometry one final time after backend teardown (windows are still alive then), so the last-seen position is what restores.
+
+- On the **loading screen**, restoring a saved session re-applied the initial window's saved bounds a second time after the backend was ready, snapping it back over any move made during startup. That redundant re-apply is now skipped when the window is already positioned at the entry being restored (the common case); it still runs in the rare case where the most-recent window's workspace no longer exists and a different saved window takes its place.

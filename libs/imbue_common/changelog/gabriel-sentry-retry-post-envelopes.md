@@ -1,0 +1,7 @@
+Sentry events are no longer discarded when a connection accepts an envelope and then never answers.
+
+Before, the SDK's transport was built without any retry configuration, so urllib3's default applied. That default retries connection failures for any method, but gates read failures on the method being idempotent -- and envelopes are POSTs. So a send that never got a connection was already retried, while one written into a connection that then went silent was dropped for good -- recorded as a discarded event, but never reported back to whoever had sent it. In production this was costing more events than were being delivered: over three days the client discarded 550 events as `network_error` against 505 accepted.
+
+urllib3 detects and replaces a pooled connection the peer closed, measured for a clean close and for a reset, so neither of those loses anything; what was left unretried was the send that got no answer at all. That fits a client which is long-lived, sends rarely, and moves between networks, though which connection state produced any particular production loss was not established.
+
+Now those sends are retried, while a rate-limit or size-limit response still goes straight to the transport's own handling rather than being retried. A user-submitted bug report is the case this matters most for: it is reported to the user with an event id at the moment it is queued, so a send that failed was indistinguishable from one that filed. Retries narrow that window; they do not close it, and reporting delivery rather than queueing remains a separate change.

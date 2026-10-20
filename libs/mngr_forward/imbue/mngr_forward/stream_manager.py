@@ -628,10 +628,6 @@ class ForwardStreamManager(MutableModel):
                     "event",
                     instance_str,
                     *sources,
-                    # Each services event re-announces one service, so only each
-                    # service's latest registration matters; replaying the whole
-                    # history on every (re)spawn would scale with the log.
-                    *(("--latest-by", f"{_SERVICES_SOURCE}:service") if _SERVICES_SOURCE in sources else ()),
                     "--follow",
                     "--quiet",
                 ],

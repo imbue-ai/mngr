@@ -1,0 +1,3 @@
+Pi's command-refusal messages are now copied verbatim from the shared guard scripts the other harnesses run, so an agent gets the same explanation for the same mistake on every harness. The wording had drifted since pi re-expresses these rules in TypeScript rather than running the scripts.
+
+Removed a lifecycle handler registered on `session_switch`, an event pi does not declare and never emits, so it had never run. Its work (recording the live session file) was already covered by the `session_start` handler, which pi fires for `/new`, `/resume` and fork alike. Extension registration does not validate event names, so a wrong one is silently inert rather than an error.

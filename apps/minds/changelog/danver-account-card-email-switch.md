@@ -1,0 +1,3 @@
+The Accounts page's email notifications setting now asks "Receive email notifications?" and answers with the app's shared switch and its Yes/No word, the same control the share panel and the create form use, instead of a hand-drawn switch reading On/Off. It still spins beside the switch and holds it inert while the preference is being written.
+
+The "keep a synchronized copy" setting of a shared folder, and the per-permission rows behind Adjust in a permission request, now draw the same switch button as every other setting. Both were real checkboxes styled as switches; nothing read them as form fields, so the checkbox styling (`perm-switch-input`) is gone and the app has one switch element.

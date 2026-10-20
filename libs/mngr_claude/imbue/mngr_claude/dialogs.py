@@ -1,7 +1,7 @@
-"""Claude Code TUI dialogs, for 2.1.307.
+"""Claude Code TUI dialogs, for 2.1.293.
 
 A SNAPSHOT OF ONE BINARY. Every pattern and option label below was read out of the
-shipped claude 2.1.307 executable. On a version bump, rewrite this file against the
+shipped claude 2.1.293 executable. On a version bump, rewrite this file against the
 new binary and change ``CLAUDE_CODE_VERSION`` -- do not annotate what moved, do not
 keep patterns "for compatibility". ``test_patterns_match_installed_binary`` asserts every
 pattern here still matches the claude build ``CLAUDE_CODE_VERSION`` names, and that check
@@ -45,7 +45,7 @@ from imbue.imbue_common.pure import pure
 
 # The claude build these patterns were read out of. It must equal the version the mngr
 # Dockerfile installs.
-CLAUDE_CODE_VERSION: Final[str] = "2.1.307"
+CLAUDE_CODE_VERSION: Final[str] = "2.1.293"
 
 
 # Pane predicates
@@ -263,27 +263,18 @@ def is_pending_shell_command(pane_content: str) -> bool:
 
 @pure
 def is_option_highlighted(pane_content: str, option_label: str) -> bool:
-    """Whether the selector's currently-highlighted option begins with ``option_label``.
+    """Whether the selector's currently-highlighted row contains ``option_label``.
 
     Used to land on a specific option before pressing Enter, so answering a dialog never
     depends on which row claude happens to highlight.
-
-    The label must start the option's text and be followed by whitespace or the end of the
-    option, because one option can be the start of another: the plugin prompt offers both
-    ``No`` and ``No, and don't show plugin installation hints again``, and a containment check
-    would land on either.
     """
-    highlighted_option_text: str | None = None
+    highlighted: str | None = None
     for line in pane_content.splitlines():
-        option_prefix = SELECTOR_HIGHLIGHTED_OPTION_RE.match(line)
-        if option_prefix is not None:
+        if SELECTOR_HIGHLIGHTED_OPTION_RE.match(line):
             # The LAST one: an earlier
             # arrow row is a stale selector scrolled above the live dialog.
-            highlighted_option_text = line[option_prefix.end() :].strip()
-    if highlighted_option_text is None or not highlighted_option_text.startswith(option_label):
-        return False
-    rest = highlighted_option_text[len(option_label) :]
-    return rest == "" or rest[0].isspace()
+            highlighted = line
+    return highlighted is not None and option_label in highlighted
 
 
 # What a dialog needs from the pane
@@ -324,9 +315,7 @@ _MAX_DIALOG_PASSES: Final[int] = 4
 
 
 def cycle_to_option(pane: DialogPane, option_label: str, max_steps: int = _MAX_OPTION_STEPS) -> bool:
-    """Walk the selector's highlight onto the option that begins with ``option_label``.
-
-    "Begins with" as :func:`is_option_highlighted` defines it: whitespace or the option's end follows the label.
+    """Walk the selector's highlight onto the option containing ``option_label``.
 
     Re-captures after every Down press rather than counting offsets, so it is correct
     regardless of where the highlight started or how the options are ordered. Returns
@@ -455,7 +444,7 @@ class Answerable(Dialog, ABC):
 
     @abstractmethod
     def get_option_label(self) -> str:
-        """The start of the option to land on before pressing Enter, up to whitespace or the option's end."""
+        """Substring of the option to land on before pressing Enter."""
 
     def deal_with(self, pane: DialogPane) -> None:
         if not pane.accepts(self.get_nickname()):
@@ -543,32 +532,11 @@ class LspPluginInstall(MatchesPattern, Answerable):
         return re.compile(r"Would you like to install this LSP plugin\?")
 
     def get_option_label(self) -> str:
-        # Declining is the inert answer; installing a plugin is not mngr's call, and the other
-        # refusals ("Never for this plugin", "Disable all LSP recommendations") change settings.
-        return "No, not now"
+        # Declining is the inert answer; installing a plugin is not mngr's call.
+        return "No, and don't show plugin installation hints again"
 
     def get_message(self) -> str:
         return "Claude is waiting for you to say whether to install an LSP plugin. Answer it in the agent's terminal."
-
-
-class PluginInstall(MatchesPattern, Answerable):
-    """Offers to install a plugin that the command just run suggests."""
-
-    def get_nickname(self) -> str:
-        return "Plugin install"
-
-    def get_pattern(self) -> re.Pattern[str]:
-        # Its third option, not its question: "Would you like to install it?" is a sentence an
-        # agent's own reply can end with, and the transcript is searched before the input box.
-        return re.compile(r"No,\s+and\s+don't\s+show\s+plugin\s+installation\s+hints\s+again")
-
-    def get_option_label(self) -> str:
-        # Declining is the inert answer. The first option installs the plugin, and the third
-        # ("No, and don't show plugin installation hints again") changes a setting.
-        return "No"
-
-    def get_message(self) -> str:
-        return "Claude is waiting for you to say whether to install a plugin. Answer it in the agent's terminal."
 
 
 # BENIGN -- always handled, never selectable
@@ -773,7 +741,6 @@ DIALOGS: Final[tuple[Dialog, ...]] = (
     EffortSwitchWarning(),
     UsageLimitReached(),
     LspPluginInstall(),
-    PluginInstall(),
     # Named self-clearing surfaces, then the footer catch-all.
     StatusWindow(),
     GenericBenign(),
@@ -787,8 +754,8 @@ DIALOGS: Final[tuple[Dialog, ...]] = (
 #
 # ALL_KNOWN_AND_UNKNOWN_DIALOGS is that plus a fallback for surfaces nobody has named: press
 # "1". It is a GUESS and is the one setting here that can be regretted -- an unnamed dialog's
-# first option is unknown by definition, and for several named ones it would have been wrong
-# (the usage-limit prompt's first option buys credits, both plugin prompts' install).
+# first option is unknown by definition, and among the four we have named it would have been
+# wrong for two (the usage-limit prompt's first option buys credits, the LSP prompt's installs).
 # It is bounded rather than trusted: the digit is only sent to a pane that actually shows a
 # numbered selector, and if the surface does not go away the send still refuses.
 #

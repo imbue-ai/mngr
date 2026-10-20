@@ -1,0 +1,1 @@
+Regenerated the `mngr imbue_cloud` CLI reference (`docs/commands/secondary/imbue_cloud.md`) to pick up the new `bucket destroy --force` / `-y` options added by the destroyed-workspace backup-retention work in `libs/mngr_imbue_cloud`.

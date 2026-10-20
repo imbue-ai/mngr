@@ -66,9 +66,7 @@ export function Modal(): m.Component<ModalAttrs> {
             // The click's own target too: a secondary-button press leaves the flags set (no click follows
             // it), and a keyboard click on a control in the card must not spend them.
             const isBackdropClick =
-              isPressStartedOnBackdrop &&
-              isPressEndedOnBackdrop &&
-              event.target === event.currentTarget;
+              isPressStartedOnBackdrop && isPressEndedOnBackdrop && event.target === event.currentTarget;
             isPressStartedOnBackdrop = false;
             isPressEndedOnBackdrop = false;
             if (onClose !== undefined && isBackdropClick) {

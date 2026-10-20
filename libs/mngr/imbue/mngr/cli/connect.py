@@ -19,7 +19,6 @@ from imbue.mngr.cli.filter_opts import build_agent_filter_cel
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
-from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 
 
@@ -33,7 +32,6 @@ class ConnectCliOptions(AgentFilterCliOptions, CommonCliOptions):
     """
 
     agent: AgentAddress | None
-    agent_option: AgentAddress | None
     start: bool
     reconnect: bool
     session_command: str | None
@@ -58,27 +56,11 @@ def _check_connect_future_options(opts: ConnectCliOptions) -> None:
         raise NotImplementedError("--no-reconnect is not implemented yet")
 
 
-def resolve_agent_address(opts: ConnectCliOptions) -> AgentAddress | None:
-    """The agent the user named, from the positional argument or ``--agent``.
-
-    The two are separate click parameters because a positional argument and an
-    option that share one parameter name overwrite each other during parsing
-    (click warns about it on every invocation), which is how ``--agent`` was
-    silently ignored before.
-    """
-    if opts.agent is not None and opts.agent_option is not None:
-        raise UserInputError("Specify the agent either as the positional argument or with --agent, not both")
-    return opts.agent if opts.agent is not None else opts.agent_option
-
-
 @click.command()
 @click.argument("agent", type=AGENT_ADDRESS, default=None, required=False)
 @optgroup.group("General")
 @optgroup.option(
-    "--agent",
-    "agent_option",
-    type=AGENT_ADDRESS,
-    help="The agent to connect to (by name or ID, optionally @HOST[.PROVIDER])",
+    "--agent", "agent", type=AGENT_ADDRESS, help="The agent to connect to (by name or ID, optionally @HOST[.PROVIDER])"
 )
 @optgroup.option(
     "--start/--no-start",
@@ -124,7 +106,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
     )
     host_ref, agent_ref = find_agent_by_address_or_interactively(
         mngr_ctx=mngr_ctx,
-        address=resolve_agent_address(opts),
+        address=opts.agent,
         host_filter=None,
         include_filters=include_filters,
         exclude_filters=exclude_filters,

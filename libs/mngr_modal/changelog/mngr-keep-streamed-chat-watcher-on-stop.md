@@ -1,0 +1,1 @@
+A running agent on a Modal host no longer reads as STOPPED for a moment while it is being renamed: the host listing now finds each agent's tmux session by the agent id the session carries, not only by its name.

@@ -78,7 +78,7 @@ WORKSPACE_PACKAGES = [
     "concurrency-group",
     "resource-guards",
     "modal-proxy",
-    "imbue-overlay",
+    "overlay",
 ]
 
 APP_ROOT = Path(__file__).resolve().parents[1]

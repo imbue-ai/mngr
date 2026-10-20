@@ -1,0 +1,3 @@
+`mngr destroy` now accepts host addresses (`@HOST`, `@HOST.PROVIDER`, or a bare `host-<hex>` id) alongside agent names. A host address destroys the host and everything on it -- including hosts with no agents at all, such as one left behind by an abandoned create. The local host is always refused. With `--force`, a host address that matches nothing is skipped instead of failing, so cleanup scripts stay idempotent. Destroy results now also report destroyed hosts (`destroyed_hosts` in JSON output).
+
+`HostNameConflictError` can now carry the conflicting host's id and state plus a remediation hint, so providers can tell users exactly which host holds a name and how to clear it.

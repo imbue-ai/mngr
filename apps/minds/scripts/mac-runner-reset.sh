@@ -16,21 +16,39 @@ set -uo pipefail
 
 log() { printf '[reset] %s\n' "$*" >&2; }
 
-APP_NAME="Imbue Studio"
-APP_BUNDLE="/Applications/$APP_NAME.app"
-# The three canonical roots, each holding every tier.
-DATA_ROOTS=(
-  "$HOME/Library/Application Support/$APP_NAME"
-  "$HOME/Library/Caches/$APP_NAME"
-  "$HOME/Library/Logs/$APP_NAME"
-)
+# The app bundles, and every root an install writes to: the canonical three,
+# plus the legacy dotfolder older builds used and the current one migrates off.
+# A runner that has run both needs all of them gone to be reproducible. The
+# pre-rename names are here for the same reason the old bundles are: crash
+# reporting can write under the product name before the app narrows its own
+# userData path.
+# CLEANUP: drop the ImbueStudio, Mind and Minds bundles and roots once every
+# runner has been reset past them; "Imbue Studio" is the current name and stays
+# (specs/imbue-studio-rename/05_cleanup.md).
+APP_BUNDLES=()
+DATA_ROOTS=()
+for app_name in "Imbue Studio" ImbueStudio Mind Minds; do
+  APP_BUNDLES+=("/Applications/$app_name.app")
+  DATA_ROOTS+=(
+    "$HOME/Library/Application Support/$app_name"
+    "$HOME/Library/Caches/$app_name"
+    "$HOME/Library/Logs/$app_name"
+  )
+done
+DATA_ROOTS+=("$HOME/.minds")
 
-log "asking $APP_NAME to quit"
-if [[ -d "$APP_BUNDLE" ]]; then
-  osascript -e "tell application \"$APP_NAME\" to quit" 2>/dev/null || true
-fi
+# Old bundles are quit and removed too, so an install from before the rename
+# cannot survive a reset and claim the deeplink scheme beside the new one.
+# CLEANUP: drop ImbueStudio, Mind and Minds once every runner has been reset
+# past them; "Imbue Studio" is the current name and stays
+# (specs/imbue-studio-rename/05_cleanup.md).
+log "asking Imbue Studio to quit"
+for bundle_name in "Imbue Studio" ImbueStudio Mind Minds; do
+  [[ -d "/Applications/$bundle_name.app" ]] || continue
+  osascript -e "tell application \"$bundle_name\" to quit" 2>/dev/null || true
+done
 for _ in 1 2 3 4 5; do
-  pids=$(pgrep -f "$APP_BUNDLE/Contents/" || true)
+  pids=$(pgrep -f '/Applications/(Imbue Studio|ImbueStudio|Minds?)\.app/Contents/' || true)
   [[ -z "$pids" ]] && break
   sleep 1
 done
@@ -38,13 +56,13 @@ done
 # The detached `mngr latchkey forward` and its children outlive the quit and can
 # still write into the data roots.
 cleanup_failed=0
-log "killing every process with a file under the app bundle or the data roots"
-if ! bash "$(dirname "$0")/kill-processes-under.sh" "$APP_BUNDLE" "${DATA_ROOTS[@]}"; then
-  log "ERROR: could not stop every process with a file under the app bundle or the data roots"
+log "killing every process with a file under the app bundles or the data roots"
+if ! bash "$(dirname "$0")/kill-processes-under.sh" "${APP_BUNDLES[@]}" "${DATA_ROOTS[@]}"; then
+  log "ERROR: could not stop every process with a file under the app bundles or the data roots"
   cleanup_failed=1
 fi
 
-BUNDLED_LIMACTL="$APP_BUNDLE/Contents/Resources/lima/bin/limactl"
+BUNDLED_LIMACTL="/Applications/Imbue Studio.app/Contents/Resources/lima/bin/limactl"
 LIMACTL=""
 if [[ -x "$BUNDLED_LIMACTL" ]]; then
   LIMACTL="$BUNDLED_LIMACTL"
@@ -118,15 +136,15 @@ log "wiping leftover /tmp diagnostic artifacts from prior runs"
 # scripts that no longer exist.
 rm -f /tmp/minds-electron.log 2>/dev/null || true
 
-log "removing the data roots and the installed app bundle"
+log "removing the data roots and the installed app bundles"
 rm -rf "${DATA_ROOTS[@]}"
-sudo rm -rf "$APP_BUNDLE"
+sudo rm -rf "${APP_BUNDLES[@]}"
 
 URL="${1:-}"
 
 # Verify the cleanup actually reached a clean state. The steps above are
 # best-effort and swallow their own failures, so without this check a pinned
-# Lima VM or a busy data root would leak silently and rot this non-ephemeral
+# Lima VM or a busy ~/.minds would leak silently and rot this non-ephemeral
 # runner. Assert the post-conditions and exit non-zero so the caller's job
 # goes red. A pure cleanup (no install URL) also expects the app to be gone;
 # when a URL is given the install below puts a fresh one back.
@@ -146,10 +164,12 @@ for root in "${DATA_ROOTS[@]}"; do
     cleanup_failed=1
   fi
 done
-if [[ -z "$URL" && -e "$APP_BUNDLE" ]]; then
-  log "ERROR: $APP_BUNDLE survived cleanup"
-  cleanup_failed=1
-fi
+for bundle in "${APP_BUNDLES[@]}"; do
+  if [[ -z "$URL" && -e "$bundle" ]]; then
+    log "ERROR: $bundle survived cleanup"
+    cleanup_failed=1
+  fi
+done
 if [[ "$cleanup_failed" -ne 0 ]]; then
   log "cleanup did not reach a clean state; failing so the dirty runner is visible"
   exit 1
@@ -162,15 +182,15 @@ if [[ -n "$URL" ]]; then
   # Install must fail loud: a run must never proceed against a stale app.
   curl -fSL --silent --show-error -o "$TMP/minds.zip" "$URL" || { log "ERROR: app download failed"; exit 1; }
   unzip -q -d "$TMP" "$TMP/minds.zip" || { log "ERROR: app unzip failed"; exit 1; }
-  sudo mv "$TMP/$APP_NAME.app" "$APP_BUNDLE" || { log "ERROR: app install (mv) failed"; exit 1; }
+  sudo mv "$TMP/Imbue Studio.app" "/Applications/Imbue Studio.app" || { log "ERROR: app install (mv) failed"; exit 1; }
   # xattr -dr returns non-zero when some signed-bundle internals refuse the
   # delete with "Operation not permitted"; we only care about the top-level
   # quarantine bit so Gatekeeper lets the app launch. Per-file failures
   # inside signed frameworks are harmless.
-  sudo xattr -dr com.apple.quarantine "$APP_BUNDLE" 2>/dev/null || true
-  sudo xattr -d com.apple.quarantine "$APP_BUNDLE" 2>/dev/null || true
-  version=$(defaults read "$APP_BUNDLE/Contents/Info.plist" CFBundleShortVersionString)
-  build=$(defaults read "$APP_BUNDLE/Contents/Info.plist" CFBundleVersion)
+  sudo xattr -dr com.apple.quarantine "/Applications/Imbue Studio.app" 2>/dev/null || true
+  sudo xattr -d com.apple.quarantine "/Applications/Imbue Studio.app" 2>/dev/null || true
+  version=$(defaults read "/Applications/Imbue Studio.app/Contents/Info.plist" CFBundleShortVersionString)
+  build=$(defaults read "/Applications/Imbue Studio.app/Contents/Info.plist" CFBundleVersion)
   log "installed $version ($build)"
 fi
 

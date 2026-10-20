@@ -35,7 +35,7 @@ dependencies = [
     "concurrency-group>=0.1.0",
     "resource-guards>=0.1.0",
     "modal-proxy>=0.1.0",
-    "imbue-overlay>=0.1.0",
+    "overlay>=0.1.0",
 ]
 
 # Supply-chain hardening: rolling 14-day cooldown. Refuses any wheel /
@@ -45,16 +45,6 @@ dependencies = [
 # during resolution (`uv lock`); a frozen install replays the lockfile.
 [tool.uv]
 exclude-newer = "14 days"
-# Same floor as the root, which does not reach this project: uv reads only the
-# nearest pyproject with a [tool.uv] table. uv below 0.13.4 bundles a root store
-# that still trusts emSign ECC Root CA - G3, which the eMudhra intermediates with
-# recoverable private keys chain to, so an older uv can be MITM'd while fetching
-# packages.
-required-version = ">=0.13.4"
-# certifi 2026.10.19 (uploaded 2026-10-20) is the first release without that
-# emSign root, so it is still inside the window. Override just this package.
-# CLEANUP: remove after 2026-11-04, once the window admits it on its own.
-exclude-newer-package = { certifi = "2026-10-21T00:00:00Z" }
 # Each shipped target must get a wheel or an sdist of every package.
 required-environments = [
     "sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -86,4 +76,4 @@ imbue-common = { path = "../../../../libs/imbue_common", editable = true }
 concurrency-group = { path = "../../../../libs/concurrency_group", editable = true }
 resource-guards = { path = "../../../../libs/resource_guards", editable = true }
 modal-proxy = { path = "../../../../libs/modal_proxy", editable = true }
-imbue-overlay = { path = "../../../../libs/overlay", editable = true }
+overlay = { path = "../../../../libs/overlay", editable = true }

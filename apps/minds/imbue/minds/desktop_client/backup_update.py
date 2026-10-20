@@ -273,8 +273,8 @@ def _apply_update_and_verify(
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
     is_stop_chats: bool,
-    # The workspace's own template version, as the update detector resolved it.
-    # None when it has none.
+    # The workspace's own template version, as the update detector resolved it
+    # (its git tag, else the create-time label). None when nobody could read one.
     workspace_version_ref: str | None,
 ) -> str | None:
     """Run the mutating update script, re-inject the env, and verify convergence.

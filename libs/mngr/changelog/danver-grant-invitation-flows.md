@@ -1,0 +1,1 @@
+Regenerated `docs/commands/secondary/imbue_cloud.md` for the new `mngr imbue_cloud shares push-grants`, `shares invite`, `shares invitation-outcomes`, and `account notification-preferences show|set` commands (the invitation work of `specs/inviting-granted-visitors/spec.md`).

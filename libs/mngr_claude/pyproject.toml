@@ -1,12 +1,12 @@
 [project]
 name = "imbue-mngr-claude"
-version = "0.3.0"
+version = "0.2.17"
 description = "Claude agent type plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.3.0",
-    "imbue-overlay==0.1.0",
+    "imbue-mngr==0.2.17",
+    "overlay==0.1.0",
     "rich>=13.0",
     # anthropic: keep UNPINNED and bump often. Imported for its typed stream-event
     # models, whose `ty` exhaustiveness check only flags new variants on upgrade.
@@ -15,7 +15,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "imbue-mngr-modal==0.3.0",
+    "imbue-mngr-modal==0.2.17",
 ]
 
 [project.entry-points.mngr]
@@ -35,7 +35,7 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py", "**/test
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
 imbue-mngr-modal = { workspace = true }
-imbue-overlay = { workspace = true }
+overlay = { workspace = true }
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:

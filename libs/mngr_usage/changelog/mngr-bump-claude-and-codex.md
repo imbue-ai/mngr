@@ -1,0 +1,3 @@
+Add `anthropic/claude-fable-5-1` (Claude Fable 5.1) and `openai/gpt-6-astra` (GPT-6 Astra) to the usage pricing table, so a usage source that reports either model's tokens without a dollar figure is priced rather than reported unpriced. Both entries are pinned against litellm's `model_prices_and_context_window` map like the rest of the table.
+
+Fable 5.1 keeps Fable 5's rates except for cache reads, which are a quarter of the price. GPT-6 Astra is the first OpenAI entry the map bills a cache write for, so the litellm pin's OpenAI half now compares that bucket against the map instead of asserting it is zero.

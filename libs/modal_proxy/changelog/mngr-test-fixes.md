@@ -1,0 +1,1 @@
+Combined-fixes integration PR (carries mngr/fix-remote-workspace): volume operations use a longer retry backoff specifically for Modal rate-limit errors (5/10/20/30s between attempts, ~65s total headroom) while other transient errors keep the fast 1/2/4/8s curve. See `mngr-fix-remote-workspace.md` in this directory for details.

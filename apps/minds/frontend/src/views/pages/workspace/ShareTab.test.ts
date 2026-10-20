@@ -122,13 +122,6 @@ function rowByText(root: unknown, text: string): AnyVnode {
   return row as AnyVnode;
 }
 
-/** A row's first line: its name and its controls. */
-function firstLineOf(row: AnyVnode): AnyVnode {
-  const [line] = row.children as AnyVnode[];
-  expect(line, "the row has no first line").toBeDefined();
-  return line;
-}
-
 /** The controls of the add row, in the order they are read. */
 function addControls(root: unknown): AnyVnode[] {
   return [
@@ -1093,47 +1086,22 @@ describe("ShareTab grant list", () => {
     expect(allText(row)).not.toContain("signed up");
   });
 
-  it("gives every row's first line the same height and never shortens a name", async () => {
+  it("gives every row the same height and never shortens a name", async () => {
     const share = await panelWithGrants();
 
     const rows = grantRows(renderTab(share));
 
     expect(rows).toHaveLength(4);
     for (const row of rows) {
+      expect(classTokensOf(row)).toContain("h-10");
       expect(classTokensOf(row)).toContain("flex-none");
-      const line = firstLineOf(row);
-      expect(classTokensOf(line)).toContain("h-10");
-      const name = collectVnodes(line).find(
+      const name = collectVnodes(row).find(
         (vnode) => attrsOf(vnode)["data-grant-name"] !== undefined,
       );
       expect(name).toBeDefined();
       expect(classTokensOf(name as AnyVnode)).toContain("truncate");
       expect(classTokensOf(name as AnyVnode)).not.toContain(
         "whitespace-nowrap",
-      );
-    }
-  });
-
-  it("lets the note beside a name give way before the name does", async () => {
-    const share = await panelWithGrants();
-    const root = renderTab(share);
-
-    for (const text of ["newcomer@example.com", "Carol Reyes"]) {
-      const row = rowByText(root, text);
-      const name = collectVnodes(row).find(
-        (vnode) => attrsOf(vnode)["data-grant-name"] !== undefined,
-      ) as AnyVnode;
-      const note = collectVnodes(row).find(
-        (vnode) => attrsOf(vnode)["data-grant-note"] !== undefined,
-      );
-      expect(note, `no note beside ${text}`).toBeDefined();
-      expect(classTokensOf(note as AnyVnode)).toEqual(
-        expect.arrayContaining(["min-w-0", "truncate"]),
-      );
-      expect(classTokensOf(note as AnyVnode)).not.toContain("shrink-0");
-      // The name never shrinks, but is held to the cell so it can truncate.
-      expect(classTokensOf(name)).toEqual(
-        expect.arrayContaining(["shrink-0", "max-w-full", "truncate"]),
       );
     }
   });
@@ -1154,29 +1122,15 @@ describe("ShareTab grant list", () => {
     }
   });
 
-  it("scrolls the whole right side as one, with nothing in it scrolling on its own", async () => {
+  it("scrolls the list alone, with nothing above it in the scroller", async () => {
     const share = await panelWithGrants();
-    const root = renderTab(share);
-    const list = byId(root, "ws-share-grants") as AnyVnode;
 
-    const scrollers = collectVnodes(root).filter((vnode) =>
-      classTokensOf(vnode).includes("overflow-y-auto"),
-    );
-    const column = scrollers.find((vnode) =>
-      collectVnodes(vnode).includes(list),
-    ) as AnyVnode;
+    const list = byId(renderTab(share), "ws-share-grants");
 
-    expect(allText(column)).toContain("Grant permission to");
-    expect(byId(column, "ws-share-agents")).toBeDefined();
-    // A scroller inside it would be the one block the rest could squeeze,
-    // down to no height at all.
-    expect(
-      collectVnodes(column).filter(
-        (vnode) =>
-          vnode !== column && classTokensOf(vnode).includes("overflow-y-auto"),
-      ),
-    ).toEqual([]);
-    expect(classTokensOf(list)).toContain("shrink-0");
+    expect(classTokensOf(list as AnyVnode)).toContain("overflow-y-auto");
+    expect(classTokensOf(list as AnyVnode)).toContain("flex-1");
+    expect(classTokensOf(list as AnyVnode)).toContain("min-h-0");
+    expect(allText(list)).not.toContain("Grant permission to");
   });
 
   it("marks a row while it saves, and offers a retry once it cannot", async () => {
@@ -2059,12 +2013,6 @@ describe("ShareTab invitations", () => {
     );
   }
 
-  function refusalOf(row: AnyVnode): AnyVnode | undefined {
-    return collectVnodes(row).find(
-      (vnode) => attrsOf(vnode)["data-invite-refusal"] !== undefined,
-    );
-  }
-
   it("fills the one status indicator with what the granter may learn, and nothing about a domain", async () => {
     const { share } = await invitationPanel({
       outcomes: [
@@ -2214,46 +2162,10 @@ describe("ShareTab invitations", () => {
     await settle();
 
     const row = rowByText(renderTab(share), "friend@example.com");
-    expect(allText(refusalOf(row))).toBe(
-      "You invited this person too recently.",
+    expect(allText(slotOf(row, "invitation"))).toContain(
+      "You invited this person too recently",
     );
     expect(allText(inviteControl(row))).toBe("Invite again");
-  });
-
-  it("says a refusal whole on a line of its own, leaving the name and the re-invite on the first line", async () => {
-    const { share } = await invitationPanel({
-      respondToInvite: () =>
-        Promise.resolve({
-          ok: true,
-          status: 200,
-          body: { outcome: "over_allowance" },
-        }),
-    });
-    expect(
-      refusalOf(rowByText(renderTab(share), "friend@example.com")),
-    ).toBeUndefined();
-    const friend = share
-      .grantsFor(WHOLE)
-      .find((grant) => grant.grantee.value === "friend@example.com");
-
-    await share.invite(WHOLE, (friend as Grant).key);
-    await settle();
-
-    const row = rowByText(renderTab(share), "friend@example.com");
-    const refusal = refusalOf(row) as AnyVnode;
-    expect(allText(refusal)).toBe(
-      "Access granted, but you've reached your invitation email limit for now.",
-    );
-    // Wrapped, never cut short.
-    expect(classTokensOf(refusal)).not.toContain("truncate");
-    const line = firstLineOf(row);
-    expect(collectVnodes(line)).not.toContain(refusal);
-    expect(
-      collectVnodes(line).some(
-        (vnode) => attrsOf(vnode)["data-grant-name"] !== undefined,
-      ),
-    ).toBe(true);
-    expect(allText(slotOf(row, "invitation"))).toBe("Invite again");
   });
 });
 

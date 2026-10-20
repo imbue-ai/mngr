@@ -1,0 +1,7 @@
+Modal's transient control-plane failures are now recognized as transient. Modal routes four gRPC statuses -- `CANCELLED`, `UNKNOWN`, `DEADLINE_EXCEEDED` and `UNAVAILABLE` -- to a single `modal.exception.ServiceError`, which the error translation had no branch for. All four therefore arrived as the generic `ModalProxyError`, which callers read as "Modal answered, definitively, no": a control-plane call that failed `UNAVAILABLE` was not retried at all, while the same call failing `INTERNAL` was.
+
+`ModalProxyServiceError` now covers that class, and `ModalProxyTransientError` is the single statement of which Modal failures are transient -- `ModalProxyInternalError`, `ModalProxyRateLimitError` and `ModalProxyServiceError` all derive from it, so callers catch the base instead of each listing the concrete types.
+
+Retry decorators now sit *above* the exception translation rather than below it, so `_is_transient_modal_error` and `_transient_wait` decide on `ModalProxy*` types. Both previously kept their own parallel list of the Modal SDK classes those came from, and the post-deploy function lookup retried on `modal.exception.NotFoundError`; all three now read the shared hierarchy, so a new transient subclass is covered without editing any of them.
+
+A contract test reads Modal's own list of retryable statuses rather than restating it, so it fails if Modal adds a status or moves one (MIND-274).

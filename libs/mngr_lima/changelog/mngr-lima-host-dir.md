@@ -1,0 +1,9 @@
+Lima hosts now record the `host_dir` they were created with, and reads target that recorded value instead of whatever `host_dir` the current context's provider config resolves to.
+
+Without this, a Lima host created from a repo whose `.mngr/settings.toml` customizes `[providers.lima].host_dir` was unreadable from anywhere else. minds hits this on every workspace: it runs `mngr create` with the workspace clone as cwd (so the project setting applies and the host is built at `/home/user/.mngr`), but runs `mngr forward` and the per-agent `mngr event ... --follow` streams from `$HOME`, where no project settings apply and the provider falls back to the built-in default `/mngr` -- a path that does not exist in the VM. The events stream exited non-zero, `mngr forward`'s resolver never learned the agent's `system_interface` URL, and the plugin served a permanent 503, so the desktop app's readiness probe spun until it timed out.
+
+The same recorded value now also drives the in-VM activity watcher and the plain-text service log directory. Restarting a host from a context that resolved a different `host_dir` previously installed the watcher against that other path: it found no `data.json` there, so the idle-timeout and max-age checks were skipped and the host stopped idle-stopping -- silently, because a failed watcher start is not raised. `_host_log_dir_str` takes the host's effective `host_dir` for the same reason, so `<host_dir>/logs` lands beside the data the host actually uses.
+
+The docker provider already persisted its per-host `host_dir` for exactly this reason; lima now matches. Records written before this field existed carry no `host_dir` and keep falling back to the provider instance's configured value, so existing hosts are unaffected.
+
+A ratchet (`test_project_ratchets.py`) caps the provider instance's ambient `host_dir` reads at the three that belong in `create_host`, so a future read path cannot silently reintroduce the same class of bug.

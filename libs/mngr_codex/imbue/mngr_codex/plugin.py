@@ -2257,8 +2257,9 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     idle -> END_OF_TURN) as the SOLE source. The shared ``classify_waiting_reason`` produces the
     verdict, so this field and the ``get_lifecycle_state`` RUNNING -> WAITING promotion cannot drift.
 
-    Field generators run for every listed agent whatever its type, so the isinstance guard is
-    what keeps this field off agents of other types.
+    Registered only for the codex type, so ``agent`` is always a :class:`CodexAgent`; the
+    isinstance guard narrows the type (a foreign agent, which the registration prevents, yields
+    ``None`` rather than a marker read off ``host``).
     """
     return agent.compute_waiting_reason() if isinstance(agent, CodexAgent) else None
 

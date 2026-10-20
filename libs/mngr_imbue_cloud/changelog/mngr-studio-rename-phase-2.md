@@ -1,0 +1,1 @@
+`ShareInfo` (and the `mngr imbue_cloud shares status` / `shares list` JSON) carries `needs_reshare`: true while the share is active on a content domain the tier has moved away from, so a client knows the next re-share will move it. False against a connector that predates the flag.
