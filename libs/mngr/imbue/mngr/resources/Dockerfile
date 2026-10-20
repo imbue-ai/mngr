@@ -170,14 +170,15 @@ WORKDIR /code/mngr/
 #   - Real source tree (offload's exported repo, mngr_schedule's
 #     producer-side-extracted tree, the test_modal_create release
 #     test's unpacked tree, local docker builds).
-#   - .mngr/dev/build/ keyframe directory containing only
-#     current.tar.gz + a .checkpoint marker (typical end-user flow via
-#     .mngr/settings.toml's pre_command_scripts hook + create_templates).
+#   - .mngr/dev/build/ keyframe directory containing current.tar.gz,
+#     a .checkpoint marker and apps/minds/scripts/git-manifest.json
+#     (typical end-user flow via .mngr/settings.toml's
+#     pre_command_scripts hook + create_templates).
 # COPY lands files owned by root:root by default, so no chown is needed.
 COPY . /code/mngr/
 
 # Bootstrap the source tree for the keyframe shape: if the COPY above
-# only carried current.tar.gz + a .checkpoint marker (the keyframe
+# carried current.tar.gz + a .checkpoint marker (the keyframe
 # shape produced by scripts/make_tar_of_repo.sh), extract the tarball
 # inline so the post-COPY RUN below can find the script it's trying
 # to invoke. We delete the tarball + checkpoint afterwards so the
