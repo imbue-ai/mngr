@@ -499,7 +499,7 @@ def _exit_status_for_escaping_exception(error: BaseException | None) -> int:
 def _log_forward_exit_reason(received_signal_name: str | None, error: BaseException | None) -> None:
     """Say on stderr why the forward is exiting, so the consumer that relays it can name the exit path.
 
-    Logged above the default console level: minds' exit report quotes the last
+    Logged above the default console level: the consumer's exit report quotes the last
     stderr lines, and this is the one that tells a signal-driven graceful stop
     from a crash, and which status the process is about to exit with.
     """
@@ -545,9 +545,7 @@ def _build_hypercorn_config(listen_socket: socket.socket, ca: LocalCertificateAu
             chain_pem, server_key_pem = generate_server_credentials(ca)
             ssl_context = build_server_ssl_context(chain_pem, server_key_pem, ca)
         except (ValueError, ssl.SSLError, OSError) as e:
-            # Naming TLS/HTTP-2 setup explicitly here makes the failure
-            # diagnosable: minds' `wait_for_listening` will otherwise just time
-            # out with no indication that the cert/context was the cause.
+            # Names TLS/HTTP-2 setup as the failing step, which the escaping exception alone does not.
             logger.error("mngr forward TLS/HTTP-2 setup failed (cert generation or SSL context): {}", e)
             raise
         config = InMemoryTLSConfig(ssl_context)
@@ -799,7 +797,7 @@ def _serve_forward_app(
     """Serve the forward app over the already-bound ``listen_socket`` via hypercorn.
 
     ``shutdown_signal_listener`` handles SIGINT/SIGTERM as a graceful stop --
-    the behaviour minds' ``terminate()`` relies on -- and records which signal
+    the behaviour a consumer that stops it with SIGTERM relies on -- and records which signal
     it was. Must run on the main thread so the loop can install those signal
     handlers.
 
