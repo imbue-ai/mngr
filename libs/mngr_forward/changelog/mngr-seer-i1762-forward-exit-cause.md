@@ -1,0 +1,1 @@
+`mngr forward` now logs why it is exiting: which shutdown signal it received (if any), or the class and raising frame of the exception escaping its serve loop or cleanup, together with the exit status it is about to return. Its SIGINT/SIGTERM handling is unchanged: a signal still triggers the same graceful shutdown.

@@ -1,10 +1,13 @@
+import os
 from collections.abc import Callable
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
+from typing import Final
 
 from sentry_sdk.integrations.flask import FlaskIntegration
 
+from imbue.imbue_common.pure import pure
 from imbue.imbue_common.sentry.core import MANUALLY_SUBMITTED_TAG as MANUALLY_SUBMITTED_TAG
 from imbue.imbue_common.sentry.core import MAX_SENTRY_LIST_SIZE
 from imbue.imbue_common.sentry.core import flush_sentry_on_shutdown as flush_sentry_on_shutdown
@@ -339,6 +342,23 @@ def _external_log_attachment_groups(
     )
 
 
+# Every CI run of the desktop app starts from a fresh data directory, and so
+# reports under a fresh anonymous user id: without this tag a failure that fires
+# once per test run reads in Sentry as one affecting hundreds of installs.
+_IS_UNDER_PYTEST_TAG: Final[str] = "is_under_pytest"
+
+
+@pure
+def is_under_pytest(environ: Mapping[str, str]) -> bool:
+    """Whether this process runs under a pytest test, directly or as a descendant of one.
+
+    pytest sets ``PYTEST_CURRENT_TEST`` in its own environment for the duration
+    of each test, and the harnesses that launch the app (and the app's launcher
+    that starts this backend) pass their environment on, so it reaches here.
+    """
+    return "PYTEST_CURRENT_TEST" in environ
+
+
 def setup_sentry(
     environment: SentryDeployEnvironment,
     release_id: str,
@@ -368,4 +388,5 @@ def setup_sentry(
         # Imbue Studio backend brokers cross-workspace reverse tunnels through the same paramiko machinery,
         # so ignore those loggers to keep Sentry from flooding on already-handled failures.
         ignored_loggers=SENTRY_IGNORED_STDLIB_LOGGER_PATTERNS,
+        extra_tags={_IS_UNDER_PYTEST_TAG: str(is_under_pytest(os.environ)).lower()},
     )

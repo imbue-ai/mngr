@@ -12,6 +12,7 @@ connection carrying more requests than hypercorn's default per-connection cap).
 # be exercised from inside an asyncio loop.
 import asyncio
 import os
+import signal
 import socket
 import ssl
 import threading
@@ -38,13 +39,16 @@ from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_forward.cli import ForwardCliOptions
 from imbue.mngr_forward.cli import ServeLoopExceptionReporter
+from imbue.mngr_forward.cli import ShutdownSignalListener
 from imbue.mngr_forward.cli import _BoundedSSLShutdownEventLoop
 from imbue.mngr_forward.cli import _DEFAULT_PORT
 from imbue.mngr_forward.cli import _SSL_SHUTDOWN_TIMED_OUT_MESSAGE
 from imbue.mngr_forward.cli import _bind_listen_socket
 from imbue.mngr_forward.cli import _build_hypercorn_config
 from imbue.mngr_forward.cli import _build_strategy
+from imbue.mngr_forward.cli import _exit_status_for_escaping_exception
 from imbue.mngr_forward.cli import _filter_snapshot
+from imbue.mngr_forward.cli import _log_forward_exit_reason
 from imbue.mngr_forward.cli import _parse_reverse_specs
 from imbue.mngr_forward.cli import _run_serve_loop
 from imbue.mngr_forward.cli import _validate_options
@@ -709,3 +713,73 @@ def test_http2_connection_is_not_drained_after_a_thousand_requests() -> None:
                     }
                     assert statuses == {stream_id: b"204" for stream_id in stream_ids}
                     answered_count += len(stream_ids)
+
+
+def _raise_cleanup_failure() -> None:
+    raise OSError("tunnel cleanup failed")
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_exit_status"),
+    [
+        (None, 0),
+        (SystemExit(3), 3),
+        (SystemExit(None), 0),
+        (click.exceptions.Exit(4), 4),
+        (click.UsageError("bad flag"), 2),
+        (click.ClickException("failed"), 1),
+        (click.Abort(), 1),
+        (OSError("boom"), 1),
+    ],
+)
+def test_exit_status_for_escaping_exception_mirrors_how_the_process_exits(
+    error: BaseException | None, expected_exit_status: int
+) -> None:
+    assert _exit_status_for_escaping_exception(error) == expected_exit_status
+
+
+def _logged_exit_reason(received_signal_name: str | None, error: BaseException | None) -> list[Any]:
+    records: list[Any] = []
+    sink_id = logger.add(lambda message: records.append(message.record), level="INFO")
+    try:
+        _log_forward_exit_reason(received_signal_name, error)
+    finally:
+        logger.remove(sink_id)
+    return records
+
+
+def test_forward_exit_reason_after_a_graceful_signal_stop_names_the_signal() -> None:
+    records = _logged_exit_reason("SIGTERM", None)
+
+    assert len(records) == 1
+    assert records[0]["level"].name == "INFO"
+    assert records[0]["message"] == (
+        "mngr forward exiting: serve loop returned; shutdown_signal=SIGTERM exit_status=0"
+    )
+
+
+def test_forward_exit_reason_for_an_escaping_exception_names_its_class_frame_and_exit_status() -> None:
+    with pytest.raises(OSError) as raised:
+        _raise_cleanup_failure()
+    records = _logged_exit_reason(None, raised.value)
+
+    assert len(records) == 1
+    assert records[0]["level"].name == "WARNING"
+    message = records[0]["message"]
+    assert message.startswith("mngr forward exiting: OSError escaped the serve loop or its cleanup at ")
+    assert "cli_test.py:" in message
+    assert message.endswith(" in _raise_cleanup_failure; shutdown_signal=None exit_status=1")
+
+
+def test_shutdown_signal_listener_records_the_first_signal_and_releases_the_trigger() -> None:
+    listener = ShutdownSignalListener()
+    loop = asyncio.new_event_loop()
+    try:
+        loop.call_soon(listener.handle_signal, signal.SIGTERM)
+        loop.call_soon(listener.handle_signal, signal.SIGINT)
+        assert listener.get_received_signal_name() is None
+        loop.run_until_complete(asyncio.wait_for(listener.wait(), timeout=5.0))
+    finally:
+        loop.close()
+
+    assert listener.get_received_signal_name() == "SIGTERM"
