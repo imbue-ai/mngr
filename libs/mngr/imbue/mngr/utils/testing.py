@@ -45,8 +45,10 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr import resources as _mngr_resources
+from imbue.mngr.agents.default_plugins.command_agent import CommandAgent
 from imbue.mngr.cli.create import create as create_command
 from imbue.mngr.config.consts import PROFILES_DIRNAME
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
@@ -64,6 +66,7 @@ from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -1857,6 +1860,29 @@ def poll_until_file_contains(path: Path, text: str, timeout: float = 5.0) -> boo
     does not wait for the substitution, so the file can trail the command's exit.
     """
     return poll_until(lambda: path.exists() and text in path.read_text(), timeout=timeout)
+
+
+def make_command_agent(local_provider: LocalProviderInstance, work_dir: Path) -> tuple[CommandAgent, Host]:
+    """A command agent on a real local host, for tests that need an agent of a type other than their own.
+
+    Built without validation, like the agent-type plugins' own test factories, so no
+    process is started and nothing is written to the host.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    agent = CommandAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-command-agent"),
+        agent_type=AgentTypeName("command"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=AgentTypeConfig(),
+        host=host,
+    )
+    return agent, host
 
 
 # Takes an exclusive flock on argv[1], signals that it holds it by creating argv[2], then waits to be killed.

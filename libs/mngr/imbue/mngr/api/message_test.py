@@ -1,5 +1,6 @@
 import re
 from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from contextlib import nullcontext
@@ -7,9 +8,13 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from threading import Lock
+from typing import Any
 from typing import Final
+from typing import TypeVar
+from uuid import uuid4
 
 import pytest
+from pydantic import Field
 
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import SendKeysAgent
@@ -24,6 +29,8 @@ from imbue.mngr.api.message import _send_message_to_agent
 from imbue.mngr.api.message import send_key_chord_to_agents
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.cli.testing import create_test_agent
+from imbue.mngr.config.agent_class_registry import register_agent_class
+from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
@@ -44,6 +51,7 @@ from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -546,39 +554,47 @@ def test_unreachable_host_fails_its_agents_or_aborts(
     assert errors == result.failed_agents
 
 
-class _AgentListFailingHost(Host):
-    """Host subclass whose get_agents always raises HostConnectionError."""
+class _AgentLoadFailingHost(Host):
+    """Host subclass whose agent loading always raises HostConnectionError."""
 
-    def get_agents(self) -> list[AgentInterface]:
-        raise HostConnectionError("could not list agents")
+    def load_agents_from_refs(self, agent_refs: Sequence[DiscoveredAgent]) -> list[AgentInterface]:
+        raise HostConnectionError("could not load agents")
 
 
-class _AgentListFailingProvider(LocalProviderInstance):
-    """Provider that returns an online _AgentListFailingHost from get_host()."""
+_HostT = TypeVar("_HostT", bound=Host)
 
-    def get_host(self, host: HostId | HostName) -> _AgentListFailingHost:
-        return _AgentListFailingHost(
-            id=self.host_id,
-            host_name=HostName("test"),
-            connector=PyinfraConnector(self._create_local_pyinfra_host()),
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
-        )
+
+def _build_local_host(host_class: type[_HostT], provider: LocalProviderInstance, host_name: str) -> _HostT:
+    """Build ``host_class`` as the provider's online local host."""
+    return host_class(
+        id=provider.host_id,
+        host_name=HostName(host_name),
+        connector=PyinfraConnector(provider._create_local_pyinfra_host()),
+        provider_instance=provider,
+        mngr_ctx=provider.mngr_ctx,
+    )
+
+
+class _AgentLoadFailingProvider(LocalProviderInstance):
+    """Provider that returns an online _AgentLoadFailingHost from get_host()."""
+
+    def get_host(self, host: HostId | HostName) -> _AgentLoadFailingHost:
+        return _build_local_host(_AgentLoadFailingHost, self, "test")
 
 
 @pytest.mark.allow_warnings(match=r"^Error accessing host")
-def test_host_that_cannot_list_its_agents_fails_them(
+def test_host_that_cannot_load_its_agents_fails_them(
     temp_host_dir: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """A reachable host whose agent listing raises must fail its agents too.
+    """A reachable host whose agent loading raises must fail its agents too.
 
-    ``get_agents`` is the one host-phase step reached past ``_resolve_online_host``, so
+    Loading the agents is the one host-phase step reached past ``_resolve_online_host``, so
     it is the statement a refactor could move into the send phase -- where the handler
     only logs and `mngr message` goes back to exiting 0 on an undelivered message.
     """
     agent_names = ("sleepy", "dozy")
-    provider = _AgentListFailingProvider(
+    provider = _AgentLoadFailingProvider(
         name=ProviderInstanceName("test-provider"),
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
@@ -601,7 +617,7 @@ def test_host_that_cannot_list_its_agents_fails_them(
     )
 
     assert result.successful_agents == []
-    assert result.failed_agents == [(name, "could not list agents") for name in agent_names]
+    assert result.failed_agents == [(name, "could not load agents") for name in agent_names]
     assert errors == result.failed_agents
 
 
@@ -650,6 +666,152 @@ def test_agent_missing_from_its_host_is_recorded_before_the_abort(
     assert result.successful_agents == []
     assert result.failed_agents == expected_failures
     assert errors == result.failed_agents
+
+
+class _RunningAgent(BaseAgent[AgentTypeConfig]):
+    """Test agent that always reports itself running, so a send reaches its delivery."""
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        return AgentLifecycleState.RUNNING
+
+
+class _LoadRecordingHost(Host):
+    """Real local host that records which agents' data.json it reads and which agent objects it builds."""
+
+    data_file_reads: list[tuple[AgentId, ...] | None] = Field(default_factory=list)
+    built_agent_ids: list[AgentId] = Field(default_factory=list)
+
+    def _read_agent_data_files(
+        self, timeout_seconds: float | None, agent_ids: Sequence[AgentId] | None
+    ) -> dict[str, str] | None:
+        self.data_file_reads.append(None if agent_ids is None else tuple(agent_ids))
+        return super()._read_agent_data_files(timeout_seconds=timeout_seconds, agent_ids=agent_ids)
+
+    def _build_agent_from_data(self, data: Mapping[str, Any]) -> AgentInterface:
+        agent = super()._build_agent_from_data(data)
+        self.built_agent_ids.append(agent.id)
+        return agent
+
+
+class _LoadRecordingProvider(LocalProviderInstance):
+    """Local provider that always serves the same _LoadRecordingHost, so a test can read what it loaded."""
+
+    served_hosts: list[_LoadRecordingHost] = Field(default_factory=list)
+
+    def get_host(self, host: HostId | HostName) -> _LoadRecordingHost:
+        if not self.served_hosts:
+            self.served_hosts.append(_build_local_host(_LoadRecordingHost, self, LOCAL_HOST_NAME))
+        return self.served_hosts[0]
+
+
+def _create_host_with_targets_among_neighbors(
+    local_provider: LocalProviderInstance, work_dir: Path, target_count: int
+) -> list[AgentInterface]:
+    """Put ``target_count`` running agents on the local host among neighbors, some of an unregistered type.
+
+    Building an unregistered-type neighbor logs a "no longer registered" warning, which the
+    autouse warning check fails the test on: a send that loads more than its targets cannot pass.
+    """
+    running_type = f"running-{uuid4().hex}"
+    register_agent_class(running_type, _RunningAgent)
+    register_agent_config(running_type, AgentTypeConfig)
+    for _ in range(4):
+        create_test_agent(local_provider, work_dir, None, None, extra_data=None, agent_class=BaseAgent)
+    for _ in range(3):
+        create_test_agent(
+            local_provider,
+            work_dir,
+            None,
+            AgentTypeName(f"guest-{uuid4().hex}"),
+            extra_data=None,
+            agent_class=BaseAgent,
+            is_type_registered=False,
+        )
+    return [
+        create_test_agent(
+            local_provider, work_dir, None, AgentTypeName(running_type), extra_data=None, agent_class=_RunningAgent
+        )
+        for _ in range(target_count)
+    ]
+
+
+def _match_for(agent: AgentInterface, provider: BaseProviderInstance) -> AgentMatch:
+    return AgentMatch(
+        agent_id=agent.id,
+        agent_name=agent.name,
+        host_id=agent.host_id,
+        host_name=HostName(LOCAL_HOST_NAME),
+        provider_name=provider.name,
+    )
+
+
+def _message_matches_on_recording_host(
+    local_provider: LocalProviderInstance, matches: Sequence[AgentMatch], mngr_ctx: MngrContext
+) -> tuple[_LoadRecordingHost, MessageResult, list[tuple[AgentId, str]]]:
+    """Message ``matches`` on the local host through a load-recording copy of it.
+
+    Returns the recording host, the result, and each (agent id, payload) delivered.
+    """
+    provider = _LoadRecordingProvider(name=local_provider.name, host_dir=local_provider.host_dir, mngr_ctx=mngr_ctx)
+    delivered: list[tuple[AgentId, str]] = []
+    result = MessageResult()
+    _process_host_for_messaging(
+        matches=matches,
+        provider=provider,
+        message_content="hello",
+        deliver=lambda agent, payload: delivered.append((agent.id, payload)),
+        error_behavior=ErrorBehavior.CONTINUE,
+        is_start_desired=False,
+        result=result,
+        result_lock=Lock(),
+        parent_cg=mngr_ctx.concurrency_group,
+        on_success=None,
+        on_error=None,
+    )
+    return provider.served_hosts[0], result, delivered
+
+
+@pytest.mark.parametrize("target_count", [1, 2], ids=["one-target", "two-targets"])
+def test_messaging_loads_only_the_targeted_agents(
+    temp_work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+    target_count: int,
+) -> None:
+    """A send reads and builds only the agents it targets, never their neighbors on the host."""
+    targets = _create_host_with_targets_among_neighbors(local_provider, temp_work_dir, target_count)
+
+    host, result, delivered = _message_matches_on_recording_host(
+        local_provider, [_match_for(target, local_provider) for target in targets], temp_mngr_ctx
+    )
+
+    assert host.data_file_reads == [tuple(target.id for target in targets)]
+    assert host.built_agent_ids == [target.id for target in targets]
+    assert sorted(delivered) == sorted((target.id, "hello") for target in targets)
+    assert sorted(result.successful_agents) == sorted(str(target.name) for target in targets)
+    assert result.failed_agents == []
+
+
+def test_messaging_a_missing_agent_among_targets_fails_only_that_agent(
+    temp_work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A targeted agent with no data.json on the host fails as not found, while the others still get the message."""
+    (target,) = _create_host_with_targets_among_neighbors(local_provider, temp_work_dir, target_count=1)
+    (missing_match,) = _make_matches_on_host(local_provider, local_provider.host_id, LOCAL_HOST_NAME, ["gone"])
+
+    host, result, delivered = _message_matches_on_recording_host(
+        local_provider, [missing_match, _match_for(target, local_provider)], temp_mngr_ctx
+    )
+
+    assert host.data_file_reads == [(missing_match.agent_id, target.id)]
+    assert host.built_agent_ids == [target.id]
+    assert delivered == [(target.id, "hello")]
+    assert result.successful_agents == [str(target.name)]
+    assert result.failed_agents == [
+        ("gone", f"Agent {missing_match.agent_id} not found on host {local_provider.host_id}")
+    ]
 
 
 @pytest.mark.tmux

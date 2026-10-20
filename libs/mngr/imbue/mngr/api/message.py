@@ -29,6 +29,7 @@ from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.agent import require_key_chord_agent
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
@@ -250,7 +251,7 @@ def _process_host_for_messaging(
     on_success: Callable[[str], None] | None,
     on_error: Callable[[str, str], None] | None,
 ) -> None:
-    """Resolve a single host, look up its agents, and send messages concurrently.
+    """Resolve a single host, load the matched agents on it, and send messages concurrently.
 
     This function is run in a thread per host. Within it, per-agent sends are
     parallelized with a nested ConcurrencyGroupExecutor. A host that cannot be reached
@@ -261,8 +262,17 @@ def _process_host_for_messaging(
     host_id = matches[0].host_id
     try:
         host = _resolve_online_host(host_id, provider, is_start_desired=is_start_desired)
-        # Look up live agents on the host that correspond to our matches
-        live_agents = host.get_agents()
+        # Only the matched agents are loaded, so the host's other agents add nothing to a send
+        agent_refs = [
+            DiscoveredAgent(
+                host_id=match.host_id,
+                agent_id=match.agent_id,
+                agent_name=match.agent_name,
+                provider_name=match.provider_name,
+            )
+            for match in matches
+        ]
+        live_agent_by_id = {agent.id: agent for agent in host.load_agents_from_refs(agent_refs)}
     except MngrError as e:
         # No agent on this host was reached, so each of them is a delivery failure.
         # Recorded before the abort check, so an aborted run still reports which agents
@@ -278,7 +288,7 @@ def _process_host_for_messaging(
         agents_to_send: list[AgentInterface] = []
 
         for match in matches:
-            agent = next((a for a in live_agents if a.id == match.agent_id), None)
+            agent = live_agent_by_id.get(match.agent_id)
             if agent is None:
                 exception = AgentNotFoundOnHostError(match.agent_id, host_id)
                 _record_agent_failure(result, result_lock, str(match.agent_name), str(exception), on_error)

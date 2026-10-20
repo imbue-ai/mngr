@@ -1,0 +1,1 @@
+The discovery test's canned outer now recognizes the outer listing script by its label lookup rather than by its first line, which the script no longer opens with (it first inspects the container a previous listing found).

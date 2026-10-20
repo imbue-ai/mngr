@@ -53,6 +53,7 @@ from pydantic import SecretStr
 from pydantic import SkipValidation
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
@@ -134,6 +135,7 @@ from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import parse_imbue_cloud_build_args
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
@@ -516,6 +518,17 @@ def _advance_workspace_start(
             assert_never(unreachable)
 
 
+class _RememberedListing(FrozenModel):
+    """What a leased host's last successful outer listing found, for the next listing to build on."""
+
+    container_id: str | None = Field(description="The container the listing found, None when the box had none")
+    listing_fingerprint: str | None = Field(
+        description="The fingerprint of the records the listing was shaped from, None unless the container was running"
+    )
+    host_ref: DiscoveredHost = Field(description="The host as that listing shaped it")
+    agent_refs: tuple[DiscoveredAgent, ...] = Field(description="The agents as that listing shaped them")
+
+
 class _OuterListingSession(MutableModel):
     """One leased host's kept outer-SSH connection for discovery listings, run one listing at a time."""
 
@@ -572,6 +585,13 @@ class ImbueCloudProvider(BaseProviderInstance):
     # when its listing fails, its lease ends or moves, or the provider closes.
     _outer_listing_session_by_host_id: dict[HostId, _OuterListingSession] = PrivateAttr(default_factory=dict)
     _outer_listing_sessions_lock: Lock = PrivateAttr(default_factory=Lock)
+    # Each leased host's last successful listing: the container the next listing inspects
+    # first instead of looking it up by label, and the record fingerprint plus shaped
+    # result a re-read answers with when the container reports nothing changed. Not a
+    # per-cycle cache: ``reset_caches`` leaves it alone; an entry goes with its lease.
+    _remembered_listing_by_host_id: dict[HostId, _RememberedListing] = PrivateAttr(default_factory=dict)
+    # Guards ``_remembered_listing_by_host_id``, which the per-host listing threads write.
+    _remembered_listings_lock: Lock = PrivateAttr(default_factory=Lock)
     # What this instance last wrote to each per-host state file, so a listing that reads
     # the same answer every few seconds (the between-poll re-read) does not rewrite and
     # fsync it every time. Not a per-cycle cache: a host id is never reused, so a stale
@@ -971,6 +991,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         """
         lease_by_host_id = {HostId(lease.host_id): lease for lease in self._list_leased_hosts_cached()}
         self._drop_outer_listing_sessions_except(lease_by_host_id)
+        self._forget_remembered_listings_except(lease_by_host_id)
         leased_result = discover_hosts_within_per_host_timeout(
             provider_name=self.name,
             cg=cg,
@@ -1025,18 +1046,37 @@ class ImbueCloudProvider(BaseProviderInstance):
         ``HostConnectionError`` instead of answering with the host's cached agents, so
         the re-read emits nothing rather than a stale listing. The listing bounds its
         own SSH command, so ``timeout_seconds`` is unused.
+
+        The listing is handed the fingerprint of the records the host's last listing was
+        shaped from, and a container whose records still fingerprint the same answers
+        without listing them; the re-read then repeats the remembered listing, which is
+        what a full listing would have shaped, and leaves the raw listing the detail
+        reads consume as the last full listing (a full poll's, or a changed re-read's)
+        left it.
         """
         del timeout_seconds
         host_id = host_ref.host_id
         lease = self._find_leased_in_fetched_list(host_id)
         if lease is None:
             raise HostNotFoundError(self.name, host_id)
-        raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(lease)
+        remembered = self._remembered_listing_for(host_id)
+        raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(
+            lease,
+            known_container_id=remembered.container_id if remembered is not None else None,
+            unchanged_fingerprint=remembered.listing_fingerprint if remembered is not None else None,
+        )
         if raw is None:
             if is_auth_failure:
                 raise HostAuthenticationError(f"outer listing of host {host_id} failed: {outer_error}")
             raise HostConnectionError(f"outer listing of host {host_id} failed: {outer_error}")
-        listed_host_ref, agent_refs = self._shape_leased_host_listing(lease, raw)
+        if raw.get("is_listing_unchanged"):
+            if remembered is None:
+                raise ImbueCloudError(
+                    f"outer listing of host {host_id} reported its records unchanged, but no listing was remembered"
+                )
+            listed_host_ref, agent_refs = remembered.host_ref, list(remembered.agent_refs)
+        else:
+            listed_host_ref, agent_refs = self._shape_leased_host_listing(lease, raw)
         return BoundedHostRead(
             host=listed_host_ref,
             agents=tuple(agent_refs),
@@ -1062,6 +1102,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         """
         leased = self._list_leased_hosts_cached()
         self._drop_outer_listing_sessions_except(HostId(lease.host_id) for lease in leased)
+        self._forget_remembered_listings_except(HostId(lease.host_id) for lease in leased)
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
         # Each leased host needs its own outer-SSH round trip (connect + run the
         # listing script), so a sequential loop's wall time is the sum across every
@@ -1132,12 +1173,18 @@ class ImbueCloudProvider(BaseProviderInstance):
         """Run one leased host's outer-SSH listing and shape it into a discovery result.
 
         May run concurrently for several hosts: writes to the shared listing
-        cache take ``_listing_raw_cache_lock``, while the sticky-identity and
+        cache take ``_listing_raw_cache_lock`` and those to the remembered listings
+        ``_remembered_listings_lock``, while the sticky-identity and
         resolved-host-dir persistence calls need no lock since each writes a
         distinct per-host file. Every leased host is listed: a held lease is a
         live resource whatever its container is doing.
         """
-        raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(entry)
+        remembered = self._remembered_listing_for(HostId(entry.host_id))
+        raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(
+            entry,
+            known_container_id=remembered.container_id if remembered is not None else None,
+            unchanged_fingerprint=None,
+        )
         if raw is None:
             return self._shape_unreachable_leased_host(entry, outer_error, is_auth_failure)
         return self._shape_leased_host_listing(entry, raw)
@@ -1273,11 +1320,38 @@ class ImbueCloudProvider(BaseProviderInstance):
             )
             if is_cache_complete:
                 agent_refs = cached_agent_refs
+        remembered = _RememberedListing(
+            container_id=raw.get("container_id"),
+            listing_fingerprint=raw.get("listing_fingerprint"),
+            host_ref=host_ref,
+            agent_refs=tuple(agent_refs),
+        )
+        with self._remembered_listings_lock:
+            self._remembered_listing_by_host_id[host_id] = remembered
         return host_ref, agent_refs
+
+    def _remembered_listing_for(self, host_id: HostId) -> _RememberedListing | None:
+        with self._remembered_listings_lock:
+            return self._remembered_listing_by_host_id.get(host_id)
+
+    def _forget_remembered_listings_except(self, leased_host_ids: Iterable[HostId]) -> None:
+        """Forget the remembered listings of hosts that are no longer leased."""
+        kept_host_ids = set(leased_host_ids)
+        with self._remembered_listings_lock:
+            forgotten_host_ids = [
+                host_id for host_id in self._remembered_listing_by_host_id if host_id not in kept_host_ids
+            ]
+            for host_id in forgotten_host_ids:
+                del self._remembered_listing_by_host_id[host_id]
 
     def _collect_listing_raw_via_outer(
         self,
         lease: LeasedHostInfo,
+        # The container a previous listing found, inspected first in place of the label lookup
+        known_container_id: str | None,
+        # The record fingerprint a previous listing of that container reported; a container whose
+        # records still fingerprint the same answers ``is_listing_unchanged`` in place of a full listing
+        unchanged_fingerprint: str | None,
     ) -> tuple[dict[str, Any] | None, str | None, bool]:
         """Run the outer listing script over root SSH on the leased VPS.
 
@@ -1299,6 +1373,8 @@ class ImbueCloudProvider(BaseProviderInstance):
                     self.mngr_ctx.config.prefix,
                     window_name=self.mngr_ctx.config.tmux.primary_window_name,
                     fallback_host_dirs=self._fallback_host_dirs(),
+                    known_container_id=known_container_id,
+                    unchanged_fingerprint=unchanged_fingerprint,
                 )
                 result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
         except HostAuthenticationError as exc:

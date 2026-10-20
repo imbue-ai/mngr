@@ -133,6 +133,7 @@ def default_connect_cli_opts() -> ConnectCliOptions:
         disable_plugin=(),
         setting=(),
         agent=None,
+        agent_option=None,
         start=True,
         reconnect=True,
         session_command=None,
