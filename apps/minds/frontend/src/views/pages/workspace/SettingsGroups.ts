@@ -134,6 +134,19 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
   // for the value CHANGING to "1" because the param stays in the URL across
   // group switches and must not re-open a field the user closed.
   let lastOverrideParam: string | null | undefined;
+  // The app-wide values can change on another surface (app Settings, the
+  // auto-update offer) while this pane stays mounted; the updates frame says
+  // when, and the pane's copy is read again.
+  let lastSeenAppUpdateSettings: string | undefined;
+  function reloadAppSettingsWhenChangedElsewhere(): void {
+    const updates = getAppContext().stores.updates;
+    if (!updates.hasReceivedUpdates) return;
+    const seen = `${String(updates.isAutoUpdateEnabled)}|${updates.updateWindow}`;
+    if (lastSeenAppUpdateSettings !== undefined && seen !== lastSeenAppUpdateSettings) {
+      void local.appSettings.load();
+    }
+    lastSeenAppUpdateSettings = seen;
+  }
   function consumeOverrideParam(): void {
     const param = new URLSearchParams(
       (m.route.get() ?? "").split("?")[1] ?? "",
@@ -148,6 +161,7 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
     },
     view(vnode) {
       consumeOverrideParam();
+      reloadAppSettingsWhenChangedElsewhere();
       const { model, selectedGroup, onSelectGroup } = vnode.attrs;
       const data = model.data;
       if (data === null) return null;

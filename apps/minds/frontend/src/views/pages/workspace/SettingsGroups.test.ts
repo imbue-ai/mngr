@@ -1093,6 +1093,42 @@ describe("the Updates settings group's app-wide update settings", () => {
   });
 });
 
+describe("the Updates settings group's app-wide settings changed elsewhere", () => {
+  it("shows a flip made on another surface once the updates frame reports it", async () => {
+    let isEnabled = false;
+    const { draw, init } = harness((url) =>
+      Promise.resolve(
+        jsonResponse(
+          url === "/ui/api/settings"
+            ? settingsOverview({ is_auto_update_enabled: isEnabled })
+            : {},
+        ),
+      ),
+    );
+    init();
+    await settleDispatch();
+    const toggleState = (): unknown =>
+      attrsOf(
+        collectVnodes(draw(BACKED)).find(
+          (vnode) => attrsOf(vnode).id === "auto-update-toggle-workspace",
+        ) as AnyVnode,
+      )["aria-checked"];
+    expect(toggleState()).toBe("false");
+
+    isEnabled = true;
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: {},
+      update_window: "2:00 AM-5:00 AM",
+      is_auto_update_enabled: true,
+    });
+    draw(BACKED);
+    await settleDispatch();
+
+    expect(toggleState()).toBe("true");
+  });
+});
+
 describe("the Updates settings group under auto-update", () => {
   it("offers no schedule of its own, and a skip instead of a cancel for an armed machine", async () => {
     const { draw, requests } = harness();
