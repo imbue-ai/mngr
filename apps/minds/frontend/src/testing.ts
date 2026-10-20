@@ -8,6 +8,7 @@ import type {
   UiNotificationEntry,
   UiWorkspacesMessage,
 } from "./channel/messages";
+import type { BrowserImportResult } from "./models/browserImport";
 import type {
   ConnectionBackendOption,
   CreateFormDefaults,
@@ -172,17 +173,44 @@ export function sharedWorkspaceRow(
 
 /** The connection backends as the server tables them: three with a pinned region, Modal placed per create. */
 export const CONNECTION_BACKEND_OPTIONS: readonly ConnectionBackendOption[] = [
-  { name: "aws", label: "AWS", is_region_pinned: true, is_local_profile_supported: true },
-  { name: "gcp", label: "GCP", is_region_pinned: true, is_local_profile_supported: false },
-  { name: "azure", label: "Azure", is_region_pinned: true, is_local_profile_supported: true },
-  { name: "modal", label: "Modal", is_region_pinned: false, is_local_profile_supported: true },
+  {
+    name: "aws",
+    label: "AWS",
+    is_region_pinned: true,
+    is_local_profile_supported: true,
+  },
+  {
+    name: "gcp",
+    label: "GCP",
+    is_region_pinned: true,
+    is_local_profile_supported: false,
+  },
+  {
+    name: "azure",
+    label: "Azure",
+    is_region_pinned: true,
+    is_local_profile_supported: true,
+  },
+  {
+    name: "modal",
+    label: "Modal",
+    is_region_pinned: false,
+    is_local_profile_supported: true,
+  },
 ];
 
 /** A create-form defaults payload with accountEntry's account as the default and Imbue Cloud selected. */
-export function createFormDefaults(overrides: Partial<CreateFormDefaults> = {}): CreateFormDefaults {
+export function createFormDefaults(
+  overrides: Partial<CreateFormDefaults> = {},
+): CreateFormDefaults {
   return {
     accounts: [
-      { user_id: "user-1", email: "alice@example.com", state: "SIGNED_IN", is_connection_owner_eligible: true },
+      {
+        user_id: "user-1",
+        email: "alice@example.com",
+        state: "SIGNED_IN",
+        is_connection_owner_eligible: true,
+      },
     ],
     default_account_id: "user-1",
     launch_modes: ["IMBUE_CLOUD", "LIMA", "DOCKER"],
@@ -191,7 +219,9 @@ export function createFormDefaults(overrides: Partial<CreateFormDefaults> = {}):
     selected_docker_runtime: "RUNSC",
     backup_providers: ["IMBUE_CLOUD", "API_KEY", "CONFIGURE_LATER"],
     selected_backup_provider: "IMBUE_CLOUD",
-    region_options_by_launch_mode: { IMBUE_CLOUD: ["US-EAST-VA", "US-WEST-OR"] },
+    region_options_by_launch_mode: {
+      IMBUE_CLOUD: ["US-EAST-VA", "US-WEST-OR"],
+    },
     region_selected_by_launch_mode: { IMBUE_CLOUD: "US-WEST-OR" },
     instance_types_by_backend: {},
     default_instance_type_by_backend: {},
@@ -248,6 +278,21 @@ export function settingsOverview(
     update_window_start_hour: 2,
     update_window_end_hour: 5,
     ...overrides,
+  };
+}
+
+/** The `POST /ui/api/settings/browser-import` outcome of an import the OS
+ * refused: the Chrome profile is there, but could not be read. On a Mac
+ * (the default) the app lacks Full Disk Access; elsewhere it is a plain
+ * permission problem. */
+export function unreadableChromeProfileOutcome(
+  isFullDiskAccessNeeded = true,
+): BrowserImportResult {
+  return {
+    is_success: false,
+    detail: "The Google Chrome profile could not be read: EPERM.",
+    error_code: "CHROME_PROFILE_NOT_READABLE",
+    is_full_disk_access_needed: isFullDiskAccessNeeded,
   };
 }
 
@@ -443,4 +488,9 @@ export function withAttr(node: unknown, name: string): AnyVnode[] {
   return collectVnodes(node).filter(
     (vnode) => attrsOf(vnode)[name] !== undefined,
   );
+}
+
+/** The vnode with this `id`, from a tree or an already collected list. */
+export function byId(node: unknown, id: string): AnyVnode | undefined {
+  return collectVnodes(node).find((vnode) => attrsOf(vnode).id === id);
 }

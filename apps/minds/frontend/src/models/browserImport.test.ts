@@ -1,10 +1,15 @@
-import { describe, expect, it } from "vitest";
-import { jsonResponse } from "../testing";
+import { describe, expect, it, vi } from "vitest";
+import {
+  jsonResponse,
+  unreadableChromeProfileOutcome,
+  withMindsNative,
+} from "../testing";
 import {
   BROWSER_IMPORT_OFFERED_URL,
   BROWSER_IMPORT_URL,
   BrowserImportModel,
   isBrowserImportOfferDue,
+  isChromeProfileUnreadable,
   markBrowserImportOffered,
 } from "./browserImport";
 
@@ -64,13 +69,22 @@ describe("BrowserImportModel", () => {
     const run = model.run();
     expect(model.isBusy).toBe(true);
     expect(model.outcome).toBeNull();
-    resolveResponse(jsonResponse({ is_success: true, detail: "" }));
+    resolveResponse(
+      jsonResponse({
+        is_success: true,
+        detail: "",
+        error_code: null,
+        is_full_disk_access_needed: false,
+      }),
+    );
 
     await expect(run).resolves.toBe(true);
     expect(model.isBusy).toBe(false);
     expect(model.outcome).toEqual({
       is_success: true,
       detail: "",
+      error_code: null,
+      is_full_disk_access_needed: false,
     });
   });
 
@@ -87,6 +101,8 @@ describe("BrowserImportModel", () => {
     expect(refused.outcome).toEqual({
       is_success: false,
       detail: "Browser cookies are not configured on this desktop",
+      error_code: null,
+      is_full_disk_access_needed: false,
     });
 
     const offline = new BrowserImportModel(
@@ -110,5 +126,69 @@ describe("BrowserImportModel", () => {
     void model.run();
     await expect(model.run()).resolves.toBe(false);
     expect(callCount).toBe(1);
+  });
+
+  it("opens the Full Disk Access list through the desktop shell and notes when that did not work", async () => {
+    const openFullDiskAccessSettings = vi.fn(async () => false);
+    await withMindsNative(
+      { platform: "darwin", openFullDiskAccessSettings },
+      async () => {
+        const model = new BrowserImportModel(
+          async () => jsonResponse({}),
+          () => {},
+        );
+        await model.openFullDiskAccessSettings();
+        expect(openFullDiskAccessSettings).toHaveBeenCalledTimes(1);
+        expect(model.isFullDiskAccessSettingsOpenFailed).toBe(true);
+
+        openFullDiskAccessSettings.mockResolvedValueOnce(true);
+        await model.openFullDiskAccessSettings();
+        expect(model.isFullDiskAccessSettingsOpenFailed).toBe(false);
+      },
+    );
+  });
+
+  it("forgets a failed settings open when a new run starts", async () => {
+    const model = new BrowserImportModel(
+      async () =>
+        jsonResponse({
+          is_success: true,
+          detail: "",
+          error_code: null,
+          is_full_disk_access_needed: false,
+        }),
+      () => {},
+    );
+    model.isFullDiskAccessSettingsOpenFailed = true;
+    await model.run();
+    expect(model.isFullDiskAccessSettingsOpenFailed).toBe(false);
+  });
+});
+
+describe("isChromeProfileUnreadable", () => {
+  it("is exactly the failure latchkey codes as an unreadable Chrome profile, on any platform", () => {
+    expect(isChromeProfileUnreadable(unreadableChromeProfileOutcome())).toBe(
+      true,
+    );
+    expect(
+      isChromeProfileUnreadable(unreadableChromeProfileOutcome(false)),
+    ).toBe(true);
+    expect(
+      isChromeProfileUnreadable({
+        is_success: false,
+        detail: "Google Chrome is not installed.",
+        error_code: null,
+        is_full_disk_access_needed: false,
+      }),
+    ).toBe(false);
+    expect(
+      isChromeProfileUnreadable({
+        is_success: true,
+        detail: "",
+        error_code: null,
+        is_full_disk_access_needed: false,
+      }),
+    ).toBe(false);
+    expect(isChromeProfileUnreadable(null)).toBe(false);
   });
 });

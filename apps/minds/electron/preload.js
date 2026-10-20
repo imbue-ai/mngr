@@ -75,6 +75,9 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // Open the OS's own notification-settings pane (no app can force a
   // re-prompt once declined -- the reader has to flip it back on there).
   openNotificationSettings: () => ipcRenderer.invoke('open-notification-settings'),
+  // Open macOS's Full Disk Access list, which the browser-cookie import needs
+  // the app on (macOS 27 and later); resolves false where there is no such list.
+  openFullDiskAccessSettings: () => ipcRenderer.invoke('open-full-disk-access-settings'),
 
   // Bring the app back in front after an external-browser OAuth hop.
   bringAppToFront: () => ipcRenderer.send('bring-app-to-front'),

@@ -22,11 +22,14 @@ import type { AnyVnode } from "../../../testing";
 import {
   allText,
   attrsOf,
+  byId,
   classTokensOf,
   collectText,
   collectVnodes,
+  renderDeep,
   renderRoot,
   renderedText,
+  unreadableChromeProfileOutcome,
   withMindsNative,
 } from "../../../testing";
 
@@ -955,11 +958,32 @@ describe("the Browser cookies panel", () => {
 
   it("states what the last run came back with", () => {
     const succeeded = browserImportModel();
-    succeeded.browserImport.outcome = { is_success: true, detail: "" };
+    succeeded.browserImport.outcome = { is_success: true, detail: "", error_code: null, is_full_disk_access_needed: false };
     expect(panelText(succeeded)).toContain("Imported your Chrome cookies.");
 
     const failed = browserImportModel();
-    failed.browserImport.outcome = { is_success: false, detail: "Google Chrome is not installed." };
+    failed.browserImport.outcome = {
+      is_success: false,
+      detail: "Google Chrome is not installed.",
+      error_code: null, is_full_disk_access_needed: false,
+    };
     expect(panelText(failed)).toContain("Google Chrome is not installed.");
+  });
+
+  it("explains Full Disk Access, with a way to the list, when macOS refused the import", async () => {
+    const openFullDiskAccessSettings = vi.fn(async () => true);
+    await withMindsNative({ platform: "darwin", openFullDiskAccessSettings }, async () => {
+      const model = browserImportModel();
+      model.browserImport.outcome = unreadableChromeProfileOutcome();
+
+      // Rendered through: the notice is a component of its own, so a shallow
+      // render would show neither its text nor its button.
+      const nodes = collectVnodes(renderDeep(renderRoot(SettingsSections, { model })));
+      expect(allText(nodes)).toContain("Full Disk Access");
+      expect(allText(nodes)).not.toContain("EPERM");
+      const openButton = byId(nodes, "browser-import-open-full-disk-access");
+      (attrsOf(openButton!).onclick as () => void)();
+      expect(openFullDiskAccessSettings).toHaveBeenCalledTimes(1);
+    });
   });
 });

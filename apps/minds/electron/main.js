@@ -2828,19 +2828,12 @@ function handleNotification(event) {
 }
 
 
-// Open the OS's own notification-settings pane so the reader can flip the
-// permission back on themselves after declining it -- no app can force a
-// re-prompt once the OS has decided.
-// Deliberately opens the general pane rather than deep-linking to this app's
-// own row: on macOS, every locally-run unpackaged dev build shares one
-// "com.github.Electron" identity in the OS's eyes (Electron.app's own
-// Info.plist, regardless of which project's checkout is running), and a
-// packaged build's real bundle id isn't available to look up here anyway.
+// Open an OS settings URL, resolving to whether the OS took it.
 function openExternalBestEffort(url) {
   return shell.openExternal(url).then(
     () => true,
     (err) => {
-      console.warn('[notification] failed to open OS notification settings:', err && err.message);
+      console.warn('[os-settings] failed to open', url, err && err.message);
       return false;
     },
   );
@@ -2888,10 +2881,27 @@ async function openLinuxNotificationSettings() {
   return false;
 }
 
+// Open the OS's own notification-settings pane so the reader can flip the
+// permission back on themselves after declining it -- no app can force a
+// re-prompt once the OS has decided.
+// Deliberately opens the general pane rather than deep-linking to this app's
+// own row: on macOS, every locally-run unpackaged dev build shares one
+// "com.github.Electron" identity in the OS's eyes (Electron.app's own
+// Info.plist, regardless of which project's checkout is running), and a
+// packaged build's real bundle id isn't available to look up here anyway.
 ipcMain.handle('open-notification-settings', () => {
   if (isMac) return openExternalBestEffort('x-apple.systempreferences:com.apple.preference.notifications');
   if (process.platform === 'linux') return openLinuxNotificationSettings();
   return openExternalBestEffort('ms-settings:notifications');
+});
+
+// Open macOS's Full Disk Access list, where the user grants the app a look at
+// Google Chrome's profile data for the browser-cookie import. No API or
+// entitlement can ask for that permission: the user flips it by hand, and the
+// grant takes effect once the app is relaunched.
+ipcMain.handle('open-full-disk-access-settings', () => {
+  if (!isMac) return false;
+  return openExternalBestEffort('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
 });
 
 // Trust the forward proxy's CA-signed leaf certs for its loopback origins.

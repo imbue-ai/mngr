@@ -110,6 +110,10 @@ interface MindsNativeSurface {
    * re-prompt once permission is declined, so this is the escape hatch.
    * Resolves to whether it actually opened. */
   openNotificationSettings(): Promise<boolean>;
+  /** Open macOS's Full Disk Access list, which the browser-cookie import
+   * needs the app on. Optional: a preload from before the import lacks it.
+   * Resolves to whether it actually opened (false off macOS). */
+  openFullDiskAccessSettings?(): Promise<boolean>;
   bringAppToFront(): void;
   openWorkspaceInNewWindow(agentId: string): void;
   claimWorkspaceWindow?(
@@ -302,6 +306,15 @@ export const electronBridge = {
     const surface = native();
     if (surface === null) return false;
     return surface.openNotificationSettings();
+  },
+  /** Whether this chrome can open macOS's Full Disk Access list: the desktop
+   * app on a Mac, on a preload that knows how. */
+  get canOpenFullDiskAccessSettings(): boolean {
+    return this.isMacPlatform && native()?.openFullDiskAccessSettings !== undefined;
+  },
+  /** Resolves to whether the list actually opened. */
+  async openFullDiskAccessSettings(): Promise<boolean> {
+    return (await native()?.openFullDiskAccessSettings?.()) ?? false;
   },
   bringAppToFront(): void {
     native()?.bringAppToFront();

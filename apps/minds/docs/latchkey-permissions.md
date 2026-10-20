@@ -194,14 +194,38 @@ Imbue Studio offers it **once**, at the moment it is worth the most: the
 first Approve that is about to open a browser for a sign-in (nothing signed
 in to the service yet, the account picker on "Add account", or a custom
 service with a login URL). Before submitting the approval, the dialog asks
-"Want to skip logging in?" with two answers:
+"Import your Chrome cookies?", says the import is optional, and gives two
+answers, of which going on without the import is the prominent one -- the
+import copies every cookie Chrome holds, which is more than most sign-ins
+need, so it is for a user who wants it rather than the default:
 
+* **Skip import** (the primary button) goes straight on to
+  the sign-in. Clicking the backdrop instead approves nothing, leaving the
+  Approve button for a click that means it.
 * **Import from Chrome** runs the import, showing progress, and then goes on
   to the sign-in, whose browser window is now already logged in. A failed
-  import shows latchkey's reason and offers "Continue to sign in" (or a
-  retry); nothing has been approved yet either way.
-* **Not now** goes straight on to the sign-in. Clicking the backdrop instead
-  approves nothing, leaving the Approve button for a click that means it.
+  import shows why and offers "Continue to sign in" (or a retry); nothing
+  has been approved yet either way.
+
+On macOS 27 and later the OS lets no application without **Full Disk
+Access** read Chrome's profile, so the import is refused outright (an
+`EPERM` with no prompt) until the user grants that permission by hand; no
+API or entitlement can ask for it. Latchkey (>= 3.19) reports this as a
+coded failure (`CHROME_PROFILE_NOT_READABLE`, a JSON object on stderr),
+which the desktop client passes through as `error_code` on the import's
+result. Latchkey gives the same code to any OS that refuses the read (a
+plain file-permission problem gets it on Linux), so the desktop client,
+which runs where latchkey ran, also says whether Full Disk Access is the
+fix (`is_full_disk_access_needed`: that code, on macOS). Both the dialog
+and the Settings panel then show what to do instead of a bare error. On a
+Mac: open System Settings > Privacy & Security > Full Disk Access (an "Open
+System Settings" button opens that list directly in the desktop app), turn
+on Imbue Studio, then quit and reopen the app and run the import again from
+Settings. Elsewhere: make Chrome's profile folder readable by the account
+running the app (latchkey's sentence, which names the folder, is shown
+underneath), then run the import again from Settings. The dialog leaves out
+"Try again" in both cases, since nothing changes until the permission has
+been granted.
 
 Shown is what counts: the desktop client records the offer as made
 (`is_browser_import_offered` in `~/.minds/config.toml`) as soon as the
