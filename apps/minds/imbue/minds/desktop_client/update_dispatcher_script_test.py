@@ -425,6 +425,18 @@ def test_a_run_whose_chat_was_renamed_is_neither_closed_out_nor_counted_as_over(
     assert staged.chat_creates() == []
 
 
+def test_a_close_out_leaves_alone_a_record_a_new_lead_wrote_meanwhile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("run.json", {"chat_agent_name": "update-to-minds-v0-9-0-2", "started_at": _IN_WINDOW + 30})
+
+    program.close_out({**_OPEN_RUN, "verdict": None}, [_agent(_WORKER, "RUNNING")])
+
+    assert staged.tool_calls("update_self.py") == []
+    assert ["stop", _WORKER] not in staged.recorded_calls()
+
+
 @pytest.mark.witnesses("workspace-updates.idle-agent-reminded")
 def test_the_watchdog_reminds_an_idle_lead_through_its_chat_and_then_waits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType

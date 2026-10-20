@@ -1068,6 +1068,17 @@ def release_leases_of(lead):
 def close_out(run, agents):
     """End a run whose lead is gone: record STUCK, stop its worker keeping its branch, release its leases."""
     lead_name = str(run.get("chat_agent_name"))
+    # The listing can take minutes; a lead that recorded a new run meanwhile must keep its record.
+    current = read_json(RUN_PATH)
+    is_same_run = (
+        isinstance(current, dict)
+        and run_verdict(current) is None
+        and current.get("chat_agent_name") == run.get("chat_agent_name")
+        and run_started_at(current) == run_started_at(run)
+    )
+    if not is_same_run:
+        log("the run record changed while this tick listed the agents; leaving %s's close-out" % lead_name)
+        return
     lead = find_run_lead(agents, run) or {"name": lead_name}
     if not record_stuck_verdict(run, MESSAGE_PARTS["gone_lead_detail"]):
         return
