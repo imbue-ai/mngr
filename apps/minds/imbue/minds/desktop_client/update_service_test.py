@@ -99,7 +99,7 @@ def _build_service(
             mngr_caller=caller,
             concurrency_group=concurrency_group,
             read_supported_version=lambda: _CEILING,
-            read_update_facts=lambda agent_id: None,
+            read_update_facts=lambda agent_id, is_sign_in_checked: None,
             read_auto_update_policy=lambda agent_id: AutoUpdatePolicy(is_enabled=False, skipped_target_ref=""),
             arm_for_auto_update=lambda agent_id: None,
         ),

@@ -20,6 +20,7 @@ from imbue.minds.desktop_client.update_status import UpdateArmOutcome
 from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceSettings
 from imbue.minds.desktop_client.update_workspace_command import build_arm_arguments
 from imbue.minds.desktop_client.update_workspace_command import build_now_arguments
+from imbue.minds.desktop_client.update_workspace_command import build_read_arguments
 from imbue.minds.desktop_client.update_workspace_command import build_update_workspace_command
 from imbue.minds.desktop_client.update_workspace_command import parse_update_command_result
 from imbue.minds.desktop_client.update_workspace_command import parse_update_workspace_facts
@@ -329,7 +330,7 @@ def test_reading_an_armed_schedule_refreshes_the_apps_fields_and_keeps_the_dispa
         is_backup_configured=False,
     )
 
-    answer = _run_mode(program, staged, "read", build_arm_arguments(moved, "")[:-2], capsys)
+    answer = _run_mode(program, staged, "read", build_read_arguments(moved, is_sign_in_checked=False), capsys)
 
     facts = parse_update_workspace_facts(answer)
     assert facts.schedule is not None
@@ -351,11 +352,25 @@ def test_reading_a_workspace_with_nothing_armed_writes_nothing(
     staged = stage_update_workspace(tmp_path, monkeypatch)
     program = load_update_workspace_program(tmp_path)
 
-    answer = _run_mode(program, staged, "read", build_arm_arguments(_SETTINGS, "")[:-2], capsys)
+    answer = _run_mode(program, staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=False), capsys)
 
     facts = parse_update_workspace_facts(answer)
     assert (facts.schedule, facts.run_status, facts.last_dispatch) == (None, None, None)
     assert not (staged.root / "data" / ".state" / "update-apply").exists()
+
+
+@pytest.mark.parametrize("is_signed_in", [True, False])
+def test_a_read_asked_about_the_account_says_whether_one_is_signed_in_with_nothing_armed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], is_signed_in: bool
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch, is_signed_in=is_signed_in)
+    program = load_update_workspace_program(tmp_path)
+
+    asked = _run_mode(program, staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=True), capsys)
+    unasked = _run_mode(program, staged, "read", build_read_arguments(_SETTINGS, is_sign_in_checked=False), capsys)
+
+    assert parse_update_workspace_facts(asked).is_signed_in is is_signed_in
+    assert parse_update_workspace_facts(unasked).is_signed_in is None
 
 
 def test_cancelling_deletes_the_schedule_and_says_whether_one_was_there(

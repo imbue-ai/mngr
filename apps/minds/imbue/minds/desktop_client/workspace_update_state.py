@@ -393,19 +393,18 @@ class WorkspaceUpdateStateStore(MutableModel):
         """Store what the workspace's schedule file and last dispatch said; None clears a workspace with neither.
 
         A workspace that could not be read (stopped) is recorded with neither: it has no cron to
-        run a schedule, so nothing is shown as scheduled there.
+        run a schedule, so nothing is shown as scheduled there. A read that found an account
+        signed in ends a sign-in refusal the last Schedule or Update now met.
         """
         facts = _ScheduleFacts(record=schedule, last_dispatch=last_dispatch, is_signed_in=is_signed_in)
         aid_str = str(agent_id)
         with self._lock:
             is_changed = self._schedule_by_agent.get(aid_str, _ScheduleFacts()) != facts
             self._schedule_by_agent[aid_str] = facts
-            if is_changed and schedule is not None and is_signed_in is True:
-                run = self._run_by_agent.get(aid_str)
-                if run is not None and run.is_sign_in_refused:
-                    self._run_by_agent[aid_str] = run.model_copy_update(
-                        to_update(run.field_ref().is_sign_in_refused, False)
-                    )
+            run = self._run_by_agent.get(aid_str)
+            if is_signed_in is True and run is not None and run.is_sign_in_refused:
+                self._run_by_agent[aid_str] = run.model_copy_update(to_update(run.field_ref().is_sign_in_refused, False))
+                is_changed = True
         if is_changed:
             self._fire_on_change()
 
@@ -818,12 +817,13 @@ class WorkspaceUpdateDetector(MutableModel):
     read_supported_version: Callable[[], str] = Field(
         frozen=True, description="The app's template ceiling (``default_workspace_template_ref``)"
     )
-    read_update_facts: Callable[[AgentId], UpdateWorkspaceFacts | None] = Field(
+    read_update_facts: Callable[[AgentId, bool], UpdateWorkspaceFacts | None] = Field(
         frozen=True,
         description="Runs the workspace's update command in its read mode: the run record, the schedule file "
-        "(refreshed on the way with the app's current ceiling, window and zone), and the last dispatch. How a "
-        "run the app did not dispatch -- scheduled, launched by hand, or finished while the app was closed -- "
-        "reaches the row. None when the workspace did not answer.",
+        "(refreshed on the way with the app's current ceiling, window and zone), and the last dispatch, plus "
+        "whether an account is signed in when the second argument asks. How a run the app did not dispatch -- "
+        "scheduled, launched by hand, or finished while the app was closed -- reaches the row. None when the "
+        "workspace did not answer.",
     )
     read_auto_update_policy: Callable[[AgentId], AutoUpdatePolicy] = Field(
         frozen=True, description="The app-wide auto-update setting and this workspace's skipped release"
@@ -956,7 +956,8 @@ class WorkspaceUpdateDetector(MutableModel):
         if not is_workspace_readable(host_state):
             self.store.record_schedule(agent_id, schedule=None, last_dispatch=None, is_signed_in=None)
             return
-        facts = self.read_update_facts(agent_id)
+        # A row that says it needs a sign-in asks whether one has landed since, so it can stop saying so.
+        facts = self.read_update_facts(agent_id, self.store.get(agent_id).needs_sign_in)
         if facts is None:
             return
         if facts.run_status is not None:

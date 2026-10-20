@@ -213,10 +213,10 @@ class UpdateSettingsSource(MutableModel):
 
 
 def read_workspace_update_facts(
-    mngr_caller: MngrCaller, workspace_address: str, settings: UpdateWorkspaceSettings
+    mngr_caller: MngrCaller, workspace_address: str, settings: UpdateWorkspaceSettings, *, is_sign_in_checked: bool
 ) -> UpdateWorkspaceFacts | None:
     """The detection sweep's one read of a workspace's updates; None when it did not answer."""
-    call = read_update_facts(mngr_caller, workspace_address, settings)
+    call = read_update_facts(mngr_caller, workspace_address, settings, is_sign_in_checked=is_sign_in_checked)
     if call.reach is not UpdateCommandReach.ANSWERED or call.payload is None:
         return None
     return parse_update_workspace_facts(call.payload)

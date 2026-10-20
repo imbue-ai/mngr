@@ -2461,8 +2461,11 @@ def _build_workspace_update_service(
         mngr_caller=mngr_caller,
         concurrency_group=root_concurrency_group,
         read_supported_version=default_workspace_template_ref,
-        read_update_facts=lambda agent_id: read_workspace_update_facts(
-            mngr_caller, build_agent_address(agent_id, backend_resolver), settings_source.settings_for(agent_id)
+        read_update_facts=lambda agent_id, is_sign_in_checked: read_workspace_update_facts(
+            mngr_caller,
+            build_agent_address(agent_id, backend_resolver),
+            settings_source.settings_for(agent_id),
+            is_sign_in_checked=is_sign_in_checked,
         ),
         read_auto_update_policy=lambda agent_id: _read_auto_update_policy(minds_config, agent_id),
         arm_for_auto_update=lambda agent_id: _arm_for_auto_update(app, agent_id),

@@ -12,7 +12,8 @@ prints one marker-wrapped JSON answer:
   the auto-open label and return once its create has finished;
 - ``cancel``: delete the schedule file;
 - ``read``: the schedule file, the run record and the last dispatch, the detection sweep's one
-  read; given the app's current values, an armed file is first refreshed with them;
+  read; given the app's current values, an armed file is first refreshed with them, and asked,
+  it says whether an account is signed in;
 - ``tick``: the dispatcher's own minute, run by cron from the installed copy.
 
 A program run by ``arm``, ``now`` or a refreshing ``read`` copies itself into the workspace, so
@@ -54,6 +55,9 @@ _ARM_MODE: Final[str] = "arm"
 _NOW_MODE: Final[str] = "now"
 _CANCEL_MODE: Final[str] = "cancel"
 _READ_MODE: Final[str] = "read"
+
+# Asks ``read`` whether an account is signed in; the program reads it under the same name.
+_CHECK_SIGN_IN_FLAG: Final[str] = "--check-sign-in"
 
 # ``now`` waits for the chat app to finish the create (its own ceiling is 300s), after a listing
 # of the workspace's agents; ``arm`` may ask an old template's account resolver under ``uv run``.
@@ -117,8 +121,8 @@ class UpdateWorkspaceFacts(FrozenModel):
     run_status: UpdateRunStatus | None = Field(description="The latest run's record; None when there is none")
     last_dispatch: UpdateLastDispatch | None = Field(description="The update chat the program last created")
     is_signed_in: bool | None = Field(
-        description="Whether an account is signed in, asked only when the schedule's skip says it was not; "
-        "None when not asked"
+        description="Whether an account is signed in, asked only when the app's row or the schedule's skip says "
+        "it was not; None when not asked"
     )
 
 
@@ -155,6 +159,10 @@ def _settings_arguments(settings: UpdateWorkspaceSettings) -> list[str]:
 
 def build_arm_arguments(settings: UpdateWorkspaceSettings, override_ref: str) -> list[str]:
     return [*_settings_arguments(settings), "--override", override_ref]
+
+
+def build_read_arguments(settings: UpdateWorkspaceSettings, *, is_sign_in_checked: bool) -> list[str]:
+    return [*_settings_arguments(settings), *([_CHECK_SIGN_IN_FLAG] if is_sign_in_checked else [])]
 
 
 def build_now_arguments(settings: UpdateWorkspaceSettings, override_ref: str) -> list[str]:
@@ -262,11 +270,18 @@ def cancel_update_schedule(mngr_caller: MngrCaller, workspace_address: str) -> U
 
 
 def read_update_facts(
-    mngr_caller: MngrCaller, workspace_address: str, settings: UpdateWorkspaceSettings
+    mngr_caller: MngrCaller, workspace_address: str, settings: UpdateWorkspaceSettings, *, is_sign_in_checked: bool
 ) -> UpdateCommandCall:
-    """The sweep's read; an armed schedule is refreshed with ``settings`` on the way."""
+    """The sweep's read; an armed schedule is refreshed with ``settings`` on the way.
+
+    ``is_sign_in_checked`` asks whether an account is signed in, for a row a refusal says has none.
+    """
     return run_update_workspace_command(
-        mngr_caller, workspace_address, _READ_MODE, _settings_arguments(settings), _READ_TIMEOUT_SECONDS
+        mngr_caller,
+        workspace_address,
+        _READ_MODE,
+        build_read_arguments(settings, is_sign_in_checked=is_sign_in_checked),
+        _READ_TIMEOUT_SECONDS,
     )
 
 
@@ -420,7 +435,8 @@ def mode_cancel(context):
 
 def mode_read(context):
     """The schedule, the run record and the last dispatch in one answer; with app fields given, an armed
-    schedule is first rewritten with them and the dispatcher brought current."""
+    schedule is first rewritten with them and the dispatcher brought current. Whether an account is signed
+    in rides along when the app asks, or the schedule's skip says none was."""
     schedule = read_json(SCHEDULE_PATH)
     if schedule is not None and _arg(context, "--ceiling"):
         fields = _app_fields(context)
@@ -430,10 +446,11 @@ def mode_read(context):
         install_dispatcher(context)
         install_cron_entry(context)
     is_signed_in = None
-    if schedule is not None and SKIP_NEEDS_SIGN_IN in (
+    is_skipped_for_sign_in = schedule is not None and SKIP_NEEDS_SIGN_IN in (
         schedule.get("pending_skip_reason"),
         schedule.get("last_skip_reason"),
-    ):
+    )
+    if "--check-sign-in" in context["argv"] or is_skipped_for_sign_in:
         is_signed_in = resolve_account()[0]
     emit(
         {

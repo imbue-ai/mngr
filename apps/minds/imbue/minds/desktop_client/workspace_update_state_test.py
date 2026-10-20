@@ -415,7 +415,7 @@ def _detector(
     *,
     store: WorkspaceUpdateStateStore | None = None,
     interval_seconds: float = 300.0,
-    read_update_facts: Callable[[AgentId], UpdateWorkspaceFacts | None] | None = None,
+    read_update_facts: Callable[[AgentId, bool], UpdateWorkspaceFacts | None] | None = None,
     auto_update_policy: AutoUpdatePolicy | None = None,
     armed: list[AgentId] | None = None,
 ) -> WorkspaceUpdateDetector:
@@ -427,7 +427,9 @@ def _detector(
         concurrency_group=concurrency_group,
         read_supported_version=lambda: "minds-v0.4.1",
         interval_seconds=interval_seconds,
-        read_update_facts=read_update_facts if read_update_facts is not None else lambda _agent_id: None,
+        read_update_facts=(
+            read_update_facts if read_update_facts is not None else lambda _agent_id, _is_sign_in_checked: None
+        ),
         read_auto_update_policy=lambda _agent_id: (
             auto_update_policy
             if auto_update_policy is not None
@@ -1018,7 +1020,7 @@ def test_the_sweep_reads_reachable_rows_and_leaves_an_in_flight_rows_record_to_t
     caller = _VersionReadingMngrCaller()
     read_ids: list[str] = []
 
-    def read_update_facts(agent_id: AgentId) -> UpdateWorkspaceFacts | None:
+    def read_update_facts(agent_id: AgentId, is_sign_in_checked: bool) -> UpdateWorkspaceFacts | None:
         read_ids.append(str(agent_id))
         return UpdateWorkspaceFacts(
             schedule=None, run_status=_run_record(verdict=UpdateVerdict.UPDATED), last_dispatch=None, is_signed_in=None
@@ -1156,6 +1158,30 @@ def test_a_refused_arm_reads_as_needing_sign_in_until_an_arm_lands(tmp_path: Pat
     assert state.is_scheduled is True
 
 
+@pytest.mark.witnesses("workspace-updates.needs-sign-in", partial="the row clearing on a read, with nothing armed")
+def test_a_refused_start_stops_needing_sign_in_once_a_read_finds_an_account(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """With nothing armed to re-arm, only the sweep's read can tell the row an account has landed."""
+    agent_id = AgentId.generate()
+    resolver = _WorkspacesResolver(url_by_agent_and_service={}, host_state_by_agent={agent_id: HostState.RUNNING})
+    asked: list[bool] = []
+
+    def read_update_facts(_agent_id: AgentId, is_sign_in_checked: bool) -> UpdateWorkspaceFacts:
+        asked.append(is_sign_in_checked)
+        return UpdateWorkspaceFacts(schedule=None, run_status=None, last_dispatch=None, is_signed_in=True)
+
+    detector = _detector(
+        tmp_path, resolver, _VersionReadingMngrCaller(), root_concurrency_group, read_update_facts=read_update_facts
+    )
+    detector.store.record_sign_in_refusal(agent_id, is_refused=True)
+
+    detector.run_pass()
+
+    assert asked == [True]
+    assert detector.store.get(agent_id).needs_sign_in is False
+
+
 def test_a_scheduled_runs_start_kind_and_chat_come_from_its_dispatch_when_its_record_predates_them(
     tmp_path: Path,
 ) -> None:
@@ -1268,7 +1294,7 @@ def test_the_sweep_arms_a_behind_workspace_under_auto_update_and_shows_a_stopped
         caller,
         root_concurrency_group,
         store=store,
-        read_update_facts=lambda _agent_id: UpdateWorkspaceFacts(
+        read_update_facts=lambda _agent_id, _is_sign_in_checked: UpdateWorkspaceFacts(
             schedule=None, run_status=None, last_dispatch=None, is_signed_in=None
         ),
         auto_update_policy=_ENABLED,
