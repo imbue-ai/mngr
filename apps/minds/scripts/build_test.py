@@ -56,7 +56,6 @@ from imbue.mngr_vps.host_setup import PINNED_GVISOR_RELEASE
 WORKSPACE_PACKAGES = [
     "minds",
     "imbue-mngr",
-    "imbue-mngr-autocompact",
     "imbue-mngr-aws",
     "imbue-mngr-azure",
     "imbue-mngr-claude",
