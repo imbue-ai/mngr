@@ -6,10 +6,10 @@
 **Synopsis:**
 
 ```text
-mngr capture [AGENT] [--full] [--window WINDOW] [--start/--no-start]
+mngr capture [AGENTS...] [--full] [--window WINDOW] [--start/--no-start]
 ```
 
-Capture and display an agent's tmux pane content.
+Capture and display one or more agents' tmux pane content.
 
 Captures the current tmux pane content for the specified agent and
 prints it to stdout. Useful for debugging agent state without connecting
@@ -23,14 +23,24 @@ different tmux window in the agent's session, by index (e.g. 1) or name.
 
 If no agent is specified and running interactively, shows a selector.
 
+Several agents can be captured in one call, which resolves all of them in a
+single discovery pass. A target that fails (one that does not exist, or a
+stopped agent under --no-start) reports its own error and the rest are still
+captured; the exit code is 1 if any target failed. With more than one target,
+human output puts a '==> NAME <==' header before each agent's pane, and
+--format json/jsonl emits one record per target with the fields target,
+agent_id, name, error and content (json as an array, jsonl one record per
+line, each written as soon as that target is done). A single target's output
+is unchanged.
+
 **Usage:**
 
 ```text
-mngr capture [OPTIONS] [AGENT]
+mngr capture [OPTIONS] [AGENTS]...
 ```
 ## Arguments
 
-- `AGENT`: The agent (optional)
+- `AGENTS`: Name(s), ID(s), or address(es) of the agent(s) to capture
 
 **Options:**
 
@@ -62,6 +72,7 @@ mngr capture [OPTIONS] [AGENT]
 
 - [mngr connect](../primary/connect.md) - Connect to an agent interactively
 - [mngr exec](../primary/exec.md) - Execute a shell command on an agent's host
+- [mngr help multi_target](../generic/multi_target.md) - Behavior when targeting multiple agents
 
 ## Examples
 
@@ -87,4 +98,10 @@ $ mngr capture my-agent --window 1
 
 ```bash
 $ mngr capture my-agent --no-start
+```
+
+**Capture several agents as JSONL**
+
+```bash
+$ mngr capture agent-1 agent-2 --full --no-start --format jsonl
 ```

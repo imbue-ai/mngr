@@ -15,9 +15,12 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import DiscoveryOutcome
 from imbue.mngr.api.discover import discover_by_address
+from imbue.mngr.api.discover import discover_by_addresses
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import discover_pinned_hosts
+from imbue.mngr.api.discover import filter_discovery_outcome_to_address_host
 from imbue.mngr.api.discover import pinned_hosts_for_addresses
+from imbue.mngr.api.discover import required_provider_names_for_addresses
 from imbue.mngr.api.discovery_events import ResolvedAgentHost
 from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
@@ -29,6 +32,7 @@ from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStateInconsistencyError
 from imbue.mngr.errors import HostNameNotFoundError
 from imbue.mngr.errors import LockNotHeldError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoMatchingHostsError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import UserInputError
@@ -693,26 +697,6 @@ def _address_matches_agent_match(address: AgentAddress, match: AgentMatch) -> bo
     return address.host.matches_host(match.host_id, match.host_name, match.provider_name)
 
 
-@pure
-def _collect_required_provider_names(
-    addresses: Sequence[AgentAddress],
-) -> tuple[ProviderInstanceName, ...] | None:
-    """Return the set of provider names a discovery call can be restricted to.
-
-    If every address has a provider set, returns the deduped tuple. If any
-    address omits the provider, returns ``None`` (meaning: all providers must
-    be queried).
-    """
-    providers: set[ProviderInstanceName] = set()
-    for addr in addresses:
-        if addr.host is None or addr.host.provider is None:
-            return None
-        providers.add(addr.host.provider)
-    if not providers:
-        return None
-    return tuple(sorted(providers))
-
-
 def find_all_agents(
     addresses: Sequence[AgentAddress],
     filter_all: bool,
@@ -730,7 +714,7 @@ def find_all_agents(
     components are post-filtered to keep only matches on a satisfying host.
     """
     agent_identifiers = [addr.agent for addr in addresses]
-    provider_filter = _collect_required_provider_names(addresses)
+    provider_filter = required_provider_names_for_addresses(addresses)
     provider_names = tuple(str(p) for p in provider_filter) if provider_filter is not None else None
     pinned_hosts = None if filter_all or include_destroyed else pinned_hosts_for_addresses(addresses)
 
@@ -828,6 +812,16 @@ def find_one_agent_and_agents_by_host(
     :class:`AgentNotFoundError` for a name, naming the pinned host.
     """
     outcome = discover_by_address(address, mngr_ctx, include_destroyed=False)
+    host_ref, agent_ref = _match_one_agent_in_outcome(address, outcome)
+    return host_ref, agent_ref, outcome.agents_by_host
+
+
+def _match_one_agent_in_outcome(
+    address: AgentAddress,
+    # Discovery already narrowed to the address's host constraint
+    outcome: DiscoveryOutcome,
+) -> tuple[DiscoveredHost, DiscoveredAgent]:
+    """Match an address against a discovery outcome, failing the way :func:`find_one_agent_and_agents_by_host` does."""
     agents_by_host = outcome.agents_by_host
     pinned_hosts = pinned_hosts_for_addresses((address,))
     is_unmatched = not _filter_all_agents(address.agent, agents_by_host)
@@ -846,8 +840,50 @@ def find_one_agent_and_agents_by_host(
     if pinned_hosts is not None and is_unmatched:
         _raise_for_unmatched_identifiers((address.agent,), outcome, pinned_hosts)
 
-    host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
-    return host_ref, agent_ref, agents_by_host
+    return filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
+
+
+class ResolvedAgentAddress(FrozenModel):
+    """An address from a batched lookup, with the agent it named."""
+
+    address: AgentAddress = Field(description="The address as it was looked up")
+    host_ref: DiscoveredHost = Field(description="The host the agent was discovered on")
+    agent_ref: DiscoveredAgent = Field(description="The agent the address named")
+
+
+class UnresolvedAgentAddress(FrozenModel):
+    """An address from a batched lookup that named no single agent, with the reason."""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    address: AgentAddress = Field(description="The address as it was looked up")
+    error: MngrError = Field(description="Why the address named no agent, as a single-address lookup raises it")
+
+
+def find_each_agent_by_address(
+    addresses: Sequence[AgentAddress],
+    mngr_ctx: MngrContext,
+) -> list[ResolvedAgentAddress | UnresolvedAgentAddress]:
+    """Resolve each address to one agent against a single discovery pass, in the given order.
+
+    Each address resolves exactly as :func:`find_one_agent` would resolve it
+    alone, but an address that does not resolve is reported in its own entry
+    rather than raised, so one bad address does not cost the others theirs.
+    Discovery itself failing still raises.
+    """
+    outcome = discover_by_addresses(addresses, mngr_ctx, include_destroyed=False, reset_caches=False)
+    resolutions: list[ResolvedAgentAddress | UnresolvedAgentAddress] = []
+    for address in addresses:
+        try:
+            host_ref, agent_ref = _match_one_agent_in_outcome(
+                address, filter_discovery_outcome_to_address_host(outcome, address)
+            )
+        except MngrError as e:
+            logger.debug("Address {} resolved to no agent: {}", address, e)
+            resolutions.append(UnresolvedAgentAddress(address=address, error=e))
+            continue
+        resolutions.append(ResolvedAgentAddress(address=address, host_ref=host_ref, agent_ref=agent_ref))
+    return resolutions
 
 
 def find_one_agent(

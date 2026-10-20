@@ -6,10 +6,10 @@
 **Synopsis:**
 
 ```text
-mngr transcript TARGET [--preserved|--preserved-only] [--role ROLE] [--tail N] [--head N] [--full] [--format human|json|jsonl|atif] [--output PATH]
+mngr transcript TARGETS... [--preserved|--preserved-only] [--role ROLE] [--tail N] [--head N] [--full] [--format human|json|jsonl|atif] [--output PATH]
 ```
 
-View the message transcript for an agent.
+View the message transcript for one or more agents.
 
 View the common transcript for an agent. The transcript contains
 user turns, agent turns, and tool results in a common, agent-agnostic format.
@@ -43,14 +43,26 @@ Use --format to control output:
     stream (Agent Trajectory Interchange Format; embeds resolvable
     subagent trajectories). Use --output PATH to write it to a file.
 
+Several agents can be read in one call, which resolves all of them in a
+single discovery pass; --role, --head, --tail and --preserved apply to each
+target on its own. A target that fails (one that does not exist, or an agent
+type without transcripts) reports its own error and the rest are still read;
+the exit code is 1 if any target failed. With more than one target, human
+output puts a '==> NAME <==' header before each agent's events, and
+--format json/jsonl emits one record per target with the fields target,
+agent_id, name, error and events (the stream's records, unmodified): json as
+an array, jsonl one record per line, each written as soon as that target is
+done. --format atif and --output take a single target. A single target's
+output is unchanged.
+
 **Usage:**
 
 ```text
-mngr transcript [OPTIONS] TARGET
+mngr transcript [OPTIONS] TARGETS...
 ```
 ## Arguments
 
-- `TARGET`: Agent name or ID whose transcript to view
+- `TARGETS`: Name(s) or ID(s) of the agent(s) whose transcripts to view
 
 **Options:**
 
@@ -91,6 +103,7 @@ mngr transcript [OPTIONS] TARGET
 
 - [mngr event](./event.md) - View all events from an agent or host
 - [mngr message](./message.md) - Send a message to an agent
+- [mngr help multi_target](../generic/multi_target.md) - Behavior when targeting multiple agents
 
 ## Examples
 
@@ -134,6 +147,12 @@ $ mngr transcript my-agent --format json
 
 ```bash
 $ mngr transcript my-agent --format atif
+```
+
+**Read several agents as JSONL**
+
+```bash
+$ mngr transcript agent-1 agent-2 --format jsonl
 ```
 
 **Include a destroyed agent**

@@ -43,6 +43,8 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentOrHostAddress
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
@@ -234,6 +236,15 @@ def _resolve_agent_events_target(address: AgentAddress, mngr_ctx: MngrContext) -
             return direct_target
         logger.debug("The host of {} is not readable by its ids; resolving it through discovery", address)
     host_ref, agent_ref = find_one_agent(address, mngr_ctx)
+    return build_events_target_for_discovered_agent(host_ref, agent_ref, mngr_ctx)
+
+
+def build_events_target_for_discovered_agent(
+    host_ref: DiscoveredHost,
+    agent_ref: DiscoveredAgent,
+    mngr_ctx: MngrContext,
+) -> EventsTarget:
+    """Build the ``EventsTarget`` for an already-discovered agent, raising MngrError when its host is unreadable."""
     with log_span("Getting events access for agent {}", agent_ref.agent_name):
         target = try_build_events_target_for_agent(
             mngr_ctx=mngr_ctx,

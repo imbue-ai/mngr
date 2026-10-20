@@ -97,7 +97,7 @@ def _make_transcript_opts(
         log_commands=None,
         plugin=(),
         disable_plugin=(),
-        target=target,
+        targets=(target,),
         role=role,
         tail=tail,
         head=head,
@@ -108,14 +108,12 @@ def _make_transcript_opts(
     )
 
 
-# =============================================================================
 # TranscriptCliOptions tests
-# =============================================================================
 
 
 def test_transcript_cli_options_can_be_constructed() -> None:
     opts = _make_transcript_opts()
-    assert opts.target == AgentAddress(agent=AgentName("my-agent"))
+    assert opts.targets == (AgentAddress(agent=AgentName("my-agent")),)
     assert opts.role == ()
     assert opts.tail is None
     assert opts.head is None
@@ -136,9 +134,7 @@ def test_transcript_cli_options_with_head() -> None:
     assert opts.head == 5
 
 
-# =============================================================================
 # _get_event_role tests
-# =============================================================================
 
 
 def test_get_event_role_maps_atif_records() -> None:
@@ -157,9 +153,7 @@ def test_get_event_role_returns_none_for_empty_event() -> None:
     assert _get_event_role({}) is None
 
 
-# =============================================================================
 # _parse_transcript_events tests
-# =============================================================================
 
 
 def _parse_events(content: str, roles: tuple[str, ...] = ()) -> list[dict[str, Any]]:
@@ -269,9 +263,7 @@ def test_parse_transcript_events_rejects_an_old_format_stream_even_when_filterin
         _parse_events(content, roles=("agent",))
 
 
-# =============================================================================
 # CLI validation tests
-# =============================================================================
 
 
 def test_transcript_cli_rejects_head_and_tail_together(
@@ -287,9 +279,7 @@ def test_transcript_cli_rejects_head_and_tail_together(
     assert "Cannot specify both --head and --tail" in result.output
 
 
-# =============================================================================
 # Integration tests with real agent data
-# =============================================================================
 
 
 def test_transcript_cli_reads_and_displays_human_format(
@@ -952,9 +942,7 @@ def test_transcript_cli_blocks_unresolvable_agent_type(
     assert "definitely-unregistered-type" in result.output
 
 
-# =============================================================================
 # --format atif (doc-builder) tests
-# =============================================================================
 
 
 def test_transcript_cli_builds_atif_document(
@@ -1654,9 +1642,7 @@ def test_transcript_cli_atif_embeds_a_grandchild_recursively(
     assert len(embedded_grandchild.steps) == 2
 
 
-# =============================================================================
 # _format_event_human tests
-# =============================================================================
 
 
 def test_format_atif_agent_step_shows_message_thinking_and_tool_calls() -> None:
@@ -1950,3 +1936,187 @@ def test_transcript_cli_filters_atif_stream_by_each_role(
     assert _types_and_sources("user") == [("step", "user")]
     assert _types_and_sources("system") == [("step", "system")]
     assert _types_and_sources("tool") == [("observation", None)]
+
+
+# Several targets in one call
+
+
+def _second_agent_stream() -> list[dict[str, Any]]:
+    return [
+        SAMPLE_ATIF_STREAM_EVENTS[0],
+        {**SAMPLE_ATIF_STREAM_EVENTS[1], "message": "Only the second agent said this"},
+    ]
+
+
+def test_transcript_of_several_targets_emits_one_envelope_each_and_keeps_going_past_failures(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    first_id, _ = create_agent_with_sample_transcript(local_provider.host_dir, agent_name="multi-first")
+    create_agent_with_events_dir(local_provider.host_dir, agent_name="multi-no-transcript-type")
+    second_id, _ = create_agent_with_sample_transcript(
+        local_provider.host_dir, agent_name="multi-second", events=_second_agent_stream()
+    )
+
+    result = cli_runner.invoke(
+        transcript,
+        ["multi-first", "multi-no-transcript-type", "multi-missing-140401", "multi-second", "--format", "jsonl"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 1
+    envelopes = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [envelope["target"] for envelope in envelopes] == [
+        "multi-first",
+        "multi-no-transcript-type",
+        "multi-missing-140401",
+        "multi-second",
+    ]
+    first, unsupported, missing, second = envelopes
+    assert first == {
+        "target": "multi-first",
+        "agent_id": str(first_id),
+        "name": "multi-first",
+        "error": None,
+        "events": SAMPLE_ATIF_STREAM_EVENTS,
+    }
+    assert second["agent_id"] == str(second_id)
+    assert second["events"] == _second_agent_stream()
+    assert unsupported["events"] is None
+    assert unsupported["name"] == "multi-no-transcript-type"
+    assert "does not produce a common transcript" in unsupported["error"]
+    assert missing["events"] is None and missing["agent_id"] is None
+    assert "multi-missing-140401" in missing["error"]
+
+
+def test_transcript_of_one_target_still_prints_the_bare_stream(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    """A single target keeps the pre-envelope output byte for byte, and carries what its envelope would."""
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="single-bare-stream")
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="single-bare-stream-peer")
+
+    single_result = cli_runner.invoke(
+        transcript, ["single-bare-stream", "--format", "jsonl"], obj=plugin_manager, catch_exceptions=False
+    )
+    multi_result = cli_runner.invoke(
+        transcript,
+        ["single-bare-stream", "single-bare-stream-peer", "--format", "jsonl"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert single_result.exit_code == 0
+    assert single_result.stdout == "".join(
+        json.dumps(event, separators=(",", ":")) + "\n" for event in SAMPLE_ATIF_STREAM_EVENTS
+    )
+    assert multi_result.exit_code == 0
+    envelope = json.loads(multi_result.stdout.splitlines()[0])
+    assert [json.loads(line) for line in single_result.stdout.splitlines()] == envelope["events"]
+
+
+def test_transcript_of_several_targets_as_json_is_one_array_and_applies_filters_per_target(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="json-first")
+    create_agent_with_sample_transcript(
+        local_provider.host_dir, agent_name="json-second", events=_second_agent_stream()
+    )
+
+    result = cli_runner.invoke(
+        transcript,
+        ["json-first", "json-second", "--role", "user", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    envelopes = json.loads(result.stdout)
+    assert [(envelope["name"], [event["message"] for event in envelope["events"]]) for envelope in envelopes] == [
+        ("json-first", ["Hello"]),
+        ("json-second", ["Only the second agent said this"]),
+    ]
+
+
+def test_transcript_of_several_targets_heads_each_agent_with_its_name_in_human_output(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="human-first")
+    create_agent_with_sample_transcript(
+        local_provider.host_dir, agent_name="human-second", events=_second_agent_stream()
+    )
+
+    result = cli_runner.invoke(transcript, ["human-missing-140411", "human-first", "human-second"], obj=plugin_manager)
+
+    assert result.exit_code == 1
+    first_block, second_block = result.stdout.split("\n\n==> human-second <==\n")
+    assert first_block.startswith("==> human-first <==\n")
+    assert "World" in first_block
+    assert "Only the second agent said this" in second_block
+    assert "World" not in second_block
+    assert "human-missing-140411" in result.stderr
+
+
+def test_transcript_of_several_targets_falls_back_to_a_preserved_archive_per_target(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="live-beside-preserved")
+    preserved_id = "agent-00000000000000000000000000000141"
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="destroyed-beside-live",
+        agent_id=preserved_id,
+        events=_second_agent_stream(),
+    )
+
+    result = cli_runner.invoke(
+        transcript,
+        ["live-beside-preserved", "destroyed-beside-live", "--preserved", "--format", "jsonl"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    live, preserved = [json.loads(line) for line in result.stdout.splitlines()]
+    assert live["events"] == SAMPLE_ATIF_STREAM_EVENTS
+    assert (preserved["agent_id"], preserved["name"], preserved["error"]) == (
+        preserved_id,
+        "destroyed-beside-live",
+        None,
+    )
+    assert preserved["events"] == _second_agent_stream()
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected_error"),
+    [
+        (["--format", "atif"], "--format atif builds one document"),
+        (["--format", "atif", "--output", "out.json"], "--format atif builds one document"),
+        (["--output", "out.json"], "--output writes one document"),
+    ],
+)
+def test_transcript_of_several_targets_rejects_single_document_output(
+    extra_args: list[str],
+    expected_error: str,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    result = cli_runner.invoke(transcript, ["first-140421", "second-140421", *extra_args], obj=plugin_manager)
+
+    assert result.exit_code != 0
+    assert expected_error in result.output

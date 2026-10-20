@@ -90,6 +90,16 @@ WORKSPACE_DIAGNOSTICS_TIMEOUT_SECONDS: Final[float] = 300.0
 # stretch with it, or the scan starves while the exec idles.
 _SCAN_TIMEOUT_FRACTION_OF_BUDGET: Final[float] = 0.6
 
+# The slice of the collection budget the collector itself may spend
+# (``--budget-seconds``), so it stops starting new work and ships what it has
+# before this side's subprocess timeout kills the exec and nothing ships at all.
+# The rest is this side's own exec overhead around the collector: mngr's start
+# and discovery before it runs, the SSH round trip, and carrying the base64
+# archive back. The gateway-log mirror exec runs before this one under its own
+# timeout, so it takes nothing from this budget. A fraction for the same reason
+# as the scan's share above.
+_COLLECTOR_BUDGET_FRACTION_OF_BUDGET: Final[float] = 0.8
+
 # The staged archive's filename inside a report's own staging directory (a
 # fresh temp dir per report, so concurrent reports cannot collide and nothing
 # needs sweeping). The ``.zip`` suffix is a contract with the upload path,
@@ -199,6 +209,7 @@ def build_diagnostics_argv(
     if include_transcript:
         flags.append("--transcript")
     flags.append(f"--scan-timeout={int(timeout_seconds * _SCAN_TIMEOUT_FRACTION_OF_BUDGET)}")
+    flags.append(f"--budget-seconds={int(timeout_seconds * _COLLECTOR_BUDGET_FRACTION_OF_BUDGET)}")
     command = f"python3 {WORKSPACE_COLLECTOR_PATH} {' '.join(flags)}"
     return [
         MNGR_BINARY,

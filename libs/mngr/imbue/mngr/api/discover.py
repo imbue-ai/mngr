@@ -421,6 +421,85 @@ def discover_pinned_hosts(
     return DiscoveryOutcome(agents_by_host=agents_by_host, results_by_provider=results_by_provider)
 
 
+@pure
+def required_provider_names_for_addresses(
+    addresses: Sequence[AgentAddress],
+) -> tuple[ProviderInstanceName, ...] | None:
+    """Return the set of provider names a discovery call can be restricted to.
+
+    If every address has a provider set, returns the deduped tuple. If any
+    address omits the provider, returns ``None`` (meaning: all providers must
+    be queried).
+    """
+    providers: set[ProviderInstanceName] = set()
+    for addr in addresses:
+        if addr.host is None or addr.host.provider is None:
+            return None
+        providers.add(addr.host.provider)
+    if not providers:
+        return None
+    return tuple(sorted(providers))
+
+
+def discover_by_addresses(
+    addresses: Sequence[AgentAddress],
+    mngr_ctx: MngrContext,
+    include_destroyed: bool,
+    reset_caches: bool,
+) -> DiscoveryOutcome:
+    """Discover the hosts and agents any of ``addresses`` could name, in one pass.
+
+    When every address pins a host id and a provider, only those hosts are read
+    (see :func:`discover_pinned_hosts`). Otherwise the addresses' providers (when
+    every one names one) narrow discovery so we skip irrelevant providers, and
+    their agent names/IDs feed the discovery event-stream optimization. The
+    outcome is not narrowed to any one address's host constraint; see
+    :func:`filter_discovery_outcome_to_address_host`.
+    """
+    pinned_hosts = None if include_destroyed else pinned_hosts_for_addresses(addresses)
+    if pinned_hosts is not None:
+        return discover_pinned_hosts(mngr_ctx, pinned_hosts, reset_caches=reset_caches)
+    provider_filter = required_provider_names_for_addresses(addresses)
+    return discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=tuple(str(p) for p in provider_filter) if provider_filter is not None else None,
+        agent_identifiers=tuple(str(address.agent) for address in addresses),
+        include_destroyed=include_destroyed,
+        reset_caches=reset_caches,
+    )
+
+
+@pure
+def filter_discovery_outcome_to_address_host(outcome: DiscoveryOutcome, address: AgentAddress) -> DiscoveryOutcome:
+    """Keep only the hosts in ``outcome`` that satisfy ``address``'s host/provider constraint, if it has one.
+
+    A constraint that names a provider also keeps only that provider's result, so
+    an outcome shared by several addresses reports no other provider's outage for
+    this one -- a lookup of this address alone would not have asked them.
+    """
+    if address.host is None:
+        return outcome
+    constraint: HostAddress = address.host
+    filtered = {
+        host_ref: agent_refs
+        for host_ref, agent_refs in outcome.agents_by_host.items()
+        if constraint.matches_host(host_ref.host_id, host_ref.host_name, host_ref.provider_name)
+    }
+    results_by_provider = (
+        outcome.results_by_provider
+        if constraint.provider is None
+        else {
+            provider_name: result
+            for provider_name, result in outcome.results_by_provider.items()
+            if provider_name == constraint.provider
+        }
+    )
+    return outcome.model_copy_update(
+        to_update(outcome.field_ref().agents_by_host, filtered),
+        to_update(outcome.field_ref().results_by_provider, results_by_provider),
+    )
+
+
 def discover_by_address(
     address: AgentAddress,
     mngr_ctx: MngrContext,
@@ -435,28 +514,7 @@ def discover_by_address(
     feeds the discovery event-stream optimization. Either way, results are then
     filtered by the address's full host/provider constraint.
     """
-    pinned_hosts = None if include_destroyed else pinned_hosts_for_addresses((address,))
-    if pinned_hosts is not None:
-        outcome = discover_pinned_hosts(mngr_ctx, pinned_hosts, reset_caches=reset_caches)
-    else:
-        provider_names: tuple[str, ...] | None = None
-        if address.host is not None and address.host.provider is not None:
-            provider_names = (str(address.host.provider),)
-        outcome = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=provider_names,
-            agent_identifiers=(str(address.agent),),
-            include_destroyed=include_destroyed,
-            reset_caches=reset_caches,
-        )
-
-    if address.host is None:
-        return outcome
-
-    constraint: HostAddress = address.host
-    filtered = {
-        host_ref: agent_refs
-        for host_ref, agent_refs in outcome.agents_by_host.items()
-        if constraint.matches_host(host_ref.host_id, host_ref.host_name, host_ref.provider_name)
-    }
-    return outcome.model_copy_update(to_update(outcome.field_ref().agents_by_host, filtered))
+    outcome = discover_by_addresses(
+        (address,), mngr_ctx, include_destroyed=include_destroyed, reset_caches=reset_caches
+    )
+    return filter_discovery_outcome_to_address_host(outcome, address)

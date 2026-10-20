@@ -1,7 +1,9 @@
 """Unit tests for the capture CLI command."""
 
+import json
 import shlex
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pluggy
@@ -10,6 +12,7 @@ from click.testing import CliRunner
 
 from imbue.mngr.cli.capture import capture
 from imbue.mngr.cli.create import create
+from imbue.mngr.cli.stop import stop
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.utils.polling import wait_for
@@ -155,3 +158,84 @@ def test_capture_specific_window(
         assert result.exit_code == 0
         assert extra_window_marker in result.output
         assert "CAPTURE_TEST_MARKER" not in result.output
+
+
+@pytest.mark.tmux
+def test_capture_of_several_agents_reports_each_target_and_keeps_going_past_failures(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    create_test_agent: Callable[..., str],
+) -> None:
+    """One call captures every running target, and a stopped or unknown target fails on its own.
+
+    Each pane carries the launch line of its own agent, so finding each envelope's
+    agent id in its content is what shows the panes were not crossed between targets.
+    """
+    create_test_agent("capture-multi-first", "sleep 140301")
+    create_test_agent("capture-multi-stopped", "sleep 140302")
+    create_test_agent("capture-multi-second", "sleep 140303")
+    stop_result = cli_runner.invoke(stop, ["capture-multi-stopped"], obj=plugin_manager, catch_exceptions=False)
+    assert stop_result.exit_code == 0, stop_result.output
+
+    result = cli_runner.invoke(
+        capture,
+        [
+            "capture-multi-first",
+            "capture-multi-stopped",
+            "capture-multi-missing-140304",
+            "capture-multi-second",
+            "--no-start",
+            "--format",
+            "jsonl",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 1
+    envelopes = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [(envelope["target"], envelope["name"]) for envelope in envelopes] == [
+        ("capture-multi-first", "capture-multi-first"),
+        ("capture-multi-stopped", "capture-multi-stopped"),
+        ("capture-multi-missing-140304", None),
+        ("capture-multi-second", "capture-multi-second"),
+    ]
+    first, stopped, missing, second = envelopes
+    for captured in (first, second):
+        assert captured["error"] is None
+        # The pane wraps the launch line, so the id can straddle a line break.
+        assert captured["agent_id"] in captured["content"].replace("\n", "")
+    assert first["agent_id"] != second["agent_id"]
+    assert stopped["content"] is None
+    assert "is stopped and automatic starting is disabled" in stopped["error"]
+    assert missing["content"] is None and missing["agent_id"] is None
+    assert "capture-multi-missing-140304" in missing["error"]
+
+    # A single target still prints the bare pane, exactly the content its envelope carried.
+    single_result = cli_runner.invoke(
+        capture, ["capture-multi-first", "--no-start"], obj=plugin_manager, catch_exceptions=False
+    )
+    assert single_result.exit_code == 0
+    expected_single_output = first["content"] if first["content"].endswith("\n") else first["content"] + "\n"
+    assert single_result.stdout == expected_single_output
+
+
+@pytest.mark.tmux
+def test_capture_of_several_agents_heads_each_pane_with_its_name_in_human_output(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    create_test_agent: Callable[..., str],
+) -> None:
+    create_test_agent("capture-human-first", "sleep 140311")
+    create_test_agent("capture-human-second", "sleep 140312")
+
+    result = cli_runner.invoke(
+        capture,
+        ["capture-human-first", "capture-human-missing-140313", "capture-human-second", "--no-start"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 1
+    headers = [line for line in result.stdout.splitlines() if line.startswith("==> ")]
+    assert headers == ["==> capture-human-first <==", "==> capture-human-second <=="]
+    assert result.stdout.startswith("==> capture-human-first <==\n")
+    assert "capture-human-missing-140313" in result.stderr

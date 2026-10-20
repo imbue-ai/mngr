@@ -1,5 +1,6 @@
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -13,8 +14,13 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.common_transcript_records import LEGACY_RECORD_TYPE_NAMES
 from imbue.mngr.agents.common_transcript_records import OLD_FORMAT_STREAM_EXPLANATION
+from imbue.mngr.api.events import EventsTarget
+from imbue.mngr.api.events import build_events_target_for_discovered_agent
 from imbue.mngr.api.events import read_common_transcript_content
 from imbue.mngr.api.events import resolve_events_target
+from imbue.mngr.api.find import ResolvedAgentAddress
+from imbue.mngr.api.find import UnresolvedAgentAddress
+from imbue.mngr.api.find import find_each_agent_by_address
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.preservation import PreservedAgentArchive
 from imbue.mngr.api.preservation import discover_preserved_agent_archives
@@ -28,7 +34,10 @@ from imbue.mngr.cli.common_opts import is_param_explicit
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_stderr_line
+from imbue.mngr.cli.target_outcomes import TargetOutcome
+from imbue.mngr.cli.target_outcomes import emit_target_outcomes
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -42,6 +51,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentOrHostAddress
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
@@ -50,7 +60,7 @@ from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 class TranscriptCliOptions(CommonCliOptions):
     """Options passed from the CLI to the transcript command."""
 
-    target: AgentOrHostAddress
+    targets: tuple[AgentOrHostAddress, ...]
     role: tuple[str, ...]
     tail: int | None
     head: int | None
@@ -139,6 +149,10 @@ def _assert_agent_type_supports_transcripts(address: AgentOrHostAddress, mngr_ct
     if not isinstance(address, AgentAddress):
         return
     _host_ref, agent_ref = find_one_agent(address, mngr_ctx)
+    _assert_discovered_agent_type_supports_transcripts(agent_ref, mngr_ctx)
+
+
+def _assert_discovered_agent_type_supports_transcripts(agent_ref: DiscoveredAgent, mngr_ctx: MngrContext) -> None:
     agent_type = agent_ref.agent_type
     if agent_type is None:
         # Agent's data.json lacks 'type'; defer to downstream error rather than blocking.
@@ -291,14 +305,18 @@ def _emit_transcript(
             sys.stdout.flush()
 
         case OutputFormat.HUMAN:
-            for idx, event in enumerate(events):
-                if idx > 0:
-                    sys.stdout.write("\n")
-                sys.stdout.write(_format_event_human(event, is_full) + "\n")
-            sys.stdout.flush()
+            _write_human_events(events, is_full)
 
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def _write_human_events(events: Sequence[dict[str, Any]], is_full: bool) -> None:
+    for idx, event in enumerate(events):
+        if idx > 0:
+            sys.stdout.write("\n")
+        sys.stdout.write(_format_event_human(event, is_full) + "\n")
+    sys.stdout.flush()
 
 
 def _emit_atif_document(
@@ -366,7 +384,7 @@ def _find_preserved_target(address: AgentOrHostAddress, mngr_ctx: MngrContext) -
 
 
 @click.command(name="transcript")
-@click.argument("target", type=AGENT_OR_HOST_ADDRESS)
+@click.argument("targets", type=AGENT_OR_HOST_ADDRESS, nargs=-1, required=True)
 @optgroup.group("Filtering")
 @optgroup.option(
     "--role",
@@ -424,6 +442,10 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
         raise UserInputError("Cannot specify both --head and --tail")
     if opts.preserved_only and not opts.preserved and is_param_explicit(ctx, "preserved"):
         raise UserInputError("Cannot specify both --preserved-only and --no-preserved")
+    if len(opts.targets) > 1:
+        _emit_multiple_transcripts(ctx, opts, output_opts, mngr_ctx)
+        return
+    target_address = opts.targets[0]
 
     # --format atif emits a whole document rather than a rendered event list, so the
     # rendering flags do not apply to it and --output applies to nothing else.
@@ -433,21 +455,21 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
             raise UserInputError(
                 "--role/--head/--tail do not apply to --format atif (the document is always complete)"
             )
-        if not isinstance(opts.target, AgentAddress):
+        if not isinstance(target_address, AgentAddress):
             raise UserInputError("--format atif requires an agent target (not a host)")
-        atif_target = opts.target
+        atif_target = target_address
     if atif_target is None and opts.output is not None:
         raise UserInputError("--output is only supported with --format atif")
     preserved_target: PreservedTranscriptTarget | None = None
     if opts.preserved_only:
-        preserved_target = _find_preserved_target(opts.target, mngr_ctx)
+        preserved_target = _find_preserved_target(target_address, mngr_ctx)
     else:
         try:
-            _assert_agent_type_supports_transcripts(opts.target, mngr_ctx)
+            _assert_agent_type_supports_transcripts(target_address, mngr_ctx)
         except MngrError as error:
             if not opts.preserved or not _is_missing_live_target(error):
                 raise
-            preserved_target = _find_preserved_target(opts.target, mngr_ctx)
+            preserved_target = _find_preserved_target(target_address, mngr_ctx)
 
     if atif_target is not None:
         _emit_atif_document(
@@ -466,7 +488,7 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
     else:
         # Resolve the target agent
         target = resolve_events_target(
-            address=opts.target,
+            address=target_address,
             mngr_ctx=mngr_ctx,
         )
 
@@ -474,37 +496,188 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
         event_file_name, content = read_common_transcript_content(target)
         target_display_name = target.display_name
 
-    # Parse and filter events
-    all_events = _parse_transcript_events(
+    all_events = _select_transcript_events(
         content,
-        roles=opts.role,
         source_description=f"transcript file '{event_file_name}' for {target_display_name}",
+        opts=opts,
+        output_format=output_opts.output_format,
     )
+    _emit_transcript(all_events, output_opts, is_full=opts.full)
+
+
+def _select_transcript_events(
+    content: str,
+    source_description: str,
+    opts: TranscriptCliOptions,
+    output_format: OutputFormat,
+) -> list[dict[str, Any]]:
+    """Parse a stream and apply the role filter, the human-only header drop, and --head/--tail."""
+    all_events = _parse_transcript_events(content, roles=opts.role, source_description=source_description)
 
     # The stream header is container framing, not conversation content, so human
     # output drops it before windowing -- otherwise `--head 1` spends its window on
     # a record it will not render. JSON/JSONL emit the raw stream, header included.
-    if output_opts.output_format == OutputFormat.HUMAN:
+    if output_format == OutputFormat.HUMAN:
         all_events = [event for event in all_events if event.get("type") != "header"]
 
-    # Apply head/tail
     if opts.head is not None:
-        all_events = all_events[: opts.head]
+        return all_events[: opts.head]
     elif opts.tail is not None:
-        all_events = all_events[-opts.tail :]
+        return all_events[-opts.tail :]
     else:
-        pass
+        return all_events
 
-    # Emit
-    _emit_transcript(all_events, output_opts, is_full=opts.full)
+
+class _TranscriptSource(FrozenModel):
+    """One target's located stream, before parsing."""
+
+    content: str = Field(description="The whole stream, rotated segments included")
+    source_description: str = Field(description="Where the stream was read from, for parse warnings")
+    agent_id: str | None = Field(description="The agent the stream belongs to, when the target names one")
+    name: str = Field(description="The agent (or host) the stream belongs to")
+
+
+class _TargetTranscript(TargetOutcome):
+    """One target's outcome in a multi-target transcript: its events, or why there are none."""
+
+    events: tuple[dict[str, Any], ...] | None = Field(
+        description="The stream's records, unmodified, or None when the target failed"
+    )
+
+
+def _emit_multiple_transcripts(
+    ctx: click.Context,
+    opts: TranscriptCliOptions,
+    output_opts: OutputOptions,
+    mngr_ctx: MngrContext,
+) -> None:
+    """Read every target's transcript against one discovery pass, reporting each target's failure on its own."""
+    if output_opts.extra_format == _ATIF_FORMAT_NAME:
+        raise UserInputError("--format atif builds one document, so it takes a single target")
+    if opts.output is not None:
+        raise UserInputError("--output writes one document, so it takes a single target")
+
+    # Live agent targets share one discovery pass; host targets and --preserved-only
+    # reads resolve on their own, exactly as a single target would.
+    live_agent_addresses = (
+        () if opts.preserved_only else tuple(address for address in opts.targets if isinstance(address, AgentAddress))
+    )
+    resolutions = find_each_agent_by_address(live_agent_addresses, mngr_ctx) if live_agent_addresses else []
+    resolution_by_address = {resolution.address: resolution for resolution in resolutions}
+
+    transcripts = (
+        _read_one_target_transcript(
+            address, resolution_by_address.get(address), opts, output_opts.output_format, mngr_ctx
+        )
+        for address in opts.targets
+    )
+    is_any_failed = emit_target_outcomes(
+        transcripts,
+        output_opts.output_format,
+        lambda target_transcript, is_first_block: _write_human_transcript_block(
+            target_transcript, is_first_block, is_full=opts.full
+        ),
+    )
+    if is_any_failed:
+        ctx.exit(1)
+
+
+def _read_one_target_transcript(
+    address: AgentOrHostAddress,
+    # The address's entry from the shared lookup; None for a target that resolves on its own
+    resolution: ResolvedAgentAddress | UnresolvedAgentAddress | None,
+    opts: TranscriptCliOptions,
+    output_format: OutputFormat,
+    mngr_ctx: MngrContext,
+) -> _TargetTranscript:
+    try:
+        source = _locate_target_transcript(address, resolution, opts, mngr_ctx)
+    except MngrError as e:
+        resolved_agent_ref = resolution.agent_ref if isinstance(resolution, ResolvedAgentAddress) else None
+        return _TargetTranscript(
+            target=str(address),
+            agent_id=str(resolved_agent_ref.agent_id) if resolved_agent_ref is not None else None,
+            name=str(resolved_agent_ref.agent_name) if resolved_agent_ref is not None else None,
+            error=str(e),
+            events=None,
+        )
+    try:
+        events = _select_transcript_events(
+            source.content, source_description=source.source_description, opts=opts, output_format=output_format
+        )
+    except OldFormatTranscriptError as e:
+        return _TargetTranscript(
+            target=str(address), agent_id=source.agent_id, name=source.name, error=str(e), events=None
+        )
+    return _TargetTranscript(
+        target=str(address), agent_id=source.agent_id, name=source.name, error=None, events=tuple(events)
+    )
+
+
+def _locate_target_transcript(
+    address: AgentOrHostAddress,
+    resolution: ResolvedAgentAddress | UnresolvedAgentAddress | None,
+    opts: TranscriptCliOptions,
+    mngr_ctx: MngrContext,
+) -> _TranscriptSource:
+    """Find and read one target's stream, applying the same --preserved rules as a single target."""
+    match resolution:
+        case None:
+            if opts.preserved_only:
+                return _read_preserved_transcript_source(_find_preserved_target(address, mngr_ctx))
+            events_target = resolve_events_target(address=address, mngr_ctx=mngr_ctx)
+            return _read_live_transcript_source(events_target, agent_id=None, name=str(address))
+        case UnresolvedAgentAddress(error=error):
+            if not opts.preserved or not _is_missing_live_target(error):
+                raise error
+            return _read_preserved_transcript_source(_find_preserved_target(address, mngr_ctx))
+        case ResolvedAgentAddress(host_ref=host_ref, agent_ref=agent_ref):
+            _assert_discovered_agent_type_supports_transcripts(agent_ref, mngr_ctx)
+            events_target = build_events_target_for_discovered_agent(host_ref, agent_ref, mngr_ctx)
+            return _read_live_transcript_source(
+                events_target, agent_id=str(agent_ref.agent_id), name=str(agent_ref.agent_name)
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _read_live_transcript_source(events_target: EventsTarget, agent_id: str | None, name: str) -> _TranscriptSource:
+    event_file_name, content = read_common_transcript_content(events_target)
+    return _TranscriptSource(
+        content=content,
+        source_description=f"transcript file '{event_file_name}' for {events_target.display_name}",
+        agent_id=agent_id,
+        name=name,
+    )
+
+
+def _read_preserved_transcript_source(preserved_target: PreservedTranscriptTarget) -> _TranscriptSource:
+    event_path, content = read_preserved_common_transcript(preserved_target.archive)
+    return _TranscriptSource(
+        content=content,
+        source_description=f"transcript file '{event_path}' for preserved agent '{preserved_target.archive.agent_name}'",
+        agent_id=str(preserved_target.archive.agent_id),
+        name=str(preserved_target.archive.agent_name),
+    )
+
+
+def _write_human_transcript_block(target_transcript: _TargetTranscript, is_first_block: bool, is_full: bool) -> None:
+    """Write one target's events under a ``==> name <==`` header, or its failure to stderr."""
+    if target_transcript.events is None:
+        logger.error("{}: {}", target_transcript.target, target_transcript.error)
+        return
+    if not is_first_block:
+        write_human_line("")
+    write_human_line("==> {} <==", target_transcript.name)
+    _write_human_events(target_transcript.events, is_full)
 
 
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="transcript",
-    one_line_description="View the message transcript for an agent",
-    synopsis="mngr transcript TARGET [--preserved|--preserved-only] [--role ROLE] [--tail N] [--head N] [--full] [--format human|json|jsonl|atif] [--output PATH]",
-    arguments_description="- `TARGET`: Agent name or ID whose transcript to view",
+    one_line_description="View the message transcript for one or more agents",
+    synopsis="mngr transcript TARGETS... [--preserved|--preserved-only] [--role ROLE] [--tail N] [--head N] [--full] [--format human|json|jsonl|atif] [--output PATH]",
+    arguments_description="- `TARGETS`: Name(s) or ID(s) of the agent(s) whose transcripts to view",
     description="""View the common transcript for an agent. The transcript contains
 user turns, agent turns, and tool results in a common, agent-agnostic format.
 
@@ -535,7 +708,19 @@ Use --format to control output:
   - json: full JSON array (for programmatic use)
   - atif: a single validated ATIF trajectory document assembled from the
     stream (Agent Trajectory Interchange Format; embeds resolvable
-    subagent trajectories). Use --output PATH to write it to a file.""",
+    subagent trajectories). Use --output PATH to write it to a file.
+
+Several agents can be read in one call, which resolves all of them in a
+single discovery pass; --role, --head, --tail and --preserved apply to each
+target on its own. A target that fails (one that does not exist, or an agent
+type without transcripts) reports its own error and the rest are still read;
+the exit code is 1 if any target failed. With more than one target, human
+output puts a '==> NAME <==' header before each agent's events, and
+--format json/jsonl emits one record per target with the fields target,
+agent_id, name, error and events (the stream's records, unmodified): json as
+an array, jsonl one record per line, each written as soon as that target is
+done. --format atif and --output take a single target. A single target's
+output is unchanged.""",
     examples=(
         ("View full transcript", "mngr transcript my-agent"),
         ("View only user messages", "mngr transcript my-agent --role user"),
@@ -544,12 +729,14 @@ Use --format to control output:
         ("Output as JSONL for piping", "mngr transcript my-agent --format jsonl"),
         ("Output as JSON", "mngr transcript my-agent --format json"),
         ("Build a full ATIF trajectory document", "mngr transcript my-agent --format atif"),
+        ("Read several agents as JSONL", "mngr transcript agent-1 agent-2 --format jsonl"),
         ("Include a destroyed agent", "mngr transcript my-agent --preserved"),
         ("Read only a preserved snapshot", "mngr transcript my-agent --preserved-only"),
     ),
     see_also=(
         ("event", "View all events from an agent or host"),
         ("message", "Send a message to an agent"),
+        ("multi_target", "Behavior when targeting multiple agents"),
     ),
 ).register()
 

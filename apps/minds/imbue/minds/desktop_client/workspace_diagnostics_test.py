@@ -34,6 +34,7 @@ from imbue.minds.desktop_client.workspace_diagnostics import REMOTE_GATEWAY_TAIL
 from imbue.minds.desktop_client.workspace_diagnostics import STAGED_ZIP_FILENAME
 from imbue.minds.desktop_client.workspace_diagnostics import WORKSPACE_COLLECTOR_PATH
 from imbue.minds.desktop_client.workspace_diagnostics import WORKSPACE_DIAGNOSTICS_TIMEOUT_SECONDS
+from imbue.minds.desktop_client.workspace_diagnostics import _COLLECTOR_BUDGET_FRACTION_OF_BUDGET
 from imbue.minds.desktop_client.workspace_diagnostics import _SCAN_TIMEOUT_FRACTION_OF_BUDGET
 from imbue.minds.desktop_client.workspace_diagnostics import build_diagnostics_argv
 from imbue.minds.desktop_client.workspace_diagnostics import build_latchkey_logs_argv
@@ -204,6 +205,17 @@ def test_the_scan_timeout_is_the_same_fraction_of_any_budget() -> None:
     sandbox_command = build_diagnostics_argv(_WORKSPACE_AGENT_ID, True, True, timeout_seconds=doubled)[3]
     assert f"--scan-timeout={int(doubled * _SCAN_TIMEOUT_FRACTION_OF_BUDGET)}" in sandbox_command
     assert production_share > 0, "the scan must get a usable share of the budget"
+
+
+def test_the_collector_budget_leaves_room_for_the_exec_around_it_under_any_budget() -> None:
+    """The collector is told to finish inside the exec's budget with room to spare for the exec
+    itself, so it ships what it has rather than being killed with nothing shipped; the room
+    stretches with a longer budget the way the scan's share does."""
+    for budget in (WORKSPACE_DIAGNOSTICS_TIMEOUT_SECONDS, WORKSPACE_DIAGNOSTICS_TIMEOUT_SECONDS * 2):
+        command = build_diagnostics_argv(_WORKSPACE_AGENT_ID, True, True, timeout_seconds=budget)[3]
+        collector_budget = int(budget * _COLLECTOR_BUDGET_FRACTION_OF_BUDGET)
+        assert f"--budget-seconds={collector_budget}" in command
+        assert int(budget * _SCAN_TIMEOUT_FRACTION_OF_BUDGET) < collector_budget < budget
 
 
 def test_the_commands_are_tiny_because_nothing_travels_in_them() -> None:
