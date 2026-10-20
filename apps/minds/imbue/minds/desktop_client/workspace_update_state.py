@@ -480,7 +480,7 @@ class WorkspaceUpdateStateStore(MutableModel):
         """Claim the run slot for ``agent_id``, returning whether this caller won it.
 
         Check and STARTING write share one lock: a dispatch spends minutes before
-        it spawns, and three threads dispatch. The claim is the run's start;
+        it spawns, and the Update now route and the bulk thread both dispatch. The claim is the run's start;
         anything the run record reports from before it is an earlier run's. The
         chat's name is the workspace's to pick, so the claim names none until
         :meth:`adopt_dispatched_chat`.
@@ -609,8 +609,8 @@ class WorkspaceUpdateStateStore(MutableModel):
 
         How a run the app did not dispatch, or one that finished while it was
         closed, becomes visible. In-flight rows are the poll's. A verdict lands
-        without the watched-run close-out: the sweep just re-read the version,
-        and there is no schedule attempt to close. ``started_at`` dedups re-reads.
+        without the watched-run close-out: the sweep just re-read the version.
+        ``started_at`` dedups re-reads.
         """
         aid_str = str(agent_id)
         # The one directory glob is paid off the lock the composed reads take; the

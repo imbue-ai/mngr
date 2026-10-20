@@ -1,11 +1,13 @@
-"""The machine-readable status contract between ``/update-self`` and the app.
+"""The machine-readable status contract between a workspace's update files and the app.
 
 The enums ``ui_models`` puts on the wire live here so the wire contract does not
 import the detection module (and the discovery resolver behind it). The skill
-writes one file, ``data/.state/update-apply/run.json``, which the app polls over
-``mngr exec``: the run's start facts, three in-flight facts (worker, hold, apply),
-and one terminal verdict. A new run's start overwrites it, so it always describes
-the latest run.
+writes ``data/.state/update-apply/run.json``, which the app polls over ``mngr
+exec``: the run's start facts, three in-flight facts (worker, hold, apply), and
+one terminal verdict. A new run's start overwrites it, so it always describes the
+latest run. The app's in-workspace update program writes ``schedule.json`` and
+``last-dispatch.json`` beside it and answers with an ``UpdateArmOutcome``; their
+parsed forms live here too.
 """
 
 import json
