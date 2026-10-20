@@ -443,3 +443,26 @@ describe("the update modal over a failed run", () => {
     expect(routeSet).toHaveBeenCalledWith(`/workspace/${AGENT}`, { chat: "agent-lead-2" });
   });
 });
+
+describe("the update modal over a run in flight", () => {
+  const WAITING: UiWorkspaceUpdate = {
+    ...OUT_OF_DATE_UPDATE,
+    activity: "WAITING",
+    chat_agent_name: "update-to-minds-v0-4-1",
+    chat_agent_id: "agent-lead-3",
+    started_by: "SCHEDULED",
+  };
+
+  it("opens the run's chat, which a scheduled run never put on screen", () => {
+    const { draw, routeSet } = harness(() => Promise.resolve(jsonResponse({})), WAITING, true);
+
+    press(draw(), "Open chat");
+
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${AGENT}`, { chat: "agent-lead-3" });
+  });
+
+  it("offers no chat while the run is still starting, before its chat exists", () => {
+    const root = harness(() => Promise.resolve(jsonResponse({})), { ...WAITING, activity: "STARTING" }).draw();
+    expect(pressableWithLabel(root, "Open chat")).toBeUndefined();
+  });
+});
