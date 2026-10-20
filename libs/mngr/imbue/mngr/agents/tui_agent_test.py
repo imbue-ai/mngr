@@ -43,9 +43,12 @@ class _RecordingTuiAgent(_ProbeTuiAgent):
     """
 
     pane_content: str = ""
+    # What preflight reports it saw; None models a preflight that does not read the pane.
+    preflight_pane_content: str | None = None
     steps: list[str] = []
     built_policies: list[SubmissionConfirmationPolicy] = []
     probes_to_return: list[SubmissionEvidenceProbe] = []
+    capture_count: int = 0
 
     @property
     def tmux_target(self) -> TmuxWindowTarget:
@@ -58,14 +61,16 @@ class _RecordingTuiAgent(_ProbeTuiAgent):
     def _capture_pane_content(
         self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False, include_styles: bool = False
     ) -> str | None:
+        self.capture_count += 1
         return self.pane_content
 
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget | str) -> str | None:
         self.steps.append("preflight")
+        return self.preflight_pane_content
 
-    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> str:
+    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget | str, message: str) -> str:
         self.steps.append("paste")
-        return tmux_target.as_shell_arg()
+        return self._send_target_arg(tmux_target)
 
     def _build_submission_evidence_probes(
         self, message: str, policy: SubmissionConfirmationPolicy
@@ -82,12 +87,15 @@ def _make_recording_agent(
     *scripted_results: CommandResult,
     probes: Sequence[SubmissionEvidenceProbe] = (),
     agent_class: type[_RecordingTuiAgent] = _RecordingTuiAgent,
+    preflight_pane_content: str | None = None,
+    pane_id: str | None = None,
 ) -> _RecordingTuiAgent:
-    host = ScriptedHost(scripted_results=list(scripted_results))
+    host = ScriptedHost(scripted_results=list(scripted_results), pane_id=pane_id)
     return agent_class.model_construct(
         id=AgentId.generate(),
         name=AgentName("probe"),
         pane_content=pane_content,
+        preflight_pane_content=preflight_pane_content,
         steps=[],
         built_policies=[],
         probes_to_return=list(probes),
@@ -125,14 +133,48 @@ def test_send_message_waits_for_ready_indicator_before_pasting() -> None:
     The readiness wait happens inside send_message (not only on the create
     path), so it covers resume too: pasting before the indicator is visible
     would drop keystrokes into a still-replaying transcript. With no evidence
-    probes the send degrades to a single best-effort Enter on the host.
+    probes the send degrades to one best-effort Enter, sent by the host script
+    once the typed message shows.
     """
     pane = f"probe-banner {_RESUME_MESSAGE}"
     agent = _make_recording_agent(pane)
     agent.send_message(_RESUME_MESSAGE)
     assert agent.steps == ["preflight", "paste"]
     host_commands = cast(ScriptedHost, agent.host).sent_commands
-    assert host_commands == ["tmux send-keys -t =s:0 Enter"]
+    assert len(host_commands) == 1
+    assert "tmux send-keys -t =s:0 Enter" in host_commands[0]
+    assert "while :" not in host_commands[0]
+
+
+def test_send_message_resolves_the_agent_pane_once_and_addresses_every_step_to_it() -> None:
+    """One pane lookup serves the whole send; each lookup is a process spawn."""
+    agent = _make_recording_agent(
+        f"probe-banner {_RESUME_MESSAGE}",
+        CommandResult(stdout="MNGR_CONFIRMED never\n", stderr="", success=True),
+        probes=[_never_confirming_probe()],
+        pane_id="%7",
+    )
+    agent.send_message(_RESUME_MESSAGE)
+    host = cast(ScriptedHost, agent.host)
+    assert [c for c in host.captured if c.startswith("tmux show-options")] == [host.captured[0]]
+    submit_command = host.sent_commands[-1]
+    assert "tmux send-keys -t %7 Enter" in submit_command
+    assert "=s:0" not in submit_command
+
+
+def test_send_message_reuses_the_pane_preflight_saw_when_it_shows_the_tui_ready() -> None:
+    """A preflight reading that already shows the ready indicator spares the readiness and leftover-text captures."""
+    pane = f"probe-banner {_RESUME_MESSAGE}"
+    agent = _make_recording_agent(pane, preflight_pane_content=pane)
+    agent.send_message(_RESUME_MESSAGE)
+    assert agent.capture_count == 0
+
+
+def test_send_message_waits_for_readiness_when_preflight_saw_no_ready_pane() -> None:
+    """A preflight reading without the indicator is not trusted: the send polls and captures afresh."""
+    agent = _make_recording_agent(f"probe-banner {_RESUME_MESSAGE}", preflight_pane_content="still painting")
+    agent.send_message(_RESUME_MESSAGE)
+    assert agent.capture_count == 2
 
 
 def test_send_message_selects_strict_policy_for_normal_messages() -> None:
@@ -218,7 +260,7 @@ def test_send_message_warns_and_records_event_for_preexisting_input_text() -> No
     assert len(event_commands) == 1
     assert "preexisting_input_text" in event_commands[0]
     # The send still went through (best-effort Enter recorded after the event).
-    assert any(command.endswith("Enter") for command in host.captured)
+    assert any("send-keys -t =s:0 Enter" in command for command in host.captured)
 
 
 def test_send_message_records_cleared_event_instead_of_warning_when_restored_command_is_cleared() -> None:
@@ -229,7 +271,7 @@ def test_send_message_records_cleared_event_instead_of_warning_when_restored_com
             return "/restored-command-71935"
 
         def _clear_preexisting_input_text_if_restored_command(
-            self, tmux_target: TmuxWindowTarget, leftover_text: str
+            self, tmux_target: TmuxWindowTarget | str, leftover_text: str
         ) -> bool:
             self.steps.append(f"clear {leftover_text}")
             return True
@@ -242,7 +284,7 @@ def test_send_message_records_cleared_event_instead_of_warning_when_restored_com
     assert len(event_commands) == 1
     assert "cleared_restored_input_text" in event_commands[0]
     assert "/restored-command-71935" in event_commands[0]
-    assert any(command.endswith("Enter") for command in host.captured)
+    assert any("send-keys -t =s:0 Enter" in command for command in host.captured)
 
 
 @pytest.mark.allow_warnings
@@ -291,7 +333,7 @@ def test_send_message_runs_preflight_before_readiness_wait() -> None:
     """
 
     class _PreflightRaisingAgent(_RecordingTuiAgent):
-        def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
+        def _preflight_send_message(self, tmux_target: TmuxWindowTarget | str) -> str | None:
             self.steps.append("preflight")
             raise SendMessageError(str(self.name), "blocking dialog")
 

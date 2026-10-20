@@ -5,15 +5,18 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Final
+from typing import cast
 
 import pydantic
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import SEND_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.agents.mock_host_test import ScriptedHost
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationOutcome
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
-from imbue.mngr.agents.tui_utils import _check_paste_content
+from imbue.mngr.agents.tui_utils import _PASTE_VISIBLE_TIMEOUT_SECONDS
+from imbue.mngr.agents.tui_utils import _build_pane_message_probe
 from imbue.mngr.agents.tui_utils import _normalize_for_match
 from imbue.mngr.agents.tui_utils import _parse_confirmation_output
 from imbue.mngr.agents.tui_utils import build_changed_token_probe
@@ -34,6 +37,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.polling import wait_for
 
 # Paste-detection helpers
 
@@ -45,35 +49,15 @@ def test_normalize_for_match_strips_non_alnum_and_lowercases() -> None:
     assert _normalize_for_match("  \n\t  ") == ""
 
 
-def test_check_paste_content_detects_paste_indicator() -> None:
-    assert _check_paste_content("some text\n[Pasted text 123 chars]\nmore text", "anything") is True
+def test_build_pane_message_probe_keeps_lowercased_ascii_alnum_tail() -> None:
+    assert _build_pane_message_probe("Hello, World! This is a test message") == "helloworldthisisatestmessage"
+    assert _build_pane_message_probe("x" * 100 + "A" * 60) == "a" * 60
+    assert _build_pane_message_probe("!!! ???") == ""
 
 
-def test_check_paste_content_detects_fuzzy_content_match() -> None:
-    pane = "prompt> hello world this is a test message"
-    assert _check_paste_content(pane, "Hello, World! This is a test message") is True
-
-
-def test_check_paste_content_returns_false_when_no_match() -> None:
-    pane = "prompt> totally different content"
-    assert _check_paste_content(pane, "Hello, World! This is a test message") is False
-
-
-def test_check_paste_content_handles_empty_message() -> None:
-    assert _check_paste_content("some content", "") is True
-
-
-def test_check_paste_content_short_message_tail() -> None:
-    """A short message should use its full length as the probe."""
-    assert _check_paste_content("prompt> abc", "abc") is True
-
-
-def test_check_paste_content_long_message_uses_tail() -> None:
-    """A long message should match on the last 60 chars."""
-    tail = "a" * 60
-    message = "x" * 100 + tail
-    pane = "prompt> " + tail
-    assert _check_paste_content(pane, message) is True
+def test_build_pane_message_probe_drops_non_ascii_like_the_c_locale_tr_pipeline() -> None:
+    """Python's lowercasing turns some non-ASCII letters into ASCII ones; the remote ``LC_ALL=C tr`` drops them."""
+    assert _build_pane_message_probe("\u0130stanbul caf\u00e9 \u212a") == "stanbulcaf"
 
 
 def test_build_normalized_message_probe_uses_normalized_tail() -> None:
@@ -123,22 +107,32 @@ def _make_probes() -> tuple[SubmissionEvidenceProbe, ...]:
     )
 
 
-def test_confirmation_command_sends_enter_after_baselines_and_before_polling() -> None:
-    """The ordering invariant of the whole engine: baselines -> Enter -> poll loop.
+def test_confirmation_command_sends_enter_after_paste_wait_and_baselines_and_before_polling() -> None:
+    """The ordering invariant of the whole engine: paste wait -> baselines -> Enter -> poll loop.
 
     Confirmation may never be evaluated before Enter was sent (the historical
     stale-signal bug confirmed before Enter and then killed the pending
-    keystroke), and baselines must be captured before Enter so this
-    submission's evidence reads as a change.
+    keystroke), baselines must be captured before Enter so this submission's
+    evidence reads as a change, and Enter must wait for the typed message to
+    show, since a TUI can take an Enter that arrives too soon as a newline.
     """
     command = build_confirmation_command(
-        tmux_target=_FAKE_TARGET, probes=_make_probes(), normalized_pane_probe="needle", window_seconds=5
+        tmux_target=_FAKE_TARGET, probes=_make_probes(), pane_message_probe="needle", window_seconds=5
     )
+    paste_wait_idx = command.index("until pane_shows_message")
     baseline_idx = command.index("base_0=")
     enter_idx = command.index("tmux send-keys -t =probe-target:0 Enter")
     loop_idx = command.index("while :")
     poll_idx = command.index("cur_0=")
-    assert baseline_idx < enter_idx < loop_idx < poll_idx
+    assert paste_wait_idx < baseline_idx < enter_idx < loop_idx < poll_idx
+
+
+def test_confirmation_command_without_probes_stops_after_enter() -> None:
+    command = build_confirmation_command(
+        tmux_target=_FAKE_TARGET, probes=(), pane_message_probe="needle", window_seconds=5
+    )
+    assert command.index("until pane_shows_message") < command.index("tmux send-keys -t =probe-target:0 Enter")
+    assert "while :" not in command
 
 
 def test_confirmation_command_has_no_background_jobs_or_traps() -> None:
@@ -148,7 +142,7 @@ def test_confirmation_command_has_no_background_jobs_or_traps() -> None:
     to kill the pending Enter keystroke after a spurious early confirmation.
     """
     command = build_confirmation_command(
-        tmux_target=_FAKE_TARGET, probes=_make_probes(), normalized_pane_probe="needle", window_seconds=5
+        tmux_target=_FAKE_TARGET, probes=_make_probes(), pane_message_probe="needle", window_seconds=5
     )
     assert " & " not in command
     assert " &\n" not in command
@@ -158,23 +152,23 @@ def test_confirmation_command_has_no_background_jobs_or_traps() -> None:
 
 def test_confirmation_command_embeds_probe_names_quoted() -> None:
     command = build_confirmation_command(
-        tmux_target=_FAKE_TARGET, probes=_make_probes(), normalized_pane_probe="needle", window_seconds=5
+        tmux_target=_FAKE_TARGET, probes=_make_probes(), pane_message_probe="needle", window_seconds=5
     )
     assert "'content probe'" in command
 
 
 def test_confirmation_command_gates_retries_on_pane_content() -> None:
     command = build_confirmation_command(
-        tmux_target=_FAKE_TARGET, probes=_make_probes(), normalized_pane_probe="needle", window_seconds=5
+        tmux_target=_FAKE_TARGET, probes=_make_probes(), pane_message_probe="needle", window_seconds=5
     )
     assert "capture-pane" in command
     assert "*needle*" in command
 
 
 def test_confirmation_command_retries_unconditionally_without_pane_probe() -> None:
-    """A message that normalizes to nothing cannot be recognized in the pane."""
+    """A message that normalizes to nothing cannot be recognized in the pane, so it is neither awaited nor gated on."""
     command = build_confirmation_command(
-        tmux_target=_FAKE_TARGET, probes=_make_probes(), normalized_pane_probe="", window_seconds=5
+        tmux_target=_FAKE_TARGET, probes=_make_probes(), pane_message_probe="", window_seconds=5
     )
     assert "capture-pane" not in command
 
@@ -222,7 +216,9 @@ class _ProbeAgent(BaseAgent[AgentTypeConfig]):
         return "pane still shows the typed message"
 
 
-def _make_probe_agent(*scripted_results: CommandResult) -> _ProbeAgent:
+def _make_probe_agent(
+    *scripted_results: CommandResult, send_command_timeout_seconds: float = SEND_COMMAND_TIMEOUT_SECONDS
+) -> _ProbeAgent:
     host = ScriptedHost(scripted_results=list(scripted_results))
     return _ProbeAgent.model_construct(
         id=AgentId.generate(),
@@ -230,27 +226,19 @@ def _make_probe_agent(*scripted_results: CommandResult) -> _ProbeAgent:
         agent_type=AgentTypeName("probe"),
         host=host,
         captured_commands=host.captured,
+        send_command_timeout_seconds=send_command_timeout_seconds,
     )
 
 
 def test_send_enter_keystroke_runs_tmux_send_keys() -> None:
     agent = _make_probe_agent()
     send_enter_keystroke(agent, _FAKE_TARGET)
-    assert [c for c in agent.captured_commands if not c.startswith(("tmux show-options", "tmux copy-mode"))] == [
-        "tmux send-keys -t =probe-target:0 Enter"
-    ]
+    assert cast(ScriptedHost, agent.host).sent_commands == ["tmux send-keys -t =probe-target:0 Enter"]
 
 
 def test_send_enter_keystroke_bounds_every_tmux_command() -> None:
-    host = ScriptedHost()
-    agent = _ProbeAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("probe"),
-        agent_type=AgentTypeName("probe"),
-        host=host,
-        captured_commands=host.captured,
-        send_command_timeout_seconds=7.5,
-    )
+    agent = _make_probe_agent(send_command_timeout_seconds=7.5)
+    host = cast(ScriptedHost, agent.host)
     send_enter_keystroke(agent, _FAKE_TARGET)
     assert len(host.captured) == 2
     assert host.captured_timeout_seconds == [7.5, 7.5]
@@ -270,7 +258,7 @@ def test_submit_and_confirm_returns_confirmed_outcome() -> None:
     assert outcome.is_confirmed is True
     assert outcome.confirming_probe_name == "marker"
     # One host round-trip for the whole confirmation window.
-    assert len([c for c in agent.captured_commands if not c.startswith(("tmux show-options", "tmux copy-mode"))]) == 1
+    assert len(cast(ScriptedHost, agent.host).sent_commands) == 1
 
 
 def test_submit_and_confirm_flags_rejection_when_a_rejection_probe_confirms() -> None:
@@ -345,9 +333,35 @@ def test_submit_and_confirm_degrades_to_plain_enter_without_probes() -> None:
         agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=(), timeout_seconds=5.0
     )
     assert outcome.is_confirmed is False
-    assert [c for c in agent.captured_commands if not c.startswith(("tmux show-options", "tmux copy-mode"))] == [
-        "tmux send-keys -t =probe-target:0 Enter"
-    ]
+    sent_commands = cast(ScriptedHost, agent.host).sent_commands
+    assert len(sent_commands) == 1
+    assert "tmux send-keys -t =probe-target:0 Enter" in sent_commands[0]
+    assert "while :" not in sent_commands[0]
+
+
+def test_submit_and_confirm_without_probes_raises_when_the_submit_script_fails() -> None:
+    """With nothing to confirm against, a failed script must not read as a best-effort Enter."""
+    agent = _make_probe_agent(CommandResult(stdout="", stderr="ssh: connection reset", success=False))
+    with pytest.raises(SendMessageError, match="submitting the message failed: ssh: connection reset"):
+        submit_message_and_confirm(
+            agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=(), timeout_seconds=5.0
+        )
+
+
+def test_submit_and_confirm_without_probes_bounds_the_script_by_the_paste_wait_and_send_timeout() -> None:
+    """With nothing to poll after Enter, the confirmation window must not stretch how long a wedged tmux holds the send."""
+    agent = _make_probe_agent(send_command_timeout_seconds=7.5)
+    host = cast(ScriptedHost, agent.host)
+    submit_message_and_confirm(agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=(), timeout_seconds=90.0)
+    assert host.captured_timeout_seconds[-1] == _PASTE_VISIBLE_TIMEOUT_SECONDS + 7.5
+
+
+def test_submit_and_confirm_raises_when_the_typed_message_never_shows() -> None:
+    agent = _make_probe_agent(CommandResult(stdout="MNGR_PASTE_NOT_VISIBLE\n", stderr="", success=False))
+    with pytest.raises(SendMessageError, match="Timeout waiting for pasted content to appear"):
+        submit_message_and_confirm(
+            agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=_make_probes(), timeout_seconds=5.0
+        )
 
 
 @pytest.mark.allow_warnings
@@ -434,20 +448,60 @@ def test_engine_confirms_when_enter_actually_executes(tmux_probe_agent: _ProbeAg
         )
 
 
+@pytest.mark.tmux
+def test_engine_recognizes_mixed_case_punctuated_non_ascii_text_in_the_pane(
+    tmux_probe_agent: _ProbeAgent, tmp_path: Path
+) -> None:
+    """The script's pane check and the Python-side probe normalize the same text the same way.
+
+    The pane only writes the evidence file once it reads a line, so the send confirms only if the
+    script recognized the message on screen and went on to press Enter.
+    """
+    session_name = f"{tmux_probe_agent.mngr_ctx.config.prefix}{tmux_probe_agent.name}"
+    evidence_path = tmp_path / "evidence-token"
+    message = "Fix the Café's README.md, then run `make TEST=1` -- ÅNGSTRÖM 36284!"
+    pane_script = (
+        f"printf '%s\\n' {shlex.quote(message)}; read -r _; "
+        f"echo submitted > {shlex.quote(str(evidence_path))}; sleep 60"
+    )
+    tmux_probe_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' -x 200 -y 24 {shlex.quote(f'sh -c {shlex.quote(pane_script)}')}",
+        timeout_seconds=5.0,
+    )
+    try:
+        outcome = submit_message_and_confirm(
+            agent=tmux_probe_agent,
+            tmux_target=TmuxWindowTarget(session_name=session_name, window=0),
+            message=message,
+            probes=(build_changed_token_probe("evidence-file", f"cat '{evidence_path}' 2>/dev/null"),),
+            timeout_seconds=10.0,
+        )
+        assert outcome.is_confirmed is True
+        assert outcome.enter_retry_offsets == ()
+    finally:
+        tmux_probe_agent.host.execute_idempotent_command(
+            f"tmux kill-session -t '={session_name}' 2>/dev/null", timeout_seconds=5.0
+        )
+
+
 _SWALLOWED_MESSAGE: Final[str] = "a long brief for the agent 36284"
 
 
 def _submit_to_enter_swallowing_pane(
-    agent: _ProbeAgent, tmp_path: Path, screen: str, timeout_seconds: float
+    agent: _ProbeAgent, tmp_path: Path, screen: str, screen_after_first_enter: str, timeout_seconds: float
 ) -> SubmissionConfirmationOutcome:
     """Submit ``_SWALLOWED_MESSAGE`` to a pane that shows ``screen`` and swallows the first Enter.
 
-    The pane writes the evidence file only on a second Enter, so the submission confirms if and only if the
-    engine retried Enter.
+    The first Enter replaces the screen with ``screen_after_first_enter``. The pane writes the evidence file
+    only on a second Enter, so the submission confirms if and only if the engine retried Enter.
     """
     session_name = f"{agent.mngr_ctx.config.prefix}{agent.name}"
     evidence_path = tmp_path / "evidence-token"
-    pane_script = f"printf '%s\\n' {shlex.quote(screen)}; read -r _; read -r _; echo retried > {shlex.quote(str(evidence_path))}; sleep 60"
+    pane_script = (
+        f"printf '%s\\n' {shlex.quote(screen)}; read -r _; "
+        f"printf '\\033[2J\\033[H%s\\n' {shlex.quote(screen_after_first_enter)}; read -r _; "
+        f"echo retried > {shlex.quote(str(evidence_path))}; sleep 60"
+    )
     agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}' -x 200 -y 24 {shlex.quote(f'sh -c {shlex.quote(pane_script)}')}",
         timeout_seconds=5.0,
@@ -479,7 +533,9 @@ def test_engine_retries_enter_while_the_message_is_pending(
     tmux_probe_agent: _ProbeAgent, tmp_path: Path, screen: str
 ) -> None:
     """A swallowed Enter is retried while the input box still holds the unsubmitted message."""
-    outcome = _submit_to_enter_swallowing_pane(tmux_probe_agent, tmp_path, screen, timeout_seconds=10.0)
+    outcome = _submit_to_enter_swallowing_pane(
+        tmux_probe_agent, tmp_path, screen, screen_after_first_enter=screen, timeout_seconds=10.0
+    )
     assert outcome.is_confirmed is True
     assert len(outcome.enter_retry_offsets) == 1
 
@@ -488,8 +544,10 @@ def test_engine_retries_enter_while_the_message_is_pending(
 def test_engine_withholds_the_enter_retry_when_nothing_is_pending(
     tmux_probe_agent: _ProbeAgent, tmp_path: Path
 ) -> None:
-    """With neither the message nor a paste placeholder on screen, Enter is not re-sent."""
-    outcome = _submit_to_enter_swallowing_pane(tmux_probe_agent, tmp_path, "> ", timeout_seconds=5.0)
+    """Once the message and any paste placeholder are gone from the screen, Enter is not re-sent."""
+    outcome = _submit_to_enter_swallowing_pane(
+        tmux_probe_agent, tmp_path, f"> {_SWALLOWED_MESSAGE}", screen_after_first_enter="> ", timeout_seconds=5.0
+    )
     assert outcome.is_confirmed is False
     assert outcome.enter_retry_offsets == ()
 
@@ -502,18 +560,68 @@ def test_engine_reports_unconfirmed_when_no_evidence_appears(tmux_probe_agent: _
     never_written = tmp_path / "never-written-token"
     probe = build_changed_token_probe("evidence-file", f"cat '{never_written}' 2>/dev/null")
 
+    message = "echo nothing writes the evidence 36284"
     tmux_probe_agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}' 'bash'", timeout_seconds=5.0
     )
     try:
+        tmux_probe_agent.host.execute_idempotent_command(
+            f"tmux send-keys -t '={session_name}:0' -l -- {shlex.quote(message)}", timeout_seconds=5.0
+        )
         outcome = submit_message_and_confirm(
             agent=tmux_probe_agent,
             tmux_target=tmux_target,
-            message="text that is not in the pane 36284",
+            message=message,
             probes=(probe,),
             timeout_seconds=1.0,
         )
         assert outcome.is_confirmed is False
+    finally:
+        tmux_probe_agent.host.execute_idempotent_command(
+            f"tmux kill-session -t '={session_name}' 2>/dev/null", timeout_seconds=5.0
+        )
+
+
+@pytest.mark.tmux
+def test_engine_gives_up_without_enter_when_the_typed_message_never_shows(
+    tmux_probe_agent: _ProbeAgent, tmp_path: Path
+) -> None:
+    """A message that never shows in the pane is never submitted: the script exits before Enter.
+
+    The pane records the first line it reads. A line typed after the script returns is that first
+    line only if the script sent no Enter of its own, since an Enter would have ended an empty one.
+    """
+    session_name = f"{tmux_probe_agent.mngr_ctx.config.prefix}{tmux_probe_agent.name}"
+    target = TmuxWindowTarget(session_name=session_name, window=0)
+    first_line_path = tmp_path / "first-line"
+    pending_first_line_path = shlex.quote(str(tmp_path / "first-line.pending"))
+    pane_script = (
+        f"read -r line; printf '%s' \"$line\" > {pending_first_line_path}; "
+        f"mv {pending_first_line_path} {shlex.quote(str(first_line_path))}; sleep 60"
+    )
+    sentinel_line = "typed after the script 36284"
+    tmux_probe_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' {shlex.quote(f'sh -c {shlex.quote(pane_script)}')}",
+        timeout_seconds=5.0,
+    )
+    try:
+        command = build_confirmation_command(
+            tmux_target=target,
+            probes=(build_changed_token_probe("evidence-file", f"cat '{tmp_path / 'never'}' 2>/dev/null"),),
+            pane_message_probe="textthatisnotinthepane36284",
+            window_seconds=1,
+            paste_wait_seconds=1,
+        )
+        result = tmux_probe_agent.host.execute_stateful_command(command, timeout_seconds=10.0)
+        assert "MNGR_PASTE_NOT_VISIBLE" in result.stdout
+
+        tmux_probe_agent.host.execute_idempotent_command(
+            f"tmux send-keys -t {target.as_shell_arg()} -l -- {shlex.quote(sentinel_line)} && "
+            f"tmux send-keys -t {target.as_shell_arg()} Enter",
+            timeout_seconds=5.0,
+        )
+        wait_for(first_line_path.exists, error_message="Expected the pane to read the line typed after the script")
+        assert first_line_path.read_text() == sentinel_line
     finally:
         tmux_probe_agent.host.execute_idempotent_command(
             f"tmux kill-session -t '={session_name}' 2>/dev/null", timeout_seconds=5.0

@@ -151,10 +151,12 @@ def make_claude_agent(
     agent_config: ClaudeAgentConfig | None = None,
     agent_type: AgentTypeName | None = None,
     work_dir: Path | None = None,
+    host: Host | None = None,
 ) -> tuple[ClaudeAgent, Host]:
-    """Create a ClaudeAgent with a real local host for testing."""
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, Host)
+    """Create a ClaudeAgent on a real local host for testing (the local provider's own, unless one is given)."""
+    if host is None:
+        host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+        assert isinstance(host, Host)
     if work_dir is None:
         work_dir = tmp_path / f"work-{str(AgentId.generate().get_uuid())[:8]}"
         work_dir.mkdir()
@@ -1676,7 +1678,7 @@ def test_content_probe_confirms_only_on_message_content_appended_after_baseline(
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     message = 'Please destroy that "inspiration" repo\non github now'
     probes = agent._build_submission_evidence_probes(message, SubmissionConfirmationPolicy.STRICT)
-    assert [probe.name for probe in probes] == ["content-raw-transcript", "content-native-transcript"]
+    assert [probe.name for probe in probes] == ["content-native-transcript", "content-raw-transcript"]
 
     state_dir = tmp_path / "agent-state"
     log_path = state_dir / "logs" / "claude_transcript" / "events.jsonl"
@@ -1689,7 +1691,7 @@ def test_content_probe_confirms_only_on_message_content_appended_after_baseline(
         + "\n"
     )
 
-    raw_probe = probes[0]
+    raw_probe = probes[1]
     baseline, poll_before_evidence = _run_content_probe(host, raw_probe, state_dir)
     assert baseline != ""
     assert poll_before_evidence == ""
@@ -1713,7 +1715,7 @@ def test_content_probe_matches_user_records_and_ignores_other_content(
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     message = "run the full test suite and report back"
     probes = agent._build_submission_evidence_probes(message, SubmissionConfirmationPolicy.STRICT)
-    raw_probe = probes[0]
+    raw_probe = probes[1]
 
     state_dir = tmp_path / "agent-state"
     log_path = state_dir / "logs" / "claude_transcript" / "events.jsonl"
@@ -1749,7 +1751,7 @@ def test_any_record_probe_on_missing_transcript_stays_quiet_and_confirms_once_it
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     probes = agent._build_submission_evidence_probes("!!", SubmissionConfirmationPolicy.STRICT)
-    raw_probe = probes[0]
+    raw_probe = probes[1]
     assert raw_probe.name == "any-record-raw-transcript"
 
     state_dir = tmp_path / "agent-state"
@@ -1773,7 +1775,7 @@ def test_low_content_messages_fall_back_to_any_record_probes(
     """A message that normalizes to (almost) nothing cannot carry identity."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     probes = agent._build_submission_evidence_probes("!!", SubmissionConfirmationPolicy.STRICT)
-    assert [probe.name for probe in probes] == ["any-record-raw-transcript", "any-record-native-transcript"]
+    assert [probe.name for probe in probes] == ["any-record-native-transcript", "any-record-raw-transcript"]
 
 
 def test_relaxed_probes_cover_session_id_marker_and_records(
@@ -2012,10 +2014,10 @@ class _ScriptedPaneClaudeAgent(ClaudeAgent):
     # past) this position (i.e. after enough Enter-accepts). A large value means it never appears.
     session_started_ready_at_position: int = Field(default=0)
 
-    def _send_target_arg(self, tmux_target: TmuxWindowTarget) -> str:
+    def _send_target_arg(self, tmux_target: TmuxWindowTarget | str) -> str:
         # This double stands in for the pane's CONTENT, not for tmux. Resolving the real pane
         # would shell out to a tmux server these tests neither have nor want.
-        return tmux_target.as_shell_arg()
+        return tmux_target if isinstance(tmux_target, str) else tmux_target.as_shell_arg()
 
     def _clear_pane_modes(self, target_arg: str) -> None:
         return None
@@ -2030,7 +2032,7 @@ class _ScriptedPaneClaudeAgent(ClaudeAgent):
         # waiting it out would only make the suite slow.
         return 0.1
 
-    def _press_enter(self, tmux_target: TmuxWindowTarget) -> None:
+    def _press_enter(self, tmux_target: TmuxWindowTarget | str) -> None:
         self.enter_press_count = self.enter_press_count + 1
         self.pane_position = min(self.pane_position + 1, len(self.scripted_panes) - 1)
 
@@ -2094,7 +2096,7 @@ class _KeyRecordingClaudeAgent(_ScriptedPaneClaudeAgent):
 
     pressed_keys: list[str] = Field(default_factory=list)
 
-    def _press_key(self, tmux_target: TmuxWindowTarget, key: str) -> None:
+    def _press_key(self, tmux_target: TmuxWindowTarget | str, key: str) -> None:
         self.pressed_keys.append(key)
         self.pane_position = min(self.pane_position + 1, len(self.scripted_panes) - 1)
 
@@ -2147,7 +2149,7 @@ def test_send_clears_restored_compact_draft_instead_of_appending(
     )
     assert isinstance(agent, _KeyRecordingClaudeAgent)
 
-    agent._clear_or_warn_about_preexisting_input_text(_TARGET)
+    agent._clear_or_warn_about_preexisting_input_text(_TARGET, agent._capture_input_box_pane_content(_TARGET))
 
     assert agent.pressed_keys == ["C-e", "C-u"]
     assert [event_type for event_type, _ in agent.recorded_events] == ["cleared_restored_input_text"]
@@ -2168,7 +2170,7 @@ def test_send_keeps_and_warns_about_a_draft_that_is_not_a_restored_compact(
     )
     assert isinstance(agent, _KeyRecordingClaudeAgent)
 
-    agent._clear_or_warn_about_preexisting_input_text(_TARGET)
+    agent._clear_or_warn_about_preexisting_input_text(_TARGET, agent._capture_input_box_pane_content(_TARGET))
 
     assert agent.pressed_keys == []
     assert [event_type for event_type, _ in agent.recorded_events] == ["preexisting_input_text"]
@@ -2189,7 +2191,7 @@ def test_send_falls_back_to_append_warning_when_clearing_restored_compact_leaves
     )
     assert isinstance(agent, _KeyRecordingClaudeAgent)
 
-    agent._clear_or_warn_about_preexisting_input_text(_TARGET)
+    agent._clear_or_warn_about_preexisting_input_text(_TARGET, agent._capture_input_box_pane_content(_TARGET))
 
     assert agent.pressed_keys == ["C-e", "C-u"]
     assert [event_type for event_type, _ in agent.recorded_events] == ["preexisting_input_text"]
@@ -2217,7 +2219,7 @@ def test_send_tells_the_input_box_hint_from_typed_text_by_its_styling(
     )
     assert isinstance(agent, _KeyRecordingClaudeAgent)
 
-    agent._clear_or_warn_about_preexisting_input_text(_TARGET)
+    agent._clear_or_warn_about_preexisting_input_text(_TARGET, agent._capture_input_box_pane_content(_TARGET))
 
     assert agent.pressed_keys == []
     assert [event_type for event_type, _ in agent.recorded_events] == expected_event_types

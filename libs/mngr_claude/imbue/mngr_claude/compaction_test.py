@@ -99,13 +99,15 @@ class _RecordingClaudeAgent(ClaudeAgent):
     def _get_agent_dir(self) -> Path:
         return self.override_agent_dir
 
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget | str) -> str | None:
+        return None
+
+    def _clear_or_warn_about_preexisting_input_text(
+        self, tmux_target: TmuxWindowTarget | str, input_box_pane_content: str | None
+    ) -> None:
         pass
 
-    def _clear_or_warn_about_preexisting_input_text(self, tmux_target: TmuxWindowTarget) -> None:
-        pass
-
-    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> str:
+    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget | str, message: str) -> str:
         self.sent_messages.append(message)
         return ""
 

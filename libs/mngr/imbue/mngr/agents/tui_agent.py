@@ -23,10 +23,10 @@ from imbue.mngr.agents.tui_utils import DEFAULT_CONFIRMATION_TIMEOUT_SECONDS
 from imbue.mngr.agents.tui_utils import RELAXED_CONFIRMATION_TIMEOUT_SECONDS
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
+from imbue.mngr.agents.tui_utils import is_pane_content_matching_indicator
 from imbue.mngr.agents.tui_utils import is_slash_command_message
 from imbue.mngr.agents.tui_utils import raise_for_unconfirmed_submission
 from imbue.mngr.agents.tui_utils import submit_message_and_confirm
-from imbue.mngr.agents.tui_utils import wait_for_paste_visible
 from imbue.mngr.agents.tui_utils import wait_for_tui_ready
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -101,7 +101,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         return None
 
     def _clear_preexisting_input_text_if_restored_command(
-        self, tmux_target: TmuxWindowTarget, leftover_text: str
+        self, tmux_target: TmuxWindowTarget | str, leftover_text: str
     ) -> bool:
         """Clear leftover input text that the TUI itself restored there; return whether the row is now empty.
 
@@ -122,11 +122,29 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         """
         return self._capture_pane_content(tmux_target)
 
-    def _clear_or_warn_about_preexisting_input_text(self, tmux_target: TmuxWindowTarget) -> None:
-        pane_content = self._capture_input_box_pane_content(tmux_target)
-        if pane_content is None:
+    def _capture_ready_input_box_pane_content(
+        self, tmux_target: TmuxWindowTarget | str, preflight_pane_content: str | None
+    ) -> str | None:
+        """Wait for the TUI to be ready and return the input-box pane content it is ready on.
+
+        Preflight's own reading of the pane answers this when it already shows the ready
+        indicator, which spares the send two pane captures; otherwise this polls for readiness
+        and captures afresh.
+        """
+        indicator = self.get_tui_ready_indicator()
+        if preflight_pane_content is not None and is_pane_content_matching_indicator(
+            preflight_pane_content, indicator
+        ):
+            return preflight_pane_content
+        wait_for_tui_ready(self, tmux_target, indicator)
+        return self._capture_input_box_pane_content(tmux_target)
+
+    def _clear_or_warn_about_preexisting_input_text(
+        self, tmux_target: TmuxWindowTarget | str, input_box_pane_content: str | None
+    ) -> None:
+        if input_box_pane_content is None:
             return
-        leftover_text = self._detect_preexisting_input_text(pane_content)
+        leftover_text = self._detect_preexisting_input_text(input_box_pane_content)
         if leftover_text is None:
             return
         if self._clear_preexisting_input_text_if_restored_command(tmux_target, leftover_text):
@@ -165,6 +183,9 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         keystrokes are never delivered while a resumed transcript is still
         replaying.
 
+        The agent's pane is looked up once and every step addresses it by that result: each
+        lookup and capture is a process spawn, and under gVisor those dominate a send.
+
         Normal messages are confirmed strictly: if no durable evidence of
         acceptance appears within ``confirmation_timeout_seconds`` (with
         bounded, pane-gated Enter retries along the way), this raises
@@ -177,11 +198,11 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
             # and would otherwise poll out the whole confirmation window before failing.
             if message.strip() == "":
                 raise SendMessageError(str(self.name), "the message is empty")
-            self._preflight_send_message(self.tmux_target)
-            wait_for_tui_ready(self, self.tmux_target, self.get_tui_ready_indicator())
-            self._clear_or_warn_about_preexisting_input_text(self.tmux_target)
-            self._send_tmux_literal_keys(self.tmux_target, message)
-            wait_for_paste_visible(self, self.tmux_target, message)
+            target_arg = self._send_target_arg(self.tmux_target)
+            preflight_pane_content = self._preflight_send_message(target_arg)
+            input_box_pane_content = self._capture_ready_input_box_pane_content(target_arg, preflight_pane_content)
+            self._clear_or_warn_about_preexisting_input_text(target_arg, input_box_pane_content)
+            self._send_tmux_literal_keys(target_arg, message)
 
             policy = self._determine_confirmation_policy(message)
             timeout_seconds = (
@@ -192,7 +213,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
             probes = tuple(self._build_submission_evidence_probes(message, policy))
             outcome = submit_message_and_confirm(
                 agent=self,
-                tmux_target=self.tmux_target,
+                tmux_target=target_arg,
                 message=message,
                 probes=probes,
                 timeout_seconds=timeout_seconds,
@@ -217,7 +238,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
                     # Not delivered: raise (never reaches the post-submit dialog check below).
                     raise_for_unconfirmed_submission(
                         agent=self,
-                        tmux_target=self.tmux_target,
+                        tmux_target=target_arg,
                         outcome=outcome,
                         timeout_seconds=timeout_seconds,
                     )
@@ -238,7 +259,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
             # send raises above and never gets here): make sure the submitted input did not open a
             # blocking dialog that leaves the agent stuck. Subclasses that can detect such dialogs
             # override this; the default is a no-op.
-            self._run_post_submit_dialog_check(self.tmux_target)
+            self._run_post_submit_dialog_check(target_arg)
 
     def _determine_confirmation_policy(self, message: str) -> SubmissionConfirmationPolicy:
         """Choose the confirmation policy for a message.
@@ -253,7 +274,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
             return SubmissionConfirmationPolicy.RELAXED
         return SubmissionConfirmationPolicy.STRICT
 
-    def _run_post_submit_dialog_check(self, tmux_target: TmuxWindowTarget) -> None:
+    def _run_post_submit_dialog_check(self, tmux_target: TmuxWindowTarget | str) -> None:
         """Handle any blocking dialog opened by the just-submitted message.
 
         Called after a send has been delivered/confirmed. Default is a no-op.

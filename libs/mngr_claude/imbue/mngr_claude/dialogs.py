@@ -824,8 +824,8 @@ def classify(pane_content: str) -> Dialog | None:
     return Unrecognized()
 
 
-def deal_with_dialogs(pane: DialogPane, max_passes: int = _MAX_DIALOG_PASSES) -> None:
-    """Clear whatever is holding the pane's input, or raise :class:`DialogBlocked`.
+def deal_with_dialogs(pane: DialogPane, max_passes: int = _MAX_DIALOG_PASSES) -> str:
+    """Clear whatever is holding the pane's input and return the capture showing it free, or raise :class:`DialogBlocked`.
 
     These chain -- dismissing one can reveal another underneath -- so this loops rather than
     classifying once. The no-progress check is the real guard: the same thing still present
@@ -840,7 +840,7 @@ def deal_with_dialogs(pane: DialogPane, max_passes: int = _MAX_DIALOG_PASSES) ->
         pane_content = pane.capture()
         blocking = classify(pane_content)
         if blocking is None:
-            return
+            return pane_content
         # Compare the PANE, not the nickname. GenericBenign covers every dismissible surface, so
         # it answers to one nickname for all of them -- and a genuine chain (the model picker
         # revealing the effort picker beneath it) would look identical to being stuck. An

@@ -65,6 +65,19 @@ _MESSAGE_LOCK_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 
 
 @pure
+def build_clear_pane_modes_tmux_subcommand(target_arg: str) -> str:
+    """The tmux subcommand that leaves any pane mode, for chaining ahead of a keystroke write with ``\\;``.
+
+    tmux parses a whole ``\\;`` list before running any of it, and ``copy-mode -q`` only exists
+    from tmux 3.2, so a bare ``copy-mode -q`` would make older tmux reject the write chained after
+    it. ``if-shell -F`` checks the format inside the same tmux process and parses the inner command
+    only when the pane really is in a mode.
+    """
+    clear_modes = shlex.quote(f"copy-mode -q -t {target_arg}")
+    return f"if-shell -F -t {target_arg} '#{{pane_in_mode}}' {clear_modes}"
+
+
+@pure
 def describe_failed_send_command(result: CommandResult, timeout_seconds: float) -> str:
     """Why a send command failed; a local command killed by its timeout leaves no output, so say so."""
     return result.stderr or result.stdout or f"no output (it may have hit the {timeout_seconds:.0f}s timeout)"
@@ -509,7 +522,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             return self._capture_pane_content(other_window.as_shell_arg(), include_scrollback=include_scrollback)
         return self._capture_pane_content(self.tmux_target, include_scrollback=include_scrollback)
 
-    def _send_target_arg(self, tmux_target: TmuxWindowTarget) -> str:
+    def _send_target_arg(self, tmux_target: TmuxWindowTarget | str) -> str:
         """The tmux ``-t`` argument every send should use: the agent's own pane, by ID.
 
         ``session:window`` resolves to whichever pane is ACTIVE, so one split silently delivers
@@ -530,9 +543,11 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         inherited that ID. Reading it is one tmux call, and that is the price of addressing the
         pane that exists now rather than the one that did.
 
-        Callers that read the pane in a loop (the readiness and dialog polls) should resolve once
-        and pass the result down, rather than paying this per iteration.
+        A send resolves once and hands the resulting string to every step after it; a string is
+        returned unchanged, since it is a target this already resolved.
         """
+        if isinstance(tmux_target, str):
+            return tmux_target
         session_arg = shlex.quote(f"={tmux_target.session_name}:")
         result = self.host.execute_stateful_command(
             f"tmux show-options -v -t {session_arg} {AGENT_PANE_ID_OPTION}",
@@ -550,12 +565,12 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         after it disappears, leaving the text sitting there unsent rather than failing.
 
         Users reach copy-mode by accident constantly -- with ``mouse on``, one wheel-up enters it
-        with no obvious indicator. ``copy-mode -q`` clears every mode type in one call and is a
-        silent no-op when the pane is in none, so it needs no ``#{pane_in_mode}`` check. Best
+        with no obvious indicator. ``copy-mode -q`` clears every mode type in one call. Best
         effort: if it fails, the send that follows will report the real problem.
         """
         self.host.execute_stateful_command(
-            f"tmux copy-mode -q -t {target_arg}", timeout_seconds=self.send_command_timeout_seconds
+            f"tmux {build_clear_pane_modes_tmux_subcommand(target_arg)}",
+            timeout_seconds=self.send_command_timeout_seconds,
         )
 
     def _run_send_command(self, command: str, failed_step: str) -> None:
@@ -583,7 +598,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """
         return capture_tmux_pane_content(
             self.host,
-            tmux_target if isinstance(tmux_target, str) else self._send_target_arg(tmux_target),
+            self._send_target_arg(tmux_target),
             timeout_seconds=_CAPTURE_PANE_TIMEOUT_SECONDS,
             include_scrollback=include_scrollback,
             include_styles=include_styles,
@@ -869,18 +884,22 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         to re-check the agent before sending.
         """
         with log_span("Sending message to agent {} (length={})", self.name, len(message)):
-            self._preflight_send_message(self.tmux_target)
-            self._send_message_simple(self.tmux_target, message)
+            target_arg = self._send_target_arg(self.tmux_target)
+            self._preflight_send_message(target_arg)
+            self._send_message_simple(target_arg, message)
 
-    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
-        """Run preflight checks before sending a message.
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget | str) -> str | None:
+        """Run preflight checks before sending a message, returning the input-box pane content they last saw, if any.
 
-        Called at the start of send_message. Default is a no-op.
+        Called at the start of send_message. Default is a no-op that saw nothing.
         Subclasses can override to perform checks (e.g., dialog detection)
-        and raise an appropriate error to abort the send.
+        and raise an appropriate error to abort the send. A subclass that reads the pane returns
+        what it read once nothing held the input, so the send can check readiness and leftover
+        input against that screen instead of capturing it again.
         """
+        return None
 
-    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> str:
+    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget | str, message: str) -> str:
         """Send literal text to a tmux pane, choosing the best method by length.
 
         Returns the resolved tmux target it sent to, so a caller following up with Enter can
@@ -899,19 +918,28 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         shell pane counts: readline and zle both enable it by default, so a ``CommandAgent``
         running a shell takes a multi-line message as one line-buffer edit that the Enter after
         it runs, rather than running each of its lines as the LF-turned-CR arrived.
+
+        Leaving any pane mode (see ``_clear_pane_modes``) rides in the same tmux invocation as the
+        write, since each invocation is a process spawn and those are slow under gVisor.
         """
         target_arg = self._send_target_arg(tmux_target)
-        self._clear_pane_modes(target_arg)
+        clear_pane_modes = build_clear_pane_modes_tmux_subcommand(target_arg)
         if len(message) < LONG_MESSAGE_THRESHOLD:
-            self._run_send_command(f"tmux send-keys -t {target_arg} -l -- {shlex.quote(message)}", "tmux send-keys")
+            self._run_send_command(
+                f"tmux {clear_pane_modes} \\; send-keys -t {target_arg} -l -- {shlex.quote(message)}",
+                "tmux send-keys",
+            )
         else:
             tmp_path = Path(f"/tmp/mngr-msg-buffer-{self.session_name}.txt")
             quoted_buffer = shlex.quote(f"mngr-{self.session_name}")
             quoted_path = shlex.quote(str(tmp_path))
             try:
                 self.host.write_text_file(tmp_path, message)
-                self._run_send_command(f"tmux load-buffer -b {quoted_buffer} {quoted_path}", "tmux load-buffer")
-                self._run_send_command(f"tmux paste-buffer -p -b {quoted_buffer} -t {target_arg}", "tmux paste-buffer")
+                self._run_send_command(
+                    f"tmux load-buffer -b {quoted_buffer} {quoted_path} \\; {clear_pane_modes} \\; "
+                    f"paste-buffer -p -b {quoted_buffer} -t {target_arg}",
+                    "tmux load-buffer/paste-buffer",
+                )
             finally:
                 self.host.execute_idempotent_command(
                     f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}",
@@ -919,7 +947,7 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
                 )
         return target_arg
 
-    def _send_message_simple(self, tmux_target: TmuxWindowTarget, message: str) -> None:
+    def _send_message_simple(self, tmux_target: TmuxWindowTarget | str, message: str) -> None:
         """Send a message directly without waiting for paste confirmation."""
         target_arg = self._send_tmux_literal_keys(tmux_target, message)
 

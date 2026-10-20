@@ -105,10 +105,10 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
 
         # The dialog preflight must clear (no dialog is present), after which
         # send_message proceeds to the paste/submit phase. With no real Claude
-        # process, that phase deterministically times out -- either
-        # wait_for_paste_visible ("Timeout waiting for pasted content to
-        # appear") or the evidence-confirmation window ("Timeout waiting for
-        # message submission evidence"). Both raise the
+        # process, that phase deterministically times out -- either the
+        # paste wait ("Timeout waiting for pasted content to appear") or the
+        # evidence-confirmation window ("Timeout waiting for message
+        # submission evidence"). Both raise the
         # base SendMessageError with a "Timeout waiting for" reason, which a
         # DialogDetectedError ("A dialog is blocking the agent's input ...")
         # never contains. Matching that substring therefore proves the failure
