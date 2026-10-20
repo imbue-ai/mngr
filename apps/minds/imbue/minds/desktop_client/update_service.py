@@ -451,6 +451,8 @@ class WorkspaceUpdateService(MutableModel):
             )
             return UpdateSchedule(outcome=outcome, failure_detail=call.failure_detail)
         self.state_store.clear_schedule(agent_id)
+        # A sweep read that started before the cancel would put the file back on the row.
+        self.detector.request_pass()
         return None
 
     def skip_update(self, agent_id: AgentId) -> UpdateSchedule | None:
