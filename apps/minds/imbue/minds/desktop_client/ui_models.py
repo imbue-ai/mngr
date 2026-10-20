@@ -485,8 +485,8 @@ class UiWorkspaceUpdate(FrozenModel):
     )
     is_workspace_readable: bool = Field(
         default=False,
-        description="Whether the last sweep could read the workspace (running and reachable), which is what it "
-        "takes for auto-update to arm it",
+        description="Whether the last sweep read the workspace's updates (running, and its read answered), which "
+        "is what it takes for auto-update to arm it",
     )
     is_scheduled: bool = Field(
         default=False, description="Whether the workspace's own schedule file is armed, as its last read said"

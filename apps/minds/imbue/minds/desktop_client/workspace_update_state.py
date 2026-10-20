@@ -1010,23 +1010,24 @@ class WorkspaceUpdateDetector(MutableModel):
         label_version = self.backend_resolver.get_agent_label(agent_id, ORIGINAL_MINDS_VERSION_LABEL)
         git_version = self._read_git_version(agent_id, host_state)
         detected = resolve_workspace_version(git_version=git_version, label_version=label_version)
+        # The run record and the schedule file ride the sweep: they are how a
+        # scheduled or undispatched run, or a verdict written while the app was
+        # closed, reaches the row. An unreadable host cannot answer ``--no-start``,
+        # and a stopped one has no cron to run a schedule.
+        is_host_readable = is_workspace_readable(host_state)
+        # A row that says it needs a sign-in asks whether one has landed since, so it can stop saying so.
+        facts = self.read_update_facts(agent_id, self.store.get(agent_id).needs_sign_in) if is_host_readable else None
         self.store.record_detection(
             agent_id,
             detection=derive_update_detection(detected.version_ref or None, supported_version or None),
             current_version=detected.version_ref,
             supported_version=supported_version,
             is_version_from_label=detected.is_from_label,
-            is_readable=is_workspace_readable(host_state),
+            is_readable=facts is not None,
         )
-        # The run record and the schedule file ride the sweep: they are how a
-        # scheduled or undispatched run, or a verdict written while the app was
-        # closed, reaches the row. An unreadable host cannot answer ``--no-start``,
-        # and a stopped one has no cron to run a schedule.
-        if not is_workspace_readable(host_state):
+        if not is_host_readable:
             self.store.record_schedule(agent_id, schedule=None, last_dispatch=None, is_signed_in=None)
             return
-        # A row that says it needs a sign-in asks whether one has landed since, so it can stop saying so.
-        facts = self.read_update_facts(agent_id, self.store.get(agent_id).needs_sign_in)
         if facts is None:
             return
         if facts.run_status is not None:

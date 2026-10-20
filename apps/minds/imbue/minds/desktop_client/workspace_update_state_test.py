@@ -409,6 +409,10 @@ class _VersionReadingMngrCaller(MngrCaller):
             return list(self._read_agent_ids)
 
 
+# A reachable workspace's read with nothing armed, no run record and no dispatch.
+_NO_FACTS = UpdateWorkspaceFacts(schedule=None, run_status=None, last_dispatch=None, is_signed_in=None)
+
+
 def _detector(
     tmp_path: Path,
     resolver: _WorkspacesResolver,
@@ -430,7 +434,7 @@ def _detector(
         read_supported_version=lambda: "minds-v0.4.1",
         interval_seconds=interval_seconds,
         read_update_facts=(
-            read_update_facts if read_update_facts is not None else lambda _agent_id, _is_sign_in_checked: None
+            read_update_facts if read_update_facts is not None else lambda _agent_id, _is_sign_in_checked: _NO_FACTS
         ),
         read_auto_update_policy=lambda _agent_id: (
             auto_update_policy
@@ -586,6 +590,22 @@ def test_a_machine_that_became_unreadable_keeps_the_version_it_was_read_at(
     # Its version still stands, but a sweep that cannot read it cannot arm it under auto-update either.
     assert state.is_workspace_readable is False
     assert caller.read_agent_ids == [str(agent_id)]
+
+
+def test_a_running_machine_whose_update_read_does_not_answer_is_not_readable(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """Discovery can call a host RUNNING whose exec fails; auto-update cannot arm it, so the row must not say it can."""
+    agent_id = AgentId.generate()
+    resolver = _WorkspacesResolver(url_by_agent_and_service={}, host_state_by_agent={agent_id: HostState.RUNNING})
+    caller = _VersionReadingMngrCaller(version_by_agent={str(agent_id): "minds-v0.3.12"})
+    detector = _detector(
+        tmp_path, resolver, caller, root_concurrency_group, read_update_facts=lambda _agent_id, _checked: None
+    )
+
+    detector.run_pass()
+
+    assert detector.store.get(agent_id).is_workspace_readable is False
 
 
 def test_a_machine_readable_again_is_re_read_whatever_the_cache_s_age(
