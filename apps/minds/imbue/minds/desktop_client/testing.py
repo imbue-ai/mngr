@@ -109,6 +109,8 @@ from imbue.minds.desktop_client.update_apply_window import RUN_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_END_SENTINEL
 from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
 from imbue.minds.desktop_client.update_dispatcher_script import UPDATE_COMMAND_RESULT_MARKER
+from imbue.minds.desktop_client.update_program_stubs_testing import STUB_MNGR_SOURCE
+from imbue.minds.desktop_client.update_program_stubs_testing import STUB_TOOL_SOURCE
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.update_workspace_command import UPDATE_WORKSPACE_PROGRAM
@@ -1580,43 +1582,6 @@ class ScriptedToolAnswer(FrozenModel):
     stderr: str = Field(default="", description="What it prints on stderr")
 
 
-_STUB_MNGR_SOURCE: Final[str] = r"""#!/usr/bin/env python3
-import json, os, sys
-with open(os.environ["STUB_CALLS_LOG"], "a") as log:
-    log.write(json.dumps(sys.argv[1:]) + "\n")
-command = sys.argv[1] if len(sys.argv) > 1 else ""
-if command == "list":
-    with open(os.environ["STUB_AGENTS_FILE"]) as handle:
-        for agent in json.load(handle):
-            fields = (agent["id"], agent["name"], agent["state"], agent.get("is_primary", ""), agent.get("chat_id", ""))
-            print("|".join(fields))
-elif command == "create":
-    print(json.dumps({"event": "created", "agent_id": "agent-" + "c" * 32}))
-sys.exit(int(os.environ.get("STUB_EXIT_" + command.upper(), "0")))
-"""
-
-# A stand-in for a template script: records its argv (and the text of a --message-file) and
-# answers with the next scripted answer, or the last one once the script runs out.
-_STUB_TOOL_SOURCE: Final[str] = r"""#!/usr/bin/env python3
-import json, os, sys
-argv = sys.argv[1:]
-message = ""
-if "--message-file" in argv:
-    with open(argv[argv.index("--message-file") + 1]) as handle:
-        message = handle.read()
-with open(os.environ["STUB_CALLS_LOG"], "a") as log:
-    log.write(json.dumps([os.path.basename(sys.argv[0])] + argv + ([message] if message else [])) + "\n")
-answers_path = sys.argv[0] + ".answers.json"
-with open(answers_path) as handle:
-    answers = json.load(handle)
-answer = answers.pop(0) if len(answers) > 1 else answers[0]
-with open(answers_path, "w") as handle:
-    json.dump(answers, handle)
-sys.stdout.write(answer["stdout"])
-sys.stderr.write(answer["stderr"])
-sys.exit(answer["exit_code"])
-"""
-
 _SERVICES_AGENT: Final[dict[str, str]] = {
     "id": "agent-" + "0" * 32,
     "name": "system-services",
@@ -1644,7 +1609,7 @@ class StagedUpdateWorkspace(FrozenModel):
         """Put a stand-in for the template script at ``relative_path`` that answers ``answers`` in order."""
         path = self.root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        _write_executable(path, _STUB_TOOL_SOURCE)
+        _write_executable(path, STUB_TOOL_SOURCE)
         path.with_name(path.name + ".answers.json").write_text(json.dumps([answer.model_dump() for answer in answers]))
 
     def tool_calls(self, script_name: str) -> list[list[str]]:
@@ -1708,8 +1673,8 @@ def stage_update_workspace(
         (root / ".mngr" / "settings.local.toml").write_text('[commands.create]\ntype = "claude"\n')
     bin_dir = tmp_path / "stub-bin"
     bin_dir.mkdir()
-    _write_executable(bin_dir / "mngr", _STUB_MNGR_SOURCE)
-    _write_executable(bin_dir / "tk", _STUB_MNGR_SOURCE)
+    _write_executable(bin_dir / "mngr", STUB_MNGR_SOURCE)
+    _write_executable(bin_dir / "tk", STUB_MNGR_SOURCE)
     if has_cron:
         _write_executable(bin_dir / "cron", "#!/bin/sh\nexit 0\n")
     live_cron_dir = tmp_path / "etc-cron.d"

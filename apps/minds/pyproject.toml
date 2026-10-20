@@ -115,6 +115,7 @@ exclude = [
   "**/conftest.py",
   "**/testing.py",
   "**/utils/snapshot_container_states_testing.py",
+  "**/desktop_client/update_program_stubs_testing.py",
 ]
 
 # Build the frontend bundle (frontend/ -> static/ui/) when packaging a real
