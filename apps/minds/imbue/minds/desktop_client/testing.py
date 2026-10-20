@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import stat
 import subprocess
 import threading
@@ -1788,3 +1789,42 @@ def update_command_exec_result(payload: Mapping[str, Any]) -> MngrCallResult:
     inner_stdout = f"{UPDATE_COMMAND_RESULT_MARKER}{json.dumps({**payload, 'schema': 1})}\n"
     event = {"event": "exec_result", "agent": "workspace", "stdout": inner_stdout, "stderr": "", "success": True}
     return MngrCallResult(returncode=0, stdout=json.dumps(event) + "\n", stderr="", is_mngr_output=True)
+
+
+def update_program_invocation(argv: Sequence[str]) -> tuple[str, dict[str, str]]:
+    """The mode and ``--flag value`` arguments one recorded ``mngr exec`` ran the workspace update program with.
+
+    Read back out of the shell string ``build_update_workspace_command`` ships: the
+    arguments follow the program's scratch path and end where its exit status is kept.
+    """
+    command = argv[3]
+    invocation = command.split("; minds_update_exit=$?", 1)[0].rsplit('"$minds_update_program" ', 1)[1]
+    mode, *arguments = shlex.split(invocation)
+    assert len(arguments) % 2 == 0, arguments
+    return mode, dict(zip(arguments[::2], arguments[1::2], strict=True))
+
+
+def armed_update_schedule_file(
+    *,
+    ceiling_ref: str,
+    override_ref: str = "",
+    window: tuple[int, int] = (2, 5),
+    zone: str = "America/Los_Angeles",
+) -> dict[str, Any]:
+    """A ``schedule.json`` as the update program's arm writes it, and as its ARMED answer carries it."""
+    return {
+        "schema": 1,
+        "armed_at": datetime.now(timezone.utc).timestamp(),
+        "ceiling": ceiling_ref,
+        "window_start_hour": window[0],
+        "window_end_hour": window[1],
+        "zone": zone,
+        "override_ref": override_ref,
+        "is_backup_configured": False,
+        "marked_chat": "",
+        "marked_at": None,
+        "window_seen_open_at": None,
+        "pending_skip_reason": "",
+        "last_skip_reason": "",
+        "last_skip_at": None,
+    }

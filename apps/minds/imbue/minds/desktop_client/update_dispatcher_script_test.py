@@ -52,6 +52,7 @@ def program(tmp_path: Path) -> ModuleType:
         ("2026-11-01T01:30:00-08:00", (1, 3), _LOS_ANGELES, "2026-11-01T08:00"),
     ],
 )
+@pytest.mark.witnesses("workspace-updates.window-in-the-users-zone")
 def test_the_window_opens_at_the_start_hour_in_the_files_zone(
     program: ModuleType, now: str, window: tuple[int, int], zone: str, opened_at_utc: str
 ) -> None:
@@ -153,6 +154,10 @@ def _never_gone() -> bool:
         (_schedule(), None, _AFTER_WINDOW, _never_gone, "nothing"),
     ],
 )
+@pytest.mark.witnesses("workspace-updates.gone-agent-restarted-in-window")
+@pytest.mark.witnesses(
+    "workspace-updates.stopped-workspace-not-updated", partial="the decision only; not the row once readable"
+)
 def test_one_tick_decides_from_the_window_and_the_run_record(
     program: ModuleType, schedule: dict[str, Any], run: dict[str, Any] | None, now: float, is_gone: Any, action: str
 ) -> None:
@@ -225,6 +230,7 @@ def _tick(program: ModuleType, staged: StagedUpdateWorkspace, now: float) -> Non
     program.mode_tick(update_program_context(program, staged, [], now))
 
 
+@pytest.mark.witnesses("workspace-updates.runs-without-the-app")
 def test_a_tick_inside_the_window_starts_the_run_once_and_marks_the_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:
@@ -245,6 +251,7 @@ def test_a_tick_inside_the_window_starts_the_run_once_and_marks_the_file(
     assert dispatch is not None and dispatch["started_by"] == "scheduled"
 
 
+@pytest.mark.witnesses("workspace-updates.skipped-window", partial="the recorded reason; not the modal line")
 def test_a_tick_that_cannot_start_the_run_keeps_trying_and_records_why_at_window_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:
@@ -265,6 +272,7 @@ def test_a_tick_that_cannot_start_the_run_keeps_trying_and_records_why_at_window
     assert closed["last_skip_at"] == _AFTER_WINDOW
 
 
+@pytest.mark.witnesses("workspace-updates.needs-sign-in", partial="the dispatcher's skip only")
 def test_a_sign_in_refusal_at_dispatch_time_is_the_windows_skip_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:
@@ -277,6 +285,7 @@ def test_a_sign_in_refusal_at_dispatch_time_is_the_windows_skip_reason(
     assert schedule is not None and schedule["pending_skip_reason"] == "NEEDS_SIGN_IN"
 
 
+@pytest.mark.witnesses("workspace-updates.failure-cancels-the-schedule")
 def test_a_tick_retires_the_schedule_once_its_run_has_a_verdict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:
@@ -289,6 +298,7 @@ def test_a_tick_retires_the_schedule_once_its_run_has_a_verdict(
     assert staged.read_state("schedule.json") is None
 
 
+@pytest.mark.witnesses("workspace-updates.gone-agent-closed-out")
 def test_the_watchdog_closes_out_a_run_whose_lead_is_gone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:
@@ -317,6 +327,7 @@ def test_the_watchdog_closes_out_a_run_whose_lead_is_gone(
     assert [call[1] for call in closes] == ["w-1"]
 
 
+@pytest.mark.witnesses("workspace-updates.idle-agent-reminded")
 def test_the_watchdog_reminds_an_idle_lead_through_its_chat_and_then_waits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:

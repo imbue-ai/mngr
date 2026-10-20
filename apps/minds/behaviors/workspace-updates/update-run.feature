@@ -16,6 +16,7 @@ Feature: Running an update
     When the user starts an update for that workspace
     Then that workspace is started
     And an update agent is started inside that workspace
+    And that workspace stays running after the update
 
   @running-workspace-not-restarted
   Scenario: A running workspace is updated without being started again
@@ -34,7 +35,7 @@ Feature: Running an update
 
   @workspace-refuses-the-agent
   Scenario: A workspace that refuses to start the update agent has its refusal shown
-    Which account and harness an agent runs on is the workspace's own decision, and so is whether one can run at all: a workspace with no provider account signed in refuses the agent in its own words, which the app shows rather than composing a reason of its own. That refusal is one the user clears themselves, so the run has to be startable again the moment they have.
+    Whether an agent can run at all is the workspace's own decision, so its refusal is shown in its own words rather than a reason the app composes. That refusal is one the user clears themselves, so the run has to be startable again the moment they have. A workspace with no AI account signed in is reported as needing a sign-in instead (see Scheduling an update).
     Given an out-of-date workspace that refuses to start any agent in it
     When the user starts an update for that workspace
     Then no update agent is started
@@ -77,10 +78,47 @@ Feature: Running an update
 
   @one-seed-message
   Scenario: Every run is started with the same message
-    The update flow is unattended by design: it ends by reporting what changed and offering a rollback, whether or not anyone watched. So a run started by hand, from a schedule, or in bulk carries no consent tier of its own -- only the slash command, and the answers the app already collected at the button that an older workspace's flow would otherwise stop to ask for again.
+    The update flow is unattended by design: it ends by reporting what changed and offering a rollback, whether or not anyone watched. So a run carries no consent tier of its own, and the agent is never told whether it was scheduled or pressed: only the slash command, the release it targets and the app's ceiling, and the answers the app already collected at the button that an older workspace's flow would otherwise stop to ask for again.
+    The release and ceiling travel in the message so the agent never has to reach the app for them.
     Given an out-of-date workspace with backups configured
     When an update is started for that workspace by any path
-    Then the update agent's seed message is the update command alone
+    Then the update agent's seed message is the update command with the release it targets and the app's ceiling
+    And the update chat is named for that release
+
+  @chats-pause-notice
+  Scenario: Updating now says that running chats pause while the update lands
+    Given an out-of-date workspace
+    When the user opens that workspace's update
+    Then the app says that running chats pause for a few minutes while the update is applied, then continue
+
+  @decision-pending
+  Scenario: An update that cannot keep something the user built ends waiting for their decision
+    Nothing is held open waiting: the run ends, and its chat is where the user decides.
+    Given a workspace whose update agent found that the update cannot keep something the user built
+    Then the run ends without changing the workspace
+    And the workspace's row says a decision is pending
+    And its update shows the agent's line about what it cannot keep, with a button into the run's chat and no Update now
+
+  @open-chat-from-outcome
+  Scenario: A finished run's chat is one click away from its outcome
+    A scheduled run shows no window of its own while it runs, so its outcome is the way in.
+    Given a workspace whose last update landed, failed, or is waiting for a decision
+    Then the outcome on the workspace's row offers a button into the run's chat
+
+  @idle-agent-reminded
+  Scenario: An update agent that sits idle without a result is reminded
+    Given a workspace with an update in flight
+    And its agent and the worker it handed off to are both idle, with no result recorded
+    Then the workspace reminds the agent that it owes a result
+    And it is not reminded again for a while
+
+  @gone-agent-closed-out
+  Scenario: An update whose agent is gone is closed out by the workspace
+    Given a workspace with an update in flight
+    And its agent is gone without recording a result
+    Then the workspace records that the update could not finish
+    And the worker it handed off to is stopped with its work kept
+    And the leases that agent held are released
 
   @one-run-per-workspace
   Rule: A workspace runs at most one update at a time

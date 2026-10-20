@@ -82,6 +82,7 @@ def test_arming_installs_the_dispatcher_and_cron_line_and_writes_the_schedule(
         (True, False, True, UpdateArmOutcome.NEEDS_SIGN_IN),
     ],
 )
+@pytest.mark.witnesses("workspace-updates.no-cron", partial="the refusal; not the app's Update now offer")
 def test_arming_refuses_a_workspace_that_cannot_run_a_scheduled_update(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -120,6 +121,7 @@ def test_re_arming_keeps_the_chat_the_dispatcher_already_started_this_window(
     assert (rearmed["marked_chat"], rearmed["marked_at"]) == ("update-to-minds-v0-9-0", _NOW - 60)
 
 
+@pytest.mark.witnesses("workspace-updates.one-seed-message")
 def test_update_now_creates_the_chat_through_the_chat_app_with_the_pinned_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -257,6 +259,7 @@ def test_a_workspace_with_no_chat_app_gets_a_bare_create_carrying_the_display_na
     assert "auto_open=true" in creates[0]
 
 
+@pytest.mark.witnesses("workspace-updates.schedule-follows-the-app")
 def test_reading_an_armed_schedule_refreshes_the_apps_fields_and_keeps_the_dispatchers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

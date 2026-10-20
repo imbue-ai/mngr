@@ -1126,6 +1126,7 @@ def test_the_row_is_scheduled_exactly_as_the_workspaces_file_says(tmp_path: Path
     assert store.get(agent_id).is_scheduled is False
 
 
+@pytest.mark.witnesses("workspace-updates.needs-sign-in", partial="the row state; not the sign-in button")
 def test_a_sign_in_skip_reads_as_needing_sign_in_until_a_read_finds_an_account(tmp_path: Path) -> None:
     store, agent_id = _out_of_date_store(tmp_path)
     store.record_schedule(
@@ -1178,6 +1179,7 @@ def test_a_scheduled_runs_start_kind_and_chat_come_from_its_dispatch_when_its_re
     assert state.chat_agent_id == "agent-" + "a" * 32
 
 
+@pytest.mark.witnesses("workspace-updates.decision-pending", partial="the row state; not the modal")
 def test_a_needs_decision_verdict_is_a_pending_decision_and_not_a_failure(tmp_path: Path) -> None:
     store, agent_id = _out_of_date_store(tmp_path)
     store.observe_run_record(agent_id, _run_record(verdict=UpdateVerdict.NEEDS_DECISION))
@@ -1219,12 +1221,17 @@ def _offered_state(**overrides: object) -> UiWorkspaceUpdate:
         (_offered_state(verdict=UpdateVerdict.STUCK, chat_agent_name="update-to-minds-v0-4-1"), _ENABLED, False),
     ],
 )
+@pytest.mark.witnesses("workspace-updates.arms-behind-workspaces")
+@pytest.mark.witnesses("workspace-updates.skip-this-update", partial="the arming decision only")
 def test_auto_update_arms_only_a_minor_release_behind_with_nothing_in_the_way(
     state: UiWorkspaceUpdate, policy: AutoUpdatePolicy, is_armed: bool
 ) -> None:
     assert should_auto_arm(state, policy, "minds-v0.4.1", last_dispatch=None) is is_armed
 
 
+@pytest.mark.witnesses(
+    "workspace-updates.failed-run-not-rescheduled", partial="the newer-release half; not the dismissal half"
+)
 def test_auto_update_arms_again_after_a_failure_once_the_ceiling_has_moved() -> None:
     failed = _offered_state(verdict=UpdateVerdict.REFUSED, chat_agent_name="update-to-minds-v0-4-0")
     dispatch = UpdateLastDispatch(
@@ -1238,6 +1245,8 @@ def test_auto_update_arms_again_after_a_failure_once_the_ceiling_has_moved() -> 
     assert should_auto_arm(failed, _ENABLED, "minds-v0.4.1", dispatch) is True
 
 
+@pytest.mark.witnesses("workspace-updates.arms-behind-workspaces")
+@pytest.mark.witnesses("workspace-updates.stopped-workspace-not-updated", partial="the row while stopped")
 def test_the_sweep_arms_a_behind_workspace_under_auto_update_and_shows_a_stopped_one_unscheduled(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
