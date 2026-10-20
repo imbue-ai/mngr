@@ -24,7 +24,8 @@ Feature: Automatic workspace updates
     And a workspace that auto-update will schedule
     Then the workspace view carries no out-of-date notice for it
     And the app offers no Schedule or Update all action
-    And the workspace's row says its update is scheduled, and its update says no action is needed
+    And the workspace's row says nothing about its update until auto-update has scheduled it
+    And once it is scheduled, the row says so, and its update says no action is needed
     And the app still reports a landed update, and a workspace too old to update in place
 
   @skip-this-update

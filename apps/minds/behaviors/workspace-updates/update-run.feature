@@ -158,10 +158,11 @@ Feature: Running an update
       Then the app still reports that update as preparing
 
     @hold-is-reported-with-its-detail
-    Example: A run that has stopped for the user's decision says what it is waiting on
+    Example: A run that has stopped for the user's go-ahead says what it is waiting on
       A recorded hold is the run's own statement, so it is surfaced without waiting for repeated idleness; its one line of detail, written for the user, is what the app shows.
+      A run holds only while it waits for the user to confirm a version past the app's; something the update cannot keep ends the run with a decision instead.
       Given a workspace with an update in flight
-      And the run records that it is holding for the user, with a line naming what it cannot keep
+      And the run records that it is holding for the user to confirm the version, with a line saying so
       Then the app reports that update as waiting for the user at once
       And the app shows the run's own line about what it is waiting on
 
