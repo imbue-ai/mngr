@@ -328,7 +328,8 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         );
       }
 
-      if (needsSignIn) {
+      // A press the workspace just refused for want of a sign-in already says so in its own words.
+      if (needsSignIn && !state.error) {
         body.push(
           m(
             Notice,

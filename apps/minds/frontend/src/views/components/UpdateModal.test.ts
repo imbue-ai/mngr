@@ -399,6 +399,19 @@ describe("the update modal over a machine that needs a sign-in", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("says once that a refused Update now needs a sign-in", async () => {
+    const refusal = "Sign in to an AI account in this workspace, then try again.";
+    const { draw } = harness(() => Promise.resolve(jsonResponse({ error: refusal }, 409)));
+    press(draw(), "Update now");
+    await settleDispatch();
+    // The refusal also lands on the row, as the next updates frame carries it.
+    updatesShell({ [AGENT]: REFUSED }, false);
+
+    const text = allText(draw());
+    expect(text).toContain(refusal);
+    expect(text).not.toContain("so its update can't start");
+  });
+
   it("stays up to show a sign-in the machine could not open", async () => {
     const { draw, onClose } = harness(
       () => Promise.resolve(jsonResponse({ error: "Couldn't open a chat in this workspace." }, 502)),
