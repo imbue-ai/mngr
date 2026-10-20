@@ -62,6 +62,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import get_agents_root_dir
+from imbue.mngr.hosts.common import get_descendant_pids
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
@@ -474,8 +475,8 @@ _TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
 _TMUX_SET_TITLES_STRING: Final[str] = "#S  #T"
 
 # Per-command timeout for the individual shell steps that make up the
-# stop/cleanup path (tmux list-windows/list-panes/kill-session, the pgrep
-# descendant walk, and the MNGR_AGENT_ID env scan). A wedged tmux client can
+# stop/cleanup path (tmux list-windows/list-panes/kill-session, the ps
+# process-table snapshot, and the MNGR_AGENT_ID env scan). A wedged tmux client can
 # hang indefinitely -- tmux occasionally fails to return under CI load, which
 # is why the test-cleanup helpers in utils/testing.py already bound every tmux
 # subprocess. Without a bound here, a single stuck `tmux list-panes` blocks
@@ -3547,8 +3548,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
           process"), so it is filtered out.
 
         The exit code is intentionally not used for classification: several stop commands
-        (the kill loop, ``pgrep`` with no matches) exit non-zero benignly, and message
-        matching is robust to the session vanishing mid-teardown.
+        (the kill loop, a tmux command whose session is already gone) exit non-zero
+        benignly, and message matching is robust to the session vanishing mid-teardown.
         """
         try:
             result = self.execute_idempotent_command(command, timeout_seconds=timeout_seconds, raise_on_timeout=True)
@@ -3596,52 +3597,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             host_id=self.id,
         )
 
-    def _get_all_descendant_pids(
-        self,
-        parent_pid: str,
-        failures: list[CleanupFailure],
-        agent_name: AgentName | None,
-        visited: set[str] | None = None,
-    ) -> list[str]:
-        """Recursively get all descendant PIDs of a given parent PID.
-
-        Appends any real failures (a ``pgrep`` error, or a timeout) to ``failures``;
-        ``pgrep`` exiting 1 with no children is benign and produces no failure.
-
-        Tracks already-visited PIDs in ``visited`` to break cycles that can
-        appear via pid reuse (a long-lived process at pid X dies, the kernel
-        recycles X as a descendant of one of its own descendants, and a
-        naive walk loops forever). Without this, a sufficiently long-lived
-        agent's destroy path could hit Python's recursion limit and crash
-        the caller mid-cleanup.
-        """
-        if visited is None:
-            visited = set()
-        if parent_pid in visited:
-            return []
-        visited.add(parent_pid)
-        descendant_pids: list[str] = []
-
-        # Get immediate children. pgrep exits 1 (no stderr) when there are no children --
-        # benign; a real pgrep error writes to stderr and is classified as a failure.
-        result, failure = self._run_classified_cleanup_command(
-            f"pgrep -P {parent_pid}",
-            failure_category=CleanupFailureCategory.PROCESSES_REMAIN,
-            benign_stderr_substrings=(),
-            agent_name=agent_name,
-        )
-        if failure is not None:
-            failures.append(failure)
-        if result.success and result.stdout.strip():
-            child_pids = result.stdout.strip().split("\n")
-            for child_pid in child_pids:
-                if child_pid and child_pid not in visited:
-                    descendant_pids.append(child_pid)
-                    # Recursively get descendants of this child
-                    descendant_pids.extend(self._get_all_descendant_pids(child_pid, failures, agent_name, visited))
-
-        return descendant_pids
-
     def _collect_session_pids(
         self, session_name: str, failures: list[CleanupFailure], agent_name: AgentName | None
     ) -> list[str]:
@@ -3673,7 +3628,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         if not windows_result.success or not windows_result.stdout.strip():
             return []
 
-        all_pids: list[str] = []
+        pane_pids: list[str] = []
         window_indices = [w.strip() for w in windows_result.stdout.strip().split("\n") if w.strip()]
         for window_idx in window_indices:
             window_target = TmuxWindowTarget(session_name=session_name, window=window_idx)
@@ -3686,10 +3641,25 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             if failure is not None:
                 failures.append(failure)
             if result.success and result.stdout.strip():
-                pane_pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
-                for pane_pid in pane_pids:
-                    all_pids.append(pane_pid)
-                    all_pids.extend(self._get_all_descendant_pids(pane_pid, failures, agent_name))
+                pane_pids.extend(p.strip() for p in result.stdout.strip().split("\n") if p.strip())
+        if not pane_pids:
+            return []
+
+        # One process-table snapshot for the whole tree: a `pgrep -P` per process costs a
+        # shell and a full /proc scan each, which is tens of ms apiece under gVisor.
+        ps_result, failure = self._run_classified_cleanup_command(
+            "ps -e -o pid=,ppid=,comm=",
+            failure_category=CleanupFailureCategory.PROCESSES_REMAIN,
+            benign_stderr_substrings=(),
+            agent_name=agent_name,
+        )
+        if failure is not None:
+            failures.append(failure)
+        all_pids: list[str] = []
+        for pane_pid in pane_pids:
+            all_pids.append(pane_pid)
+            if ps_result.success:
+                all_pids.extend(get_descendant_pids(pane_pid, ps_result.stdout))
         return all_pids
 
     def _collect_pids_by_agent_id_env(
@@ -3704,7 +3674,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         The agent's env file (sourced via `set -a`) exports MNGR_AGENT_ID into every
         process spawned in its tmux session. Scanning by env var catches orphans
         whose ancestor died abruptly (SIGKILL, OOM, segfault) -- their reparenting
-        to PID 1 hides them from the tmux pane / pgrep -P descendant walk.
+        to PID 1 hides them from the tmux pane descendant walk.
 
         Linux: walks /proc/<pid>/environ. The file is NUL-separated KEY=VALUE
         records, so `grep -z` is used and `^` anchors at the start of each record

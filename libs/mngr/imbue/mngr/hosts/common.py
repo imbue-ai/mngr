@@ -318,16 +318,12 @@ def _parse_ps_output(ps_output: str) -> tuple[dict[str, list[str]], dict[str, st
 
 
 @pure
-def _collect_descendant_names(
-    root_pid: str,
-    children_by_ppid: dict[str, list[str]],
-    comm_by_pid: dict[str, str],
-) -> list[str]:
-    """Collect comm names of all descendant processes via BFS, visiting each process once.
+def _collect_descendant_pids(root_pid: str, children_by_ppid: dict[str, list[str]]) -> list[str]:
+    """Collect the pids of all descendant processes via BFS, visiting each process once.
 
     ps reads each process separately, so its parent links can form a cycle.
     """
-    descendant_names: list[str] = []
+    descendant_pids: list[str] = []
     visited_pids = {root_pid}
     queue = list(children_by_ppid.get(root_pid, []))
     while queue:
@@ -335,10 +331,26 @@ def _collect_descendant_names(
         if pid in visited_pids:
             continue
         visited_pids.add(pid)
-        if pid in comm_by_pid:
-            descendant_names.append(comm_by_pid[pid])
+        descendant_pids.append(pid)
         queue.extend(children_by_ppid.get(pid, []))
-    return descendant_names
+    return descendant_pids
+
+
+@pure
+def _collect_descendant_names(
+    root_pid: str,
+    children_by_ppid: dict[str, list[str]],
+    comm_by_pid: dict[str, str],
+) -> list[str]:
+    """Collect the comm names of all descendant processes, in BFS order."""
+    return [comm_by_pid[pid] for pid in _collect_descendant_pids(root_pid, children_by_ppid)]
+
+
+@pure
+def get_descendant_pids(root_pid: str, ps_output: str) -> list[str]:
+    """Get the pids of all descendant processes from ``ps -e -o pid=,ppid=,comm=`` output."""
+    children_by_ppid, _comm_by_pid = _parse_ps_output(ps_output)
+    return _collect_descendant_pids(root_pid, children_by_ppid)
 
 
 @pure

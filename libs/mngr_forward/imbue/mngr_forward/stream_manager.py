@@ -13,7 +13,9 @@ plugin needs:
   per filter-matching agent instance produces service-registration / request
   events (host-scoped addressing, since an agent id is only unique per host).
   Lines pass through to the envelope writer's ``event`` stream and drive
-  the resolver's per-agent service map.
+  the resolver's per-agent service map. No stream is started while discovery
+  reports the agent's host as down (stopped, paused, crashed and the like); it
+  starts once discovery reports the host in any other state.
 - ``bounce_observe()`` terminates only the observe subprocess and respawns it
   with the same args; per-agent event subprocesses, registered callbacks, and
   resolver state survive.
@@ -59,6 +61,7 @@ from imbue.mngr.errors import EXIT_CODE_TARGET_NOT_FOUND
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
@@ -92,6 +95,21 @@ _EVENTS_STDERR_TAIL_MAX_LINES: Final[int] = 5
 # view and ours disagree -- and one disagreement is not worth 15 minutes of
 # silence for an agent that may well be alive.
 _EVENTS_GONE_TARGET_STRIKES_REQUIRED: Final[int] = 2
+# Host states in which the host is definitively not running. No events stream is
+# started for an agent on such a host: without a readable volume each spawn is a
+# whole mngr process start that exits at once, and with one the child only parks
+# until the host runs, so it has nothing live to report. UNKNOWN and an unreported
+# state are deliberately absent -- neither is evidence that the host is down.
+_HOST_STATES_WITHOUT_EVENTS_STREAM: Final[frozenset[HostState]] = frozenset(
+    {
+        HostState.STOPPING,
+        HostState.STOPPED,
+        HostState.PAUSED,
+        HostState.CRASHED,
+        HostState.FAILED,
+        HostState.DESTROYED,
+    }
+)
 
 
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
@@ -182,6 +200,8 @@ class ForwardStreamManager(MutableModel):
     _events_gone_target_strikes_by_instance: dict[str, int] = PrivateAttr(default_factory=dict)
     # When each live events child last printed a line, for diagnosing an origin that resolves to nothing.
     _events_last_line_at_by_instance: dict[str, float] = PrivateAttr(default_factory=dict)
+    # Instances whose stream is held back until their host is running again, so the wait is logged once.
+    _events_waiting_for_host_instances: set[str] = PrivateAttr(default_factory=set)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
     _compiled_includes: list[Any] = PrivateAttr(default_factory=list)
@@ -364,7 +384,9 @@ class ForwardStreamManager(MutableModel):
             self._handle_host_ssh_info(event)
         elif isinstance(event, AgentDiscoveryEvent):
             self._handle_agent_discovered(event)
-        elif isinstance(event, (HostDiscoveryEvent, AgentDestroyedEvent, HostDestroyedEvent)):
+        elif isinstance(event, HostDiscoveryEvent):
+            self._handle_host_discovered(event)
+        elif isinstance(event, (AgentDestroyedEvent, HostDestroyedEvent)):
             self._apply_event_and_reconcile(event)
         elif isinstance(event, DiscoveryErrorEvent):
             # Fold into the aggregator so its per-provider error map stays current,
@@ -406,7 +428,8 @@ class ForwardStreamManager(MutableModel):
         # A per-agent events stream can die (e.g. its host rebooted and broke the
         # long-lived --follow connection). Nothing respawns it on its own, so the
         # periodic snapshot drives the retry: re-start it for every agent the
-        # aggregator still tracks (the call is a no-op for live ones). Restrict this
+        # aggregator still tracks (for a live one the call spawns nothing, only
+        # judging whether it has run long enough to count as healthy). Restrict this
         # to agents the aggregator kept -- it is span-aware and deliberately does not
         # re-add an agent whose own destroy event landed during this snapshot's span,
         # so restarting a stream from the raw event.agents would resurrect (and never
@@ -463,9 +486,8 @@ class ForwardStreamManager(MutableModel):
         with self._lock:
             self._ssh_by_host_id[host_id_str] = ssh_info
         self._aggregator.apply_event(event)
-        agents_on_host = [agent for agent in self._aggregator.get_agents() if str(agent.host_id) == host_id_str]
 
-        for agent in agents_on_host:
+        for agent in self._agents_on_host(host_id_str):
             self.resolver.update_ssh_info(agent.instance_key, ssh_info)
             for callback in self._on_agent_discovered_callbacks:
                 self._safely_call(
@@ -475,6 +497,16 @@ class ForwardStreamManager(MutableModel):
                     self._provider_name_for_agent(agent.instance_key),
                     name="on_agent_discovered (ssh-info-late)",
                 )
+
+    def _handle_host_discovered(self, event: HostDiscoveryEvent) -> None:
+        self._apply_event_and_reconcile(event)
+        # A host that just came back up gets its agents' streams now rather than
+        # at the next snapshot.
+        for agent in self._agents_on_host(str(event.host.host_id)):
+            self._start_events_stream(agent.instance_key)
+
+    def _agents_on_host(self, host_id_str: str) -> list[DiscoveredAgent]:
+        return [agent for agent in self._aggregator.get_agents() if str(agent.host_id) == host_id_str]
 
     def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
         if not self._agent_passes_filter(event.agent):
@@ -491,6 +523,13 @@ class ForwardStreamManager(MutableModel):
             return "unknown"
         return str(agent.provider_name)
 
+    def _host_state_without_events_stream(self, instance_key: AgentInstanceKey) -> HostState | None:
+        """Return the agent's host state if it rules out an events stream, else None."""
+        host = self._aggregator.get_host_by_id().get(str(instance_key.host_id))
+        if host is None or host.host_state not in _HOST_STATES_WITHOUT_EVENTS_STREAM:
+            return None
+        return host.host_state
+
     # Per-agent events streams
 
     def _start_events_stream(self, instance_key: AgentInstanceKey) -> None:
@@ -501,10 +540,15 @@ class ForwardStreamManager(MutableModel):
             # source was filtered out by ``--event-include`` / ``--event-exclude``.
             return
         instance_str = str(instance_key)
+        blocking_host_state = self._host_state_without_events_stream(instance_key)
         with self._lock:
             existing = self._events_processes.get(instance_str)
             if existing is not None and existing.poll() is None:
                 # A live events stream is already running for this agent.
+                self._reset_backoff_if_healthy_locked(instance_str)
+                return
+            if blocking_host_state is not None:
+                self._hold_back_events_stream_locked(instance_key, blocking_host_state)
                 return
             if existing is not None:
                 # The previous stream exited -- most often because the agent's
@@ -520,21 +564,6 @@ class ForwardStreamManager(MutableModel):
                 # with per-source penalties that storm sustains the penalty
                 # window forever, locking this machine out of a healthy VM.
                 now = time.monotonic()
-                # Judge healthiness once, at the first snapshot that notices
-                # the death (popping spawned_at makes later snapshots skip
-                # this check). Re-evaluating on every snapshot would let a
-                # corpse waiting out a 60s window "age into" healthiness and
-                # reset the ladder even though the stream died instantly.
-                spawned_at = self._events_spawned_at_by_instance.pop(instance_str, None)
-                if spawned_at is not None and now - spawned_at >= _EVENTS_STREAM_HEALTHY_AGE_SECONDS:
-                    # The dead stream had lived long enough to count as
-                    # healthy; treat this exit as a fresh incident. That clears
-                    # the gone-target strikes too: a stream that ran healthily
-                    # for a minute proves its target existed, so an earlier
-                    # strike must not combine with a later one hours apart to
-                    # sideline a live agent for the long backoff.
-                    self._events_respawn_backoff_by_instance.pop(instance_str, None)
-                    self._events_gone_target_strikes_by_instance.pop(instance_str, None)
                 if now < self._events_next_respawn_at_by_instance.get(instance_str, 0.0):
                     # Still inside the backoff window: keep the dead entry so a
                     # later snapshot retries once the window has passed.
@@ -582,6 +611,7 @@ class ForwardStreamManager(MutableModel):
                     )
                 self._events_next_respawn_at_by_instance[instance_str] = now + backoff
                 self._events_processes.pop(instance_str, None)
+            self._events_waiting_for_host_instances.discard(instance_str)
             # Preserve any already-known services across a respawn (the new
             # stream re-emits current registrations on connect); only seed an
             # empty map on the first spawn.
@@ -618,16 +648,47 @@ class ForwardStreamManager(MutableModel):
         except InvalidConcurrencyGroupStateError:
             logger.debug("Skipping events stream for {} -- concurrency group inactive", instance_key)
 
-    def _stop_events_stream(self, instance_key: AgentInstanceKey) -> None:
-        instance_str = str(instance_key)
-        with self._lock:
-            process = self._events_processes.pop(instance_str, None)
+    def _reset_backoff_if_healthy_locked(self, instance_str: str) -> None:
+        """Clear a live stream's ladder and gone-target strikes once past the healthy age; the caller holds the lock.
+
+        A stream seen alive past the healthy age makes its eventual death a fresh
+        incident rather than part of a crash loop.
+        """
+        spawned_at = self._events_spawned_at_by_instance.get(instance_str)
+        if spawned_at is not None and time.monotonic() - spawned_at >= _EVENTS_STREAM_HEALTHY_AGE_SECONDS:
             self._events_respawn_backoff_by_instance.pop(instance_str, None)
-            self._events_next_respawn_at_by_instance.pop(instance_str, None)
-            self._events_spawned_at_by_instance.pop(instance_str, None)
-            self._events_stderr_tail_by_instance.pop(instance_str, None)
             self._events_gone_target_strikes_by_instance.pop(instance_str, None)
-            self._events_last_line_at_by_instance.pop(instance_str, None)
+
+    def _hold_back_events_stream_locked(self, instance_key: AgentInstanceKey, host_state: HostState) -> None:
+        """Mark an instance as waiting for its host to run, logging once per wait; the caller holds the lock."""
+        instance_str = str(instance_key)
+        is_newly_waiting = instance_str not in self._events_waiting_for_host_instances
+        # Drop any dead stream along with its pacing: its deaths are explained by
+        # the host being down, so the stream starts at once when the host runs again.
+        self._forget_events_stream_locked(instance_str)
+        self._events_waiting_for_host_instances.add(instance_str)
+        if is_newly_waiting:
+            logger.info(
+                "Held back per-agent events stream for {}: its host is {}; starting it once the host runs",
+                instance_key,
+                host_state,
+            )
+
+    def _forget_events_stream_locked(self, instance_str: str) -> RunningProcess | None:
+        """Drop an instance's events process and all of its pacing state; the caller holds the lock."""
+        process = self._events_processes.pop(instance_str, None)
+        self._events_respawn_backoff_by_instance.pop(instance_str, None)
+        self._events_next_respawn_at_by_instance.pop(instance_str, None)
+        self._events_spawned_at_by_instance.pop(instance_str, None)
+        self._events_stderr_tail_by_instance.pop(instance_str, None)
+        self._events_gone_target_strikes_by_instance.pop(instance_str, None)
+        self._events_last_line_at_by_instance.pop(instance_str, None)
+        self._events_waiting_for_host_instances.discard(instance_str)
+        return process
+
+    def _stop_events_stream(self, instance_key: AgentInstanceKey) -> None:
+        with self._lock:
+            process = self._forget_events_stream_locked(str(instance_key))
         if process is None:
             return
         try:

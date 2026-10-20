@@ -1721,6 +1721,73 @@ def test_reap_agent_process_tree_kills_pane_and_env_marked_orphans_but_not_the_s
     assert not any("kill-session" in command for command in commands)
 
 
+def _kill_command_pids(commands: list[str]) -> set[str]:
+    """The pids named in the recorded SIGTERM/SIGKILL loop."""
+    kill_command = next(command for command in commands if "kill -TERM" in command)
+    return set(kill_command.split(";", 1)[0].removeprefix("for p in ").split())
+
+
+def test_reap_agent_process_tree_kills_every_pane_descendant_from_one_ps_snapshot(
+    local_provider: LocalProviderInstance,
+) -> None:
+    agent = make_test_agent_details("reap-ps-snapshot-agent")
+    ps_output = "\n".join(
+        [
+            "1 0 init",
+            "41001 1 bash",
+            "41002 41001 claude",
+            "41003 41002 node",
+            "42001 1 bash",
+            "42002 42001 tee",
+            "43001 1 sshd",
+            "43002 43001 bash",
+        ]
+    )
+
+    def handle(command: str) -> CommandResult:
+        if "list-windows" in command:
+            return CommandResult(stdout="0\n1", stderr="", success=True)
+        if "list-panes" in command:
+            pane_pid = "41001" if ":0" in command else "42001"
+            return CommandResult(stdout=pane_pid, stderr="", success=True)
+        if command.startswith("ps -e"):
+            return CommandResult(stdout=ps_output, stderr="", success=True)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
+
+    failures = host.reap_agent_process_tree(cast(AgentInterface, agent))
+
+    assert failures == []
+    commands = [command for command, _ in recorded]
+    assert sum(1 for command in commands if command.startswith("ps -e")) == 1
+    assert _kill_command_pids(commands) == {"41001", "41002", "41003", "42001", "42002"}
+
+
+@pytest.mark.allow_warnings(match=r"^Cleanup step left a resource behind on host")
+def test_reap_agent_process_tree_records_a_ps_error_and_still_kills_the_pane(
+    local_provider: LocalProviderInstance,
+) -> None:
+    agent = make_test_agent_details("reap-ps-error-agent")
+
+    def handle(command: str) -> CommandResult:
+        if "list-windows" in command:
+            return CommandResult(stdout="0", stderr="", success=True)
+        if "list-panes" in command:
+            return CommandResult(stdout="44001", stderr="", success=True)
+        if command.startswith("ps -e"):
+            return CommandResult(stdout="", stderr="ps: cannot read /proc", success=False)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
+
+    failures = host.reap_agent_process_tree(cast(AgentInterface, agent))
+
+    assert [failure.category for failure in failures] == [CleanupFailureCategory.PROCESSES_REMAIN]
+    assert "ps: cannot read /proc" in failures[0].message
+    assert _kill_command_pids([command for command, _ in recorded]) == {"44001"}
+
+
 def _make_local_command_intercepting_host(
     local_provider: LocalProviderInstance,
     agent: AgentInterface,

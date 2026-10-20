@@ -22,6 +22,7 @@ from imbue.mngr.hosts.common import classify_waiting_reason
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import determine_lifecycle_probe_result
+from imbue.mngr.hosts.common import get_descendant_pids
 from imbue.mngr.hosts.common import get_descendant_process_names
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.common import resolve_expected_process_name
@@ -494,6 +495,27 @@ def test_descendant_names_visits_each_process_once_when_the_parent_links_form_a_
     ps_output = "100 300 init\n200 100 bash\n300 200 sleep\n"
     result = get_descendant_process_names("100", ps_output)
     assert result == ["bash", "sleep"]
+
+
+def test_descendant_pids_returns_empty_for_no_children() -> None:
+    assert get_descendant_pids("999", "100 1 init\n200 1 sshd\n") == []
+
+
+def test_descendant_pids_finds_the_whole_tree_and_nothing_outside_it() -> None:
+    ps_output = "100 1 bash\n200 100 claude\n300 200 node\n400 100 tee\n500 1 sshd\n600 500 bash\n"
+    assert get_descendant_pids("100", ps_output) == ["200", "400", "300"]
+
+
+def test_descendant_pids_keeps_a_comm_with_spaces() -> None:
+    assert get_descendant_pids("100", "100 1 bash\n200 100 tmux: server\n") == ["200"]
+
+
+def test_descendant_pids_ignores_an_exiting_process_listed_with_pid_zero() -> None:
+    assert get_descendant_pids("100", "100 1 bash\n0 100 sleep\n200 100 claude\n") == ["200"]
+
+
+def test_descendant_pids_visits_each_process_once_when_the_parent_links_form_a_cycle() -> None:
+    assert get_descendant_pids("100", "100 300 init\n200 100 bash\n300 200 sleep\n") == ["200", "300"]
 
 
 def test_resolve_expected_process_name_for_claude() -> None:

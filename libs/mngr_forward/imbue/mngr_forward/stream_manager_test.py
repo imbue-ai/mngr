@@ -24,6 +24,7 @@ from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.errors import EXIT_CODE_TARGET_NOT_FOUND
@@ -31,7 +32,10 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.utils.polling import poll_until
@@ -88,12 +92,13 @@ def _provider_snapshot_line(
     agents: tuple[DiscoveredAgent, ...],
     counter: list[int],
     provider_name: str = "modal",
+    hosts: tuple[DiscoveredHost, ...] = (),
 ) -> str:
     del counter
     event = make_provider_discovery_snapshot_event(
         provider_name=ProviderInstanceName(provider_name),
         agents=agents,
-        hosts=(),
+        hosts=hosts,
         discovery_started_at=_DISCOVERY_STARTED_AT,
         discovery_finished_at=_DISCOVERY_FINISHED_AT,
     )
@@ -644,13 +649,14 @@ def test_events_stream_backoff_resets_after_a_healthy_stream(
     _start_events(manager, _INSTANCE_1)
     assert len(fake_cg.spawned) == 2
 
-    # Simulate the respawned stream living past the healthy age, then dying,
-    # with the previous backoff window already elapsed (test hooks on the
-    # manager's private pacing state).
+    # Simulate the respawned stream living past the healthy age, seen alive by a
+    # snapshot, then dying with the previous backoff window already elapsed
+    # (test hooks on the manager's private pacing state).
     now = time.monotonic()
     backoff_by_instance, next_respawn_at_by_instance, spawned_at_by_instance = _pacing_state(manager)
     spawned_at_by_instance[instance_str] = now - 3600.0
     next_respawn_at_by_instance[instance_str] = now - 1.0
+    _start_events(manager, _INSTANCE_1)
     fake_cg.spawned[1].mark_dead(1)
     _start_events(manager, _INSTANCE_1)
     assert len(fake_cg.spawned) == 3
@@ -664,9 +670,8 @@ def test_crash_loop_backoff_is_not_reset_by_time_spent_waiting_in_the_window(
 ) -> None:
     """Waiting out a backoff window must not count toward the healthy age.
 
-    Healthiness is judged from the stream's actual lifetime, at the moment its
-    death is first noticed. If it were re-judged on every snapshot, a corpse
-    sitting through a 60s window would "age into" healthiness and reset the
+    Only a stream seen alive past the healthy age counts as healthy. If a corpse
+    sitting through a 60s window could "age into" healthiness, it would reset the
     ladder to the initial backoff -- so a permanently dying stream would cycle
     2..60s,reset forever and the 60s cap could never hold.
     """
@@ -854,11 +859,12 @@ def test_a_healthy_run_clears_the_gone_target_strikes(
     fake_cg.spawned[0].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
     _start_events(manager, _INSTANCE_1)
 
-    # The respawn runs long enough to count as healthy before it dies, again
-    # with the gone-target code.
+    # The respawn runs long enough to count as healthy, is seen alive by a
+    # snapshot, and then dies, again with the gone-target code.
     _backoff, next_respawn_at_by_instance, spawned_at_by_instance = _pacing_state(manager)
     spawned_at_by_instance[instance_str] = time.monotonic() - (_EVENTS_STREAM_HEALTHY_AGE_SECONDS + 1.0)
     next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
+    _start_events(manager, _INSTANCE_1)
     fake_cg.spawned[1].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
     before = time.monotonic()
     _start_events(manager, _INSTANCE_1)
@@ -867,3 +873,216 @@ def test_a_healthy_run_clears_the_gone_target_strikes(
     # not the long window.
     _backoff, next_respawn_at_by_instance, _spawned = _pacing_state(manager)
     assert next_respawn_at_by_instance[instance_str] - before < 60.0
+
+
+def test_a_stream_first_noticed_dead_after_a_long_snapshot_gap_does_not_reset_the_ladder(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """Only a stream seen alive past the healthy age counts as healthy.
+
+    Regression for the ladder dropping back to 2s for streams that died at once:
+    when snapshots were more than the healthy age apart, the gap between the
+    spawn and the snapshot that noticed the death was counted as lifetime.
+    """
+    manager, _resolver, _buf, _counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    instance_str = str(_INSTANCE_1)
+
+    _start_events(manager, _INSTANCE_1)
+    fake_cg.spawned[0].mark_dead(1)
+    _start_events(manager, _INSTANCE_1)
+    assert len(fake_cg.spawned) == 2
+
+    # The respawn dies at once, and the next snapshot only arrives well past
+    # the healthy age (no snapshot saw it alive in between).
+    backoff_by_instance, next_respawn_at_by_instance, spawned_at_by_instance = _pacing_state(manager)
+    fake_cg.spawned[1].mark_dead(1)
+    spawned_at_by_instance[instance_str] = time.monotonic() - (_EVENTS_STREAM_HEALTHY_AGE_SECONDS + 30.0)
+    next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
+    _start_events(manager, _INSTANCE_1)
+    assert len(fake_cg.spawned) == 3
+    # The ladder kept escalating (stored 4 -> 8) instead of resetting to 4.
+    assert backoff_by_instance[instance_str] == 8.0
+
+
+def _host(host_state: HostState | None) -> DiscoveredHost:
+    return DiscoveredHost(
+        host_id=_HOST_ID,
+        host_name=HostName("host-name"),
+        provider_name=ProviderInstanceName("modal"),
+        host_state=host_state,
+    )
+
+
+def _host_discovered_line(host: DiscoveredHost, counter: list[int]) -> str:
+    event = HostDiscoveryEvent(
+        timestamp=IsoTimestamp("2026-05-03T00:00:05.000000000+00:00"),
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        host=host,
+    )
+    return _serialize(event)
+
+
+def _waiting_instances(manager: ForwardStreamManager) -> set[str]:
+    """Expose the instances whose stream is held back for their host (test hook)."""
+    return manager._events_waiting_for_host_instances
+
+
+@pytest.mark.parametrize(
+    "host_state",
+    [
+        HostState.STOPPING,
+        HostState.STOPPED,
+        HostState.PAUSED,
+        HostState.CRASHED,
+        HostState.FAILED,
+        HostState.DESTROYED,
+    ],
+)
+def test_no_events_stream_is_started_for_an_agent_whose_host_is_not_running(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+    host_state: HostState,
+) -> None:
+    """An agent on a host discovery reports as not running is tracked, but gets no events stream.
+
+    Regression for the respawn storm against stopped Lima VMs: every spawn was a
+    full mngr process start that exited at once with "the host is not online".
+    """
+    manager, resolver, _buf, counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    discovered: list[AgentId] = []
+    manager.add_on_agent_discovered_callback(lambda agent_id, _ssh, _prov: discovered.append(agent_id))
+
+    for _ in range(3):
+        _feed_observe(
+            manager, _provider_snapshot_line((_agent(TEST_AGENT_ID_1),), counter, hosts=(_host(host_state),))
+        )
+
+    assert fake_cg.spawned == []
+    # Discovery itself is unaffected: the agent is known and announced once.
+    assert _INSTANCE_1 in resolver.list_known_agent_instances()
+    assert discovered == [TEST_AGENT_ID_1]
+
+
+@pytest.mark.parametrize("host_state", [None, HostState.UNKNOWN, HostState.RUNNING, HostState.STARTING])
+def test_events_stream_starts_when_the_host_is_not_known_to_be_down(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+    host_state: HostState | None,
+) -> None:
+    """An up, unreported or UNKNOWN host state does not hold the stream back.
+
+    An unreported or UNKNOWN state is not evidence that the host is down.
+    """
+    manager, _resolver, _buf, counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+
+    _feed_observe(manager, _provider_snapshot_line((_agent(TEST_AGENT_ID_1),), counter, hosts=(_host(host_state),)))
+
+    assert len(fake_cg.spawned) == 1
+
+
+def test_held_back_stream_starts_on_the_first_snapshot_showing_the_host_running(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """A stream held back for a stopped host starts as soon as discovery shows the host running.
+
+    The dead child's backoff window must not delay it: those deaths were the host
+    being down, not a crash loop.
+    """
+    manager, _resolver, _buf, counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    instance_str = str(_INSTANCE_1)
+    agents = (_agent(TEST_AGENT_ID_1),)
+
+    # A running host's stream crash-loops a few times, so a backoff window is open.
+    _feed_observe(manager, _provider_snapshot_line(agents, counter, hosts=(_host(HostState.RUNNING),)))
+    for idx in range(3):
+        fake_cg.spawned[idx].mark_dead(1)
+        _pacing_state(manager)[1][instance_str] = time.monotonic() - 1.0
+        _start_events(manager, _INSTANCE_1)
+    fake_cg.spawned[3].mark_dead(1)
+    assert len(fake_cg.spawned) == 4
+
+    # The host stops: the dead stream and its pacing are dropped, nothing spawns.
+    _feed_observe(manager, _provider_snapshot_line(agents, counter, hosts=(_host(HostState.STOPPED),)))
+    backoff_by_instance, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
+    assert len(fake_cg.spawned) == 4
+    assert instance_str not in backoff_by_instance
+    assert instance_str not in next_respawn_at_by_instance
+    assert _waiting_instances(manager) == {instance_str}
+
+    # The host runs again: the stream starts on this very snapshot.
+    _feed_observe(manager, _provider_snapshot_line(agents, counter, hosts=(_host(HostState.RUNNING),)))
+    assert len(fake_cg.spawned) == 5
+    assert _waiting_instances(manager) == set()
+
+
+def test_host_running_event_starts_held_back_streams_without_waiting_for_a_snapshot(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    manager, _resolver, _buf, counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    other_host_id = HostId("host-" + "0" * 31 + "2")
+    other_agent = _agent(TEST_AGENT_ID_2, host_id=other_host_id)
+
+    _feed_observe(
+        manager,
+        _provider_snapshot_line((_agent(TEST_AGENT_ID_1), other_agent), counter, hosts=(_host(HostState.STOPPED),)),
+    )
+    # The other agent's host is unreported, so only its stream started.
+    assert len(fake_cg.spawned) == 1
+
+    _feed_observe(manager, _host_discovered_line(_host(HostState.RUNNING), counter))
+
+    assert len(fake_cg.spawned) == 2
+    assert _waiting_instances(manager) == set()
+
+
+def test_live_stream_is_left_alone_when_its_host_is_reported_stopped(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """A stream that is still running proves more than a possibly stale host state, so it is not torn down."""
+    manager, _resolver, _buf, counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    agents = (_agent(TEST_AGENT_ID_1),)
+
+    _feed_observe(manager, _provider_snapshot_line(agents, counter, hosts=(_host(HostState.RUNNING),)))
+    _feed_observe(manager, _provider_snapshot_line(agents, counter, hosts=(_host(HostState.STOPPED),)))
+
+    assert len(fake_cg.spawned) == 1
+    assert fake_cg.spawned[0].poll() is None
+    assert manager.get_events_stream_status(_INSTANCE_1).running_seconds is not None
+    assert _waiting_instances(manager) == set()
+
+
+def test_held_back_stream_is_logged_once_per_wait(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    manager, _resolver, _buf, counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    agents = (_agent(TEST_AGENT_ID_1),)
+    infos: list[str] = []
+    sink_id = logger.add(infos.append, level="INFO", format="{message}")
+    try:
+        for _ in range(3):
+            _feed_observe(manager, _provider_snapshot_line(agents, counter, hosts=(_host(HostState.STOPPED),)))
+        held_back_logs = [message for message in infos if "Held back per-agent events stream" in message]
+        assert len(held_back_logs) == 1
+        assert "STOPPED" in held_back_logs[0]
+
+        # After the host has run (and the stream started), a new stop is a new wait.
+        _feed_observe(manager, _provider_snapshot_line(agents, counter, hosts=(_host(HostState.RUNNING),)))
+        fake_cg.spawned[0].mark_dead(1)
+        _feed_observe(manager, _provider_snapshot_line(agents, counter, hosts=(_host(HostState.STOPPED),)))
+        held_back_logs = [message for message in infos if "Held back per-agent events stream" in message]
+        assert len(held_back_logs) == 2
+    finally:
+        logger.remove(sink_id)
