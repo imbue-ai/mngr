@@ -484,7 +484,7 @@ describe("auto-update's quiet surfaces", () => {
     // available" meanwhile would offer the user a job the app has taken on.
     expect(updateBadgeFor(OUT_OF_DATE, false, true)).toBeNull();
     expect(standingUpdateNotice(OUT_OF_DATE, false, true)).toBe("none");
-    // The same machine without auto-update is an offer, as before.
+    // The same machine without auto-update is an offer.
     expect(updateBadgeFor(OUT_OF_DATE, false, false)?.state).toBe("out-of-date");
     expect(standingUpdateNotice(OUT_OF_DATE, false, false)).toBe("out-of-date");
   });

@@ -307,8 +307,7 @@ export class ShellState {
 
   /** Land in a workspace on one of its chats: asked of the frame directly when
    * the workspace is already on screen, else carried as ``?chat=`` for
-   * handleRouteChanged to forward once the frame is up (the notification
-   * feed's chat gesture, from an update surface). */
+   * handleRouteChanged to forward once the frame is up. */
   openWorkspaceChat(anyId: string, chatAgentId: string): void {
     const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
     if (this.displayedWorkspaceAgentId() === agentScoped) {

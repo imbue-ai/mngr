@@ -85,7 +85,7 @@ def test_the_windows_hand_back_runs_through_the_registered_dispatcher_without_th
 def test_building_the_update_service_drops_the_schedules_an_older_build_kept(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """Schedules live in each workspace now; the app-side records would otherwise sit there forever."""
+    """Schedules live in each workspace; the app-side records would otherwise sit there forever."""
     retired_dir = tmp_path / "data" / "update_schedules"
     retired_dir.mkdir(parents=True)
     (retired_dir / f"{AgentId.generate()}.json").write_text("{}")

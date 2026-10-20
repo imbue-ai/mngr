@@ -2394,7 +2394,7 @@ def _read_auto_update_policy(minds_config: MindsConfig | None, agent_id: AgentId
 
 
 def _drop_retired_update_schedules(data_dir: Path) -> None:
-    """Remove the app-side schedule records an older build kept; schedules live in each workspace now."""
+    """Remove the app-side schedule records an older build kept; schedules live in each workspace."""
     # CLEANUP: drop this once every install has launched a build that owns no update_schedules dir.
     retired_dir = data_dir / "update_schedules"
     if retired_dir.is_dir():

@@ -157,10 +157,10 @@ CRITICAL_APP_LEASE_PREFIX = "editing critical app "
 AUTO_OPEN_LABELS = ("assist", "auto_open")
 SKIP_CLAUDE_INSTALLATION_CHECK_SETTING = "agent_types.claude.check_installation=false"
 
-# The watchdog reminds an idle lead after this many consecutive idle ticks, and then no more
-# often than every REMINDER_INTERVAL_SECONDS.
 # How long a window waits before trying again after an attempt that can cost something to repeat.
 RETRY_BACKOFF_SECONDS_BY_SKIP = {SKIP_DISPATCH_FAILED: 15 * 60, SKIP_NEEDS_SIGN_IN: 5 * 60}
+# The watchdog reminds an idle lead after this many consecutive idle ticks, and then no more
+# often than every REMINDER_INTERVAL_SECONDS.
 IDLE_TICKS_BEFORE_REMINDER = 3
 REMINDER_INTERVAL_SECONDS = 20 * 60
 MAX_NAME_SUFFIX = 20

@@ -1,8 +1,7 @@
 // The one place a machine's update situation is explained and acted on. Thin
 // on content by design: this owes the reader the two versions, that the run
 // costs an agent's time and credits, and every state that needs more than a
-// badge (unknown-version explainers, app-behind, schedule, sign-in, decision,
-// verdict).
+// badge.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";

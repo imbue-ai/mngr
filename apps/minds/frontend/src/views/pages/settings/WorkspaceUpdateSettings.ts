@@ -1,7 +1,6 @@
 // The app-wide workspace-update settings: auto-update and the window scheduled
-// updates start in. Drawn by the app's Settings > Updates panel and by every
-// workspace's Updates group, which show the same values and write the same
-// app-wide settings.
+// updates start in. Every surface that draws them shows and writes the same
+// app-wide values.
 
 import m from "mithril";
 import type { SettingsModel } from "../../../models/settings";

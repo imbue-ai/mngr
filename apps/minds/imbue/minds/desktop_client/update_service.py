@@ -1,9 +1,8 @@
 """Starts, schedules, and closes out update runs; every action is one run of the workspace's update command.
 
 The workspace owns its schedule: arming writes a file and a cron line into it, and its own
-dispatcher starts the run inside the window, so nothing here waits for a window or holds a
-workspace up for one. The liveness poll here is the app's only reader of an in-flight run: it
-moves the row and lands the verdict.
+dispatcher starts the run inside the window. The liveness poll here is the app's only reader of
+an in-flight run: it moves the row and lands the verdict.
 """
 
 import shlex
