@@ -1610,8 +1610,11 @@ class StagedUpdateWorkspace(FrozenModel):
         """Put a stand-in for the template script at ``relative_path`` that answers ``answers`` in order."""
         path = self.root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        _write_executable(path, STUB_TOOL_SOURCE)
-        path.with_name(path.name + ".answers.json").write_text(json.dumps([answer.model_dump() for answer in answers]))
+        _write_scripted_tool(path, answers)
+
+    def script_program_on_path(self, name: str, answers: Sequence[ScriptedToolAnswer]) -> None:
+        """Put a stand-in for the program ``name`` on the stub PATH that answers ``answers`` in order."""
+        _write_scripted_tool(self.bin_dir / name, answers)
 
     def tool_calls(self, script_name: str) -> list[list[str]]:
         """The recorded argv of every call to the stubbed template script named ``script_name``."""
@@ -1639,6 +1642,11 @@ class StagedUpdateWorkspace(FrozenModel):
 def _write_executable(path: Path, text: str) -> None:
     path.write_text(text)
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _write_scripted_tool(path: Path, answers: Sequence[ScriptedToolAnswer]) -> None:
+    _write_executable(path, STUB_TOOL_SOURCE)
+    path.with_name(path.name + ".answers.json").write_text(json.dumps([answer.model_dump() for answer in answers]))
 
 
 STAGED_CREATED_CHAT: Final[dict[str, str]] = {

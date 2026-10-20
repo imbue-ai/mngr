@@ -333,22 +333,22 @@ def _app_fields(context):
 
 
 def _readiness_refusal(context, is_cron_needed):
-    """The outcome that stops an arm or a now before it does anything, or None to go ahead."""
+    """``(refusal, account)``: the outcome that stops an arm or a now before it does anything (None to go
+    ahead), and what ``resolve_account`` answered once the checks got that far (None before)."""
     if is_cron_needed and not is_cron_available(context["live_cron_dir"]):
-        return _create_result(
-            OUTCOME_NO_CRON, "This workspace has no cron program, so nothing in it could start a scheduled update."
-        )
+        detail = "This workspace has no cron program, so nothing in it could start a scheduled update."
+        return _create_result(OUTCOME_NO_CRON, detail), None
     if not is_skill_present():
-        return _create_result(OUTCOME_TOO_OLD_TO_UPDATE, "This workspace predates the update-self skill.")
-    is_signed_in, _ = resolve_account()
-    if not is_signed_in:
-        return _create_result(OUTCOME_NEEDS_SIGN_IN, "No AI account is signed in to this workspace.")
-    return None
+        return _create_result(OUTCOME_TOO_OLD_TO_UPDATE, "This workspace predates the update-self skill."), None
+    account = resolve_account()
+    if not account[0]:
+        return _create_result(OUTCOME_NEEDS_SIGN_IN, "No AI account is signed in to this workspace."), account
+    return None, account
 
 
 def mode_arm(context):
     install_dispatcher(context)
-    refusal = _readiness_refusal(context, is_cron_needed=True)
+    refusal, _ = _readiness_refusal(context, is_cron_needed=True)
     if refusal is not None:
         emit(dict(refusal, mode="arm", schedule=read_json(SCHEDULE_PATH)))
         return
@@ -386,7 +386,7 @@ def mode_arm(context):
 def mode_now(context):
     install_dispatcher(context)
     install_cron_entry(context)
-    refusal = _readiness_refusal(context, is_cron_needed=False)
+    refusal, account = _readiness_refusal(context, is_cron_needed=False)
     if refusal is not None:
         emit(dict(refusal, mode="now"))
         return
@@ -427,7 +427,9 @@ def mode_now(context):
         "override_ref": _arg(context, "--override"),
         "is_backup_configured": _arg(context, "--backup-configured", "1") == "1",
     }
-    created = create_update_chat(fields, STARTED_BY_IMMEDIATE, is_auto_open=True, agents=agents, now=context["now"])
+    created = create_update_chat(
+        fields, STARTED_BY_IMMEDIATE, is_auto_open=True, agents=agents, now=context["now"], account=account
+    )
     emit(dict(created, mode="now"))
 
 

@@ -337,6 +337,25 @@ def test_a_workspace_with_no_messenger_gets_a_bare_create_carrying_the_display_n
     assert "auto_open=true" in creates[0]
 
 
+def test_update_now_asks_an_older_templates_account_resolver_once_and_creates_on_its_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch, is_signed_in=False, has_message_chat=False)
+    scripts_dir = staged.root / "system" / "scripts"
+    (scripts_dir / "require_create_account.py").unlink()
+    (scripts_dir / "default_account_args.py").write_text("")
+    staged.script_program_on_path("uv", [ScriptedToolAnswer(stdout="--env\nCLAUDE_CONFIG_DIR=/home/user/acc/a1\n")])
+    program = load_update_workspace_program(tmp_path)
+
+    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+
+    assert parse_update_command_result(answer).outcome is UpdateArmOutcome.CREATED
+    assert staged.tool_calls("uv") == [["run", "python", "system/scripts/default_account_args.py", "claude"]]
+    creates = [call for call in staged.recorded_calls() if call[:1] == ["create"]]
+    assert len(creates) == 1
+    assert creates[0][creates[0].index("--env") + 1] == "CLAUDE_CONFIG_DIR=/home/user/acc/a1"
+
+
 @pytest.mark.witnesses("workspace-updates.schedule-follows-the-app")
 def test_reading_an_armed_schedule_refreshes_the_apps_fields_and_keeps_the_dispatchers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

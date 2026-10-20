@@ -732,15 +732,16 @@ def _create_through_mngr(name, display_name, message, labels, account_args):
     return _create_result(OUTCOME_CREATED, "", name, _created_agent_id(created.stdout))
 
 
-def create_update_chat(schedule_like, started_by, is_auto_open, agents, now):
+def create_update_chat(schedule_like, started_by, is_auto_open, agents, now, account):
     """Create the update chat for a pinned target, record the dispatch, and say how it went.
 
-    ``schedule_like`` carries ``ceiling``, ``override_ref`` and ``is_backup_configured``.
+    ``schedule_like`` carries ``ceiling``, ``override_ref`` and ``is_backup_configured``;
+    ``account`` is what ``resolve_account`` answered.
     """
     ceiling_ref = str(schedule_like.get("ceiling") or "")
     override_ref = str(schedule_like.get("override_ref") or "")
     target_ref = override_ref or ceiling_ref
-    is_signed_in, account_args = resolve_account()
+    is_signed_in, account_args = account
     if not is_signed_in:
         return _create_result(OUTCOME_NEEDS_SIGN_IN, "No AI account is signed in to this workspace.")
     base_name, display_name = update_chat_names(target_ref)
@@ -974,7 +975,9 @@ def dispatch_scheduled(schedule, run, agents, now):
         return SKIP_LEASE_HELD
     if not is_skill_present():
         return SKIP_DISPATCH_FAILED
-    result = create_update_chat(schedule, STARTED_BY_SCHEDULED, is_auto_open=False, agents=agents, now=now)
+    result = create_update_chat(
+        schedule, STARTED_BY_SCHEDULED, is_auto_open=False, agents=agents, now=now, account=resolve_account()
+    )
     if result["outcome"] == OUTCOME_CREATED:
         schedule["marked_chat"] = result["chat_agent_name"]
         return None
