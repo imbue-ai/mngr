@@ -574,16 +574,6 @@ class WorkspaceUpdateStateStore(MutableModel):
         self._fire_on_change()
         return True
 
-    def clear_dispatch_failure(self, agent_id: AgentId) -> None:
-        """Drop the record of an update that never went out: a newer request (a schedule) supersedes it."""
-        aid_str = str(agent_id)
-        with self._lock:
-            facts = self._run_by_agent.get(aid_str)
-            if facts is None or facts.dispatch_failure is None:
-                return
-            self._run_by_agent[aid_str] = facts.model_copy_update(to_update(facts.field_ref().dispatch_failure, None))
-        self._fire_on_change()
-
     def adopt_run_record(self, agent_id: AgentId, status: UpdateRunStatus) -> None:
         """The poll read the in-flight run's own record: it becomes the row's, and its verdict ends the run.
 
