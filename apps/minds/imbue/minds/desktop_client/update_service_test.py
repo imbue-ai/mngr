@@ -30,6 +30,7 @@ from imbue.minds.desktop_client.testing import update_program_invocation
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
 from imbue.minds.desktop_client.update_service import DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME
+from imbue.minds.desktop_client.update_service import SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME
 from imbue.minds.desktop_client.update_service import UpdateDispatchOutcome
 from imbue.minds.desktop_client.update_service import UpdateScheduleOutcome
 from imbue.minds.desktop_client.update_service import UpdateSettingsSource
@@ -914,6 +915,28 @@ def test_an_auto_update_arm_targets_the_ceiling_with_no_override(
     mode, flags = update_program_invocation(caller.calls[0])
     assert (mode, flags["--ceiling"], flags["--override"]) == ("arm", _CEILING, "")
     assert service.state_store.get(agent_id).is_scheduled is True
+
+
+def test_an_auto_update_arm_the_workspace_refused_says_so_on_the_row_until_an_arm_lands(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """Under auto-update a behind row is quiet, so an arm that cannot land has to say why there."""
+    detail = "This workspace has no cron program, so nothing in it could start a scheduled update."
+    caller = ScriptedMngrCaller(results=(_command_answer("NO_CRON", detail), _armed()))
+    service = _build_service(tmp_path, root_concurrency_group, caller=caller)
+    agent_id = AgentId.generate()
+
+    service.arm_for_auto_update(agent_id)
+
+    refused = service.state_store.get(agent_id)
+    assert refused.dispatch_failure == SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME[UpdateScheduleOutcome.NO_CRON]
+    assert refused.dispatch_failure_detail == detail
+
+    service.arm_for_auto_update(agent_id)
+
+    armed = service.state_store.get(agent_id)
+    assert armed.is_scheduled is True
+    assert armed.dispatch_failure == ""
 
 
 def test_a_cancel_the_workspace_answered_takes_the_schedule_off_the_row(

@@ -522,6 +522,12 @@ describe("auto-update's quiet surfaces", () => {
     const failed = { ...OUT_OF_DATE, verdict: "STUCK" as const, chat_agent_id: "agent-chat" };
     expect(updateBadgeFor(failed, false, true)?.state).toBe("failed");
   });
+
+  it("says why a machine the workspace would not let auto-update arm is still behind", () => {
+    const refused = { ...OUT_OF_DATE, dispatch_failure: "This workspace can't run scheduled updates. Update it now instead." };
+    expect(updateBadgeFor(refused, false, true)?.state).toBe("failed");
+    expect(standingUpdateNotice(refused, false, true)).toBe("out-of-date");
+  });
 });
 
 describe("a run that ended needing the user's decision", () => {

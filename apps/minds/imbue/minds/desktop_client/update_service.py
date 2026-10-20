@@ -415,10 +415,21 @@ class WorkspaceUpdateService(MutableModel):
                 assert_never(unreachable)
 
     def arm_for_auto_update(self, agent_id: AgentId) -> None:
-        """The sweep's auto-update arm, at the ceiling; its outcome lands on the row as any arm's does."""
+        """The sweep's auto-update arm, at the ceiling.
+
+        Nobody pressed anything, so a refusal is recorded on the row: under auto-update the row
+        says nothing of a behind workspace, and one whose arm keeps failing would never say so.
+        """
         schedule = self.schedule_update(agent_id, override_ref="")
-        if schedule.outcome is not UpdateScheduleOutcome.ARMED:
-            logger.info("Could not arm the auto-update of {}: {}", agent_id, schedule.outcome.value)
+        if schedule.outcome in (UpdateScheduleOutcome.ARMED, UpdateScheduleOutcome.NEEDS_SIGN_IN):
+            return
+        logger.info("Could not arm the auto-update of {}: {}", agent_id, schedule.outcome.value)
+        self.state_store.record_skipped_dispatch(
+            agent_id,
+            UpdateDispatchFailure(
+                message=SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME[schedule.outcome], detail=schedule.failure_detail
+            ),
+        )
 
     def cancel_schedule(self, agent_id: AgentId) -> UpdateSchedule | None:
         """Delete the workspace's schedule file; None when it landed, else what stopped it."""

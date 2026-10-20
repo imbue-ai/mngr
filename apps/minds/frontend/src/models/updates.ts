@@ -42,16 +42,18 @@ export function isRecreationRequired(update: UiWorkspaceUpdate): boolean {
 }
 
 /** Whether auto-update will take care of this machine on its own, so the
- * surfaces that offer the update stay quiet. A machine the user skipped, or
- * one that cannot be armed until an AI account is signed in, is not handled:
- * it says it is behind as it would without auto-update. One read behind but
- * not armed yet is handled; the next sweep arms it. */
+ * surfaces that offer the update stay quiet. A machine the user skipped, one
+ * that cannot be armed until an AI account is signed in, or one whose arm the
+ * workspace refused, is not handled: it says it is behind as it would without
+ * auto-update. One read behind but not armed yet is handled; the next sweep
+ * arms it. */
 export function isHandledByAutoUpdate(update: UiWorkspaceUpdate, isAutoUpdateEnabled: boolean): boolean {
   return (
     isAutoUpdateEnabled &&
     isUpdateOffered(update) &&
     !(update.needs_sign_in ?? false) &&
-    !(update.is_update_skipped ?? false)
+    !(update.is_update_skipped ?? false) &&
+    !update.dispatch_failure
   );
 }
 
