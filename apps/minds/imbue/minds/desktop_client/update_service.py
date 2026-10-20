@@ -533,6 +533,8 @@ class WorkspaceUpdateService(MutableModel):
                 verdict.value,
                 resulting_ref or "?",
             )
+        elif verdict is UpdateVerdict.NEEDS_DECISION:
+            logger.info("Update run in machine {} ended waiting on the user's decision; nothing was applied", agent_id)
         else:
             logger.info(
                 "Update run in machine {} ended {}: now on {}",
