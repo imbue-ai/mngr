@@ -351,7 +351,7 @@ class WorkspaceUpdateService(MutableModel):
             case UpdateArmOutcome.ALREADY_RUNNING:
                 # The run under way is the answer to the press: the row reports it from here.
                 if result.chat_agent_name:
-                    self.state_store.adopt_dispatched_chat(
+                    self.state_store.adopt_run_under_way(
                         agent_id, chat_agent_name=result.chat_agent_name, chat_agent_id=result.chat_id
                     )
                 return UpdateDispatch(outcome=UpdateDispatchOutcome.ALREADY_RUNNING, failure_detail=result.detail)

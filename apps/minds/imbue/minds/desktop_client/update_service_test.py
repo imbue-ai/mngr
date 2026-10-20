@@ -545,7 +545,8 @@ def test_an_update_now_that_created_the_chat_runs_the_row_under_that_chat(
 def test_an_update_now_that_finds_a_run_under_way_adopts_that_run(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """The run under way is the answer to the press: the row reports it, not a failure."""
+    """The run under way is the answer to the press: the row reports it, not a failure, and not the version the
+    press asked for, which that run is not going to."""
     caller = RecordingMngrCaller(
         result=_command_answer(
             "ALREADY_RUNNING",
@@ -557,13 +558,14 @@ def test_an_update_now_that_finds_a_run_under_way_adopts_that_run(
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
 
-    dispatch = service.dispatch_update(agent_id)
+    dispatch = service.dispatch_update(agent_id, target_override="minds-v0.9.1")
 
     assert dispatch.outcome is UpdateDispatchOutcome.ALREADY_RUNNING
     state = service.state_store.get(agent_id)
     assert state.activity is UpdateActivity.RUNNING
     assert state.chat_agent_name == "update-to-minds-v0-8-9"
     assert state.chat_agent_id == _CHAT_ID
+    assert state.target_override == ""
     assert state.dispatch_failure == ""
 
 
