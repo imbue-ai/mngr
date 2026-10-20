@@ -1651,6 +1651,10 @@ class StagedUpdateWorkspace(FrozenModel):
         """The recorded argv of every call to the stubbed template script named ``script_name``."""
         return [call[1:] for call in self.recorded_calls() if call[:1] == [script_name]]
 
+    def chat_creates(self) -> list[list[str]]:
+        """Every chat the stubbed messenger was asked to create; the message text is the last item of each."""
+        return [call for call in self.tool_calls("message_chat.py") if call[:1] == ["--create"]]
+
     def recorded_calls(self) -> list[list[str]]:
         if not self.calls_log.exists():
             return []

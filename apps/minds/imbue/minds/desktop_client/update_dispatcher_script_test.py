@@ -225,10 +225,6 @@ def test_the_watchdog_decides_from_the_lead_and_worker_states(
     assert program.decide_watchdog_action(run, agents, busy, state, _IN_WINDOW) == action
 
 
-def _creates(staged: StagedUpdateWorkspace) -> list[list[str]]:
-    return [call for call in staged.tool_calls("message_chat.py") if call[:1] == ["--create"]]
-
-
 def _tick(program: ModuleType, staged: StagedUpdateWorkspace, now: float) -> None:
     program.mode_tick(update_program_context(program, staged, [], now))
 
@@ -243,7 +239,7 @@ def test_a_tick_inside_the_window_starts_the_run_once_and_marks_the_file(
     staged.set_agents([_agent(_LEAD, "RUNNING", "agent-" + "a" * 32)])
     _tick(program, staged, _IN_WINDOW + 60)
 
-    creates = _creates(staged)
+    creates = staged.chat_creates()
     assert len(creates) == 1
     # A scheduled run surfaces no window of its own.
     assert "--label" not in creates[0]
@@ -293,7 +289,7 @@ def test_a_lease_counts_as_held_only_while_its_holder_is_there(
 
     schedule = staged.read_state("schedule.json")
     assert schedule is not None
-    assert len(_creates(staged)) == (1 if is_dispatched else 0)
+    assert len(staged.chat_creates()) == (1 if is_dispatched else 0)
     assert schedule["pending_skip_reason"] == ("" if is_dispatched else "LEASE_HELD")
 
 
@@ -424,7 +420,7 @@ def test_a_failed_create_is_not_retried_until_its_backoff_has_passed(
     _tick(program, staged, _IN_WINDOW + 60)
     _tick(program, staged, _IN_WINDOW + 16 * 60)
 
-    assert len(_creates(staged)) == 2
+    assert len(staged.chat_creates()) == 2
     schedule = staged.read_state("schedule.json")
     assert schedule is not None and schedule["marked_chat"] == _LEAD
 

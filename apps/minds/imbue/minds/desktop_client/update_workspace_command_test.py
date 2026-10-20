@@ -127,11 +127,6 @@ def _labels(argv: list[str]) -> list[str]:
     return [argv[index + 1] for index, token in enumerate(argv) if token == "--label"]
 
 
-def _creates(staged: StagedUpdateWorkspace) -> list[list[str]]:
-    """Every chat the messenger was asked to create; the message text is the last item of each."""
-    return [call for call in staged.tool_calls("message_chat.py") if call[:1] == ["--create"]]
-
-
 @pytest.mark.witnesses("workspace-updates.one-seed-message")
 def test_update_now_creates_the_chat_through_the_templates_messenger_with_the_pinned_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -144,7 +139,7 @@ def test_update_now_creates_the_chat_through_the_templates_messenger_with_the_pi
     result = parse_update_command_result(answer)
     assert result.outcome is UpdateArmOutcome.CREATED
     assert (result.chat_agent_name, result.chat_id) == (STAGED_CREATED_CHAT["name"], STAGED_CREATED_CHAT["chat_id"])
-    creates = _creates(staged)
+    creates = staged.chat_creates()
     assert len(creates) == 1
     assert (_flag(creates[0], "--name"), _flag(creates[0], "--title")) == (
         "update-to-minds-v0-9-0",
@@ -183,7 +178,7 @@ def test_an_override_without_backups_carries_both_notes_and_names_the_chat_for_t
 
     _run_mode(program, staged, "now", build_now_arguments(settings, "upstream/main"), capsys)
 
-    create = _creates(staged)[0]
+    create = staged.chat_creates()[0]
     assert (_flag(create, "--name"), _flag(create, "--title")) == (
         "update-to-upstream-main",
         "Update to upstream/main",
@@ -213,7 +208,7 @@ def test_a_messenger_from_before_the_title_is_asked_again_without_it(
     answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     assert parse_update_command_result(answer).outcome is UpdateArmOutcome.CREATED
-    assert ["--title" in create for create in _creates(staged)] == [True, False]
+    assert ["--title" in create for create in staged.chat_creates()] == [True, False]
 
 
 def test_a_taken_chat_name_gets_the_next_free_suffix(
@@ -237,7 +232,7 @@ def test_a_taken_chat_name_gets_the_next_free_suffix(
 
     _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
-    assert [_flag(create, "--name") for create in _creates(staged)] == [
+    assert [_flag(create, "--name") for create in staged.chat_creates()] == [
         "update-to-minds-v0-9-0-2",
         "update-to-minds-v0-9-0-3",
     ]
@@ -256,7 +251,7 @@ def test_update_now_adopts_a_run_already_under_way(
     result = parse_update_command_result(answer)
     assert result.outcome is UpdateArmOutcome.ALREADY_RUNNING
     assert (result.chat_agent_name, result.chat_id) == ("update-to-minds-v0-8-7", "agent-" + "d" * 32)
-    assert _creates(staged) == []
+    assert staged.chat_creates() == []
 
 
 @pytest.mark.parametrize(
