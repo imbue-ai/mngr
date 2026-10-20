@@ -76,7 +76,13 @@ export class AutoUpdatePromptModel {
   private async readInputs(): Promise<void> {
     const [decision, isFirstLaunch] = await Promise.all([
       this.readDecision(),
-      this.readIsFirstLaunchAfterAppUpdate().catch(() => false),
+      this.readIsFirstLaunchAfterAppUpdate().catch((error: unknown) => {
+        console.warn(
+          "Could not read whether this launch follows an app update",
+          error,
+        );
+        return false;
+      }),
     ]);
     this.decision = decision;
     this.isFirstLaunchAfterAppUpdate = isFirstLaunch;
@@ -90,12 +96,18 @@ export class AutoUpdatePromptModel {
       const response = await this.fetchImpl("/ui/api/settings", {
         credentials: "same-origin",
       });
-      if (!response.ok) return undefined;
+      if (!response.ok) {
+        console.warn(
+          `Could not read the auto-update prompt's answer: HTTP ${response.status}`,
+        );
+        return undefined;
+      }
       const payload = (await response.json()) as {
         auto_update_prompt_decision?: AutoUpdatePromptDecision | null;
       };
       return payload.auto_update_prompt_decision ?? null;
-    } catch {
+    } catch (error) {
+      console.warn("Could not read the auto-update prompt's answer", error);
       return undefined;
     }
   }
