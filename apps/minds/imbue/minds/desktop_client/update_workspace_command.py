@@ -58,10 +58,11 @@ _CANCEL_MODE: Final[str] = "cancel"
 _READ_MODE: Final[str] = "read"
 
 # ``now`` waits for the chat app to finish the create (its own ceiling is 300s), after a listing
-# of the workspace's agents; ``arm`` may ask an old template's account resolver under ``uv run``.
+# of the workspace's agents; ``arm`` may ask an old template's account resolver under ``uv run``,
+# and so may a ``read`` that checks the sign-in.
 _NOW_TIMEOUT_SECONDS: Final[float] = 420.0
 _ARM_TIMEOUT_SECONDS: Final[float] = 150.0
-_READ_TIMEOUT_SECONDS: Final[float] = 60.0
+_READ_TIMEOUT_SECONDS: Final[float] = _ARM_TIMEOUT_SECONDS
 _CANCEL_TIMEOUT_SECONDS: Final[float] = 60.0
 
 
