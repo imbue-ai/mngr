@@ -42,6 +42,9 @@ dependencies = [
     "imbue-mngr-codex",
     "imbue-mngr-opencode",
     "imbue-mngr-pi-coding",
+    # The plugin whose [plugins.autocompact] section the default workspace
+    # template configures; mngr rejects that section's fields without it.
+    "imbue-mngr-autocompact",
     "modal>=1.4.3",
     "paramiko>=3.0",
     "playwright>=1.40.0",
@@ -77,6 +80,7 @@ build-backend = "hatchling.build"
 concurrency-group = { workspace = true }
 imbue-mngr = { workspace = true }
 imbue-mngr-antigravity = { workspace = true }
+imbue-mngr-autocompact = { workspace = true }
 imbue-mngr-aws = { workspace = true }
 imbue-mngr-azure = { workspace = true }
 imbue-mngr-gcp = { workspace = true }
