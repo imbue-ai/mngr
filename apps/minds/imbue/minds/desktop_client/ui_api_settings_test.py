@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,8 +21,11 @@ from imbue.minds.desktop_client.testing import RecordingNotificationDispatcher
 from imbue.minds.desktop_client.testing import WriteCountingMindsConfig
 from imbue.minds.desktop_client.ui_api_settings import compute_error_reporting_version
 from imbue.minds.desktop_client.ui_api_settings import compute_notification_prefs_version
+from imbue.minds.desktop_client.ui_api_settings import is_full_disk_access_needed
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
+from imbue.mngr_latchkey.core import ChromeImportOutcome
+from imbue.mngr_latchkey.core import LatchkeyErrorCode
 from imbue.mngr_latchkey.testing import FakeLatchkey
 
 
@@ -575,7 +579,12 @@ def test_browser_import_runs_latchkeys_import_once_and_counts_as_the_offer(tmp_p
     response = client.post("/ui/api/settings/browser-import")
 
     assert response.status_code == 200
-    assert json.loads(response.data) == {"is_success": True, "detail": ""}
+    assert json.loads(response.data) == {
+        "is_success": True,
+        "detail": "",
+        "error_code": None,
+        "is_full_disk_access_needed": False,
+    }
     assert latchkey.import_chrome_call_count == 1
     assert minds_config.get_is_browser_import_offered() is True
 
@@ -583,7 +592,9 @@ def test_browser_import_runs_latchkeys_import_once_and_counts_as_the_offer(tmp_p
 def test_a_failed_browser_import_answers_with_latchkeys_reason(tmp_path: Path) -> None:
     latchkey = FakeLatchkey(latchkey_directory=tmp_path)
     latchkey.configure(
-        import_chrome_result=(False, "Google Chrome is not installed in any of the standard locations.")
+        import_chrome_result=ChromeImportOutcome(
+            is_success=False, detail="Google Chrome is not installed in any of the standard locations."
+        )
     )
     client = _build_client_with_latchkey(tmp_path, latchkey, MindsConfig(data_dir=tmp_path / "config"))
 
@@ -593,7 +604,35 @@ def test_a_failed_browser_import_answers_with_latchkeys_reason(tmp_path: Path) -
     assert json.loads(response.data) == {
         "is_success": False,
         "detail": "Google Chrome is not installed in any of the standard locations.",
+        "error_code": None,
+        "is_full_disk_access_needed": False,
     }
+
+
+def test_a_browser_import_denied_by_macos_answers_with_the_code_the_client_acts_on(tmp_path: Path) -> None:
+    latchkey = FakeLatchkey(latchkey_directory=tmp_path)
+    latchkey.configure(
+        import_chrome_result=ChromeImportOutcome(
+            is_success=False,
+            detail="The Google Chrome profile at /Users/me/Chrome/Default could not be read: EPERM.",
+            error_code=LatchkeyErrorCode.CHROME_PROFILE_NOT_READABLE,
+        )
+    )
+    client = _build_client_with_latchkey(tmp_path, latchkey, MindsConfig(data_dir=tmp_path / "config"))
+
+    response = client.post("/ui/api/settings/browser-import")
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["error_code"] == "CHROME_PROFILE_NOT_READABLE"
+    # The fix is macOS's Full Disk Access list only where the import ran on a Mac.
+    assert body["is_full_disk_access_needed"] is (sys.platform == "darwin")
+
+
+def test_full_disk_access_is_the_fix_only_for_an_unreadable_profile_on_a_mac() -> None:
+    assert is_full_disk_access_needed(LatchkeyErrorCode.CHROME_PROFILE_NOT_READABLE, "darwin") is True
+    assert is_full_disk_access_needed(LatchkeyErrorCode.CHROME_PROFILE_NOT_READABLE, "linux") is False
+    assert is_full_disk_access_needed(None, "darwin") is False
 
 
 def _preferences_client(tmp_path: Path, cli: FakeImbueCloudCli) -> FlaskClient:

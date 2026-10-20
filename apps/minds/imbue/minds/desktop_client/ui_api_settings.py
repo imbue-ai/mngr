@@ -16,6 +16,7 @@ when absent) so a stale window can never silently clobber a newer change.
 
 import hashlib
 import json
+import sys
 from typing import Callable
 from typing import TypeVar
 
@@ -44,6 +45,7 @@ from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
+from imbue.mngr_latchkey.core import LatchkeyErrorCode
 
 _WriteT = TypeVar("_WriteT", bound=FrozenModel)
 
@@ -117,6 +119,28 @@ class UiBrowserImportResult(FrozenModel):
 
     is_success: bool = Field(description="Whether the import completed")
     detail: str = Field(description="Why the import did not happen; empty on success")
+    error_code: LatchkeyErrorCode | None = Field(
+        default=None,
+        description="Latchkey's code for the failure when it gave one this package knows; None otherwise",
+    )
+    is_full_disk_access_needed: bool = Field(
+        default=False,
+        description=(
+            "Whether the fix is granting the app Full Disk Access: the Chrome profile could not be read "
+            "and this desktop is a Mac, where that is what denies every application a look at Chrome's data"
+        ),
+    )
+
+
+def is_full_disk_access_needed(error_code: LatchkeyErrorCode | None, platform: str) -> bool:
+    """Whether a failed import is the macOS Full Disk Access case.
+
+    Latchkey reports an unreadable Chrome profile with the same code on every
+    platform (a plain file-permission problem gets it on Linux), but only on
+    macOS is the remedy the Full Disk Access list. ``platform`` is
+    ``sys.platform`` of this desktop, the one latchkey ran on.
+    """
+    return error_code is LatchkeyErrorCode.CHROME_PROFILE_NOT_READABLE and platform == "darwin"
 
 
 class UiErrorReportingWrite(FrozenModel):
@@ -489,8 +513,12 @@ def _handle_browser_import_run() -> Response:
     Blocks for the whole run (tens of seconds), like the browser sign-in an
     Approve runs: the caller shows a spinner and reads the outcome from the
     body. A failed import answers 200 with ``is_success`` false and latchkey's
-    reason, so the dialog can show it and go on to the sign-in. Also counts as
-    the offer having been made, since running it is one way of answering it.
+    reason, so the dialog can show it and go on to the sign-in; when latchkey
+    coded the failure, ``error_code`` carries it, and
+    ``is_full_disk_access_needed`` says whether this desktop's platform makes
+    the Full Disk Access list the fix, so the client can say what to do rather
+    than quote the reason. Also counts as the offer having been made, since
+    running it is one way of answering it.
     """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
@@ -500,8 +528,15 @@ def _handle_browser_import_run() -> Response:
     minds_config = get_state().minds_config
     if minds_config is not None:
         minds_config.set_is_browser_import_offered(True)
-    is_success, detail = handler.latchkey.import_chrome_browser_state()
-    return _json_response(UiBrowserImportResult(is_success=is_success, detail=detail))
+    outcome = handler.latchkey.import_chrome_browser_state()
+    return _json_response(
+        UiBrowserImportResult(
+            is_success=outcome.is_success,
+            detail=outcome.detail,
+            error_code=outcome.error_code,
+            is_full_disk_access_needed=is_full_disk_access_needed(outcome.error_code, sys.platform),
+        )
+    )
 
 
 def _handle_update_window_write() -> Response:

@@ -69,7 +69,15 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
-exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py", "**/utils/plugin_testing.py"]
+exclude = [
+  "*_test.py",
+  "test_*.py",
+  "**/conftest.py",
+  "**/testing.py",
+  "**/utils/plugin_testing.py",
+  "**/agents/agent_release_testing.py",
+  "**/providers/provider_release_testing.py",
+]
 
 # Ship the help-topic doc files inside the package so `mngr help <topic>` works
 # in a PyPI wheel install (the top-level docs/ tree is otherwise not packaged).

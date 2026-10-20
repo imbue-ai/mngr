@@ -794,8 +794,8 @@ export class InboxModel {
     await this.continueToApproval();
   }
 
-  /** "Not now" (or "Continue to sign in" after a failed import): on to the
-   * approval the click was for. */
+  /** "Skip import" (or "Continue to sign in" after a failed
+   * import): on to the approval the click was for. */
   declineBrowserImport(): void {
     if (this.browserImport.isBusy) return;
     void this.continueToApproval();

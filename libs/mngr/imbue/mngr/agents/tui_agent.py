@@ -28,6 +28,7 @@ from imbue.mngr.agents.tui_utils import raise_for_unconfirmed_submission
 from imbue.mngr.agents.tui_utils import submit_message_and_confirm
 from imbue.mngr.agents.tui_utils import wait_for_paste_visible
 from imbue.mngr.agents.tui_utils import wait_for_tui_ready
+from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentConfigT
 
@@ -172,6 +173,10 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         warning and records an agent event instead of failing.
         """
         with log_span("Sending message to agent {} (length={})", self.name, len(message)):
+            # A TUI ignores Enter on an empty input box, so a blank message leaves no evidence
+            # and would otherwise poll out the whole confirmation window before failing.
+            if message.strip() == "":
+                raise SendMessageError(str(self.name), "the message is empty")
             self._preflight_send_message(self.tmux_target)
             wait_for_tui_ready(self, self.tmux_target, self.get_tui_ready_indicator())
             self._clear_or_warn_about_preexisting_input_text(self.tmux_target)

@@ -146,7 +146,15 @@ PREVENT_BUILTIN_EXCEPTION_RAISES = RegexRatchetRule(
 PREVENT_INLINE_IMPORTS = RegexRatchetRule(
     rule_name="inline imports",
     rule_description="Imports should be at the top of the file, not inline within functions",
-    pattern_string=r"^[ \t]+import\s+\w+|^[ \t]+from\s+\S+\s+import\b",
+    # A bare ``import`` must be the whole statement (modules, aliases, then at
+    # most a comment or a ``;``-separated statement), so a prose line in a
+    # docstring that happens to start with the word does not count. The
+    # whitespace inside it is ``[ \t]`` rather than ``\s``, which under
+    # MULTILINE would run the match onto the blank line after the import.
+    pattern_string=(
+        r"^[ \t]+import[ \t]+[\w.]+([ \t]+as[ \t]+\w+)?([ \t]*,[ \t]*[\w.]+([ \t]+as[ \t]+\w+)?)*[ \t]*([;#].*)?$"
+        r"|^[ \t]+from\s+\S+\s+import\b"
+    ),
     is_multiline=True,
 )
 

@@ -20,6 +20,7 @@ import {
 } from "../../../models/settings";
 import { formatRelativeAgo } from "../../../models/backups";
 import { BROWSER_IMPORT_SUCCESS_MESSAGE } from "../../../models/browserImport";
+import { browserImportFailureNotice } from "../../components/UnreadableChromeProfileNotice";
 import type { NotificationStyle } from "../../../models/notificationsUi";
 import { electronBridge } from "../../../electron-bridge";
 import { Button } from "../../components/Button";
@@ -359,9 +360,7 @@ function browserImportPanel(model: SettingsModel): m.Children {
             BROWSER_IMPORT_SUCCESS_MESSAGE,
           )
         : null,
-      outcome !== null && !outcome.is_success
-        ? m(Notice, { variant: "error", role: "alert", id: "browser-import-result" }, outcome.detail)
-        : null,
+      browserImportFailureNotice(browserImport, "browser-import-result"),
     ]),
     m(
       "p",

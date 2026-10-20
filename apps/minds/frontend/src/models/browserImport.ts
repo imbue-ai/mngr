@@ -4,6 +4,7 @@
 // the first Approve that is about to sign in, and the button in Settings that
 // runs it again later -- so the call and its busy/outcome state live here.
 
+import { electronBridge } from "../electron-bridge";
 import type { FetchLike } from "./requestDetailPrefetch";
 
 /** `GET /ui/api/settings/browser-import`. */
@@ -19,6 +20,31 @@ export interface BrowserImportResult {
   is_success: boolean;
   /** Why the import did not happen; empty on success. */
   detail: string;
+  /** Latchkey's code for the failure when it gave one; null otherwise, and
+   * on success. */
+  error_code: string | null;
+  /** Whether the fix is granting the app Full Disk Access: the Chrome
+   * profile could not be read, and the desktop is a Mac, where that is what
+   * denies every application a look at Chrome's data. The backend decides,
+   * since it is the one running where latchkey ran. */
+  is_full_disk_access_needed: boolean;
+}
+
+/** Latchkey's code for an import the OS refused: the Chrome profile is there,
+ * but could not be read. Whether that is a Mac's Full Disk Access or plain
+ * file permissions, `is_full_disk_access_needed` says. */
+export const CHROME_PROFILE_NOT_READABLE = "CHROME_PROFILE_NOT_READABLE";
+
+/** Whether the outcome is the one the user fixes (a permission) rather than
+ * reads about. */
+export function isChromeProfileUnreadable(
+  outcome: BrowserImportResult | null,
+): boolean {
+  return (
+    outcome !== null &&
+    !outcome.is_success &&
+    outcome.error_code === CHROME_PROFILE_NOT_READABLE
+  );
 }
 
 /** What a successful run says: the backend reports only that it succeeded. */
@@ -66,6 +92,10 @@ export class BrowserImportModel {
   isBusy = false;
   /** The last run's outcome; null before any run, and while one is in flight. */
   outcome: BrowserImportResult | null = null;
+  /** Whether the last try to open the Full Disk Access list did not open it,
+   * so the surface can say so rather than leave the button looking like it
+   * silently did nothing. */
+  isFullDiskAccessSettingsOpenFailed = false;
 
   constructor(
     private readonly fetchImpl: FetchLike,
@@ -79,6 +109,7 @@ export class BrowserImportModel {
     if (this.isBusy) return false;
     this.isBusy = true;
     this.outcome = null;
+    this.isFullDiskAccessSettingsOpenFailed = false;
     this.redraw();
     try {
       const response = await this.fetchImpl(BROWSER_IMPORT_URL, {
@@ -96,16 +127,28 @@ export class BrowserImportModel {
           detail:
             body?.error ??
             `Could not import from Chrome (HTTP ${response.status}).`,
+          error_code: null,
+          is_full_disk_access_needed: false,
         };
       }
     } catch {
       this.outcome = {
         is_success: false,
         detail: "Could not import from Chrome (network error).",
+        error_code: null,
+        is_full_disk_access_needed: false,
       };
     }
     this.isBusy = false;
     this.redraw();
     return this.outcome.is_success;
+  }
+
+  /** Open macOS's Full Disk Access list for the user to put the app on. */
+  async openFullDiskAccessSettings(): Promise<void> {
+    this.isFullDiskAccessSettingsOpenFailed = false;
+    const isOpened = await electronBridge.openFullDiskAccessSettings();
+    this.isFullDiskAccessSettingsOpenFailed = !isOpened;
+    this.redraw();
   }
 }

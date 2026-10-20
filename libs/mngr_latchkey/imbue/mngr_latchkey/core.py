@@ -884,6 +884,83 @@ def summarize_latchkey_failure(raw_output: str, fallback: str) -> str:
     return summary
 
 
+class LatchkeyErrorCode(UpperCaseStrEnum):
+    """The machine-readable failure codes latchkey (>= 3.19) prints for the failures a surface can act on.
+
+    A coded failure reaches stderr as one JSON line,
+    ``{"errorCode": ..., "errorMessage": ...}``, instead of the crash dump
+    :func:`summarize_latchkey_failure` condenses. Values are the codes as
+    latchkey spells them.
+    """
+
+    # ``auth import-chrome``: the Chrome profile is there but its files could
+    # not be read. On macOS (27 and later) that is the OS denying every
+    # application without Full Disk Access a look at Chrome's data; the user
+    # has to grant it by hand in System Settings, and no API can ask for it.
+    CHROME_PROFILE_NOT_READABLE = auto()
+
+
+class CodedLatchkeyFailure(FrozenModel):
+    """A failure latchkey reported with a code, as parsed off its stderr."""
+
+    code: str = Field(description="The code as latchkey printed it, known to LatchkeyErrorCode or not")
+    message: str = Field(description="Latchkey's own sentence about the failure")
+
+    @property
+    def known_code(self) -> LatchkeyErrorCode | None:
+        """The code as a member, or None for a code newer than this package."""
+        if self.code in LatchkeyErrorCode:
+            return LatchkeyErrorCode(self.code)
+        return None
+
+
+# The key latchkey's ``formatCodedErrorAsJson`` writes first, which is what
+# places the object in the output; a crash dump never names it.
+_CODED_FAILURE_KEY: Final[str] = '"errorCode"'
+
+
+def parse_coded_latchkey_failure(raw_output: str) -> CodedLatchkeyFailure | None:
+    """The coded failure in a failed latchkey CLI's output, or None when it printed none.
+
+    The object is decoded from wherever it opens rather than from a line of
+    its own: Node writes its own warnings to stderr ahead of it, and nothing
+    here depends on latchkey keeping it on one line.
+    """
+    key_index = raw_output.find(_CODED_FAILURE_KEY)
+    if key_index == -1:
+        return None
+    start = raw_output.rfind("{", 0, key_index)
+    if start == -1:
+        return None
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(raw_output, start)
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "Ignoring latchkey output that names an error code but is not a JSON object: {} ({})",
+            raw_output[start:],
+            e,
+        )
+        return None
+    if not isinstance(payload, dict):
+        return None
+    code = payload.get("errorCode")
+    message = payload.get("errorMessage")
+    if isinstance(code, str) and isinstance(message, str):
+        return CodedLatchkeyFailure(code=code, message=message)
+    return None
+
+
+class ChromeImportOutcome(FrozenModel):
+    """What one ``latchkey auth import-chrome`` run came to."""
+
+    is_success: bool = Field(description="Whether the import completed")
+    detail: str = Field(description="Why the import did not happen; empty on success")
+    error_code: LatchkeyErrorCode | None = Field(
+        default=None,
+        description="The failure's code when latchkey gave one this package knows, so a surface can act on it",
+    )
+
+
 def merge_minds_latchkey_config(
     existing_config_json: str | None,
     custom_service_entries: Mapping[str, JsonValue] | None = None,
@@ -1926,7 +2003,7 @@ class Latchkey(MutableModel):
             timeout_seconds=_AUTH_SET_TIMEOUT_SECONDS,
         )
 
-    def import_chrome_browser_state(self) -> tuple[bool, str]:
+    def import_chrome_browser_state(self) -> ChromeImportOutcome:
         """Run ``latchkey auth import-chrome`` (latchkey >= 3.16) and report the outcome.
 
         Imports the cookies of the user's default Google Chrome profile, and the
@@ -1938,10 +2015,12 @@ class Latchkey(MutableModel):
 
         Latchkey copies the profile and reads it through a headless Chrome, so
         the call takes tens of seconds; it is bounded by
-        :data:`_IMPORT_CHROME_TIMEOUT_SECONDS`. Returns ``(True, "")`` on a
-        clean exit -- the exit status is the whole contract; what latchkey
-        prints about the import only reaches the log -- or ``(False, detail)``
-        with the reason (no Chrome installed, no default profile, ...).
+        :data:`_IMPORT_CHROME_TIMEOUT_SECONDS`. A clean exit is a success --
+        the exit status is the whole contract; what latchkey prints about the
+        import only reaches the log. A failure carries the reason (no Chrome
+        installed, no default profile, ...) and, when latchkey (>= 3.19)
+        reported it with a code this package knows, that code, so a surface
+        can say what to do about it rather than quote the sentence.
         """
         result = self._run_latchkey_subprocess(
             log_label="auth import-chrome",
@@ -1951,13 +2030,24 @@ class Latchkey(MutableModel):
         )
         if result.returncode == 0:
             logger.info("latchkey auth import-chrome succeeded: {}", result.stdout.strip())
-            return True, ""
+            return ChromeImportOutcome(is_success=True, detail="")
         if result.is_timed_out:
             logger.warning("latchkey auth import-chrome timed out after {}s", _IMPORT_CHROME_TIMEOUT_SECONDS)
-            return False, f"Importing from Chrome did not finish within {_IMPORT_CHROME_TIMEOUT_SECONDS:.0f} seconds."
+            return ChromeImportOutcome(
+                is_success=False,
+                detail=f"Importing from Chrome did not finish within {_IMPORT_CHROME_TIMEOUT_SECONDS:.0f} seconds.",
+            )
         raw_message = result.stderr.strip() or result.stdout.strip() or "latchkey auth import-chrome failed"
         logger.warning("latchkey auth import-chrome exited {}: {}", result.returncode, raw_message)
-        return False, summarize_latchkey_failure(raw_message, fallback="latchkey auth import-chrome failed")
+        coded_failure = parse_coded_latchkey_failure(raw_message)
+        if coded_failure is not None:
+            return ChromeImportOutcome(
+                is_success=False, detail=coded_failure.message, error_code=coded_failure.known_code
+            )
+        return ChromeImportOutcome(
+            is_success=False,
+            detail=summarize_latchkey_failure(raw_message, fallback="latchkey auth import-chrome failed"),
+        )
 
     def _run_latchkey_auth_command(
         self,

@@ -6,10 +6,12 @@ from pathlib import Path
 import pytest
 
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_TMUX_TARGETS
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_INLINE_IMPORTS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_TRAILING_COMMENTS
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule
 
 _BARE_TMUX_TARGET_PATTERN = re.compile(PREVENT_BARE_TMUX_TARGETS.pattern_string, re.MULTILINE)
+_INLINE_IMPORT_PATTERN = re.compile(PREVENT_INLINE_IMPORTS.pattern_string, re.MULTILINE)
 
 
 def _commit_module(git_repo: Path, source: str) -> None:
@@ -74,3 +76,40 @@ def test_bare_tmux_target_rule_flags_name_targets_without_exact_match(line: str)
 )
 def test_bare_tmux_target_rule_accepts_exact_names_and_tmux_ids(line: str) -> None:
     assert _BARE_TMUX_TARGET_PATTERN.search(line) is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "    import os",
+        "    import os.path as osp",
+        "    import json as _json, os as _os",
+        "    import sys, os  # the shell needs both",
+        "    import pdb; pdb.set_trace()",
+        "\timport os",
+        "    from pathlib import Path",
+    ],
+)
+def test_inline_import_rule_flags_an_indented_import_statement(line: str) -> None:
+    assert _INLINE_IMPORT_PATTERN.search(line) is not None
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "    import only reaches the log. A failure carries the reason.",
+        "    import the cookies of the default profile",
+        "import os",
+        "from pathlib import Path",
+    ],
+)
+def test_inline_import_rule_ignores_prose_and_top_level_imports(line: str) -> None:
+    assert _INLINE_IMPORT_PATTERN.search(line) is None
+
+
+def test_inline_import_rule_match_stops_at_the_end_of_the_import_line() -> None:
+    source = "    import os\n\n    import sys\n"
+    assert [match.group(0) for match in _INLINE_IMPORT_PATTERN.finditer(source)] == [
+        "    import os",
+        "    import sys",
+    ]

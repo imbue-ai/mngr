@@ -6,9 +6,11 @@
 // attempt (status polling + the op-log SSE). Reached from the start flow in
 // the same session, the flow's transcript renders between the two.
 //
-// When the attempt is ready the agent asks how the user would like to start,
-// the whole conversation is handed to the new workspace as its first chat
-// (models/welcomeChat.ts), and the wash carries the app in; a failure or an
+// The whole conversation is handed over as the new workspace's first chat
+// (models/welcomeChat.ts) as soon as the page knows the attempt's settings, so
+// it is seeded even if the page is left before the workspace is ready. When
+// the attempt is ready the agent asks how the user would like to start, the
+// page waits for that seed, and the wash carries the app in; a failure or an
 // interrupted record becomes an agent turn with Retry and Dismiss / Discard,
 // the retry reopening the create form as a modal prefilled from the attempt's
 // record.
@@ -215,11 +217,14 @@ export const CreatingPage: m.ClosureComponent = () => {
   }
 
   /**
-   * Hand the conversation so far to the new workspace as its first chat. Best effort: a
-   * workspace that cannot take it (its chat app still down, an older template) is entered
-   * all the same, on its plain landing page, with the reason in the console.
+   * Hand the conversation so far to the new workspace as its first chat. Posted once the page
+   * knows the attempt's settings, while the workspace is still being built, so the desktop
+   * client seeds it when the attempt finishes even if this page has been left by then; posted
+   * again once it is done, which waits for that seed. Best effort: a workspace that cannot take
+   * it (its chat app still down, an older template) is entered all the same, with the reason in
+   * the console.
    */
-  function seedWelcomeChat(): Promise<void> {
+  function handOverWelcomeChat(): Promise<void> {
     const request = state.detail?.live?.request;
     if (request === undefined || request === null) return Promise.resolve();
     const entries = state.isFromStartFlow ? startFlow.state.entries : [];
@@ -245,7 +250,7 @@ export const CreatingPage: m.ClosureComponent = () => {
         if (state.isDone) return;
         state.isDone = true;
         state.redirectUrl = redirectUrl;
-        state.welcomeChat = seedWelcomeChat();
+        state.welcomeChat = handOverWelcomeChat();
         scheduleEntry();
       },
       onFailed(error, errorKind) {
@@ -599,6 +604,7 @@ export const CreatingPage: m.ClosureComponent = () => {
         if (state !== own) return;
         own.detail = detail;
         if (detail.kind === "live") {
+          void handOverWelcomeChat();
           startWatching();
         } else if (detail.kind === "gone") {
           m.route.set("/");

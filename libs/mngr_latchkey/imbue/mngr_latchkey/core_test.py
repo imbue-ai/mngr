@@ -44,6 +44,8 @@ from imbue.mngr_latchkey.additional_services import additional_service_registrat
 from imbue.mngr_latchkey.cli import _run_gateway_health_check_loop
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
+from imbue.mngr_latchkey.core import ChromeImportOutcome
+from imbue.mngr_latchkey.core import CodedLatchkeyFailure
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import HIDDEN_BUILTIN_SERVICES
 from imbue.mngr_latchkey.core import LATCHKEY_CREDENTIAL_TYPE_OAUTH
@@ -51,6 +53,7 @@ from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyBinaryNotFoundError
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.core import LatchkeyErrorCode
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
@@ -60,6 +63,7 @@ from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_SERVICES
 from imbue.mngr_latchkey.core import MINDS_OAUTH_REDIRECT_URI_BY_SERVICE
 from imbue.mngr_latchkey.core import _log_gateway_output_line
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
+from imbue.mngr_latchkey.core import parse_coded_latchkey_failure
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.devices import DesktopDeviceIdentity
@@ -334,13 +338,18 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         "    open(out, 'w').write(_json.dumps(payload))\n"
         "    sys.exit(0)\n"
         # ``auth import-chrome`` succeeds with latchkey's own summary unless a
-        # ``no-chrome`` marker sits in the latchkey directory, which makes it
-        # fail the way a computer without Chrome does.
+        # marker sits in the latchkey directory: ``no-chrome`` makes it fail
+        # the way a computer without Chrome does, ``chrome-unreadable`` the
+        # way a Mac without Full Disk Access does (one coded JSON line).
         'if sys.argv[1:3] == ["auth", "import-chrome"]:\n'
-        "    import os as _os\n"
+        "    import json as _json, os as _os\n"
         "    directory = _os.environ['LATCHKEY_DIRECTORY']\n"
         "    if _os.path.exists(_os.path.join(directory, 'no-chrome')):\n"
         "        print('Error: Google Chrome is not installed in any of the standard locations.', file=sys.stderr)\n"
+        "        sys.exit(1)\n"
+        "    if _os.path.exists(_os.path.join(directory, 'chrome-unreadable')):\n"
+        "        print(_json.dumps({'errorCode': 'CHROME_PROFILE_NOT_READABLE', 'errorMessage': "
+        "'The Google Chrome profile at /Users/me/Chrome/Default could not be read: EPERM.'}), file=sys.stderr)\n"
         "        sys.exit(1)\n"
         "    print('Imported 12 cookie(s) and the localStorage of 2 origin(s) into ' + directory + '/browser_state.json.enc.')\n"
         "    print('  https://slack.com')\n"
@@ -3754,7 +3763,7 @@ def test_import_chrome_browser_state_reports_a_clean_exit_as_success(tmp_path: P
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
 
-    assert manager.import_chrome_browser_state() == (True, "")
+    assert manager.import_chrome_browser_state() == ChromeImportOutcome(is_success=True, detail="")
 
 
 def test_import_chrome_browser_state_surfaces_latchkeys_reason_on_failure(tmp_path: Path) -> None:
@@ -3763,7 +3772,64 @@ def test_import_chrome_browser_state_surfaces_latchkeys_reason_on_failure(tmp_pa
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
 
-    is_success, detail = manager.import_chrome_browser_state()
+    outcome = manager.import_chrome_browser_state()
 
-    assert is_success is False
-    assert "Google Chrome is not installed" in detail
+    assert outcome.is_success is False
+    assert outcome.error_code is None
+    assert "Google Chrome is not installed" in outcome.detail
+
+
+def test_import_chrome_browser_state_carries_the_code_of_an_unreadable_profile(tmp_path: Path) -> None:
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    (tmp_path / "chrome-unreadable").write_text("")
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+
+    outcome = manager.import_chrome_browser_state()
+
+    assert outcome.is_success is False
+    assert outcome.error_code is LatchkeyErrorCode.CHROME_PROFILE_NOT_READABLE
+    # The sentence, not the JSON line it arrived in.
+    assert outcome.detail == "The Google Chrome profile at /Users/me/Chrome/Default could not be read: EPERM."
+
+
+def test_parse_coded_latchkey_failure_reads_the_json_line_among_other_output() -> None:
+    raw = (
+        "(node:123) Warning: something\n"
+        '{"errorCode":"CHROME_PROFILE_NOT_READABLE","errorMessage":"The profile could not be read."}\n'
+    )
+    failure = parse_coded_latchkey_failure(raw)
+    assert failure is not None
+    assert failure == CodedLatchkeyFailure(
+        code="CHROME_PROFILE_NOT_READABLE", message="The profile could not be read."
+    )
+    assert failure.known_code is LatchkeyErrorCode.CHROME_PROFILE_NOT_READABLE
+
+
+def test_parse_coded_latchkey_failure_does_not_depend_on_the_object_fitting_one_line() -> None:
+    raw = (
+        "(node:123) ExperimentalWarning: something\n"
+        "{\n"
+        '  "errorCode": "CHROME_PROFILE_NOT_READABLE",\n'
+        '  "errorMessage": "The profile could not be read: EPERM,\\n  operation not permitted."\n'
+        "}\n"
+        "trailing output\n"
+    )
+    assert parse_coded_latchkey_failure(raw) == CodedLatchkeyFailure(
+        code="CHROME_PROFILE_NOT_READABLE", message="The profile could not be read: EPERM,\n  operation not permitted."
+    )
+
+
+def test_parse_coded_latchkey_failure_ignores_output_that_is_not_a_coded_failure() -> None:
+    assert parse_coded_latchkey_failure("Error: Google Chrome is not installed.") is None
+    assert parse_coded_latchkey_failure("{ not json\n{}\n") is None
+    assert parse_coded_latchkey_failure('{"errorCode": 5, "errorMessage": "x"}') is None
+    # Names the key but is no JSON object: a crash dump quoting the source.
+    assert parse_coded_latchkey_failure('throw new CodedError({ "errorCode": code })') is None
+
+
+def test_parse_coded_latchkey_failure_keeps_a_code_this_package_does_not_know() -> None:
+    failure = parse_coded_latchkey_failure('{"errorCode":"SOMETHING_NEW","errorMessage":"A newer latchkey said so."}')
+    assert failure is not None
+    assert failure == CodedLatchkeyFailure(code="SOMETHING_NEW", message="A newer latchkey said so.")
+    assert failure.known_code is None

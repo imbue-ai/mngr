@@ -26,6 +26,7 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr_latchkey.core import ChromeImportOutcome
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
@@ -95,7 +96,9 @@ class FakeLatchkey(Latchkey):
     _accounts_by_service: dict[str, tuple[ServiceAccountCredential, ...]] = PrivateAttr(default_factory=dict)
     _auth_list_error: BaseException | None = PrivateAttr(default=None)
     # What ``import_chrome_browser_state`` reports, and how often it was asked.
-    _import_chrome_result: tuple[bool, str] = PrivateAttr(default=(True, ""))
+    _import_chrome_result: ChromeImportOutcome = PrivateAttr(
+        default_factory=lambda: ChromeImportOutcome(is_success=True, detail="")
+    )
     _import_chrome_call_count: int = PrivateAttr(default=0)
 
     # Auth / services-info doubles. The credential-grant flow now lives in the
@@ -122,7 +125,7 @@ class FakeLatchkey(Latchkey):
         service_info: LatchkeyServiceInfo | None = None,
         accounts_by_service: dict[str, tuple[ServiceAccountCredential, ...]] | None = None,
         auth_list_error: BaseException | None = None,
-        import_chrome_result: tuple[bool, str] | None = None,
+        import_chrome_result: ChromeImportOutcome | None = None,
     ) -> None:
         """Install the given doubles, leaving everything not passed as it was.
 
@@ -213,7 +216,7 @@ class FakeLatchkey(Latchkey):
         """How many times ``import_chrome_browser_state`` has been called."""
         return self._import_chrome_call_count
 
-    def import_chrome_browser_state(self) -> tuple[bool, str]:
+    def import_chrome_browser_state(self) -> ChromeImportOutcome:
         self._import_chrome_call_count += 1
         return self._import_chrome_result
 
