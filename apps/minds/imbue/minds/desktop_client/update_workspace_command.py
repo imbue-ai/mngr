@@ -392,7 +392,7 @@ def mode_now(context):
             )
         )
         return
-    if is_update_lease_held():
+    if is_update_lease_held(agents):
         emit(
             dict(
                 _create_result(OUTCOME_ALREADY_RUNNING, "Another update flow is working in this workspace."), mode="now"

@@ -275,6 +275,28 @@ def test_a_tick_that_cannot_start_the_run_keeps_trying_and_records_why_at_window
     assert closed["last_skip_at"] == _AFTER_WINDOW
 
 
+@pytest.mark.parametrize(("holder_state", "is_dispatched"), [("RUNNING", False), (None, True), ("STOPPED", True)])
+def test_a_lease_counts_as_held_only_while_its_holder_is_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType, holder_state: str | None, is_dispatched: bool
+) -> None:
+    """A lease whose holder is gone is abandoned: the update's lead takes it over, so it must not stop the start."""
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.write_state("schedule.json", _schedule())
+    staged.set_agents([_agent("old-lead", holder_state)] if holder_state is not None else [])
+    tickets = staged.root / "data" / ".tickets"
+    tickets.mkdir(parents=True)
+    (tickets / "w-1.md").write_text(
+        "---\nid: w-1\nstatus: in_progress\n---\n# updating workspace\n\nHeld by old-lead across the update-self pass.\n"
+    )
+
+    _tick(program, staged, _IN_WINDOW)
+
+    schedule = staged.read_state("schedule.json")
+    assert schedule is not None
+    assert len(_creates(staged)) == (1 if is_dispatched else 0)
+    assert schedule["pending_skip_reason"] == ("" if is_dispatched else "LEASE_HELD")
+
+
 @pytest.mark.witnesses("workspace-updates.needs-sign-in", partial="the dispatcher's skip only")
 def test_a_sign_in_refusal_at_dispatch_time_is_the_windows_skip_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType

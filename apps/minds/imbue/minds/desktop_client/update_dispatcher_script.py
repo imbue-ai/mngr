@@ -466,8 +466,34 @@ def open_update_leases():
     return leases
 
 
-def is_update_lease_held():
-    return any(title == UPDATE_LEASE_TITLE for _, title, _, _ in open_update_leases())
+def agent_identities(agent):
+    """Every handle a lease can name its holder by: the agent's name, its id, and its chat's id."""
+    return {str(agent.get("name") or ""), str(agent.get("id") or ""), chat_id_of(agent)} - {""}
+
+
+def _lease_holders(front, body):
+    """Who a lease names as its holder: the creator tk stamped, and the lease's own ``Held by`` words."""
+    holders = set(re.findall(r"Held by (\S+) ", body))
+    if front.get("agent"):
+        holders.add(front["agent"])
+    return holders
+
+
+def is_update_lease_held(agents):
+    """Whether an ``updating workspace`` lease is held by an agent that is still there.
+
+    A lease whose holder has ended is abandoned, and the update's lead takes it over by the
+    skill's own rule. One that names no holder, or a listing that could not be read, counts as held.
+    """
+    for _, title, front, body in open_update_leases():
+        if title != UPDATE_LEASE_TITLE:
+            continue
+        holders = _lease_holders(front, body)
+        if agents is None or not holders:
+            return True
+        if any(not is_agent_ended(agent) and agent_identities(agent) & holders for agent in agents):
+            return True
+    return False
 
 
 def run_verdict(run):
@@ -822,7 +848,7 @@ def dispatch_scheduled(schedule, run, agents):
     """Start the scheduled run, marking ``schedule`` with its chat; the skip reason when it could not start."""
     if is_run_in_flight(run, agents):
         return SKIP_UPDATE_IN_FLIGHT
-    if is_update_lease_held():
+    if is_update_lease_held(agents):
         return SKIP_LEASE_HELD
     if not is_skill_present():
         return SKIP_DISPATCH_FAILED
@@ -905,11 +931,10 @@ def record_stuck_verdict(run, detail):
 
 def release_leases_of(lead):
     """Close the update leases the gone lead created, matched by the creator tk stamped or the lease's own words."""
-    owners = {str(lead.get("name") or ""), str(lead.get("id") or ""), chat_id_of(lead)} - {""} if lead else set()
+    owners = agent_identities(lead)
     tk = shutil.which("tk", path=agent_env().get("PATH")) or "system/vendor/tk/ticket"
     for lease_id, title, front, body in open_update_leases():
-        is_owned = front.get("agent") in owners or any(("Held by %s " % owner) in body for owner in owners)
-        if not is_owned:
+        if not _lease_holders(front, body) & owners:
             continue
         closed = run_command(
             [tk, "close", lease_id, "Released: the update agent that held it is gone."],
