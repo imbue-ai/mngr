@@ -376,6 +376,10 @@ class _ForwardStderrCollapser(MutableModel):
     _tail_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _tail: deque[str] = PrivateAttr(default_factory=lambda: deque(maxlen=_STDERR_TAIL_LINE_COUNT))
 
+    def scrub(self, line: str) -> str:
+        """Scrub ``line`` the way the tail's lines are, for quoting other plugin output in the same report."""
+        return _scrub_stderr_line(line, self._home_dir)
+
     def get_tail(self) -> tuple[str, ...]:
         """The last relayed messages, oldest first, scrubbed for quoting in an error report."""
         with self._tail_lock:
@@ -457,7 +461,7 @@ class _ForwardStderrCollapser(MutableModel):
 
     def _relay(self, message: str) -> None:
         logger.debug("mngr forward stderr: {}", message)
-        scrubbed = _scrub_stderr_line(message, self._home_dir)
+        scrubbed = self.scrub(message)
         with self._tail_lock:
             self._tail.append(scrubbed)
 
@@ -577,6 +581,18 @@ class EnvelopeStreamConsumer(MutableModel):
     # wrote just before it died.
     _stdout_drained_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _stderr_drained_event: threading.Event = PrivateAttr(default_factory=threading.Event)
+    # The structured `{"event": "error", ...}` line mngr's CLI writes to stdout
+    # (in `--format jsonl`) when an exception escapes the plugin command: the
+    # error class, and its message scrubbed for quoting in the exit report.
+    # Guarded by `_lock`.
+    _plugin_error_class: str | None = PrivateAttr(default=None)
+    _plugin_error_message: str | None = PrivateAttr(default=None)
+    # When this backend began its own shutdown (monotonic clock) and the signal
+    # that started it, so the exit report can tell a plugin that died alongside
+    # its parent (both signalled at once) from one that died on its own.
+    # Guarded by `_lock`.
+    _backend_shutdown_began_at_monotonic: float | None = PrivateAttr(default=None)
+    _backend_shutdown_signal_name: str | None = PrivateAttr(default=None)
 
     def add_on_agent_discovered_callback(self, callback: OnAgentDiscoveredCallback) -> None:
         """Register a callback fired for every observe-stream agent discovery."""
@@ -702,6 +718,20 @@ class EnvelopeStreamConsumer(MutableModel):
             )
         return port
 
+    def note_backend_shutdown_began(self, signal_name: str) -> None:
+        """Record that this backend received ``signal_name`` and is shutting down.
+
+        Called from the backend's signal handler, before the lifespan teardown
+        reaches :meth:`terminate`. A plugin that exits in between is still
+        reported as unexpected; this lets that report say the backend was
+        already on its way out, and for how long.
+        """
+        with self._lock:
+            if self._backend_shutdown_began_at_monotonic is not None:
+                return
+            self._backend_shutdown_began_at_monotonic = time.monotonic()
+            self._backend_shutdown_signal_name = signal_name
+
     def terminate(self) -> None:
         """Stop the plugin subprocess (SIGTERM, then SIGKILL on timeout).
 
@@ -750,6 +780,7 @@ class EnvelopeStreamConsumer(MutableModel):
         if process is None:
             return
         exit_code = process.wait()
+        exited_at_monotonic = time.monotonic()
         self._exit_code = exit_code
         # The pipes can still hold a `listening` envelope or the traceback
         # naming the failing step when `wait()` returns; let the readers finish.
@@ -767,7 +798,7 @@ class EnvelopeStreamConsumer(MutableModel):
             if self._has_reported_exit:
                 return
             self._has_reported_exit = True
-            self._log_unexpected_exit(exit_code, is_stdout_drained, is_stderr_drained)
+            self._log_unexpected_exit(exit_code, exited_at_monotonic, is_stdout_drained, is_stderr_drained)
         finally:
             self._listening_settled_event.set()
         with self._lock:
@@ -778,7 +809,13 @@ class EnvelopeStreamConsumer(MutableModel):
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_unexpected_exit callback failed: {}", e)
 
-    def _log_unexpected_exit(self, exit_code: int, is_stdout_drained: bool, is_stderr_drained: bool) -> None:
+    def _log_unexpected_exit(
+        self,
+        exit_code: int,
+        exited_at_monotonic: float,
+        is_stdout_drained: bool,
+        is_stderr_drained: bool,
+    ) -> None:
         """Report an unasked-for exit with enough context to tell a startup failure from a runtime crash.
 
         The classifying facts go in the message itself, which is all a Sentry
@@ -787,9 +824,20 @@ class EnvelopeStreamConsumer(MutableModel):
         the event's message.
         """
         attached_at = self._attached_at_monotonic
-        seconds_since_spawn = round(time.monotonic() - attached_at, 1) if attached_at is not None else None
+        seconds_since_spawn = round(exited_at_monotonic - attached_at, 1) if attached_at is not None else None
         with self._lock:
             had_reported_listening = self._listening_port is not None
+            plugin_error_class = self._plugin_error_class
+            plugin_error_message = self._plugin_error_message
+            backend_shutdown_began_at = self._backend_shutdown_began_at_monotonic
+            backend_shutdown_signal = self._backend_shutdown_signal_name
+        # Negative when the backend's signal arrived only after the plugin had
+        # exited (during the pipe-drain wait that precedes this report).
+        seconds_since_backend_shutdown_began = (
+            round(exited_at_monotonic - backend_shutdown_began_at, 1)
+            if backend_shutdown_began_at is not None
+            else None
+        )
         stderr_tail = self._stderr_collapser.get_tail()
         logger.bind(
             exit_code=exit_code,
@@ -799,13 +847,19 @@ class EnvelopeStreamConsumer(MutableModel):
             is_stdout_drained=is_stdout_drained,
             is_stderr_drained=is_stderr_drained,
             stderr_tail="\n".join(stderr_tail),
+            plugin_error_class=plugin_error_class,
+            plugin_error_message=plugin_error_message,
+            backend_shutdown_signal=backend_shutdown_signal,
+            seconds_since_backend_shutdown_began=seconds_since_backend_shutdown_began,
         ).error(
             "mngr forward exited unexpectedly with code {}; had_reported_listening={} seconds_since_spawn={} "
-            "stderr_tail_lines={}",
+            "stderr_tail_lines={} plugin_error_class={} backend_shutdown_signal={}",
             _describe_exit_code(exit_code),
             had_reported_listening,
             seconds_since_spawn,
             len(stderr_tail),
+            plugin_error_class,
+            backend_shutdown_signal,
         )
 
     def _handle_envelope_line(self, line: str) -> None:
@@ -818,6 +872,9 @@ class EnvelopeStreamConsumer(MutableModel):
             logger.warning("Could not parse envelope line {!r}: {}", stripped[:200], e)
             return
         if not isinstance(envelope, dict):
+            return
+        if envelope.get("event") == "error":
+            self._record_plugin_error(envelope)
             return
         stream = envelope.get("stream")
         agent_id_value = envelope.get("agent_id")
@@ -833,6 +890,16 @@ class EnvelopeStreamConsumer(MutableModel):
             self._handle_forward_payload(payload)
         else:
             logger.trace("Unknown envelope stream {!r}", stream)
+
+    def _record_plugin_error(self, error_line: dict[str, Any]) -> None:
+        """Keep the error mngr's CLI reported for the plugin command, for the exit report that follows it."""
+        error_class = error_line.get("error_class")
+        message = error_line.get("message")
+        scrubbed_message = self._stderr_collapser.scrub(message) if isinstance(message, str) else None
+        logger.debug("mngr forward reported error {}: {}", error_class, scrubbed_message)
+        with self._lock:
+            self._plugin_error_class = error_class if isinstance(error_class, str) else None
+            self._plugin_error_message = scrubbed_message
 
     def _did_poll_straddle_a_sleep(self, event: ProviderDiscoverySnapshotEvent) -> bool:
         """Whether this process stopped running somewhere inside the poll's own window."""
