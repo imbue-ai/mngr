@@ -42,6 +42,9 @@ LAST_DISPATCH_FILE_PATH: Final[str] = f"{UPDATE_STATE_DIR}/last-dispatch.json"
 # Opens the program's one JSON answer on stdout, so it can be found in noisy output.
 UPDATE_COMMAND_RESULT_MARKER: Final[str] = "MINDS_UPDATE_COMMAND_JSON:"
 
+# Asks the command's ``read`` whether an account is signed in.
+UPDATE_COMMAND_CHECK_SIGN_IN_FLAG: Final[str] = "--check-sign-in"
+
 # What the watchdog sends an idle lead whose run has no verdict.
 WATCHDOG_REMINDER_MESSAGE: Final[str] = (
     "A note from the Imbue Studio app: this update has no recorded result yet, and neither you nor "
@@ -75,6 +78,7 @@ def _app_constants_block() -> str:
         f"SCHEDULE_PATH = {json.dumps(SCHEDULE_FILE_PATH)}",
         f"LAST_DISPATCH_PATH = {json.dumps(LAST_DISPATCH_FILE_PATH)}",
         f"RESULT_MARKER = {json.dumps(UPDATE_COMMAND_RESULT_MARKER)}",
+        f"CHECK_SIGN_IN_FLAG = {json.dumps(UPDATE_COMMAND_CHECK_SIGN_IN_FLAG)}",
         f"STARTED_BY_SCHEDULED = {json.dumps(UpdateStartedBy.SCHEDULED.value.lower())}",
         f"STARTED_BY_IMMEDIATE = {json.dumps(UpdateStartedBy.IMMEDIATE.value.lower())}",
         *(f"OUTCOME_{outcome.value} = {json.dumps(outcome.value)}" for outcome in UpdateArmOutcome),

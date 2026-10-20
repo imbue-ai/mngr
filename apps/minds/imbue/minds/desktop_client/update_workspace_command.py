@@ -39,6 +39,7 @@ from imbue.minds.desktop_client.in_workspace_mngr import exec_verdict_detail
 from imbue.minds.desktop_client.in_workspace_mngr import inner_stdout_from_exec_result
 from imbue.minds.desktop_client.in_workspace_mngr import is_exec_cut_off_on_reached_host
 from imbue.minds.desktop_client.in_workspace_mngr import jsonl_events
+from imbue.minds.desktop_client.update_dispatcher_script import UPDATE_COMMAND_CHECK_SIGN_IN_FLAG
 from imbue.minds.desktop_client.update_dispatcher_script import UPDATE_COMMAND_RESULT_MARKER
 from imbue.minds.desktop_client.update_dispatcher_script import UPDATE_DISPATCHER_PROGRAM_CORE
 from imbue.minds.desktop_client.update_status import UpdateArmOutcome
@@ -55,9 +56,6 @@ _ARM_MODE: Final[str] = "arm"
 _NOW_MODE: Final[str] = "now"
 _CANCEL_MODE: Final[str] = "cancel"
 _READ_MODE: Final[str] = "read"
-
-# Asks ``read`` whether an account is signed in; the program reads it under the same name.
-_CHECK_SIGN_IN_FLAG: Final[str] = "--check-sign-in"
 
 # ``now`` waits for the chat app to finish the create (its own ceiling is 300s), after a listing
 # of the workspace's agents; ``arm`` may ask an old template's account resolver under ``uv run``.
@@ -162,7 +160,7 @@ def build_arm_arguments(settings: UpdateWorkspaceSettings, override_ref: str) ->
 
 
 def build_read_arguments(settings: UpdateWorkspaceSettings, *, is_sign_in_checked: bool) -> list[str]:
-    return [*_settings_arguments(settings), *([_CHECK_SIGN_IN_FLAG] if is_sign_in_checked else [])]
+    return [*_settings_arguments(settings), *([UPDATE_COMMAND_CHECK_SIGN_IN_FLAG] if is_sign_in_checked else [])]
 
 
 def build_now_arguments(settings: UpdateWorkspaceSettings, override_ref: str) -> list[str]:
@@ -450,7 +448,7 @@ def mode_read(context):
         schedule.get("pending_skip_reason"),
         schedule.get("last_skip_reason"),
     )
-    if "--check-sign-in" in context["argv"] or is_skipped_for_sign_in:
+    if CHECK_SIGN_IN_FLAG in context["argv"] or is_skipped_for_sign_in:
         is_signed_in = resolve_account()[0]
     emit(
         {
