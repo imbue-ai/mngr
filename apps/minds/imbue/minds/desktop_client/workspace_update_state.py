@@ -666,6 +666,9 @@ class WorkspaceUpdateStateStore(MutableModel):
             )
             if is_newer_than_failed_attempt:
                 new_facts = new_facts.model_copy_update(to_update(new_facts.field_ref().dispatch_failure, None))
+            # The held chat id is the earlier run's; the last dispatch names this one's.
+            if status.chat_agent_name != facts.record.chat_agent_name:
+                new_facts = new_facts.model_copy_update(to_update(new_facts.field_ref().chat_agent_id, ""))
             self._run_by_agent[aid_str] = new_facts
         self._fire_on_change()
 
