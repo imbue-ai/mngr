@@ -500,11 +500,14 @@ export class UpdatesStore {
     return this.forAgent(agentId).activity === "APPLYING";
   }
 
-  /** Every machine confirmed out of date and not already updating -- what the
-   * bulk actions cover. */
+  /** Every machine confirmed out of date, not already updating, and not waiting
+   * on the user's decision about its last run -- what the bulk actions cover. */
   updatableAgentIds(): string[] {
     return [...this.updateByAgentId.entries()]
-      .filter(([agentId, update]) => isUpdateOffered(update) && !this.isUpdating(agentId))
+      .filter(
+        ([agentId, update]) =>
+          isUpdateOffered(update) && !this.isUpdating(agentId) && !(update.is_decision_pending ?? false),
+      )
       .map(([agentId]) => agentId);
   }
 

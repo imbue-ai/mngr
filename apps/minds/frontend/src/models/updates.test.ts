@@ -148,6 +148,7 @@ describe("UpdatesStore", () => {
         "agent-current": { ...OUT_OF_DATE, availability: "UP_TO_DATE" },
         "agent-patch": { ...OUT_OF_DATE, availability: "PATCH_AVAILABLE" },
         "agent-running": { ...OUT_OF_DATE, activity: "RUNNING" },
+        "agent-deciding": { ...OUT_OF_DATE, verdict: "NEEDS_DECISION", is_decision_pending: true },
       }),
     );
 

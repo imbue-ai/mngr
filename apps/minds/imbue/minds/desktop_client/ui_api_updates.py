@@ -271,9 +271,10 @@ def _parse_bulk_request() -> UiBulkUpdateRequest | None:
 
 
 def _eligible_bulk_ids(service: WorkspaceUpdateService, requested: tuple[str, ...]) -> list[AgentId]:
-    """The requested workspaces that are confirmed out of date and not already running.
+    """The requested workspaces that are confirmed out of date, not already running, and not waiting on a decision.
 
-    Filtered server-side because the SPA's list can be a moment stale.
+    Filtered server-side because the SPA's list can be a moment stale. A pending decision is answered in its
+    run's chat, which re-lands the kept work; a fresh run would set that work aside.
     """
     eligible: list[AgentId] = []
     for agent_id_str in requested:
@@ -281,7 +282,7 @@ def _eligible_bulk_ids(service: WorkspaceUpdateService, requested: tuple[str, ..
         if parsed_id is None:
             continue
         state = service.state_store.get(parsed_id)
-        if state.is_update_offered and not state.is_run_in_flight:
+        if state.is_update_offered and not state.is_run_in_flight and not state.is_decision_pending:
             eligible.append(parsed_id)
     return eligible
 

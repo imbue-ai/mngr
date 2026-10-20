@@ -5,6 +5,8 @@ import threading
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +45,7 @@ from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.update_service import _SIGN_IN_OPENED_SENTINEL
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
+from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateUnknownReason
 from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.update_status import describe_skip_reason
@@ -217,6 +220,20 @@ def _begin_running_run(app: Flask, agent_id: AgentId, chat_agent_name: str) -> N
     store = _service(app).state_store
     assert store.try_begin_run(agent_id, target_override="")
     assert store.adopt_dispatched_chat(agent_id, chat_agent_name=chat_agent_name, chat_agent_id="")
+
+
+def _end_run_needing_decision(app: Flask, agent_id: AgentId) -> None:
+    """The row as a run that ended needing the user's decision left it."""
+    _service(app).state_store.observe_run_record(
+        agent_id,
+        UpdateRunStatus(
+            chat_agent_name="update-deciding",
+            started_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
+            verdict=UpdateVerdict.NEEDS_DECISION,
+            verdict_at=datetime(2026, 10, 1, 1, tzinfo=timezone.utc),
+        ),
+    )
+    assert _service(app).state_store.get(agent_id).is_decision_pending
 
 
 def _post(client: FlaskClient, path: str, body: dict[str, Any] | None = None) -> Any:
@@ -898,22 +915,26 @@ def test_a_bulk_action_acts_only_on_the_requested_machines_live_state_says_are_b
     accepted_key: str,
     result: MngrCallResult,
 ) -> None:
-    """An unknown machine is passed over here even though the single-machine route would take it."""
+    """An unknown machine is passed over here even though the single-machine route would take it, and so is
+    one whose last run is waiting on the user's decision: its chat is where that is answered."""
     caller = RecordingMngrCaller(result=result)
     client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
     stale_id = AgentId.generate()
     unknown_id = AgentId.generate()
     running_id = AgentId.generate()
     patch_id = AgentId.generate()
+    deciding_id = AgentId.generate()
     _mark_out_of_date(app, stale_id)
     _mark_out_of_date(app, running_id)
     _mark_patch_available(app, patch_id)
+    _mark_out_of_date(app, deciding_id)
     _begin_running_run(app, running_id, "update-already")
+    _end_run_needing_decision(app, deciding_id)
 
     response = _post(
         client,
         f"/ui/api/updates/bulk/{bulk_action}",
-        {"agent_ids": [str(stale_id), str(unknown_id), str(running_id), str(patch_id)]},
+        {"agent_ids": [str(stale_id), str(unknown_id), str(running_id), str(patch_id), str(deciding_id)]},
     )
 
     assert response.status_code == 200
