@@ -163,7 +163,8 @@ class UpdateScheduleOutcome(UpperCaseStrEnum):
     NO_CRON = auto()
     UNSUPPORTED = auto()
     NOT_RUNNING = auto()
-    """The command could not reach the workspace: a schedule needs it running, through the window too."""
+    """The command could not reach the workspace (stopped, or unreachable): a schedule needs it running, through
+    the window too."""
     UNREACHABLE = auto()
     """The command reached the workspace but gave no answer."""
     FAILED = auto()
@@ -174,8 +175,7 @@ SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME: Final[dict[UpdateScheduleOutcome, str]] = {
     UpdateScheduleOutcome.NO_CRON: "This workspace can't run scheduled updates. Update it now instead.",
     UpdateScheduleOutcome.UNSUPPORTED: DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.UNSUPPORTED],
     UpdateScheduleOutcome.NOT_RUNNING: (
-        "This workspace has to be running to schedule its update, and during the update window too. "
-        "Start it and try again."
+        "Couldn't reach this workspace. It has to be running to schedule its update, and during the update window too."
     ),
     UpdateScheduleOutcome.UNREACHABLE: "Couldn't confirm the update was scheduled in this workspace.",
     UpdateScheduleOutcome.FAILED: "Couldn't schedule the update in this workspace.",
