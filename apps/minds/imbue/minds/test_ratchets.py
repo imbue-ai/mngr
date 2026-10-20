@@ -11,9 +11,14 @@ _DIR = Path(__file__).parent.parent.parent
 pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
-# These files carry Python scripts as strings that run inside a workspace container; the scripts'
-# prints are their return protocol, which the regex cannot tell from the file's own output.
-_EMBEDDED_CONTAINER_SCRIPTS: tuple[str, ...] = ("test_litellm_via_workspace.py",)
+# These files carry Python programs as strings that run inside a workspace container, which the
+# regexes cannot tell from the file's own code: the programs' prints are their return protocol, and
+# their processes, loops, and imports are the container's.
+_EMBEDDED_CONTAINER_SCRIPTS: tuple[str, ...] = (
+    "test_litellm_via_workspace.py",
+    "*/desktop_client/update_dispatcher_script.py",
+    "*/desktop_client/update_workspace_command.py",
+)
 
 
 # ratchet_group("Code safety")
@@ -32,11 +37,11 @@ def test_prevent_eval() -> None:
 
 
 def test_prevent_while_true() -> None:
-    rc.check_while_true(_DIR, snapshot(0))
+    rc.check_while_true(_DIR, snapshot(0), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(10))
+    rc.check_time_sleep(_DIR, snapshot(10), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
 
 
 def test_prevent_global_keyword() -> None:
@@ -44,7 +49,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(5), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
+    rc.check_bare_print(_DIR, snapshot(7), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
 
 
 # ratchet_group("Exception handling")
@@ -74,7 +79,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(1))
+    rc.check_inline_imports(_DIR, snapshot(1), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
 
 
 def test_prevent_relative_imports() -> None:
@@ -257,6 +262,7 @@ def test_prevent_direct_subprocess() -> None:
         "*/deployment_tests/helpers.py",
         "*/desktop_client/e2e_workspace_runner.py",
         "*/desktop_client/default_workspace_template_worktree.py",
+        *_EMBEDDED_CONTAINER_SCRIPTS,
     )
     rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
 

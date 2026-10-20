@@ -161,7 +161,13 @@ def test_an_override_without_backups_carries_both_notes_and_names_the_chat_for_t
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
     program = load_update_workspace_program(tmp_path)
-    settings = _SETTINGS.model_copy(update={"is_backup_configured": False})
+    settings = UpdateWorkspaceSettings(
+        ceiling_ref="minds-v0.9.0",
+        window_start_hour=2,
+        window_end_hour=5,
+        zone="America/Los_Angeles",
+        is_backup_configured=False,
+    )
     with scripted_update_chat_app(staged.root, create_answers=[_CREATED]) as requests:
         _run_mode(program, staged, "now", build_now_arguments(settings, "upstream/main"), capsys)
 
