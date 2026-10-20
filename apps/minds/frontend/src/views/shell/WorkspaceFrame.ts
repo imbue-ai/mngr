@@ -85,6 +85,13 @@ export interface PermissionResolutionEntry {
 export const WORKSPACE_ORIGIN_FAMILY =
   /^(?:[a-z0-9_-]+\.)*(?:host|agent)-[a-f0-9]+\.(?:localhost|127\.0\.0\.1)$/i;
 
+// A feature missing here is refused to every page inside the workspace,
+// however far down it is framed, before the OS is ever asked. `microphone`
+// lets a workspace app listen to an audio input (the built-in mic, a headset
+// on the audio port, a USB interface); the OS still asks the user first.
+export const WORKSPACE_FRAME_ALLOW =
+  "clipboard-read *; clipboard-write *; fullscreen *; microphone *";
+
 async function loadEmbedContract(): Promise<EmbedContractModule> {
   // Runtime URL import (the module is served by Flask, not bundled); the
   // variable specifier keeps both Vite and tsc from trying to resolve it.
@@ -824,7 +831,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           // shell's page frames add it too).
           sandbox:
             "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-pointer-lock",
-          allow: "clipboard-read *; clipboard-write *; fullscreen *",
+          allow: WORKSPACE_FRAME_ALLOW,
           class: "workspace-surface border-0 bg-surface-primary",
           style: "box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;",
         }),
