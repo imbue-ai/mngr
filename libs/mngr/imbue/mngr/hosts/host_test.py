@@ -4925,6 +4925,22 @@ def test_host_get_agent_by_id_returns_none_when_not_found(
     assert result is None
 
 
+def test_host_get_agent_by_id_reads_only_that_agent(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """Looking up one agent must not read its neighbors, so a neighbor's unparseable data.json cannot break it."""
+    agent = _create_generic_agent_state(local_host, temp_work_dir)
+    corrupt_neighbor = _create_generic_agent_state(local_host, temp_work_dir)
+    (get_agent_state_dir_path(temp_host_dir, corrupt_neighbor.id) / "data.json").write_text("{not json")
+
+    result = local_host._get_agent_by_id(agent.id)
+
+    assert result is not None
+    assert (result.id, result.name, result.agent_type) == (agent.id, agent.name, agent.agent_type)
+
+
 # Tests for Host._create_host_tmux_config
 
 

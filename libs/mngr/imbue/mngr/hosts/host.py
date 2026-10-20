@@ -3892,12 +3892,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         failures.append(failure)
 
     def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
-        """Get an agent by ID."""
-        agents = self.get_agents()
-        for agent in agents:
-            if agent.id == agent_id:
-                return agent
-        return None
+        """Get an agent by ID, reading only that agent's data.json."""
+        content = (self._read_agent_data_files(timeout_seconds=None, agent_ids=[agent_id]) or {}).get(str(agent_id))
+        if content is None:
+            return None
+        return self._load_agent_from_data(get_agent_state_dir_path(self.host_dir, agent_id), content)
 
     def _get_agent_command(self, agent: AgentInterface) -> str:
         """Get the command for an agent."""
