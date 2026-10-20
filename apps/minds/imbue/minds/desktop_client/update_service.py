@@ -166,7 +166,7 @@ class UpdateScheduleOutcome(UpperCaseStrEnum):
     """The command could not reach the workspace (stopped, or unreachable): a schedule needs it running, through
     the window too."""
     UNREACHABLE = auto()
-    """The command reached the workspace but gave no answer."""
+    """The command gave no answer: cut off in the workspace, or mngr said nothing, so whether it ran is unknown."""
     FAILED = auto()
 
 
