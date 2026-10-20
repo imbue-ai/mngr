@@ -501,6 +501,12 @@ describe("auto-update's quiet surfaces", () => {
     expect(standingUpdateNotice(skipped, false, true)).toBe("out-of-date");
   });
 
+  it("still says a machine read behind only from its label is behind, since the sweep cannot arm it", () => {
+    const fromLabel = { ...OUT_OF_DATE, is_version_from_label: true };
+    expect(updateBadgeFor(fromLabel, false, true)?.state).toBe("out-of-date");
+    expect(standingUpdateNotice(fromLabel, false, true)).toBe("out-of-date");
+  });
+
   it("says a machine that cannot be armed needs a sign-in, with the way to give it one", () => {
     const refused = { ...OUT_OF_DATE, needs_sign_in: true };
     const badge = updateBadgeFor(refused, false, true);

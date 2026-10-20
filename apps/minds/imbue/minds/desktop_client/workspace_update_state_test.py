@@ -1235,6 +1235,8 @@ def _offered_state(**overrides: object) -> UiWorkspaceUpdate:
     [
         (_offered_state(), _ENABLED, True),
         (_offered_state(), AutoUpdatePolicy(is_enabled=False, skipped_target_ref=""), False),
+        # A behind reading from the create-time label is not a positive read: the workspace may be current.
+        (_offered_state(is_version_from_label=True), _ENABLED, False),
         # A patch rides along with the next minor release.
         (_offered_state(availability=UpdateAvailability.PATCH_AVAILABLE), _ENABLED, False),
         (_offered_state(is_scheduled=True), _ENABLED, False),

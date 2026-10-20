@@ -795,12 +795,15 @@ def should_auto_arm(
 ) -> bool:
     """Whether the sweep arms this workspace's update for the user.
 
-    Only a workspace positively read a minor release behind, with nothing armed or running,
-    no decision pending, and this release not skipped. A run that failed after its lead's
+    Only a workspace positively read a minor release behind (by git, not its create-time label,
+    which a stopped or unreadable workspace falls back to), with nothing armed or running, no
+    decision pending, and this release not skipped. A run that failed after its lead's
     best effort, or stalled without a verdict, is not re-armed for the same release: a retry
     needs something to have changed -- a newer ceiling, or the user dismissing the failure.
     """
-    if not policy.is_enabled or not state.is_update_offered or state.is_scheduled or state.is_run_in_flight:
+    if not policy.is_enabled or not state.is_update_offered or state.is_version_from_label:
+        return False
+    if state.is_scheduled or state.is_run_in_flight:
         return False
     if state.is_decision_pending or policy.skipped_target_ref == ceiling_ref:
         return False
