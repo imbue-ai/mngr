@@ -22,8 +22,9 @@ export interface AutoUpdatePromptInputs {
   hasOutOfDateWorkspace: boolean;
 }
 
-/** Whether the prompt is due, and for which reason. Turning auto-update on
- * from Settings answers it too: there is nothing left to offer. */
+/** Whether the prompt is due, and for which reason. Nothing is offered while
+ * auto-update is on, wherever it was turned on; the Settings toggle records no
+ * answer, though, so turning it back off can bring the offer back. */
 export function autoUpdatePromptTriggerFor(
   inputs: AutoUpdatePromptInputs,
 ): AutoUpdatePromptTrigger | null {
