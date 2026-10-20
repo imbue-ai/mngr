@@ -273,6 +273,7 @@ function renderUpdatesGroup(
   const overrideValue = draft?.value ?? prefill;
   const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
   const isScheduled = update.is_scheduled ?? false;
+  const skipLine = scheduleSkipLine(update);
   const isDecisionPending = update.is_decision_pending ?? false;
   const needsSignIn = (update.needs_sign_in ?? false) && !isUpdating;
   const chatAgentId = update.chat_agent_id ?? "";
@@ -403,12 +404,8 @@ function renderUpdatesGroup(
                       isAutoUpdateEnabled,
                     ),
                   ),
-                  scheduleSkipLine(update)
-                    ? m(
-                        "p",
-                        { class: "type-helper text-tertiary" },
-                        scheduleSkipLine(update),
-                      )
+                  skipLine
+                    ? m("p", { class: "type-helper text-tertiary" }, skipLine)
                     : null,
                 ])
               : null,

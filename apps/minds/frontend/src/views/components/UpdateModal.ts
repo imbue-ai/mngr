@@ -16,6 +16,7 @@ import {
   scheduleSkipLine,
   scheduledLine,
   updateActivityNotice,
+  updateRunOutcome,
 } from "../../models/updates";
 import type { UpdateActionResult } from "../../models/updates";
 import { Button } from "./Button";
@@ -514,8 +515,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         // cleared; a stall, or an update that never went out, wears a failure
         // badge too, so it gets the same Dismiss. A failed run's chat is where
         // it says what it found.
-        const isRunFailed = update.activity === "STALLED" || isFailureVerdict(update.verdict);
-        if (isRunFailed && chatAgentId && !update.dispatch_failure) actions.push(openChatButton("secondary"));
+        if (updateRunOutcome(update) === "failed" && chatAgentId) actions.push(openChatButton("secondary"));
         const isOutcomeShowing = Boolean(verdict) || update.activity === "STALLED" || Boolean(update.dispatch_failure);
         if (isOutcomeShowing) actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
         if (isScheduled && isAutoUpdateEnabled) {
