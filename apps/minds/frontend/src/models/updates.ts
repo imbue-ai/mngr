@@ -456,6 +456,8 @@ export class UpdatesStore {
   updateWindow = "";
   /** Whether the app arms every behind machine's update itself. */
   isAutoUpdateEnabled = false;
+  /** Whether a frame has arrived, so `isAutoUpdateEnabled` is the app's word rather than the default. */
+  hasReceivedUpdates = false;
 
   private updateByAgentId = new Map<string, UiWorkspaceUpdate>();
   /** Machines this window has just dispatched for, held until the pushed state
@@ -469,6 +471,7 @@ export class UpdatesStore {
     this.updateByAgentId = new Map(Object.entries(message.updates ?? {}));
     this.updateWindow = message.update_window ?? "";
     this.isAutoUpdateEnabled = message.is_auto_update_enabled ?? false;
+    this.hasReceivedUpdates = true;
     for (const agentId of [...this.pendingAgentIds]) {
       const pushed = this.updateByAgentId.get(agentId);
       if (pushed !== undefined && isRunInFlight(pushed)) this.pendingAgentIds.delete(agentId);

@@ -64,6 +64,13 @@ describe("the auto-update prompt's triggers", () => {
     expect(enabled.model.triggerFor(true, true)).toBeNull();
   });
 
+  it("stays down until the app has said whether auto-update is already on", async () => {
+    const { model } = backend(null, true);
+    await model.load();
+    expect(model.triggerFor(null, false)).toBeNull();
+    expect(model.triggerFor(false, false)).toBe("app-updated");
+  });
+
   it("stays down until the recorded answer has been read", () => {
     const { model } = backend(null, true);
     expect(model.triggerFor(false, true)).toBeNull();

@@ -115,12 +115,14 @@ export class AutoUpdatePromptModel {
     }
   }
 
-  /** The reason to show the prompt now, or null to keep it down. */
+  /** The reason to show the prompt now, or null to keep it down.
+   * `isAutoUpdateEnabled` is null until the app has said: offering it before
+   * then would ask a user who already turned it on. */
   triggerFor(
-    isAutoUpdateEnabled: boolean,
+    isAutoUpdateEnabled: boolean | null,
     hasOutOfDateWorkspace: boolean,
   ): AutoUpdatePromptTrigger | null {
-    if (this.decision === undefined || this.isPutAway) return null;
+    if (this.decision === undefined || this.isPutAway || isAutoUpdateEnabled === null) return null;
     const due = autoUpdatePromptTriggerFor({
       decision: this.decision,
       isAutoUpdateEnabled,

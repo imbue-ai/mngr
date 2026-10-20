@@ -1169,7 +1169,7 @@ export const LandingPage: m.ClosureComponent = () => {
       isUpdateOffered(updates.forAgent(entry.id)),
     );
     const trigger = autoUpdatePrompt.triggerFor(
-      updates.isAutoUpdateEnabled,
+      updates.hasReceivedUpdates ? updates.isAutoUpdateEnabled : null,
       hasOutOfDateWorkspace,
     );
     if (trigger === null) return null;
