@@ -364,14 +364,9 @@ def _handle_if_match_write(
     every settings record Imbue Studio owns so each one doesn't reimplement the same
     parse/validate/If-Match/compare-and-swap skeleton.
     """
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _error_response("Invalid JSON body", 400)
-    try:
-        write = write_model_type.model_validate(body)
-    except ValidationError as e:
-        logger.debug("Rejected a malformed settings write body: {}", e)
-        return _error_response("Invalid JSON body", 400)
+    write = _read_json_write(write_model_type)
+    if isinstance(write, Response):
+        return write
     provided_version = request.headers.get("If-Match")
     if provided_version is None:
         return _error_response("If-Match header is required for this write", 428)
@@ -646,14 +641,9 @@ def _handle_sign_in_browser_write() -> Response:
     minds_config = state.minds_config
     if minds_config is None:
         return _error_response("Settings storage is not configured", 503)
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _error_response("Invalid JSON body", 400)
-    try:
-        write = UiSignInBrowserWrite.model_validate(body)
-    except ValidationError as e:
-        logger.debug("Rejected a malformed sign-in browser write body: {}", e)
-        return _error_response("Invalid JSON body", 400)
+    write = _read_json_write(UiSignInBrowserWrite)
+    if isinstance(write, Response):
+        return write
     if write.browser_id is not None and all(
         browser.browser_id != write.browser_id for browser in state.sign_in_browsers.list_browsers()
     ):
