@@ -295,20 +295,21 @@ class WorkspaceUpdateService(MutableModel):
             dispatch = self._start_claimed_run(agent_id, target_override or "")
             return dispatch
         finally:
-            if dispatch is None:
-                self.state_store.release_failed_claim(agent_id, _DISPATCH_RAISED_FAILURE)
-            elif dispatch.outcome is UpdateDispatchOutcome.NEEDS_SIGN_IN:
-                # The row's sign-in state is the answer; a failure line beside it would say it twice.
-                self.state_store.release_failed_claim(agent_id, None)
-            elif dispatch.outcome is not UpdateDispatchOutcome.DISPATCHED:
-                self.state_store.release_failed_claim(
-                    agent_id,
-                    UpdateDispatchFailure(
-                        message=DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[dispatch.outcome], detail=dispatch.failure_detail
-                    ),
-                )
-            else:
-                pass
+            match dispatch:
+                case None:
+                    self.state_store.release_failed_claim(agent_id, _DISPATCH_RAISED_FAILURE)
+                case UpdateDispatch(outcome=UpdateDispatchOutcome.DISPATCHED):
+                    pass
+                case UpdateDispatch(outcome=UpdateDispatchOutcome.NEEDS_SIGN_IN):
+                    # The row's sign-in state is the answer; a failure line beside it would say it twice.
+                    self.state_store.release_failed_claim(agent_id, None)
+                case UpdateDispatch(outcome=outcome, failure_detail=failure_detail):
+                    self.state_store.release_failed_claim(
+                        agent_id,
+                        UpdateDispatchFailure(
+                            message=DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[outcome], detail=failure_detail
+                        ),
+                    )
 
     def _start_claimed_run(self, agent_id: AgentId, override_ref: str) -> UpdateDispatch:
         """Do the work of a dispatch that has already won the run slot.
