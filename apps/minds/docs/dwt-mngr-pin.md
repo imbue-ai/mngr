@@ -16,6 +16,16 @@ commit into `system/vendor/mngr-assets/`. So the pin *is* the mngr that runs ins
 every agent, wherever the workspace is built: a release, a pool bake, the dev
 desktop app, or a CI harness. Moving the pin is the only way to change it.
 
+One file travels with the pin rather than being fetched at build time: the published
+`imbue-studio` skill (`apps/minds/skills_plugin/skills/imbue-studio/SKILL.md` here),
+which the template commits verbatim at `.agents/skills/imbue-studio/SKILL.md` so that
+every harness reading its skills tree has it. The template's
+`system/scripts/vendor_mngr_skill.py` is that file's one writer and checker: every pin
+move below runs its `--write` with the commit the pin was resolved from and stages the
+copy with the pin, and the template's `pin-is-public` CI job runs its `--check` against
+the pinned commit, so the skill a workspace carries always describes the mngr it runs
+and nobody has to re-vendor it by hand after a release.
+
 The pin names one of two repos:
 
 - the **public mirror**, https://github.com/imbue-ai/mngr, which template `main` and

@@ -505,6 +505,17 @@ def test_list_workspaces_returns_known_workspaces(tmp_path: Path) -> None:
     assert str(agent_id) in ids
 
 
+def test_list_workspaces_reports_every_listed_workspace_as_the_users_own(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.get("/api/v1/workspaces", headers=_auth_header())
+
+    assert response.status_code == 200
+    workspaces = json.loads(response.data)["workspaces"]
+    assert workspaces
+    assert all(workspace["is_owned"] is True for workspace in workspaces)
+
+
 def test_list_workspaces_requires_bearer(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
 

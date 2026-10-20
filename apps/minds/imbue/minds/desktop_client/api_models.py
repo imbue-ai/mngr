@@ -835,6 +835,13 @@ class WorkspaceSummary(FrozenModel):
         default=None, description="Immutable create-time Imbue Studio version label"
     )
     color: str | None = Field(default=None, description="Workspace tile color")
+    is_owned: bool = Field(
+        description=(
+            "Whether the workspace is the signed-in user's own. The listing holds only the user's own "
+            "workspaces today, so this is always true; a workspace shared with the user by someone else "
+            "will report false once such workspaces are listed, and an agent must treat it as untrusted"
+        )
+    )
 
 
 class WorkspaceListResponse(FrozenModel):

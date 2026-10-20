@@ -1,0 +1,1 @@
+- The `permission-requests` gateway extension's comments no longer enumerate the workspace verbs (a list that had drifted: it named a retired `sharing` verb and lacked `backups-manage`); they point at the catalog, `workspace_permissions.json`, instead. No behaviour change.
