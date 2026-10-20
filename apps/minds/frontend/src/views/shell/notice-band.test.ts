@@ -350,15 +350,15 @@ describe("noticeBandFor, an update run", () => {
   });
 
   it("names what a held run is waiting on when the run said", () => {
-    // The hold is about the reader's creation; the run's own line says which.
+    // The hold waits for the reader's go-ahead; the run's own line says on what.
     const band = noticeBandFor("healthy", "healthy", true, {
       updateRunPhase: "waiting",
-      updateHoldDetail: "Your dashboard widget has no place in the new layout.",
+      updateHoldDetail: "Waiting for you to confirm minds-v0.9.1, which is newer than Imbue Studio.",
     });
     expect(band?.key).toBe("workspace-update-waiting");
     expect(band?.variant).toBe("warn");
-    expect(band?.message.startsWith("Your dashboard widget has no place in the new layout.")).toBe(true);
-    expect(band?.message).toContain("waiting for your decision");
+    expect(band?.message.startsWith("Waiting for you to confirm minds-v0.9.1, which is newer than Imbue Studio.")).toBe(true);
+    expect(band?.message).toContain("waiting for your go-ahead");
   });
 
   it("says a waiting run is the reader's move rather than something in progress", () => {

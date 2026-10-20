@@ -287,14 +287,14 @@ describe("updateBadgeFor", () => {
       activity: "WAITING" as const,
       chat_agent_name: "update-1",
       is_hold_recorded: true,
-      hold_detail: "Your dashboard widget and the new layout both changed the same file.",
+      hold_detail: "Waiting for you to confirm minds-v0.9.1, which is newer than Imbue Studio.",
     };
     const badge = updateBadgeFor(held, true);
     expect(badge?.state).toBe("waiting");
-    expect(badge?.tooltip).toContain("waiting for your decision");
+    expect(badge?.tooltip).toContain("waiting for your go-ahead");
     const notice = updateActivityNotice(held);
-    expect(notice.message.startsWith("Your dashboard widget and the new layout both changed the same file.")).toBe(true);
-    expect(notice.message).toContain("waiting for your decision");
+    expect(notice.message.startsWith("Waiting for you to confirm minds-v0.9.1, which is newer than Imbue Studio.")).toBe(true);
+    expect(notice.message).toContain("waiting for your go-ahead");
     expect(notice.message).toContain("in the update-1 tab");
     expect(notice.isWaiting).toBe(false);
   });

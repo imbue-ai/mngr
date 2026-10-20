@@ -338,13 +338,13 @@ function updateRunNotice(phase: UpdateRunPhase, holdDetail: string | null): Noti
         action: SEE_UPDATE,
       };
     case "waiting": {
-      // A recorded hold is about something the reader built; the run's own line says which.
+      // A recorded hold waits for the reader's go-ahead on the version; the run's own line says what it needs.
       return {
         key: "workspace-update-waiting",
         variant: "warn",
         message:
           holdDetail !== null
-            ? `${holdDetail ? `${holdDetail} ` : ""}This workspace's update is waiting for your decision in its chat.`
+            ? `${holdDetail ? `${holdDetail} ` : ""}This workspace's update is waiting for your go-ahead in its chat.`
             : "This workspace's update has stopped to ask you something in its chat.",
         action: SEE_UPDATE,
       };

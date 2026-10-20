@@ -207,12 +207,12 @@ export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = 
       const where = update.chat_agent_name
         ? `in the ${update.chat_agent_name} tab inside the workspace`
         : "in its chat tab inside the workspace";
-      // A recorded hold is about something the reader built; the run's own
-      // detail line names it, so it leads.
+      // A recorded hold waits for the reader's go-ahead on the version; the
+      // run's own detail line says what it needs, so it leads.
       const detail = update.hold_detail ? `${update.hold_detail} ` : "";
       return {
         message: update.is_hold_recorded
-          ? `${detail}The update agent is waiting for your decision ${where}.`
+          ? `${detail}The update agent is waiting for your go-ahead ${where}.`
           : `The update agent is waiting for you ${where}.`,
         isWaiting: false,
       };
@@ -273,7 +273,7 @@ export function updateBadgeFor(
       tone: "warn",
       label: "Waiting for you",
       tooltip: update?.is_hold_recorded
-        ? "The update is waiting for your decision — open this workspace to continue"
+        ? "The update is waiting for your go-ahead — open this workspace to continue"
         : "The update agent has stopped and is waiting in its chat — open this workspace to continue",
       isSpinnerShown: false,
     };
