@@ -572,14 +572,9 @@ def _handle_update_window_write() -> Response:
     minds_config = get_state().minds_config
     if minds_config is None:
         return _error_response("Settings storage is not configured", 503)
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _error_response("Invalid JSON body", 400)
-    try:
-        write = UiUpdateWindowWrite.model_validate(body)
-    except ValidationError as e:
-        logger.debug("Rejected a malformed update-window write body: {}", e)
-        return _error_response("Invalid JSON body", 400)
+    write = _read_json_write(UiUpdateWindowWrite)
+    if isinstance(write, Response):
+        return write
     if write.start_hour == write.end_hour:
         return _error_response("The update window needs a start and end that differ", 400)
     minds_config.set_update_window(write.start_hour, write.end_hour)
