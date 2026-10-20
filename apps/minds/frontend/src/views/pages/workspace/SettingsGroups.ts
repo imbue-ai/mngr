@@ -547,7 +547,10 @@ function renderUpdatesGroup(
                           variant: "secondary",
                           id: "update-override-btn",
                           disabled:
-                            isBusy || isUpdating || overrideValue.trim() === "",
+                            isBusy ||
+                            isUpdating ||
+                            isDecisionPending ||
+                            overrideValue.trim() === "",
                           onclick: () => requestDispatch(overrideValue.trim()),
                         },
                         pending !== null && pending.targetRef !== ""
@@ -567,6 +570,7 @@ function renderUpdatesGroup(
                               disabled:
                                 isBusy ||
                                 isUpdating ||
+                                isDecisionPending ||
                                 overrideValue.trim() === "",
                               onclick: () =>
                                 requestSchedule(overrideValue.trim()),

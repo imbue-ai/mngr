@@ -378,6 +378,31 @@ describe("the Updates settings group's specific-version field", () => {
       "upstream/some-branch",
     );
   });
+
+  it("starts no run over a decision the last one is waiting on", () => {
+    const { draw } = harness();
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: {
+        [UNBACKED]: {
+          ...OUT_OF_DATE,
+          verdict: "NEEDS_DECISION",
+          is_decision_pending: true,
+        },
+      },
+      update_window: "2:00 AM-5:00 AM",
+    });
+
+    press(updatesGroupDeep(draw(UNBACKED)), "Update to a specific version");
+    typeOverride(updatesGroupDeep(draw(UNBACKED)), "minds-v0.9.1");
+
+    const pane = updatesGroupDeep(draw(UNBACKED));
+    for (const label of ["Update to this version", "Schedule"]) {
+      const button = pressableWithLabel(pane, label);
+      expect(button).toBeDefined();
+      expect(attrsOf(button as AnyVnode).disabled).toBe(true);
+    }
+  });
 });
 
 describe("the Updates settings group after an update that never went out", () => {
