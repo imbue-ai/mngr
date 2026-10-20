@@ -342,7 +342,7 @@ def _dispatch_one_bulk(service: WorkspaceUpdateService, agent_id: AgentId) -> No
 
 def _schedule_one_bulk(service: WorkspaceUpdateService, agent_id: AgentId) -> None:
     # Re-arming rewrites the file, so a machine already pointed at a named version keeps it.
-    schedule = service.schedule_update(agent_id, override_ref=_armed_target_ref(service, agent_id))
+    schedule = service.schedule_update_unwatched(agent_id, override_ref=_armed_target_ref(service, agent_id))
     logger.info("Bulk update schedule for {}: {}", agent_id, schedule.outcome.value)
 
 

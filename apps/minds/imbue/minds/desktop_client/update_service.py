@@ -414,22 +414,31 @@ class WorkspaceUpdateService(MutableModel):
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def arm_for_auto_update(self, agent_id: AgentId) -> None:
-        """The sweep's auto-update arm, at the ceiling.
+    def schedule_update_unwatched(self, agent_id: AgentId, *, override_ref: str) -> UpdateSchedule:
+        """Arm ``agent_id``'s update for a caller nobody is waiting on, recording a refusal on the row.
 
-        Nobody pressed anything, so a refusal is recorded on the row: under auto-update the row
-        says nothing of a behind workspace, and one whose arm keeps failing would never say so.
+        The sweep's auto-update arm and the bulk schedule both answer before the arm runs, so the
+        row is the only place a refusal can reach the user. A sign-in refusal is the row's own state.
         """
-        schedule = self.schedule_update(agent_id, override_ref="")
+        schedule = self.schedule_update(agent_id, override_ref=override_ref)
         if schedule.outcome in (UpdateScheduleOutcome.ARMED, UpdateScheduleOutcome.NEEDS_SIGN_IN):
-            return
-        logger.info("Could not arm the auto-update of {}: {}", agent_id, schedule.outcome.value)
+            return schedule
+        logger.info("Could not arm the update of {}: {}", agent_id, schedule.outcome.value)
         self.state_store.record_skipped_dispatch(
             agent_id,
             UpdateDispatchFailure(
                 message=SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME[schedule.outcome], detail=schedule.failure_detail
             ),
         )
+        return schedule
+
+    def arm_for_auto_update(self, agent_id: AgentId) -> None:
+        """The sweep's auto-update arm, at the ceiling.
+
+        Under auto-update the row says nothing of a behind workspace, so one whose arm keeps
+        failing would never say so but for the refusal recorded on it.
+        """
+        self.schedule_update_unwatched(agent_id, override_ref="")
 
     def cancel_schedule(self, agent_id: AgentId) -> UpdateSchedule | None:
         """Delete the workspace's schedule file; None when it landed, else what stopped it."""

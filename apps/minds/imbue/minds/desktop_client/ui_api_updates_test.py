@@ -2,6 +2,7 @@
 
 import json
 import threading
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -975,7 +976,7 @@ def test_bulk_schedule_arms_every_confirmed_out_of_date_machine(
 
 
 class _OneMachineOfflineMngrCaller(RecordingMngrCaller):
-    """Every machine creates its update chat except ``offline_agent``, whose host stays down."""
+    """Every machine answers ``result`` except ``offline_agent``, whose host stays down."""
 
     offline_agent: str
 
@@ -987,31 +988,53 @@ class _OneMachineOfflineMngrCaller(RecordingMngrCaller):
         cwd: Path | None = None,
     ) -> MngrCallResult:
         super().call(argv, timeout, env_overrides, cwd)
-        return _HOST_OFFLINE if argv[2] == self.offline_agent else _CREATED
+        return _HOST_OFFLINE if argv[2] == self.offline_agent else self.result
 
 
+@pytest.mark.parametrize(
+    ("bulk_action", "reachable_answer", "is_reachable_done", "offline_failure"),
+    [
+        (
+            "now",
+            _CREATED,
+            lambda state: state.activity is UpdateActivity.RUNNING,
+            "Couldn't reach this workspace to start the update.",
+        ),
+        (
+            "schedule",
+            _armed(),
+            lambda state: state.is_scheduled,
+            SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME[UpdateScheduleOutcome.NOT_RUNNING],
+        ),
+    ],
+)
 @pytest.mark.witnesses(
     "workspace-updates.bulk-unsent-update-is-reported", partial="the published row, not its rendering"
 )
-def test_a_machine_a_bulk_update_could_not_reach_says_why_on_its_row_while_the_rest_start(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+def test_a_machine_a_bulk_action_could_not_reach_says_why_on_its_row_while_the_rest_go_ahead(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    bulk_action: str,
+    reachable_answer: MngrCallResult,
+    is_reachable_done: Callable[[UiWorkspaceUpdate], bool],
+    offline_failure: str,
 ) -> None:
     """The bulk route answers before any machine is tried, so the row is the only place the outcome can land."""
     offline_id = AgentId.generate()
     reachable_id = AgentId.generate()
-    caller = _OneMachineOfflineMngrCaller(offline_agent=str(offline_id))
+    caller = _OneMachineOfflineMngrCaller(offline_agent=str(offline_id), result=reachable_answer)
     client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
     _mark_out_of_date(app, offline_id)
     _mark_out_of_date(app, reachable_id)
 
-    response = _post(client, "/ui/api/updates/bulk/now", {"agent_ids": [str(offline_id), str(reachable_id)]})
+    response = _post(
+        client, f"/ui/api/updates/bulk/{bulk_action}", {"agent_ids": [str(offline_id), str(reachable_id)]}
+    )
 
     assert response.status_code == 200
-    assert poll_until(
-        lambda: _published(app, reachable_id).activity is UpdateActivity.RUNNING, timeout=_BULK_TIMEOUT_SECONDS
-    )
+    assert poll_until(lambda: is_reachable_done(_published(app, reachable_id)), timeout=_BULK_TIMEOUT_SECONDS)
     published = _published(app, offline_id)
-    assert published.dispatch_failure == "Couldn't reach this workspace to start the update."
+    assert published.dispatch_failure == offline_failure
     assert published.dispatch_failure_detail == _HOST_OFFLINE_DETAIL
     assert published.is_run_in_flight is False
 
