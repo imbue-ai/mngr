@@ -10,6 +10,7 @@ import {
   displayVersion,
   isFailureVerdict,
   isRecreationRequired,
+  isRunInFlight,
   isUpdateDispatchable,
   labelVersionNote,
   recordedDispatchFailure,
@@ -517,7 +518,9 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         // badge too, so it gets the same Dismiss. A failed run's chat is where
         // it says what it found.
         // A run the cron started opens no window while it runs, so its chat is reached from here.
-        if (isUpdating && update.activity !== "STARTING" && chatAgentId) actions.push(openChatButton("primary"));
+        if (isRunInFlight(update) && update.activity !== "STARTING" && chatAgentId) {
+          actions.push(openChatButton("primary"));
+        }
         if (updateRunOutcome(update) === "failed" && chatAgentId) actions.push(openChatButton("secondary"));
         const isOutcomeShowing = Boolean(verdict) || update.activity === "STALLED" || Boolean(update.dispatch_failure);
         if (isOutcomeShowing) actions.push(dismissOutcomeButton(agentId, isBusy, onClose));

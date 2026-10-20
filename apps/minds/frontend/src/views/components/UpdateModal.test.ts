@@ -1,6 +1,6 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { clearAppContextForTests } from "../../app-context";
+import { clearAppContextForTests, getAppContext } from "../../app-context";
 import type { UiWorkspaceUpdate } from "../../channel/messages";
 import type { AnyVnode } from "../../testing";
 import {
@@ -464,5 +464,15 @@ describe("the update modal over a run in flight", () => {
   it("offers no chat while the run is still starting, before its chat exists", () => {
     const root = harness(() => Promise.resolve(jsonResponse({})), { ...WAITING, activity: "STARTING" }).draw();
     expect(pressableWithLabel(root, "Open chat")).toBeUndefined();
+  });
+
+  it("offers no chat while this window's own press is on its way, though the row names the last run's", () => {
+    const { draw } = harness(() => new Promise<Response>(() => undefined), {
+      ...OUT_OF_DATE_UPDATE,
+      chat_agent_id: "agent-earlier-lead",
+    });
+    void getAppContext().stores.updates.updateNow(AGENT);
+
+    expect(pressableWithLabel(draw(), "Open chat")).toBeUndefined();
   });
 });
