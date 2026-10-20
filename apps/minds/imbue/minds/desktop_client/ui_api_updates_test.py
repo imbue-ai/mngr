@@ -23,12 +23,19 @@ from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import CANCELLED_UPDATE_COMMAND_RESULT
+from imbue.minds.desktop_client.testing import CREATED_UPDATE_COMMAND_RESULT
+from imbue.minds.desktop_client.testing import CUT_OFF_ON_REACHED_HOST_EXEC_RESULT
+from imbue.minds.desktop_client.testing import NEEDS_SIGN_IN_UPDATE_COMMAND_RESULT
+from imbue.minds.desktop_client.testing import UPDATE_CHAT_ID
+from imbue.minds.desktop_client.testing import UPDATE_CHAT_NAME
 from imbue.minds.desktop_client.testing import armed_update_schedule_file
+from imbue.minds.desktop_client.testing import begin_dispatched_update_run
 from imbue.minds.desktop_client.testing import blocking_release_wait_body
 from imbue.minds.desktop_client.testing import exec_error_stdout
 from imbue.minds.desktop_client.testing import host_offline_exec_result
 from imbue.minds.desktop_client.testing import landed_verdict
-from imbue.minds.desktop_client.testing import update_command_exec_result
+from imbue.minds.desktop_client.testing import update_command_answer
 from imbue.minds.desktop_client.testing import update_program_invocation
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
 from imbue.minds.desktop_client.testing import write_stub_mngr
@@ -65,39 +72,24 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.polling import poll_until
 
 _CEILING = default_workspace_template_ref()
-_CHAT_NAME = "update-to-minds-v0-9-0"
-_CHAT_ID = "agent-" + "d" * 32
 _BULK_TIMEOUT_SECONDS = 10.0
 
 
-def _answer(outcome: str, detail: str = "", **extra: Any) -> MngrCallResult:
-    """The workspace update program answering ``outcome`` through ``mngr exec``."""
-    return update_command_exec_result({"outcome": outcome, "detail": detail, **extra})
-
-
 def _armed(override_ref: str = "") -> MngrCallResult:
-    return _answer(
+    return update_command_answer(
         "ARMED", mode="arm", schedule=armed_update_schedule_file(ceiling_ref=_CEILING, override_ref=override_ref)
     )
 
 
-_CREATED = _answer("CREATED", chat_agent_name=_CHAT_NAME, chat_id=_CHAT_ID)
-_NEEDS_SIGN_IN = _answer("NEEDS_SIGN_IN", "No AI account is signed in to this workspace.")
-_TOO_OLD = _answer("TOO_OLD_TO_UPDATE", "This workspace predates the update-self skill.")
-_CANCELLED = update_command_exec_result({"mode": "cancel", "is_cancelled": True})
+_TOO_OLD = update_command_answer("TOO_OLD_TO_UPDATE", "This workspace predates the update-self skill.")
 # A command that never reached the machine because its host is down: what a stopped machine answers first.
 _HOST_OFFLINE = host_offline_exec_result()
 _HOST_OFFLINE_DETAIL = "Host 'host-1' is offline and automatic starting is disabled."
-_CUT_OFF_ON_REACHED_HOST = MngrCallResult(
-    returncode=1,
-    stdout=exec_error_stdout(f"{COMMAND_EXECUTION_FAILURE_PREFIX} workspace: Connection reset by peer"),
-    is_mngr_output=True,
-)
 
 
 def _stopped_machine_caller() -> ScriptedMngrCaller:
     """A machine that is down until the dispatch starts it, and creates the chat once it has."""
-    return ScriptedMngrCaller(results=(_HOST_OFFLINE, _CREATED))
+    return ScriptedMngrCaller(results=(_HOST_OFFLINE, CREATED_UPDATE_COMMAND_RESULT))
 
 
 class _SystemServicesResolver(StaticBackendResolver):
@@ -217,9 +209,7 @@ def _arm_on_the_row(app: Flask, agent_id: AgentId, override_ref: str) -> None:
 
 
 def _begin_running_run(app: Flask, agent_id: AgentId, chat_agent_name: str) -> None:
-    store = _service(app).state_store
-    assert store.try_begin_run(agent_id, target_override="")
-    assert store.adopt_dispatched_chat(agent_id, chat_agent_name=chat_agent_name, chat_agent_id="")
+    begin_dispatched_update_run(_service(app).state_store, agent_id, chat_agent_name)
 
 
 def _end_run_needing_decision(app: Flask, agent_id: AgentId) -> None:
@@ -257,7 +247,7 @@ def test_a_machine_with_no_readable_version_is_still_sent_its_update_agent(
     unknown_reason: UpdateUnknownReason,
 ) -> None:
     """Both unknowns dispatch: the machine's own agent reads its upstream."""
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _service(app).state_store.record_detection(
         agent_id,
         detection=UpdateDetection(availability=UpdateAvailability.UNKNOWN, unknown_reason=unknown_reason),
@@ -276,7 +266,7 @@ def test_a_machine_with_no_readable_version_is_still_sent_its_update_agent(
 def test_a_machine_with_only_a_patch_available_is_sent_its_update_agent_when_asked(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _mark_patch_available(app, agent_id)
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
@@ -309,7 +299,7 @@ def test_a_machine_read_as_having_nothing_to_run_is_refused_without_asking_it(
     availability: UpdateAvailability,
 ) -> None:
     """The readings that are positive answers rather than missing ones, the too-old machine included."""
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _mark(app, agent_id, availability, "minds-v0.4.1")
 
     assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 409
@@ -322,7 +312,7 @@ def test_a_machine_read_as_having_nothing_to_run_is_refused_without_asking_it(
 def test_an_explicit_ref_dispatches_a_machine_the_gate_would_refuse(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _mark_up_to_date(app, agent_id)
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now", {"target_ref": "minds-v0.5.0"})
@@ -339,7 +329,7 @@ def test_an_explicit_ref_dispatches_a_machine_the_gate_would_refuse(
 def test_a_ref_that_could_read_as_a_flag_or_shell_text_is_refused(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId, route: str
 ) -> None:
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _mark_out_of_date(app, agent_id)
 
     response = _post(client, f"/ui/api/updates/{agent_id}/{route}", {"target_ref": "--force; rm -rf /"})
@@ -368,7 +358,7 @@ def test_an_update_now_refused_for_sign_in_answers_409_and_marks_the_row_for_sig
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
     """The row's sign-in state is the answer; a failure line beside it would say it twice."""
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_NEEDS_SIGN_IN)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=NEEDS_SIGN_IN_UPDATE_COMMAND_RESULT)
     _mark_out_of_date(app, agent_id)
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
@@ -388,11 +378,11 @@ def test_an_update_now_on_a_machine_already_updating_answers_409_and_shows_that_
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
-        mngr_result=_answer(
+        mngr_result=update_command_answer(
             "ALREADY_RUNNING",
             "An update is already running in this workspace.",
             chat_agent_name="update-to-minds-v0-8-9",
-            chat_id=_CHAT_ID,
+            chat_id=UPDATE_CHAT_ID,
         ),
     )
     _mark_out_of_date(app, agent_id)
@@ -403,7 +393,7 @@ def test_an_update_now_on_a_machine_already_updating_answers_409_and_shows_that_
     published = _published(app, agent_id)
     assert published.activity is UpdateActivity.RUNNING
     assert published.chat_agent_name == "update-to-minds-v0-8-9"
-    assert published.chat_agent_id == _CHAT_ID
+    assert published.chat_agent_id == UPDATE_CHAT_ID
     assert published.dispatch_failure == ""
 
 
@@ -425,7 +415,7 @@ def test_an_unreachable_machine_answers_502_rather_than_409(
 def test_a_dispatched_update_runs_the_row_under_the_chat_the_workspace_created(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _mark_out_of_date(app, agent_id)
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
@@ -435,8 +425,8 @@ def test_a_dispatched_update_runs_the_row_under_the_chat_the_workspace_created(
     published = _published(app, agent_id)
     # RUNNING, not STARTING: STARTING is what the stalled reconcile refuses to probe.
     assert published.activity is UpdateActivity.RUNNING
-    assert published.chat_agent_name == _CHAT_NAME
-    assert published.chat_agent_id == _CHAT_ID
+    assert published.chat_agent_name == UPDATE_CHAT_NAME
+    assert published.chat_agent_id == UPDATE_CHAT_ID
 
 
 # The run's chat not listed at all: the probe's positive "this run is over".
@@ -569,7 +559,7 @@ def test_a_running_machine_is_updated_without_being_started(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
     """A start against a running machine costs as much as the command and flips its row through STARTING for nothing."""
-    caller = RecordingMngrCaller(result=_CREATED)
+    caller = RecordingMngrCaller(result=CREATED_UPDATE_COMMAND_RESULT)
     client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
     _mark_out_of_date(app, agent_id)
 
@@ -607,7 +597,7 @@ def test_a_machine_the_app_stopped_may_be_recovered_again_once_an_update_starts_
 def test_a_second_dispatch_loses_to_the_run_already_in_flight_without_asking_the_machine(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _mark_out_of_date(app, agent_id)
     _post(client, f"/ui/api/updates/{agent_id}/now")
 
@@ -622,7 +612,7 @@ def test_the_frame_says_whether_each_machine_has_backups(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
     """A machine without a canonical restic env reads as unbacked."""
-    _client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    _client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _mark_out_of_date(app, agent_id)
 
     message = build_workspace_updates_message(_service(app), (2, 5), None)
@@ -636,7 +626,7 @@ def test_a_dispatch_tells_the_workspace_whether_the_machine_has_backups(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId, is_backup_configured: bool
 ) -> None:
     """The workspace's program words the go-ahead into the run; the app collected the answer at the button."""
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     service = _service(app)
     _mark_out_of_date(app, agent_id)
     if is_backup_configured:
@@ -654,9 +644,14 @@ def test_a_dispatch_tells_the_workspace_whether_the_machine_has_backups(
 @pytest.mark.parametrize(
     ("result", "expected_status", "expected_outcome", "expected_detail"),
     (
-        (_NEEDS_SIGN_IN, 409, UpdateScheduleOutcome.NEEDS_SIGN_IN, "No AI account is signed in to this workspace."),
         (
-            _answer("NO_CRON", "This workspace has no cron program."),
+            NEEDS_SIGN_IN_UPDATE_COMMAND_RESULT,
+            409,
+            UpdateScheduleOutcome.NEEDS_SIGN_IN,
+            "No AI account is signed in to this workspace.",
+        ),
+        (
+            update_command_answer("NO_CRON", "This workspace has no cron program."),
             409,
             UpdateScheduleOutcome.NO_CRON,
             "This workspace has no cron program.",
@@ -664,7 +659,7 @@ def test_a_dispatch_tells_the_workspace_whether_the_machine_has_backups(
         (_TOO_OLD, 409, UpdateScheduleOutcome.UNSUPPORTED, "This workspace predates the update-self skill."),
         (_HOST_OFFLINE, 409, UpdateScheduleOutcome.NOT_RUNNING, _HOST_OFFLINE_DETAIL),
         (
-            _CUT_OFF_ON_REACHED_HOST,
+            CUT_OFF_ON_REACHED_HOST_EXEC_RESULT,
             502,
             UpdateScheduleOutcome.UNREACHABLE,
             f"{COMMAND_EXECUTION_FAILURE_PREFIX} workspace: Connection reset by peer",
@@ -715,7 +710,7 @@ def test_scheduling_arms_the_workspace_and_shows_on_the_row_at_once(
 def test_cancelling_a_schedule_the_workspace_answered_takes_it_off_the_row(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    caller = ScriptedMngrCaller(results=(_armed(), _CANCELLED))
+    caller = ScriptedMngrCaller(results=(_armed(), CANCELLED_UPDATE_COMMAND_RESULT))
     client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
     _mark_out_of_date(app, agent_id)
     _post(client, f"/ui/api/updates/{agent_id}/schedule")
@@ -767,7 +762,7 @@ def test_skipping_an_update_cancels_its_schedule_and_marks_the_row_skipped_for_t
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
     minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
-    caller = ScriptedMngrCaller(results=(_armed(), _CANCELLED))
+    caller = ScriptedMngrCaller(results=(_armed(), CANCELLED_UPDATE_COMMAND_RESULT))
     client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller, minds_config=minds_config)
     _mark_out_of_date(app, agent_id)
     _post(client, f"/ui/api/updates/{agent_id}/schedule")
@@ -798,7 +793,9 @@ def test_the_frame_says_a_machine_is_skipped_only_for_the_release_the_app_is_on_
     minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
     if skipped_target is not None:
         minds_config.set_skipped_update_target(str(agent_id), skipped_target)
-    _client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED, minds_config=minds_config)
+    _client, app = _build_client(
+        tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT, minds_config=minds_config
+    )
     _mark_out_of_date(app, agent_id)
 
     frame = build_workspace_updates_message(_service(app), (2, 5), minds_config)
@@ -814,7 +811,7 @@ def test_the_frame_carries_the_auto_update_setting(
     if is_auto_update_enabled is not None:
         minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
         minds_config.set_auto_update_workspaces(is_auto_update_enabled)
-    _client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    _client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _mark_out_of_date(app, agent_id)
 
     frame = build_workspace_updates_message(_service(app), (2, 5), minds_config)
@@ -872,7 +869,7 @@ def test_a_press_that_names_no_target_keeps_the_one_the_schedule_is_armed_with(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
     """The plain buttons sit under "Scheduled to update to X"; they must not retarget the machine."""
-    caller = ScriptedMngrCaller(results=(_armed("minds-v0.5.0"), _CREATED))
+    caller = ScriptedMngrCaller(results=(_armed("minds-v0.5.0"), CREATED_UPDATE_COMMAND_RESULT))
     client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
     _mark_out_of_date(app, agent_id)
     _arm_on_the_row(app, agent_id, "minds-v0.5.0")
@@ -906,7 +903,7 @@ def test_a_bulk_schedule_leaves_an_armed_machines_named_target_alone(
 @pytest.mark.witnesses("workspace-updates.patch-available-not-prompted", partial="the bulk actions only")
 @pytest.mark.parametrize(
     ("bulk_action", "accepted_key", "result"),
-    (("now", "dispatching", _CREATED), ("schedule", "scheduled", _armed())),
+    (("now", "dispatching", CREATED_UPDATE_COMMAND_RESULT), ("schedule", "scheduled", _armed())),
 )
 def test_a_bulk_action_acts_only_on_the_requested_machines_live_state_says_are_behind(
     tmp_path: Path,
@@ -971,7 +968,7 @@ def test_bulk_now_starts_every_confirmed_out_of_date_machine_with_no_gate_on_wha
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
     """Each machine gets the one "now" command and nothing before it: the workspace decides what to pause."""
-    caller = RecordingMngrCaller(result=_CREATED)
+    caller = RecordingMngrCaller(result=CREATED_UPDATE_COMMAND_RESULT)
     client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller, is_host_running=True)
     first_id = AgentId.generate()
     second_id = AgentId.generate()
@@ -990,7 +987,7 @@ def test_bulk_now_starts_every_confirmed_out_of_date_machine_with_no_gate_on_wha
     for each_id in (first_id, second_id):
         calls = _calls_for(caller, each_id)
         assert [update_program_invocation(call)[0] for call in calls] == ["now"]
-        assert store.get(each_id).chat_agent_name == _CHAT_NAME
+        assert store.get(each_id).chat_agent_name == UPDATE_CHAT_NAME
 
 
 def test_bulk_schedule_arms_every_confirmed_out_of_date_machine(
@@ -1034,7 +1031,7 @@ class _OneMachineOfflineMngrCaller(RecordingMngrCaller):
     [
         (
             "now",
-            _CREATED,
+            CREATED_UPDATE_COMMAND_RESULT,
             lambda state: state.activity is UpdateActivity.RUNNING,
             "Couldn't reach this workspace to start the update.",
         ),
@@ -1244,7 +1241,7 @@ def test_a_build_with_no_update_machinery_answers_503_rather_than_pretending(
 def test_an_unparseable_machine_id_is_refused_with_400(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
 
     assert _post(client, "/ui/api/updates/not-an-agent-id/now").status_code == 400
     assert _recording_caller(app).calls == []
@@ -1261,7 +1258,7 @@ def test_the_update_state_rides_the_bootstrap_document_into_first_paint(
 ) -> None:
     """The badge must show on first paint, not a frame later."""
     monkeypatch.setenv("MINDS_UI_MANIFEST_PATH", str(_write_ui_manifest(tmp_path)))
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _mark_out_of_date(app, agent_id)
 
     html = client.get("/ui/").get_data(as_text=True)
@@ -1296,7 +1293,7 @@ def test_the_updates_frame_carries_which_side_had_no_version(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
     """The modal cannot tell the two unknowns apart if the frame flattens them."""
-    _client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    _client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     service = _service(app)
     service.state_store.record_detection(
         agent_id,
@@ -1321,7 +1318,7 @@ def test_the_updates_frame_carries_which_side_had_no_version(
 def test_dismissing_the_updated_note_leaves_a_failure_verdict_standing(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     state_store = _service(app).state_store
     state_store.set_activity(agent_id, UpdateActivity.RUNNING)
     state_store.adopt_run_record(agent_id, landed_verdict(UpdateVerdict.UPDATED, resulting_ref="minds-v0.4.1"))
@@ -1347,7 +1344,9 @@ def test_a_machine_that_refuses_the_agent_has_its_own_words_shown_and_the_run_sl
 ) -> None:
     """The workspace's refusal is one the user clears themselves, so pressing Update again must be possible."""
     refusal = "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']"
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_answer(program_outcome, refusal))
+    client, app = _build_client(
+        tmp_path, root_concurrency_group, mngr_result=update_command_answer(program_outcome, refusal)
+    )
     _mark_out_of_date(app, agent_id)
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
@@ -1453,7 +1452,7 @@ def test_an_update_that_goes_out_after_one_that_did_not_clears_the_failure(
     _mark_out_of_date(app, agent_id)
     _press_update_now_and_fail_to_reach(client, app, agent_id)
 
-    caller.result = _CREATED
+    caller.result = CREATED_UPDATE_COMMAND_RESULT
     assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 200
 
     published = _published(app, agent_id)
@@ -1507,7 +1506,7 @@ def test_a_dispatch_that_loses_to_a_live_run_records_no_failure_over_it(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
     """The run in flight is the answer to the press; a refusal recorded over it would read as a failure."""
-    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_CREATED)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT)
     _mark_out_of_date(app, agent_id)
     assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 200
 

@@ -16,6 +16,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import SYSTEM_SERVICES_PROVIDER_NAME
+from imbue.minds.desktop_client.testing import begin_dispatched_update_run
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import landed_verdict
 from imbue.minds.desktop_client.testing import make_update_state_store
@@ -86,12 +87,6 @@ def _make_manager(
         fallback_window_seconds=fallback_window_seconds,
     )
     return manager, tracker, store, recoveries
-
-
-def _begin_run(store: WorkspaceUpdateStateStore, agent_id: AgentId) -> None:
-    """Put a row in flight with the chat name the probe fixtures use."""
-    assert store.try_begin_run(agent_id, target_override="")
-    assert store.adopt_dispatched_chat(agent_id, chat_agent_name=_CHAT, chat_agent_id="")
 
 
 def _is_failure_suppressed(tracker: SystemInterfaceHealthTracker, agent_id: AgentId) -> bool:
@@ -490,7 +485,7 @@ def test_a_prepare_phase_outage_dispatches_recovery_normally(
 ) -> None:
     manager, tracker, store, _ = _make_manager(root_concurrency_group, tmp_path, probe_stdout=_NO_RUN_STDOUT)
     agent_id = AgentId.generate()
-    _begin_run(store, agent_id)
+    begin_dispatched_update_run(store, agent_id, _CHAT)
     tracker.mark_stuck(agent_id)
 
     assert manager.should_decline_recovery_dispatch(agent_id) is False
@@ -504,7 +499,7 @@ def test_an_apply_under_way_at_the_stuck_edge_arms_the_window_and_declines(
     """The race path: the outage lands between polls and the stuck edge fires first."""
     manager, tracker, store, _ = _make_manager(root_concurrency_group, tmp_path, probe_stdout=_APPLYING_STDOUT)
     agent_id = AgentId.generate()
-    _begin_run(store, agent_id)
+    begin_dispatched_update_run(store, agent_id, _CHAT)
 
     assert manager.should_decline_recovery_dispatch(agent_id) is True
     assert manager.is_window_open(agent_id) is True
@@ -518,7 +513,7 @@ def test_a_stuck_edge_a_machine_cannot_answer_is_declined_but_not_reported_as_ap
 ) -> None:
     manager, tracker, store, _ = _make_manager(root_concurrency_group, tmp_path, probe_stdout="")
     agent_id = AgentId.generate()
-    _begin_run(store, agent_id)
+    begin_dispatched_update_run(store, agent_id, _CHAT)
     tracker.mark_stuck(agent_id)
 
     assert manager.should_decline_recovery_dispatch(agent_id) is True
@@ -534,7 +529,7 @@ def test_a_machine_that_answers_again_during_the_guards_probe_is_left_alone(
     caller = HookedMngrCaller(result=MngrCallResult(returncode=0, stdout=probe_stdout))
     manager, tracker, store, _ = _make_manager(root_concurrency_group, tmp_path, mngr_caller=caller)
     agent_id = AgentId.generate()
-    _begin_run(store, agent_id)
+    begin_dispatched_update_run(store, agent_id, _CHAT)
     tracker.mark_stuck(agent_id)
     caller.set_on_call(lambda _argv: tracker.record_probe_success(agent_id))
 
@@ -653,7 +648,7 @@ def test_a_workspace_reporting_no_run_and_no_agent_is_unlocked(
         supported_version="minds-v0.4.1",
         is_version_from_label=False,
     )
-    _begin_run(store, agent_id)
+    begin_dispatched_update_run(store, agent_id, _CHAT)
 
     assert manager.probe_run(agent_id).is_run_alive is False
 
@@ -676,7 +671,7 @@ def test_the_run_probe_reaches_its_machine_by_the_host_discovery_placed_it_on(
         tmp_path,
         backend_resolver=build_resolver_with_system_services(agent_id, AgentId.generate(), host_id=host_id),
     )
-    _begin_run(store, agent_id)
+    begin_dispatched_update_run(store, agent_id, _CHAT)
 
     manager.probe_run(agent_id)
 

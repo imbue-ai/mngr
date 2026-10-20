@@ -8,7 +8,6 @@ from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from typing import Any
 
 import pytest
 from pydantic import Field
@@ -18,14 +17,21 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import CANCELLED_UPDATE_COMMAND_RESULT
+from imbue.minds.desktop_client.testing import CREATED_UPDATE_COMMAND_RESULT
+from imbue.minds.desktop_client.testing import CUT_OFF_ON_REACHED_HOST_EXEC_RESULT
+from imbue.minds.desktop_client.testing import EXEC_CUT_OFF_REASON
+from imbue.minds.desktop_client.testing import NEEDS_SIGN_IN_UPDATE_COMMAND_RESULT
 from imbue.minds.desktop_client.testing import SYSTEM_SERVICES_PROVIDER_NAME
+from imbue.minds.desktop_client.testing import UPDATE_CHAT_ID
+from imbue.minds.desktop_client.testing import UPDATE_CHAT_NAME
 from imbue.minds.desktop_client.testing import armed_update_schedule_file
+from imbue.minds.desktop_client.testing import begin_dispatched_update_run
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
-from imbue.minds.desktop_client.testing import exec_error_stdout
 from imbue.minds.desktop_client.testing import exec_result_stdout
 from imbue.minds.desktop_client.testing import host_offline_exec_result
 from imbue.minds.desktop_client.testing import make_update_state_store
-from imbue.minds.desktop_client.testing import update_command_exec_result
+from imbue.minds.desktop_client.testing import update_command_answer
 from imbue.minds.desktop_client.testing import update_program_invocation
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
@@ -46,13 +52,10 @@ from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.minds.utils.testing import ScriptedMngrCaller
-from imbue.mngr.api.exec import COMMAND_EXECUTION_FAILURE_PREFIX
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 
 _CEILING = "minds-v0.9.0"
-_CHAT_NAME = "update-to-minds-v0-9-0"
-_CHAT_ID = "agent-" + "d" * 32
 
 
 class _InvalidationRecordingDetector(WorkspaceUpdateDetector):
@@ -127,23 +130,7 @@ def _record_start(started: list[AgentId], *, failure_reason: str | None) -> Call
     return start
 
 
-def _begin_running_run(store: WorkspaceUpdateStateStore, agent_id: AgentId, chat_agent_name: str) -> None:
-    """Put ``agent_id``'s row where a dispatch whose chat the workspace created leaves it."""
-    assert store.try_begin_run(agent_id, target_override="")
-    assert store.adopt_dispatched_chat(agent_id, chat_agent_name=chat_agent_name, chat_agent_id="")
-
-
-def _command_answer(outcome: str, detail: str = "", **extra: Any) -> MngrCallResult:
-    """The workspace update program answering ``outcome`` through ``mngr exec``."""
-    return update_command_exec_result({"outcome": outcome, "detail": detail, **extra})
-
-
-_CREATED = _command_answer("CREATED", chat_agent_name=_CHAT_NAME, chat_id=_CHAT_ID)
-_NEEDS_SIGN_IN = _command_answer("NEEDS_SIGN_IN", "No AI account is signed in to this workspace.")
-_CANCELLED = update_command_exec_result({"mode": "cancel", "is_cancelled": True})
 _HOST_OFFLINE = host_offline_exec_result()
-_CUT_OFF_REASON = f"{COMMAND_EXECUTION_FAILURE_PREFIX} workspace: Connection reset by peer"
-_CUT_OFF_ON_REACHED_HOST = MngrCallResult(returncode=1, stdout=exec_error_stdout(_CUT_OFF_REASON), is_mngr_output=True)
 
 
 def _armed(*, override_ref: str = "") -> MngrCallResult:
@@ -151,7 +138,7 @@ def _armed(*, override_ref: str = "") -> MngrCallResult:
     schedule = armed_update_schedule_file(
         ceiling_ref=_CEILING, override_ref=override_ref, window=(23, 3), zone="Europe/Berlin"
     )
-    return _command_answer("ARMED", mode="arm", schedule=schedule)
+    return update_command_answer("ARMED", mode="arm", schedule=schedule)
 
 
 # The run's chat listed with no live process: the probe's positive "this run is over".
@@ -167,7 +154,7 @@ def test_a_run_that_vanished_is_stalled_and_tells_no_listener(
     landings_told: list[AgentId] = []
     service.add_on_update_landed_callback(lambda agent_id, run_started_at, ended_at: landings_told.append(agent_id))
     agent_id = AgentId.generate()
-    _begin_running_run(service.state_store, agent_id, "update-old")
+    begin_dispatched_update_run(service.state_store, agent_id, "update-old")
 
     service.poll_in_flight_runs()
 
@@ -195,7 +182,7 @@ def test_a_verdict_in_the_run_record_ends_the_run_and_re_reads_the_version(
     )
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
-    _begin_running_run(service.state_store, agent_id, "update-x")
+    begin_dispatched_update_run(service.state_store, agent_id, "update-x")
 
     service.poll_in_flight_runs()
 
@@ -225,7 +212,7 @@ def _poll_a_run_whose_record_reads(
         lambda agent_id, run_started_at, ended_at: told.append((agent_id, run_started_at, ended_at))
     )
     agent_id = AgentId.generate()
-    _begin_running_run(service.state_store, agent_id, chat_agent_name)
+    begin_dispatched_update_run(service.state_store, agent_id, chat_agent_name)
     service.poll_in_flight_runs()
     return service, agent_id, told
 
@@ -321,7 +308,7 @@ def test_another_runs_record_does_not_close_this_run_out(
     )
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
-    _begin_running_run(service.state_store, agent_id, "update-new")
+    begin_dispatched_update_run(service.state_store, agent_id, "update-new")
 
     service.poll_in_flight_runs()
 
@@ -342,7 +329,7 @@ def test_an_apply_sighting_windows_the_apply_before_any_probe_fails(
     )
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
-    _begin_running_run(service.state_store, agent_id, "update-x")
+    begin_dispatched_update_run(service.state_store, agent_id, "update-x")
 
     service.poll_in_flight_runs()
 
@@ -369,7 +356,7 @@ def test_a_recorded_hold_surfaces_at_once_with_its_detail(
     )
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
-    _begin_running_run(service.state_store, agent_id, "update-x")
+    begin_dispatched_update_run(service.state_store, agent_id, "update-x")
 
     service.poll_in_flight_runs()
 
@@ -380,7 +367,7 @@ def test_a_recorded_hold_surfaces_at_once_with_its_detail(
 
 
 def _waiting_on_a_recorded_hold(service: WorkspaceUpdateService, agent_id: AgentId) -> None:
-    _begin_running_run(service.state_store, agent_id, "update-x")
+    begin_dispatched_update_run(service.state_store, agent_id, "update-x")
     service.state_store.set_activity(agent_id, UpdateActivity.WAITING)
     service.state_store.adopt_run_record(
         agent_id, UpdateRunStatus(chat_agent_name="update-x", is_holding=True, hold_detail="A conflict")
@@ -464,7 +451,7 @@ def test_a_lead_parked_on_a_background_task_with_its_worker_idle_is_not_reported
     )
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
-    _begin_running_run(service.state_store, agent_id, "update-x")
+    begin_dispatched_update_run(service.state_store, agent_id, "update-x")
     service.state_store.set_activity(agent_id, starting_activity)
 
     service.poll_in_flight_runs()
@@ -486,7 +473,7 @@ def test_the_poll_adopts_the_records_own_start_as_the_runs_identity(
     )
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
-    _begin_running_run(service.state_store, agent_id, "update-x")
+    begin_dispatched_update_run(service.state_store, agent_id, "update-x")
 
     service.poll_in_flight_runs()
 
@@ -510,7 +497,7 @@ def test_the_poll_remembers_the_runs_chat_id_from_the_workspaces_listing(
     )
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
-    _begin_running_run(service.state_store, agent_id, "update-x")
+    begin_dispatched_update_run(service.state_store, agent_id, "update-x")
 
     service.poll_in_flight_runs()
 
@@ -523,7 +510,7 @@ def test_an_update_now_that_created_the_chat_runs_the_row_under_that_chat(
 ) -> None:
     """The workspace names the chat, so the row learns it from the answer; one exec, and no start for a running host."""
     started: list[AgentId] = []
-    caller = RecordingMngrCaller(result=_CREATED)
+    caller = RecordingMngrCaller(result=CREATED_UPDATE_COMMAND_RESULT)
     service = _build_service(tmp_path, root_concurrency_group, caller=caller, started=started)
     agent_id = AgentId.generate()
 
@@ -532,8 +519,8 @@ def test_an_update_now_that_created_the_chat_runs_the_row_under_that_chat(
     assert dispatch.outcome is UpdateDispatchOutcome.DISPATCHED
     state = service.state_store.get(agent_id)
     assert state.activity is UpdateActivity.RUNNING
-    assert state.chat_agent_name == _CHAT_NAME
-    assert state.chat_agent_id == _CHAT_ID
+    assert state.chat_agent_name == UPDATE_CHAT_NAME
+    assert state.chat_agent_id == UPDATE_CHAT_ID
     assert state.target_override == "minds-v0.9.1"
     assert state.dispatch_failure == ""
     assert started == []
@@ -548,11 +535,11 @@ def test_an_update_now_that_finds_a_run_under_way_adopts_that_run(
     """The run under way is the answer to the press: the row reports it, not a failure, and not the version the
     press asked for, which that run is not going to."""
     caller = RecordingMngrCaller(
-        result=_command_answer(
+        result=update_command_answer(
             "ALREADY_RUNNING",
             "An update is already running in this workspace.",
             chat_agent_name="update-to-minds-v0-8-9",
-            chat_id=_CHAT_ID,
+            chat_id=UPDATE_CHAT_ID,
         )
     )
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
@@ -564,7 +551,7 @@ def test_an_update_now_that_finds_a_run_under_way_adopts_that_run(
     state = service.state_store.get(agent_id)
     assert state.activity is UpdateActivity.RUNNING
     assert state.chat_agent_name == "update-to-minds-v0-8-9"
-    assert state.chat_agent_id == _CHAT_ID
+    assert state.chat_agent_id == UPDATE_CHAT_ID
     assert state.target_override == ""
     assert state.dispatch_failure == ""
 
@@ -574,7 +561,7 @@ def test_an_update_now_refused_for_another_flows_lease_unlocks_the_row_and_says_
 ) -> None:
     """With no chat named there is no run for the row to report, so it must not stay locked."""
     detail = "Another update flow is working in this workspace."
-    caller = RecordingMngrCaller(result=_command_answer("ALREADY_RUNNING", detail))
+    caller = RecordingMngrCaller(result=update_command_answer("ALREADY_RUNNING", detail))
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
 
@@ -591,7 +578,7 @@ def test_an_update_now_refused_for_another_flows_lease_unlocks_the_row_and_says_
 def test_an_update_now_refused_for_sign_in_shows_the_sign_in_state_rather_than_a_failure_line(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    caller = RecordingMngrCaller(result=_NEEDS_SIGN_IN)
+    caller = RecordingMngrCaller(result=NEEDS_SIGN_IN_UPDATE_COMMAND_RESULT)
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
 
@@ -609,7 +596,7 @@ def test_an_update_now_refused_for_sign_in_shows_the_sign_in_state_rather_than_a
 def test_an_update_that_goes_out_after_a_sign_in_refusal_clears_the_sign_in_state(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    caller = ScriptedMngrCaller(results=(_NEEDS_SIGN_IN, _CREATED))
+    caller = ScriptedMngrCaller(results=(NEEDS_SIGN_IN_UPDATE_COMMAND_RESULT, CREATED_UPDATE_COMMAND_RESULT))
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
     service.dispatch_update(agent_id)
@@ -624,7 +611,7 @@ def test_an_update_now_on_a_workspace_too_old_for_the_skill_is_unsupported(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
     caller = RecordingMngrCaller(
-        result=_command_answer("TOO_OLD_TO_UPDATE", "This workspace predates the update-self skill.")
+        result=update_command_answer("TOO_OLD_TO_UPDATE", "This workspace predates the update-self skill.")
     )
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
@@ -643,7 +630,7 @@ def test_an_update_chat_the_workspace_could_not_create_fails_in_the_workspaces_o
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, program_outcome: str
 ) -> None:
     detail = "The chat app said: no harness is installed for this account."
-    caller = RecordingMngrCaller(result=_command_answer(program_outcome, detail))
+    caller = RecordingMngrCaller(result=update_command_answer(program_outcome, detail))
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
 
@@ -660,7 +647,7 @@ def test_an_update_chat_the_workspace_could_not_create_fails_in_the_workspaces_o
 @pytest.mark.parametrize(
     ("result", "expected_detail"),
     (
-        (_CUT_OFF_ON_REACHED_HOST, _CUT_OFF_REASON),
+        (CUT_OFF_ON_REACHED_HOST_EXEC_RESULT, EXEC_CUT_OFF_REASON),
         (MngrCallResult(returncode=1, stdout=exec_result_stdout("", "MemoryError\n"), is_mngr_output=True), ""),
         (MngrCallResult(returncode=-1, is_timed_out=True, stderr="mngr exec --agent x timed out after 420s"), ""),
         (MngrCallResult(returncode=1, stderr="mngr warm process exited without returning a result"), ""),
@@ -727,7 +714,7 @@ def test_an_update_runs_on_its_machine_by_the_host_discovery_placed_it_on(
     """A bare id would make mngr list every host of the provider before the command reaches the workspace."""
     agent_id = AgentId.generate()
     host_id = HostId.generate()
-    caller = RecordingMngrCaller(result=_CREATED)
+    caller = RecordingMngrCaller(result=CREATED_UPDATE_COMMAND_RESULT)
     service = _build_service(
         tmp_path,
         root_concurrency_group,
@@ -747,7 +734,7 @@ def test_an_update_the_command_could_not_reach_starts_the_machine_once_and_runs_
     """Discovery can think a stopped machine is up, so the command's own reach decides, not the host state."""
     started: list[AgentId] = []
     agent_id = AgentId.generate()
-    caller = ScriptedMngrCaller(results=(_HOST_OFFLINE, _CREATED))
+    caller = ScriptedMngrCaller(results=(_HOST_OFFLINE, CREATED_UPDATE_COMMAND_RESULT))
     service = _build_service(tmp_path, root_concurrency_group, caller=caller, started=started)
 
     dispatch = service.dispatch_update(agent_id)
@@ -755,7 +742,7 @@ def test_an_update_the_command_could_not_reach_starts_the_machine_once_and_runs_
     assert dispatch.outcome is UpdateDispatchOutcome.DISPATCHED
     assert started == [agent_id]
     assert [update_program_invocation(call)[0] for call in caller.calls] == ["now", "now"]
-    assert service.state_store.get(agent_id).chat_agent_name == _CHAT_NAME
+    assert service.state_store.get(agent_id).chat_agent_name == UPDATE_CHAT_NAME
 
 
 def test_an_update_still_unreachable_after_its_machine_started_says_what_mngr_said(
@@ -826,7 +813,7 @@ def test_an_armed_schedule_shows_on_the_row_at_once_from_the_workspaces_own_file
 def test_a_schedule_refused_for_sign_in_shows_on_the_row_until_an_arm_lands(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    caller = ScriptedMngrCaller(results=(_NEEDS_SIGN_IN, _armed()))
+    caller = ScriptedMngrCaller(results=(NEEDS_SIGN_IN_UPDATE_COMMAND_RESULT, _armed()))
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
 
@@ -859,7 +846,7 @@ def test_a_schedule_the_workspace_refused_arms_nothing_and_carries_its_words(
     expected_outcome: UpdateScheduleOutcome,
 ) -> None:
     detail = "This workspace has no cron program, so nothing in it could start a scheduled update."
-    caller = RecordingMngrCaller(result=_command_answer(program_outcome, detail))
+    caller = RecordingMngrCaller(result=update_command_answer(program_outcome, detail))
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
 
@@ -879,7 +866,7 @@ def test_a_schedule_the_workspace_refused_arms_nothing_and_carries_its_words(
             UpdateScheduleOutcome.NOT_RUNNING,
             "Host 'host-1' is offline and automatic starting is disabled.",
         ),
-        (_CUT_OFF_ON_REACHED_HOST, UpdateScheduleOutcome.UNREACHABLE, _CUT_OFF_REASON),
+        (CUT_OFF_ON_REACHED_HOST_EXEC_RESULT, UpdateScheduleOutcome.UNREACHABLE, EXEC_CUT_OFF_REASON),
     ),
     ids=("not_reached", "cut_off"),
 )
@@ -924,7 +911,7 @@ def test_an_auto_update_arm_the_workspace_refused_says_so_on_the_row_until_an_ar
 ) -> None:
     """Under auto-update a behind row is quiet, so an arm that cannot land has to say why there."""
     detail = "This workspace has no cron program, so nothing in it could start a scheduled update."
-    caller = ScriptedMngrCaller(results=(_command_answer("NO_CRON", detail), _armed()))
+    caller = ScriptedMngrCaller(results=(update_command_answer("NO_CRON", detail), _armed()))
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
 
@@ -944,7 +931,7 @@ def test_an_auto_update_arm_the_workspace_refused_says_so_on_the_row_until_an_ar
 def test_a_cancel_the_workspace_answered_takes_the_schedule_off_the_row(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    caller = ScriptedMngrCaller(results=(_armed(), _CANCELLED))
+    caller = ScriptedMngrCaller(results=(_armed(), CANCELLED_UPDATE_COMMAND_RESULT))
     service = _build_service(tmp_path, root_concurrency_group, caller=caller)
     agent_id = AgentId.generate()
     service.schedule_update(agent_id, override_ref="")
@@ -960,7 +947,7 @@ def test_a_cancel_the_workspace_answered_takes_the_schedule_off_the_row(
     ("result", "expected_outcome"),
     (
         (_HOST_OFFLINE, UpdateScheduleOutcome.NOT_RUNNING),
-        (_CUT_OFF_ON_REACHED_HOST, UpdateScheduleOutcome.UNREACHABLE),
+        (CUT_OFF_ON_REACHED_HOST_EXEC_RESULT, UpdateScheduleOutcome.UNREACHABLE),
     ),
     ids=("not_reached", "cut_off"),
 )
@@ -989,7 +976,7 @@ def test_skipping_an_update_remembers_the_apps_ceiling_for_that_workspace_and_ca
 ) -> None:
     """The sweep re-arms nothing for this release; a relaunched app reads the same skip."""
     config_dir = tmp_path / "minds-config"
-    caller = ScriptedMngrCaller(results=(_armed(), _CANCELLED))
+    caller = ScriptedMngrCaller(results=(_armed(), CANCELLED_UPDATE_COMMAND_RESULT))
     service = _build_service(
         tmp_path, root_concurrency_group, caller=caller, minds_config=MindsConfig(data_dir=config_dir)
     )

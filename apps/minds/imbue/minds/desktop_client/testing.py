@@ -121,6 +121,7 @@ from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import PersistedProviderInstanceConfig
+from imbue.mngr.api.exec import COMMAND_EXECUTION_FAILURE_PREFIX
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -1740,6 +1741,35 @@ def update_command_exec_result(payload: Mapping[str, Any]) -> MngrCallResult:
     inner_stdout = f"{UPDATE_COMMAND_RESULT_MARKER}{json.dumps({**payload, 'schema': 1})}\n"
     event = {"event": "exec_result", "agent": "workspace", "stdout": inner_stdout, "stderr": "", "success": True}
     return MngrCallResult(returncode=0, stdout=json.dumps(event) + "\n", stderr="", is_mngr_output=True)
+
+
+def update_command_answer(outcome: str, detail: str = "", **extra: Any) -> MngrCallResult:
+    """The workspace update program answering ``outcome`` through ``mngr exec``."""
+    return update_command_exec_result({"outcome": outcome, "detail": detail, **extra})
+
+
+UPDATE_CHAT_NAME: Final[str] = "update-to-minds-v0-9-0"
+UPDATE_CHAT_ID: Final[str] = "agent-" + "d" * 32
+CREATED_UPDATE_COMMAND_RESULT: Final[MngrCallResult] = update_command_answer(
+    "CREATED", chat_agent_name=UPDATE_CHAT_NAME, chat_id=UPDATE_CHAT_ID
+)
+NEEDS_SIGN_IN_UPDATE_COMMAND_RESULT: Final[MngrCallResult] = update_command_answer(
+    "NEEDS_SIGN_IN", "No AI account is signed in to this workspace."
+)
+CANCELLED_UPDATE_COMMAND_RESULT: Final[MngrCallResult] = update_command_exec_result(
+    {"mode": "cancel", "is_cancelled": True}
+)
+# An exec that reached the workspace and was cut off there, so the program may have run.
+EXEC_CUT_OFF_REASON: Final[str] = f"{COMMAND_EXECUTION_FAILURE_PREFIX} workspace: Connection reset by peer"
+CUT_OFF_ON_REACHED_HOST_EXEC_RESULT: Final[MngrCallResult] = MngrCallResult(
+    returncode=1, stdout=exec_error_stdout(EXEC_CUT_OFF_REASON), is_mngr_output=True
+)
+
+
+def begin_dispatched_update_run(store: WorkspaceUpdateStateStore, agent_id: AgentId, chat_agent_name: str) -> None:
+    """Put ``agent_id``'s row where a dispatch whose chat the workspace created leaves it."""
+    assert store.try_begin_run(agent_id, target_override="")
+    assert store.adopt_dispatched_chat(agent_id, chat_agent_name=chat_agent_name, chat_agent_id="")
 
 
 def update_program_invocation(argv: Sequence[str]) -> tuple[str, dict[str, str]]:
