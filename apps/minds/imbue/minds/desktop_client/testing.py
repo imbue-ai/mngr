@@ -1814,6 +1814,7 @@ def armed_update_schedule_file(
         "marked_at": None,
         "window_seen_open_at": None,
         "pending_skip_reason": "",
+        "next_attempt_at": None,
         "last_skip_reason": "",
         "last_skip_at": None,
     }
