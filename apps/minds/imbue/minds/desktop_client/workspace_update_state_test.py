@@ -208,6 +208,7 @@ def _out_of_date_store(tmp_path: Path) -> tuple[WorkspaceUpdateStateStore, Agent
         current_version="minds-v0.3.12",
         supported_version="minds-v0.4.1",
         is_version_from_label=False,
+        is_readable=True,
     )
     return store, agent_id
 
@@ -233,6 +234,7 @@ def test_a_detection_sweep_landing_mid_run_does_not_reset_the_activity(tmp_path:
         current_version="minds-v0.3.12",
         supported_version="minds-v0.4.1",
         is_version_from_label=False,
+        is_readable=True,
     )
 
     assert store.get(agent_id).activity is UpdateActivity.APPLYING
@@ -573,6 +575,7 @@ def test_a_machine_that_became_unreadable_keeps_the_version_it_was_read_at(
     caller = _VersionReadingMngrCaller(version_by_agent={str(agent_id): "minds-v0.4.1"})
     detector = _detector(tmp_path, resolver, caller, root_concurrency_group)
     detector.run_pass()
+    assert detector.store.get(agent_id).is_workspace_readable is True
 
     resolver.host_state_by_agent = {agent_id: HostState.STARTING}
     detector.run_pass()
@@ -580,6 +583,8 @@ def test_a_machine_that_became_unreadable_keeps_the_version_it_was_read_at(
     state = detector.store.get(agent_id)
     assert state.current_version == "minds-v0.4.1"
     assert state.is_version_from_label is False
+    # Its version still stands, but a sweep that cannot read it cannot arm it under auto-update either.
+    assert state.is_workspace_readable is False
     assert caller.read_agent_ids == [str(agent_id)]
 
 

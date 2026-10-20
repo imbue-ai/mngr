@@ -39,6 +39,7 @@ const OUT_OF_DATE = {
   current_version: "minds-v0.3.9",
   supported_version: "minds-v0.4.1",
   is_version_from_label: false,
+  is_workspace_readable: true,
   activity: "IDLE" as const,
 };
 
@@ -505,6 +506,12 @@ describe("auto-update's quiet surfaces", () => {
     const fromLabel = { ...OUT_OF_DATE, is_version_from_label: true };
     expect(updateBadgeFor(fromLabel, false, true)?.state).toBe("out-of-date");
     expect(standingUpdateNotice(fromLabel, false, true)).toBe("out-of-date");
+  });
+
+  it("still says a machine read behind earlier and stopped since is behind, since the sweep cannot arm it", () => {
+    const stopped = { ...OUT_OF_DATE, is_workspace_readable: false };
+    expect(updateBadgeFor(stopped, false, true)?.state).toBe("out-of-date");
+    expect(standingUpdateNotice(stopped, false, true)).toBe("out-of-date");
   });
 
   it("says a machine that cannot be armed needs a sign-in, with the way to give it one", () => {

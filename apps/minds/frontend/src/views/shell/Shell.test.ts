@@ -848,15 +848,20 @@ describe("Shell notice band wiring", () => {
   });
 
   it.each([
-    ["auto-update will arm it", {}, null],
+    ["auto-update will arm it", { is_workspace_readable: true }, null],
+    [
+      "the last sweep could not read it, so cannot arm it",
+      { is_workspace_readable: false },
+      "This workspace is running an older version of Imbue Studio.",
+    ],
     [
       "the user skipped this release",
-      { is_update_skipped: true },
+      { is_workspace_readable: true, is_update_skipped: true },
       "This workspace is running an older version of Imbue Studio.",
     ],
     [
       "it cannot be armed without a sign-in",
-      { needs_sign_in: true },
+      { is_workspace_readable: true, needs_sign_in: true },
       "This workspace can't update until an AI account is signed in to it.",
     ],
   ])("under auto-update, a behind machine whose %s gets the band it should", (_name, fields, expectedMessage) => {

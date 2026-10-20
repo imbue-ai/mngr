@@ -163,6 +163,7 @@ class _DetectionFacts(FrozenModel):
     current_version: str = Field(default="")
     supported_version: str = Field(default="")
     is_version_from_label: bool = Field(default=False)
+    is_readable: bool = Field(default=False)
 
 
 class _RunFacts(FrozenModel):
@@ -274,6 +275,7 @@ def _compose(detected: _DetectionFacts, run: _RunFacts, schedule_facts: _Schedul
         current_version=detected.current_version,
         supported_version=detected.supported_version,
         is_version_from_label=detected.is_version_from_label,
+        is_workspace_readable=detected.is_readable,
         activity=run.activity,
         run_started_at=run.record.started_at,
         is_hold_recorded=is_waiting and run.record.is_holding,
@@ -347,14 +349,20 @@ class WorkspaceUpdateStateStore(MutableModel):
         current_version: str,
         supported_version: str,
         is_version_from_label: bool,
+        is_readable: bool,
     ) -> bool:
-        """Store one workspace's detection result; return whether it changed."""
+        """Store one workspace's detection result; return whether it changed.
+
+        ``is_readable`` is whether this sweep could read the workspace, which is what it
+        takes for the sweep to arm it.
+        """
         detected = _DetectionFacts(
             availability=detection.availability,
             unknown_reason=detection.unknown_reason,
             current_version=current_version,
             supported_version=supported_version,
             is_version_from_label=is_version_from_label,
+            is_readable=is_readable,
         )
         with self._lock:
             is_changed = self._detected_by_agent.get(str(agent_id)) != detected
@@ -973,6 +981,7 @@ class WorkspaceUpdateDetector(MutableModel):
             current_version=detected.version_ref,
             supported_version=supported_version,
             is_version_from_label=detected.is_from_label,
+            is_readable=is_workspace_readable(host_state),
         )
         # The run record and the schedule file ride the sweep: they are how a
         # scheduled or undispatched run, or a verdict written while the app was

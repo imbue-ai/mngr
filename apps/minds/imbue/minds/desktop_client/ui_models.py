@@ -483,6 +483,11 @@ class UiWorkspaceUpdate(FrozenModel):
     in_place_compatible_ref: str = Field(
         default="", description="Newest version still applicable in place, offered alongside a refusal"
     )
+    is_workspace_readable: bool = Field(
+        default=False,
+        description="Whether the last sweep could read the workspace (running and reachable), which is what it "
+        "takes for auto-update to arm it",
+    )
     is_scheduled: bool = Field(
         default=False, description="Whether the workspace's own schedule file is armed, as its last read said"
     )

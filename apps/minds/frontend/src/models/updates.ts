@@ -44,15 +44,16 @@ export function isRecreationRequired(update: UiWorkspaceUpdate): boolean {
 /** Whether auto-update will take care of this machine on its own, so the
  * surfaces that offer the update stay quiet. A machine the user skipped, one
  * that cannot be armed until an AI account is signed in, one whose arm the
- * workspace refused, or one read only from its create-time label (stopped or
- * unreadable, so the sweep cannot arm it), is not handled: it says it is behind
- * as it would without auto-update. One positively read behind but not armed yet
- * is handled; the next sweep arms it. */
+ * workspace refused, one read only from its create-time label, or one the last
+ * sweep could not read (stopped or unreachable, so the sweep cannot arm it) is
+ * not handled: it says it is behind as it would without auto-update. One
+ * positively read behind but not armed yet is handled; the next sweep arms it. */
 export function isHandledByAutoUpdate(update: UiWorkspaceUpdate, isAutoUpdateEnabled: boolean): boolean {
   return (
     isAutoUpdateEnabled &&
     isUpdateOffered(update) &&
     !update.is_version_from_label &&
+    (update.is_workspace_readable ?? false) &&
     !(update.needs_sign_in ?? false) &&
     !(update.is_update_skipped ?? false) &&
     !update.dispatch_failure

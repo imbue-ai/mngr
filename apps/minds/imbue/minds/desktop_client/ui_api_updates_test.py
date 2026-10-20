@@ -184,6 +184,7 @@ def _mark(app: Flask, agent_id: AgentId, availability: UpdateAvailability, curre
         current_version=current_version,
         supported_version="minds-v0.4.1",
         is_version_from_label=False,
+        is_readable=True,
     )
 
 
@@ -254,6 +255,7 @@ def test_a_machine_with_no_readable_version_is_still_sent_its_update_agent(
         current_version="",
         supported_version="minds-v0.4.1",
         is_version_from_label=False,
+        is_readable=True,
     )
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
@@ -1303,6 +1305,7 @@ def test_the_updates_frame_carries_which_side_had_no_version(
         current_version="minds-v0.3.9",
         supported_version="gabriel/some-branch",
         is_version_from_label=False,
+        is_readable=True,
     )
 
     frame = build_workspace_updates_message(service, (2, 5), None)
