@@ -403,7 +403,9 @@ class WorkspaceUpdateStateStore(MutableModel):
             self._schedule_by_agent[aid_str] = facts
             run = self._run_by_agent.get(aid_str)
             if is_signed_in is True and run is not None and run.is_sign_in_refused:
-                self._run_by_agent[aid_str] = run.model_copy_update(to_update(run.field_ref().is_sign_in_refused, False))
+                self._run_by_agent[aid_str] = run.model_copy_update(
+                    to_update(run.field_ref().is_sign_in_refused, False)
+                )
                 is_changed = True
         if is_changed:
             self._fire_on_change()
