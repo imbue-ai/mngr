@@ -1059,6 +1059,9 @@ def test_legacy_shape_for_plan_is_none_for_an_instance_type_outside_the_table(te
     assert provider._legacy_shape_for_plan("p5.48xlarge") is None
 
 
+# Flaky while MIND-534 is open: building the offline host resolves the state bucket
+# through a real sts:GetCallerIdentity call, which can outlast the 10s timeout.
+@pytest.mark.flaky
 def test_get_host_resources_answers_a_stopped_host_from_its_mirrored_record_without_any_ec2_call(
     temp_mngr_ctx: MngrContext,
 ) -> None:

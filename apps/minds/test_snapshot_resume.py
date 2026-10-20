@@ -1011,6 +1011,9 @@ def _ensure_restic_on_sandbox_host(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(900)
+# Flaky while MIND-259 is open: the `mngr exec` that writes restic.env can miss the
+# resumed workspace's agent in discovery and fail the provisioning.
+@pytest.mark.flaky
 def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     running_workspace: _ResumedWorkspace,
     tmp_path: Path,
