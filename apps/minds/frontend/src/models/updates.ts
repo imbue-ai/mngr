@@ -426,7 +426,7 @@ function scheduleWindowText(update: UiWorkspaceUpdate, appWindow: string, viewer
 /** What an armed schedule says, for the modal and the machine's Updates
  * settings group. Window-relative rather than "tonight": the window is
  * configurable to any hours. Under auto-update the schedule is the app's own
- * doing, so it also says nothing is asked of the reader. */
+ * doing, so it also says nothing is asked of the reader, unless a sign-in is. */
 export function scheduledLine(
   update: UiWorkspaceUpdate,
   appWindow: string,
@@ -436,9 +436,9 @@ export function scheduledLine(
   const override = update.override_ref ?? "";
   const target = override ? ` to ${displayVersion(override)}` : "";
   const windowText = scheduleWindowText(update, appWindow, viewerZone);
-  return isAutoUpdateEnabled
-    ? `Studio will update this workspace${target} in the next update window (${windowText}). No action is needed.`
-    : `Scheduled to update${target} in the next update window (${windowText}).`;
+  if (!isAutoUpdateEnabled) return `Scheduled to update${target} in the next update window (${windowText}).`;
+  const line = `Studio will update this workspace${target} in the next update window (${windowText}).`;
+  return (update.needs_sign_in ?? false) ? line : `${line} No action is needed.`;
 }
 
 /** Why the last window passed without a start, and that the schedule stands;

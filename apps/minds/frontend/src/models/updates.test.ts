@@ -590,6 +590,10 @@ describe("the schedule's lines", () => {
     const line = scheduledLine({ ...ARMED, override_ref: "minds-v0.9.1" }, "", true, "America/Los_Angeles");
     expect(line).toContain("to v0.9.1");
     expect(line).toContain("No action is needed.");
+    // A sign-in is asked of the reader, beside this line.
+    expect(scheduledLine({ ...ARMED, needs_sign_in: true }, "", true, "America/Los_Angeles")).not.toContain(
+      "No action is needed.",
+    );
   });
 
   it("adds the skip line only after a window passed without a start", () => {
