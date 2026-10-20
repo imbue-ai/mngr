@@ -122,13 +122,21 @@ def _never_gone() -> bool:
         (_schedule(marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60), None, _IN_WINDOW, lambda: True, "dispatch"),
         # The same, with its lead still there: leave it be.
         (_schedule(marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60), None, _IN_WINDOW, lambda: False, "note_window"),
-        # The run the file dispatched has a verdict: retire the file.
+        # The run the file dispatched has a verdict, though the file was re-armed after it started: retire it.
+        (
+            _schedule(armed_at=_WINDOW_OPENED + 120, marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60),
+            {"chat_agent_name": _LEAD, "started_at": _WINDOW_OPENED + 90, "verdict": "UPDATED"},
+            _IN_WINDOW,
+            _never_gone,
+            "remove",
+        ),
+        # A verdict under the marked name from a run that started before the mark is an earlier chat's.
         (
             _schedule(marked_chat=_LEAD, marked_at=_WINDOW_OPENED + 60),
             {"chat_agent_name": _LEAD, "started_at": _WINDOW_OPENED - 99999, "verdict": "UPDATED"},
             _IN_WINDOW,
-            _never_gone,
-            "remove",
+            lambda: False,
+            "note_window",
         ),
         # A verdict from a run that predates the arm says nothing about this schedule.
         (

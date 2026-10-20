@@ -766,14 +766,20 @@ def decide_schedule_action(schedule, run, now, is_marked_lead_gone):
     armed_at = float(schedule.get("armed_at") or 0.0)
     started_at = run_started_at(run)
     marked_chat = str(schedule.get("marked_chat") or "")
-    is_marked_run = bool(marked_chat) and isinstance(run, dict) and run.get("chat_agent_name") == marked_chat
+    marked_at = schedule.get("marked_at")
+    marked_at = float(marked_at) if isinstance(marked_at, (int, float)) and not isinstance(marked_at, bool) else None
+    # A record under the marked name that started before the mark is an earlier chat's that had the name.
+    is_marked_run = (
+        bool(marked_chat)
+        and isinstance(run, dict)
+        and run.get("chat_agent_name") == marked_chat
+        and (started_at is None or marked_at is None or started_at >= marked_at)
+    )
     if run_verdict(run) is not None and ((started_at is not None and started_at >= armed_at) or is_marked_run):
         return "remove"
     window = current_window(
         now, int(schedule["window_start_hour"]), int(schedule["window_end_hour"]), str(schedule.get("zone") or "")
     )
-    marked_at = schedule.get("marked_at")
-    marked_at = float(marked_at) if isinstance(marked_at, (int, float)) and not isinstance(marked_at, bool) else None
     if window is None:
         seen = schedule.get("window_seen_open_at")
         if not isinstance(seen, (int, float)) or isinstance(seen, bool):
