@@ -26,6 +26,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroupState
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
@@ -946,25 +947,45 @@ def _install_sighup_handler(
         logger.debug("Could not install SIGHUP handler: {}", e)
         return
 
-    def _watcher() -> None:
-        while True:
-            bounce_event.wait()
-            bounce_event.clear()
-            try:
-                if stream_manager is not None:
-                    stream_manager.bounce_observe()
-                else:
-                    _resnapshot_no_observe(resolver, reverse_handler, opts)
-            except (OSError, RuntimeError) as e:
-                logger.warning("SIGHUP dispatch failed: {}", e)
+    def _dispatch() -> None:
+        if stream_manager is not None:
+            stream_manager.bounce_observe()
+        else:
+            _resnapshot_no_observe(resolver, reverse_handler, opts)
 
     start_mngr_thread(
         concurrency_group=concurrency_group,
-        target=_watcher,
+        target=_watch_for_sighup_bounces,
+        args=(bounce_event, _dispatch, concurrency_group),
         daemon=True,
         name="mngr-forward-sighup-watcher",
         is_checked=False,
     )
+
+
+_SIGHUP_WATCHER_POLL_SECONDS: Final[float] = 0.5
+
+
+def _watch_for_sighup_bounces(
+    bounce_event: threading.Event,
+    dispatch: Callable[[], None],
+    concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Run ``dispatch`` for each SIGHUP that sets ``bounce_event``, until ``concurrency_group`` stops being active.
+
+    The group joins this thread when it exits (when ``forward()`` returns after
+    a graceful SIGTERM/SIGINT stop) and fails if the thread is still alive after
+    its exit timeout, so the wait is bounded and the loop ends once the group
+    has begun exiting.
+    """
+    while concurrency_group.state == ConcurrencyGroupState.ACTIVE:
+        if not bounce_event.wait(timeout=_SIGHUP_WATCHER_POLL_SECONDS):
+            continue
+        bounce_event.clear()
+        try:
+            dispatch()
+        except (OSError, RuntimeError) as e:
+            logger.warning("SIGHUP dispatch failed: {}", e)
 
 
 def _resnapshot_no_observe(

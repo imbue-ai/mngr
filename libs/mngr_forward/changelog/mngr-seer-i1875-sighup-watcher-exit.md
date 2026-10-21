@@ -1,0 +1,1 @@
+`mngr forward` now exits with status 0 within a few seconds when stopped by SIGTERM or SIGINT. Previously its SIGHUP watcher thread waited for SIGHUP forever, so every graceful stop waited out the command's 10-second thread-exit timeout and then failed with `StrandTimedOutError` (exit status 1). The minds backend read that status as a crashed discovery/proxy subprocess.
