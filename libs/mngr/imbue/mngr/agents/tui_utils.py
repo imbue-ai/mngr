@@ -596,4 +596,8 @@ def raise_for_unconfirmed_submission(
     pane_content = agent._capture_pane_content(tmux_target)
     diagnostics = _build_unconfirmed_diagnostics(outcome, max(1, int(timeout_seconds)), pane_content)
     logger.error("Message submission was not confirmed -- {}", diagnostics)
-    raise SendMessageError(str(agent.name), f"Timeout waiting for message submission evidence: {diagnostics}")
+    raise SendMessageError(
+        str(agent.name),
+        f"Timeout waiting for message submission evidence: {diagnostics}",
+        SendFailureKind.SUBMISSION_UNCONFIRMED,
+    )

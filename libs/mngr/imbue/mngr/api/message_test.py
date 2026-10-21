@@ -28,6 +28,7 @@ from imbue.mngr.api.message import _process_host_for_messaging
 from imbue.mngr.api.message import _send_message_to_agent
 from imbue.mngr.api.message import send_key_chord_to_agents
 from imbue.mngr.api.message import send_message_to_agents
+from imbue.mngr.api.message import send_message_with_resend_guidance
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_config_registry import register_agent_config
@@ -463,6 +464,106 @@ def test_send_message_records_failure_when_the_lifecycle_probe_raises(
     assert errors == result.failed_agents
 
 
+class _RunningAgent(BaseAgent[AgentTypeConfig]):
+    """Test agent that reports RUNNING, so a send goes straight to delivery."""
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        return AgentLifecycleState.RUNNING
+
+
+_UNCONFIRMED_REASON: Final[str] = "Timeout waiting for message submission evidence: no evidence within 90s"
+
+
+def _deliver_unconfirmed(agent: AgentInterface, payload: str) -> None:
+    raise SendMessageError(str(agent.name), _UNCONFIRMED_REASON, SendFailureKind.SUBMISSION_UNCONFIRMED)
+
+
+def test_unconfirmed_submission_is_recorded_with_its_kind(
+    temp_work_dir: Path,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A delivery that typed the message but could not confirm it keeps that kind in the result.
+
+    The kind is what tells a client the text may already be in the agent's input, so it must
+    not send it again the way it would after a failure that typed nothing.
+    """
+    agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=None,
+        agent_type=None,
+        extra_data=None,
+        agent_class=_RunningAgent,
+    )
+
+    result = MessageResult()
+    _send_message_to_agent(
+        agent=agent,
+        host=agent.host,
+        message_content="hello",
+        deliver=_deliver_unconfirmed,
+        result=result,
+        result_lock=Lock(),
+        error_behavior=ErrorBehavior.CONTINUE,
+        is_start_desired=True,
+        on_success=None,
+        on_error=None,
+    )
+
+    assert result.successful_agents == []
+    assert result.failures == [
+        AgentSendFailure(
+            agent_name=str(agent.name), reason=_UNCONFIRMED_REASON, kind=SendFailureKind.SUBMISSION_UNCONFIRMED
+        )
+    ]
+
+
+class _UnconfirmedSendAgent(SendKeysAgent[AgentTypeConfig]):
+    """Test agent whose sends are typed but never confirmed."""
+
+    def send_message(self, message: str) -> None:
+        raise SendMessageError(str(self.name), _UNCONFIRMED_REASON, SendFailureKind.SUBMISSION_UNCONFIRMED)
+
+
+class _NotReadySendAgent(SendKeysAgent[AgentTypeConfig]):
+    """Test agent whose sends are refused before anything is typed."""
+
+    def send_message(self, message: str) -> None:
+        raise SendMessageError(str(self.name), "the agent is still starting", SendFailureKind.NOT_READY)
+
+
+@pytest.mark.parametrize(
+    ("agent_class", "expected_kind", "expected_guidance"),
+    [
+        (_UnconfirmedSendAgent, SendFailureKind.SUBMISSION_UNCONFIRMED, "Check before resending: mngr connect"),
+        (_NotReadySendAgent, SendFailureKind.NOT_READY, "NOT delivered. Resend it with: mngr message"),
+    ],
+    ids=["unconfirmed", "not-delivered"],
+)
+def test_resend_guidance_keeps_the_kind_and_withholds_a_resend_that_could_duplicate(
+    temp_work_dir: Path,
+    local_provider: LocalProviderInstance,
+    agent_class: type[BaseAgent[AgentTypeConfig]],
+    expected_kind: SendFailureKind,
+    expected_guidance: str,
+) -> None:
+    """An initial or resume message that may already be in the agent's input is not called undelivered."""
+    agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=None,
+        agent_type=None,
+        extra_data=None,
+        agent_class=agent_class,
+    )
+
+    with pytest.raises(SendMessageError) as exc_info:
+        send_message_with_resend_guidance(agent, "hello", "created and started")
+
+    assert exc_info.value.kind == expected_kind
+    assert f"{expected_guidance} {agent.name}" in exc_info.value.reason
+
+
 def _make_matches_on_host(
     provider: BaseProviderInstance,
     host_id: HostId,
@@ -551,6 +652,7 @@ def test_unreachable_host_fails_its_agents_or_aborts(
 
     assert result.successful_agents == []
     assert result.failed_agents == [(name, expected_error) for name in agent_names]
+    assert [failure.kind for failure in result.failures] == [SendFailureKind.AGENT_NOT_FOUND] * len(agent_names)
     assert errors == result.failed_agents
 
 
@@ -618,6 +720,7 @@ def test_host_that_cannot_load_its_agents_fails_them(
 
     assert result.successful_agents == []
     assert result.failed_agents == [(name, "could not load agents") for name in agent_names]
+    assert [failure.kind for failure in result.failures] == [SendFailureKind.AGENT_NOT_FOUND] * len(agent_names)
     assert errors == result.failed_agents
 
 
@@ -665,6 +768,7 @@ def test_agent_missing_from_its_host_is_recorded_before_the_abort(
 
     assert result.successful_agents == []
     assert result.failed_agents == expected_failures
+    assert [failure.kind for failure in result.failures] == [SendFailureKind.AGENT_NOT_FOUND] * len(expected_failures)
     assert errors == result.failed_agents
 
 
