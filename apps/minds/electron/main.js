@@ -1947,21 +1947,23 @@ async function promptWorkspaceShutdown() {
   console.log('[workspace-shutdown] prompt: running workspaces =', JSON.stringify(running));
   if (running.length === 0) return { proceed: true, stop: false, running: [] };
   const names = running.map((workspace) => workspace.name).join(', ');
+  // No "leave running" choice: the app's latchkey forward (the gateway the
+  // workspaces' agents reach their credentials through) stops with the app,
+  // so a workspace left running would keep using the computer's resources
+  // while its agents can no longer work.
   const { response } = await showQuitPrompt({
-    type: 'question',
-    buttons: ['Cancel', 'Leave running', 'Shut down all'],
-    defaultId: 2,
+    type: 'warning',
+    buttons: ['Cancel', 'Quit and stop workspaces'],
+    defaultId: 1,
     cancelId: 0,
     message: running.length === 1
-      ? '1 workspace is still running on this computer'
-      : `${running.length} workspaces are still running on this computer`,
-    detail: `${names}\n\nLeaving them running keeps using your computer's resources. `
-      + 'Shutting them down stops their agents and makes their services inaccessible '
-      + '(your data is preserved and you can start them again).',
+      ? 'Quitting will stop the workspace running on this computer'
+      : `Quitting will stop the ${running.length} workspaces running on this computer`,
+    detail: `${names}\n\nStopping them pauses their agents and makes their services inaccessible `
+      + 'until you open Imbue Studio and start them again (your data is preserved).',
   });
-  console.log(`[workspace-shutdown] prompt: user chose ${['Cancel', 'Leave running', 'Shut down all'][response]} (response=${response})`);
+  console.log(`[workspace-shutdown] prompt: user chose ${['Cancel', 'Quit and stop workspaces'][response]} (response=${response})`);
   if (response === 0) return { proceed: false, stop: false, running: [] };
-  if (response === 1) return { proceed: true, stop: false, running: [] };
   return { proceed: true, stop: true, running };
 }
 
