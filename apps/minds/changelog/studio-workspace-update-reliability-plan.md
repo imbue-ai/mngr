@@ -20,4 +20,4 @@ Workspace updates now run inside the workspace, so a scheduled update no longer 
 
 - A workspace whose update is running can no longer be scheduled, so a schedule cannot outlive the run and start a fresh one after it.
 
-- "Skip" in a workspace's Updates settings asks the same confirmation as the update window.
+- "Skip" in a workspace's Updates settings asks the same confirmation as the update window, and those settings, like the window, drop a scheduled update's controls while an update is under way.
