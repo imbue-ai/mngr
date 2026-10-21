@@ -1198,6 +1198,13 @@ describe("the Updates settings group's skip question", () => {
     });
     press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
     press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
+    // The skip cancels the schedule first, so the unscheduled row arrives before its answer.
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: false } },
+      update_window: "2:00 AM-5:00 AM",
+      is_auto_update_enabled: true,
+    });
 
     const cancel = pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel");
     expect(cancel).toBeDefined();

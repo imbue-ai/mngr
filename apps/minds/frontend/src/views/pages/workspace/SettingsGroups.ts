@@ -285,8 +285,14 @@ function renderUpdatesGroup(
   const update = updates.forAgent(agentId);
   const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
   const isScheduled = update.is_scheduled ?? false;
+  const pendingSchedule = forMachine(local.pendingSchedule, agentId);
   // A question about a schedule that has since gone is dropped, so it cannot come back unasked.
-  if (local.skipConfirmAgentId === agentId && !(isScheduled && isAutoUpdateEnabled)) {
+  // Not while its skip is out: the skip cancels the schedule before it answers.
+  if (
+    local.skipConfirmAgentId === agentId &&
+    pendingSchedule?.action !== "skip" &&
+    !(isScheduled && isAutoUpdateEnabled)
+  ) {
     local.skipConfirmAgentId = null;
   }
   if (updates.publishedFor(agentId) === null && updates.isHiddenWhileStopped(agentId)) {
@@ -297,7 +303,6 @@ function renderUpdatesGroup(
   }
   const isUpdating = updates.isUpdating(agentId);
   const pending = forMachine(local.pendingDispatch, agentId);
-  const pendingSchedule = forMachine(local.pendingSchedule, agentId);
   const isBusy = pending !== null || pendingSchedule !== null;
   const prefill = devOverridePrefill(update.supported_version ?? "");
   const draft = forMachine(local.overrideDraft, agentId);
