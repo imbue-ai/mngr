@@ -276,7 +276,6 @@ describe("updateBadgeFor", () => {
     const held = {
       ...OUT_OF_DATE_UPDATE,
       activity: "WAITING" as const,
-      chat_agent_name: "update-1",
       is_hold_recorded: true,
       hold_detail: "Waiting for you to confirm minds-v0.9.1, which is newer than Imbue Studio.",
     };
@@ -359,12 +358,12 @@ describe("an update that landed with a note for the reader", () => {
 });
 
 describe("updateActivityNotice", () => {
-  // STARTING can last minutes for a stopped machine, and its chat tab does
-  // not exist yet.
-  it("waits, without naming a tab, while the agent is still being created", () => {
-    const notice = updateActivityNotice({ ...OUT_OF_DATE_UPDATE, activity: "STARTING", chat_agent_name: "update-fox" });
+  // STARTING can last minutes for a stopped machine, and its chat does not
+  // exist yet.
+  it("waits, without pointing at the update chat, while the agent is still being created", () => {
+    const notice = updateActivityNotice({ ...OUT_OF_DATE_UPDATE, activity: "STARTING" });
     expect(notice.isWaiting).toBe(true);
-    expect(notice.message).not.toContain("update-fox");
+    expect(notice.message).not.toContain("update chat");
   });
 
   it.each(["RUNNING", "WAITING", "STALLED"] as const)(
@@ -381,7 +380,6 @@ describe("updateActivityNotice", () => {
     const running = updateActivityNotice({
       ...OUT_OF_DATE_UPDATE,
       activity: "RUNNING",
-      chat_agent_name: "update-fox",
       target_override: "main",
     });
     expect(running.message).toContain("Preparing the update to main");
