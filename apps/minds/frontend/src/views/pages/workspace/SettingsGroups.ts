@@ -285,13 +285,16 @@ function renderUpdatesGroup(
   const update = updates.forAgent(agentId);
   const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
   const isScheduled = update.is_scheduled ?? false;
+  // Under auto-update the app arms the schedule itself, so the way
+  // to say "not this release" is a skip, which the sweep honors.
+  const isSkipOffered = isScheduled && isAutoUpdateEnabled;
   const pendingSchedule = forMachine(local.pendingSchedule, agentId);
   // A question about a schedule that has since gone is dropped, so it cannot come back unasked.
   // Not while its skip is out: the skip cancels the schedule before it answers.
   if (
     local.skipConfirmAgentId === agentId &&
     pendingSchedule?.action !== "skip" &&
-    !(isScheduled && isAutoUpdateEnabled)
+    !isSkipOffered
   ) {
     local.skipConfirmAgentId = null;
   }
@@ -476,9 +479,7 @@ function renderUpdatesGroup(
                     "Sign in",
                   )
                 : null,
-              // Under auto-update the app arms the schedule itself, so the way
-              // to say "not this release" is a skip, which the sweep honors.
-              isScheduled && isAutoUpdateEnabled
+              isSkipOffered
                 ? m(
                     Button,
                     {
