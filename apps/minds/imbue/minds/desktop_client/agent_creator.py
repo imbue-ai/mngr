@@ -3152,7 +3152,14 @@ class AgentCreator(MutableModel):
             ValueError,
             OSError,
         ) as e:
-            logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
+            if isinstance(e, MngrCommandError) and e.error_class == QUOTA_EXCEEDED_ERROR_CLASS:
+                # The account's quota (e.g. the waitlist) refused the create: a
+                # correct, deterministic outcome whose sentence the creating page
+                # shows the person, not a fault for error reporting. The mngr
+                # transcript is still in the create log and the FAILED record.
+                logger.info("Create attempt {} was refused by the account's quota: {}", create_attempt_id, e)
+            else:
+                logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
             log_sink.put("[Imbue Studio] ERROR: {}".format(e))
             # The steps that did finish measured something real; only they are kept.
             self._record_progress_durations(launch_mode, tracker)
