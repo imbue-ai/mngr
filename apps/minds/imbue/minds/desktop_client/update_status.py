@@ -3,8 +3,8 @@
 The enums ``ui_models`` puts on the wire live here so the wire contract does not
 import the detection module (and the discovery resolver behind it). The skill
 writes ``data/.state/update-apply/run.json``, which the app polls over ``mngr
-exec``: the run's start facts, its in-flight facts, and one terminal verdict. A new run's start overwrites it, so it always describes the
-latest run. The app's in-workspace update program writes ``schedule.json`` and
+exec``: the run's start facts, its in-flight facts, and one terminal verdict. A
+new run's start overwrites it, so it always describes the latest run. The app's in-workspace update program writes ``schedule.json`` and
 ``last-dispatch.json`` beside it and answers with an ``UpdateArmOutcome``; their
 parsed forms live here too.
 """
