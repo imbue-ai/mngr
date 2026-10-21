@@ -1182,6 +1182,36 @@ describe("the Updates settings group under auto-update", () => {
 });
 
 describe("the Updates settings group's skip question", () => {
+  it("stays up, held, while the skip is out, and gives way to its answer", async () => {
+    let answer: ((response: Response) => void) | null = null;
+    const { draw } = harness(
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: true } },
+      update_window: "2:00 AM-5:00 AM",
+      is_auto_update_enabled: true,
+    });
+    press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
+    press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
+
+    const cancel = pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel");
+    expect(cancel).toBeDefined();
+    expect(attrsOf(cancel as AnyVnode).disabled).toBe(true);
+
+    const refusal = "This workspace couldn't record the skip.";
+    (answer as unknown as (response: Response) => void)(jsonResponse({ error: refusal }, 409));
+    await settleDispatch();
+
+    const answered = updatesGroup(draw(BACKED));
+    expect(pressableWithLabel(answered, "Cancel")).toBeUndefined();
+    expect(allText(answered)).toContain(refusal);
+  });
+
   it("is dropped once the schedule it asks about is gone, so it does not come back unasked", () => {
     const { draw } = harness();
     const armed = (isScheduled: boolean) =>
