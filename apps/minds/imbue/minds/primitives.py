@@ -10,6 +10,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.errors import ContentDomainError
+from imbue.minds.errors import WorkspaceMessageTypeError
 
 # The AWS regions offered when registering an AWS connection (a connection is
 # pinned to its region for life). Deliberately only the US datacenters by
@@ -308,5 +309,31 @@ class ContentDomain(NonEmptyStr):
             raise ContentDomainError(
                 f"content_domain must be dot-joined lowercase DNS labels (letters, digits, interior hyphens; "
                 f"at most 63 characters each), got {value!r}"
+            )
+        return super().__new__(cls, value)
+
+
+# A workspace message type as an app's manifest registers it: a lowercase
+# prefix, ``:``, and a lowercase kebab-case name (default-workspace-template's
+# ``app_manifest.primitives.MessageType`` applies the same shape).
+_WORKSPACE_MESSAGE_TYPE_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9]*:[a-z0-9]+(?:-[a-z0-9]+)*$")
+MAX_WORKSPACE_MESSAGE_TYPE_LENGTH: Final[int] = 64
+# The prefix of the workspace shell's own app-contract messages, which no app registers.
+WORKSPACE_SHELL_MESSAGE_PREFIX: Final[str] = "shell:"
+
+
+class WorkspaceMessageType(NonEmptyStr):
+    """The type of a message posted into a workspace's frame (``minds:show-routine``): lowercase ``prefix:kebab-name``."""
+
+    def __new__(cls, value: str) -> Self:
+        if _WORKSPACE_MESSAGE_TYPE_RE.fullmatch(value) is None or len(value) > MAX_WORKSPACE_MESSAGE_TYPE_LENGTH:
+            raise WorkspaceMessageTypeError(
+                f"a workspace message type is a lowercase prefix, ':', and a lowercase kebab-case name, "
+                f"at most {MAX_WORKSPACE_MESSAGE_TYPE_LENGTH} characters, got {value!r}"
+            )
+        if value.startswith(WORKSPACE_SHELL_MESSAGE_PREFIX):
+            raise WorkspaceMessageTypeError(
+                f"a workspace message type may not use the workspace shell's own prefix "
+                f"{WORKSPACE_SHELL_MESSAGE_PREFIX!r}, got {value!r}"
             )
         return super().__new__(cls, value)

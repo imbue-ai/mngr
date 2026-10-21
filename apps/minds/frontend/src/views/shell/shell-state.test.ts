@@ -1,4 +1,5 @@
 import m from "mithril";
+import type { WorkspaceMessage } from "../../models/workspaceMessage";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyStores } from "../../models/boot";
 import { takePendingHelpLaunch } from "../../models/help";
@@ -296,16 +297,26 @@ describe("ShellState.closeAppOverlay", () => {
   });
 });
 
-describe("ShellState chat deep link and focus-chat relay", () => {
+describe("ShellState chat deep link and workspace-message relay", () => {
   const flush = () => Promise.resolve();
+  /** Register a sender that records focus-chat asks as [workspace, chat] pairs. */
+  const recordFocusChats = (
+    shell: ShellState,
+    sent: [string, string][],
+    isReady: () => boolean = () => true,
+  ): void => {
+    shell.registerWorkspaceMessageSender((workspaceAgentId, message) => {
+      if (!isReady()) return false;
+      if (message.kind !== "focus-chat") throw new Error(message.kind);
+      sent.push([workspaceAgentId, message.chatAgentId]);
+      return true;
+    });
+  };
 
   it("consumes ?chat= once: strips it by replacement and asks the frame for the chat", async () => {
     const shell = makeShell();
     const sent: [string, string][] = [];
-    shell.registerFocusChatSender((workspaceAgentId, chatAgentId) => {
-      sent.push([workspaceAgentId, chatAgentId]);
-      return true;
-    });
+    recordFocusChats(shell, sent);
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
@@ -329,11 +340,7 @@ describe("ShellState chat deep link and focus-chat relay", () => {
     const shell = makeShell();
     const sent: [string, string][] = [];
     let isFrameReady = false;
-    shell.registerFocusChatSender((workspaceAgentId, chatAgentId) => {
-      if (!isFrameReady) return false;
-      sent.push([workspaceAgentId, chatAgentId]);
-      return true;
-    });
+    recordFocusChats(shell, sent, () => isFrameReady);
     vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
     land(shell, `/workspace/${WORKSPACE_ID}?chat=agent-cc33`);
@@ -341,16 +348,16 @@ describe("ShellState chat deep link and focus-chat relay", () => {
     expect(sent).toEqual([]);
 
     isFrameReady = true;
-    shell.flushPendingFocusChat();
+    shell.flushPendingWorkspaceMessage();
     expect(sent).toEqual([[WORKSPACE_ID, "agent-cc33"]]);
     // Sent once: a second load does not repeat it.
-    shell.flushPendingFocusChat();
+    shell.flushPendingWorkspaceMessage();
     expect(sent).toHaveLength(1);
   });
 
   it("puts the feed overlay away on an in-place ask, which changes no route", () => {
     const shell = makeShell();
-    shell.registerFocusChatSender(() => true);
+    shell.registerWorkspaceMessageSender(() => true);
     shell.openNotifications();
 
     shell.requestFocusChat(WORKSPACE_ID, "agent-cc33");
@@ -358,25 +365,71 @@ describe("ShellState chat deep link and focus-chat relay", () => {
     expect(shell.isNotificationsOpen).toBe(false);
   });
 
+  it("sends an app message (a notification's destination) as the frame posts it, and holds it until the frame is ready", () => {
+    const shell = makeShell();
+    const sent: [string, WorkspaceMessage][] = [];
+    let isFrameReady = false;
+    shell.registerWorkspaceMessageSender((workspaceAgentId, message) => {
+      if (!isFrameReady) return false;
+      sent.push([workspaceAgentId, message]);
+      return true;
+    });
+    const message: WorkspaceMessage = {
+      kind: "app-message",
+      type: "minds:show-routine",
+      fields: { routine_id: "inbox-digest" },
+    };
+
+    shell.requestWorkspaceMessage(WORKSPACE_ID, message);
+    expect(sent).toEqual([]);
+
+    isFrameReady = true;
+    shell.flushPendingWorkspaceMessage();
+    expect(sent).toEqual([[WORKSPACE_ID, message]]);
+    shell.flushPendingWorkspaceMessage();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("holds only the newest unsent message: a later ask replaces an earlier one", () => {
+    const shell = makeShell();
+    shell.requestFocusChat(WORKSPACE_ID, "agent-cc33");
+    shell.requestWorkspaceMessage(WORKSPACE_ID, {
+      kind: "app-message",
+      type: "minds:show-routine",
+      fields: {},
+    });
+    const sent: WorkspaceMessage[] = [];
+    shell.registerWorkspaceMessageSender((_workspaceAgentId, message) => {
+      sent.push(message);
+      return true;
+    });
+
+    shell.flushPendingWorkspaceMessage();
+
+    expect(sent).toEqual([
+      { kind: "app-message", type: "minds:show-routine", fields: {} },
+    ]);
+  });
+
   it("drops a frame's sender on unregister only when it is still the registered one", () => {
     const shell = makeShell();
     const first = (): boolean => true;
     const second = (): boolean => true;
-    shell.registerFocusChatSender(first);
-    shell.registerFocusChatSender(second);
-    shell.unregisterFocusChatSender(first);
+    shell.registerWorkspaceMessageSender(first);
+    shell.registerWorkspaceMessageSender(second);
+    shell.unregisterWorkspaceMessageSender(first);
     // The successor's sender still takes the ask.
     shell.requestFocusChat(WORKSPACE_ID, "agent-cc33");
-    shell.unregisterFocusChatSender(second);
+    shell.unregisterWorkspaceMessageSender(second);
     // With nothing registered the ask is held for the next frame.
     shell.requestFocusChat(WORKSPACE_ID, "agent-dd44");
-    const sent: string[] = [];
-    shell.registerFocusChatSender((_workspaceAgentId, chatAgentId) => {
-      sent.push(chatAgentId);
+    const sent: WorkspaceMessage[] = [];
+    shell.registerWorkspaceMessageSender((_workspaceAgentId, message) => {
+      sent.push(message);
       return true;
     });
-    shell.flushPendingFocusChat();
-    expect(sent).toEqual(["agent-dd44"]);
+    shell.flushPendingWorkspaceMessage();
+    expect(sent).toEqual([{ kind: "focus-chat", chatAgentId: "agent-dd44" }]);
   });
 });
 

@@ -21,7 +21,7 @@
 #        - Invoke notify_user (best-effort; silently skipped if the command
 #          is not defined).
 #   3. Mark the agent inactive, unless a queued prompt is about to start the
-#      next turn, and exit.
+#      next turn or another stop hook blocked the turn end, and exit.
 #
 # Identification strategy:
 #   All stop hooks and bash tool tasks are direct children of the Claude
@@ -167,8 +167,39 @@ has_queued_prompt() {
     [ "$latest_record" = "enqueue" ]
 }
 
+# Check whether another stop hook blocked the turn end
+# A stop hook that exits 2 sends Claude back to work on its feedback, and no hook
+# fires when that continuation starts, so clearing the marker would leave the
+# whole continuation reporting WAITING. Claude Code writes the block's feedback
+# (an isMeta user record whose content starts "Stop hook feedback:") as soon as
+# that hook exits, while the other stop hooks are still running, and the turn's
+# stop_hook_summary only once they have all finished. So the turn end was
+# blocked when the latest of those records is a feedback record. A StopFailure
+# turn end is never blocked.
+has_blocked_stop_hook() {
+    if [ "$HOOK_EVENT_NAME" = "StopFailure" ] || [ -z "$TRANSCRIPT_PATH" ] || [ ! -r "$TRANSCRIPT_PATH" ]; then
+        return 1
+    fi
+    local latest_record
+    latest_record=$(grep -E '"stop_hook_summary"|Stop hook feedback:' "$TRANSCRIPT_PATH" 2>/dev/null \
+        | jq -R -s -r '
+            [split("\n")[] | fromjson? | select(type == "object")
+                | if .subtype == "stop_hook_summary" then "turn-end"
+                  elif .type == "user" and .isMeta == true and ((.message.content // "") | tostring | startswith("Stop hook feedback:")) then "blocked"
+                  else empty end]
+            | last // ""' 2>/dev/null) || true
+    [ "$latest_record" = "blocked" ]
+}
+
+# Whether the agent keeps working past this turn end: a queued prompt starts the
+# next turn, or (except on an interrupt, $1 non-empty) another stop hook blocked it
+is_turn_continuing() {
+    has_queued_prompt && return 0
+    [ -z "${1:-}" ] && has_blocked_stop_hook
+}
+
 # Mark agent as inactive and emit activity event, or leave it active when a
-# queued prompt is about to start the next turn
+# queued prompt is about to start the next turn or another stop hook blocked it
 # $1 (optional): reason for marking inactive (e.g. "signal:SIGTERM")
 # $2 (optional): lock-acquire timeout (seconds) for the transcript flush
 #                (default FLUSH_LOCK_TIMEOUT_NORMAL)
@@ -187,16 +218,17 @@ mark_inactive() {
         mngr_common_transcript_flush "$flush_lock_timeout"
     fi
     rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"
-    if has_queued_prompt; then
-        echo "wait_for_stop_hook: a queued prompt starts the next turn, leaving the agent active"
+    if is_turn_continuing "$reason"; then
+        echo "wait_for_stop_hook: a queued prompt or a blocking stop hook continues the turn, leaving the agent active"
         return 0
     fi
     rm -f "$MNGR_AGENT_STATE_DIR/active"
     # A prompt submitted just before the clear had its marker removed by it, and
-    # its enqueue record may not have reached the transcript yet, so re-check
-    # once that lag has passed and restore the marker
+    # its enqueue record may not have reached the transcript yet (nor a block's
+    # feedback, for a hook that exited just before the check), so re-check once
+    # that lag has passed and restore the marker
     sleep "$REQUEUE_RECHECK_DELAY"
-    if has_queued_prompt; then
+    if is_turn_continuing "$reason"; then
         touch "$MNGR_AGENT_STATE_DIR/active"
         return 0
     fi

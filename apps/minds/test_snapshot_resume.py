@@ -50,6 +50,7 @@ from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
@@ -76,7 +77,6 @@ from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import await_chat_reply
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
 from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via_electron
-from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_effort
 from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_defaults
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
@@ -182,24 +182,37 @@ def _exec_in_container(container_name: str, command: str, *, timeout: int) -> su
     )
 
 
-def _all_minds_container_ids() -> list[str]:
-    return _run_docker(["ps", "-aq", "--filter", f"name={_workspace_container_prefix()}"]).split()
-
-
-def _running_workspace_container_name() -> str:
-    """Return the running workspace agent container (not the docker-state sidecar)."""
+def _recorded_env_container_names(snapshot_container_states: Mapping[str, DockerContainerState]) -> list[str]:
+    """The containers under the env's prefix that the snapshot was resumed with."""
     prefix = _workspace_container_prefix()
-    names = _run_docker(["ps", "--format", "{{.Names}}"]).splitlines()
-    workspace_names = [name for name in names if name.startswith(prefix) and _DOCKER_STATE_MARKER not in name]
-    assert workspace_names, f"No running {prefix}* workspace container; running containers: {names!r}"
+    return sorted(name for name in snapshot_container_states if name.startswith(prefix))
+
+
+def _snapshot_workspace_container_name(snapshot_container_states: Mapping[str, DockerContainerState]) -> str:
+    """The workspace container (not the docker-state sidecar) the snapshot was resumed with.
+
+    Read from the snapshot's recording rather than from the daemon: offload reuses a sandbox
+    across batches, so workspaces other tests created can be running beside it under the same prefix.
+    """
+    workspace_names = [
+        name for name in _recorded_env_container_names(snapshot_container_states) if _DOCKER_STATE_MARKER not in name
+    ]
+    assert len(workspace_names) == 1, (
+        f"Expected exactly one {_workspace_container_prefix()}* workspace container among those the snapshot "
+        f"was resumed with: {_format_container_states(snapshot_container_states)}"
+    )
     return workspace_names[0]
 
 
-def _start_all_minds_containers() -> None:
-    container_ids = _all_minds_container_ids()
-    assert container_ids, "No minds containers captured in the snapshot to start."
-    # Start them in one call; docker start is idempotent for already-running ones.
-    subprocess.run(["docker", "start", *container_ids], check=True, capture_output=True, text=True, timeout=120)
+def _start_snapshot_containers(snapshot_container_states: Mapping[str, DockerContainerState]) -> None:
+    """Start the snapshot's workspace and docker-state containers; already-running ones are left as they are."""
+    subprocess.run(
+        ["docker", "start", *_recorded_env_container_names(snapshot_container_states)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
 
 
 def _list_agents_in_container(container_name: str) -> list[dict[str, Any]]:
@@ -326,7 +339,9 @@ def _wait_for_system_interface_down(container_name: str) -> bool:
 
 
 @pytest.fixture(scope="session")
-def running_workspace() -> Iterator[_ResumedWorkspace]:
+def running_workspace(
+    snapshot_container_states: Mapping[str, DockerContainerState],
+) -> Iterator[_ResumedWorkspace]:
     """Resume the snapshot's workspace and yield it once system_interface serves.
 
     The captured container is stopped, so a sandbox booted from the snapshot
@@ -334,8 +349,8 @@ def running_workspace() -> Iterator[_ResumedWorkspace]:
     the bootstrap respawns system_interface. This is the mngr-level building
     block behind minds' own recovery flow.
     """
-    _start_all_minds_containers()
-    container_name = _running_workspace_container_name()
+    container_name = _snapshot_workspace_container_name(snapshot_container_states)
+    _start_snapshot_containers(snapshot_container_states)
     services_agent_id = _system_services_agent_id(container_name)
     start_result = _exec_in_container(
         container_name,
@@ -432,6 +447,33 @@ def test_workspace_docker_container_is_present_and_stopped(
 
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
+@pytest.mark.timeout(120)
+def test_resumed_workspace_is_the_snapshots_own_even_beside_a_newer_container_under_its_prefix(
+    snapshot_container_states: Mapping[str, DockerContainerState],
+) -> None:
+    """The resume tests act on the workspace the snapshot was resumed with, never on a lookalike.
+
+    Offload reuses a sandbox across batches, so a workspace another test created can be running
+    beside the snapshot's under the same container prefix, and ``docker ps`` lists the newest first.
+    """
+    image_id = _run_docker(
+        ["inspect", "--format", "{{.Image}}", _snapshot_workspace_container_name(snapshot_container_states)]
+    ).strip()
+    lookalike_name = f"{_workspace_container_prefix()}lookalike-{get_short_random_string()}"
+    _run_docker(["run", "--detach", "--name", lookalike_name, "--entrypoint", "sleep", image_id, "58213"])
+    try:
+        resumed_workspace_name = _snapshot_workspace_container_name(snapshot_container_states)
+    finally:
+        _run_docker(["rm", "--force", lookalike_name])
+
+    assert resumed_workspace_name in snapshot_container_states, (
+        f"Took {resumed_workspace_name!r} for the resumed workspace, but the snapshot was resumed with "
+        f"{_format_container_states(snapshot_container_states)}."
+    )
+
+
+@pytest.mark.minds_snapshot_resume
+@pytest.mark.docker
 @pytest.mark.timeout(300)
 def test_resumed_workspace_serves_system_interface(running_workspace: _ResumedWorkspace) -> None:
     """After resume, the workspace's system_interface answers HTTP.
@@ -520,7 +562,9 @@ def test_resumed_workspace_registered_expected_apps(running_workspace: _ResumedW
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(360)
-def test_minds_recovery_restores_dead_system_interface() -> None:
+def test_minds_recovery_restores_dead_system_interface(
+    snapshot_container_states: Mapping[str, DockerContainerState],
+) -> None:
     """A dead system_interface is revived by an agent bounce.
 
     Drives the actual minds recovery building blocks against a deterministic
@@ -534,8 +578,8 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
     Self-contained (it establishes its own broken state) so it is robust to
     running in the same sandbox as the ``running_workspace`` fixture tests.
     """
-    _start_all_minds_containers()
-    container_name = _running_workspace_container_name()
+    container_name = _snapshot_workspace_container_name(snapshot_container_states)
+    _start_snapshot_containers(snapshot_container_states)
     services_agent_id = _system_services_agent_id(container_name)
 
     # Break it: stopping the system-services agent tears down the bootstrap
@@ -650,15 +694,22 @@ def _point_desktop_mngr_at_the_baked_workspace(tmp_path: Path, monkeypatch: pyte
     return baked_mngr_host_dir
 
 
-def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+def _prepare_electron_workspace_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_name: str
+) -> tuple[Path, Path]:
     """Set the minds env + provider overrides and materialize the throwaway DEFAULT_WORKSPACE_TEMPLATE + host config.
 
     Returns ``(default_workspace_template_path, host_config_root)`` for ``create_workspace_via_electron``.
     """
     configure_logging()
-    # Route env-var defaults through monkeypatch so injected MINDS_ROOT_NAME /
-    # MINDS_CLIENT_CONFIG_PATH revert between tests; defaults to the committed
-    # ci-snapshot tier.
+    # A root of its own gives the created workspace a container prefix of its
+    # own, so it is never taken for the snapshot's workspace and can be removed
+    # by that prefix. The client config stays the committed ci-snapshot tier's.
+    monkeypatch.setenv("MINDS_ROOT_NAME", root_name)
+    monkeypatch.setenv(
+        "MINDS_CLIENT_CONFIG_PATH",
+        str(repo_tier_client_config_path(env_name_from_root_name(_DEFAULT_MINDS_ROOT_NAME))),
+    )
     ensure_minds_env_defaults(setenv=monkeypatch.setenv)
     # No Modal creds here, so silence the Electron-spawned mngr's Modal discovery.
     monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
@@ -680,6 +731,13 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
     default_workspace_template_path = resolve_default_workspace_template_path()
     host_config_root = _isolated_host_config_root(tmp_path)
     return default_workspace_template_path, host_config_root
+
+
+def _remove_containers_named_with_prefix(prefix: str) -> None:
+    """Remove every container, running or not, whose name carries ``prefix``."""
+    container_ids = _run_docker(["ps", "--all", "--quiet", "--filter", f"name={prefix}"]).split()
+    if container_ids:
+        _run_docker(["rm", "--force", *container_ids], timeout=120)
 
 
 def _sign_in_and_chat(page: Page | Frame, api_key: str, token: str) -> None:
@@ -728,7 +786,10 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     if not anthropic_api_key:
         pytest.skip("ANTHROPIC_API_KEY is required for the chooser sign-in workspace chat round-trip")
 
-    default_workspace_template_path, host_config_root = _prepare_electron_workspace_inputs(tmp_path, monkeypatch)
+    root_name = f"minds-ci-e2e{get_short_random_string()}"
+    default_workspace_template_path, host_config_root = _prepare_electron_workspace_inputs(
+        tmp_path, monkeypatch, root_name
+    )
 
     workspace_name = f"forever-{get_short_random_string()}"
     token = get_short_random_string()
@@ -750,7 +811,7 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
             on_workspace_ready=lambda page: _sign_in_and_chat(page, anthropic_api_key, token),
         )
     finally:
-        destroy_agent_best_effort(workspace_name, config_project_dir=host_config_root / ".mngr")
+        _remove_containers_named_with_prefix(mngr_prefix_for(root_name))
 
 
 # Backup-update chat gate against a deterministically RUNNING agent

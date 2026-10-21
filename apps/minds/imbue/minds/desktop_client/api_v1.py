@@ -331,7 +331,7 @@ _CREATE_ATTEMPT_DISCARD_HOST_LIST_TIMEOUT_SECONDS: Final[float] = 120.0
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=AgentNotificationRequest, resp=json_response_model(OkResponse))
 def _handle_notification(agent_id: str) -> OkResponse | Response:
-    """Land a chat agent's message in the notification feed (bell, badge, toast, OS banner)."""
+    """Land a workspace agent's message in the notification feed (bell, badge, toast, OS banner)."""
     feed = get_state().notification_feed
     if feed is None:
         return _json_error("Notification feed not configured", 501)
@@ -340,10 +340,16 @@ def _handle_notification(agent_id: str) -> OkResponse | Response:
     body = AgentNotificationRequest.model_validate(request.get_json(silent=True, force=True) or {})
     if not body.message:
         return _json_error("'message' field is required and must be a string", 400)
-    text = f"{body.title}: {body.message}" if body.title else body.message
 
     feed.append_agent_message(
-        build_agent_message_card(AgentId(agent_id), text, get_state().backend_resolver), watched_by=body.watched_by
+        build_agent_message_card(
+            AgentId(agent_id),
+            title=body.title,
+            message=body.message,
+            backend_resolver=get_state().backend_resolver,
+            destination=body.destination,
+        ),
+        watched_by=body.watched_by,
     )
     return OkResponse(ok=True)
 
@@ -1929,8 +1935,7 @@ def _handle_create_operation_status(operation_id: str) -> CreateOperationStatusR
         kind="create",
         status=str(info.status),
         # Human-readable stage caption for the creating page (e.g. "Cloning
-        # repository...", "Failed: ..."), mode-aware. Restores the live caption
-        # the old per-stage SSE status frames carried.
+        # repository...", "Failed: ..."), mode-aware.
         status_text=status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode),
         is_done=info.status == AgentCreateAttemptStatus.DONE,
         agent_id=str(info.agent_id) if info.agent_id is not None else None,
@@ -5107,8 +5112,8 @@ def create_api_v1_blueprint() -> Blueprint:
         methods=["PATCH"],
     )
 
-    # Operation dismissal (replaces /api/destroying/<id>/dismiss). Only a destroy
-    # operation has a dismissable on-disk record; create/restart cards self-clear.
+    # Operation dismissal. Only a destroy operation has a dismissable on-disk
+    # record; create/restart cards self-clear.
     blueprint.add_url_rule(
         "/workspaces/operations/destroy/<operation_id>",
         view_func=_handle_dismiss_destroy_operation,

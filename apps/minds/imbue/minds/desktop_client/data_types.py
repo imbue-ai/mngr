@@ -1,11 +1,18 @@
 """Frozen domain objects for the desktop client."""
 
 from enum import auto
+from typing import Final
+from typing import Self
 
+from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import RootModel
+from pydantic import model_validator
 
 from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.errors import WorkspaceMessageTypeError
+from imbue.minds.primitives import WorkspaceMessageType
 
 
 class RemoteWorkspaceKind(LowerCaseStrEnum):
@@ -150,3 +157,35 @@ class MachineSizeSelection(FrozenModel):
     @property
     def is_empty(self) -> bool:
         return self.cpu_count is None and self.memory_gb is None and self.disk_gb is None
+
+
+# The key a workspace message's type travels under, beside its other fields.
+WORKSPACE_MESSAGE_TYPE_KEY: Final[str] = "type"
+
+
+class NotificationDestination(RootModel[dict[str, str]]):
+    """The workspace message a notification's click delivers into the workspace frame, as the frame receives it.
+
+    Flat on the wire: ``type`` (a message type an app's manifest registers, which the workspace shell routes to
+    that app's page) beside the message's other fields, every one a string. Replaces landing in a chat.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    @model_validator(mode="after")
+    def _check_message_type(self) -> Self:
+        if WORKSPACE_MESSAGE_TYPE_KEY not in self.root:
+            raise WorkspaceMessageTypeError(
+                f"a notification destination names its message type under {WORKSPACE_MESSAGE_TYPE_KEY!r}"
+            )
+        WorkspaceMessageType(self.root[WORKSPACE_MESSAGE_TYPE_KEY])
+        return self
+
+    @property
+    def message_type(self) -> WorkspaceMessageType:
+        return WorkspaceMessageType(self.root[WORKSPACE_MESSAGE_TYPE_KEY])
+
+    @property
+    def fields(self) -> dict[str, str]:
+        """The message's fields other than its type."""
+        return {key: value for key, value in self.root.items() if key != WORKSPACE_MESSAGE_TYPE_KEY}

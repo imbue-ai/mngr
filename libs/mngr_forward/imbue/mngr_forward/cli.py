@@ -26,6 +26,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroupState
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
@@ -499,7 +500,7 @@ def _exit_status_for_escaping_exception(error: BaseException | None) -> int:
 def _log_forward_exit_reason(received_signal_name: str | None, error: BaseException | None) -> None:
     """Say on stderr why the forward is exiting, so the consumer that relays it can name the exit path.
 
-    Logged above the default console level: minds' exit report quotes the last
+    Logged above the default console level: the consumer's exit report quotes the last
     stderr lines, and this is the one that tells a signal-driven graceful stop
     from a crash, and which status the process is about to exit with.
     """
@@ -545,9 +546,7 @@ def _build_hypercorn_config(listen_socket: socket.socket, ca: LocalCertificateAu
             chain_pem, server_key_pem = generate_server_credentials(ca)
             ssl_context = build_server_ssl_context(chain_pem, server_key_pem, ca)
         except (ValueError, ssl.SSLError, OSError) as e:
-            # Naming TLS/HTTP-2 setup explicitly here makes the failure
-            # diagnosable: minds' `wait_for_listening` will otherwise just time
-            # out with no indication that the cert/context was the cause.
+            # Names TLS/HTTP-2 setup as the failing step, which the escaping exception alone does not.
             logger.error("mngr forward TLS/HTTP-2 setup failed (cert generation or SSL context): {}", e)
             raise
         config = InMemoryTLSConfig(ssl_context)
@@ -799,7 +798,7 @@ def _serve_forward_app(
     """Serve the forward app over the already-bound ``listen_socket`` via hypercorn.
 
     ``shutdown_signal_listener`` handles SIGINT/SIGTERM as a graceful stop --
-    the behaviour minds' ``terminate()`` relies on -- and records which signal
+    the behaviour a consumer that stops it with SIGTERM relies on -- and records which signal
     it was. Must run on the main thread so the loop can install those signal
     handlers.
 
@@ -948,25 +947,45 @@ def _install_sighup_handler(
         logger.debug("Could not install SIGHUP handler: {}", e)
         return
 
-    def _watcher() -> None:
-        while True:
-            bounce_event.wait()
-            bounce_event.clear()
-            try:
-                if stream_manager is not None:
-                    stream_manager.bounce_observe()
-                else:
-                    _resnapshot_no_observe(resolver, reverse_handler, opts)
-            except (OSError, RuntimeError) as e:
-                logger.warning("SIGHUP dispatch failed: {}", e)
+    def _dispatch() -> None:
+        if stream_manager is not None:
+            stream_manager.bounce_observe()
+        else:
+            _resnapshot_no_observe(resolver, reverse_handler, opts)
 
     start_mngr_thread(
         concurrency_group=concurrency_group,
-        target=_watcher,
+        target=_watch_for_sighup_bounces,
+        args=(bounce_event, _dispatch, concurrency_group),
         daemon=True,
         name="mngr-forward-sighup-watcher",
         is_checked=False,
     )
+
+
+_SIGHUP_WATCHER_POLL_SECONDS: Final[float] = 0.5
+
+
+def _watch_for_sighup_bounces(
+    bounce_event: threading.Event,
+    dispatch: Callable[[], None],
+    concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Run ``dispatch`` for each SIGHUP that sets ``bounce_event``, until ``concurrency_group`` stops being active.
+
+    The group joins this thread when it exits (when ``forward()`` returns after
+    a graceful SIGTERM/SIGINT stop) and fails if the thread is still alive after
+    its exit timeout, so the wait is bounded and the loop ends once the group
+    has begun exiting.
+    """
+    while concurrency_group.state == ConcurrencyGroupState.ACTIVE:
+        if not bounce_event.wait(timeout=_SIGHUP_WATCHER_POLL_SECONDS):
+            continue
+        bounce_event.clear()
+        try:
+            dispatch()
+        except (OSError, RuntimeError) as e:
+            logger.warning("SIGHUP dispatch failed: {}", e)
 
 
 def _resnapshot_no_observe(

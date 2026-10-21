@@ -33,10 +33,12 @@ from hypercorn.typing import ASGISendCallable
 from hypercorn.typing import Scope
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_forward.cli import ForwardCliOptions
 from imbue.mngr_forward.cli import ServeLoopExceptionReporter
 from imbue.mngr_forward.cli import ShutdownSignalListener
@@ -52,6 +54,7 @@ from imbue.mngr_forward.cli import _log_forward_exit_reason
 from imbue.mngr_forward.cli import _parse_reverse_specs
 from imbue.mngr_forward.cli import _run_serve_loop
 from imbue.mngr_forward.cli import _validate_options
+from imbue.mngr_forward.cli import _watch_for_sighup_bounces
 from imbue.mngr_forward.data_types import ForwardAgentSnapshot
 from imbue.mngr_forward.data_types import ForwardListSnapshot
 from imbue.mngr_forward.data_types import ForwardPortStrategy
@@ -783,3 +786,42 @@ def test_shutdown_signal_listener_records_the_first_signal_and_releases_the_trig
         loop.close()
 
     assert listener.get_received_signal_name() == "SIGTERM"
+
+
+def test_sighup_watcher_lets_its_group_exit_cleanly() -> None:
+    """The watcher ends once its group starts exiting, so a graceful forward stop does not fail the group's exit."""
+    bounce_event = threading.Event()
+    with ConcurrencyGroup(name="sighup-watcher-test", exit_timeout_seconds=2.0) as group:
+        watcher = start_mngr_thread(
+            concurrency_group=group,
+            target=_watch_for_sighup_bounces,
+            args=(bounce_event, lambda: None, group),
+            name="sighup-watcher-test",
+            is_checked=False,
+        )
+
+    assert not watcher.is_alive()
+
+
+def test_sighup_watcher_dispatches_each_bounce_and_survives_a_failed_one() -> None:
+    bounce_event = threading.Event()
+    dispatch_count = 0
+
+    def _dispatch() -> None:
+        nonlocal dispatch_count
+        dispatch_count += 1
+        if dispatch_count == 1:
+            raise OSError("observe could not be restarted")
+
+    with ConcurrencyGroup(name="sighup-watcher-test", exit_timeout_seconds=2.0) as group:
+        start_mngr_thread(
+            concurrency_group=group,
+            target=_watch_for_sighup_bounces,
+            args=(bounce_event, _dispatch, group),
+            name="sighup-watcher-test",
+            is_checked=False,
+        )
+        bounce_event.set()
+        wait_for(lambda: dispatch_count == 1 and not bounce_event.is_set(), timeout=5.0, poll_interval=0.01)
+        bounce_event.set()
+        wait_for(lambda: dispatch_count == 2, timeout=5.0, poll_interval=0.01)

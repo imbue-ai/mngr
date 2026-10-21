@@ -24,8 +24,9 @@ entries of three kinds, each with its own lifecycle:
   into receipts when they are read: watched on arrival (the workspace says a
   page is showing the chat to a focused reader), or read later (the workspace
   reports the chat became watched). Showing their workspace reads nothing by
-  itself. They leave the feed when cleared (which is what opening one does)
-  and drop out when their workspace leaves the list.
+  itself. A message from the workspace's primary agent, which is not a chat,
+  carries no chat and is never read. They leave the feed when cleared (which
+  is what opening one does) and drop out when their workspace leaves the list.
 - System events are appended by the backup producers. Clearing removes them.
 
 Entries are stamped with their event's own timestamp (``requested_at`` on a
@@ -71,6 +72,7 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
@@ -127,14 +129,28 @@ class PendingNotificationCard(FrozenModel):
 
 
 class AgentMessageCard(FrozenModel):
-    """A chat agent's note to the user, as the agent notifications route resolved it."""
+    """A workspace agent's note to the user, as the agent notifications route resolved it."""
 
-    chat_agent_id: str = Field(description="Stable chat id where a click lands; the sender's agent id for older chats")
-    chat_name: str = Field(description="The chat's display name (the entry's headline)")
+    chat_agent_id: str = Field(
+        description=(
+            "Stable chat id where a click lands (the sender's agent id for older chats); '' when the sender is "
+            "not a chat (the workspace's primary agent), so the click only raises the workspace"
+        )
+    )
+    chat_name: str = Field(
+        description=(
+            "The entry's headline: the chat's name for a chat's message, the message's title (else the agent's "
+            "name) for the workspace's primary agent, which is not a chat"
+        )
+    )
     body: str = Field(description="The message text")
-    workspace_agent_id: str = Field(description="The chat's workspace (its primary agent id); '' when unresolvable")
+    workspace_agent_id: str = Field(description="The sender's workspace (its primary agent id); '' when unresolvable")
     workspace_name: str = Field(description="The workspace's display name")
     workspace_accent: str = Field(description="The workspace's ``#rrggbb`` accent")
+    destination: NotificationDestination | None = Field(
+        default=None,
+        description="The workspace message a click posts into the workspace frame instead of focusing the chat",
+    )
 
 
 class SystemEventCard(FrozenModel):
@@ -281,12 +297,14 @@ class NotificationFeed(MutableModel):
         sent_at: datetime | None = None,
         watched_by: tuple[str, ...] = (),
     ) -> UiNotificationEntry:
-        """Record a chat agent's message and nudge the OS for it.
+        """Record a workspace agent's message and nudge the OS for it.
 
         ``watched_by`` names the chat page instances the workspace says are
         showing the chat to a focused reader. A watched message is recorded
         already read and surfaces nowhere, unless the screen is locked: the
-        watcher may be this very machine with the chat left focused.
+        watcher may be this very machine with the chat left focused. A message
+        from the workspace's primary agent, which is not a chat, has no
+        watchers and is only ever cleared.
         """
         is_watched = len(watched_by) > 0 and not self.is_screen_locked()
         entry = UiNotificationEntry(
@@ -303,6 +321,7 @@ class NotificationFeed(MutableModel):
             workspace_name=card.workspace_name,
             workspace_accent=card.workspace_accent,
             service_name="",
+            destination=card.destination,
         )
         if is_watched:
             logger.debug(
@@ -604,9 +623,11 @@ def build_dispatch_request(entry: UiNotificationEntry) -> NotificationRequest:
     """The OS banner for a feed entry: workspace as the title, headline as the subtitle, detail as the body.
 
     The click lands where the feed row's click lands: the review popup for a
-    request, the chat for an agent message, the backups surface for a system
-    event. No workspace agent id means nowhere sensible to land for a
-    workspace-scoped entry, so no url in that case.
+    request, the chat for an agent message (the bare workspace when the
+    message carries a destination, which the entry action delivers once the
+    workspace is up, or comes from an agent that is not a chat), the backups
+    surface for a system event. No workspace agent id means nowhere sensible
+    to land for a workspace-scoped entry, so no url in that case.
     """
     match entry.kind:
         case NotificationKind.PERMISSION_REQUEST:
@@ -617,11 +638,7 @@ def build_dispatch_request(entry: UiNotificationEntry) -> NotificationRequest:
             )
             body = entry.body or _FALLBACK_DISPATCH_MESSAGE
         case NotificationKind.AGENT_MESSAGE:
-            url = (
-                f"/workspace/{entry.workspace_agent_id}?chat={entry.chat_agent_id}"
-                if entry.workspace_agent_id
-                else None
-            )
+            url = _agent_message_url(entry)
             body = entry.body
         case NotificationKind.SYSTEM_EVENT:
             if entry.link_path:
@@ -634,6 +651,14 @@ def build_dispatch_request(entry: UiNotificationEntry) -> NotificationRequest:
         case _ as unreachable:
             assert_never(unreachable)
     return NotificationRequest(title=entry.workspace_name, subtitle=entry.title, body=body, url=url, entry=entry)
+
+
+def _agent_message_url(entry: UiNotificationEntry) -> str | None:
+    if not entry.workspace_agent_id:
+        return None
+    if entry.destination is None and entry.chat_agent_id:
+        return f"/workspace/{entry.workspace_agent_id}?chat={entry.chat_agent_id}"
+    return f"/workspace/{entry.workspace_agent_id}"
 
 
 def _parse_requested_at(value: str) -> datetime | None:
