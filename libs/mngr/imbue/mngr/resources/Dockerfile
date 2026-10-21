@@ -153,7 +153,7 @@ ENV UV_LINK_MODE=copy
 # only cargo-installed tool in the image, so the toolchain has no further
 # purpose. If a future tool needs to be cargo-installed, install it in
 # this same RUN before the cleanup line.
-RUN export OFFLOAD_VERSION=0.9.14 \
+RUN export OFFLOAD_VERSION=0.10.0 \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
     && /root/.cargo/bin/cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload \
