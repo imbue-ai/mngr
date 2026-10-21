@@ -250,7 +250,7 @@ describe("the update modal's verdict line", () => {
     expect(allText(draw())).toContain("Couldn't dismiss this update's outcome.");
   });
 
-  it("points a run that ended short at its own chat rather than offering machinery of its own", () => {
+  it("neither names a run that ended short by its agent's internal name nor offers machinery of its own", () => {
     const { draw } = harness(() => Promise.resolve(jsonResponse({})), {
       ...OUT_OF_DATE_UPDATE,
       verdict: "NEEDS_RECREATION",
