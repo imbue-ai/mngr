@@ -284,7 +284,8 @@ function renderUpdatesGroup(
   const updates = stores.updates;
   const update = updates.forAgent(agentId);
   const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
-  const isScheduled = update.is_scheduled ?? false;
+  // A run under way supersedes the schedule, and a skip or cancel beside it would not stop it.
+  const isScheduled = (update.is_scheduled ?? false) && !updates.isUpdating(agentId);
   // Under auto-update the app arms the schedule itself, so the way
   // to say "not this release" is a skip, which the sweep honors.
   const isSkipOffered = isScheduled && isAutoUpdateEnabled;

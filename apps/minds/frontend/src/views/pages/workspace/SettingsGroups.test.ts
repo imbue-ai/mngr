@@ -1252,6 +1252,27 @@ describe("the Updates settings group's skip question", () => {
   });
 });
 
+describe("the Updates settings group over a run under way", () => {
+  it.each([true, false])(
+    "drops the schedule's controls, which would not stop the run (auto-update %s)",
+    (isAutoUpdateEnabled) => {
+      const { draw } = harness();
+      getAppContext().stores.updates.applyUpdatesMessage({
+        type: "workspace_updates",
+        updates: {
+          [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: true, activity: "RUNNING" },
+        },
+        update_window: "2:00 AM-5:00 AM",
+        is_auto_update_enabled: isAutoUpdateEnabled,
+      });
+
+      const group = updatesGroup(draw(BACKED));
+      expect(byId(group, "ws-update-skip-btn")).toBeUndefined();
+      expect(byId(group, "ws-update-cancel-schedule-btn")).toBeUndefined();
+    },
+  );
+});
+
 describe("the Updates settings group of a stopped workspace", () => {
   it("offers nothing to do until the workspace starts, and claims no version state", () => {
     const { draw } = harness();
