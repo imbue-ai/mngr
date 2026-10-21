@@ -53,11 +53,7 @@ interface UpdateModalState {
 
 /** Where to go when a run ended without landing: its own chat has the details,
  * and whatever it found, the next step is a conversation with it. */
-function checkInLine(update: UiWorkspaceUpdate): string {
-  return update.chat_agent_name
-    ? `Check in with the update agent in the ${update.chat_agent_name} tab inside the workspace.`
-    : "Check in with the update agent in its chat tab inside the workspace.";
-}
+const CHECK_IN_LINE = "Check in with the update agent in the update chat.";
 
 /** What the verdict of a finished run says, in the reader's terms. */
 function verdictMessage(update: UiWorkspaceUpdate): string {
@@ -79,15 +75,15 @@ function verdictMessage(update: UiWorkspaceUpdate): string {
     case "ALREADY_CURRENT":
       return `This workspace is already up to date${update.current_version ? ` on ${displayVersion(update.current_version)}` : ""}. Nothing was changed.`;
     case "NEEDS_RECREATION":
-      return `The update agent found that this update can't be applied to this workspace in place. ${checkInLine(update)}`;
+      return `The update agent found that this update can't be applied to this workspace in place. ${CHECK_IN_LINE}`;
     case "STUCK":
-      return `The update couldn't finish and couldn't clean up after itself. ${checkInLine(update)}`;
+      return `The update couldn't finish and couldn't clean up after itself. ${CHECK_IN_LINE}`;
     case "NEEDS_DECISION":
       return "The update stopped short of applying: it can't keep something you built in this workspace. Decide how to go on in its chat.";
     case "REFUSED":
       return update.in_place_compatible_ref
-        ? `The update didn't run. ${displayVersion(update.in_place_compatible_ref)} can still be applied to this workspace. ${checkInLine(update)}`
-        : `The update didn't run. ${checkInLine(update)}`;
+        ? `The update didn't run. ${displayVersion(update.in_place_compatible_ref)} can still be applied to this workspace. ${CHECK_IN_LINE}`
+        : `The update didn't run. ${CHECK_IN_LINE}`;
     default:
       return "";
   }

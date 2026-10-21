@@ -286,7 +286,7 @@ describe("updateBadgeFor", () => {
     const notice = updateActivityNotice(held);
     expect(notice.message.startsWith("Waiting for you to confirm minds-v0.9.1, which is newer than Imbue Studio.")).toBe(true);
     expect(notice.message).toContain("waiting for your go-ahead");
-    expect(notice.message).toContain("in the update-1 tab");
+    expect(notice.message).toContain("in the update chat");
     expect(notice.isWaiting).toBe(false);
   });
 
@@ -367,16 +367,15 @@ describe("updateActivityNotice", () => {
     expect(notice.message).not.toContain("update-fox");
   });
 
-  it("names the tab to open once the agent is actually there", () => {
-    const notice = updateActivityNotice({ ...OUT_OF_DATE_UPDATE, activity: "RUNNING", chat_agent_name: "update-fox" });
-    expect(notice.isWaiting).toBe(false);
-    expect(notice.message).toContain("Open the update-fox tab");
-  });
-
-  it("still says where to look for a run whose chat it cannot name", () => {
-    const notice = updateActivityNotice({ ...OUT_OF_DATE_UPDATE, activity: "RUNNING" });
-    expect(notice.message).toContain("chat tab");
-  });
+  it.each(["RUNNING", "WAITING", "STALLED"] as const)(
+    "points a %s run at the update chat, never at its agent's internal name, which the chat list does not show",
+    (activity) => {
+      const notice = updateActivityNotice({ ...OUT_OF_DATE_UPDATE, activity, chat_agent_name: "Update-to-v041" });
+      expect(notice.isWaiting).toBe(false);
+      expect(notice.message.toLowerCase()).toContain("the update chat");
+      expect(notice.message).not.toContain("Update-to-v041");
+    },
+  );
 
   it("names the version a run was given an explicit target for", () => {
     const running = updateActivityNotice({

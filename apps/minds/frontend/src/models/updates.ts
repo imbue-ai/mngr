@@ -212,30 +212,24 @@ export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = 
       return STARTING_NOTICE;
     case "RUNNING":
       return {
-        message: update.chat_agent_name
-          ? `${preparing}. Open the ${update.chat_agent_name} tab inside the workspace to see the progress.`
-          : `${preparing}. The update agent's chat tab has the live progress.`,
+        message: `${preparing}. The update chat has the live progress.`,
         isWaiting: false,
       };
     case "WAITING": {
-      const where = update.chat_agent_name
-        ? `in the ${update.chat_agent_name} tab inside the workspace`
-        : "in its chat tab inside the workspace";
       // A recorded hold waits for the reader's go-ahead on the version; the
       // run's own detail line says what it needs, so it leads.
       const detail = update.hold_detail ? `${update.hold_detail} ` : "";
       return {
         message: update.is_hold_recorded
-          ? `${detail}The update agent is waiting for your go-ahead ${where}.`
-          : `The update agent is waiting for you ${where}.`,
+          ? `${detail}The update agent is waiting for your go-ahead in the update chat.`
+          : "The update agent is waiting for you in the update chat.",
         isWaiting: false,
       };
     }
     case "STALLED":
       return {
-        message: update.chat_agent_name
-          ? `The update agent is no longer running and never reported a result. Check in with it in the ${update.chat_agent_name} tab inside the workspace.`
-          : "The update agent is no longer running and never reported a result. Check in with it in its chat tab inside the workspace.",
+        message:
+          "The update agent is no longer running and never reported a result. Check in with it in the update chat.",
         isWaiting: false,
       };
     default:

@@ -4,7 +4,7 @@ Workspace updates now run inside the workspace, so a scheduled update no longer 
 
 - "Update now" creates the update chat inside the workspace in one step, and a workspace that was stopped stays running afterwards. The app no longer starts or stops workspaces for a schedule, and no longer holds an update back while chats are working.
 
-- The update chat is named for its release ("Update to v0.9.0") in its chat list, and its first message carries the release and the app's ceiling, so the update never has to ask the app for its version.
+- The update chat is named for its release ("Update to v0.9.0") in its chat list, and the update window calls it "the update chat" rather than by its internal agent name. Its first message carries the release and the app's ceiling, so the update never has to ask the app for its version.
 
 - A watchdog in the workspace reminds an update agent that sits idle without a result, and closes out one that is gone, releasing its leases and keeping its worker's branch.
 
