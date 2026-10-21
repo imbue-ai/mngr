@@ -358,6 +358,14 @@ describe("the update modal under auto-update", () => {
     schedule_window: "1:00 AM-4:00 AM",
     schedule_zone: "",
   };
+  function armed(isScheduled: boolean): void {
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: { [AGENT]: { ...ARMED, is_scheduled: isScheduled } },
+      update_window: "2:00 AM-5:00 AM",
+      is_auto_update_enabled: true,
+    });
+  }
 
   it("gives the armed window, asks nothing, and offers updating now or skipping the named release", () => {
     const { draw } = harness(() => Promise.resolve(jsonResponse({})), ARMED, true);
@@ -388,13 +396,6 @@ describe("the update modal under auto-update", () => {
 
   it("drops the skip question once the schedule it asks about is gone, so it does not come back unasked", () => {
     const { draw } = harness(() => Promise.resolve(jsonResponse({})), ARMED, true);
-    const armed = (isScheduled: boolean) =>
-      getAppContext().stores.updates.applyUpdatesMessage({
-        type: "workspace_updates",
-        updates: { [AGENT]: { ...ARMED, is_scheduled: isScheduled } },
-        update_window: "2:00 AM-5:00 AM",
-        is_auto_update_enabled: true,
-      });
     press(draw(), "Skip v0.4.1");
     expect(pressableWithLabel(draw(), "Cancel")).toBeDefined();
 
@@ -417,12 +418,7 @@ describe("the update modal under auto-update", () => {
     );
     press(draw(), "Skip v0.4.1");
     press(draw(), "Skip v0.4.1");
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: { [AGENT]: { ...ARMED, is_scheduled: false } },
-      update_window: "2:00 AM-5:00 AM",
-      is_auto_update_enabled: true,
-    });
+    armed(false);
 
     const cancel = pressableWithLabel(draw(), "Cancel");
     expect(cancel).toBeDefined();
