@@ -8,6 +8,6 @@ Workspace updates now run inside the workspace, so a scheduled update no longer 
 
 - A watchdog in the workspace reminds an update agent that sits idle without a result, and closes out one that is gone, releasing its leases and keeping its worker's branch.
 
-- New auto-update setting, off until you choose it, offered once in a prompt. When it is on, Studio schedules every workspace that is a release behind and quiets the out-of-date notices; a workspace it cannot schedule (no cron, too old, unreachable) says why on its row instead, and one that is stopped or does not answer still shows that it is behind. "Skip this update" holds one workspace back until the next release.
+- New auto-update setting, off until you choose it, offered once in a prompt. When it is on, Studio schedules every workspace that is a release behind and quiets the out-of-date notices; a workspace it cannot schedule (no cron, too old, unreachable) says why on its row instead, and one read behind that has since stopped or stopped answering still shows that it is behind. "Skip this update" holds one workspace back until the next release.
 
 - An update that cannot keep something you built now ends waiting for your decision, with a button into its chat. "Updated to X", failed updates, and an update that is still running also get an "Open chat" button, and a workspace with no AI account signed in shows a "Sign in" button.
