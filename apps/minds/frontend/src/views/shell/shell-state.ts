@@ -882,8 +882,7 @@ export class ShellState {
     return this.openUpdateAgentId;
   }
 
-  /** Whether the open update modal was asked for to confirm a skip (the band's
-   * Dismiss on a pending decision). */
+  /** Whether the open update modal was asked for to confirm a skip. */
   isUpdateSkipConfirmRequested(): boolean {
     return this.isUpdateSkipConfirmOpen;
   }
@@ -899,8 +898,8 @@ export class ShellState {
     this.isUpdateSkipConfirmOpen = false;
   }
 
-  /** A run outcome's Dismiss pressed outside the update modal (the band): the
-   * outcome cleared, or the modal when it could not be, which has room to say why. */
+  /** A run outcome's Dismiss pressed outside the update modal: the outcome
+   * cleared, or the modal when it could not be, which has room to say why. */
   dismissUpdateOutcomeOrExplain(anyId: string): void {
     const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
     void this.stores.updates.dismissRunOutcome(agentScoped).then((result) => {

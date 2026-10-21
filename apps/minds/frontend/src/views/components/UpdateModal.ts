@@ -32,7 +32,7 @@ export interface UpdateModalAttrs {
   agentId: string;
   /** Its display name, for copy that names it. */
   workspaceName: string;
-  /** Opens on the skip confirmation (the band's Dismiss on a pending decision). */
+  /** Opens on the skip confirmation. */
   isSkipConfirmOpen?: boolean;
   onClose: () => void;
 }
