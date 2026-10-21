@@ -57,7 +57,7 @@ MINDS_APP_PATH="/tmp/Imbue Studio-260530xxxxx.app/Contents/MacOS/Imbue Studio \
 
 ## Isolation
 
-Each Playwright run sets a unique `MINDS_ROOT_NAME=minds-pw-<runId>` so `paths.js::getMindsRootName()` resolves all state (cookies, venv, mngr host_dir) under `~/.minds-pw-<runId>/`. The user's live `~/.minds/` is never touched. The isolated dir is left on disk for postmortem; clean up manually with `rm -rf ~/.minds-pw-*`.
+A packaged build's bundled `root_name` wins over `MINDS_ROOT_NAME`, so the environment cannot change the tier a Playwright run uses. `MINDS_DATA_HOME=<dir>` moves all three of that tier's roots under `<dir>/<tier>/{state,cache,logs}/`. Without it, a run uses the build's live roots under `~/Library/{Application Support,Caches,Logs}/Imbue Studio/<tier>/`, the same ones a user's launch does. Specs destroy any workspace they create before exiting.
 
 ## Authoring notes
 
@@ -73,7 +73,7 @@ The slack-permission-flow test intercepts `https://slack.com/api/*` calls at the
 - /etc/hosts maps `slack.com` and `files.slack.com` to `127.0.0.1`.
 - A self-signed cert for those hosts is installed in `/Library/Keychains/System.keychain` so the host's `libcurl-darwinssl` trusts it. Brew curl + `CURL_CA_BUNDLE` is used in place of the system curl that ignores `--cacert`.
 - `slack-mock-server.js` listens on `127.0.0.1:8443` (plain HTTP); a sudo'd `socat OPENSSL-LISTEN:443,reuseaddr,fork TCP:localhost:8443` terminates TLS and forwards.
-- `latchkey auth set slack -H "Authorization: Bearer mock-tok"` pre-seeds creds against the bundled latchkey shim with `LATCHKEY_DIRECTORY=$HOME/.minds/latchkey`.
+- `latchkey auth set slack -H "Authorization: Bearer mock-tok"` pre-seeds creds against the bundled latchkey shim with `LATCHKEY_DIRECTORY` set to the state root's `latchkey/` (`~/Library/Application Support/Imbue Studio/<tier>/latchkey`).
 - Teardown reverses /etc/hosts, removes the trusted cert, clears the latchkey slack auth, and kills mock + socat. Runs in an `always()` step so a failed test still cleans the runner.
 
 The agent's latchkey gateway runs on the macOS host (started by Imbue Studio.app), not inside the lima VM — the agent reaches it via reverse-SSH back to `127.0.0.1:1989` and the host's gateway makes the outbound `slack.com` call. All interception lives on the host for that reason.

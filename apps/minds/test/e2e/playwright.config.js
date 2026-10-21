@@ -6,9 +6,7 @@
 // pre-release artifact.
 //
 // Tests rely on the test runner spawning Electron via Playwright's
-// `electron.launch`, which inherits this process's env. We isolate
-// minds's host_dir under a per-run tmp path so a Playwright run
-// neither destroys nor inherits the user's live `~/.minds/` state.
+// `electron.launch`, which inherits this process's env.
 
 const path = require('path');
 
@@ -18,7 +16,7 @@ module.exports = {
   // mngr-forward port grabbing don't tolerate parallel instances.
   workers: 1,
   fullyParallel: false,
-  // First-launch on a fresh isolated host_dir runs uv sync which can take
+  // First launch on a fresh state root runs uv sync which can take
   // 30-60s before the chat panel is ready; lima boot to workspace ready
   // adds another 2-4 min.
   timeout: 10 * 60 * 1000,
