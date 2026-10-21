@@ -244,19 +244,21 @@ export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = 
 }
 
 /** The one situation the update modal explains, ordered by what the reader
- * would act on first. A run's outcome outranks the offer: the outcome is
- * settled (in its chat, or by dismissing it) before another run is offered. A
- * run that landed this app's version outranks it too, since detection reads
- * the machine as behind for a while after the apply; one that landed an older
- * version ranks below it, so a newer release is not hidden behind its success. */
+ * would act on first. A run in flight and a run's outcome come first, as on
+ * the row's badge, even over a machine that cannot be updated in place: the
+ * outcome is settled (in its chat, or by dismissing it) before anything else is
+ * said. A run that landed this app's version outranks the offer too, since
+ * detection reads the machine as behind for a while after the apply; one that
+ * landed an older version ranks below it, so a newer release is not hidden
+ * behind its success. */
 export type UpdateModalSituation =
-  | "needs-recreation"
-  | "app-behind"
   | "in-progress"
   | "not-started"
   | "decision-pending"
   | "failed"
   | "updated-with-note"
+  | "needs-recreation"
+  | "app-behind"
   | "skipped"
   | "needs-sign-in"
   | "scheduled"
@@ -266,14 +268,14 @@ export type UpdateModalSituation =
   | "up-to-date";
 
 export function updateModalSituation(update: UiWorkspaceUpdate, isUpdating: boolean): UpdateModalSituation {
-  if (isRecreationRequired(update)) return "needs-recreation";
-  if (update.availability === "APP_BEHIND") return "app-behind";
   if (isUpdating) return "in-progress";
   const outcome = updateRunOutcome(update);
   if (outcome === "not-started") return "not-started";
   if (outcome === "decision-pending") return "decision-pending";
   if (outcome === "failed") return "failed";
   if (outcome === "needs-attention") return "updated-with-note";
+  if (isRecreationRequired(update)) return "needs-recreation";
+  if (update.availability === "APP_BEHIND") return "app-behind";
   const landed = update.success_note_version ?? "";
   if (update.verdict === "UPDATED" && landed !== "" && landed === update.supported_version) return "updated";
   if (isUpdateSkipped(update)) return "skipped";

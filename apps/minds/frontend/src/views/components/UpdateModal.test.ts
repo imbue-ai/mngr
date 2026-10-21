@@ -302,6 +302,33 @@ describe("the update modal over a machine too old to update in place", () => {
   });
 });
 
+// The row badges the outcome over either condition, so the modal it opens must settle it.
+describe("the update modal over a run's outcome on a machine it cannot update in place", () => {
+  it.each([
+    [
+      "ahead of the app, after a run that landed with a note",
+      {
+        ...OUT_OF_DATE_UPDATE,
+        availability: "APP_BEHIND",
+        verdict: "UPDATED_WITH_REBUILD_ITEMS",
+        verdict_detail: "Rebuild the dashboard widget.",
+        chat_agent_id: "agent-lead-6",
+      },
+      "Rebuild the dashboard widget.",
+    ],
+    [
+      "too old, after a run that failed",
+      { ...OUT_OF_DATE_UPDATE, availability: "NEEDS_RECREATION", verdict: "STUCK", chat_agent_id: "agent-lead-6" },
+      "The update couldn't finish",
+    ],
+  ] as const)("shows the outcome, its chat, and Dismiss on a machine %s", (_case, update, outcomeText) => {
+    const root = harness(() => Promise.resolve(jsonResponse({})), update as UiWorkspaceUpdate).draw();
+
+    expect(allText(root)).toContain(outcomeText);
+    expect(buttonLabels(root)).toEqual(["Open chat", "Dismiss"]);
+  });
+});
+
 describe("the update modal over a machine behind only by a patch", () => {
   const PATCH: UiWorkspaceUpdate = {
     ...OUT_OF_DATE_UPDATE,
