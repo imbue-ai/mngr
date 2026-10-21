@@ -235,7 +235,8 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
                     # best-effort Enter and there is nothing to confirm against.
                     logger.debug("Agent type supplies no submission evidence; Enter sent best-effort")
                 elif policy == SubmissionConfirmationPolicy.STRICT:
-                    # Not delivered: raise (never reaches the post-submit dialog check below).
+                    # Unconfirmed, not undelivered -- the text may already be with the agent. Raise
+                    # (never reaches the post-submit dialog check below).
                     raise_for_unconfirmed_submission(
                         agent=self,
                         tmux_target=target_arg,

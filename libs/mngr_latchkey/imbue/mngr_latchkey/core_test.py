@@ -18,6 +18,7 @@ from loguru import logger
 from paramiko.ssh_exception import NoValidConnectionsError
 from pydantic import Field
 from pydantic import PrivateAttr
+from pyinfra.api.exceptions import ConnectError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
@@ -2360,6 +2361,21 @@ def _raised_from(error: BaseException, cause: BaseException) -> BaseException:
     return error
 
 
+def _raised_while_handling(error: BaseException, handled: BaseException) -> BaseException:
+    """Return ``error`` chained as if it had been ``raise``d inside the ``except`` block that caught ``handled``."""
+    error.__context__ = handled
+    return error
+
+
+def _outer_host_auth_error(paramiko_error: paramiko.AuthenticationException) -> BaseException:
+    """The shape the outer host raises for a paramiko auth failure: pyinfra wraps it implicitly, the host explicitly."""
+    message = f"Authentication error (username=root, key=/tmp/id_ed25519) ({paramiko_error})"
+    connect_error = _raised_while_handling(ConnectError(message), paramiko_error)
+    return _raised_from(
+        HostAuthenticationError(f"Authentication failed when connecting to host: {message}"), connect_error
+    )
+
+
 @pytest.mark.parametrize(
     ("error", "is_transient"),
     [
@@ -2397,7 +2413,33 @@ def _raised_from(error: BaseException, cause: BaseException) -> BaseException:
             True,
             id="wrapped-no-valid-connections",
         ),
+        pytest.param(
+            _outer_host_auth_error(paramiko.AuthenticationException("Authentication timeout.")),
+            True,
+            id="host-authentication-error-from-auth-timeout",
+        ),
         pytest.param(HostAuthenticationError("Authentication failed"), False, id="host-authentication-error"),
+        pytest.param(
+            _outer_host_auth_error(paramiko.AuthenticationException("Authentication failed.")),
+            False,
+            id="host-authentication-error-from-rejected-key",
+        ),
+        pytest.param(
+            _outer_host_auth_error(paramiko.BadAuthenticationType("Bad authentication type", ["password"])),
+            False,
+            id="host-authentication-error-from-bad-auth-type",
+        ),
+        pytest.param(
+            _raised_from(
+                HostAuthenticationError("Authentication failed"),
+                _raised_from(
+                    ConnectError("Authentication error (username=root) (Authentication timeout.)"),
+                    paramiko.AuthenticationException("Authentication timeout."),
+                ),
+            ),
+            True,
+            id="host-authentication-error-from-explicitly-chained-auth-timeout",
+        ),
         pytest.param(SSHTunnelError("No SSH key file", SSHTunnelPhase.LOCAL_SETUP), False, id="tunnel-local-setup"),
         pytest.param(RemoteGatewayError("Malformed permissions file"), False, id="remote-gateway-error-alone"),
         pytest.param(HostNotFoundError(ProviderInstanceName("p"), HostId()), False, id="host-not-found"),

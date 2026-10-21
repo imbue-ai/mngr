@@ -5,9 +5,10 @@ and the workspace is on an earlier minor release; PATCH_AVAILABLE when it sorts 
 within the same minor release, which is never prompted for; NEEDS_RECREATION when the
 workspace's own version sorts below the hardcoded in-place cutoff, whatever the app is
 pinned to; anything else is UNKNOWN, never reported as behind but still dispatchable (the agent reads
-the workspace's own upstream). Git is read before the create-time label because the
-label never moves after an update. The git read is an ``mngr exec``, so it only
-ever runs in the background sweep, never on a render path.
+the workspace's own upstream). The version comes from the workspace's own git. The
+create-time label never moves after an update, so it is used only when it sorts below
+the in-place cutoff: no update can have taken such a workspace past it. The git read
+is an ``mngr exec``, so it only ever runs in the background sweep, never on a render path.
 """
 
 import threading
@@ -140,22 +141,6 @@ def topology_signature(host_state_by_agent: Mapping[AgentId, HostState | None]) 
     )
 
 
-class DetectedVersion(FrozenModel):
-    """The version read for one workspace, and which source it came from."""
-
-    version_ref: str = Field(default="", description="The ref read, '' when neither source produced one")
-    is_from_label: bool = Field(default=False, description="Whether it came from the create-time label")
-
-
-def resolve_workspace_version(*, git_version: str | None, label_version: str | None) -> DetectedVersion:
-    """Pick the version to compare, git over the create-time label: the label never moves after an update."""
-    if git_version:
-        return DetectedVersion(version_ref=git_version, is_from_label=False)
-    if label_version:
-        return DetectedVersion(version_ref=label_version, is_from_label=True)
-    return DetectedVersion()
-
-
 class _DetectionFacts(FrozenModel):
     """The detection-sweep half of a workspace's update state."""
 
@@ -163,7 +148,6 @@ class _DetectionFacts(FrozenModel):
     unknown_reason: UpdateUnknownReason | None = Field(default=None)
     current_version: str = Field(default="")
     supported_version: str = Field(default="")
-    is_version_from_label: bool = Field(default=False)
     is_readable: bool = Field(default=False)
 
 
@@ -291,7 +275,6 @@ def _compose(detected: _DetectionFacts, run: _RunFacts, schedule_facts: _Schedul
         unknown_reason=detected.unknown_reason,
         current_version=detected.current_version,
         supported_version=detected.supported_version,
-        is_version_from_label=detected.is_version_from_label,
         is_workspace_readable=detected.is_readable,
         activity=run.activity,
         run_started_at=run.record.started_at,
@@ -365,7 +348,6 @@ class WorkspaceUpdateStateStore(MutableModel):
         detection: UpdateDetection,
         current_version: str,
         supported_version: str,
-        is_version_from_label: bool,
         is_readable: bool,
     ) -> bool:
         """Store one workspace's detection result; return whether it changed.
@@ -378,7 +360,6 @@ class WorkspaceUpdateStateStore(MutableModel):
             unknown_reason=detection.unknown_reason,
             current_version=current_version,
             supported_version=supported_version,
-            is_version_from_label=is_version_from_label,
             is_readable=is_readable,
         )
         with self._lock:
@@ -845,15 +826,12 @@ def should_auto_arm(
 ) -> bool:
     """Whether the sweep arms this workspace's update for the user.
 
-    Only a workspace positively read a minor release behind (by git, not its create-time label,
-    which a stopped or unreadable workspace falls back to), with nothing armed or running, no
+    Only a workspace positively read a minor release behind, with nothing armed or running, no
     decision pending, and this release not skipped. A run that failed after its lead's
     best effort, or stalled without a verdict, is not re-armed for the same release: a retry
     needs something to have changed -- a newer ceiling, or the user dismissing the failure.
     """
-    if not policy.is_enabled or not state.is_update_offered or state.is_version_from_label:
-        return False
-    if state.is_scheduled or state.is_run_in_flight:
+    if not policy.is_enabled or not state.is_update_offered or state.is_scheduled or state.is_run_in_flight:
         return False
     if state.is_decision_pending or policy.skipped_target_ref == ceiling_ref:
         return False
@@ -871,13 +849,18 @@ def should_auto_arm(
 class WorkspaceUpdateDetector(MutableModel):
     """Background sweep that keeps every workspace's detection slice current.
 
-    One pass per interval plus on-demand passes; a workspace never read this session falls back to its create-time label.
+    One pass per interval plus on-demand passes. A workspace never read this session is
+    UNKNOWN, unless its create-time label is below the in-place cutoff.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     store: WorkspaceUpdateStateStore = Field(frozen=True, description="Where detection results are published")
-    backend_resolver: BackendResolverInterface = Field(frozen=True, description="Source of workspaces and labels")
+    backend_resolver: BackendResolverInterface = Field(
+        frozen=True,
+        description="Source of the active workspaces, their host states, the host each one is on, and their "
+        "create-time labels",
+    )
     mngr_caller: MngrCaller = Field(frozen=True, description="Runs the in-workspace git read")
     concurrency_group: ConcurrencyGroup = Field(
         frozen=True, description="Parent group for the sweep strand and for each sweep's concurrent reads"
@@ -1008,8 +991,8 @@ class WorkspaceUpdateDetector(MutableModel):
 
     def _detect_one(self, agent_id: AgentId, host_state: HostState | None, supported_version: str) -> None:
         label_version = self.backend_resolver.get_agent_label(agent_id, ORIGINAL_MINDS_VERSION_LABEL)
-        git_version = self._read_git_version(agent_id, host_state)
-        detected = resolve_workspace_version(git_version=git_version, label_version=label_version)
+        below_floor_label_version = label_version if is_below_in_place_update_floor(label_version) else None
+        version = self._read_git_version(agent_id, host_state) or below_floor_label_version
         # The run record and the schedule file ride the sweep: they are how a
         # scheduled or undispatched run, or a verdict written while the app was
         # closed, reaches the row. An unreadable host cannot answer ``--no-start``,
@@ -1019,10 +1002,9 @@ class WorkspaceUpdateDetector(MutableModel):
         facts = self.read_update_facts(agent_id, self.store.get(agent_id).needs_sign_in) if is_host_readable else None
         self.store.record_detection(
             agent_id,
-            detection=derive_update_detection(detected.version_ref or None, supported_version or None),
-            current_version=detected.version_ref,
+            detection=derive_update_detection(version, supported_version or None),
+            current_version=version or "",
             supported_version=supported_version,
-            is_version_from_label=detected.is_from_label,
             is_readable=facts is not None,
         )
         if not is_host_readable:
@@ -1044,12 +1026,11 @@ class WorkspaceUpdateDetector(MutableModel):
     def _read_git_version(self, agent_id: AgentId, host_state: HostState | None) -> str | None:
         """The workspace's own ``minds-v*`` tag, from the cache or a fresh exec.
 
-        A read this session outranks the create-time label for as long as the
-        machine is known: its version moves only when an update lands inside it,
-        which invalidates the cache, so neither a stretch of unreadability (a
-        stop, a start the app itself announced, a discovery gap) nor a read that
-        failed (an exec timeout under slow discovery) is evidence that the last
-        read is wrong. The label answers only for a machine never read at all.
+        A read this session holds for as long as the machine is known: its
+        version moves only when an update lands inside it, which invalidates the
+        cache, so neither a stretch of unreadability (a stop, a start the app
+        itself announced, a discovery gap) nor a read that failed (an exec
+        timeout under slow discovery) is evidence that the last read is wrong.
 
         A machine that was unreadable is re-read as soon as it is readable again,
         whatever the cache's age. Only a successful read is cached: an empty read

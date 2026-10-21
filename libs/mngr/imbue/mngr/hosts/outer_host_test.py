@@ -11,6 +11,8 @@ from typing import Any
 from typing import cast
 
 import pytest
+from paramiko import AuthenticationException
+from paramiko import BadAuthenticationType
 from paramiko import ChannelException
 from paramiko import SFTPAttributes
 from paramiko import SFTPClient
@@ -37,6 +39,7 @@ from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
+from imbue.mngr.hosts.outer_host import is_ssh_auth_timeout
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import is_unreachable_peer_connect_error
 from imbue.mngr.interfaces.data_types import FileType
@@ -856,6 +859,60 @@ def test_is_unreachable_peer_connect_error(exception: OSError, expected: bool) -
     (``is_dead_ssh_connection_error``) and must not match.
     """
     assert is_unreachable_peer_connect_error(exception) is expected
+
+
+def _connect_error_raised_while_handling(handled: BaseException) -> ConnectError:
+    """A pyinfra ``ConnectError`` chained the way pyinfra raises it: inside the ``except`` block that caught ``handled``."""
+    error = ConnectError(f"Authentication error (username=root) ({handled})")
+    error.__context__ = handled
+    return error
+
+
+def _connect_error_raised_from_none(handled: BaseException) -> ConnectError:
+    """Like ``_connect_error_raised_while_handling``, but with the context suppressed as ``raise ... from None`` does."""
+    error = _connect_error_raised_while_handling(handled)
+    error.__suppress_context__ = True
+    return error
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected"),
+    [
+        pytest.param(AuthenticationException("Authentication timeout."), True, id="bare-timeout"),
+        pytest.param(
+            _connect_error_raised_while_handling(AuthenticationException("Authentication timeout.")),
+            True,
+            id="timeout-behind-implicit-context",
+        ),
+        pytest.param(AuthenticationException("Authentication failed."), False, id="bare-rejection"),
+        pytest.param(
+            _connect_error_raised_while_handling(AuthenticationException("Authentication failed.")),
+            False,
+            id="rejection-behind-implicit-context",
+        ),
+        pytest.param(
+            _connect_error_raised_while_handling(BadAuthenticationType("Bad authentication type", ["password"])),
+            False,
+            id="bad-auth-type",
+        ),
+        pytest.param(
+            _connect_error_raised_from_none(AuthenticationException("Authentication timeout.")),
+            False,
+            id="timeout-behind-suppressed-context",
+        ),
+        pytest.param(
+            ConnectError("Authentication error (username=root) (Authentication timeout.)"), False, id="text-only"
+        ),
+    ],
+)
+def test_is_ssh_auth_timeout(exception: BaseException, expected: bool) -> None:
+    """Only paramiko's own timeout exception counts, found through the links Python's traceback would show.
+
+    A refusal is the same paramiko class with a different message, a subclass is
+    always a refusal, and a message that merely mentions the timeout without
+    paramiko's exception behind it is not evidence of one.
+    """
+    assert is_ssh_auth_timeout(exception) is expected
 
 
 class _FakeSftpSetupChannel:

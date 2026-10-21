@@ -8,7 +8,6 @@ import {
   isRunInFlight,
   isUpdateDispatchable,
   isUpdateOffered,
-  labelVersionNote,
   rowUpdateShortcutFor,
   scheduleSkipLine,
   scheduledLine,
@@ -408,20 +407,6 @@ describe("updateActivityNotice", () => {
   });
 });
 
-describe("labelVersionNote", () => {
-  // A running machine that has never updated itself also falls back to the
-  // label, and there the label is exactly its version.
-  it("offers to start only a machine that is actually stopped", () => {
-    expect(labelVersionNote("STOPPED")).toContain("start it");
-  });
-
-  it("says nothing over a running machine, whose label is the answer", () => {
-    for (const liveness of ["RUNNING", "STARTING", "STOPPING", "UNKNOWN", "", undefined]) {
-      expect(labelVersionNote(liveness)).toBeNull();
-    }
-  });
-});
-
 describe("updateBadgeFor before the backend has read a machine", () => {
   // The map is empty for the first seconds after launch; badging "Version
   // unknown" there states a verdict nobody reached.
@@ -492,12 +477,6 @@ describe("auto-update's quiet surfaces", () => {
     const skipped = { ...OUT_OF_DATE_UPDATE, is_update_skipped: true };
     expect(updateBadgeFor(skipped, false, true)?.state).toBe("out-of-date");
     expect(standingUpdateNotice(skipped, false, true)).toBe("out-of-date");
-  });
-
-  it("still says a machine read behind only from its label is behind, since the sweep cannot arm it", () => {
-    const fromLabel = { ...OUT_OF_DATE_UPDATE, is_version_from_label: true };
-    expect(updateBadgeFor(fromLabel, false, true)?.state).toBe("out-of-date");
-    expect(standingUpdateNotice(fromLabel, false, true)).toBe("out-of-date");
   });
 
   it("still says a machine read behind earlier and stopped since is behind, since the sweep cannot arm it", () => {

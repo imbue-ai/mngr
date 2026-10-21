@@ -13,7 +13,6 @@ const UNKNOWN_UPDATE: UiWorkspaceUpdate = {
   availability: "UNKNOWN",
   current_version: "",
   supported_version: "",
-  is_version_from_label: false,
   activity: "IDLE",
 };
 
@@ -49,7 +48,6 @@ export function isHandledByAutoUpdate(update: UiWorkspaceUpdate, isAutoUpdateEna
   return (
     isAutoUpdateEnabled &&
     isUpdateOffered(update) &&
-    !update.is_version_from_label &&
     (update.is_workspace_readable ?? false) &&
     !(update.needs_sign_in ?? false) &&
     !(update.is_update_skipped ?? false) &&
@@ -95,14 +93,6 @@ export function isUpdateDispatchable(update: UiWorkspaceUpdate): boolean {
  * question, which has a state of its own. */
 export function isFailureVerdict(verdict: UpdateVerdict | null | undefined): boolean {
   return verdict === "STUCK" || verdict === "REFUSED" || verdict === "NEEDS_RECREATION";
-}
-
-/** What to say about a version read from the machine's create-time label, or
- * null. Only a stopped machine earns a note: a running one was asked and its
- * label is the truth; a stopped one could not be asked, so its label may be stale. */
-export function labelVersionNote(liveness: string | undefined): string | null {
-  if (liveness !== "STOPPED") return null;
-  return "Read from when this workspace was created — start it to see the version it's actually running.";
 }
 
 /** A template ref as the reader sees it: `minds-v0.8.2` -> `v0.8.2`; any other ref as is. */

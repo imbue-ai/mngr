@@ -41,7 +41,6 @@ from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDet
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.desktop_client.workspace_update_state import derive_update_detection
 from imbue.minds.desktop_client.workspace_update_state import is_below_in_place_update_floor
-from imbue.minds.desktop_client.workspace_update_state import resolve_workspace_version
 from imbue.minds.desktop_client.workspace_update_state import should_auto_arm
 from imbue.minds.desktop_client.workspace_update_state import topology_signature
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -99,7 +98,6 @@ def _state_with(availability: UpdateAvailability) -> UiWorkspaceUpdate:
         availability=availability,
         current_version="",
         supported_version="",
-        is_version_from_label=False,
         activity=UpdateActivity.IDLE,
     )
 
@@ -179,26 +177,6 @@ def test_a_positive_verdict_carries_no_unknown_reason() -> None:
         assert derive_update_detection(workspace_ref, "minds-v0.4.1").unknown_reason is None
 
 
-@pytest.mark.witnesses("workspace-updates.updated-workspace-not-re-offered")
-def test_git_wins_over_the_create_time_label() -> None:
-    """A workspace that already updated itself must not be badged off its birth version."""
-    detected = resolve_workspace_version(git_version="minds-v0.4.1", label_version="minds-v0.3.1")
-    assert detected.version_ref == "minds-v0.4.1"
-    assert detected.is_from_label is False
-
-
-def test_the_label_answers_for_a_workspace_git_cannot_be_read_in() -> None:
-    """A stopped workspace still has the one version fact knowable offline."""
-    detected = resolve_workspace_version(git_version=None, label_version="minds-v0.3.1")
-    assert detected.version_ref == "minds-v0.3.1"
-    assert detected.is_from_label is True
-
-
-def test_a_workspace_with_neither_source_reports_nothing() -> None:
-    detected = resolve_workspace_version(git_version=None, label_version=None)
-    assert detected.version_ref == ""
-
-
 def _out_of_date_store(tmp_path: Path) -> tuple[WorkspaceUpdateStateStore, AgentId]:
     store = make_update_state_store(tmp_path)
     agent_id = AgentId.generate()
@@ -207,7 +185,6 @@ def _out_of_date_store(tmp_path: Path) -> tuple[WorkspaceUpdateStateStore, Agent
         detection=UpdateDetection(availability=UpdateAvailability.OUT_OF_DATE),
         current_version="minds-v0.3.12",
         supported_version="minds-v0.4.1",
-        is_version_from_label=False,
         is_readable=True,
     )
     return store, agent_id
@@ -233,7 +210,6 @@ def test_a_detection_sweep_landing_mid_run_does_not_reset_the_activity(tmp_path:
         detection=UpdateDetection(availability=UpdateAvailability.OUT_OF_DATE),
         current_version="minds-v0.3.12",
         supported_version="minds-v0.4.1",
-        is_version_from_label=False,
         is_readable=True,
     )
 
@@ -366,7 +342,7 @@ class _WorkspacesResolver(StaticBackendResolver):
         return self.host_state_by_agent
 
     def get_agent_label(self, agent_id: AgentId, label_key: str) -> str | None:
-        if label_key != ORIGINAL_MINDS_VERSION_LABEL:
+        if label_key != "original_minds_version":
             return None
         return self.label_by_agent.get(str(agent_id))
 
@@ -375,10 +351,12 @@ class _VersionReadingMngrCaller(MngrCaller):
     """Answers the one-exec version read per agent (marker line, then tag), recording who was asked.
 
     ``barrier`` (when set) is waited on inside every call, so a test can assert the reads overlap.
+    An agent in ``failing_agent_ids`` gets the failed exec a stale address produces.
     """
 
     version_by_agent: Mapping[str, str] = Field(default_factory=dict)
     marker_subject_by_agent: Mapping[str, str] = Field(default_factory=dict)
+    failing_agent_ids: frozenset[str] = Field(default=frozenset())
     barrier: threading.Barrier | None = Field(default=None)
     _read_agent_ids: list[str] = PrivateAttr(default_factory=list)
     _read_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -397,6 +375,8 @@ class _VersionReadingMngrCaller(MngrCaller):
             self._read_agent_ids.append(agent_id_str)
         if self.barrier is not None:
             self.barrier.wait(timeout=10.0)
+        if agent_id_str in self.failing_agent_ids:
+            return MngrCallResult(returncode=1, stderr="Agent lookup failed; discovery returned: no hosts")
         # Neither line is a failure of the command: ``git log`` prints nothing for
         # no marker, and the read discards ``describe``'s exit code.
         lines = [self.marker_subject_by_agent.get(agent_id_str), self.version_by_agent.get(agent_id_str)]
@@ -445,26 +425,64 @@ def _detector(
     )
 
 
-def test_a_stopped_workspace_is_read_from_its_label_without_an_exec(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+@pytest.mark.witnesses("workspace-updates.unread-workspace-is-unknown")
+@pytest.mark.parametrize(
+    ("host_state", "is_exec_failing", "is_exec_expected"),
+    [
+        # --no-start: a stopped machine cannot answer, so it is not asked.
+        (HostState.STOPPED, False, False),
+        (HostState.RUNNING, True, True),
+        (HostState.RUNNING, False, True),
+    ],
+    ids=["stopped", "exec-failed", "nothing-to-read"],
+)
+def test_a_workspace_whose_git_has_not_answered_is_unknown_from_a_label_at_the_floor_or_above(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    host_state: HostState,
+    is_exec_failing: bool,
+    is_exec_expected: bool,
 ) -> None:
-    """The read passes --no-start, so a stopped machine cannot answer it."""
+    """Its label names an out-of-date release, but only the one it was created at, so it must not read as out of date."""
     agent_id = AgentId.generate()
     resolver = _WorkspacesResolver(
         url_by_agent_and_service={},
-        host_state_by_agent={agent_id: HostState.STOPPED},
-        label_by_agent={str(agent_id): "minds-v0.3.12"},
+        host_state_by_agent={agent_id: host_state},
+        label_by_agent={str(agent_id): "minds-v0.3.10"},
     )
-    caller = _VersionReadingMngrCaller()
+    caller = _VersionReadingMngrCaller(
+        failing_agent_ids=frozenset({str(agent_id)}) if is_exec_failing else frozenset()
+    )
     detector = _detector(tmp_path, resolver, caller, root_concurrency_group)
 
     detector.run_pass()
 
-    assert caller.read_agent_ids == []
+    assert caller.read_agent_ids == ([str(agent_id)] if is_exec_expected else [])
     state = detector.store.get(agent_id)
-    assert state.current_version == "minds-v0.3.12"
-    assert state.is_version_from_label is True
-    assert state.availability is UpdateAvailability.OUT_OF_DATE
+    assert state.current_version == ""
+    assert state.availability is UpdateAvailability.UNKNOWN
+    assert state.unknown_reason is UpdateUnknownReason.NO_MACHINE_VERSION
+
+
+@pytest.mark.witnesses("workspace-updates.unread-below-cutoff-needs-recreation")
+def test_a_workspace_whose_git_has_not_answered_needs_recreation_from_a_label_below_the_floor(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """No update can have taken it past the floor, so its label is still its version."""
+    agent_id = AgentId.generate()
+    resolver = _WorkspacesResolver(
+        url_by_agent_and_service={},
+        host_state_by_agent={agent_id: HostState.RUNNING},
+        label_by_agent={str(agent_id): "minds-v0.3.5"},
+    )
+    caller = _VersionReadingMngrCaller(failing_agent_ids=frozenset({str(agent_id)}))
+    detector = _detector(tmp_path, resolver, caller, root_concurrency_group)
+
+    detector.run_pass()
+
+    state = detector.store.get(agent_id)
+    assert state.current_version == "minds-v0.3.5"
+    assert state.availability is UpdateAvailability.NEEDS_RECREATION
 
 
 def test_an_unknown_host_state_is_still_read(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
@@ -480,6 +498,7 @@ def test_an_unknown_host_state_is_still_read(tmp_path: Path, root_concurrency_gr
     assert detector.store.get(agent_id).current_version == "minds-v0.3.12"
 
 
+@pytest.mark.witnesses("workspace-updates.updated-workspace-not-re-offered")
 def test_a_tagless_machine_reads_the_update_it_already_applied(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
@@ -499,28 +518,7 @@ def test_a_tagless_machine_reads_the_update_it_already_applied(
 
     state = detector.store.get(agent_id)
     assert state.current_version == "minds-v0.4.1"
-    assert state.is_version_from_label is False
     assert state.availability is UpdateAvailability.UP_TO_DATE
-
-
-def test_a_machine_with_neither_marker_nor_tag_still_falls_back_to_its_label(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """Both reads coming up empty is the one case the create-time label answers."""
-    agent_id = AgentId.generate()
-    resolver = _WorkspacesResolver(
-        url_by_agent_and_service={},
-        host_state_by_agent={agent_id: HostState.RUNNING},
-        label_by_agent={str(agent_id): "minds-v0.3.17"},
-    )
-    detector = _detector(tmp_path, resolver, _VersionReadingMngrCaller(), root_concurrency_group)
-
-    detector.run_pass()
-
-    state = detector.store.get(agent_id)
-    assert state.current_version == "minds-v0.3.17"
-    assert state.is_version_from_label is True
-    assert state.availability is UpdateAvailability.OUT_OF_DATE
 
 
 def test_a_second_sweep_reuses_the_version_it_already_read(
@@ -541,7 +539,7 @@ def test_a_second_sweep_reuses_the_version_it_already_read(
 
 
 def test_a_machine_that_just_started_is_re_read(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
-    """Its git only became readable now; the label it fell back to is its birth version."""
+    """Its git only became readable now."""
     agent_id = AgentId.generate()
     resolver = _WorkspacesResolver(
         url_by_agent_and_service={},
@@ -564,11 +562,11 @@ def test_a_machine_that_just_started_is_re_read(tmp_path: Path, root_concurrency
 def test_a_machine_that_became_unreadable_keeps_the_version_it_was_read_at(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """Its git cannot move while nothing runs in it, and the label is only its birth version.
+    """Its git cannot move while nothing runs in it.
 
     Pressing Update on a running machine announces it as STARTING before the
-    no-op start returns; the badge must not drop to the create-time version for
-    the length of that announcement.
+    no-op start returns; the badge must not drop to unknown for the length of
+    that announcement.
     """
     agent_id = AgentId.generate()
     resolver = _WorkspacesResolver(
@@ -586,7 +584,6 @@ def test_a_machine_that_became_unreadable_keeps_the_version_it_was_read_at(
 
     state = detector.store.get(agent_id)
     assert state.current_version == "minds-v0.4.1"
-    assert state.is_version_from_label is False
     # Its version still stands, but a sweep that cannot read it cannot arm it under auto-update either.
     assert state.is_workspace_readable is False
     assert caller.read_agent_ids == [str(agent_id)]
@@ -632,7 +629,7 @@ def test_a_machine_readable_again_is_re_read_whatever_the_cache_s_age(
 def test_a_read_that_failed_keeps_the_version_already_read(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """An exec that timed out under slow discovery says nothing about the version; the label would say less."""
+    """An exec that timed out under slow discovery says nothing about the version."""
     agent_id = AgentId.generate()
     resolver = _WorkspacesResolver(
         url_by_agent_and_service={},
@@ -649,7 +646,6 @@ def test_a_read_that_failed_keeps_the_version_already_read(
     state = detector.store.get(agent_id)
     assert caller.read_agent_ids == [str(agent_id), str(agent_id)]
     assert state.current_version == "minds-v0.4.1"
-    assert state.is_version_from_label is False
 
 
 def test_a_landed_update_invalidates_the_cached_version(
@@ -1307,7 +1303,6 @@ def _offered_state(**overrides: object) -> UiWorkspaceUpdate:
         "availability": UpdateAvailability.OUT_OF_DATE,
         "current_version": "minds-v0.3.12",
         "supported_version": "minds-v0.4.1",
-        "is_version_from_label": False,
         "activity": UpdateActivity.IDLE,
     }
     fields.update(overrides)
@@ -1319,8 +1314,8 @@ def _offered_state(**overrides: object) -> UiWorkspaceUpdate:
     [
         (_offered_state(), _ENABLED, True),
         (_offered_state(), AutoUpdatePolicy(is_enabled=False, skipped_target_ref=""), False),
-        # A behind reading from the create-time label is not a positive read: the workspace may be current.
-        (_offered_state(is_version_from_label=True), _ENABLED, False),
+        # A workspace the sweep has not read is not a positive read: it may be current.
+        (_offered_state(availability=UpdateAvailability.UNKNOWN, current_version=""), _ENABLED, False),
         # A patch rides along with the next minor release.
         (_offered_state(availability=UpdateAvailability.PATCH_AVAILABLE), _ENABLED, False),
         (_offered_state(is_scheduled=True), _ENABLED, False),

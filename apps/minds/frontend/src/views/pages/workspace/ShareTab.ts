@@ -117,10 +117,13 @@ const LINK_BOX_CLASS =
   "flex flex-1 min-w-0 items-center gap-2 rounded-md border border-default " +
   "bg-fill-subtle px-3 py-2 type-body text-tertiary";
 
-// Every row is the same height whatever it holds, so a long list scans as a
-// single column.
-const ROW_CLASS =
-  "flex h-10 flex-none items-center gap-2 overflow-hidden rounded-md border px-3";
+// Every row's first line is the same height whatever it holds, so a long list
+// scans as a single column.
+const ROW_LINE_CLASS = "flex h-10 items-center gap-2";
+
+const ROW_BOX_CLASS = "flex-none overflow-hidden rounded-md border px-3";
+
+const ROW_CLASS = ROW_LINE_CLASS + " " + ROW_BOX_CLASS;
 
 // A domain row's outline is mixed from its surface, so the two read as one
 // mark.
@@ -739,7 +742,11 @@ function submitAddRow(share: SharePanelModel): void {
   share.addGrant(target, row.kind, row.value);
 }
 
-/** The target's own grant list: the one part of the pane that scrolls.
+/** The target's own grant list.
+ *
+ * It never scrolls on its own; the whole right column does. A list scrolling
+ * inside that flex column is the one block its siblings can squeeze, down to
+ * no height.
  *
  * An app's pane leads with what the whole workspace already admits, collapsed,
  * because those permissions apply here too and a reader deciding who can reach
@@ -768,9 +775,7 @@ function renderGrantList(
     "div",
     {
       id: "ws-share-grants",
-      class:
-        "mt-4 flex flex-1 min-h-0 flex-col gap-1.5 overflow-y-auto " +
-        "[scrollbar-gutter:stable]",
+      class: "mt-4 flex shrink-0 flex-col gap-1.5",
     },
     // Every row carries a key, and Mithril wants all of a list's children
     // keyed or none of them: the inherited group is built in rather than left
@@ -849,13 +854,17 @@ function renderGrantRow(
   const grantee = grant.grantee;
   const isDomain = grantee.kind === "email_domain";
   const text = grantText(share, grant);
+  const invitation = share.invitationStatusIndicator(
+    share.currentTarget,
+    grant,
+  );
   return m(
     "div",
     {
       key: grant.key,
       "data-grant-row": grant.key,
       class:
-        ROW_CLASS +
+        ROW_BOX_CLASS +
         " " +
         rowSurfaceClass(share, isDomain) +
         (isJustAdded(share, grant) ? " grant-row-added" : ""),
@@ -870,50 +879,61 @@ function renderGrantRow(
         : {}),
     },
     [
-      renderGrantLead(share, grant),
-      // The name takes the row's slack and truncates under pressure, so the status indicator and the
-      // remove control to its right always keep their place inside the row.
-      m(
-        "span",
-        { class: "min-w-0 flex-1 flex items-baseline gap-2 overflow-hidden" },
-        [
-          m(
-            "span",
-            {
-              "data-grant-name": grant.key,
-              class: "min-w-0 truncate type-body text-primary",
-            },
-            text.primary,
-          ),
-          text.secondary === null
-            ? null
-            : m(
-                "span",
-                { class: "shrink-0 type-body text-tertiary" },
-                text.secondary,
-              ),
-        ],
-      ),
-      renderInvitationStatusIndicator(share, grant),
-      renderGrantState(share, grant),
-      isOwned
-        ? m(
-            "button",
-            {
-              type: "button",
-              class:
-                "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-md text-tertiary " +
-                "hover:bg-fill-hover hover:text-important cursor-pointer transition-colors",
-              "aria-label": isDomain
-                ? `Remove anyone at ${grantee.value}`
-                : `Remove ${text.primary}`,
-              onclick: () => share.removeGrant(share.currentTarget, grant.key),
-            },
-            m(Icon16, { name: "close" }),
-          )
-        : // The row keeps the width the control would have taken, so an
-          // inherited row lines up with the pane's own rows below it.
-          m("span", { class: "h-6 w-6 shrink-0" }),
+      m("div", { class: ROW_LINE_CLASS }, [
+        renderGrantLead(share, grant),
+        // The name takes the row's slack and truncates under pressure, so the status indicator and the
+        // remove control to its right always keep their place inside the row.
+        m(
+          "span",
+          {
+            class: "min-w-0 flex-1 flex items-baseline gap-2 overflow-hidden",
+          },
+          [
+            m(
+              "span",
+              {
+                "data-grant-name": grant.key,
+                class:
+                  "min-w-0 max-w-full shrink-0 truncate type-body text-primary",
+              },
+              text.primary,
+            ),
+            // The note gives way first: the name is who the row is about.
+            text.secondary === null
+              ? null
+              : m(
+                  "span",
+                  {
+                    "data-grant-note": grant.key,
+                    class: "min-w-0 truncate type-body text-tertiary",
+                  },
+                  text.secondary,
+                ),
+          ],
+        ),
+        renderInvitationStatusIndicator(share, grant, invitation),
+        renderGrantState(share, grant),
+        isOwned
+          ? m(
+              "button",
+              {
+                type: "button",
+                class:
+                  "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-md text-tertiary " +
+                  "hover:bg-fill-hover hover:text-important cursor-pointer transition-colors",
+                "aria-label": isDomain
+                  ? `Remove anyone at ${grantee.value}`
+                  : `Remove ${text.primary}`,
+                onclick: () =>
+                  share.removeGrant(share.currentTarget, grant.key),
+              },
+              m(Icon16, { name: "close" }),
+            )
+          : // The row keeps the width the control would have taken, so an
+            // inherited row lines up with the pane's own rows below it.
+            m("span", { class: "h-6 w-6 shrink-0" }),
+      ]),
+      renderInvitationRefusal(grant, invitation),
     ],
   );
 }
@@ -928,14 +948,14 @@ function rowSurfaceClass(share: SharePanelModel, isDomain: boolean): string {
 /** The one typed thing the row's invitation status indicator shows (the model reduces the request, the
  * refusal, and the outcome to a single value, so exactly one is ever on screen): a fixed-height
  * cell so an outcome arriving never moves the row, holding the status and, when a re-invite can
- * be requested, an "Invite again" control. The first invitation is automatic, so there is no
- * first "Invite" button here. */
+ * be requested, an "Invite again" control. A refusal's words are the exception, said on a line of
+ * their own under the name. The first invitation is automatic, so there is no first "Invite"
+ * button here. */
 function renderInvitationStatusIndicator(
   share: SharePanelModel,
   grant: Grant,
+  state: InvitationStatusIndicator,
 ): m.Children {
-  const target = share.currentTarget;
-  const state = share.invitationStatusIndicator(target, grant);
   return m(
     "span",
     {
@@ -943,6 +963,25 @@ function renderInvitationStatusIndicator(
       class: "flex h-6 min-w-0 shrink items-center gap-1.5 type-helper",
     },
     invitationStatusIndicatorContents(share, grant, state),
+  );
+}
+
+/** A refusal is written as a sentence: on the first line it would be cut short
+ * or push the name out of the row, so it wraps under the name instead. */
+function renderInvitationRefusal(
+  grant: Grant,
+  state: InvitationStatusIndicator,
+): m.Children {
+  if (state.kind !== "refused") return null;
+  return m(
+    "p",
+    {
+      "data-invite-refusal": grant.key,
+      // pl-8 is the lead's width plus the line's gap, which starts the words
+      // where the name starts.
+      class: "-mt-1 pb-2 pl-8 type-helper text-important",
+    },
+    state.message,
   );
 }
 
@@ -1006,10 +1045,7 @@ function invitationStatusIndicatorContents(
         state.canReinvite ? reinviteButton(share, grant) : null,
       ];
     case "refused":
-      return [
-        indicatorText("text-important", state.message, state.message),
-        state.canReinvite ? reinviteButton(share, grant) : null,
-      ];
+      return state.canReinvite ? reinviteButton(share, grant) : null;
     case "joined":
       return indicatorText(
         "text-success",

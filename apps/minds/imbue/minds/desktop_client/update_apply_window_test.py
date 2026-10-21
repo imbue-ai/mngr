@@ -669,7 +669,6 @@ def test_a_workspace_reporting_no_run_and_no_agent_is_unlocked(
         detection=UpdateDetection(availability=UpdateAvailability.OUT_OF_DATE),
         current_version="minds-v0.3.9",
         supported_version="minds-v0.4.1",
-        is_version_from_label=False,
         is_readable=True,
     )
     begin_dispatched_update_run(store, agent_id, _CHAT)

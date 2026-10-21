@@ -63,6 +63,7 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.outer_host import is_ssh_auth_timeout
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import is_unreachable_peer_connect_error
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -222,15 +223,17 @@ def is_transient_remote_wiring_error(error: BaseException) -> bool:
     never reached the host at all (:func:`is_unreachable_peer_connect_error`),
     which is a host that is booting, restarting or momentarily off this
     machine's network; for a ``HostConnectionError``, which is what those
-    become after the outer host's own retries give up; and for a tunnel failure
-    the tunnel layer attributes to the host rather than to this device.
-    Everything else -- trust material missing on this device, a rejected key, a
-    malformed file -- is a failure no amount of retrying fixes, and is reported
-    at once.
+    become after the outer host's own retries give up; for a tunnel failure
+    the tunnel layer attributes to the host rather than to this device; and for
+    a ``HostAuthenticationError`` only when sshd never answered authentication
+    in time (:func:`is_ssh_auth_timeout`), which is a slow host rather than a
+    rejected key. Everything else -- trust material missing on this device, a
+    rejected key, a malformed file -- is a failure no amount of retrying fixes,
+    and is reported at once.
     """
     for link in _exception_chain(error):
         if isinstance(link, HostAuthenticationError):
-            return False
+            return is_ssh_auth_timeout(link)
         if isinstance(link, HostConnectionError):
             return True
         if isinstance(link, SSHTunnelError):

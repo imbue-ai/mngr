@@ -50,6 +50,7 @@ from fastapi import Request
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
 from fastapi.responses import HTMLResponse
+from fastapi.responses import PlainTextResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.websockets import WebSocketState
@@ -382,7 +383,7 @@ def _unauthenticated_subdomain_response(
     """
     accept = request.headers.get("accept", "")
     if "text/html" not in accept:
-        return Response(status_code=403, content="Not authenticated")
+        return PlainTextResponse("Not authenticated", status_code=403)
     scheme = "https" if use_http2 else "http"
     next_url = request.url.path
     if request.url.query:
@@ -909,7 +910,7 @@ async def _forward_workspace_http(
                 # abandon a request whose client is in fact still waiting.
                 disconnect_task.result()
                 logger.debug("Client disconnected before the backend stream for {} opened", agent_id)
-                return Response(status_code=499, content="Client disconnected")
+                return PlainTextResponse("Client disconnected", status_code=499)
             backend_response = handoff_task.result()
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
             # All three mean the same thing here, because ``send(stream=True)``
@@ -934,7 +935,7 @@ async def _forward_workspace_http(
             _emit_backend_failure(
                 envelope_writer, agent_id, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, None, e
             )
-            return Response(status_code=504, content="Proxy connection pool exhausted")
+            return PlainTextResponse("Proxy connection pool exhausted", status_code=504)
         except httpx.TimeoutException as e:
             # A wedged-but-listening backend produces a TimeoutException
             # rather than ConnectError. Surface this as CONNECT_ERROR so a
@@ -944,7 +945,7 @@ async def _forward_workspace_http(
             _emit_backend_failure(
                 envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, e
             )
-            return Response(status_code=504, content="Backend stream timed out")
+            return PlainTextResponse("Backend stream timed out", status_code=504)
         finally:
             # Cancelling the loser is what releases its resources; a no-op on
             # whichever task already finished, so the success path leaves
@@ -971,7 +972,7 @@ async def _forward_workspace_http(
             finally:
                 await backend_response.aclose()
             logger.debug("Client disconnected as the backend stream for {} opened", agent_id)
-            return Response(status_code=499, content="Client disconnected")
+            return PlainTextResponse("Client disconnected", status_code=499)
 
         if is_shell_target and 200 <= backend_response.status_code < 300:
             _emit_backend_answered(envelope_writer, answered_envelope_limiter, agent_id, backend_response.status_code)
@@ -1032,7 +1033,7 @@ async def _forward_workspace_http(
             # it exists only to end the ASGI exchange. No envelope either: a
             # client that gave up is evidence about the client, not the backend.
             logger.debug("Client disconnected before the backend for {} answered at {}", agent_id, backend_url)
-            return Response(status_code=499, content="Client disconnected")
+            return PlainTextResponse("Client disconnected", status_code=499)
         backend_response = backend_task.result()
     except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
         # System interface may not yet be listening, or it may have closed the
@@ -1059,13 +1060,13 @@ async def _forward_workspace_http(
         # starting does not produce this.
         logger.warning("Lost the backend connection for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None, e)
-        return Response(status_code=502, content="Backend connection lost")
+        return PlainTextResponse("Backend connection lost", status_code=502)
     except httpx.PoolTimeout as e:
         # Same distinction as the SSE branch above: the proxy's own pool is
         # exhausted and the backend was never dialed.
         logger.warning("Exhausted the proxy connection pool for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, None, e)
-        return Response(status_code=504, content="Proxy connection pool exhausted")
+        return PlainTextResponse("Proxy connection pool exhausted", status_code=504)
     except httpx.TimeoutException as e:
         # Either the dial timed out, or the backstop expired on a backend that
         # never answered at all. Both are genuine failures (the stall notice
@@ -1075,7 +1076,7 @@ async def _forward_workspace_http(
         # accepted it and then stayed silent is a different condition.
         logger.warning("Timed out reaching the backend for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, e)
-        return Response(status_code=504, content="Backend timed out")
+        return PlainTextResponse("Backend timed out", status_code=504)
     finally:
         stall_notice.cancel()
         # Cancelling the loser is what actually releases the backend
@@ -1242,7 +1243,7 @@ def _service_unavailable_response(request: Request) -> Response:
     accepts_html = "text/html" in request.headers.get("accept", "")
     if accepts_html:
         return HTMLResponse(content=_SERVICE_UNAVAILABLE_HTML, status_code=503)
-    return Response(status_code=503, content="Backend not yet available")
+    return PlainTextResponse("Backend not yet available", status_code=503)
 
 
 def _sanitize_next_url(value: str) -> str:
@@ -1280,7 +1281,7 @@ def _handle_subdomain_auth_bridge(
     if not verify_subdomain_auth_token(
         token=token, signing_key=signing_key, origin_coordinate=str(host_info.coordinate)
     ):
-        return Response(status_code=403, content="Invalid or expired subdomain auth token")
+        return PlainTextResponse("Invalid or expired subdomain auth token", status_code=403)
     cookie_value = create_session_cookie(signing_key=signing_key)
     response = Response(status_code=302, headers={"Location": next_url})
     _set_forward_session_cookie(
@@ -1381,7 +1382,7 @@ async def _handle_workspace_forward_http(
                 next_path = f"{next_path}?{request.url.query}"
             location = f"{scheme}://{label_prefix}{agent_id}.localhost:{listen_port}{next_path}"
             return Response(status_code=301, headers={"Location": location})
-        return Response(status_code=404, content="This origin moved to its agent-keyed URL; reload.")
+        return PlainTextResponse("This origin moved to its agent-keyed URL; reload.", status_code=404)
 
     # CLEANUP: drop this redirect (with ``_parse_legacy_service_path`` and
     # ``ForwardResolver.is_shell_target``) once no supported workspace predates
@@ -1760,7 +1761,7 @@ def _handle_browser_bridge(
     # Compare bytes: compare_digest raises TypeError on non-ASCII str, and the
     # token comes straight from the query string.
     if not token or not secrets.compare_digest(token.encode("utf-8"), browser_bridge_token.encode("utf-8")):
-        return Response(status_code=403, content="Invalid browser bridge token")
+        return PlainTextResponse("Invalid browser bridge token", status_code=403)
     next_url = _sanitize_next_url(request.query_params.get("next", "/"))
     signing_key = auth_store.get_signing_key()
     cookie_value = create_session_cookie(signing_key=signing_key)

@@ -1,7 +1,11 @@
 import hashlib
+import os
+import shutil
+import subprocess
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from pathlib import Path
 
 import pytest
 
@@ -203,10 +207,75 @@ def test_write_script_holds_the_lock_and_writes_only_over_the_body_it_was_compos
     script = build_authorized_keys_write_script(existing, existing + "ssh-ed25519 BBBB minds-ssh-grant\n")
 
     assert script.startswith(f"set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; flock {AUTHORIZED_KEYS_LOCK_PATH} sh -c ")
-    assert hashlib.sha256(existing.encode()).hexdigest() in script
+    # The read arrives through ``mngr exec --format json``, which strips trailing newlines, so the digest is of the stripped body.
+    assert hashlib.sha256(existing.rstrip("\n").encode()).hexdigest() in script
     # The outer ``set -e`` stops at ``sh -c``; the guarded script sets its own so a failed write is not masked.
     assert "sh -c 'set -e; current=$(" in script
     assert f"echo {AUTHORIZED_KEYS_CHANGED_MARKER} >&2; exit 75" in script
     assert "chmod 600 ~/.ssh/authorized_keys" in script
     # An absent file reads as empty, so the digest of "" is what the first grant expects.
     assert hashlib.sha256(b"").hexdigest() in build_authorized_keys_write_script("", "ssh-ed25519 BBBB x\n")
+
+
+# The write script runs under `flock`, which macOS does not ship.
+_requires_flock = pytest.mark.skipif(shutil.which("flock") is None, reason="the flock binary is not installed")
+
+
+def _run_write_script(home: Path, script: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["sh", "-c", script], env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, check=False
+    )
+
+
+def _read_as_mngr_exec_json_does(home: Path) -> str:
+    """The body the grant route sees: ``mngr exec --format json`` strips trailing newlines from stdout."""
+    return (home / ".ssh" / "authorized_keys").read_text().rstrip("\n")
+
+
+@_requires_flock
+def test_write_script_lands_over_a_newline_terminated_file_read_through_mngr_exec(tmp_path: Path) -> None:
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "authorized_keys").write_text("ssh-ed25519 AAAA owner@laptop\n")
+    new_content = "ssh-ed25519 AAAA owner@laptop\nssh-ed25519 BBBB minds-ssh-grant\n"
+
+    result = _run_write_script(
+        tmp_path, build_authorized_keys_write_script(_read_as_mngr_exec_json_does(tmp_path), new_content)
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / ".ssh" / "authorized_keys").read_text() == new_content
+
+
+@_requires_flock
+def test_write_script_lands_again_over_the_body_the_previous_grant_wrote(tmp_path: Path) -> None:
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "authorized_keys").write_text("ssh-ed25519 AAAA owner@laptop\n")
+    lines = [
+        build_authorized_keys_line(
+            public_key=_KEY, requester_workspace_id=requester, expires_at=_NOW + timedelta(hours=1)
+        )
+        for requester in ("agent-first", "agent-second")
+    ]
+    for line, requester in zip(lines, ("agent-first", "agent-second"), strict=True):
+        existing = _read_as_mngr_exec_json_does(tmp_path)
+        new_content = compose_pruned_authorized_keys(existing, line, requester_workspace_id=requester, now=_NOW)
+        result = _run_write_script(tmp_path, build_authorized_keys_write_script(existing, new_content))
+        assert result.returncode == 0, result.stderr
+
+    assert (
+        tmp_path / ".ssh" / "authorized_keys"
+    ).read_text() == f"ssh-ed25519 AAAA owner@laptop\n{lines[0]}\n{lines[1]}\n"
+
+
+@_requires_flock
+def test_write_script_refuses_when_the_file_changed_since_the_read(tmp_path: Path) -> None:
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "authorized_keys").write_text("ssh-ed25519 AAAA owner@laptop\n")
+    script = build_authorized_keys_write_script(_read_as_mngr_exec_json_does(tmp_path), "ssh-ed25519 BBBB x\n")
+    (tmp_path / ".ssh" / "authorized_keys").write_text("ssh-ed25519 AAAA owner@laptop\nssh-ed25519 DDDD other\n")
+
+    result = _run_write_script(tmp_path, script)
+
+    assert result.returncode == 75
+    assert AUTHORIZED_KEYS_CHANGED_MARKER in result.stderr
+    assert "DDDD" in (tmp_path / ".ssh" / "authorized_keys").read_text()

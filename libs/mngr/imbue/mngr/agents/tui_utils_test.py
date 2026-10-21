@@ -28,6 +28,7 @@ from imbue.mngr.agents.tui_utils import raise_for_unconfirmed_submission
 from imbue.mngr.agents.tui_utils import send_enter_keystroke
 from imbue.mngr.agents.tui_utils import submit_message_and_confirm
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.errors import SendFailureKind
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -366,7 +367,7 @@ def test_submit_and_confirm_raises_when_the_typed_message_never_shows() -> None:
 
 @pytest.mark.allow_warnings
 def test_raise_for_unconfirmed_submission_includes_diagnostics() -> None:
-    """The strict-failure error carries the probe diagnostics, retry history, and pane."""
+    """The strict-failure error carries the probe diagnostics, retry history, and pane, classified as unconfirmed."""
     agent = _make_probe_agent(
         CommandResult(
             stdout="MNGR_ENTER_RETRY 3\nMNGR_UNCONFIRMED\nMNGR_PROBE marker base=[a] final=[a]\n",
@@ -383,6 +384,7 @@ def test_raise_for_unconfirmed_submission_includes_diagnostics() -> None:
     assert "marker base=[a] final=[a]" in error_text
     assert "[3]" in error_text
     assert "pane still shows the typed message" in error_text
+    assert exc_info.value.kind == SendFailureKind.SUBMISSION_UNCONFIRMED
 
 
 # Real-tmux engine tests
