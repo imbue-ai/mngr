@@ -342,7 +342,7 @@ class _WorkspacesResolver(StaticBackendResolver):
         return self.host_state_by_agent
 
     def get_agent_label(self, agent_id: AgentId, label_key: str) -> str | None:
-        if label_key != "original_minds_version":
+        if label_key != ORIGINAL_MINDS_VERSION_LABEL:
             return None
         return self.label_by_agent.get(str(agent_id))
 
