@@ -341,6 +341,8 @@ function renderUpdatesGroup(
           : updates.skipUpdate(agentId);
     void call.then((result) => {
       if (local.pendingSchedule === inFlight) local.pendingSchedule = null;
+      if (action === "skip" && local.skipConfirmAgentId === agentId)
+        local.skipConfirmAgentId = null;
       if (!result.isOk)
         local.updateError = {
           agentId,
@@ -419,11 +421,8 @@ function renderUpdatesGroup(
           })
         : local.skipConfirmAgentId === agentId && isScheduled && isAutoUpdateEnabled
           ? skipConfirmPrompt(update, isAutoUpdateEnabled, {
-              isSkipping: false,
-              onConfirm: () => {
-                local.skipConfirmAgentId = null;
-                writeSchedule("skip");
-              },
+              isSkipping: pendingSchedule?.action === "skip",
+              onConfirm: () => writeSchedule("skip"),
               onCancel: () => {
                 local.skipConfirmAgentId = null;
               },
