@@ -431,11 +431,17 @@ The cooldown only bites during **resolution** -- `pnpm install` without `--froze
 ### Running locally
 
 ```bash
-apps/minds/scripts/start-desktop.sh   # pnpm install + pnpm start, from any directory
+apps/minds/scripts/start-desktop.sh            # pnpm install + pnpm start, from any directory
+apps/minds/scripts/start-desktop.sh --reopen   # the app is already running: give me its window
 ```
 
 The script selects the pinned Node, requires the pinned pnpm, installs the
 Electron dependencies, and launches the app in dev mode against production.
+`--reopen` skips the install and the UI build and just starts Electron, which
+hands the launch to the already-running app through the single-instance lock
+and exits: the dev-mode equivalent of launching a packaged install's shortcut
+again, and the way back to a window on a desktop with no tray icon (the
+internal `just minds-start` recipe does this for you when its app is up).
 On Linux, `apps/minds/scripts/install-linux.sh` installs every prerequisite
 above (and Docker) and writes a launcher that runs this script; see
 [dev-setup.md](./dev-setup.md).
