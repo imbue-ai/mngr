@@ -257,9 +257,9 @@ export type UpdateModalSituation =
   | "decision-pending"
   | "failed"
   | "updated-with-note"
+  | "skipped"
   | "needs-sign-in"
   | "scheduled"
-  | "skipped"
   | "offered"
   | "updated"
   | "unknown"
@@ -276,9 +276,9 @@ export function updateModalSituation(update: UiWorkspaceUpdate, isUpdating: bool
   if (outcome === "needs-attention") return "updated-with-note";
   const landed = update.success_note_version ?? "";
   if (update.verdict === "UPDATED" && landed !== "" && landed === update.supported_version) return "updated";
+  if (isUpdateSkipped(update)) return "skipped";
   if (update.needs_sign_in ?? false) return "needs-sign-in";
   if (update.is_scheduled ?? false) return "scheduled";
-  if (isUpdateSkipped(update)) return "skipped";
   if (update.availability === "OUT_OF_DATE" || update.availability === "PATCH_AVAILABLE") return "offered";
   if (update.verdict === "UPDATED" || update.verdict === "ALREADY_CURRENT") return "updated";
   if (update.availability === "UNKNOWN") return "unknown";

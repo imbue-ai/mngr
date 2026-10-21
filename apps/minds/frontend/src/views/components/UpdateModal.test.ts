@@ -361,22 +361,27 @@ describe("the update modal under auto-update", () => {
     expect(allText(root)).not.toContain("next update window");
   });
 
-  it("tells a skipped machine what the skip means and still updates it by hand", async () => {
-    const { draw, requests } = harness(
-      () => Promise.resolve(jsonResponse({})),
-      { ...OUT_OF_DATE_UPDATE, is_update_skipped: true },
-      true,
-    );
-    const root = draw();
+  // A skip outranks a standing sign-in, as on the row: the sweep will not arm a skipped release.
+  it.each([false, true])(
+    "tells a skipped machine what the skip means and still updates it by hand (needs sign-in: %s)",
+    async (needsSignIn) => {
+      const { draw, requests } = harness(
+        () => Promise.resolve(jsonResponse({})),
+        { ...OUT_OF_DATE_UPDATE, is_update_skipped: true, needs_sign_in: needsSignIn },
+        true,
+      );
+      const root = draw();
 
-    expect(allText(root)).toContain(
-      "You skipped v0.4.1 for this workspace. Imbue Studio won't update it automatically until a newer version is available.",
-    );
-    expect(buttonLabels(root)).toEqual(["Update now"]);
-    press(root, "Update now");
-    await settleDispatch();
-    expect(requests).toEqual([`/ui/api/updates/${AGENT}/now`]);
-  });
+      expect(allText(root)).toContain(
+        "You skipped v0.4.1 for this workspace. Imbue Studio won't update it automatically until a newer version is available.",
+      );
+      expect(allText(root)).not.toContain("schedules its update again");
+      expect(buttonLabels(root)).toEqual(["Update now"]);
+      press(root, "Update now");
+      await settleDispatch();
+      expect(requests).toEqual([`/ui/api/updates/${AGENT}/now`]);
+    },
+  );
 
   it("says why the last window passed without a start, and that the next one will try", () => {
     const { draw } = harness(
