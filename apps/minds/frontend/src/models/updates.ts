@@ -42,8 +42,8 @@ export function isRecreationRequired(update: UiWorkspaceUpdate): boolean {
 }
 
 /** Whether auto-update will take care of this machine on its own, so the
- * surfaces that offer the update stay quiet. A machine the sweep cannot arm
- * says it is behind as it would without auto-update. One positively read
+ * surfaces that offer the update stay quiet. A machine the sweep will not or
+ * cannot arm says it is behind as it would without auto-update. One positively read
  * behind but not armed yet is handled; the next sweep arms it. */
 export function isHandledByAutoUpdate(update: UiWorkspaceUpdate, isAutoUpdateEnabled: boolean): boolean {
   return (
