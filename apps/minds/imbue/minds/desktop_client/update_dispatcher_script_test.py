@@ -19,7 +19,7 @@ from imbue.minds.desktop_client.testing import stage_update_workspace
 from imbue.minds.desktop_client.testing import update_program_context
 
 _LOS_ANGELES = "America/Los_Angeles"
-_LEAD = "update-to-minds-v0-9-0"
+_LEAD = STAGED_CREATED_CHAT["name"]
 _LEAD_ID = "agent-" + "1" * 32
 _WORKER = "update-self"
 
@@ -429,7 +429,7 @@ def test_a_close_out_leaves_alone_a_record_a_new_lead_wrote_meanwhile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: ModuleType
 ) -> None:
     staged = stage_update_workspace(tmp_path, monkeypatch)
-    staged.write_state("run.json", {"chat_agent_name": "update-to-minds-v0-9-0-2", "started_at": _IN_WINDOW + 30})
+    staged.write_state("run.json", {"chat_agent_name": "Update-to-v090-2", "started_at": _IN_WINDOW + 30})
 
     program.close_out({**_OPEN_RUN, "verdict": None}, [_agent(_WORKER, "RUNNING")])
 

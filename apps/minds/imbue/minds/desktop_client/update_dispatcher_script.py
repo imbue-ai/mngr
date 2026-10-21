@@ -593,21 +593,29 @@ def display_version(ref):
     return re.sub(r"^minds-(?=v\d)", "", ref)
 
 
-def update_chat_names(target_ref):
-    """The update chat's agent name and display name for ``target_ref``."""
-    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", target_ref).strip("-_") or "release"
-    return "update-to-" + slug, "Update to " + display_version(target_ref)
+def update_chat_title(target_ref):
+    """The name the update chat for ``target_ref`` is shown under."""
+    return "Update to " + display_version(target_ref)
 
 
-def first_free_name(base_name, taken_names):
+def chat_app_agent_name(title):
+    """The agent name the chat app gives a chat it is asked to create as ``title`` (its canonical form)."""
+    stripped = re.sub(r"[^a-zA-Z0-9 _-]+", "", title.strip())
+    return re.sub(r"\s+", "-", stripped).strip("-_")
+
+
+def mngr_agent_name(title):
+    """The agent name a bare ``mngr create`` gives the chat shown as ``title``, which mngr names cannot hold."""
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", title).strip("-_") or "update"
+
+
+def first_free_title(title, taken_names, agent_name_of):
+    """``title``, or the first numbered one after it, whose agent name is not one of ``taken_names``."""
     taken = {name.casefold() for name in taken_names}
-    if base_name.casefold() not in taken:
-        return base_name
-    for suffix in range(2, MAX_NAME_SUFFIX + 1):
-        candidate = "%s-%d" % (base_name, suffix)
-        if candidate.casefold() not in taken:
+    for candidate in [title] + ["%s %d" % (title, suffix) for suffix in range(2, MAX_NAME_SUFFIX + 1)]:
+        if agent_name_of(candidate).casefold() not in taken:
             return candidate
-    return "%s-%d" % (base_name, int(time.time()))
+    return "%s %d" % (title, int(time.time()))
 
 
 def render_message(target_ref, ceiling_ref, is_override, is_backup_configured):
@@ -647,25 +655,25 @@ def _created_chat_line(stdout):
     return {}
 
 
-def _create_through_message_chat(base_name, taken_names, display_name, message, labels):
+def _create_through_message_chat(title, taken_names, message, labels):
     """Ask the workspace's chat app for the chat through the template's own messenger.
 
-    A result dict, or None when no messenger here can create a chat (a template from before
-    the script or its create mode), for the bare create to take over. A messenger from
-    before ``--title`` is asked again without it, and a taken name under the next free one.
+    The chat is asked for by ``title``, which the chat app shows and names its agent for. A
+    result dict, or None when no messenger here can create a chat (a template from before the
+    script or its create mode) or the messenger's own ``mngr create`` behind an unreachable chat
+    app refused the title as an agent name, for the bare create to take over. A taken name is
+    asked again under the next free title.
     """
     if not os.path.isfile(MESSAGE_CHAT_SCRIPT):
         return None
     taken = list(taken_names)
-    name = first_free_name(base_name, taken)
-    is_title_passed = True
+    name = first_free_title(title, taken, chat_app_agent_name)
     handle, message_path = tempfile.mkstemp(suffix=".md")
     with os.fdopen(handle, "w", encoding="utf-8") as out:
         out.write(message)
     try:
         while True:
             argv = [sys.executable or "python3", MESSAGE_CHAT_SCRIPT, "--create", "--name", name]
-            argv += ["--title", display_name] if is_title_passed else []
             for key, value in labels.items():
                 argv += ["--label", "%s=%s" % (key, value)]
             argv += ["--message-file", message_path]
@@ -674,23 +682,22 @@ def _create_through_message_chat(base_name, taken_names, display_name, message, 
             detail = bounded(stderr)
             if created.returncode == MESSAGE_CHAT_DELIVERED:
                 line = _created_chat_line(created.stdout)
-                return _create_result(OUTCOME_CREATED, "", str(line.get("name") or name), str(line.get("chat_id") or ""))
+                agent_name = str(line.get("name") or chat_app_agent_name(name))
+                return _create_result(OUTCOME_CREATED, "", agent_name, str(line.get("chat_id") or ""))
             if created.returncode == MESSAGE_CHAT_NO_VERDICT:
-                if is_title_passed and "--title" in stderr:
-                    is_title_passed = False
-                    continue
                 return None
             if any(refusal in stderr for refusal in SIGN_IN_REFUSALS):
                 return _create_result(OUTCOME_NEEDS_SIGN_IN, detail)
             if NAME_TAKEN_REFUSAL in stderr and len(taken) < len(taken_names) + MAX_NAME_SUFFIX:
-                taken.append(name)
-                name = first_free_name(base_name, taken)
+                taken.append(chat_app_agent_name(name))
+                name = first_free_title(title, taken, chat_app_agent_name)
                 continue
             if STILL_CREATING_REFUSAL in stderr:
                 # The create runs on past the chat app's own wait; the chat is on its way.
-                return _create_result(OUTCOME_CREATED, detail, name, "")
+                return _create_result(OUTCOME_CREATED, detail, chat_app_agent_name(name), "")
             if "Falling back to `mngr create`" in stderr:
-                return _create_result(OUTCOME_CHAT_APP_UNREACHABLE, detail)
+                log("the chat app could not create the update chat: %s" % detail)
+                return None
             return _create_result(OUTCOME_CREATE_FAILED, detail)
     finally:
         os.unlink(message_path)
@@ -707,11 +714,12 @@ def _created_agent_id(create_stdout):
     return ""
 
 
-def _create_through_mngr(name, display_name, message, labels, account_args):
+def _create_through_mngr(title, message, labels, account_args):
     """The fallback for a template whose messenger cannot create a chat: a bare ``mngr create`` from the chat
     template, which sources the workspace's environment itself when cron runs it."""
+    name = mngr_agent_name(title)
     argv = ["mngr", "create", name, "--template", "chat", "--transfer", "none", "--no-connect"]
-    argv += ["--label", "user_created=true", "--label", "display_name=" + display_name]
+    argv += ["--label", "user_created=true", "--label", "display_name=" + title]
     for key, value in labels.items():
         argv += ["--label", "%s=%s" % (key, value)]
     argv += ["-S", SKIP_CLAUDE_INSTALLATION_CHECK_SETTING]
@@ -744,16 +752,16 @@ def create_update_chat(schedule_like, started_by, is_auto_open, agents, now, acc
     is_signed_in, account_args = account
     if not is_signed_in:
         return _create_result(OUTCOME_NEEDS_SIGN_IN, "No AI account is signed in to this workspace.")
-    base_name, display_name = update_chat_names(target_ref)
+    title = update_chat_title(target_ref)
     taken_names = [str(agent.get("name") or "") for agent in agents or []]
     message = render_message(
         target_ref, ceiling_ref, bool(override_ref), bool(schedule_like.get("is_backup_configured", True))
     )
     labels = {label: "true" for label in AUTO_OPEN_LABELS} if is_auto_open else {}
-    result = _create_through_message_chat(base_name, taken_names, display_name, message, labels)
+    result = _create_through_message_chat(title, taken_names, message, labels)
     if result is None:
-        name = first_free_name(base_name, taken_names)
-        result = _create_through_mngr(name, display_name, message, labels, account_args)
+        free_title = first_free_title(title, taken_names, mngr_agent_name)
+        result = _create_through_mngr(free_title, message, labels, account_args)
     if result["outcome"] == OUTCOME_CREATED:
         write_json(
             LAST_DISPATCH_PATH,

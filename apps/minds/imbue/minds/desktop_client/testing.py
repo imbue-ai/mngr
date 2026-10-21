@@ -1651,7 +1651,7 @@ def _write_scripted_tool(path: Path, answers: Sequence[ScriptedToolAnswer]) -> N
 
 STAGED_CREATED_CHAT: Final[dict[str, str]] = {
     "chat_id": "agent-" + "a" * 32,
-    "name": "update-to-minds-v0-9-0",
+    "name": "Update-to-v090",
     "display_name": "Update to v0.9.0",
 }
 
@@ -1756,7 +1756,7 @@ def update_command_answer(outcome: str, detail: str = "", **extra: Any) -> MngrC
     return update_command_exec_result({"outcome": outcome, "detail": detail, **extra})
 
 
-UPDATE_CHAT_NAME: Final[str] = "update-to-minds-v0-9-0"
+UPDATE_CHAT_NAME: Final[str] = "Update-to-v090"
 UPDATE_CHAT_ID: Final[str] = "agent-" + "d" * 32
 CREATED_UPDATE_COMMAND_RESULT: Final[MngrCallResult] = update_command_answer(
     "CREATED", chat_agent_name=UPDATE_CHAT_NAME, chat_id=UPDATE_CHAT_ID

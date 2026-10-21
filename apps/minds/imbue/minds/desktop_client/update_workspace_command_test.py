@@ -143,10 +143,7 @@ def test_update_now_creates_the_chat_through_the_templates_messenger_with_the_pi
     assert (result.chat_agent_name, result.chat_id) == (STAGED_CREATED_CHAT["name"], STAGED_CREATED_CHAT["chat_id"])
     creates = staged.chat_creates()
     assert len(creates) == 1
-    assert (_flag(creates[0], "--name"), _flag(creates[0], "--title")) == (
-        "update-to-minds-v0-9-0",
-        "Update to v0.9.0",
-    )
+    assert _flag(creates[0], "--name") == "Update to v0.9.0"
     assert _labels(creates[0]) == ["assist=true", "auto_open=true"]
     assert creates[0][-1] == snapshot("""\
 /update-self
@@ -159,7 +156,7 @@ When you resolve the target in Step 2, append `--ceiling minds-v0.9.0` to the `r
     dispatch = staged.read_state("last-dispatch.json")
     assert dispatch is not None
     assert (dispatch["chat_agent_name"], dispatch["started_by"], dispatch["ceiling"]) == (
-        "update-to-minds-v0-9-0",
+        STAGED_CREATED_CHAT["name"],
         "immediate",
         "minds-v0.9.0",
     )
@@ -181,10 +178,7 @@ def test_an_override_without_backups_carries_both_notes_and_names_the_chat_for_t
     _run_mode(program, staged, "now", build_now_arguments(settings, "upstream/main"), capsys)
 
     create = staged.chat_creates()[0]
-    assert (_flag(create, "--name"), _flag(create, "--title")) == (
-        "update-to-upstream-main",
-        "Update to upstream/main",
-    )
+    assert _flag(create, "--name") == "Update to upstream/main"
     paragraphs = create[-1].split("\n\n")
     assert paragraphs[1].startswith("The Imbue Studio app pinned this update")
     assert "- Target: upstream/main\n- Ceiling: minds-v0.9.0" in paragraphs[1]
@@ -194,23 +188,51 @@ def test_an_override_without_backups_carries_both_notes_and_names_the_chat_for_t
     assert paragraphs[3].startswith("This workspace has no backups configured")
 
 
-def test_a_messenger_from_before_the_title_is_asked_again_without_it(
+def test_a_messenger_whose_own_bare_create_refuses_the_title_hands_the_create_to_the_programs_bare_create(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A released messenger behind an unreachable chat app runs ``mngr create`` under the title it was given, which
+    no mngr name can hold; the program's own bare create names the agent so mngr takes it."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
     staged.script_tool(
         "system/scripts/message_chat.py",
         [
-            ScriptedToolAnswer(exit_code=2, stderr="message_chat.py: error: unrecognized arguments: --title\n"),
-            ScriptedToolAnswer(stdout=json.dumps(STAGED_CREATED_CHAT) + "\n"),
+            ScriptedToolAnswer(
+                exit_code=1,
+                stderr="Falling back to `mngr create`: could not connect to the chat app\n"
+                "AgentName must be alphanumeric (with dashes and underscores allowed in the middle): "
+                "'Update to v0.9.0'\n",
+            )
         ],
     )
     program = load_update_workspace_program(tmp_path)
 
     answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
-    assert parse_update_command_result(answer).outcome is UpdateArmOutcome.CREATED
-    assert ["--title" in create for create in staged.chat_creates()] == [True, False]
+    result = parse_update_command_result(answer)
+    assert (result.outcome, result.chat_agent_name) == (UpdateArmOutcome.CREATED, "Update-to-v0-9-0")
+    creates = [call for call in staged.recorded_calls() if call[:1] == ["create"]]
+    assert len(creates) == 1
+    assert creates[0][1] == "Update-to-v0-9-0"
+    assert "display_name=Update to v0.9.0" in creates[0]
+
+
+def test_a_chat_app_and_a_bare_create_that_both_fail_read_as_the_chat_app_unreachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    staged = stage_update_workspace(tmp_path, monkeypatch)
+    staged.script_tool(
+        "system/scripts/message_chat.py",
+        [ScriptedToolAnswer(exit_code=1, stderr="Falling back to `mngr create`: could not connect to the chat app\n")],
+    )
+    monkeypatch.setenv("STUB_EXIT_CREATE", "1")
+    program = load_update_workspace_program(tmp_path)
+
+    answer = _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
+
+    result = parse_update_command_result(answer)
+    assert (result.outcome, result.detail) == (UpdateArmOutcome.CHAT_APP_UNREACHABLE, "mngr create exited 1")
+    assert staged.read_state("last-dispatch.json") is None
 
 
 def test_a_taken_chat_name_gets_the_next_free_suffix(
@@ -218,14 +240,14 @@ def test_a_taken_chat_name_gets_the_next_free_suffix(
 ) -> None:
     """Earlier runs' chats stay as history, so a second update to the same release needs its own name."""
     staged = stage_update_workspace(tmp_path, monkeypatch)
-    staged.set_agents([{"name": "update-to-minds-v0-9-0", "id": "agent-" + "b" * 32, "state": "WAITING"}])
+    staged.set_agents([{"name": "Update-to-v090", "id": "agent-" + "b" * 32, "state": "WAITING"}])
     staged.script_tool(
         "system/scripts/message_chat.py",
         [
             ScriptedToolAnswer(
                 exit_code=1,
                 stderr="The chat app did not create the chat: "
-                "A chat named 'update-to-minds-v0-9-0-2' already exists; pick another name\n",
+                "A chat named 'Update to v0.9.0 2' already exists; pick another name\n",
             ),
             ScriptedToolAnswer(stdout=json.dumps(STAGED_CREATED_CHAT) + "\n"),
         ],
@@ -235,8 +257,8 @@ def test_a_taken_chat_name_gets_the_next_free_suffix(
     _run_mode(program, staged, "now", build_now_arguments(_SETTINGS, ""), capsys)
 
     assert [_flag(create, "--name") for create in staged.chat_creates()] == [
-        "update-to-minds-v0-9-0-2",
-        "update-to-minds-v0-9-0-3",
+        "Update to v0.9.0 2",
+        "Update to v0.9.0 3",
     ]
 
 
@@ -296,15 +318,8 @@ def test_update_now_adopts_a_chat_dispatched_moments_ago_that_has_not_recorded_i
             UpdateArmOutcome.NEEDS_SIGN_IN,
         ),
         ("The chat app did not create the chat: mngr create exited 1\n", UpdateArmOutcome.CREATE_FAILED),
-        (
-            "Falling back to `mngr create`: could not connect to the chat app\nmngr create failed\n",
-            UpdateArmOutcome.CHAT_APP_UNREACHABLE,
-        ),
-        # The bare create's own output follows the fallback line, and can run long.
-        (
-            "Falling back to `mngr create`: could not connect to the chat app\n" + "mngr create: a log line\n" * 100,
-            UpdateArmOutcome.CHAT_APP_UNREACHABLE,
-        ),
+        # A refusal can run long; the detail keeps its tail.
+        ("The chat app did not create the chat: " + "a log line\n" * 200, UpdateArmOutcome.CREATE_FAILED),
     ],
 )
 def test_a_create_the_chat_app_refused_reads_as_the_refusal_it_was(
@@ -337,7 +352,7 @@ def test_a_workspace_with_no_messenger_gets_a_bare_create_carrying_the_display_n
     assert parse_update_command_result(answer).outcome is UpdateArmOutcome.CREATED
     creates = [call for call in staged.recorded_calls() if call[:1] == ["create"]]
     assert len(creates) == 1
-    assert creates[0][1] == "update-to-minds-v0-9-0"
+    assert creates[0][1] == "Update-to-v0-9-0"
     assert "display_name=Update to v0.9.0" in creates[0]
     assert "auto_open=true" in creates[0]
 
