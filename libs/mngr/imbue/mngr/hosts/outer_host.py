@@ -35,6 +35,7 @@ from typing import Mapping
 from uuid import uuid4
 
 from loguru import logger
+from paramiko import AuthenticationException
 from paramiko import Channel
 from paramiko import ChannelException
 from paramiko import SFTPClient
@@ -305,6 +306,47 @@ def is_unreachable_peer_connect_error(exception: OSError) -> bool:
     return (
         isinstance(exception, (NoValidConnectionsError, ConnectionRefusedError))
         or exception.errno in _UNREACHABLE_PEER_ERRNOS
+    )
+
+
+def _exception_chain_with_context(exception: BaseException) -> Iterator[BaseException]:
+    """Yield the exception and every exception behind it the way Python's traceback shows them, outermost first.
+
+    Follows an explicit ``__cause__`` and, where there is none, an implicit
+    ``__context__`` (an exception raised while handling another, without
+    ``from``) unless it was suppressed: pyinfra raises its ``ConnectError``
+    inside the ``except`` block that caught paramiko's exception, so that is the
+    only link to it.
+    """
+    yield exception
+    behind = (
+        exception.__cause__
+        if exception.__cause__ is not None or exception.__suppress_context__
+        else exception.__context__
+    )
+    if behind is not None:
+        yield from _exception_chain_with_context(behind)
+
+
+# paramiko raises the same ``AuthenticationException`` both when sshd rejects every
+# key ("Authentication failed.") and when sshd has not answered by ``auth_timeout``
+# (``AuthHandler.wait_for_response``); this message is the only thing telling them apart.
+_PARAMIKO_AUTH_TIMEOUT_MESSAGE: Final[str] = "Authentication timeout."
+
+
+@pure
+def is_ssh_auth_timeout(exception: BaseException) -> bool:
+    """Whether paramiko gave up waiting for sshd to answer authentication somewhere behind this exception.
+
+    ``OuterHost._ensure_connected`` reports every paramiko authentication
+    failure as a ``HostAuthenticationError``, timeouts included, so a caller
+    that needs to tell a slow sshd from a rejected key has to look at paramiko's
+    own exception. Only that exact class counts: its subclasses
+    (``BadAuthenticationType`` and the like) are always a refusal.
+    """
+    return any(
+        type(link) is AuthenticationException and link.args == (_PARAMIKO_AUTH_TIMEOUT_MESSAGE,)
+        for link in _exception_chain_with_context(exception)
     )
 
 
