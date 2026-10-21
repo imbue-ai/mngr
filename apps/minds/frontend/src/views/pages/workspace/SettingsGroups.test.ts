@@ -1201,6 +1201,31 @@ describe("the Updates settings group's skip question", () => {
 
     expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeUndefined();
   });
+
+  it("is dropped when the workspace stops, so starting it again does not bring it back", () => {
+    const { draw } = harness();
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: true } },
+      update_window: "2:00 AM-5:00 AM",
+      is_auto_update_enabled: true,
+    });
+    const withLiveness = (liveness: "RUNNING" | "STOPPED") =>
+      getAppContext().stores.workspaces.applyWorkspacesMessage(
+        workspacesMessage({
+          workspaces: [{ ...workspacesMessage().workspaces[0], id: BACKED, liveness }],
+        }),
+      );
+    withLiveness("RUNNING");
+    press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
+    expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeDefined();
+
+    withLiveness("STOPPED");
+    draw(BACKED);
+    withLiveness("RUNNING");
+
+    expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeUndefined();
+  });
 });
 
 describe("the Updates settings group of a stopped workspace", () => {

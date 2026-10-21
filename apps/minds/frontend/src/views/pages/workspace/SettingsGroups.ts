@@ -282,13 +282,19 @@ function renderUpdatesGroup(
 ): m.Children {
   const { stores, shell } = getAppContext();
   const updates = stores.updates;
+  const update = updates.forAgent(agentId);
+  const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
+  const isScheduled = update.is_scheduled ?? false;
+  // A question about a schedule that has since gone is dropped, so it cannot come back unasked.
+  if (local.skipConfirmAgentId === agentId && !(isScheduled && isAutoUpdateEnabled)) {
+    local.skipConfirmAgentId = null;
+  }
   if (updates.publishedFor(agentId) === null && updates.isHiddenWhileStopped(agentId)) {
     return m("div", { class: "max-w-md" }, [
       m(SectionHeader, "Update"),
       m("p", { id: "ws-updates-stopped", class: "type-helper text-secondary" }, "Start this workspace to see its updates."),
     ]);
   }
-  const update = updates.forAgent(agentId);
   const isUpdating = updates.isUpdating(agentId);
   const pending = forMachine(local.pendingDispatch, agentId);
   const pendingSchedule = forMachine(local.pendingSchedule, agentId);
@@ -296,12 +302,6 @@ function renderUpdatesGroup(
   const prefill = devOverridePrefill(update.supported_version ?? "");
   const draft = forMachine(local.overrideDraft, agentId);
   const overrideValue = draft?.value ?? prefill;
-  const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
-  const isScheduled = update.is_scheduled ?? false;
-  // A question about a schedule that has since gone is dropped, so it cannot come back unasked.
-  if (local.skipConfirmAgentId === agentId && !(isScheduled && isAutoUpdateEnabled)) {
-    local.skipConfirmAgentId = null;
-  }
   const skipLine = scheduleSkipLine(update);
   const isDecisionPending = update.is_decision_pending ?? false;
   const needsSignIn = (update.needs_sign_in ?? false) && !isUpdating;
