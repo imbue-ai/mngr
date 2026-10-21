@@ -69,6 +69,7 @@ from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
 from imbue.minds.desktop_client.create_progress import OperationProgressTracker
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
+from imbue.minds.desktop_client.imbue_cloud_cli import QUOTA_EXCEEDED_ERROR_CLASS
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -80,6 +81,7 @@ from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_GIT_TOKEN_REMO
 from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_GIT_TOKEN_VAULT_KEY
 from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_MNGR_REPO_URL
 from imbue.minds.desktop_client.template_mngr_pin import PUBLIC_MNGR_REPO_URL
+from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
 from imbue.minds.desktop_client.testing import install_stub_on_path
 from imbue.minds.desktop_client.testing import mngr_create_stub_body
@@ -2454,6 +2456,47 @@ def test_a_finished_create_attempt_runs_the_done_hook_with_its_workspace(tmp_pat
     assert finished == [(create_attempt_id, aid)]
     info = creator.get_create_attempt_info(create_attempt_id)
     assert info is not None and info.status is AgentCreateAttemptStatus.DONE
+
+
+@pytest.mark.timeout(30)
+def test_a_quota_refused_create_fails_the_attempt_without_an_error_log(tmp_path: Path, monkeypatch) -> None:
+    """A waitlisted account's refusal is a correct outcome shown on the creating page, not a fault to report.
+
+    ERROR records become error-tracker events, so logging this one there filed an
+    event for every waitlisted person who tried to create a workspace.
+    """
+    refusal = json.dumps(
+        {"event": "error", "error_class": QUOTA_EXCEEDED_ERROR_CLASS, "message": "This account is on the waitlist."}
+    )
+    install_stub_mngr_on_path(
+        tmp_path / "fake-bin", monkeypatch, f'if [ "$1" = "create" ]; then echo \'{refusal}\'; exit 1; fi\nexit 0'
+    )
+    creator = _make_test_creator(tmp_path)
+
+    with capture_error_logs() as error_records:
+        create_attempt_id = creator.start_create_attempt(str(_make_fake_repo(tmp_path)), host_name="waitlist-71003")
+        _wait_until_finished(creator, create_attempt_id)
+        creator.wait_for_all()
+
+    info = creator.get_create_attempt_info(create_attempt_id)
+    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
+    assert info.error == "This account is on the waitlist."
+    assert error_records == []
+
+
+@pytest.mark.timeout(30)
+def test_a_create_failing_for_any_other_reason_still_logs_an_error(tmp_path: Path, monkeypatch) -> None:
+    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, 'if [ "$1" = "create" ]; then exit 1; fi\nexit 0')
+    creator = _make_test_creator(tmp_path)
+
+    with capture_error_logs() as error_records:
+        create_attempt_id = creator.start_create_attempt(str(_make_fake_repo(tmp_path)), host_name="failing-71004")
+        _wait_until_finished(creator, create_attempt_id)
+        creator.wait_for_all()
+
+    info = creator.get_create_attempt_info(create_attempt_id)
+    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
+    assert any("Failed to create agent for create attempt" in record for record in error_records)
 
 
 def test_scratch_clone_roots_are_unique_per_create_attempt() -> None:
