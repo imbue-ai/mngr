@@ -1,0 +1,7 @@
+Fixed a flake in the snapshot-resume backup tests (`test_backup_enable_repair_and_destination_change_on_resumed_workspace` and `test_backup_restore_rewinds_the_resumed_workspace_in_place`, MIND-259) that failed with `BackupProvisioningError: Failed to write data/.secrets/restic.env`. Offload reuses a snapshot sandbox across test batches, and the Electron create-and-chat test left its own workspace container running there under the snapshot workspace's name prefix, because its teardown could never find the workspace it created. The resume fixture took the newest container with that prefix, so the backup tests went on to provision an agent the snapshot's mngr state had never seen.
+
+- The resume fixture and the recovery test now pick the workspace from the container states the sandbox recorded at resume, and fail if that recording does not name exactly one workspace container. A new snapshot-lane test pins this by running a newer container under the same prefix.
+
+- The Electron create-and-chat test now runs under a minds root of its own and removes that root's containers when it finishes, raising if docker cannot remove them.
+
+- `test_backup_enable_repair_and_destination_change_on_resumed_workspace` is no longer marked flaky, since MIND-259 was its only recorded cause. `test_backup_restore_rewinds_the_resumed_workspace_in_place` keeps its mark for the separate `xvfb: ERROR (spawn error)` race.
