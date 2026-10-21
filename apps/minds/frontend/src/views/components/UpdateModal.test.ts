@@ -405,6 +405,34 @@ describe("the update modal under auto-update", () => {
     expect(pressableWithLabel(draw(), "Cancel")).toBeUndefined();
   });
 
+  it("keeps the skip question, held, while its skip is out, though the skip unschedules the row first", async () => {
+    let answer: ((response: Response) => void) | null = null;
+    const { draw, onClose } = harness(
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = resolve;
+        }),
+      ARMED,
+      true,
+    );
+    press(draw(), "Skip v0.4.1");
+    press(draw(), "Skip v0.4.1");
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: { [AGENT]: { ...ARMED, is_scheduled: false } },
+      update_window: "2:00 AM-5:00 AM",
+      is_auto_update_enabled: true,
+    });
+
+    const cancel = pressableWithLabel(draw(), "Cancel");
+    expect(cancel).toBeDefined();
+    expect(attrsOf(cancel as AnyVnode).disabled).toBe(true);
+
+    (answer as unknown as (response: Response) => void)(jsonResponse({}));
+    await settleDispatch();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("drops the schedule's controls while its run, or one pressed instead, is under way", () => {
     // The run supersedes the schedule; a Skip beside it would not stop it.
     const root = harness(

@@ -404,7 +404,8 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       };
       const isSkipOffered = situation === "decision-pending" || (situation === "scheduled" && isAutoUpdateEnabled);
       // A question about a skip no longer offered is dropped, so it cannot come back unasked.
-      if (!isSkipOffered) state.isSkipConfirmOpen = false;
+      // Not while its skip is out: the skip cancels the schedule before it answers.
+      if (!isSkipOffered && state.pendingAction !== "skip") state.isSkipConfirmOpen = false;
 
       switch (situation) {
         case "needs-recreation":
