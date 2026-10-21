@@ -39,7 +39,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 
 # 409 for a workspace that cannot run the update as it stands (the user can fix that), 502 for
-# one we could not reach -- the same split the /assist dispatch makes.
+# one we could not reach.
 _DISPATCH_STATUS_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, int]] = {
     UpdateDispatchOutcome.DISPATCHED: 200,
     UpdateDispatchOutcome.ALREADY_RUNNING: 409,

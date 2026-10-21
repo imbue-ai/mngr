@@ -509,7 +509,7 @@ class WorkspaceUpdateStateStore(MutableModel):
         """Claim the run slot for ``agent_id``, returning whether this caller won it.
 
         Check and STARTING write share one lock: a dispatch spends minutes before
-        it spawns, and the Update now route and the bulk thread both dispatch. The claim is the run's start;
+        it spawns, and more than one caller dispatches. The claim is the run's start;
         anything the run record reports from before it is an earlier run's. The
         chat's name is the workspace's to pick, so the claim names none until
         :meth:`adopt_dispatched_chat`.

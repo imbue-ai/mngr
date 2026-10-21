@@ -1,4 +1,4 @@
-"""Durable update-row dismissals: one atomically-written JSON file per workspace, mirroring ``pending_create_attempts``.
+"""Durable update-row dismissals: one atomically-written JSON file per workspace.
 
 A run's record stays in the workspace and is re-read by every launch's sweep, so a
 dismissal has to outlive the app or the note and badge come back on each relaunch.

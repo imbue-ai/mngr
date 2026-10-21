@@ -321,8 +321,8 @@ def agent_env():
 def list_agents():
     """Every agent the workspace's mngr lists, as dicts; None when it could not list them.
 
-    A ``--format`` template scoped to the local provider, as the template's own in-container
-    readers list agents: it answers from local state where ``--format json`` can fail.
+    A ``--format`` template scoped to the local provider: it answers from local state where
+    ``--format json`` can fail.
     """
     listed = run_command(list(MNGR_LIST_ARGV), MNGR_LIST_TIMEOUT_SECONDS, agent_env())
     if listed.returncode != 0:

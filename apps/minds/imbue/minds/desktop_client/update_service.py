@@ -435,8 +435,7 @@ class WorkspaceUpdateService(MutableModel):
     def schedule_update_unwatched(self, agent_id: AgentId, *, override_ref: str) -> UpdateSchedule:
         """Arm ``agent_id``'s update for a caller nobody is waiting on, recording a refusal on the row.
 
-        The sweep's auto-update arm and the bulk schedule both answer before the arm runs, so the
-        row is the only place a refusal can reach the user. A sign-in refusal is the row's own state.
+        A sign-in refusal is the row's own state.
         """
         schedule = self.schedule_update(agent_id, override_ref=override_ref)
         if schedule.outcome in (UpdateScheduleOutcome.ARMED, UpdateScheduleOutcome.NEEDS_SIGN_IN):

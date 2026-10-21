@@ -1,8 +1,8 @@
 // Which app version the previous launch ran, so the renderer can tell the
 // first launch into an app update (the auto-update prompt's first trigger).
 //
-// Free of any `electron` import, like display-zoom.js, so it is testable
-// under plain node: the caller passes the data directory and the version in.
+// Free of any `electron` import, so it is testable under plain node: the
+// caller passes the data directory and the version in.
 
 const fs = require('fs');
 const path = require('path');
