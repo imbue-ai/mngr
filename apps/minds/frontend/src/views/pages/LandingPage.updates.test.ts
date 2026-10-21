@@ -104,7 +104,7 @@ describe("the machines list under auto-update", () => {
     expect(byId(root, "landing-bulk-updates")).toBeDefined();
   });
 
-  it("shows an armed row as scheduled, and a skipped one as behind again", () => {
+  it("shows an armed row as scheduled, and a skipped one as skipped", () => {
     const { draw } = harness(
       {
         [ALPHA]: { ...OUT_OF_DATE_UPDATE, is_scheduled: true },
@@ -115,7 +115,7 @@ describe("the machines list under auto-update", () => {
 
     expect(
       updateBadges(draw()).map((badge) => allText(badge.children)),
-    ).toEqual(["Update scheduled", "Update available"]);
+    ).toEqual(["Update scheduled", "Skipped v0.4.1"]);
   });
 });
 

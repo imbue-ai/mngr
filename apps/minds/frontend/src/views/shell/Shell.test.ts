@@ -854,11 +854,7 @@ describe("Shell notice band wiring", () => {
       { is_workspace_readable: false },
       "This workspace is running an older version of Imbue Studio.",
     ],
-    [
-      "the user skipped this release",
-      { is_workspace_readable: true, is_update_skipped: true },
-      "This workspace is running an older version of Imbue Studio.",
-    ],
+    ["the user skipped this release", { is_workspace_readable: true, is_update_skipped: true }, null],
     [
       "it cannot be armed without a sign-in",
       { is_workspace_readable: true, needs_sign_in: true },
@@ -890,6 +886,44 @@ describe("Shell notice band wiring", () => {
     } else {
       expect(attrsOf(band as AnyVnode).payload).toMatchObject({ message: expectedMessage });
     }
+  });
+
+  it("routes a pending decision's band buttons: Open chat into the run's chat, Dismiss to the skip confirmation", () => {
+    const openWorkspaceChat = vi.fn();
+    const openUpdateModal = vi.fn();
+    const { state } = makeShell({
+      openWorkspaceChat,
+      openUpdateModal,
+      stores: {
+        requests: { hasPendingForWorkspace: () => false },
+        workspaces: {
+          toAgentScopedId: (anyId: string) => anyId,
+          entryByAnyId: () => null,
+        },
+        health: {
+          statusFor: () => "healthy",
+          discoveryHealth: "healthy",
+          appEnvironmentCondition: () => "NONE",
+          recoveryKindFor: () => null,
+        },
+        updates: updatesStoreStub("OUT_OF_DATE", false, false, false, {
+          verdict: "NEEDS_DECISION",
+          is_decision_pending: true,
+          chat_agent_id: "agent-update-chat",
+        }),
+      },
+    } as unknown as Partial<ShellState>);
+
+    const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#content"));
+
+    const attrs = attrsOf(collectVnodes(root).find((vnode) => vnode.tag === NoticeBand) as AnyVnode) as {
+      payload: { actions: { label: string }[] };
+      onAction: (action: unknown) => void;
+    };
+    expect(attrs.payload.actions.map((action) => action.label)).toEqual(["Open chat", "Dismiss"]);
+    for (const action of attrs.payload.actions) attrs.onAction(action);
+    expect(openWorkspaceChat).toHaveBeenCalledWith(WORKSPACE_ID, "agent-update-chat");
+    expect(openUpdateModal).toHaveBeenCalledWith(WORKSPACE_ID, { isSkipConfirmOpen: true });
   });
 
   it("covers a machine whose update is landing with a card nothing dismisses", () => {

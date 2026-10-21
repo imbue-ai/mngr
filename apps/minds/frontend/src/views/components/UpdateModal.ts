@@ -8,15 +8,17 @@ import { getAppContext } from "../../app-context";
 import type { UiWorkspaceUpdate } from "../../channel/messages";
 import {
   displayVersion,
-  isFailureVerdict,
   isRecreationRequired,
-  isRunInFlight,
   isUpdateDispatchable,
   recordedDispatchFailure,
   scheduleSkipLine,
   scheduledLine,
+  skipConfirmationLine,
+  skippedLine,
+  skippedVersionText,
   updateActivityNotice,
-  updateRunOutcome,
+  updateChatAgentIdFor,
+  updateModalSituation,
 } from "../../models/updates";
 import type { UpdateActionResult } from "../../models/updates";
 import { Button } from "./Button";
@@ -30,6 +32,8 @@ export interface UpdateModalAttrs {
   agentId: string;
   /** Its display name, for copy that names it. */
   workspaceName: string;
+  /** Opens on the skip confirmation (the band's Dismiss on a pending decision). */
+  isSkipConfirmOpen?: boolean;
   onClose: () => void;
 }
 
@@ -41,6 +45,8 @@ interface UpdateModalState {
   errorDetail: string;
   /** Which press is held for the go-ahead-without-backups confirmation. */
   noBackupConfirm: "now" | "schedule" | null;
+  /** Whether the skip confirmation stands in for the action row. */
+  isSkipConfirmOpen: boolean;
 }
 
 /** Where to go when a run ended without landing: its own chat has the details,
@@ -132,6 +138,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
     error: "",
     errorDetail: "",
     noBackupConfirm: null,
+    isSkipConfirmOpen: false,
   };
 
   function run(
@@ -254,7 +261,41 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
     );
   }
 
+  /** The skip confirmation, drawn in place of the action row it was asked from. */
+  function skipConfirmPrompt(agentId: string, update: UiWorkspaceUpdate, onClose: () => void): m.Children {
+    const updates = getAppContext().stores.updates;
+    return m("div", { class: "flex flex-col gap-2" }, [
+      m("p", { class: "type-helper text-primary" }, skipConfirmationLine(update, updates.isAutoUpdateEnabled)),
+      m("div", { class: "flex flex-wrap items-center gap-2" }, [
+        m(
+          Button,
+          {
+            variant: "primary",
+            id: "update-modal-confirm-skip",
+            disabled: state.pendingAction !== null,
+            onclick: () => run("skip", () => updates.skipUpdate(agentId), onClose),
+          },
+          state.pendingAction === "skip" ? m(Spinner, { size: "sm" }) : `Skip ${skippedVersionText(update)}`,
+        ),
+        m(
+          Button,
+          {
+            variant: "secondary",
+            disabled: state.pendingAction !== null,
+            onclick: () => {
+              state.isSkipConfirmOpen = false;
+            },
+          },
+          "Cancel",
+        ),
+      ]),
+    ]);
+  }
+
   return {
+    oninit(vnode) {
+      state.isSkipConfirmOpen = vnode.attrs.isSkipConfirmOpen ?? false;
+    },
     view(vnode) {
       const { agentId, workspaceName, onClose } = vnode.attrs;
       const { stores, shell } = getAppContext();
@@ -262,101 +303,99 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       const update = updates.forAgent(agentId);
       const isBusy = state.pendingAction !== null;
       const isUpdating = updates.isUpdating(agentId);
+      const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
+      const chatAgentId = updateChatAgentIdFor(update, isUpdating);
+      const situation = updateModalSituation(update, isUpdating);
 
       const body: m.Children[] = [];
-      if (update.availability === "UNKNOWN") {
-        body.push(update.unknown_reason === "NO_APP_VERSION" ? noAppVersionBody(update) : unreadableMachineBody());
-      } else if (update.availability === "APP_BEHIND") {
-        body.push(appBehindBody(update));
-      } else if (isRecreationRequired(update)) {
-        body.push(needsRecreationBody(update, workspaceName));
-      } else {
-        body.push(
-          m("div", { class: "flex flex-col gap-1" }, [
-            updateVersionRow("This workspace", update.current_version),
-            updateVersionRow("Supported by Imbue Studio", update.supported_version),
-          ]),
-        );
-      }
+      const actions: m.Children[] = [];
+      let error = { message: state.error, detail: state.errorDetail };
 
-      const activity = updateActivityNotice(update, isUpdating);
-      if (activity.message) {
-        body.push(
+      const versionRows = (): m.Children =>
+        m("div", { class: "flex flex-col gap-1" }, [
+          updateVersionRow("This workspace", update.current_version),
+          updateVersionRow("Supported by Imbue Studio", update.supported_version),
+        ]);
+      const pushOutcome = (variant: "success" | "warn" | "error", message: string): void => {
+        body.push(m(Notice, { variant }, message));
+        if (update.verdict_detail) body.push(m("p", { class: "type-helper text-secondary" }, update.verdict_detail));
+      };
+      const pushOpenChat = (): void => {
+        if (!chatAgentId) return;
+        actions.push(
           m(
-            Notice,
-            { variant: "info" },
-            m("div", { class: "flex items-center gap-2" }, [
-              activity.isWaiting ? m(Spinner, { size: "sm" }) : null,
-              m("span", activity.message),
-            ]),
+            Button,
+            {
+              variant: "primary",
+              id: "update-modal-open-chat",
+              disabled: isBusy,
+              onclick: () => {
+                onClose();
+                shell.openWorkspaceChat(agentId, chatAgentId);
+              },
+            },
+            "Open chat",
           ),
         );
-      }
-
-      const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
-      const isScheduled = update.is_scheduled ?? false;
-      const isDecisionPending = update.is_decision_pending ?? false;
-      const needsSignIn = (update.needs_sign_in ?? false) && !isUpdating;
-      const chatAgentId = update.chat_agent_id ?? "";
-
-      const verdict = verdictMessage(update);
-      if (verdict) {
-        const variant = isDecisionPending ? "warn" : isFailureVerdict(update.verdict) ? "error" : "success";
-        body.push(m(Notice, { variant }, verdict));
-      }
-      if (update.verdict_detail) {
-        body.push(m("p", { class: "type-helper text-secondary" }, update.verdict_detail));
-      }
-
-      if (isScheduled) {
-        const skipLine = scheduleSkipLine(update);
-        body.push(
-          m("div", { class: "flex flex-col gap-1" }, [
-            m(
-              "p",
-              { class: "type-helper text-secondary" },
-              scheduledLine(update, updates.updateWindow, isAutoUpdateEnabled),
-            ),
-            skipLine ? m("p", { class: "type-helper text-tertiary" }, skipLine) : null,
-          ]),
-        );
-      }
-
-      // A press the workspace just refused for want of a sign-in already says so in its own words.
-      if (needsSignIn && !state.error) {
-        body.push(
+      };
+      const pushSkipButton = (label: string): void => {
+        actions.push(
           m(
-            Notice,
-            { variant: "warn" },
-            isAutoUpdateEnabled
-              ? "No AI account is signed in to this workspace, so Studio can't update it automatically. " +
-                  "Sign in, and Studio schedules its update again."
-              : "No AI account is signed in to this workspace, so its update can't start. Sign in, then try again.",
+            Button,
+            {
+              variant: "secondary",
+              id: "update-modal-skip",
+              disabled: isBusy,
+              onclick: () => {
+                state.isSkipConfirmOpen = true;
+              },
+            },
+            label,
           ),
         );
-      }
-
-      // A pending decision is answered in the run's chat, not by another run.
-      const isDispatchable = isUpdateDispatchable(update) && !isUpdating && !isDecisionPending;
-      if (isDispatchable) {
-        // Stated once: facts about what an update is, not warnings on one button.
+      };
+      // Enter the machine BEFORE dispatching: the machine's interface opens the
+      // run's chat tab only for clients connected when the agent appears. The
+      // modal survives this one navigation (see handleRouteChanged). A plain
+      // enterWorkspace: the dispatch starts a stopped machine itself, and the
+      // recovery route's start intent would start it twice.
+      const runNow = (): void => {
+        shell.enterWorkspace(agentId);
+        run("now", () => updates.updateNow(agentId), onClose);
+      };
+      const runSchedule = (): void => run("schedule", () => updates.scheduleUpdate(agentId), () => undefined);
+      const pressButton = (press: "now" | "schedule", label: string, variant: "primary" | "secondary"): m.Children =>
+        m(
+          Button,
+          {
+            variant,
+            id: `update-modal-${press}`,
+            disabled: isBusy,
+            onclick: () => {
+              if (updates.needsNoBackupConfirmation(agentId)) {
+                state.noBackupConfirm = press;
+              } else if (press === "now") {
+                runNow();
+              } else {
+                runSchedule();
+              }
+            },
+          },
+          state.pendingAction === press ? m(Spinner, { size: "sm" }) : label,
+        );
+      // The offer's facts, stated once rather than as warnings on one button, and
+      // the way to name a different version, which lives in the machine's
+      // settings (?override=1 lands there with the field open). Scheduling is the
+      // default: the apply takes services down, and the update window is when
+      // nobody is in the machine. Under auto-update the app arms it itself.
+      const pushOffer = (): void => {
         body.push(
-          m("div", { class: "flex flex-col gap-1" }, [
-            m(
-              "p",
-              { class: "type-helper text-tertiary" },
-              "Updating runs an agent inside this workspace, which uses credits.",
-            ),
-            m(
-              "p",
-              { class: "type-helper text-tertiary" },
+          m(
+            "p",
+            { class: "type-helper text-tertiary" },
+            "Updating runs an agent inside this workspace, which uses credits. " +
               "Running chats pause for a few minutes while the update is applied, then continue.",
-            ),
-          ]),
-        );
-        // Naming a different version lives in the machine's settings;
-        // ?override=1 lands there with the field open.
-        body.push(
+          ),
           m(
             "button",
             {
@@ -371,55 +410,91 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             "Update to a different version…",
           ),
         );
-      }
+        if (!isAutoUpdateEnabled) actions.push(pressButton("schedule", "Schedule update", "primary"));
+        actions.push(pressButton("now", "Update now", isAutoUpdateEnabled ? "primary" : "secondary"));
+      };
+      const isSkipOffered = situation === "decision-pending" || (situation === "scheduled" && isAutoUpdateEnabled);
 
-      const signInFailure = updates.signInFailureFor(agentId);
-      const error = state.error
-        ? { message: state.error, detail: state.errorDetail }
-        : signInFailure !== null && needsSignIn
-          ? { message: signInFailure.error, detail: signInFailure.detail }
-          : recordedDispatchFailure(update, isUpdating);
-      if (error.message) body.push(m(Notice, { variant: "error" }, [error.message, machineVerdict(error.detail)]));
-
-      const openChatButton = (variant: "primary" | "secondary"): m.Children =>
-        m(
-          Button,
-          {
-            variant,
-            id: "update-modal-open-chat",
-            disabled: isBusy,
-            onclick: () => {
-              onClose();
-              shell.openWorkspaceChat(agentId, chatAgentId);
-            },
-          },
-          "Open chat",
-        );
-
-      const actions: m.Children[] = [];
-      if (isRecreationRequired(update)) {
-        // The first of the two steps; the second happens inside the new machine.
-        actions.push(
-          m(
-            Button,
-            {
-              variant: "primary",
-              id: "update-modal-create-machine",
-              onclick: () => {
-                onClose();
-                m.route.set("/create");
+      switch (situation) {
+        case "needs-recreation":
+          body.push(needsRecreationBody(update, workspaceName));
+          // The first of the two steps; the second happens inside the new machine.
+          actions.push(
+            m(
+              Button,
+              {
+                variant: "primary",
+                id: "update-modal-create-machine",
+                onclick: () => {
+                  onClose();
+                  m.route.set("/create");
+                },
               },
-            },
-            "Create a new workspace",
-          ),
-        );
-      } else if (isDecisionPending) {
-        // The decision is made in the run's chat. Without a way into it, Dismiss is the
-        // only way off the badge; with one, dismissing would let a fresh pass set the
-        // kept work aside.
-        actions.push(chatAgentId ? openChatButton("primary") : dismissOutcomeButton(agentId, isBusy, onClose));
-      } else {
-        if (needsSignIn) {
+              "Create a new workspace",
+            ),
+          );
+          break;
+        case "app-behind":
+          body.push(appBehindBody(update));
+          break;
+        case "in-progress": {
+          const activity = updateActivityNotice(update, isUpdating);
+          body.push(
+            m(
+              Notice,
+              { variant: "info" },
+              m("div", { class: "flex items-center gap-2" }, [
+                activity.isWaiting ? m(Spinner, { size: "sm" }) : null,
+                m("span", activity.message),
+              ]),
+            ),
+          );
+          // A run the cron started opens no window while it runs, so its chat is reached from here.
+          if (update.activity !== "STARTING") pushOpenChat();
+          break;
+        }
+        case "not-started":
+          if (!error.message) error = recordedDispatchFailure(update, isUpdating);
+          if (isUpdateDispatchable(update)) actions.push(pressButton("now", "Try again", "primary"));
+          actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
+          break;
+        case "decision-pending":
+          pushOutcome("warn", verdictMessage(update));
+          pushOpenChat();
+          // Dismissing it is a skip: a fresh run would set the kept work aside.
+          pushSkipButton("Dismiss");
+          break;
+        case "failed":
+          pushOutcome(
+            "error",
+            update.activity === "STALLED" ? updateActivityNotice(update).message : verdictMessage(update),
+          );
+          pushOpenChat();
+          actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
+          break;
+        case "updated-with-note":
+          pushOutcome("success", verdictMessage(update));
+          pushOpenChat();
+          actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
+          break;
+        case "needs-sign-in": {
+          // A press the workspace just refused for want of a sign-in already says so in its own words.
+          if (!error.message) {
+            body.push(
+              m(
+                Notice,
+                { variant: "warn" },
+                isAutoUpdateEnabled
+                  ? "No AI account is signed in to this workspace, so Studio can't update it automatically. " +
+                      "Sign in, and Studio schedules its update again."
+                  : "No AI account is signed in to this workspace, so its update can't start. Sign in, then try again.",
+              ),
+            );
+          }
+          const signInFailure = updates.signInFailureFor(agentId);
+          if (!error.message && signInFailure !== null) {
+            error = { message: signInFailure.error, detail: signInFailure.detail };
+          }
           actions.push(
             m(
               Button,
@@ -432,119 +507,87 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
               state.pendingAction === "sign-in" ? m(Spinner, { size: "sm" }) : "Sign in",
             ),
           );
+          break;
         }
-        if (isDispatchable) {
-          // Enter the machine BEFORE dispatching: the machine's interface opens
-          // the run's chat tab only for clients connected when the agent appears.
-          // The modal survives this one navigation (see handleRouteChanged). A
-          // plain enterWorkspace: the dispatch starts a stopped machine itself,
-          // and the recovery route's start intent would start it twice.
-          const runNow = (): void => {
-            shell.enterWorkspace(agentId);
-            run("now", () => updates.updateNow(agentId), onClose);
-          };
-          const runSchedule = (): void => run("schedule", () => updates.scheduleUpdate(agentId), () => undefined);
-          // Under auto-update the app arms the schedule itself; with one armed
-          // already there is nothing to schedule.
-          const isScheduleOffered = !isAutoUpdateEnabled && !isScheduled;
-          if (state.noBackupConfirm !== null) {
-            // The question replaces the action row so there is one way to answer it.
-            const heldPress = state.noBackupConfirm === "now" ? runNow : runSchedule;
-            body.push(
-              noBackupConfirmPrompt({
-                onConfirm: () => {
-                  state.noBackupConfirm = null;
-                  heldPress();
-                },
-                onCancel: () => {
-                  state.noBackupConfirm = null;
-                },
-              }),
-            );
+        case "scheduled": {
+          const skipLine = scheduleSkipLine(update);
+          body.push(
+            versionRows(),
+            m("div", { class: "flex flex-col gap-1" }, [
+              m(
+                "p",
+                { class: "type-helper text-secondary" },
+                scheduledLine(update, updates.updateWindow, isAutoUpdateEnabled),
+              ),
+              skipLine ? m("p", { class: "type-helper text-tertiary" }, skipLine) : null,
+            ]),
+          );
+          actions.push(pressButton("now", "Update now instead", "primary"));
+          if (isAutoUpdateEnabled) {
+            // Cancelling would only be re-armed by the next sweep; skipping is the
+            // way to say "not this release".
+            pushSkipButton(`Skip ${skippedVersionText(update)}`);
           } else {
-            // Scheduling is the default: the apply takes services down, and the
-            // update window is when nobody is in the machine.
-            if (isScheduleOffered) {
-              actions.push(
-                m(
-                  Button,
-                  {
-                    variant: "primary",
-                    disabled: isBusy,
-                    onclick: () => {
-                      if (updates.needsNoBackupConfirmation(agentId)) {
-                        state.noBackupConfirm = "schedule";
-                      } else {
-                        runSchedule();
-                      }
-                    },
-                  },
-                  state.pendingAction === "schedule" ? m(Spinner, { size: "sm" }) : "Schedule update",
-                ),
-              );
-            }
             actions.push(
               m(
                 Button,
                 {
-                  variant: isScheduleOffered || needsSignIn ? "secondary" : "primary",
+                  variant: "secondary",
+                  id: "update-modal-cancel-schedule",
                   disabled: isBusy,
-                  onclick: () => {
-                    if (updates.needsNoBackupConfirmation(agentId)) {
-                      state.noBackupConfirm = "now";
-                    } else {
-                      runNow();
-                    }
-                  },
+                  onclick: () => run("cancel", () => updates.cancelSchedule(agentId), () => undefined),
                 },
-                state.pendingAction === "now"
-                  ? m(Spinner, { size: "sm" })
-                  : isScheduled
-                    ? "Update now instead"
-                    : "Update now",
+                state.pendingAction === "cancel" ? m(Spinner, { size: "sm" }) : "Cancel schedule",
               ),
             );
           }
+          break;
         }
-        // A run the cron started opens no window while it runs, so its chat is reached from here.
-        if (isRunInFlight(update) && update.activity !== "STARTING" && chatAgentId) {
-          actions.push(openChatButton("primary"));
-        }
-        // A run's outcome outlives it and the row wears the badge until it is
-        // cleared; a stall, or an update that never went out, wears a failure
-        // badge too, so it gets the same Dismiss. A failed run's chat is where
-        // it says what it found.
-        if (updateRunOutcome(update) === "failed" && chatAgentId) actions.push(openChatButton("secondary"));
-        const isOutcomeShowing = Boolean(verdict) || update.activity === "STALLED" || Boolean(update.dispatch_failure);
-        if (isOutcomeShowing) actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
-        if (isScheduled && isAutoUpdateEnabled) {
-          // Cancelling would only be re-armed by the next sweep; skipping is the
-          // way to say "not this release".
-          actions.push(
-            m(
-              Button,
-              {
-                variant: "secondary",
-                id: "update-modal-skip",
-                disabled: isBusy,
-                onclick: () => run("skip", () => updates.skipUpdate(agentId), onClose),
-              },
-              state.pendingAction === "skip" ? m(Spinner, { size: "sm" }) : "Skip this update",
-            ),
+        case "skipped":
+          body.push(
+            versionRows(),
+            m("p", { class: "type-helper text-secondary" }, skippedLine(update, isAutoUpdateEnabled)),
           );
-        } else if (isScheduled) {
-          actions.push(
-            m(
-              Button,
-              {
-                variant: "secondary",
-                disabled: isBusy,
-                onclick: () => run("cancel", () => updates.cancelSchedule(agentId), () => undefined),
-              },
-              state.pendingAction === "cancel" ? m(Spinner, { size: "sm" }) : "Cancel schedule",
-            ),
-          );
-        }
+          actions.push(pressButton("now", "Update now", "primary"));
+          break;
+        case "offered":
+          body.push(versionRows());
+          pushOffer();
+          break;
+        case "updated":
+          body.push(versionRows());
+          pushOutcome("success", verdictMessage(update));
+          actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
+          break;
+        case "unknown":
+          body.push(update.unknown_reason === "NO_APP_VERSION" ? noAppVersionBody(update) : unreadableMachineBody());
+          pushOffer();
+          break;
+        case "up-to-date":
+          body.push(versionRows());
+          break;
+      }
+
+      if (error.message) body.push(m(Notice, { variant: "error" }, [error.message, machineVerdict(error.detail)]));
+
+      // A held question replaces the action row so there is one way to answer it.
+      if (state.noBackupConfirm !== null) {
+        const heldPress = state.noBackupConfirm === "now" ? runNow : runSchedule;
+        body.push(
+          noBackupConfirmPrompt({
+            onConfirm: () => {
+              state.noBackupConfirm = null;
+              heldPress();
+            },
+            onCancel: () => {
+              state.noBackupConfirm = null;
+            },
+          }),
+        );
+        actions.length = 0;
+      } else if (state.isSkipConfirmOpen && isSkipOffered) {
+        body.push(skipConfirmPrompt(agentId, update, onClose));
+        actions.length = 0;
       }
 
       return m(

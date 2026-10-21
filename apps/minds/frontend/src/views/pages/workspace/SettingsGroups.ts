@@ -232,19 +232,19 @@ function outOfDateNotice(agentId: string): m.Children {
     { variant: payload.variant, extra: "mb-4", id: "ws-settings-out-of-date" },
     m("div", { class: "flex items-center justify-between gap-3" }, [
       m("span", payload.message),
-      payload.action !== null
-        ? m(
-            Button,
-            {
-              variant: "secondary",
-              onclick: () =>
-                payload.action?.kind === "sign-in-for-update"
-                  ? shell.signInForUpdateOrExplain(agentId)
-                  : shell.openUpdateModal(agentId),
-            },
-            payload.action.label,
-          )
-        : null,
+      payload.actions.map((action) =>
+        m(
+          Button,
+          {
+            variant: "secondary",
+            onclick: () =>
+              action.kind === "sign-in-for-update"
+                ? shell.signInForUpdateOrExplain(agentId)
+                : shell.openUpdateModal(agentId),
+          },
+          action.label,
+        ),
+      ),
     ]),
   );
 }

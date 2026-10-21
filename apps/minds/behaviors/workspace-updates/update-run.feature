@@ -99,11 +99,24 @@ Feature: Running an update
     And the workspace's row says a decision is pending
     And its update shows the agent's line about what it cannot keep, with a button into the run's chat and no Update now
 
+  @dismiss-decision-skips-release
+  Scenario: Dismissing a decision skips the release it was for
+    A fresh run of the same release would set aside the work the last one kept for the decision, so dismissing the decision is a choice not to take that release.
+    Given a workspace whose update is waiting for a decision
+    When the user dismisses it
+    Then the app says which release is skipped and what skipping it means, and skips it only once the user confirms
+    When the user confirms
+    Then the workspace no longer reports a decision pending
+    And it is not updated automatically to that release
+
   @open-chat-from-outcome
-  Scenario: A finished run's chat is one click away from its outcome
-    A scheduled run shows no window of its own while it runs, so its outcome is the way in.
+  Scenario: A run's chat is one click away from where its progress or outcome is reported
+    A scheduled run shows no window of its own while it runs, so its report is the way in.
     Given a workspace whose last update landed, failed, or is waiting for a decision
     Then the outcome on the workspace's row offers a button into the run's chat
+    And the outcome over the workspace offers a button into the run's chat and a way to dismiss it
+    Given a workspace whose update is preparing or waiting for the user, and whose run's chat exists
+    Then the report over the workspace offers a button into the run's chat
 
   @idle-agent-reminded
   Scenario: An update agent that sits idle without a result is reminded

@@ -473,15 +473,20 @@ class WorkspaceUpdateService(MutableModel):
         return None
 
     def skip_update(self, agent_id: AgentId) -> UpdateSchedule | None:
-        """Skip the current release for this workspace under auto-update: remember it, and cancel its schedule.
+        """Skip the current release for this workspace: remember it, cancel its schedule, and clear a decision.
 
-        The sweep re-arms it once the app's ceiling moves to a newer release.
+        A decision its last run is waiting on is dismissed with it, since the user chose not to take
+        this release. The sweep re-arms the workspace once the app's ceiling moves to a newer release.
         """
         refusal = self.cancel_schedule(agent_id)
         # Only once the cancel landed: a workspace still armed would run the update it was told to skip.
-        if refusal is None and self.minds_config is not None:
+        if refusal is not None:
+            return refusal
+        if self.minds_config is not None:
             self.minds_config.set_skipped_update_target(str(agent_id), self.settings_source.read_ceiling())
-        return refusal
+        if self.state_store.get(agent_id).is_decision_pending:
+            self.state_store.dismiss_run_outcome(agent_id)
+        return None
 
     def open_sign_in_chat(self, agent_id: AgentId) -> bool:
         """Open a new chat window in the workspace with the provider chooser up; whether it opened.

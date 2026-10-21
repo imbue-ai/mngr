@@ -35,6 +35,14 @@ function pressableWithLabel(
   );
 }
 
+/** The labels of every button the modal draws, in order. */
+function buttonLabels(root: m.Children): string[] {
+  return collectVnodes(root)
+    .filter((vnode) => typeof attrsOf(vnode).onclick === "function" && vnode.tag !== "div")
+    .map((vnode) => allText(vnode.children).trim())
+    .filter(Boolean);
+}
+
 function press(root: m.Children, label: string): void {
   const pressable = pressableWithLabel(root, label);
   if (pressable === undefined) throw new Error(`no "${label}" to press`);
@@ -45,6 +53,7 @@ function harness(
   respond: (url: string) => Promise<Response>,
   update: UiWorkspaceUpdate = OUT_OF_DATE_UPDATE,
   isAutoUpdateEnabled = false,
+  isSkipConfirmOpen = false,
 ): Harness {
   updatesShell({ [AGENT]: update }, isAutoUpdateEnabled);
   const { fetchImpl, requests } = recordingFetch(respond);
@@ -53,8 +62,9 @@ function harness(
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   const onClose = vi.fn();
   const instance = UpdateModal() as unknown as m.Component;
+  const attrs = { agentId: AGENT, workspaceName: "box", isSkipConfirmOpen, onClose };
+  (instance.oninit as unknown as (v: m.Vnode) => void).call(instance, m(instance, attrs as unknown as m.Attributes) as m.Vnode);
   function draw(): m.Children {
-    const attrs = { agentId: AGENT, workspaceName: "box", onClose };
     const vnode = m(instance, attrs as unknown as m.Attributes) as m.Vnode;
     return (instance.view as unknown as (v: m.Vnode) => m.Children).call(
       instance,
@@ -169,7 +179,7 @@ describe("the update modal's Update now", () => {
     });
     expect(allText(draw())).toContain("Couldn't reach this workspace to start the update.");
 
-    press(draw(), "Update now");
+    press(draw(), "Try again");
 
     expect(allText(draw())).not.toContain("Couldn't reach this workspace to start the update.");
   });
@@ -196,9 +206,36 @@ describe("the update modal's verdict line", () => {
       success_note_version: "minds-v0.4.1",
     });
 
-    expect(allText(draw())).toContain(
+    const root = draw();
+    expect(allText(root)).toContain(
       "This workspace was updated to v0.4.1.",
     );
+    // Not offered again on the strength of a read that has not caught up.
+    expect(buttonLabels(root)).toEqual(["Dismiss"]);
+  });
+
+  it("offers a newer release over an earlier run's success", () => {
+    const { draw } = harness(() => Promise.resolve(jsonResponse({})), {
+      ...OUT_OF_DATE_UPDATE,
+      verdict: "UPDATED",
+      success_note_version: "minds-v0.4.0",
+    });
+    const root = draw();
+
+    expect(allText(root)).not.toContain("This workspace was updated");
+    expect(buttonLabels(root)).toEqual(["Update to a different version…", "Schedule update", "Update now"]);
+  });
+
+  it("settles a failed run before offering another: its chat and Dismiss, no update buttons", () => {
+    const { draw } = harness(() => Promise.resolve(jsonResponse({})), {
+      ...OUT_OF_DATE_UPDATE,
+      verdict: "REFUSED",
+      chat_agent_id: "agent-lead-4",
+    });
+    const root = draw();
+
+    expect(buttonLabels(root)).toEqual(["Open chat", "Dismiss"]);
+    expect(allText(root)).not.toContain("uses credits");
   });
 
   it("points a run that ended short at its own chat rather than offering machinery of its own", () => {
@@ -285,28 +322,60 @@ describe("the update modal under auto-update", () => {
     schedule_zone: "",
   };
 
-  it("gives the armed window, asks nothing, and offers updating now, skipping, or another version", () => {
+  it("gives the armed window, asks nothing, and offers updating now or skipping the named release", () => {
     const { draw } = harness(() => Promise.resolve(jsonResponse({})), ARMED, true);
     const root = draw();
-    const text = allText(root);
 
-    expect(text).toContain("in the next update window (1:00 AM-4:00 AM). No action is needed.");
-    expect(pressableWithLabel(root, "Update now instead")).toBeDefined();
-    expect(pressableWithLabel(root, "Skip this update")).toBeDefined();
-    expect(pressableWithLabel(root, "Update to a different version")).toBeDefined();
+    expect(allText(root)).toContain("in the next update window (1:00 AM-4:00 AM). No action is needed.");
     // The app arms the schedule itself, so the reader has none to make or cancel.
-    expect(pressableWithLabel(root, "Schedule update")).toBeUndefined();
-    expect(pressableWithLabel(root, "Cancel schedule")).toBeUndefined();
+    expect(buttonLabels(root)).toEqual(["Update now instead", "Skip v0.4.1"]);
   });
 
-  it("skips the release through the skip route and closes", async () => {
+  it("says what skipping means and skips only once confirmed", async () => {
     const { draw, requests, onClose } = harness(() => Promise.resolve(jsonResponse({})), ARMED, true);
 
-    press(draw(), "Skip this update");
+    press(draw(), "Skip v0.4.1");
+    const asking = draw();
+    expect(allText(asking)).toContain(
+      "Imbue Studio won't update this workspace to v0.4.1. When a newer version is available, it'll schedule that one instead.",
+    );
+    expect(buttonLabels(asking)).toEqual(["Skip v0.4.1", "Cancel"]);
+    expect(requests).toEqual([]);
+
+    press(asking, "Skip v0.4.1");
     await settleDispatch();
 
     expect(requests).toEqual([`/ui/api/updates/${AGENT}/skip`]);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the schedule's controls while its run, or one pressed instead, is under way", () => {
+    // The run supersedes the schedule; a Skip beside it would not stop it.
+    const root = harness(
+      () => Promise.resolve(jsonResponse({})),
+      { ...ARMED, activity: "RUNNING", chat_agent_id: "agent-lead-5", chat_agent_name: "Update-to-v041" },
+      true,
+    ).draw();
+
+    expect(buttonLabels(root)).toEqual(["Open chat"]);
+    expect(allText(root)).not.toContain("next update window");
+  });
+
+  it("tells a skipped machine what the skip means and still updates it by hand", async () => {
+    const { draw, requests } = harness(
+      () => Promise.resolve(jsonResponse({})),
+      { ...OUT_OF_DATE_UPDATE, is_update_skipped: true },
+      true,
+    );
+    const root = draw();
+
+    expect(allText(root)).toContain(
+      "You skipped v0.4.1 for this workspace. Imbue Studio won't update it automatically until a newer version is available.",
+    );
+    expect(buttonLabels(root)).toEqual(["Update now"]);
+    press(root, "Update now");
+    await settleDispatch();
+    expect(requests).toEqual([`/ui/api/updates/${AGENT}/now`]);
   });
 
   it("says why the last window passed without a start, and that the next one will try", () => {
@@ -344,24 +413,36 @@ describe("the update modal over a run that needs the user's decision", () => {
     chat_agent_name: "update-to-minds-v0-4-1",
   };
 
-  it("shows the run's own account and only the way into its chat", () => {
+  it("shows the run's own account, the way into its chat, and Dismiss, with no update offered", () => {
     const { draw } = harness(() => Promise.resolve(jsonResponse({})), PENDING);
     const root = draw();
 
     expect(allText(root)).toContain("Your dashboard widget and the new layout both changed the same file.");
-    const pressables = collectVnodes(root).filter(
-      (vnode) => typeof attrsOf(vnode).onclick === "function" && vnode.tag !== "div",
-    );
-    // No Update now, Schedule, version link, or Dismiss beside it.
-    expect(pressables.map((vnode) => allText(vnode.children).trim()).filter(Boolean)).toEqual(["Open chat"]);
+    expect(buttonLabels(root)).toEqual(["Open chat", "Dismiss"]);
   });
 
-  it("offers Dismiss when the run's chat is unknown, so the badge is never a dead end", () => {
+  it("offers Dismiss alone when the run's chat is unknown, so the badge is never a dead end", () => {
     const { draw } = harness(() => Promise.resolve(jsonResponse({})), { ...PENDING, chat_agent_id: "" });
-    const pressables = collectVnodes(draw()).filter(
-      (vnode) => typeof attrsOf(vnode).onclick === "function" && vnode.tag !== "div",
+    expect(buttonLabels(draw())).toEqual(["Dismiss"]);
+  });
+
+  it("dismisses a decision as a skip of the release, once confirmed", async () => {
+    const { draw, requests } = harness(() => Promise.resolve(jsonResponse({})), PENDING);
+
+    press(draw(), "Dismiss");
+    const asking = draw();
+    expect(allText(asking)).toContain(
+      "Imbue Studio won't update this workspace to v0.4.1, and won't remind you about it. When a newer version is available, it'll let you know.",
     );
-    expect(pressables.map((vnode) => allText(vnode.children).trim()).filter(Boolean)).toEqual(["Dismiss"]);
+    press(asking, "Skip v0.4.1");
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${AGENT}/skip`]);
+  });
+
+  it("opens on the confirmation when the band's Dismiss asked for it", () => {
+    const root = harness(() => Promise.resolve(jsonResponse({})), PENDING, false, true).draw();
+    expect(buttonLabels(root)).toEqual(["Skip v0.4.1", "Cancel"]);
   });
 
   it("lands in the workspace on the run's chat", () => {

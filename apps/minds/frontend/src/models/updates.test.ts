@@ -292,7 +292,7 @@ describe("updateBadgeFor", () => {
 
   it("says a waiting run is the reader's move, not a spinner", () => {
     const badge = updateBadgeFor({ ...OUT_OF_DATE_UPDATE, activity: "WAITING" }, true);
-    expect(badge).toMatchObject({ state: "waiting", tone: "warn", label: "Waiting for you", isSpinnerShown: false });
+    expect(badge).toMatchObject({ state: "waiting", tone: "warn", label: "Needs your answer", isSpinnerShown: false });
   });
 
   it("keeps a failed run visible over a machine that is still out of date", () => {
@@ -473,11 +473,18 @@ describe("auto-update's quiet surfaces", () => {
     expect(badge).toMatchObject({ state: "scheduled", tone: "neutral", label: "Update scheduled" });
   });
 
-  it("puts a skipped machine's out-of-date state back, since auto-update will leave it alone", () => {
-    const skipped = { ...OUT_OF_DATE_UPDATE, is_update_skipped: true };
-    expect(updateBadgeFor(skipped, false, true)?.state).toBe("out-of-date");
-    expect(standingUpdateNotice(skipped, false, true)).toBe("out-of-date");
-  });
+  it.each([true, false])(
+    "keeps a skipped release quiet, with a neutral badge into the modal (auto-update %s)",
+    (isAutoUpdateEnabled) => {
+      const skipped = { ...OUT_OF_DATE_UPDATE, is_update_skipped: true, needs_sign_in: true };
+      expect(updateBadgeFor(skipped, false, isAutoUpdateEnabled)).toMatchObject({
+        state: "skipped",
+        tone: "neutral",
+        label: "Skipped v0.4.1",
+      });
+      expect(standingUpdateNotice(skipped, false, isAutoUpdateEnabled)).toBe("none");
+    },
+  );
 
   it("still says a machine read behind earlier and stopped since is behind, since the sweep cannot arm it", () => {
     const stopped = { ...OUT_OF_DATE_UPDATE, is_workspace_readable: false };

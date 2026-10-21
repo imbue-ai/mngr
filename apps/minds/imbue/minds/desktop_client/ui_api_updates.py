@@ -238,7 +238,7 @@ def _handle_cancel_schedule(agent_id: str) -> Response:
 
 
 def _handle_skip_update(agent_id: str) -> Response:
-    """POST /ui/api/updates/<agent_id>/skip: skip the app's current release for this machine under auto-update."""
+    """POST /ui/api/updates/<agent_id>/skip: skip the app's current release for this machine."""
     resolved = _resolve_machine_request(agent_id)
     if isinstance(resolved, Response):
         return resolved

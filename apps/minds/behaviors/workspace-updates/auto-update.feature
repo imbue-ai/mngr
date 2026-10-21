@@ -32,10 +32,13 @@ Feature: Automatic workspace updates
   Scenario: Skipping an update holds one workspace back until the next release
     Given auto-update is on
     And a workspace with a scheduled update
-    When the user skips that update
+    When the user asks to skip that update
+    Then the app says which release is skipped and what skipping it means, and skips it only once the user confirms
+    When the user confirms
     Then that workspace is no longer scheduled
     And it is not scheduled again until the app moves to a newer release
-    And its row shows it as out of date again, with its own update actions
+    And the workspace view carries no out-of-date notice for it
+    And its row says the release was skipped, with a way to update it by hand
 
   @sign-in-blocks-auto-update
   Scenario: A workspace that cannot be scheduled for want of a sign-in says so

@@ -160,6 +160,7 @@ export class ShellState {
    * tied to a displayed machine (the machines list opens it from a row); it is
    * dropped by the next navigation away from its machine. */
   private openUpdateAgentId: string | null = null;
+  private isUpdateSkipConfirmOpen = false;
   /** The mounted content iframe, installed by WorkspaceFrame (null when none is
    * mounted: hub pages, recovery, destroying, the workspace sub-pages). The
    * frame is ALSO mounted behind an app modal that forwarded ?workspace=, which
@@ -881,13 +882,31 @@ export class ShellState {
     return this.openUpdateAgentId;
   }
 
+  /** Whether the open update modal was asked for to confirm a skip (the band's
+   * Dismiss on a pending decision). */
+  isUpdateSkipConfirmRequested(): boolean {
+    return this.isUpdateSkipConfirmOpen;
+  }
+
   /** The user asked for the update modal (a badge, the band's "See update"). */
-  openUpdateModal(agentId: string): void {
+  openUpdateModal(agentId: string, options: { isSkipConfirmOpen?: boolean } = {}): void {
     this.openUpdateAgentId = agentId;
+    this.isUpdateSkipConfirmOpen = options.isSkipConfirmOpen ?? false;
   }
 
   closeUpdateModal(): void {
     this.openUpdateAgentId = null;
+    this.isUpdateSkipConfirmOpen = false;
+  }
+
+  /** A run outcome's Dismiss pressed outside the update modal (the band): the
+   * outcome cleared, or the modal when it could not be, which has room to say why. */
+  dismissUpdateOutcomeOrExplain(anyId: string): void {
+    const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
+    void this.stores.updates.dismissRunOutcome(agentScoped).then((result) => {
+      if (!result.isOk) this.openUpdateModal(agentScoped);
+      m.redraw();
+    });
   }
 
   /** Close whichever update modal is up, reporting whether there was one. Not

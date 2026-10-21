@@ -29,6 +29,7 @@ import { PopoutDropOverlay } from "./PopoutDropOverlay";
 import { noticeBandFor } from "./notice-band";
 import {
   standingUpdateNotice,
+  updateChatAgentIdFor,
   updateRunOutcome,
   updateRunPhase,
 } from "../../models/updates";
@@ -392,6 +393,10 @@ export function Shell(): m.Component<ShellAttrs> {
               shell.stores.updates.isUpdating(agentScoped),
             );
       const updateOutcome = updateRunOutcome(published);
+      const updateChatAgentId =
+        agentScoped === null
+          ? ""
+          : updateChatAgentIdFor(published, shell.stores.updates.isUpdating(agentScoped));
       const band = noticeBandFor(
         health,
         shell.stores.health.discoveryHealth,
@@ -418,6 +423,7 @@ export function Shell(): m.Component<ShellAttrs> {
             ? (published.hold_detail ?? "")
             : null,
           updateRunOutcome: updateOutcome,
+          isUpdateChatKnown: updateChatAgentId !== "",
           standingUpdateNotice: standingNotice,
         },
       );
@@ -455,15 +461,21 @@ export function Shell(): m.Component<ShellAttrs> {
           ? m(NoticeBand, {
               shell,
               payload: band,
-              onAction: () => {
-                if (band.action?.kind === "restart-app") {
+              onAction: (action) => {
+                if (action.kind === "restart-app") {
                   electronBridge.restartApp();
                 } else if (agentScoped === null) {
                   return;
-                } else if (band.action?.kind === "update-workspace") {
+                } else if (action.kind === "update-workspace") {
                   shell.openUpdateModal(agentScoped);
-                } else if (band.action?.kind === "sign-in-for-update") {
+                } else if (action.kind === "sign-in-for-update") {
                   shell.signInForUpdateOrExplain(agentScoped);
+                } else if (action.kind === "open-update-chat") {
+                  shell.openWorkspaceChat(agentScoped, updateChatAgentId);
+                } else if (action.kind === "dismiss-update-outcome") {
+                  shell.dismissUpdateOutcomeOrExplain(agentScoped);
+                } else if (action.kind === "skip-update") {
+                  shell.openUpdateModal(agentScoped, { isSkipConfirmOpen: true });
                 } else {
                   shell.openRecoveryModal(agentScoped);
                 }
@@ -490,6 +502,7 @@ export function Shell(): m.Component<ShellAttrs> {
               workspaceName:
                 shell.stores.workspaces.entryByAnyId(updateModalAgentId)
                   ?.name ?? "this workspace",
+              isSkipConfirmOpen: shell.isUpdateSkipConfirmRequested(),
               onClose: () => shell.closeUpdateModal(),
             })
           : null,

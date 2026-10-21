@@ -59,7 +59,9 @@ from imbue.minds.desktop_client.update_status import describe_skip_reason
 from imbue.minds.desktop_client.update_status import format_update_window
 from imbue.minds.desktop_client.update_status import parse_update_schedule_record
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
+from imbue.minds.desktop_client.workspace_update_state import AutoUpdatePolicy
 from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
+from imbue.minds.desktop_client.workspace_update_state import should_auto_arm
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import HookedMngrCaller
@@ -775,6 +777,28 @@ def test_skipping_an_update_cancels_its_schedule_and_marks_the_row_skipped_for_t
     assert published.is_scheduled is False
     assert published.is_update_skipped is True
     assert update_program_invocation(caller.calls[1])[0] == "cancel"
+
+
+@pytest.mark.witnesses("workspace-updates.dismiss-decision-skips-release")
+def test_skipping_a_release_whose_run_awaits_a_decision_clears_the_decision_and_holds_the_release_back(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """The decision's Dismiss is a skip: the row stops asking, and no fresh run sets the kept work aside."""
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    caller = ScriptedMngrCaller(results=(CANCELLED_UPDATE_COMMAND_RESULT,))
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller, minds_config=minds_config)
+    _mark_out_of_date(app, agent_id)
+    _end_run_needing_decision(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/skip")
+
+    assert response.status_code == 200
+    published = _published(app, agent_id)
+    assert (published.is_decision_pending, published.verdict, published.is_update_skipped) == (False, None, True)
+    policy = AutoUpdatePolicy(
+        is_enabled=True, skipped_target_ref=minds_config.get_skipped_update_target(str(agent_id)) or ""
+    )
+    assert should_auto_arm(_service(app).state_store.get(agent_id), policy, _CEILING, None) is False
 
 
 @pytest.mark.parametrize(

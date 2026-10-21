@@ -30,18 +30,18 @@ export function LocalPageNotice(): m.Component {
           { variant: payload.variant, id: "local-page-notice" },
           m("div", { class: "flex items-center justify-between gap-3" }, [
             m("span", payload.message),
-            payload.action !== null
-              ? m(
-                  Button,
-                  {
-                    variant: "secondary",
-                    // The only action that fixes this condition, and it is
-                    // recoverable: every machine keeps running across it.
-                    onclick: () => electronBridge.restartApp(),
-                  },
-                  payload.action.label,
-                )
-              : null,
+            payload.actions.map((action) =>
+              m(
+                Button,
+                {
+                  variant: "secondary",
+                  // The only action that fixes this condition, and it is
+                  // recoverable: every machine keeps running across it.
+                  onclick: () => electronBridge.restartApp(),
+                },
+                action.label,
+              ),
+            ),
           ]),
         ),
       );

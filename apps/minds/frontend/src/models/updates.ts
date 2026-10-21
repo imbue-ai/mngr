@@ -55,6 +55,33 @@ export function isHandledByAutoUpdate(update: UiWorkspaceUpdate, isAutoUpdateEna
   );
 }
 
+/** Whether the user skipped the release this machine is behind by: it is
+ * neither updated automatically nor reminded about until a newer one ships. */
+export function isUpdateSkipped(update: UiWorkspaceUpdate): boolean {
+  return isUpdateOffered(update) && (update.is_update_skipped ?? false);
+}
+
+/** The release a skip is for, as the reader sees it: the one this app ships. */
+export function skippedVersionText(update: UiWorkspaceUpdate): string {
+  return displayVersion(update.supported_version) || "this update";
+}
+
+/** What skipping this machine's update means, asked before it is done. */
+export function skipConfirmationLine(update: UiWorkspaceUpdate, isAutoUpdateEnabled: boolean): string {
+  const version = skippedVersionText(update);
+  return isAutoUpdateEnabled
+    ? `Imbue Studio won't update this workspace to ${version}. When a newer version is available, it'll schedule that one instead.`
+    : `Imbue Studio won't update this workspace to ${version}, and won't remind you about it. When a newer version is available, it'll let you know.`;
+}
+
+/** What a skipped machine's modal says in place of the offer. */
+export function skippedLine(update: UiWorkspaceUpdate, isAutoUpdateEnabled: boolean): string {
+  const version = skippedVersionText(update);
+  return isAutoUpdateEnabled
+    ? `You skipped ${version} for this workspace. Imbue Studio won't update it automatically until a newer version is available.`
+    : `You skipped ${version} for this workspace. Imbue Studio won't remind you about it until a newer version is available.`;
+}
+
 /** The standing condition a surface says about a machine's version, if any.
  * Standing because it will still be true tomorrow, unlike a run's phase or
  * outcome. */
@@ -70,7 +97,7 @@ export function standingUpdateNotice(
   isAutoUpdateEnabled = false,
 ): StandingUpdateNotice {
   if (isRecreationRequired(update)) return "needs-recreation";
-  if (isUpdating) return "none";
+  if (isUpdating || isUpdateSkipped(update)) return "none";
   if (update.needs_sign_in ?? false) return "needs-sign-in";
   if (isUpdateOffered(update) && !isHandledByAutoUpdate(update, isAutoUpdateEnabled)) return "out-of-date";
   return "none";
@@ -216,6 +243,48 @@ export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = 
   }
 }
 
+/** The one situation the update modal explains, ordered by what the reader
+ * would act on first. A run's outcome outranks the offer: the outcome is
+ * settled (in its chat, or by dismissing it) before another run is offered. A
+ * run that landed this app's version outranks it too, since detection reads
+ * the machine as behind for a while after the apply; one that landed an older
+ * version ranks below it, so a newer release is not hidden behind its success. */
+export type UpdateModalSituation =
+  | "needs-recreation"
+  | "app-behind"
+  | "in-progress"
+  | "not-started"
+  | "decision-pending"
+  | "failed"
+  | "updated-with-note"
+  | "needs-sign-in"
+  | "scheduled"
+  | "skipped"
+  | "offered"
+  | "updated"
+  | "unknown"
+  | "up-to-date";
+
+export function updateModalSituation(update: UiWorkspaceUpdate, isUpdating: boolean): UpdateModalSituation {
+  if (isRecreationRequired(update)) return "needs-recreation";
+  if (update.availability === "APP_BEHIND") return "app-behind";
+  if (isUpdating) return "in-progress";
+  const outcome = updateRunOutcome(update);
+  if (outcome === "not-started") return "not-started";
+  if (outcome === "decision-pending") return "decision-pending";
+  if (outcome === "failed") return "failed";
+  if (outcome === "needs-attention") return "updated-with-note";
+  const landed = update.success_note_version ?? "";
+  if (update.verdict === "UPDATED" && landed !== "" && landed === update.supported_version) return "updated";
+  if (update.needs_sign_in ?? false) return "needs-sign-in";
+  if (update.is_scheduled ?? false) return "scheduled";
+  if (isUpdateSkipped(update)) return "skipped";
+  if (update.availability === "OUT_OF_DATE" || update.availability === "PATCH_AVAILABLE") return "offered";
+  if (update.verdict === "UPDATED" || update.verdict === "ALREADY_CURRENT") return "updated";
+  if (update.availability === "UNKNOWN") return "unknown";
+  return "up-to-date";
+}
+
 export type UpdateBadgeState =
   | "updating"
   | "waiting"
@@ -225,9 +294,17 @@ export type UpdateBadgeState =
   | "needs-recreation"
   | "needs-sign-in"
   | "scheduled"
+  | "skipped"
   | "out-of-date"
   | "unknown";
 export type UpdateBadgeTone = "neutral" | "warn" | "error";
+
+/** The run's chat to open from a surface, or "" for none: a press still on its
+ * way has no run of its own yet, and the chat the row names is an earlier run's. */
+export function updateChatAgentIdFor(update: UiWorkspaceUpdate | null, isUpdating: boolean): string {
+  if (update === null || (isUpdating && !isRunInFlight(update))) return "";
+  return update.chat_agent_id ?? "";
+}
 
 /** The machines-list row badge for one machine's update situation. */
 export interface UpdateBadge {
@@ -258,7 +335,7 @@ export function updateBadgeFor(
     return {
       state: "waiting",
       tone: "warn",
-      label: "Waiting for you",
+      label: "Needs your answer",
       tooltip: update?.is_hold_recorded
         ? "The update is waiting for your go-ahead — open this workspace to continue"
         : "The update agent has stopped and is waiting in its chat — open this workspace to continue",
@@ -294,7 +371,7 @@ export function updateBadgeFor(
     return {
       state: "decision-pending",
       tone: "warn",
-      label: "Needs your decision",
+      label: "Needs your answer",
       tooltip: "The update can't keep something you built in this workspace — decide in its chat",
       isSpinnerShown: false,
     };
@@ -325,6 +402,17 @@ export function updateBadgeFor(
       tone: "warn",
       label: "Recreate to update",
       tooltip: "This workspace is too old to update in place — see how to move your work to a new one",
+      isSpinnerShown: false,
+    };
+  }
+  // Neutral: the reader chose this, so it asks nothing of them, but it is still
+  // the way to the modal that updates the machine by hand.
+  if (isUpdateSkipped(update)) {
+    return {
+      state: "skipped",
+      tone: "neutral",
+      label: `Skipped ${skippedVersionText(update)}`,
+      tooltip: "You skipped this update — open to update by hand",
       isSpinnerShown: false,
     };
   }
@@ -493,13 +581,17 @@ export class UpdatesStore {
     return this.forAgent(agentId).activity === "APPLYING";
   }
 
-  /** Every machine confirmed out of date, not already updating, and not waiting
-   * on the user's decision about its last run -- what the bulk actions cover. */
+  /** Every machine confirmed out of date, not already updating, not waiting
+   * on the user's decision about its last run, and not skipped -- what the bulk
+   * actions cover. */
   updatableAgentIds(): string[] {
     return [...this.updateByAgentId.entries()]
       .filter(
         ([agentId, update]) =>
-          isUpdateOffered(update) && !this.isUpdating(agentId) && !(update.is_decision_pending ?? false),
+          isUpdateOffered(update) &&
+          !this.isUpdating(agentId) &&
+          !(update.is_decision_pending ?? false) &&
+          !isUpdateSkipped(update),
       )
       .map(([agentId]) => agentId);
   }
@@ -531,8 +623,9 @@ export class UpdatesStore {
     return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/schedule/cancel`, {});
   }
 
-  /** Skip the release auto-update armed: it cancels the schedule, and the
-   * sweep leaves the machine alone until a newer release. */
+  /** Skip the app's current release for this machine: it cancels any schedule
+   * and any decision its last run is waiting on, and the machine is neither
+   * updated automatically nor reminded about until a newer release. */
   async skipUpdate(agentId: string): Promise<UpdateActionResult> {
     return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/skip`, {});
   }
