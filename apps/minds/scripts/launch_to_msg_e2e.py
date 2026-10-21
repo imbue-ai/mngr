@@ -124,11 +124,11 @@ MINDS_APP_PATH = Path(os.environ.get("MINDS_APP_PATH", "/Applications/Imbue Stud
 
 
 def _bundled_root_name() -> str:
-    """The MINDS_ROOT_NAME baked into the app under test, which names its data root.
+    """The MINDS_ROOT_NAME baked into the app under test, which names its tier.
 
-    A staging / dev build writes to ``~/.minds-<env>``, not ``~/.minds``. Reading the
-    build's own root_name keeps this harness pointed at the app's real data root
-    instead of a stale one left behind by some other build.
+    A staging / dev build writes to its own tier's roots, not production's. Reading
+    the build's own root_name keeps this harness pointed at the app's real data roots
+    instead of stale ones left behind by some other build.
     """
     override = os.environ.get("MINDS_ROOT_NAME")
     if override:
@@ -643,7 +643,7 @@ def wait_backend_url(since_offset: int = 0) -> str:
 
     deadline = time.time() + LAUNCH_BACKEND_TIMEOUT
     pattern = re.compile(
-        r"(?:Minds|Mind|Imbue Studio) login URL \(one-time use\): "
+        r"Imbue Studio login URL \(one-time use\): "
         r"(http://(?:127\.0\.0\.1|localhost):\d+/login\?one_time_code=[A-Za-z0-9_-]+)"
     )
     while time.time() < deadline:
@@ -705,7 +705,7 @@ def dismiss_consent_if_present(page: Page, *, timeout: float = 8_000) -> bool:
 
     The SPA consent screen (ConsentPage) takes over the page while
     ``error_reporting_consent_given`` is False, which it always is on a wiped
-    ~/.minds. It is not once-per-run: it can
+    state root. It is not once-per-run: it can
     be back on a later ``goto("/")``, and a caller that assumed otherwise spent
     the rest of the run driving a dialog it thought was the home page.
     """
@@ -1409,8 +1409,9 @@ def pre_run_sweep() -> None:
         elif stale.exists():
             with contextlib.suppress(OSError):
                 stale.unlink()
-    # Clear slack creds left by a dev run without a reset. Skipped when the store is absent, since
-    # clearing creates it and its key before the first launch migrates the legacy latchkey dir there.
+    # Clear slack creds left by a dev run without a reset. Skipped when the store is absent:
+    # clearing creates it and its encryption_key, and a store that exists before the first
+    # launch stops the data migration from moving the legacy latchkey dir there.
     if LATCHKEY_DIR.exists():
         with contextlib.suppress(Exception):
             latchkey_clear_slack()
@@ -1504,7 +1505,7 @@ def run_e2e() -> int:
 
         # The post-login error-reporting consent screen
         # (the SPA ConsentPage, shown while error_reporting_consent_given is False --
-        # always here, since the runner's ~/.minds is wiped each run) sits on
+        # always here, since the runner's state root is wiped each run) sits on
         # the home page until answered. Dismiss it once via Continue; the
         # POST /consent + reload then proceeds home, so the create flow and the
         # later both-tiles home assertion see the home page, not the consent.
