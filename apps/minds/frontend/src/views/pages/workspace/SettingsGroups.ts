@@ -44,12 +44,14 @@ import {
   recordedDispatchFailure,
   scheduleSkipLine,
   scheduledLine,
+  skippedVersionText,
   standingUpdateNotice,
   updateActivityNotice,
 } from "../../../models/updates";
 import { SettingsModel } from "../../../models/settings";
 import {
   noBackupConfirmPrompt,
+  skipConfirmPrompt,
   updateVersionRow,
 } from "../../components/UpdateModal";
 import { workspaceUpdateSettings } from "../settings/WorkspaceUpdateSettings";
@@ -95,6 +97,8 @@ interface SettingsGroupsLocalState {
     action: "now" | "schedule";
     targetRef: string;
   } | null;
+  /** The machine whose skip is waiting on its confirmation, or null. */
+  skipConfirmAgentId: string | null;
   /** The last dispatch's refusal and the machine it was refused for, or null. */
   updateError: { agentId: string; message: string; detail: string } | null;
   /** The resize fields as typed, and the machine they were typed for; null until edited. */
@@ -125,6 +129,7 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
     pendingDispatch: null,
     pendingSchedule: null,
     noBackupConfirm: null,
+    skipConfirmAgentId: null,
     updateError: null,
     sizeDraft: null,
     appSettings: new SettingsModel(),
@@ -277,6 +282,12 @@ function renderUpdatesGroup(
 ): m.Children {
   const { stores, shell } = getAppContext();
   const updates = stores.updates;
+  if (updates.publishedFor(agentId) === null && updates.isHiddenWhileStopped(agentId)) {
+    return m("div", { class: "max-w-md" }, [
+      m(SectionHeader, "Update"),
+      m("p", { id: "ws-updates-stopped", class: "type-helper text-secondary" }, "Start this workspace to see its updates."),
+    ]);
+  }
   const update = updates.forAgent(agentId);
   const isUpdating = updates.isUpdating(agentId);
   const pending = forMachine(local.pendingDispatch, agentId);
@@ -406,7 +417,18 @@ function renderUpdatesGroup(
               local.noBackupConfirm = null;
             },
           })
-        : [
+        : local.skipConfirmAgentId === agentId && isScheduled && isAutoUpdateEnabled
+          ? skipConfirmPrompt(update, isAutoUpdateEnabled, {
+              isSkipping: false,
+              onConfirm: () => {
+                local.skipConfirmAgentId = null;
+                writeSchedule("skip");
+              },
+              onCancel: () => {
+                local.skipConfirmAgentId = null;
+              },
+            })
+          : [
             isScheduled
               ? m("div", { class: "flex flex-col gap-1 mb-3" }, [
                   m(
@@ -455,11 +477,11 @@ function renderUpdatesGroup(
                       variant: "secondary",
                       id: "ws-update-skip-btn",
                       disabled: isBusy,
-                      onclick: () => writeSchedule("skip"),
+                      onclick: () => {
+                        local.skipConfirmAgentId = agentId;
+                      },
                     },
-                    pendingSchedule?.action === "skip"
-                      ? m(Spinner, { size: "sm" })
-                      : "Skip this update",
+                    `Skip ${skippedVersionText(update)}`,
                   )
                 : isScheduled
                   ? m(

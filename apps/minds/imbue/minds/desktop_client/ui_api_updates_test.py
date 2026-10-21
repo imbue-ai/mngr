@@ -981,6 +981,23 @@ def test_a_machine_waiting_on_a_decision_is_not_sent_a_fresh_run(
     assert _published(app, agent_id).is_decision_pending
 
 
+@pytest.mark.witnesses("workspace-updates.no-schedule-during-run")
+def test_a_machine_with_an_update_running_is_not_scheduled_another(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """A schedule armed mid-run would outlive the run, and start a fresh one in the next window."""
+    caller = RecordingMngrCaller(result=_armed())
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
+    _mark_out_of_date(app, agent_id)
+    _begin_running_run(app, agent_id, "Update-to-v041")
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/schedule")
+
+    assert response.status_code == 409
+    assert caller.calls == []
+    assert _published(app, agent_id).is_scheduled is False
+
+
 def _calls_for(caller: RecordingMngrCaller, agent_id: AgentId) -> list[list[str]]:
     return [call for call in caller.calls if call[2] == str(agent_id)]
 

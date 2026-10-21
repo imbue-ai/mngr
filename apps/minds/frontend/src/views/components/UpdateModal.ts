@@ -130,6 +130,26 @@ export function noBackupConfirmPrompt(handlers: { onConfirm: () => void; onCance
   ]);
 }
 
+/** The skip confirmation, drawn in place of the controls it was asked from.
+ * Shared with the machine's Updates settings group. */
+export function skipConfirmPrompt(
+  update: UiWorkspaceUpdate,
+  isAutoUpdateEnabled: boolean,
+  handlers: { isSkipping: boolean; onConfirm: () => void; onCancel: () => void },
+): m.Children {
+  return m("div", { class: "flex flex-col gap-2" }, [
+    m("p", { class: "type-helper text-primary" }, skipConfirmationLine(update, isAutoUpdateEnabled)),
+    m("div", { class: "flex flex-wrap items-center gap-2" }, [
+      m(
+        Button,
+        { variant: "primary", id: "update-confirm-skip", disabled: handlers.isSkipping, onclick: handlers.onConfirm },
+        handlers.isSkipping ? m(Spinner, { size: "sm" }) : `Skip ${skippedVersionText(update)}`,
+      ),
+      m(Button, { variant: "secondary", disabled: handlers.isSkipping, onclick: handlers.onCancel }, "Cancel"),
+    ]),
+  ]);
+}
+
 export function UpdateModal(): m.Component<UpdateModalAttrs> {
   const state: UpdateModalState = {
     pendingAction: null,
@@ -257,37 +277,6 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       `This workspace (${displayVersion(update.current_version)}) is newer than this copy of Imbue Studio ` +
         `(${displayVersion(update.supported_version)}). Update the app to catch up — there's nothing to run here.`,
     );
-  }
-
-  /** The skip confirmation, drawn in place of the action row it was asked from. */
-  function skipConfirmPrompt(agentId: string, update: UiWorkspaceUpdate, onClose: () => void): m.Children {
-    const updates = getAppContext().stores.updates;
-    return m("div", { class: "flex flex-col gap-2" }, [
-      m("p", { class: "type-helper text-primary" }, skipConfirmationLine(update, updates.isAutoUpdateEnabled)),
-      m("div", { class: "flex flex-wrap items-center gap-2" }, [
-        m(
-          Button,
-          {
-            variant: "primary",
-            id: "update-modal-confirm-skip",
-            disabled: state.pendingAction !== null,
-            onclick: () => run("skip", () => updates.skipUpdate(agentId), onClose),
-          },
-          state.pendingAction === "skip" ? m(Spinner, { size: "sm" }) : `Skip ${skippedVersionText(update)}`,
-        ),
-        m(
-          Button,
-          {
-            variant: "secondary",
-            disabled: state.pendingAction !== null,
-            onclick: () => {
-              state.isSkipConfirmOpen = false;
-            },
-          },
-          "Cancel",
-        ),
-      ]),
-    ]);
   }
 
   return {
@@ -586,7 +575,15 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         );
         actions.length = 0;
       } else if (state.isSkipConfirmOpen && isSkipOffered) {
-        body.push(skipConfirmPrompt(agentId, update, onClose));
+        body.push(
+          skipConfirmPrompt(update, isAutoUpdateEnabled, {
+            isSkipping: state.pendingAction === "skip",
+            onConfirm: () => run("skip", () => updates.skipUpdate(agentId), onClose),
+            onCancel: () => {
+              state.isSkipConfirmOpen = false;
+            },
+          }),
+        );
         actions.length = 0;
       }
 

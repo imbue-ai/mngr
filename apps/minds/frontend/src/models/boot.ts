@@ -35,14 +35,15 @@ declare global {
 }
 
 export function createEmptyStores(): AppStores {
+  const workspaces = new WorkspacesStore();
   return {
-    workspaces: new WorkspacesStore(),
+    workspaces,
     health: new HealthStore(),
     requests: new RequestsStore(),
     notifications: new NotificationsStore(),
     accounts: new AccountsStore(),
     providers: new ProvidersStore(),
-    updates: new UpdatesStore(),
+    updates: new UpdatesStore((agentId) => workspaces.entryByAnyId(agentId)?.liveness ?? ""),
   };
 }
 

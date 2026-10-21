@@ -18,11 +18,13 @@ import type { AnyVnode } from "../../../testing";
 import {
   allText,
   attrsOf,
+  byId,
   collectVnodes,
   jsonResponse,
   renderDeep,
   settingsOverview,
   settle,
+  workspacesMessage,
 } from "../../../testing";
 import { CopyField } from "../../components/Layout";
 import { SettingsGroups } from "./SettingsGroups";
@@ -1167,9 +1169,30 @@ describe("the Updates settings group under auto-update", () => {
     ).toBeUndefined();
     const armed = updatesGroup(draw(BACKED));
     expect(pressableWithLabel(armed, "Cancel schedule")).toBeUndefined();
-    press(armed, "Skip this update");
+    press(armed, "Skip v0.4.1");
+    // Asked first, as the update modal asks.
+    const asking = updatesGroup(draw(BACKED));
+    expect(pressableWithLabel(asking, "Cancel")).toBeDefined();
+    expect(requests).toEqual([]);
+    press(asking, "Skip v0.4.1");
     await settleDispatch();
 
     expect(requests).toEqual([`/ui/api/updates/${BACKED}/skip`]);
+  });
+});
+
+describe("the Updates settings group of a stopped workspace", () => {
+  it("offers nothing to do until the workspace starts, and claims no version state", () => {
+    const { draw } = harness();
+    getAppContext().stores.workspaces.applyWorkspacesMessage(
+      workspacesMessage({
+        workspaces: [{ ...workspacesMessage().workspaces[0], id: BACKED, liveness: "STOPPED" }],
+      }),
+    );
+
+    const pane = renderDeep(draw(BACKED)) as m.Children;
+    expect(byId(pane, "ws-updates-stopped")).toBeDefined();
+    expect(byId(pane, "ws-updates-group")).toBeUndefined();
+    expect(allText(pane)).not.toContain("v0.3.9");
   });
 });

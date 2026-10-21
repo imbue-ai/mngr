@@ -68,6 +68,14 @@ Feature: Scheduling an update
     When the user schedules that workspace's update
     Then the app says the workspace must be running, during the update window too
 
+  @no-schedule-during-run
+  Scenario: A workspace whose update is running cannot be scheduled
+    A schedule set while a run is under way would outlive it, and start a fresh run in the next window even after the run ended waiting for the user's decision.
+    Given a workspace with an update in flight
+    When the user schedules that workspace's update
+    Then the update is not scheduled
+    And the app says an update is already running in that workspace
+
   @no-cron
   Scenario: A workspace that cannot run scheduled jobs is told to update now instead
     Given an out-of-date workspace with no scheduler of its own

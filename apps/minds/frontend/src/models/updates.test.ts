@@ -182,6 +182,78 @@ describe("UpdatesStore", () => {
   });
 });
 
+describe("a stopped machine's update state", () => {
+  function storeWith(liveness: Record<string, string>, updates: UiWorkspaceUpdatesMessage["updates"]): UpdatesStore {
+    const store = new UpdatesStore((agentId) => liveness[agentId] ?? "");
+    store.applyUpdatesMessage(message(updates));
+    return store;
+  }
+
+  it.each(["STOPPED", "STOPPING"])(
+    "shows nothing while %s that needs the machine to answer, and all of it again once it runs",
+    (stoppedLiveness) => {
+      const liveness: Record<string, string> = { "agent-a": stoppedLiveness };
+      const store = storeWith(liveness, {
+        "agent-a": {
+          ...OUT_OF_DATE_UPDATE,
+          verdict: "NEEDS_DECISION",
+          is_decision_pending: true,
+          is_scheduled: true,
+          needs_sign_in: true,
+          chat_agent_id: "agent-chat",
+          success_note_version: "minds-v0.4.0",
+        },
+      });
+
+      expect(store.publishedFor("agent-a")).toBeNull();
+      expect(updateBadgeFor(store.publishedFor("agent-a"), store.isUpdating("agent-a"))).toBeNull();
+      expect(standingUpdateNotice(store.forAgent("agent-a"), false)).toBe("none");
+      expect(store.updatableAgentIds()).toEqual([]);
+
+      liveness["agent-a"] = "RUNNING";
+      expect(updateBadgeFor(store.publishedFor("agent-a"), false)?.state).toBe("decision-pending");
+    },
+  );
+
+  it("hides a run that reads as in progress, since nothing can be running in a stopped machine", () => {
+    const store = storeWith({ "agent-a": "STOPPED" }, { "agent-a": { ...OUT_OF_DATE_UPDATE, activity: "RUNNING" } });
+    expect(store.isUpdating("agent-a")).toBe(false);
+  });
+
+  it("keeps a landing apply whole, whose restart can read as a stop", () => {
+    const applying = { ...OUT_OF_DATE_UPDATE, activity: "APPLYING" as const, chat_agent_id: "agent-chat" };
+    const store = storeWith({ "agent-a": "STOPPING" }, { "agent-a": applying });
+    expect(store.publishedFor("agent-a")).toEqual(applying);
+    expect(store.isApplying("agent-a")).toBe(true);
+  });
+
+  it("keeps the facts that need nothing from the machine: an update that never went out, and recreation", () => {
+    const store = storeWith(
+      { "agent-a": "STOPPED", "agent-b": "STOPPED" },
+      {
+        "agent-a": { ...OUT_OF_DATE_UPDATE, dispatch_failure: "Couldn't start this workspace.", verdict: "STUCK" },
+        "agent-b": { ...OUT_OF_DATE_UPDATE, availability: "NEEDS_RECREATION", is_scheduled: true },
+      },
+    );
+
+    expect(updateBadgeFor(store.publishedFor("agent-a"), false)).toMatchObject({
+      state: "failed",
+      tooltip: "Couldn't start this workspace.",
+    });
+    expect(store.publishedFor("agent-a")?.verdict).toBeUndefined();
+    expect(updateBadgeFor(store.publishedFor("agent-b"), false)?.state).toBe("needs-recreation");
+    expect(store.publishedFor("agent-b")?.is_scheduled).toBeUndefined();
+  });
+
+  it("shows a press this window just made on a stopped machine, which the press starts", () => {
+    const store = storeWith({ "agent-a": "STOPPED" }, { "agent-a": OUT_OF_DATE_UPDATE });
+    vi.stubGlobal("fetch", () => new Promise<Response>(() => undefined));
+    void store.updateNow("agent-a");
+
+    expect(updateBadgeFor(store.publishedFor("agent-a"), store.isUpdating("agent-a"))?.state).toBe("updating");
+  });
+});
+
 describe("update state predicates", () => {
   it("counts every live phase of a run as in flight, waiting included", () => {
     for (const activity of ["STARTING", "RUNNING", "WAITING", "APPLYING"] as const) {

@@ -219,6 +219,10 @@ def _handle_schedule_update(agent_id: str) -> Response:
     if isinstance(resolved, Response):
         return resolved
     service, parsed_id, target_ref = resolved
+    # A schedule armed during a run outlives it: if the run ends waiting on a decision, the
+    # window would start a fresh run that sets the kept work aside.
+    if service.state_store.get(parsed_id).is_run_in_flight:
+        return _error_response(DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.ALREADY_RUNNING], 409)
     return _schedule_response(service.schedule_update(parsed_id, override_ref=target_ref))
 
 

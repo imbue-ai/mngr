@@ -522,6 +522,34 @@ export function scheduleSkipLine(update: UiWorkspaceUpdate): string {
   return reason ? `${reason} Studio will try again in the next window.` : "";
 }
 
+/** Whether a machine's lifecycle reading says it is stopped or stopping, so
+ * nothing can be read from it or done in it until it starts. */
+function isStoppedLiveness(liveness: string): boolean {
+  return liveness === "STOPPED" || liveness === "STOPPING";
+}
+
+/** What a stopped machine still shows of its update state, or null for
+ * nothing. Most of it needs the machine to answer -- reading the outcome,
+ * dismissing a decision, skipping, cancelling -- and the next read after it
+ * starts brings back whatever was not dismissed. A landing apply restarts the
+ * machine's services and is shown whole; the two facts that need nothing from
+ * the machine stay: an update that never went out, which only this app holds,
+ * and a machine too old to update in place, whose remedy is a new machine. */
+export function updateShownWhileStopped(update: UiWorkspaceUpdate): UiWorkspaceUpdate | null {
+  if (update.activity === "APPLYING") return update;
+  const isRecreation = isRecreationRequired(update);
+  if (!update.dispatch_failure && !isRecreation) return null;
+  return {
+    availability: isRecreation ? "NEEDS_RECREATION" : "UNKNOWN",
+    current_version: update.current_version,
+    supported_version: update.supported_version,
+    activity: "IDLE",
+    is_backup_configured: update.is_backup_configured,
+    dispatch_failure: update.dispatch_failure,
+    dispatch_failure_detail: update.dispatch_failure_detail,
+  };
+}
+
 export class UpdatesStore {
   /** The configured local window scheduled updates run in, as the modal shows it. */
   updateWindow = "";
@@ -537,6 +565,10 @@ export class UpdatesStore {
   /** Why the last sign-in ask failed, per machine, so whichever surface the
    * reader goes to next can say so; dropped on the next ask. */
   private signInFailureByAgentId = new Map<string, UpdateActionResult>();
+
+  /** `livenessOf` reads a machine's lifecycle state (STOPPED, RUNNING, ...;
+   * "" when unknown), which decides how much of its update state is shown. */
+  constructor(private readonly livenessOf: (agentId: string) => string = () => "") {}
 
   applyUpdatesMessage(message: UiWorkspaceUpdatesMessage): void {
     this.updateByAgentId = new Map(Object.entries(message.updates ?? {}));
@@ -557,14 +589,23 @@ export class UpdatesStore {
 
   /** This machine's update state; the all-unknown default when there is none. */
   forAgent(agentId: string): UiWorkspaceUpdate {
-    return this.updateByAgentId.get(agentId) ?? UNKNOWN_UPDATE;
+    return this.publishedFor(agentId) ?? UNKNOWN_UPDATE;
   }
 
   /** This machine's update state as the backend published it, or null before
    * it has. The `forAgent` default is a safe value but not a reading: for the
-   * first seconds after launch it would badge every machine "Version unknown". */
+   * first seconds after launch it would badge every machine "Version unknown".
+   * A stopped machine shows only what `updateShownWhileStopped` keeps, unless
+   * this window has just pressed its update, which starts it. */
   publishedFor(agentId: string): UiWorkspaceUpdate | null {
-    return this.updateByAgentId.get(agentId) ?? null;
+    const published = this.updateByAgentId.get(agentId) ?? null;
+    if (published === null || !this.isHiddenWhileStopped(agentId)) return published;
+    return updateShownWhileStopped(published);
+  }
+
+  /** Whether this machine's update state is held back because it is stopped. */
+  isHiddenWhileStopped(agentId: string): boolean {
+    return !this.pendingAgentIds.has(agentId) && isStoppedLiveness(this.livenessOf(agentId));
   }
 
   /** Whether the row should read as updating, optimistic dispatch included. */
@@ -580,7 +621,8 @@ export class UpdatesStore {
   /** The machines the bulk actions cover: confirmed out of date, with nothing
    * standing in the way of a fresh run. */
   updatableAgentIds(): string[] {
-    return [...this.updateByAgentId.entries()]
+    return [...this.updateByAgentId.keys()]
+      .map((agentId) => [agentId, this.forAgent(agentId)] as const)
       .filter(
         ([agentId, update]) =>
           isUpdateOffered(update) &&
