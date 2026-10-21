@@ -1,10 +1,11 @@
 """Which folders the user asked to keep synced, remembered across restarts.
 
 One atomically-written JSON file per workspace, held in memory so the panel can
-be built without touching the disk. What is recorded is only what the user chose -- the path,
-which way changes move, and which side wins a conflict. Nothing about how a
-sync is *going*: a sync's state belongs to the running ``mngr pair``, and a
-persisted "SYNCING" would be a lie the moment Imbue Studio is not running.
+be built without touching the disk. What is recorded is only what the user
+chose -- the path, which way changes move, and which side wins a conflict.
+Nothing about how a sync is *going*: a sync's state belongs to the running
+``mngr pair``, and a persisted "SYNCING" would be a lie the moment Imbue Studio
+is not running.
 
 The record outlives the sync. Turning sync off does not delete it, because the
 machine is still holding the copy that sync produced: the record is what
