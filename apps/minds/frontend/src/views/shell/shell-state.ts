@@ -161,6 +161,7 @@ export class ShellState {
    * dropped by the next navigation away from its machine. */
   private openUpdateAgentId: string | null = null;
   private isUpdateSkipConfirmOpen = false;
+  private updateModalFailure: UpdateActionResult | null = null;
   /** The mounted content iframe, installed by WorkspaceFrame (null when none is
    * mounted: hub pages, recovery, destroying, the workspace sub-pages). The
    * frame is ALSO mounted behind an app modal that forwarded ?workspace=, which
@@ -887,15 +888,25 @@ export class ShellState {
     return this.isUpdateSkipConfirmOpen;
   }
 
+  /** Why a press made outside the open update modal failed, for it to say. */
+  updateModalOpeningFailure(): UpdateActionResult | null {
+    return this.updateModalFailure;
+  }
+
   /** The user asked for the update modal (a badge, the band's "See update"). */
-  openUpdateModal(agentId: string, options: { isSkipConfirmOpen?: boolean } = {}): void {
+  openUpdateModal(
+    agentId: string,
+    options: { isSkipConfirmOpen?: boolean; failure?: UpdateActionResult } = {},
+  ): void {
     this.openUpdateAgentId = agentId;
     this.isUpdateSkipConfirmOpen = options.isSkipConfirmOpen ?? false;
+    this.updateModalFailure = options.failure ?? null;
   }
 
   closeUpdateModal(): void {
     this.openUpdateAgentId = null;
     this.isUpdateSkipConfirmOpen = false;
+    this.updateModalFailure = null;
   }
 
   /** A run outcome's Dismiss pressed outside the update modal: the outcome
@@ -903,7 +914,7 @@ export class ShellState {
   dismissUpdateOutcomeOrExplain(anyId: string): void {
     const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
     void this.stores.updates.dismissRunOutcome(agentScoped).then((result) => {
-      if (!result.isOk) this.openUpdateModal(agentScoped);
+      if (!result.isOk) this.openUpdateModal(agentScoped, { failure: result });
       m.redraw();
     });
   }

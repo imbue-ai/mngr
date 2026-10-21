@@ -503,6 +503,7 @@ export function Shell(): m.Component<ShellAttrs> {
                 shell.stores.workspaces.entryByAnyId(updateModalAgentId)
                   ?.name ?? "this workspace",
               isSkipConfirmOpen: shell.isUpdateSkipConfirmRequested(),
+              openingFailure: shell.updateModalOpeningFailure(),
               onClose: () => shell.closeUpdateModal(),
             })
           : null,

@@ -14,6 +14,7 @@ import {
   updatesShell,
 } from "../../testing";
 import { UpdateModal } from "./UpdateModal";
+import type { UpdateModalAttrs } from "./UpdateModal";
 
 const AGENT = "agent-" + "c".repeat(8);
 
@@ -53,7 +54,7 @@ function harness(
   respond: (url: string) => Promise<Response>,
   update: UiWorkspaceUpdate = OUT_OF_DATE_UPDATE,
   isAutoUpdateEnabled = false,
-  isSkipConfirmOpen = false,
+  openedWith: Pick<UpdateModalAttrs, "isSkipConfirmOpen" | "openingFailure"> = {},
 ): Harness {
   updatesShell({ [AGENT]: update }, isAutoUpdateEnabled);
   const { fetchImpl, requests } = recordingFetch(respond);
@@ -62,7 +63,7 @@ function harness(
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   const onClose = vi.fn();
   const instance = UpdateModal() as unknown as m.Component;
-  const attrs = { agentId: AGENT, workspaceName: "box", isSkipConfirmOpen, onClose };
+  const attrs = { agentId: AGENT, workspaceName: "box", ...openedWith, onClose };
   (instance.oninit as unknown as (v: m.Vnode) => void).call(instance, m(instance, attrs as unknown as m.Attributes) as m.Vnode);
   function draw(): m.Children {
     const vnode = m(instance, attrs as unknown as m.Attributes) as m.Vnode;
@@ -236,6 +237,17 @@ describe("the update modal's verdict line", () => {
 
     expect(buttonLabels(root)).toEqual(["Open chat", "Dismiss"]);
     expect(allText(root)).not.toContain("uses credits");
+  });
+
+  it("says why the band's Dismiss it was opened for did not land", () => {
+    const { draw } = harness(
+      () => Promise.resolve(jsonResponse({})),
+      { ...OUT_OF_DATE_UPDATE, verdict: "REFUSED" },
+      false,
+      { openingFailure: { isOk: false, error: "Couldn't dismiss this update's outcome.", detail: "" } },
+    );
+
+    expect(allText(draw())).toContain("Couldn't dismiss this update's outcome.");
   });
 
   it("points a run that ended short at its own chat rather than offering machinery of its own", () => {
@@ -446,7 +458,9 @@ describe("the update modal over a run that needs the user's decision", () => {
   });
 
   it("opens on the confirmation when the band's Dismiss asked for it", () => {
-    const root = harness(() => Promise.resolve(jsonResponse({})), PENDING, false, true).draw();
+    const root = harness(() => Promise.resolve(jsonResponse({})), PENDING, false, {
+      isSkipConfirmOpen: true,
+    }).draw();
     expect(buttonLabels(root)).toEqual(["Skip v0.4.1", "Cancel"]);
   });
 

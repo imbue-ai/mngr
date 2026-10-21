@@ -34,6 +34,8 @@ export interface UpdateModalAttrs {
   workspaceName: string;
   /** Opens on the skip confirmation. */
   isSkipConfirmOpen?: boolean;
+  /** A press made outside the modal that failed, which it opened to explain. */
+  openingFailure?: UpdateActionResult | null;
   onClose: () => void;
 }
 
@@ -295,6 +297,8 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
   return {
     oninit(vnode) {
       state.isSkipConfirmOpen = vnode.attrs.isSkipConfirmOpen ?? false;
+      state.error = vnode.attrs.openingFailure?.error ?? "";
+      state.errorDetail = vnode.attrs.openingFailure?.detail ?? "";
     },
     view(vnode) {
       const { agentId, workspaceName, onClose } = vnode.attrs;
