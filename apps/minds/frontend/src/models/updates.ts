@@ -318,7 +318,7 @@ export interface UpdateBadge {
 
 /** Which badge a machine's row shows, or null. One at most, ordered by what
  * the reader would act on first: a run in flight, a decision or a failed run,
- * the standing "needs recreation", "needs sign-in", or "out of date", then
+ * the standing "needs recreation", "skipped", "needs sign-in", or "out of date", then
  * "unknown", then a bare armed schedule. Every one opens the modal (hence
  * buttons); only "out of date" is an offer, and under auto-update it is
  * withheld for a machine auto-update will arm itself. A null `update` (nothing
