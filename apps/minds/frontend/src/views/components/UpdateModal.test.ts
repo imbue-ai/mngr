@@ -386,6 +386,25 @@ describe("the update modal under auto-update", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("drops the skip question once the schedule it asks about is gone, so it does not come back unasked", () => {
+    const { draw } = harness(() => Promise.resolve(jsonResponse({})), ARMED, true);
+    const armed = (isScheduled: boolean) =>
+      getAppContext().stores.updates.applyUpdatesMessage({
+        type: "workspace_updates",
+        updates: { [AGENT]: { ...ARMED, is_scheduled: isScheduled } },
+        update_window: "2:00 AM-5:00 AM",
+        is_auto_update_enabled: true,
+      });
+    press(draw(), "Skip v0.4.1");
+    expect(pressableWithLabel(draw(), "Cancel")).toBeDefined();
+
+    armed(false);
+    draw();
+    armed(true);
+
+    expect(pressableWithLabel(draw(), "Cancel")).toBeUndefined();
+  });
+
   it("drops the schedule's controls while its run, or one pressed instead, is under way", () => {
     // The run supersedes the schedule; a Skip beside it would not stop it.
     const root = harness(

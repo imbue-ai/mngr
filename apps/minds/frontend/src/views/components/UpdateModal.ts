@@ -403,6 +403,8 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         actions.push(pressButton("now", "Update now", isAutoUpdateEnabled ? "primary" : "secondary"));
       };
       const isSkipOffered = situation === "decision-pending" || (situation === "scheduled" && isAutoUpdateEnabled);
+      // A question about a skip no longer offered is dropped, so it cannot come back unasked.
+      if (!isSkipOffered) state.isSkipConfirmOpen = false;
 
       switch (situation) {
         case "needs-recreation":
@@ -574,7 +576,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
           }),
         );
         actions.length = 0;
-      } else if (state.isSkipConfirmOpen && isSkipOffered) {
+      } else if (state.isSkipConfirmOpen) {
         body.push(
           skipConfirmPrompt(update, isAutoUpdateEnabled, {
             isSkipping: state.pendingAction === "skip",
