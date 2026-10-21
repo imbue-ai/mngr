@@ -21,8 +21,8 @@ importers:
         specifier: 6.8.9
         version: 6.8.9
       latchkey:
-        specifier: ^3.19.0
-        version: 3.19.0
+        specifier: ^3.19.3
+        version: 3.19.3
       semver:
         specifier: ^7.6.3
         version: 7.7.4
@@ -1667,8 +1667,8 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  latchkey@3.19.0:
-    resolution: {integrity: sha512-mdhKBORwBCymRmzxOOZrpPtb/ZqF266RrSXEFhC8fIK6pu3dVAnarqPw2gxLVWUNlA2ElLd8xMIPNRQmcxeUtw==}
+  latchkey@3.19.3:
+    resolution: {integrity: sha512-nkBeiO4gX+aRD/xT4Bi37kRrRNVPTlhO37f/G9FgD8d0gyRvI/j0DqcEmMMZDJKMOxkKekWUcrXAQMSFAcDJdg==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -3879,7 +3879,7 @@ snapshots:
       lazy-val: 1.0.5
       lodash.escaperegexp: 4.1.2
       lodash.isequal: 4.5.0
-      semver: 7.7.4
+      semver: 7.8.5
     transitivePeerDependencies:
       - supports-color
 
@@ -4166,7 +4166,7 @@ snapshots:
       es6-error: 4.1.1
       matcher: 3.0.0
       roarr: 2.15.4
-      semver: 7.7.4
+      semver: 7.8.5
       serialize-error: 7.0.1
     optional: true
 
@@ -4439,7 +4439,7 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  latchkey@3.19.0:
+  latchkey@3.19.3:
     dependencies:
       '@imbue-ai/detent': 1.16.0
       '@napi-rs/keyring': 1.2.0
