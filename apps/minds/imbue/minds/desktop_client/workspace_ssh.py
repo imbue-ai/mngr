@@ -204,10 +204,15 @@ def build_authorized_keys_write_script(existing_content: str, new_content: str) 
     the caller re-reads and composes again. The guarded script sets ``-e`` of its
     own, since the outer one does not reach into ``sh -c``: a failed write must
     not be reported as a success by the ``chmod`` after it.
+
+    Both digests are taken with trailing newlines stripped: the read comes back
+    through ``mngr exec --format json``, which strips them from the command's
+    stdout, so hashing the file as-is on the target would never match once the
+    file ends in a newline -- and every body this function writes does.
     """
-    expected_digest = hashlib.sha256(existing_content.encode("utf-8")).hexdigest()
+    expected_digest = hashlib.sha256(existing_content.rstrip("\n").encode("utf-8")).hexdigest()
     guarded = (
-        "set -e; current=$(cat ~/.ssh/authorized_keys 2>/dev/null | sha256sum | cut -d' ' -f1); "
+        "set -e; current=$(printf '%s' \"$(cat ~/.ssh/authorized_keys 2>/dev/null)\" | sha256sum | cut -d' ' -f1); "
         f'if [ "$current" != "{expected_digest}" ]; then '
         f"echo {AUTHORIZED_KEYS_CHANGED_MARKER} >&2; exit {_AUTHORIZED_KEYS_CHANGED_EXIT_CODE}; fi; "
         f"printf '%s' {shlex.quote(new_content)} > ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys"
