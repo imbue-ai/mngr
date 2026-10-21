@@ -303,6 +303,7 @@ function renderUpdatesGroup(
     return m("div", { class: "max-w-md" }, [
       m(SectionHeader, "Update"),
       m("p", { id: "ws-updates-stopped", class: "type-helper text-secondary" }, "Start this workspace to see its updates."),
+      appUpdateSettingsSection(local),
     ]);
   }
   const isUpdating = updates.isUpdating(agentId);
@@ -648,13 +649,18 @@ function renderUpdatesGroup(
           )
         : null,
     ]),
-    local.appSettings.overview !== null
-      ? m("div", { class: "mt-8" }, [
-          m(SectionHeader, "Update settings"),
-          workspaceUpdateSettings(local.appSettings, "workspace"),
-        ])
-      : null,
+    appUpdateSettingsSection(local),
   ]);
+}
+
+/** The app-wide update settings, which need nothing from the machine, so a stopped one shows them too. */
+function appUpdateSettingsSection(local: SettingsGroupsLocalState): m.Children {
+  return local.appSettings.overview !== null
+    ? m("div", { class: "mt-8" }, [
+        m(SectionHeader, "Update settings"),
+        workspaceUpdateSettings(local.appSettings, "workspace"),
+      ])
+    : null;
 }
 
 function renderGeneralGroup(

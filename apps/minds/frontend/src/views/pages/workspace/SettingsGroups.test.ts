@@ -1274,8 +1274,12 @@ describe("the Updates settings group over a run under way", () => {
 });
 
 describe("the Updates settings group of a stopped workspace", () => {
-  it("offers nothing to do until the workspace starts, and claims no version state", () => {
-    const { draw } = harness();
+  it("offers nothing to do in it until it starts and claims no version state, but keeps the app-wide settings", async () => {
+    const { draw, init } = harness((url) =>
+      Promise.resolve(jsonResponse(url === "/ui/api/settings" ? settingsOverview() : {})),
+    );
+    init();
+    await settleDispatch();
     getAppContext().stores.workspaces.applyWorkspacesMessage(
       workspacesMessage({
         workspaces: [{ ...workspacesMessage().workspaces[0], id: BACKED, liveness: "STOPPED" }],
@@ -1286,5 +1290,6 @@ describe("the Updates settings group of a stopped workspace", () => {
     expect(byId(pane, "ws-updates-stopped")).toBeDefined();
     expect(byId(pane, "ws-updates-group")).toBeUndefined();
     expect(allText(pane)).not.toContain("v0.3.9");
+    expect(byId(pane, "auto-update-toggle-workspace")).toBeDefined();
   });
 });
