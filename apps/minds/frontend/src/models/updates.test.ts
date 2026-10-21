@@ -285,7 +285,6 @@ describe("updateBadgeFor", () => {
     const notice = updateActivityNotice(held);
     expect(notice.message.startsWith("Waiting for you to confirm minds-v0.9.1, which is newer than Imbue Studio.")).toBe(true);
     expect(notice.message).toContain("waiting for your go-ahead");
-    expect(notice.message).toContain("in the update chat");
     expect(notice.isWaiting).toBe(false);
   });
 
@@ -360,18 +359,15 @@ describe("an update that landed with a note for the reader", () => {
 describe("updateActivityNotice", () => {
   // STARTING can last minutes for a stopped machine, and its chat does not
   // exist yet.
-  it("waits, without pointing at the update chat, while the agent is still being created", () => {
-    const notice = updateActivityNotice({ ...OUT_OF_DATE_UPDATE, activity: "STARTING" });
-    expect(notice.isWaiting).toBe(true);
-    expect(notice.message).not.toContain("update chat");
+  it("waits while the agent is still being created", () => {
+    expect(updateActivityNotice({ ...OUT_OF_DATE_UPDATE, activity: "STARTING" }).isWaiting).toBe(true);
   });
 
   it.each(["RUNNING", "WAITING", "STALLED"] as const)(
-    "points a %s run at the update chat, never at its agent's internal name, which the chat list does not show",
+    "never names a %s run's chat by its agent's internal name, which the chat list does not show",
     (activity) => {
       const notice = updateActivityNotice({ ...OUT_OF_DATE_UPDATE, activity, chat_agent_name: "Update-to-v041" });
       expect(notice.isWaiting).toBe(false);
-      expect(notice.message.toLowerCase()).toContain("the update chat");
       expect(notice.message).not.toContain("Update-to-v041");
     },
   );

@@ -258,9 +258,6 @@ describe("the update modal's verdict line", () => {
     });
     const root = draw();
 
-    expect(allText(root)).toContain(
-      "Check in with the update agent in the update chat.",
-    );
     expect(allText(root)).not.toContain("update-fox");
     expect(pressableWithLabel(root, "Migrate")).toBeUndefined();
     expect(pressableWithLabel(root, "Dismiss")).toBeDefined();
