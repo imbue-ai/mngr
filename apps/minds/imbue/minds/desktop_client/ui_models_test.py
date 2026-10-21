@@ -171,6 +171,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "FolderSyncDirection",
             "FolderSyncState",
             "HostRecoveryKind",
+            "NotificationDestination",
             "NotificationKind",
             "NotificationOutcome",
             "ProviderPanelStatus",

@@ -2,8 +2,7 @@
 // cross-origin iframe + the white anti-flash mirror behind it, and the embed
 // contract endpoint.
 //
-// Faithful port of pages/Chrome.jinja + the frame parts of chrome.js. A
-// machine's health is NOT drawn here: the shell owns that, so one band can
+// A machine's health is NOT drawn here: the shell owns that, so one band can
 // speak for whichever condition is actually relevant (a dead discovery
 // consumer outranks the stuck machine it produces) and so the surface
 // shrinks under it instead of being obscured by it.
@@ -14,13 +13,13 @@ import { fetchJson } from "../../models/create";
 import { armProviderRelay, stopProviderRelay } from "../../models/providerRelay";
 import type {
   DetachedWindowEntry,
-  FocusChatSender,
   OpenLinkSender,
   PermissionResolvedSender,
   ReattachWindowSender,
   ShellState,
   TearOutSender,
   WorkspaceFrameHandle,
+  WorkspaceMessageSender,
 } from "./shell-state";
 import type {
   PopoutOpenRequest,
@@ -412,7 +411,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   };
   let snapshotResendTimer: ReturnType<typeof setTimeout> | null = null;
   let permissionResolvedSender: PermissionResolvedSender | null = null;
-  let focusChatSender: FocusChatSender | null = null;
+  let workspaceMessageSender: WorkspaceMessageSender | null = null;
   let reattachWindowSender: ReattachWindowSender | null = null;
   let tearOutSender: TearOutSender | null = null;
   let openLinkSender: OpenLinkSender | null = null;
@@ -526,9 +525,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           onWorkspaceReady: (opensLinks) => {
             isMountedPageReady = true;
             linkHandling.pageReady(opensLinks);
-            // A chat ask held while the page was not listening -- a fresh
+            // A message held while the page was not listening -- a fresh
             // mount, or a click from another workspace -- goes now.
-            shell.flushPendingFocusChat();
+            shell.flushPendingWorkspaceMessage();
           },
           openExternalLink: electronBridge.opensExternalLinks
             ? (url) => electronBridge.openExternalLink(url)
@@ -579,17 +578,25 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           });
         };
         shell.registerPermissionResolvedSender(permissionResolvedSender);
-        focusChatSender = (workspaceAgentId, chatAgentId) => {
+        workspaceMessageSender = (workspaceAgentId, message) => {
           if (
             shell.stores.workspaces.toAgentScopedId(mountedAnyId()) !==
             workspaceAgentId
           )
             return false;
           if (!isMountedPageReady) return false;
-          endpoint?.send(loaded.FOCUS_CHAT, { chatId: chatAgentId });
-          return true;
+          switch (message.kind) {
+            case "focus-chat":
+              endpoint?.send(loaded.FOCUS_CHAT, { chatId: message.chatAgentId });
+              return true;
+            case "app-message":
+              // The workspace shell routes the type to the app whose
+              // manifest registers it; the fields ride beside the type.
+              endpoint?.send(message.type, message.fields);
+              return true;
+          }
         };
-        shell.registerFocusChatSender(focusChatSender);
+        shell.registerWorkspaceMessageSender(workspaceMessageSender);
         reattachWindowSender = (windowId, frame) => {
           endpoint?.send(loaded.REATTACH_WINDOW, frame === null ? { windowId } : { windowId, frame });
         };
@@ -641,9 +648,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         );
         permissionResolvedSender = null;
       }
-      if (focusChatSender !== null) {
-        vnode.attrs.shell.unregisterFocusChatSender(focusChatSender);
-        focusChatSender = null;
+      if (workspaceMessageSender !== null) {
+        vnode.attrs.shell.unregisterWorkspaceMessageSender(workspaceMessageSender);
+        workspaceMessageSender = null;
       }
       if (reattachWindowSender !== null) {
         vnode.attrs.shell.unregisterReattachWindowSender(reattachWindowSender);

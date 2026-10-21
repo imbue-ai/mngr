@@ -33,6 +33,7 @@ from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.connections.data_types import DEFAULT_CREDENTIAL_SOURCE_NAME
+from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.folder_sync import FolderSyncState
@@ -369,7 +370,18 @@ class UiNotificationEntry(FrozenModel):
     body: str = Field(description="Detail line snapshotted at creation; may be empty")
     request_id: str = Field(description="The originating request event id for permission requests; '' otherwise")
     chat_agent_id: str = Field(
-        default="", description="Stable chat destination for an agent message (agent id for older chats); '' otherwise"
+        default="",
+        description=(
+            "Stable chat destination for an agent message (agent id for older chats); '' otherwise, including "
+            "a message from a workspace's primary agent, which is not a chat"
+        ),
+    )
+    destination: NotificationDestination | None = Field(
+        default=None,
+        description=(
+            "For an agent message, the workspace message its click posts into the workspace frame (an app's page "
+            "opens for it) instead of focusing a chat; None lands in the chat, or on the workspace alone"
+        ),
     )
     workspace_agent_id: str = Field(
         description="Origin workspace's agent id; '' when unresolvable or for an account-level system event"

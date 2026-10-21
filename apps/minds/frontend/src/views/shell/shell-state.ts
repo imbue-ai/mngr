@@ -1,7 +1,7 @@
 // Cross-view shell state: which workspace is displayed, accent painting, and
 // workspace-entry navigation. The mutable singleton the Shell + frame views
 // share (mithril redraws pull from it; imperative document-level effects --
-// CSS variables -- happen here, exactly as chrome.js did).
+// CSS variables -- happen here).
 
 import m from "mithril";
 import type { AppStores } from "../../models/boot";
@@ -27,6 +27,7 @@ import { recoveryRoute } from "../../models/create";
 import { setPendingHelpLaunch } from "../../models/help";
 import { WebLoginModel, webLogin } from "../../models/webLogin";
 import type { UiWorkspaceEntry } from "../../channel/messages";
+import type { WorkspaceMessage } from "../../models/workspaceMessage";
 import { rowClickActionFor } from "../pages/landing-controls";
 
 /** Posts one permission-resolution message into the mounted workspace frame
@@ -46,11 +47,12 @@ export interface WaitingRequestList {
   hasWaitingRequests(): boolean;
 }
 
-/** Sends a focus-chat ask into the mounted frame; false when the frame's page
- * is not listening or not on that workspace, so the shell holds the ask. */
-export type FocusChatSender = (
+/** Sends a workspace message (a focus-chat ask, an app message) into the
+ * mounted frame; false when the frame's page is not listening or not on that
+ * workspace, so the shell holds the message. Registered by WorkspaceFrame. */
+export type WorkspaceMessageSender = (
   workspaceAgentId: string,
-  chatAgentId: string,
+  message: WorkspaceMessage,
 ) => boolean;
 
 /** Sends a reattach ask into the mounted frame: return the pulled-out window
@@ -184,15 +186,15 @@ export class ShellState {
   /** The ``?chat=`` deep link already consumed, keyed by route+id; same
    * reasoning as ``consumedReviewKey``. */
   private consumedChatKey: string | null = null;
-  /** A chat the displayed workspace should show once its page is listening.
-   * Set by `requestFocusChat` when the frame cannot take the ask yet (its
-   * page has not announced itself, or it is not on that workspace) and
-   * flushed when the announcement arrives. */
-  private pendingFocusChat: {
+  /** A message the displayed workspace should take once its page is
+   * listening. Set by `requestWorkspaceMessage` when the frame cannot take
+   * it yet (its page has not announced itself, or it is not on that
+   * workspace) and flushed when the announcement arrives. */
+  private pendingWorkspaceMessage: {
     workspaceAgentId: string;
-    chatAgentId: string;
+    message: WorkspaceMessage;
   } | null = null;
-  private focusChatSender: FocusChatSender | null = null;
+  private workspaceMessageSender: WorkspaceMessageSender | null = null;
   /** The last ``selected`` request id `openInbox` pushed a NEW /inbox entry
    * for, and when. `openInbox` already replaces in place once the route IS
    * `/inbox` -- this guards the window before that lands: `currentRoutePath`
@@ -553,43 +555,55 @@ export class ShellState {
     this.isPopoutDropTarget = isOver;
   }
 
-  registerFocusChatSender(sender: FocusChatSender): void {
-    this.focusChatSender = sender;
+  registerWorkspaceMessageSender(sender: WorkspaceMessageSender): void {
+    this.workspaceMessageSender = sender;
   }
 
   /** Drop `sender` if it is still the registered one (a frame torn down after
    * its successor registered must not clear the successor's). */
-  unregisterFocusChatSender(sender: FocusChatSender): void {
-    if (this.focusChatSender === sender) this.focusChatSender = null;
+  unregisterWorkspaceMessageSender(sender: WorkspaceMessageSender): void {
+    if (this.workspaceMessageSender === sender)
+      this.workspaceMessageSender = null;
   }
 
-  /** Ask the workspace to show one of its chats (an agent message's click).
-   * Sent now when the mounted page is that workspace's and listening;
-   * otherwise held until it announces itself, which calls
-   * `flushPendingFocusChat`.
+  /** Post a message into the workspace's page (a notification's click: show
+   * a chat, or show an app's page). Sent now when the mounted page is that
+   * workspace's and listening; otherwise held until it announces itself,
+   * which calls `flushPendingWorkspaceMessage`.
    * Fire-and-forget: a workspace that does not know the message just stays
-   * where it is. A newer ask replaces an older unsent one. Landing in a chat
-   * is leaving the feed, like a row's route jump, so the popover closes even
-   * though the in-place ask changes no route. */
-  requestFocusChat(workspaceAgentId: string, chatAgentId: string): void {
+   * where it is. A newer message replaces an older unsent one. Landing in
+   * the workspace is leaving the feed, like a row's route jump, so the
+   * popover closes even though the in-place send changes no route. */
+  requestWorkspaceMessage(
+    workspaceAgentId: string,
+    message: WorkspaceMessage,
+  ): void {
     this.closeNotifications();
-    const sender = this.focusChatSender;
-    if (sender !== null && sender(workspaceAgentId, chatAgentId)) {
-      this.pendingFocusChat = null;
+    const sender = this.workspaceMessageSender;
+    if (sender !== null && sender(workspaceAgentId, message)) {
+      this.pendingWorkspaceMessage = null;
       return;
     }
-    this.pendingFocusChat = { workspaceAgentId, chatAgentId };
+    this.pendingWorkspaceMessage = { workspaceAgentId, message };
   }
 
-  /** The mounted page announced that it is listening: send the ask it was
-   * holding, if it is for the workspace now on screen. An ask for some other
-   * workspace stays held (the reader may be on their way there). */
-  flushPendingFocusChat(): void {
-    const pending = this.pendingFocusChat;
-    const sender = this.focusChatSender;
+  /** Ask the workspace to show one of its chats (an agent message's click). */
+  requestFocusChat(workspaceAgentId: string, chatAgentId: string): void {
+    this.requestWorkspaceMessage(workspaceAgentId, {
+      kind: "focus-chat",
+      chatAgentId,
+    });
+  }
+
+  /** The mounted page announced that it is listening: send the message it
+   * was holding, if it is for the workspace now on screen. One for some
+   * other workspace stays held (the reader may be on their way there). */
+  flushPendingWorkspaceMessage(): void {
+    const pending = this.pendingWorkspaceMessage;
+    const sender = this.workspaceMessageSender;
     if (pending === null || sender === null) return;
-    if (sender(pending.workspaceAgentId, pending.chatAgentId))
-      this.pendingFocusChat = null;
+    if (sender(pending.workspaceAgentId, pending.message))
+      this.pendingWorkspaceMessage = null;
   }
 
   /** Drop `sender` if it is still the registered one (a frame torn down after
@@ -1281,9 +1295,8 @@ export class ShellState {
   /**
    * Open Get help / report a bug, carrying the displayed workspace so the page
    * can offer the in-workspace /assist flow -- only when that workspace's
-   * interface is healthy, mirroring the legacy titlebar's assist gating. The
-   * one place the bug button's route is built, so the titlebar's own button
-   * and its raised copy open the identical page.
+   * interface is healthy. The one place the bug button's route is built, so
+   * the titlebar's own button and its raised copy open the identical page.
    *
    * Arrived at from another titlebar popup's route (the options panel or the
    * request popup, via the raised strip), this is a switch, not a stack: that

@@ -17,6 +17,7 @@ from imbue.minds.desktop_client.app import _derive_ui_requests_message
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
+from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import PermissionEffect
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
@@ -328,7 +329,7 @@ def test_build_agent_message_card_names_the_chat_and_resolves_its_workspace_by_n
         chat_agent_id=chat_agent_id,
     )
 
-    card = build_agent_message_card(chat_agent_id, "Done with the build.", resolver)
+    card = build_agent_message_card(chat_agent_id, None, "Done with the build.", resolver, destination=None)
 
     assert card.chat_agent_id == str(chat_agent_id)
     assert card.chat_name == "Migration chat"
@@ -336,13 +337,79 @@ def test_build_agent_message_card_names_the_chat_and_resolves_its_workspace_by_n
     assert card.workspace_agent_id == str(workspace_agent_id)
     assert card.workspace_name == "alpha"
     assert card.workspace_accent == "#123456"
+    assert card.destination is None
+
+
+def test_build_agent_message_card_for_the_workspace_primary_agent_carries_no_chat() -> None:
+    """The primary agent is the workspace itself, not a chat: a click raises the workspace, nothing else."""
+    workspace_agent_id = AgentId()
+    resolver = ChatInWorkspaceResolver(
+        url_by_agent_and_service={},
+        workspace_agent_id=workspace_agent_id,
+        chat_agent_id=AgentId(),
+    )
+
+    card = build_agent_message_card(workspace_agent_id, None, "The inbox digest ran.", resolver, destination=None)
+
+    assert card.chat_agent_id == ""
+    assert card.chat_name == "alpha"
+    assert card.body == "The inbox digest ran."
+    assert card.workspace_agent_id == str(workspace_agent_id)
+    assert card.workspace_name == "alpha"
+    assert card.workspace_accent == "#123456"
+
+
+def test_build_agent_message_card_heads_a_primary_agent_message_with_its_title() -> None:
+    """The primary agent's own name means nothing to the user: a titled message is headed by the title alone."""
+    workspace_agent_id = AgentId()
+    resolver = ChatInWorkspaceResolver(
+        url_by_agent_and_service={},
+        workspace_agent_id=workspace_agent_id,
+        chat_agent_id=AgentId(),
+    )
+
+    card = build_agent_message_card(workspace_agent_id, "Inbox digest", "3 new items", resolver, destination=None)
+
+    assert card.chat_name == "Inbox digest"
+    assert card.body == "3 new items"
+
+
+def test_build_agent_message_card_keeps_a_chat_message_headed_by_the_chat_with_the_title_as_a_prefix() -> None:
+    workspace_agent_id = AgentId()
+    chat_agent_id = AgentId()
+    resolver = ChatInWorkspaceResolver(
+        url_by_agent_and_service={},
+        workspace_agent_id=workspace_agent_id,
+        chat_agent_id=chat_agent_id,
+    )
+
+    card = build_agent_message_card(chat_agent_id, "Test run", "all green", resolver, destination=None)
+
+    assert card.chat_name == "Migration chat"
+    assert card.body == "Test run: all green"
+
+
+def test_build_agent_message_card_carries_the_destination_through() -> None:
+    workspace_agent_id = AgentId()
+    resolver = ChatInWorkspaceResolver(
+        url_by_agent_and_service={},
+        workspace_agent_id=workspace_agent_id,
+        chat_agent_id=AgentId(),
+    )
+    destination = NotificationDestination.model_validate({"type": "minds:show-routine", "routine_id": "inbox-digest"})
+
+    card = build_agent_message_card(
+        workspace_agent_id, None, "The inbox digest ran.", resolver, destination=destination
+    )
+
+    assert card.destination == destination
 
 
 def test_build_agent_message_card_for_an_unknown_chat_still_records_the_message() -> None:
     chat_agent_id = AgentId()
     resolver = StaticBackendResolver(url_by_agent_and_service={})
 
-    card = build_agent_message_card(chat_agent_id, "hello", resolver)
+    card = build_agent_message_card(chat_agent_id, None, "hello", resolver, destination=None)
 
     assert card.chat_name == str(chat_agent_id)
     assert card.workspace_agent_id == ""

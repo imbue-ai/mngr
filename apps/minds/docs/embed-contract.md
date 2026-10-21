@@ -80,6 +80,15 @@ see the `*_PATTERN` constants in the module.
 | `minds:reattach-window` | `{ windowId, frame? }` | Return a pulled-out window to the desktop, shown and raised: at `frame` (`{ x, y, width, height }` in fractions of the workspace surface, which is the frame's whole viewport; the receiver maps it onto its own backdrop and clamps it) when a re-dock drag dropped it there, else at its kept frame. |
 | `minds:open-link` | `{ url }` | Open this link where the workspace opens it: for a local URL, the window of the app whose `<label>.localhost` host it is on, or of the app registered at its port when its host is `localhost`, `127.0.0.1`, or `[::1]`, else the in-workspace browser; the app's own window for one of this workspace's app addresses, its share addresses included; a refusal notice for another workspace's address; an external link in the app of the workspace registered for it, else back out with `minds:open-external`. `url` is an absolute `http:`, `https:`, `mailto:` or `tel:` URL of at most `MAX_OPEN_LINK_URL_LENGTH` (8192) characters. The desktop app sends it in place of opening a popup (`target="_blank"`, `window.open`) the workspace's page asked for, or of an external page replacing one of the workspace's frames, and only to a page that announced `opensLinks: true`. |
 
+The chrome also posts, with the same `{ type, ...fields }` envelope, a
+notification's `destination`: a message whose type an app's manifest
+registers (`minds:show-routine`, say) rather than one of the types above. The
+module's own validators never see it -- the workspace shell's page relays
+such a message from `window.parent` to the registered app by the manifest
+(default-workspace-template's desktop contracts, section 5.6) -- and the chrome
+sends it only after `minds:workspace-ready`, fire-and-forget like
+`minds:focus-chat`. A workspace with no app registered for the type ignores it.
+
 `minds:open-ai-keys-ack`'s semantic is "an Imbue Studio chrome is present" --
 NOT "the desktop app is present". Plain-browser chrome acks too.
 
