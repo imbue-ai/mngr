@@ -1182,6 +1182,15 @@ describe("the Updates settings group under auto-update", () => {
 });
 
 describe("the Updates settings group's skip question", () => {
+  function armBacked(isScheduled: boolean): void {
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: isScheduled } },
+      update_window: "2:00 AM-5:00 AM",
+      is_auto_update_enabled: true,
+    });
+  }
+
   it("stays up, held, while the skip is out, and gives way to its answer", async () => {
     let answer: ((response: Response) => void) | null = null;
     const { draw } = harness(
@@ -1190,21 +1199,11 @@ describe("the Updates settings group's skip question", () => {
           answer = resolve;
         }),
     );
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: true } },
-      update_window: "2:00 AM-5:00 AM",
-      is_auto_update_enabled: true,
-    });
+    armBacked(true);
     press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
     press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
     // The skip cancels the schedule first, so the unscheduled row arrives before its answer.
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: false } },
-      update_window: "2:00 AM-5:00 AM",
-      is_auto_update_enabled: true,
-    });
+    armBacked(false);
 
     const cancel = pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel");
     expect(cancel).toBeDefined();
@@ -1221,32 +1220,20 @@ describe("the Updates settings group's skip question", () => {
 
   it("is dropped once the schedule it asks about is gone, so it does not come back unasked", () => {
     const { draw } = harness();
-    const armed = (isScheduled: boolean) =>
-      getAppContext().stores.updates.applyUpdatesMessage({
-        type: "workspace_updates",
-        updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: isScheduled } },
-        update_window: "2:00 AM-5:00 AM",
-        is_auto_update_enabled: true,
-      });
-    armed(true);
+    armBacked(true);
     press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
     expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeDefined();
 
-    armed(false);
+    armBacked(false);
     draw(BACKED);
-    armed(true);
+    armBacked(true);
 
     expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeUndefined();
   });
 
   it("is dropped when the workspace stops, so starting it again does not bring it back", () => {
     const { draw } = harness();
-    getAppContext().stores.updates.applyUpdatesMessage({
-      type: "workspace_updates",
-      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: true } },
-      update_window: "2:00 AM-5:00 AM",
-      is_auto_update_enabled: true,
-    });
+    armBacked(true);
     const withLiveness = (liveness: "RUNNING" | "STOPPED") =>
       getAppContext().stores.workspaces.applyWorkspacesMessage(
         workspacesMessage({
