@@ -4401,7 +4401,6 @@ def test_backup_service_update_refuses_a_machine_below_the_in_place_floor(
         detection=UpdateDetection(availability=UpdateAvailability.NEEDS_RECREATION),
         current_version="minds-v0.3.9",
         supported_version="",
-        is_version_from_label=False,
     )
 
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})

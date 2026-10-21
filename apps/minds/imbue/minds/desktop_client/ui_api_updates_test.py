@@ -151,7 +151,6 @@ def _mark_out_of_date(app: Flask, agent_id: AgentId) -> None:
         detection=UpdateDetection(availability=UpdateAvailability.OUT_OF_DATE),
         current_version="minds-v0.3.9",
         supported_version="minds-v0.4.1",
-        is_version_from_label=False,
     )
 
 
@@ -161,7 +160,6 @@ def _mark_patch_available(app: Flask, agent_id: AgentId) -> None:
         detection=UpdateDetection(availability=UpdateAvailability.PATCH_AVAILABLE),
         current_version="minds-v0.4.0",
         supported_version="minds-v0.4.1",
-        is_version_from_label=False,
     )
 
 
@@ -188,7 +186,6 @@ def test_a_machine_with_no_readable_version_is_still_sent_its_update_agent(
         detection=UpdateDetection(availability=UpdateAvailability.UNKNOWN, unknown_reason=unknown_reason),
         current_version="",
         supported_version="minds-v0.4.1",
-        is_version_from_label=False,
     )
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
@@ -246,7 +243,6 @@ def test_a_machine_read_as_having_nothing_to_run_is_refused(
         detection=UpdateDetection(availability=availability),
         current_version="minds-v0.4.1",
         supported_version="minds-v0.4.1",
-        is_version_from_label=False,
     )
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
@@ -268,7 +264,6 @@ def test_an_explicit_ref_dispatches_a_machine_the_gate_would_refuse(
         detection=UpdateDetection(availability=UpdateAvailability.UP_TO_DATE),
         current_version="minds-v0.4.1",
         supported_version="minds-v0.4.1",
-        is_version_from_label=False,
     )
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now", {"target_ref": "minds-v0.5.0"})
@@ -983,7 +978,6 @@ def test_the_updates_frame_carries_which_side_had_no_version(
         ),
         current_version="minds-v0.3.9",
         supported_version="gabriel/some-branch",
-        is_version_from_label=False,
     )
 
     frame = build_workspace_updates_message(service, update_window=(2, 5))

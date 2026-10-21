@@ -469,10 +469,6 @@ class UiWorkspaceUpdate(FrozenModel):
     supported_version: str = Field(
         description="The ref this app is pinned to; a branch rather than a minds-v* tag when it imposes no ceiling"
     )
-    is_version_from_label: bool = Field(
-        description="Whether the version came from the create-time label because the machine's own git "
-        "has not been read this session (it has been unreachable throughout, or every read so far failed)"
-    )
     activity: UpdateActivity = Field(description="What an update run is doing right now")
     run_started_at: datetime | None = Field(
         default=None,

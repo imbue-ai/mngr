@@ -107,18 +107,35 @@ Feature: Detecting an out-of-date workspace
     Then only the workspace confirmed to be out of date is dispatched
 
   @version-sources
-  Rule: A workspace is read from what it is running; only one the app has not yet read is read from what it was created at
-    The created-at version never changes and is never preferred over a version read from the workspace, or a workspace that already updated itself would be reported as out of date forever.
+  Rule: A workspace's version is read from what it is running; what it was created at counts only below the in-place cutoff
+    The created-at version never changes, so it stops naming what a workspace runs at that workspace's first update; reporting it would offer such a workspace an update it already has.
+    A workspace created at a release older than the oldest one that can be updated in place cannot have been updated past it, so for that workspace alone the created-at version still names what it runs.
+    Any other workspace the app has not read is reported as unknown.
     A version read from a workspace holds while that workspace cannot be read and past a read that fails, because its version moves only when an update lands in it.
     A workspace that can be read again is read again before its earlier reading is relied on.
     A workspace created from a published template descends from a release without carrying that release's name, so the app resolves the name from the template rather than reporting unknown.
-    It resolves a name that way only for a workspace the template could name; any other tree's version stays what its own history and its created-at record say.
+    It resolves a name that way only for a workspace the template could name; any other tree's version stays what its own history says, or below the in-place cutoff what it was created at.
 
     @updated-workspace-not-re-offered
     Example: A workspace that already updated itself is not offered the same update again
       Given a workspace created at an earlier template release
       And that workspace is running the supported template release
       Then the app reports that workspace as up to date
+
+    @unread-workspace-is-unknown
+    Example: A workspace the app has not read is unknown, not the version it was created at
+      Given the app supports a template release
+      And a workspace created at an earlier template release that can still be updated in place
+      And the app has not read the template release that workspace is running
+      Then the app reports that workspace's version as unknown
+      And the app does not report that workspace as out of date
+
+    @unread-below-cutoff-needs-recreation
+    Example: A workspace created below the in-place cutoff needs recreating before the app has read it
+      Given a workspace created at a template release older than minds-v0.3.10
+      And the app has not read the template release that workspace is running
+      Then the app reports that workspace as needing recreation
+      And the app offers no update for that workspace
 
     @read-held-while-unreadable
     Example: A workspace that can no longer be read keeps the version it was read at

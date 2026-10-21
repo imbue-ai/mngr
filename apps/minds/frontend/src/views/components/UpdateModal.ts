@@ -11,7 +11,6 @@ import {
   isFailureVerdict,
   isRecreationRequired,
   isUpdateDispatchable,
-  labelVersionNote,
   recordedDispatchFailure,
   updateActivityNotice,
 } from "../../models/updates";
@@ -280,12 +279,6 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             updateVersionRow("Supported by Imbue Studio", update.supported_version),
           ]),
         );
-        const labelNote = update.is_version_from_label
-          ? labelVersionNote(stores.workspaces.entryByAnyId(agentId)?.liveness)
-          : null;
-        if (labelNote !== null) {
-          body.push(m("p", { class: "type-helper text-tertiary" }, labelNote));
-        }
       }
 
       const activity = updateActivityNotice(update, isUpdating);

@@ -275,6 +275,7 @@ from imbue.minds.desktop_client.workspace_record_store import RECORD_TOO_NEW_MES
 from imbue.minds.desktop_client.workspace_record_store import is_record_too_new
 from imbue.minds.desktop_client.workspace_recovery import RecoveryDispatchOutcome
 from imbue.minds.desktop_client.workspace_recovery import dispatch_host_recovery
+from imbue.minds.desktop_client.workspace_update_state import ORIGINAL_MINDS_VERSION_LABEL
 from imbue.minds.desktop_client.workspace_update_state import is_below_in_place_update_floor
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
@@ -438,7 +439,7 @@ def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
         account_email=account.email if account is not None else None,
         provider_name=info.provider_name if info is not None else None,
         create_time=info.create_time.isoformat() if info is not None and info.create_time is not None else None,
-        original_minds_version=backend_resolver.get_agent_label(agent_id, "original_minds_version"),
+        original_minds_version=backend_resolver.get_agent_label(agent_id, ORIGINAL_MINDS_VERSION_LABEL),
         color=backend_resolver.get_workspace_color(agent_id),
         # Discovery lists only this user's own workspaces: the connector's records
         # listing is the caller's, and the "shared with you" index has no read side yet.
@@ -590,7 +591,7 @@ def _handle_workspace_version(agent_id: str) -> WorkspaceVersionResponse | Respo
     if parsed_id not in backend_resolver.list_known_workspace_ids():
         return _json_error(f"Unknown workspace {agent_id}", 404)
 
-    original = backend_resolver.get_agent_label(parsed_id, "original_minds_version")
+    original = backend_resolver.get_agent_label(parsed_id, ORIGINAL_MINDS_VERSION_LABEL)
     # The (best-effort) in-workspace git read runs through the shared
     # warm-process MngrCaller (initialized at startup); any failure yields the
     # empty/None defaults rather than raising.
@@ -2045,10 +2046,11 @@ def _resolve_backup_route_context(agent_id: str) -> "tuple[AgentId, Installation
 def _resolve_workspace_version_ref(parsed_id: AgentId) -> str | None:
     """The workspace's own template version as the update detector last resolved it.
 
-    ``None`` when nothing has read one yet -- a fresh app that has not swept, or
-    a machine whose version neither its git nor its create-time label names. The
-    backup-service update treats that as "not below the floor": refusing on a
-    version nobody could read would strand ordinary machines.
+    ``None`` when the detector has none -- a fresh app that has not swept, or a
+    machine whose git has not answered this session and whose create-time label
+    does not place it below the floor. The backup-service update treats that as
+    "not below the floor": refusing on a version nobody could read would strand
+    ordinary machines.
     """
     service = get_state().workspace_update_service
     if service is None:
