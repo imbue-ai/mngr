@@ -298,6 +298,10 @@ function renderUpdatesGroup(
   const overrideValue = draft?.value ?? prefill;
   const isAutoUpdateEnabled = updates.isAutoUpdateEnabled;
   const isScheduled = update.is_scheduled ?? false;
+  // A question about a schedule that has since gone is dropped, so it cannot come back unasked.
+  if (local.skipConfirmAgentId === agentId && !(isScheduled && isAutoUpdateEnabled)) {
+    local.skipConfirmAgentId = null;
+  }
   const skipLine = scheduleSkipLine(update);
   const isDecisionPending = update.is_decision_pending ?? false;
   const needsSignIn = (update.needs_sign_in ?? false) && !isUpdating;
@@ -419,7 +423,7 @@ function renderUpdatesGroup(
               local.noBackupConfirm = null;
             },
           })
-        : local.skipConfirmAgentId === agentId && isScheduled && isAutoUpdateEnabled
+        : local.skipConfirmAgentId === agentId
           ? skipConfirmPrompt(update, isAutoUpdateEnabled, {
               isSkipping: pendingSchedule?.action === "skip",
               onConfirm: () => writeSchedule("skip"),

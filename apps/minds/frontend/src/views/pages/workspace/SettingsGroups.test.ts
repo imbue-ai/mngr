@@ -1181,6 +1181,28 @@ describe("the Updates settings group under auto-update", () => {
   });
 });
 
+describe("the Updates settings group's skip question", () => {
+  it("is dropped once the schedule it asks about is gone, so it does not come back unasked", () => {
+    const { draw } = harness();
+    const armed = (isScheduled: boolean) =>
+      getAppContext().stores.updates.applyUpdatesMessage({
+        type: "workspace_updates",
+        updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: isScheduled } },
+        update_window: "2:00 AM-5:00 AM",
+        is_auto_update_enabled: true,
+      });
+    armed(true);
+    press(updatesGroup(draw(BACKED)), "Skip v0.4.1");
+    expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeDefined();
+
+    armed(false);
+    draw(BACKED);
+    armed(true);
+
+    expect(pressableWithLabel(updatesGroup(draw(BACKED)), "Cancel")).toBeUndefined();
+  });
+});
+
 describe("the Updates settings group of a stopped workspace", () => {
   it("offers nothing to do until the workspace starts, and claims no version state", () => {
     const { draw } = harness();
