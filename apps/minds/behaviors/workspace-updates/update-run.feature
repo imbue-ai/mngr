@@ -140,7 +140,7 @@ Feature: Running an update
   Scenario: An update whose agent is gone is closed out by the workspace
     Given a workspace with an update in flight
     And its agent is gone without recording a result
-    Then the workspace records that the update could not finish
+    Then the workspace records the update as stuck
     And the worker it handed off to is stopped with its work kept
     And the leases that agent held are released
 
