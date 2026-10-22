@@ -142,19 +142,22 @@ def parse_peer_credentials(raw: bytes, platform: str) -> PeerCredentials:
     return PeerCredentials(uid=uid, pid=pid)
 
 
-def read_peer_credentials(connection: socket.socket, platform: str = sys.platform) -> PeerCredentials:
+def read_peer_credentials(connection: socket.socket) -> PeerCredentials:
     """Ask the kernel who is on the other end of an accepted Unix socket connection.
 
-    Raises ``PeerCredentialsError`` when the socket refuses the option.
+    Raises ``PeerCredentialsError`` when the socket refuses the option, or on a
+    platform with no peer-credential option this reads.
     """
     try:
-        if platform == _DARWIN_PLATFORM:
+        if sys.platform == "darwin":
             raw = connection.getsockopt(_DARWIN_SOL_LOCAL, _DARWIN_LOCAL_PEERCRED, _DARWIN_XUCRED_BUFFER_BYTES)
-        else:
+        elif sys.platform == "linux":
             raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize(_LINUX_PEERCRED_FORMAT))
+        else:
+            raise PeerCredentialsError(f"Reading peer credentials is not supported on {sys.platform}")
     except OSError as e:
         raise PeerCredentialsError(f"Could not read the peer credentials of a socket connection: {e}") from e
-    return parse_peer_credentials(raw, platform)
+    return parse_peer_credentials(raw, sys.platform)
 
 
 def is_peer_allowed(credentials: PeerCredentials, allowed_uid: int) -> bool:
@@ -166,19 +169,18 @@ class LocalSocketWsgiServer(wsgi.Server):
 
     The peer check runs in ``process_conn``, the first thing cheroot does with an
     accepted connection and before any worker reads from it; a connection from
-    another uid is closed there and never queued. ``allowed_uid`` and
-    ``peer_platform`` are plain attributes :func:`create_local_socket_server`
-    sets after construction, since cheroot's server is not a pydantic model.
+    another uid is closed there and never queued. ``allowed_uid`` is a plain
+    attribute :func:`create_local_socket_server` sets after construction, since
+    cheroot's server is not a pydantic model.
     """
 
     # No uid matches until the factory sets the real one, so a server built any
     # other way admits nobody.
     allowed_uid: int = -1
-    peer_platform: str = sys.platform
 
     def process_conn(self, conn: Any) -> None:
         try:
-            credentials = read_peer_credentials(conn.socket, self.peer_platform)
+            credentials = read_peer_credentials(conn.socket)
         except PeerCredentialsError as e:
             logger.warning("Refusing a local-socket connection whose peer could not be identified: {}", e)
             conn.close()
@@ -246,13 +248,11 @@ def create_local_socket_server(
     wsgi_app: Any,
     numthreads: int,
     allowed_uid: int = os.getuid(),
-    platform: str = sys.platform,
 ) -> LocalSocketWsgiServer:
     """Build (but do not bind) the local-socket listener serving ``wsgi_app`` as the local user."""
     server = LocalSocketWsgiServer(str(socket_path), mark_requests_local_trusted(wsgi_app), numthreads=numthreads)
     server.gateway = WebSocketAwareGateway
     server.allowed_uid = allowed_uid
-    server.peer_platform = platform
     return server
 
 
