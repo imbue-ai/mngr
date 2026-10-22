@@ -84,8 +84,8 @@ function verdictMessage(update: UiWorkspaceUpdate): string {
       return "The update stopped short of applying: it can't keep something you built in this workspace. Decide how to go on in its chat.";
     case "REFUSED":
       return update.in_place_compatible_ref
-        ? `The update didn't run. ${displayVersion(update.in_place_compatible_ref)} can still be applied to this workspace. ${CHECK_IN_LINE}`
-        : `The update didn't run. ${CHECK_IN_LINE}`;
+        ? `The update wasn't applied. ${displayVersion(update.in_place_compatible_ref)} can still be applied to this workspace. ${CHECK_IN_LINE}`
+        : `The update wasn't applied. ${CHECK_IN_LINE}`;
     default:
       return "";
   }
