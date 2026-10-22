@@ -4,7 +4,7 @@
 
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { clearAppContextForTests } from "../../app-context";
+import { clearAppContextForTests, getAppContext } from "../../app-context";
 import type { UiWorkspaceUpdate } from "../../channel/messages";
 import type { AnyVnode } from "../../testing";
 import {
@@ -214,5 +214,37 @@ describe("a row's way into its run's chat", () => {
       false,
     );
     expect(pressable(draw(), "landing-update-open-chat")).toBeUndefined();
+  });
+});
+
+describe("a row's update badge while its run is under way", () => {
+  it.each([
+    ["preparing", "RUNNING"],
+    ["waiting on the user", "WAITING"],
+    ["applying", "APPLYING"],
+  ] as const)("goes straight into the run's chat while it is %s", (_case, activity) => {
+    const { draw, routeSet } = harness(
+      { [ALPHA]: { ...OUT_OF_DATE_UPDATE, activity, chat_agent_id: "agent-lead-12" } },
+      true,
+    );
+
+    press(updateBadges(draw())[0]);
+
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${ALPHA}`, {
+      chat: "agent-lead-12",
+    });
+    expect(getAppContext().shell.openUpdateModalAgentId()).toBeNull();
+  });
+
+  it.each([
+    ["a run still starting, with no chat yet", { ...OUT_OF_DATE_UPDATE, activity: "STARTING" }],
+    ["a scheduled update", { ...OUT_OF_DATE_UPDATE, is_scheduled: true, chat_agent_id: "agent-lead-old" }],
+  ] as const)("opens the update window for %s", (_case, update) => {
+    const { draw, routeSet } = harness({ [ALPHA]: update as UiWorkspaceUpdate }, false);
+
+    press(updateBadges(draw())[0]);
+
+    expect(getAppContext().shell.openUpdateModalAgentId()).toBe(ALPHA);
+    expect(routeSet).not.toHaveBeenCalled();
   });
 });

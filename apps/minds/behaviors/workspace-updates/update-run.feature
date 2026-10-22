@@ -125,8 +125,9 @@ Feature: Running an update
     Given a workspace whose last update landed, failed, or is waiting for a decision
     Then the outcome on the workspace's row offers a button into the run's chat
     And the outcome over the workspace offers a button into the run's chat and a way to dismiss it
-    Given a workspace whose update is preparing or waiting for the user, and whose run's chat exists
+    Given a workspace whose update is preparing, applying, or waiting for the user, and whose run's chat exists
     Then the report over the workspace offers a button into the run's chat
+    And the update on the workspace's row opens the run's chat itself, not a window that only offers it
 
   @idle-agent-reminded
   Scenario: An update agent that sits idle without a result is reminded

@@ -326,6 +326,15 @@ export function updateChatAgentIdFor(update: UiWorkspaceUpdate | null, isUpdatin
   return update.chat_agent_id ?? "";
 }
 
+/** The chat a click on a machine's update badge lands in instead of the
+ * update modal, or "" for the modal: a run under way whose chat is known, over
+ * which the modal would only repeat the badge and offer that chat. */
+export function runChatInsteadOfModal(update: UiWorkspaceUpdate | null, isUpdating: boolean): string {
+  if (update === null || updateModalSituation(update, isUpdating) !== "in-progress") return "";
+  if (update.activity === "STARTING") return "";
+  return updateChatAgentIdFor(update, isUpdating);
+}
+
 /** The machines-list row badge for one machine's update situation. */
 export interface UpdateBadge {
   state: UpdateBadgeState;
