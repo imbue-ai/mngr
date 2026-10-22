@@ -1171,7 +1171,7 @@ describe("the Updates settings group under auto-update", () => {
     });
   }
 
-  it("offers no plain schedule for a machine it will arm, and a skip instead of a cancel for one it armed", async () => {
+  it("offers no schedule for a machine it armed to the supported version, only a skip", async () => {
     const { draw, requests } = harness();
     underAutoUpdate({
       [BACKED]: {
@@ -1181,17 +1181,10 @@ describe("the Updates settings group under auto-update", () => {
         is_scheduled: true,
         is_schedule_auto_armed: true,
       },
-      [UNBACKED]: {
-        ...OUT_OF_DATE,
-        is_backup_configured: false,
-        is_workspace_readable: true,
-      },
     });
 
-    expect(
-      byId(updatesGroup(draw(UNBACKED)), "ws-update-schedule-btn"),
-    ).toBeUndefined();
     const armed = updatesGroup(draw(BACKED));
+    expect(byId(armed, "ws-update-schedule-btn")).toBeUndefined();
     expect(pressableWithLabel(armed, "Cancel schedule")).toBeUndefined();
     press(armed, "Skip v0.4.1");
     // Asked first, as the update modal asks.
@@ -1205,6 +1198,7 @@ describe("the Updates settings group under auto-update", () => {
   });
 
   it.each([
+    ["auto-update has not armed yet", OUT_OF_DATE],
     [
       "only a patch behind",
       {
@@ -1219,7 +1213,7 @@ describe("the Updates settings group under auto-update", () => {
     ],
     ["whose release was skipped", { ...OUT_OF_DATE, is_update_skipped: true }],
   ] as const)(
-    "offers to schedule a machine %s, which it will not arm itself",
+    "offers to schedule a machine %s",
     async (_case, update) => {
       const { draw, requests } = harness();
       underAutoUpdate({
@@ -1258,6 +1252,51 @@ describe("the Updates settings group under auto-update", () => {
     await settleDispatch();
 
     expect(requests).toEqual([`/ui/api/updates/${BACKED}/schedule`]);
+  });
+
+  it("offers no schedule for a machine the user scheduled to the supported version by name", () => {
+    const { draw } = harness();
+    underAutoUpdate({
+      [BACKED]: {
+        ...OUT_OF_DATE,
+        is_backup_configured: true,
+        is_workspace_readable: true,
+        is_scheduled: true,
+        override_ref: "minds-v0.4.1",
+      },
+    });
+
+    const group = updatesGroup(draw(BACKED));
+    expect(byId(group, "ws-update-schedule-btn")).toBeUndefined();
+    expect(pressableWithLabel(group, "Cancel schedule")).toBeDefined();
+  });
+
+  it("replaces a schedule for another version with one naming the supported version", async () => {
+    const bodies: Record<string, string> = {};
+    const { draw, requests } = harness((url, init) => {
+      if (init?.body !== undefined) bodies[url] = String(init.body);
+      return Promise.resolve(jsonResponse({}));
+    });
+    underAutoUpdate({
+      [BACKED]: {
+        ...OUT_OF_DATE,
+        is_backup_configured: true,
+        is_workspace_readable: true,
+        is_scheduled: true,
+        override_ref: "upstream/some-branch",
+      },
+    });
+
+    const group = updatesGroup(draw(BACKED));
+    expect(pressableWithLabel(group, "Cancel schedule")).toBeDefined();
+    press(group, "Schedule update");
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${BACKED}/schedule`]);
+    // A bare press keeps the armed version, so this one names the app's.
+    expect(
+      JSON.parse(bodies[`/ui/api/updates/${BACKED}/schedule`]),
+    ).toEqual({ target_ref: "minds-v0.4.1" });
   });
 
   it("lets the user cancel a schedule they armed, which says it is scheduled rather than that nothing is asked", async () => {

@@ -40,9 +40,9 @@ import { MachineSizeInput } from "../../components/MachineSizeInput";
 import {
   devOverridePrefill,
   isArmedByAutoUpdate,
-  isHandledByAutoUpdate,
   isRecreationRequired,
   isUpdateDispatchable,
+  plainScheduleTargetRef,
   recordedDispatchFailure,
   scheduleSkipLine,
   scheduledLine,
@@ -323,6 +323,10 @@ function renderUpdatesGroup(
   // A pending decision is answered in the run's chat, not by another run.
   const isDispatchBlocked =
     isBusy || isUpdating || isDecisionPending || !isUpdateDispatchable(update);
+  const plainScheduleTarget = plainScheduleTargetRef(update);
+  // A named version is not gated on availability, as the specific-version field is not.
+  const isPlainScheduleBlocked =
+    plainScheduleTarget === "" ? isDispatchBlocked : isBusy || isUpdating || isDecisionPending;
 
   /** A press of either update-now button; asks the same no-backups question the modal asks. */
   function requestDispatch(targetRef: string): void {
@@ -485,6 +489,21 @@ function renderUpdatesGroup(
                     "Sign in",
                   )
                 : null,
+              plainScheduleTarget === null
+                ? null
+                : m(
+                    Button,
+                    {
+                      variant: "primary",
+                      id: "ws-update-schedule-btn",
+                      disabled: isPlainScheduleBlocked,
+                      onclick: () => requestSchedule(plainScheduleTarget),
+                    },
+                    pendingSchedule?.action === "schedule" &&
+                      pendingSchedule.targetRef === plainScheduleTarget
+                      ? m(Spinner, { size: "sm" })
+                      : "Schedule update",
+                  ),
               isSkipOffered
                 ? m(
                     Button,
@@ -511,21 +530,7 @@ function renderUpdatesGroup(
                         ? m(Spinner, { size: "sm" })
                         : "Cancel schedule",
                     )
-                  : isHandledByAutoUpdate(update, isAutoUpdateEnabled)
-                    ? null
-                    : m(
-                        Button,
-                        {
-                          variant: "primary",
-                          id: "ws-update-schedule-btn",
-                          disabled: isDispatchBlocked,
-                          onclick: () => requestSchedule(""),
-                        },
-                        pendingSchedule?.action === "schedule" &&
-                          pendingSchedule.targetRef === ""
-                          ? m(Spinner, { size: "sm" })
-                          : "Schedule update",
-                      ),
+                  : null,
               m(
                 Button,
                 {
@@ -618,7 +623,7 @@ function renderUpdatesGroup(
                           onclick: () => requestSchedule(overrideValue.trim()),
                         },
                         pendingSchedule?.action === "schedule" &&
-                          pendingSchedule.targetRef !== ""
+                          pendingSchedule.targetRef === overrideValue.trim()
                           ? m(Spinner, { size: "sm" })
                           : "Schedule",
                       ),

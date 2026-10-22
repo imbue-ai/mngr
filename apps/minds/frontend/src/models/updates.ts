@@ -143,6 +143,19 @@ export function devOverridePrefill(supportedVersion: string): string {
   return supportedVersion === "main" ? "main" : `upstream/${supportedVersion}`;
 }
 
+/** What the plain "Schedule update" sends, or null when it is not offered
+ * because the machine is already scheduled to the version the app supports.
+ * With nothing armed it sends no ref, which means that version. Over a schedule
+ * for another version it names that version, since a bare press keeps the armed one. */
+export function plainScheduleTargetRef(update: UiWorkspaceUpdate): string | null {
+  if (!(update.is_scheduled ?? false)) return "";
+  const supported = update.supported_version ?? "";
+  const named = devOverridePrefill(supported) || supported;
+  const armed = update.override_ref ?? "";
+  if (armed === "" || named === "" || armed === supported || armed === named) return null;
+  return named;
+}
+
 /** Which part of a run a machine is in. Preparing is split from applying
  * because only the apply touches the live machine (its services go down). */
 export type UpdateRunPhase = "none" | "preparing" | "applying" | "waiting";

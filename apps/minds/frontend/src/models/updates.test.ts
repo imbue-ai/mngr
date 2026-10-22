@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { UiWorkspaceUpdatesMessage } from "../channel/messages";
+import type { UiWorkspaceUpdate, UiWorkspaceUpdatesMessage } from "../channel/messages";
 import {
   UpdatesStore,
   devOverridePrefill,
@@ -10,6 +10,7 @@ import {
   isUpdateOffered,
   rowUpdateShortcutFor,
   scheduleSkipLine,
+  plainScheduleTargetRef,
   scheduledLine,
   standingUpdateNotice,
   updateActivityNotice,
@@ -660,6 +661,25 @@ describe("the schedule's lines", () => {
     expect(scheduledLine(ARMED, "", true, "America/Los_Angeles")).toBe(
       "Scheduled to update in the next update window (1:00 AM-4:00 AM).",
     );
+  });
+
+  it.each([
+    ["nothing is armed", { ...OUT_OF_DATE_UPDATE }, ""],
+    ["the supported version is armed", { ...ARMED }, null],
+    ["the supported version is armed by name", { ...ARMED, override_ref: "minds-v0.4.1" }, null],
+    ["another version is armed", { ...ARMED, override_ref: "upstream/some-branch" }, "minds-v0.4.1"],
+    [
+      "another version is armed on a dev build",
+      { ...ARMED, supported_version: "gabe/some-branch", override_ref: "main" },
+      "upstream/gabe/some-branch",
+    ],
+    [
+      "another version is armed on a dev build, by its branch",
+      { ...ARMED, supported_version: "gabe/some-branch", override_ref: "upstream/gabe/some-branch" },
+      null,
+    ],
+  ] as const)("names what the plain schedule sends when %s", (_case, update, expected) => {
+    expect(plainScheduleTargetRef(update as UiWorkspaceUpdate)).toBe(expected);
   });
 
   it("adds the skip line only after a window passed without a start", () => {

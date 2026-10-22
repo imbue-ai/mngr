@@ -511,12 +511,24 @@ describe("the update modal under auto-update", () => {
     expect(requests).toEqual([`/ui/api/updates/${AGENT}/schedule/cancel`]);
   });
 
-  it("offers no schedule on a machine not armed yet, only updating now", () => {
+  it("offers to schedule a machine it has not armed yet, as without auto-update", () => {
     const root = harness(() => Promise.resolve(jsonResponse({})), OUT_OF_DATE_UPDATE, true).draw();
-    expect(pressableWithLabel(root, "Schedule update")).toBeUndefined();
-    const now = pressableWithLabel(root, "Update now");
-    expect(now).toBeDefined();
-    expect(attrsOf(now as AnyVnode).variant).toBe("primary");
+    expect(buttonLabels(root)).toEqual(["Update to a different version…", "Schedule update", "Update now"]);
+  });
+
+  it("offers to replace a schedule for another version with the supported one", async () => {
+    const { draw, requests } = harness(
+      () => Promise.resolve(jsonResponse({})),
+      { ...ARMED, is_schedule_auto_armed: false, override_ref: "upstream/some-branch" },
+      true,
+    );
+    const root = draw();
+
+    expect(buttonLabels(root)).toEqual(["Update now instead", "Schedule update", "Cancel schedule"]);
+    press(root, "Schedule update");
+    await settleDispatch();
+
+    expect(requests).toEqual([`/ui/api/updates/${AGENT}/schedule`]);
   });
 });
 

@@ -9,9 +9,9 @@ import type { UiWorkspaceUpdate } from "../../channel/messages";
 import {
   displayVersion,
   isArmedByAutoUpdate,
-  isHandledByAutoUpdate,
   isRecreationRequired,
   isUpdateDispatchable,
+  plainScheduleTargetRef,
   recordedDispatchFailure,
   scheduleSkipLine,
   scheduledLine,
@@ -357,7 +357,9 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         shell.enterWorkspace(agentId);
         run("now", () => updates.updateNow(agentId), onClose);
       };
-      const runSchedule = (): void => run("schedule", () => updates.scheduleUpdate(agentId), () => undefined);
+      const scheduleTargetRef = plainScheduleTargetRef(update);
+      const runSchedule = (): void =>
+        run("schedule", () => updates.scheduleUpdate(agentId, scheduleTargetRef ?? ""), () => undefined);
       const pressButton = (press: "now" | "schedule", label: string, variant: "primary" | "secondary"): m.Children =>
         m(
           Button,
@@ -381,7 +383,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       // the way to name a different version, which lives in the machine's
       // settings (?override=1 lands there with the field open). Scheduling is the
       // default: the apply takes services down, and the update window is when
-      // nobody is in the machine. A machine auto-update will arm is left to it.
+      // nobody is in the machine.
       const pushOffer = (): void => {
         body.push(
           m(
@@ -404,9 +406,8 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             "Update to a different version…",
           ),
         );
-        const isScheduleOffered = !isHandledByAutoUpdate(update, isAutoUpdateEnabled);
-        if (isScheduleOffered) actions.push(pressButton("schedule", "Schedule update", "primary"));
-        actions.push(pressButton("now", "Update now", isScheduleOffered ? "secondary" : "primary"));
+        actions.push(pressButton("schedule", "Schedule update", "primary"));
+        actions.push(pressButton("now", "Update now", "secondary"));
       };
       const isSkipOffered =
         situation === "decision-pending" ||
@@ -524,6 +525,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
             ]),
           );
           actions.push(pressButton("now", "Update now instead", "primary"));
+          if (scheduleTargetRef !== null) actions.push(pressButton("schedule", "Schedule update", "secondary"));
           if (isArmedByAutoUpdate(update, isAutoUpdateEnabled)) {
             // Cancelling would only be re-armed by the next sweep; skipping is the
             // way to say "not this release".

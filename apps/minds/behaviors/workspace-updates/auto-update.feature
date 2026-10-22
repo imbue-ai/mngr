@@ -23,7 +23,7 @@ Feature: Automatic workspace updates
     Given auto-update is on
     And a workspace that auto-update will schedule
     Then the workspace view carries no out-of-date notice for it
-    And the app offers no Schedule or Update all action
+    And the app offers no Schedule all or Update all action
     And the workspace's row says nothing about its update until auto-update has scheduled it
     And once it is scheduled, the row says so, and its update says no action is needed
     And the app still reports a landed update, and a workspace too old to update in place
@@ -41,11 +41,11 @@ Feature: Automatic workspace updates
     And its row says the release was skipped, with a way to update it by hand
 
   @schedule-by-hand-under-auto-update
-  Scenario: With auto-update on, the user can still schedule an update auto-update would not make
+  Scenario: With auto-update on, the user can still schedule a workspace's update by hand
     Given auto-update is on
-    And a workspace auto-update will not schedule: one only a patch behind, one whose version is unknown, or one whose release was skipped
-    Then the workspace's settings offer to schedule its update
-    And they offer to schedule a specific version, for any workspace
+    Then a workspace's update can be scheduled by hand, unless it is already scheduled to the version the app supports
+    And a specific version can be scheduled for any workspace
+    And scheduling the supported version over a schedule for another version replaces that schedule
     When the user schedules an update
     Then its update says it is scheduled, with a way to cancel the schedule rather than skip the release
     And auto-update leaves that schedule as the user made it
