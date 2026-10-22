@@ -1,0 +1,5 @@
+Added the blueprint plan (`blueprint/github-sync-skill/`) and implemented it in the default-workspace-template repo (companion branch `mngr/github-backup-skill` there): the always-on `runtime-backup` service is removed and replaced with an opt-in `github-sync` skill.
+
+The template's default config no longer pushes anything to GitHub -- the runtime-backup supervisord service, bootstrap's `mindsbackup/$MNGR_AGENT_ID` worktree machinery, the always-installed post-commit auto-push hook, and all `GH_TOKEN` usage are gone. The new skill (on user request) creates a dedicated private GitHub repo through latchkey, points `origin` at it, wires plain `git push` through the latchkey gateway for every checkout, activates the post-commit auto-push hook, and adds a `[program:github-sync]` service that syncs `runtime/` to the stable `runtime-sync` branch with periodic private-visibility re-verification (pushes halt if the repo is ever public). `libs/runtime_backup` was renamed and extended into `libs/github_sync`.
+
+No mngr monorepo code changes; all functional changes live in default-workspace-template.
