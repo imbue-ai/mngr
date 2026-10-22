@@ -16,7 +16,7 @@ Workspace updates now run inside the workspace, so a scheduled update no longer 
 
 - The update window shows one situation at a time, with only the buttons that situation needs: a run in progress shows only "Open chat", a run that ended shows its outcome and "Open chat" or "Dismiss" before any new update is offered, and a scheduled update's controls are gone once its run, or one started with "Update now instead", is under way.
 
-- A stopped workspace says nothing about its update until it is running again: whether it is behind, scheduled or skipped, and how its last update ended, all come back on the first read after it starts. An update that is landing, an update that never went out, and a workspace too old to update in place are still shown.
+- A stopped workspace says nothing about its update until it is running again: whether it is behind, scheduled or skipped, and how its last update ended, all come back on the first read after it starts. An update that is landing, an update Studio is starting the workspace for, an update that never went out, and a workspace too old to update in place are still shown.
 
 - A workspace whose update is running can no longer be scheduled, so a schedule cannot outlive the run and start a fresh one after it.
 

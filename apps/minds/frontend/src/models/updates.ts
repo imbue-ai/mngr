@@ -532,11 +532,12 @@ function isStoppedLiveness(liveness: string): boolean {
 /** What a stopped machine still shows of its update state, or null for
  * nothing. The rest can be neither read nor acted on until the machine
  * starts, and the first read after that brings back what was not dismissed. A
- * landing apply restarts the machine's services, so it is shown whole; what
- * needs nothing from the machine stays: an update that never went out, which
- * only this app holds, and a machine too old to update in place. */
+ * landing apply restarts the machine's services, and a run this app is
+ * starting starts the machine itself, so both are shown whole; what needs
+ * nothing from the machine stays: an update that never went out, which only
+ * this app holds, and a machine too old to update in place. */
 export function updateShownWhileStopped(update: UiWorkspaceUpdate): UiWorkspaceUpdate | null {
-  if (update.activity === "APPLYING") return update;
+  if (update.activity === "APPLYING" || update.activity === "STARTING") return update;
   const isRecreation = isRecreationRequired(update);
   if (!update.dispatch_failure && !isRecreation) return null;
   return {

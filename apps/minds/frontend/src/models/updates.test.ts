@@ -245,11 +245,15 @@ describe("a stopped machine's update state", () => {
     expect(store.publishedFor("agent-b")?.is_scheduled).toBeUndefined();
   });
 
-  it("shows a press this window just made on a stopped machine, which the press starts", () => {
+  it("shows a press on a stopped machine as updating while the press starts it, past the claim's push", () => {
     const store = storeWith({ "agent-a": "STOPPED" }, { "agent-a": OUT_OF_DATE_UPDATE });
     vi.stubGlobal("fetch", () => new Promise<Response>(() => undefined));
     void store.updateNow("agent-a");
+    expect(updateBadgeFor(store.publishedFor("agent-a"), store.isUpdating("agent-a"))?.state).toBe("updating");
 
+    // The claim's push releases the press's optimistic hold before the machine reads as started.
+    store.applyUpdatesMessage(message({ "agent-a": { ...OUT_OF_DATE_UPDATE, activity: "STARTING" } }));
+    expect(store.isQuietWhileStopped("agent-a")).toBe(false);
     expect(updateBadgeFor(store.publishedFor("agent-a"), store.isUpdating("agent-a"))?.state).toBe("updating");
   });
 });
