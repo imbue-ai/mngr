@@ -244,8 +244,11 @@ export function updateActivityNotice(update: UiWorkspaceUpdate, isDispatching = 
  * said. A run that landed this app's version outranks the offer too, since
  * detection reads the machine as behind for a while after the apply; one that
  * landed an older version ranks below it, so a newer release is not hidden
- * behind its success. */
+ * behind its success. A stopped machine with nothing of its update state shown
+ * (`UpdatesStore.isQuietWhileStopped`) outranks them all; `updateModalSituation`
+ * reads the update alone, so it never returns "stopped". */
 export type UpdateModalSituation =
+  | "stopped"
   | "in-progress"
   | "not-started"
   | "decision-pending"
@@ -259,8 +262,7 @@ export type UpdateModalSituation =
   | "offered"
   | "updated"
   | "unknown"
-  | "up-to-date"
-  | "stopped";
+  | "up-to-date";
 
 export function updateModalSituation(update: UiWorkspaceUpdate, isUpdating: boolean): UpdateModalSituation {
   if (isUpdating) return "in-progress";
