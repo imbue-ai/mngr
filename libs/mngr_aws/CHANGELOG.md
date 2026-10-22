@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: Bare placement (`isolation=NONE`) — the agent runs directly on the EC2 instance with no Docker container, reached at `vps_ip:22` as root. Idle agent runs `shutdown -P now`, which stops the EC2 instance via `InstanceInitiatedShutdownBehavior`. Bare release tests added.

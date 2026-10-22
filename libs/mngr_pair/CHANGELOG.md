@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-10-22
+
 ### Added
 
 - Added: `mngr pair` works with agents on remote hosts, running a second unison on the host over mngr's SSH transport. Both ends need unison 2.52+ and `unison-fsmonitor`; when the host lacks a usable one, mngr installs a pinned, checksum-verified static unison 2.54.0 into `~/.mngr/bin` (Linux x86_64 only).

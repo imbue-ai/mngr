@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.10] - 2026-10-22
+
 ### Added
 
 - Added: Container realizer can run a base image that is already present in the VPS's local Docker daemon, skipping both the build and the pull. Opt-in via a new `allow_local_image` flag on `RealizePlacementContext` (off by default, so OVH / Vultr / AWS behavior is unchanged). Backs the imbue_cloud slice "build once per box, `docker load` per slice" acceleration.

@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: Bare placement (`isolation=NONE`) — an Azure OS shutdown does not halt compute billing, so the bare agent's idle `shutdown.sh` runs the ARM self-deallocate directly (the same call the container idle watcher uses), keeping the self-deallocate role assignment and skipping the host-side sentinel watcher. Bare release tests added.

@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-10-22
+
 ### Added
 
 - Added: `is_vm_runtime_enabled` option under `[providers.modal]` (default false) creates sandboxes on Modal's VM runtime (`experimental_options = {"vm_runtime": True}`) instead of gVisor, giving stronger isolation and broader syscall compatibility (e.g. Docker-in-sandbox state surviving a filesystem snapshot).

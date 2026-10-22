@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-10-22
+
 ### Added
 
 - Added: `version` field on the opencode agent type pins the installed opencode CLI; provisioning verifies the installed opencode matches and errors on mismatch.

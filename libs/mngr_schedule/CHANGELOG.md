@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Fixed
 
 - Fixed: `mngr schedule remove` finds and stops the schedule's Modal app; it matched `modal app list --json` rows on the wrong keys, logged "Modal app not found in environment", and left the app running.

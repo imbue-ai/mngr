@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-10-22
+
 ### Added
 
 - Added: Attach, peek, and reply to the focused agent from the kanpan board. `Enter` attaches to the agent's tmux session and restores the board on detach (`Ctrl-b d`). `Space` opens a live bordered peek panel below the board showing the agent's recent user/assistant conversation via `mngr transcript --role user --role agent`, refreshed every couple of seconds; tool calls and framework-injected turns don't appear, so the peek reads like the human conversation. Type into the panel's `›` input and press `Enter` to send a message to the agent (the send runs in the background via `mngr message`; your reply is echoed as a `›` line immediately and replaced by the real message once the agent accepts it, so several replies typed in a row deliver in order; a failed send drops the echo and renders a `(reply failed: ...)` line). The reply input supports readline-style editing via `urwid_readline` (word movement/delete, jump-to-start/end, kill-to-start/end). A `?` overlay lists the full keymap; the footer shows a relative refresh stamp on the left and the core keys on the right.

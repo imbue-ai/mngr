@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: `mngr list` reports a Vultr host's real vCPUs, RAM, and disk (recorded at create) instead of a 1 CPU / 1 GB placeholder; earlier hosts on the default `vc2-2c-4gb` plan answer from a table, others list the size as unknown.

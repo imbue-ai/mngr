@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: `mngr list` reports an OVH host's real vCores, RAM, and disk (recorded at create) instead of a 1 CPU / 1 GB placeholder; earlier hosts on the default `vps-2025-model1` plan answer from a table, others list the size as unknown.

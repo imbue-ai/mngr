@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.21] - 2026-10-22
+
 ### Added
 
 - Added: `secret_wrapping` module — pure envelope-encryption helpers (argon2id key derivation, AES-256-GCM DEK wrap/unwrap and secrets encrypt/decrypt) used by the minds workspace-sync feature. New dependencies: `argon2-cffi`, `cryptography`.

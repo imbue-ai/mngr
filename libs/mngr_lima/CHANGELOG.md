@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: `LimaProviderInstance.rename_host` — updates the logical host name on the (offline-writable) host record, so it works whether or not the VM is running.

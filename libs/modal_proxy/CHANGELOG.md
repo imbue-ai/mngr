@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: `ModalInterface.sandbox_create` accepts an optional `experimental_options` mapping (mirrors `modal.Sandbox.create`), letting callers request Modal's VM runtime via `experimental_options={"vm_runtime": True}`.

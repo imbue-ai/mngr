@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: `mngr file list` and `mngr file put` accept a `--format` template rendering one line per record (`list`: `name`, `path`, `file_type`, `size`, `modified`, `permissions`; `put`: `path`, `size`); `get` still rejects templates.

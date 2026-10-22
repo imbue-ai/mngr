@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: `mngr forward --use-http2` flag terminates TLS and negotiates HTTP/2 (via ALPN) for the workspace origin instead of plain HTTP/1.1, so the workspace UI is no longer capped by Chromium's ~6-connection-per-origin HTTP/1.1 limit. When set, the proxy mints a fresh leaf cert at startup (SANs `localhost`, `*.localhost`, `127.0.0.1`) plus a per-SNI cert for each nested `.localhost` origin, all signed by a persistent local CA under `$MNGR_HOST_DIR/plugin/forward/ca/`; `mngr forward --trust-ca` installs that CA into the platform trust store (macOS login keychain, Linux per-user NSS). It serves TLS + h2 via hypercorn (replacing uvicorn), and its client-facing URLs become `https`/`wss` with the `mngr_forward_session` cookie marked `Secure`. WebSockets (terminal, log stream, `/api/ws` state socket) keep working over the TLS connection. Off by default (a human running `mngr forward` still gets plain HTTP/1.1); there is no runtime HTTP fallback — if TLS setup fails the proxy exits during startup naming TLS/HTTP-2 as the cause.

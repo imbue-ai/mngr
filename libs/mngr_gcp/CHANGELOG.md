@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: Bare placement (`isolation=NONE`) — the idle agent runs `shutdown -P now` as the VM's root, which on GCE stops the instance; the container-only sentinel + host-side systemd watcher is skipped. Bare release tests added.

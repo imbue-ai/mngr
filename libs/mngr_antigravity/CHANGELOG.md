@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: `update_policy` field on the antigravity agent type (`AUTO` / `ASK` / `NEVER`, default `NEVER`) governing agy's background self-updater via `AGY_CLI_DISABLE_AUTO_UPDATE`. agy has no version-pin capability, so there is no `version` field.

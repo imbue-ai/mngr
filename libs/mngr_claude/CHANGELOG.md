@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-10-22
+
 ### Added
 
 - Added: `update_policy` field on the claude agent type (`AUTO` / `ASK` / `NEVER`, default `NEVER`) governs Claude Code's background auto-updater via `DISABLE_AUTOUPDATER=1`. **Behavior change:** local claude agents now disable the auto-updater by default; previously the per-agent config inherited your `~/.claude.json` `autoUpdates` value. Set `update_policy = "AUTO"` to opt back in. Ignored in shared (`isolate_local_config_dir = false`) mode.

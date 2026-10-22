@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.0] - 2026-10-22
+
 ### Added
 
 - Added: New `imbue-mngr-docker` plugin holding the docker provider, split out of `imbue-mngr`. `mngr create @.docker`, `mngr docker resize`, `mngr help docker_usage` and `[providers.docker]` settings are unchanged but need the plugin (`uv tool install imbue-mngr --with imbue-mngr-docker`, or `mngr plugin add imbue-mngr-docker`). The docker error classes moved to `imbue.mngr_docker.errors` (names unchanged); the backend registers lazily, so `mngr --help`, `mngr config` and `mngr list` no longer import the docker SDK.

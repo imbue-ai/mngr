@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: `version` field on the codex agent type pins the installed codex CLI via `npm i -g @openai/codex@<version>`; provisioning verifies the installed codex matches and errors on mismatch. A pin suppresses the provision-time update check (`update_policy` is ignored).

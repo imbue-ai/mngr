@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Changed
 
 - Changed: `mngr notify` detects a running observer with mngr's read-only `is_observe_writer_running` probe: it no longer creates a lock file in a host dir that never had an observer, sees an observer whose lock file another user owns, and starts an observer when the probe itself fails.

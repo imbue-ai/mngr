@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-10-22
+
 ### Added
 
 - Added: `setup_command_context` (and `parse_output_options`) accept an optional `max_log_size_mb` override so a command can pin its own rotated-log size cap instead of inheriting `logging.max_log_size_mb` from config. Long-running daemons that write to a dedicated `--log-file` use this to keep a smaller cap than the general mngr default.

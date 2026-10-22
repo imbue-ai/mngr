@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: `version` field on the pi agent type pins the installed pi CLI via `npm install -g @earendil-works/pi-coding-agent@<version>`; provisioning errors on mismatch.

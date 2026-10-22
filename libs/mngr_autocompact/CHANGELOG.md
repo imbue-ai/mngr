@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.0] - 2026-10-22
+
 ### Added
 
 - Added: New `mngr_autocompact` plugin: in `on_next_prompt` mode it compacts a stale agent right before a message is sent to it, and the `mngr autocompact` command group (`check` lists agents needing compaction, `run` compacts them) serves agents in `proactive_timer` mode that have sat idle until shortly before their prompt cache expires and whose context reaches `min_context_tokens` (default 200,000). Both commands take multiple agent targets (resolved like `mngr stop`) or `--all`, and skip targets without compaction support with a warning.
