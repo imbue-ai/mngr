@@ -1093,8 +1093,8 @@ dependencies = [
     { name = "coolname" },
     { name = "cryptography" },
     { name = "imbue-common" },
+    { name = "imbue-overlay" },
     { name = "markdown-it-py" },
-    { name = "overlay" },
     { name = "packaging" },
     { name = "paramiko" },
     { name = "pluggy" },
@@ -1123,8 +1123,8 @@ requires-dist = [
     { name = "coolname", specifier = ">=3.0.0" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "imbue-common", editable = "../../../../libs/imbue_common" },
+    { name = "imbue-overlay", editable = "../../../../libs/overlay" },
     { name = "markdown-it-py", specifier = ">=2.2.0" },
-    { name = "overlay", editable = "../../../../libs/overlay" },
     { name = "packaging", specifier = ">=21.0" },
     { name = "paramiko", specifier = "==3.5.1" },
     { name = "pluggy", specifier = ">=1.5.0" },
@@ -1225,7 +1225,7 @@ source = { editable = "../../../../libs/mngr_claude" }
 dependencies = [
     { name = "anthropic" },
     { name = "imbue-mngr" },
-    { name = "overlay" },
+    { name = "imbue-overlay" },
     { name = "rich" },
 ]
 
@@ -1233,7 +1233,7 @@ dependencies = [
 requires-dist = [
     { name = "anthropic" },
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
-    { name = "overlay", editable = "../../../../libs/overlay" },
+    { name = "imbue-overlay", editable = "../../../../libs/overlay" },
     { name = "rich", specifier = ">=13.0" },
 ]
 
@@ -1535,6 +1535,15 @@ requires-dist = [
 ]
 
 [[package]]
+name = "imbue-overlay"
+version = "0.1.0"
+source = { editable = "../../../../libs/overlay" }
+
+[package.metadata]
+requires-dist = [{ name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" }]
+provides-extras = ["dev"]
+
+[[package]]
 name = "iniconfig"
 version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1823,9 +1832,9 @@ dependencies = [
     { name = "imbue-mngr-pair" },
     { name = "imbue-mngr-pi-coding" },
     { name = "imbue-mngr-vps" },
+    { name = "imbue-overlay" },
     { name = "minds" },
     { name = "modal-proxy" },
-    { name = "overlay" },
     { name = "resource-guards" },
 ]
 
@@ -1852,9 +1861,9 @@ requires-dist = [
     { name = "imbue-mngr-pair", editable = "../../../../libs/mngr_pair" },
     { name = "imbue-mngr-pi-coding", editable = "../../../../libs/mngr_pi_coding" },
     { name = "imbue-mngr-vps", editable = "../../../../libs/mngr_vps" },
+    { name = "imbue-overlay", editable = "../../../../libs/overlay" },
     { name = "minds", editable = "../../" },
     { name = "modal-proxy", editable = "../../../../libs/modal_proxy" },
-    { name = "overlay", editable = "../../../../libs/overlay" },
     { name = "resource-guards", editable = "../../../../libs/resource_guards" },
 ]
 
@@ -1994,15 +2003,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/ee/8b/aa9e2d8b8dfa7c946
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ca/6f/a04e900f465ff3221ccc395522503e2d10e79fa21f2723c8e177aae1e0d1/opentelemetry_api-1.44.0-py3-none-any.whl", hash = "sha256:94b98c893a91b88657eaac1e3ba89618cdb85be6918196705354f34728b2cdef", size = 60018, upload-time = "2026-07-16T15:25:11.657Z" },
 ]
-
-[[package]]
-name = "overlay"
-version = "0.1.0"
-source = { editable = "../../../../libs/overlay" }
-
-[package.metadata]
-requires-dist = [{ name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" }]
-provides-extras = ["dev"]
 
 [[package]]
 name = "ovh"

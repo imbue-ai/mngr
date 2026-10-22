@@ -23,10 +23,12 @@ dependencies = [
 # only ever forward. This only buys a detection delay; it can't catch a
 # compromise that stays undetected past the window.
 exclude-newer = "2026-09-02T00:00:00Z"
+# Older uv writes an older revision of uv.lock than the committed one.
+required-version = ">=0.12.22"
 
 [tool.uv.sources]
 imbue-common = { workspace = true }
-overlay = { workspace = true }
+imbue-overlay = { workspace = true }
 
 [tool.uv.workspace]
 members = ["libs/*", "apps/*"]
