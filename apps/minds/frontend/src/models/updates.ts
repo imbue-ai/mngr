@@ -536,7 +536,7 @@ function isStoppedLiveness(liveness: string): boolean {
  * starting starts the machine itself, so both are shown whole; what needs
  * nothing from the machine stays: an update that never went out, which only
  * this app holds, and a machine too old to update in place. */
-export function updateShownWhileStopped(update: UiWorkspaceUpdate): UiWorkspaceUpdate | null {
+function updateShownWhileStopped(update: UiWorkspaceUpdate): UiWorkspaceUpdate | null {
   if (update.activity === "APPLYING" || update.activity === "STARTING") return update;
   const isRecreation = isRecreationRequired(update);
   if (!update.dispatch_failure && !isRecreation) return null;
