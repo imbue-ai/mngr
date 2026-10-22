@@ -23,7 +23,8 @@ import type { PresetName } from "./create/form-model";
 
 /** Every page `loadedPage` built, torn down as the router would after each
  * test: a host-name check the page debounced would otherwise fire after the
- * real `m.redraw` is restored, which throws with nothing mounted. */
+ * real `m.redraw` is restored, which throws here, where there is no
+ * `requestAnimationFrame` for it to schedule on. */
 const loadedPages: m.Component<CreatePageAttrs>[] = [];
 
 afterEach(() => {
