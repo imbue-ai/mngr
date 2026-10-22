@@ -1,3 +1,0 @@
-An antigravity agent's transcript streamer and common transcript converter keep running after the agent is renamed, including after it restarts. The background-tasks supervisor tracks the agent's tmux session by its session id, which a rename does not change, and new launch commands no longer carry the session name. For an agent created by an older mngr, `mngr start` rewrites the session name out of its stored launch command, so its transcript runs again after its next restart.
-
-The supervisor's pidfile is keyed on the agent id, so a new agent that takes a renamed agent's old name gets its own supervisor.

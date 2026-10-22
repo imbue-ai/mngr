@@ -1,5 +1,0 @@
-An unreachable Modal control plane no longer aborts every `mngr` command. When the Modal server cannot be connected to -- most often a dropped network -- the modal provider now raises `ProviderUnavailableError` instead of a fatal `MngrError`, so commands that query multiple providers skip modal and carry on with the providers they *can* reach. Previously a laptop that lost its wifi would fail a `mngr start` for a *docker* workspace on Modal, before ever getting to Docker.
-
-Commands that genuinely target Modal still fail loudly: `mngr create @.modal` surfaces the outage directly (with guidance pointing at your network connection and https://status.modal.com rather than the generic "start Docker" advice), and an agent lookup that matches nothing reports the Modal outage rather than claiming the agent does not exist.
-
-Only the connectivity case is reclassified. Every other Modal failure -- anything Modal actually answered with -- remains fatal, so a genuinely broken Modal integration still surfaces as an error rather than a silently short listing.

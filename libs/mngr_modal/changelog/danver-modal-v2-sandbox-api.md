@@ -1,3 +1,0 @@
-Bumped the pinned `modal` SDK from `1.4.3` to `1.5.4`. Modal-backed agents now run on Modal's V2 Sandbox backend (enabled at the modal-proxy boundary), which provides higher sandbox creation rates and concurrency. No change is required from users, and GPU sandboxes automatically continue to use the V1 backend.
-
-`start_host` now confirms a discovered sandbox is actually alive (via the new `poll()` probe) before treating the host as running, instead of trusting its presence in `Sandbox.list`. Under V2 a just-terminated sandbox can linger in the listing, which otherwise made a stopped or hard-killed host look like it was still running (so a resume left a stale `stop_reason`, and a restart after a hard kill failed to report the missing snapshot).

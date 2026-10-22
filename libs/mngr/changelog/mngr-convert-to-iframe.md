@@ -1,1 +1,0 @@
-Regenerate the `mngr forward` command reference (`docs/commands/secondary/forward.md`) for the mngr_forward embedding substrate: new `--browser-bridge-token`, `--embedder-origin`, and `--trust-ca` options, and the `--use-http2` description now reflects per-startup leaf certs minted from a persistent local CA instead of a regenerated self-signed cert.

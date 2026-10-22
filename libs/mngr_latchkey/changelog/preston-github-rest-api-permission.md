@@ -1,3 +1,0 @@
-Added: a curated `service_display_name` in the services catalog, naming a service as a whole rather than one of its scopes.
-
-Catalog display names are per *scope*, and a service exposing several disambiguates each one with a parenthetical (`GitHub (REST API)`, `GitHub (GraphQL API)`, `GitHub (git)`). One credential backs every scope, so readers that name the whole connection had to fall back to the first scope's label -- reading as though the other scopes sat beneath that one. The generator now curates the service's own name beside the scope labels, and `services.json` carries it for the services that need one (`github`, `gitlab`); everything else takes its single scope's label verbatim, so `Notion (MCP)` is unchanged.

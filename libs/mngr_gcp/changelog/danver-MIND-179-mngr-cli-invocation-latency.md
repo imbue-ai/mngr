@@ -1,1 +1,0 @@
-Faster `mngr` cold start: the GCP provider now registers lazily, so the Google Compute Engine SDK (`google.cloud.compute`) -- roughly 900 Python modules -- is imported only when a GCP provider is actually operated, not on every `mngr` invocation. Provider-independent commands (`mngr config`, `mngr list`, `mngr --help`) no longer pay that import cost.

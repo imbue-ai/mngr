@@ -1,1 +1,0 @@
-Reworded latchkey gateway docs, comments, and one error message ("A VPS latchkey gateway requires a tunneled host") from the minds-level workspace vocabulary to host/agent terms while merging the machine/workspace naming cleanup branch (`mngr/fix-machine-workspace-naming`, PR #436) into up-to-date main. No behavior change.

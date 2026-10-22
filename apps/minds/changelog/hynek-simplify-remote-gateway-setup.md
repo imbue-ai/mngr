@@ -1,1 +1,0 @@
-Remote workspaces now use one Latchkey gateway URL. Minds selects the intended desktop or VPS gateway topology before workspace creation, so VPS-backed workspaces use the remote gateway's default permissions file while permissions, approval requests, and Minds API routes are transparently forwarded to the desktop gateway.

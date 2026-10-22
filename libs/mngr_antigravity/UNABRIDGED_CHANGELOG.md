@@ -4,6 +4,115 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-16
+
+An antigravity agent's transcript streamer and common transcript converter keep running after the agent is renamed, including after it restarts. The background-tasks supervisor tracks the agent's tmux session by its session id, which a rename does not change, and new launch commands no longer carry the session name. For an agent created by an older mngr, `mngr start` rewrites the session name out of its stored launch command, so its transcript runs again after its next restart.
+
+The supervisor's pidfile is keyed on the agent id, so a new agent that takes a renamed agent's old name gets its own supervisor.
+
+## 2026-10-13
+
+The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
+
+## 2026-10-12
+
+The antigravity release tests now run on a Mac where agy keeps its login in the keychain. They used to fail during setup looking for an `antigravity-oauth-token` file that agy only writes when there is no OS keyring.
+
+## 2026-10-05
+
+Adopted the new repo-wide `raw ConcurrencyGroup.start_new_thread calls` ratchet (`test_prevent_raw_start_new_thread`). It flags production code that calls `ConcurrencyGroup.start_new_thread` directly instead of `start_mngr_thread`, the mngr helper that destroys the thread's gevent Hub when its target returns. No production code change in this project.
+
+## 2026-09-30
+
+Removed the 16 comment lines that had accumulated inside `libs/mngr_antigravity/imbue/mngr_antigravity/test_ratchets.py` explaining why individual ratchet counts had been raised.
+
+A ratchet file records counts, not history. The reason a count moved now goes in the commit message and the changelog entry, the reason a particular code site is allowed goes in that module's docstring, and the set of exempt files goes in the `excluded_patterns=(...)` argument -- all places that stay correct as the code changes, which the comments did not.
+
+## 2026-09-21
+
+Adopted the new repo-wide `raw ConcurrencyGroupExecutor construction` ratchet (`test_prevent_raw_concurrency_group_executor`). It flags production code that builds a `ConcurrencyGroupExecutor` directly instead of using `mngr_executor`, the wrapper that destroys each worker thread's gevent Hub. No production code change in this project.
+
+## 2026-09-17
+
+Persisting a trusted source repo into the user's global Antigravity settings file writes that file in place (`is_atomic=False`) rather than through the atomic rename that `write_text_file` now defaults to, so a settings file that is a symlink into the user's dotfiles stays a symlink and keeps its mode and owner.
+
+## 2026-09-01
+
+The antigravity common-transcript emitter now writes ATIF-shaped stream records
+(`header` / `step` / `observation`) instead of the legacy
+`user_message` / `assistant_message` / `tool_result` envelopes, per
+`specs/atif-transcript-alignment/spec.md`. Every stream opens with a
+`header` line pinning `ATIF-v1.7`, and the envelope's `source` field is
+renamed `emitter` (ATIF claims `source` for the step originator).
+
+Full fidelity: a tool call's `arguments` is the complete decoded object (agy
+serializes them as a JSON string; anything that does not parse to an object
+rides whole under `_raw`) and `CODE_ACTION` output is recorded untruncated.
+The 200-character input previews and 2000-character output cap are gone;
+truncation is now purely a display-time concern in `mngr transcript`.
+
+Newly captured: the planner's thinking, which the SQLite decoder already reads
+off `CortexStepPlannerResponse` and hangs on the `PLANNER_RESPONSE` record,
+now becomes that agent step's `reasoning_content` instead of being discarded.
+
+agy's own per-conversation annotations (`conversation_id`, `step_index`) moved
+under the ATIF `extra` objects -- on the step for user and agent steps, and on
+the result for observations -- since every other field on a record must be an
+ATIF field for the doc-builder to assemble documents mechanically.
+
+Records are now appended in the order agy wrote them rather than sorted by
+timestamp. A `CODE_ACTION` could previously be emitted *before* the
+`PLANNER_RESPONSE` that called the tool: when the decoder degraded a step's
+`created_at`, the converter substituted conversion time, which sorts after every
+recorded event. The reader treats append order as authoritative, so that tool
+output was dropped from the assembled transcript.
+
+A step whose `created_at` the decoder could not read (it degrades those to an
+empty string) now carries conversion time as its timestamp instead of failing
+the ATIF requirement that every step and observation record have one.
+
+The ATIF stream header's `event_id` is now unique per agent stream: `header-<sha256(agent_id:emitter)[:32]>` instead of the fixed `"header"`. A fixed id repeats identically for every agent on every host, so analytics' fleet-wide event-id dedupe collapsed all header rows to one per account, destroying the per-agent (emitter, `schema_version`) mix.
+
+The agent id is the agent state directory's basename (a UUID4-based value), so distinct agents never collide and a restart reuses the same id.
+
+The antigravity common-transcript emitter now writes ATIF-shaped stream records (`header` / `step` / `observation`) per `specs/atif-transcript-alignment/spec.md`: full-fidelity tool arguments and outputs (no more 200/2000-char truncation), planner thinking captured as `reasoning_content`, append-order preservation, and a per-agent-unique header `event_id`. The per-layer `mngr-atif-*.md` entries in this PR carry the details.
+
+## 2026-08-26
+
+Antigravity agents accept the workspace's role templates. `output_style` and `append_system_prompt` are now config fields on the agent type, and their text is written to the per-agent `~/.gemini/GEMINI.md` rule file that `agy` auto-loads -- under the per-agent `$HOME` mngr already provisions, so it never touches the source repo. Without a field to route them to, `mngr create --type antigravity --template chat` was rejected before it launched anything.
+
+No model is pinned on the agent type. `agy` reads its model from its own `settings.json`, but the workspace's model bar is uniform across harnesses now (each harness writes its live model to `model_state.json`), so a pinned slug here would be a second source of truth that goes stale the moment someone runs `/model` in the agent's terminal.
+
+An antigravity agent also stamps an `antigravity_process_started` marker in its state directory on every launch and resume, matching the `claude_process_started` / `codex_process_started` / `pi_process_started` markers the peer plugins write.
+
+Consumers use its mtime to bound transcript staleness. This matters more for agy than for the others because agy resumes from its own conversation store: after a mid-turn restart the previous process's steps are still present, including a dispatched tool call that never completed, and without a process-start timestamp there is no way to tell that tail apart from live work.
+
+The statusline now mirrors the model agy reports into the uniform `model_state.json` the workspace's model bar reads. Only `model` is written: agy has no separate effort or fast axis, since the tier is baked into the model id. The parse is deliberately tolerant -- if agy renames or nests that field, nothing is written and the bar falls back to showing no model, rather than disturbing the lifecycle work this script exists for.
+
+The model parse reads agy's actual payload shape: `model` is an object (`{"id": "Gemini 3.7 Flash (High)", "effort": "high"}`), not a string, so the earlier string-only match never fired and no model was ever recorded. `effort` is deliberately not written -- agy has no separate effort axis and the tier is already inside that display name.
+
+Renamed `auto_dismiss_dialogs` to `auto_dismiss_dialogs_at_startup`. Same behaviour; the name now says when it applies.
+
+## 2026-08-25
+
+Release-test helpers' `workspace`/`prepare_adoption_workspace` identifiers renamed to `project_dir`/`prepare_adoption_project_dir` (mngr-level terminology sweep; no behavior change).
+
+Merged the machine/workspace naming cleanup branch (`mngr/fix-machine-workspace-naming`, PR #436) into this branch and resolved the merge conflicts against main. The changes themselves are described in this project's `mngr-fix-machine-workspace-naming` changelog entry.
+
+## 2026-08-03
+
+Merge main into the mithril-refactor stack (relay-based sharing, iframe desktop shell, Mithril SPA). The changes to this project arrive verbatim from main and are described by their original PRs' changelog entries; no project-specific conflict resolution was needed here.
+
+No code changes in this project. This PR lands the mithril-stack rewrite (relay-based sharing, single-iframe Electron shell, mithril SPA) into main; for this project that means only the per-PR changelog entries accumulated on the stack's development branches.
+
+## 2026-08-02
+
+Reduced the idle CPU cost of the per-agent common-transcript watcher.
+
+`common_transcript.sh` now skips a conversion pass entirely when the raw transcript has not changed since the last completed pass. Each pass spawns a Python interpreter that re-reads and re-parses both the whole input file and the whole output file, so on an idle agent that work was repeated every 5 seconds for no result. The change-detection state is held in memory only, so a restart still performs one full reconciling pass exactly as before, and a pass skipped because a concurrent `--single-pass` flush holds the convert lock is retried on the next cycle rather than being lost.
+
+Added the repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (synced into every project's `test_ratchets.py`): Modal images must install from a committed hash-locked requirements export instead of passing bare package names to `pip_install`/`uv_pip_install`. No violations in this project (count 0).
+
 ## 2026-07-14
 
 # Antigravity: marker-based message delivery confirmation

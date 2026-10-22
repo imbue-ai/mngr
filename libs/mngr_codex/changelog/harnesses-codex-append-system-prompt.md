@@ -1,3 +1,0 @@
-Removed the codex private-prompt file mechanism: codex no longer copies a repo-committed `.codex/AGENTS.md` into `CODEX_HOME/AGENTS.md` at provision time. Codex-specific instructions now reach the agent through `developer_instructions` (the harness-neutral `append_system_prompt` channel, set on the `[agent_types.codex]` config block) -- the same channel every other harness already uses -- so there is one uniform way to deliver per-harness instructions and no bespoke per-agent file copy.
-
-Dropped the now-unused `get_codex_global_instructions_path` and `get_repo_codex_instructions_path` helpers and the `_GLOBAL_INSTRUCTIONS_FILENAME` constant from `codex_config`.

@@ -1,15 +1,15 @@
 [project]
 name = "imbue-mngr-gcp"
-version = "0.1.2"
+version = "0.2.0"
 description = "GCP Compute Engine provider backend plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "imbue-mngr==0.2.17",
+    "imbue-mngr==0.3.0",
     "imbue-mngr-vps==0.1.10",
     # Used for the best-effort 'gcloud config get compute/zone' probe in config.py
     # (run through a ConcurrencyGroup rather than subprocess directly).
-    "concurrency-group==0.1.20",
+    "concurrency-group==0.1.21",
     # google-cloud-compute ships a py.typed marker, so botocore-style stub
     # packages are not needed -- the SDK's request/response types are checked
     # directly.

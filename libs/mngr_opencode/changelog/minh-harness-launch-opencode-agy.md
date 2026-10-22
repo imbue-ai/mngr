@@ -1,5 +1,0 @@
-OpenCode agents accept the workspace's role templates. `output_style` and `append_system_prompt` are now config fields on the agent type, and their text is written to the per-agent `AGENTS.md` that OpenCode auto-loads as its global rules -- the OpenCode analog of Codex's `developer_instructions` and Pi's `APPEND_SYSTEM.md`. Without a field to route them to, `mngr create --type opencode --template chat` was rejected before it launched anything.
-
-OpenCode's TUI also starts in the workspace image now. It is a Bun binary that extracts its OpenTUI native render library to the temp directory and maps it executable, which the image's `noexec` `/tmp` refuses ("failed to map segment from shared object"); `TMPDIR` now points at a per-agent directory under the agent state dir, which is exec-capable.
-
-`MNGR_OPENCODE_BIN` may now be a multi-word launch command rather than a bare binary path, so opencode can be launched through a wrapper (the workspace points it at its OOM band wrapper). The launch script splits it into an argv array and uses it for both the server and the attached TUI, so both processes inherit the band.

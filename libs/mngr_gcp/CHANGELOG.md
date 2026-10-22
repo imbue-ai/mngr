@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Added
 
 - Added: Bare placement (`isolation=NONE`) — the idle agent runs `shutdown -P now` as the VM's root, which on GCE stops the instance; the container-only sentinel + host-side systemd watcher is skipped. Bare release tests added.
@@ -13,6 +15,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Offline `host_dir` support, matching the AWS / Azure shape. A stopped GCE instance's `host_dir` is now readable without SSH; capture is operator-driven at `mngr stop` to a Google Cloud Storage state bucket. `mngr gcp prepare` creates the bucket (default name `mngr-state-<project_id>`, overridable via `state_bucket_name`); `mngr gcp cleanup` deletes it (`--force` to delete when it still holds offline state).
 - Added: `is_offline_host_dir_enabled` config field (default on) to disable offline `host_dir` capture without removing the bucket.
 - Added: A running bare GCP host is discoverable with the default provider config — a `mngr-isolation` metadata item stamped at create lets discovery resolve placement from the cloud API without SSH.
+- Added: `service_account_key_json` config field (`SecretStr`): when set, credentials come from the pasted service-account key instead of ADC, and the key's `project_id` is the project fallback.
+- Added: `mngr list` reports a GCP host's real vCPUs, RAM, and boot disk size (recorded at create) instead of a 1 CPU / 1 GB placeholder; this needs the `compute.machineTypes.get` permission. Hosts created earlier answer from a built-in machine-type table.
+- Added: `mngr gcp prepare --format jsonl` announces its `gcp.firewall` and `gcp.state_bucket` steps as a plan and reports each one starting and completing.
 
 ### Changed
 
@@ -23,10 +28,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `project_id` config field now defaults to `None` instead of `""`, matching the other optional identifier fields. Resolution behavior is unchanged: an unset `project_id` still falls back to the project ADC resolves from the environment.
 - Changed: GCP hosts inherit the shared VPS host-setup fix that registers the gVisor (runsc) runtime with `--overlay2=none`, so an agent container's writable layer persists across a `docker stop`/`start` or host reboot instead of being lost to the default per-sandbox overlay.
 - Changed: Host-side idle-watcher systemd unit renamed from `mngr-gcp-idle-watcher` to the shared `mngr-idle-watcher`.
+- Changed: Hosts are opened with a per-host VM-root client key (`keys/host_keys/<hex>/vps_ssh_key`) minted at create instead of the provider-wide `keys/vps_ssh_key`, picked via the instance's `mngr-host-id` metadata; existing hosts fall back to the old key on the machine that created them. Destroying a stopped instance also removes the host's local key material and pin records.
+- Changed: Default GCE boot image is the `debian-13` family instead of `debian-12`.
+- Changed: The GCE startup script installs the shared `mngr_vps` sshd drop-in, and GCE VMs get the shared `mngr_vps` container-host hardening (container memory cap, tmpfs mounts under runsc, Docker daemon and journal bounds).
+- Changed: Faster `mngr` cold start: the GCP provider registers lazily, so `google.cloud.compute` is imported only when a GCP provider is used.
+
+### Deprecated
+
+- Deprecated: `boot_disk_size_gb`, replaced by the shared `root_disk_size_gb`; setting both to different values is a config error.
 
 ### Fixed
 
 - Fixed: Renaming a host now re-stamps the `mngr-host-name` instance metadata (the cheap identity tag offline discovery reads), so a host renamed and then stopped lists under its new name rather than its old one.
+- Fixed: `mngr start` no longer has its first SSH connection reset (`Connection reset by peer`): the startup script restarts sshd only when the host key or sshd drop-in changed.
+- Fixed: Destroying a GCP host no longer ends as a cleanup failure after the instance is deleted; a 404 on the follow-up metadata write is treated as nothing to update.
 
 ## [v0.1.2] - 2026-06-18
 

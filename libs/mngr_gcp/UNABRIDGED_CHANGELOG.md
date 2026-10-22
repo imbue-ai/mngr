@@ -4,6 +4,95 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-18
+
+`mngr gcp prepare --format jsonl` now announces its two steps (`gcp.firewall`, `gcp.state_bucket`) as a plan and reports each one starting and completing, so a caller driving it from a UI can show real progress while the firewall rule and state bucket are set up.
+
+## 2026-10-17
+
+Hosts are now opened with a per-host VM-root client key (`keys/host_keys/<hex>/vps_ssh_key`) minted at create, instead of the provider-wide `keys/vps_ssh_key`; discovery reads the host id from the instance's `mngr-host-id` metadata to pick that key. Existing hosts keep working through a read-only fallback to the old provider-wide key on the machine that created them. Destroying a stopped instance now also removes the host's local key material and pin records.
+
+Destroying a GCP host no longer reports a cleanup failure after the instance is deleted: the record cleanup that follows the delete rewrites the instance's metadata, and reached the deleted instance through a cached listing, so its read answered 404 and the destroy ended as failed although the VM was gone (which left the workspace's synced record active). A 404 on that metadata write is now "nothing to update", as it already was on the read side.
+
+## 2026-10-13
+
+The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved 5 tests that sat under `Project-level checks` to the groups the source gives them; created the `Hardcoded paths` group; moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
+
+## 2026-10-10
+
+- `mngr list` reports a GCP host's real size (the machine type's vCPUs and RAM from the GCE machine-type catalog, and the boot disk size), recorded on the host record at create, instead of the 1 CPU / 1 GB placeholder. The describe needs `compute.machineTypes.get`, now listed with the per-host create permissions. Hosts created before this release answer from a table of the machine types the Imbue Studio create form offers.
+
+- The boot disk size knob is now `root_disk_size_gb` (shared with AWS and Azure). `boot_disk_size_gb` keeps working as a deprecated alias; setting both to different values is a config error.
+
+- The GCP release trip asserts the size `mngr list` reports matches what GCE says the machine type is.
+
+## 2026-10-08
+
+Comment and docstring prose that referred to the desktop app as "Minds" now
+says "Imbue Studio". No behavior change: every identifier (`MINDS_*` env vars,
+`minds-*` service and scope names, paths) keeps its spelling, per
+`apps/minds/style_guide.md`.
+
+## 2026-10-05
+
+Adopted the new repo-wide `raw ConcurrencyGroup.start_new_thread calls` ratchet (`test_prevent_raw_start_new_thread`). It flags production code that calls `ConcurrencyGroup.start_new_thread` directly instead of `start_mngr_thread`, the mngr helper that destroys the thread's gevent Hub when its target returns. No production code change in this project.
+
+## 2026-09-30
+
+Removed the 3 comment lines that had accumulated inside `libs/mngr_gcp/imbue/mngr_gcp/test_ratchets.py` explaining why individual ratchet counts had been raised.
+
+A ratchet file records counts, not history. The reason a count moved now goes in the commit message and the changelog entry, the reason a particular code site is allowed goes in that module's docstring, and the set of exempt files goes in the `excluded_patterns=(...)` argument -- all places that stay correct as the code changes, which the comments did not.
+
+## 2026-09-29
+
+The GCE startup script stages the same sshd drop-in the shared `mngr_vps` host setup installs (session caps, key-only root login, no per-source penalties), through the shared renderer, so the two writers cannot drift and the shared step finds the file in place on every boot instead of restarting sshd a second time. GCE VMs also receive the new `mngr_vps` container-host hardening (container memory cap, tmpfs mounts under runsc, Docker daemon and journal bounds); see `libs/mngr_vps/changelog/mngr-cloud-provider-updates.md`.
+
+The default GCE boot image is now the global `debian-13` (trixie) family instead of `debian-12`, matching the other mngr_vps clouds, the workspace container, and the desktop lima VM. Override with `default_source_image` or `--gcp-image=` as before.
+
+- The GCE startup script now installs mngr's SSH host key and sshd drop-in only when they differ from what is on disk, and restarts sshd only then. The guest agent re-runs the script on every boot, so the old unconditional restart happened on every `mngr start` too, right after mngr had seen the expected host key and just as it opened its first connection, which sshd then reset (`Connection reset by peer`). Bare-isolation hosts, whose agent endpoint is the VM's port 22, hit this most.
+
+The GCP provider's config reference -- shown by `mngr config` and in the package README's option table -- now calls the credential paste flow "the Imbue Studio bring-your-own-account paste flow".
+
+Merges the Debian 13 default and the VPS container parity work (issues #975 and #976): the default GCE boot image is the `debian-13` family, the startup script installs mngr's host key and sshd drop-in only when they differ from what is on disk (so `mngr start` no longer has its first connection reset), and GCE VMs receive the shared mngr_vps hardening. See the `mngr-host-sizing-debian-13` and `mngr-cloud-provider-updates` entries for the details.
+
+## 2026-09-21
+
+Adopted the new repo-wide `raw ConcurrencyGroupExecutor construction` ratchet (`test_prevent_raw_concurrency_group_executor`). It flags production code that builds a `ConcurrencyGroupExecutor` directly instead of using `mngr_executor`, the wrapper that destroys each worker thread's gevent Hub. No production code change in this project.
+
+## 2026-08-19
+
+Faster `mngr` cold start: the GCP provider now registers lazily, so the Google Compute Engine SDK (`google.cloud.compute`) -- roughly 900 Python modules -- is imported only when a GCP provider is actually operated, not on every `mngr` invocation. Provider-independent commands (`mngr config`, `mngr list`, `mngr --help`) no longer pay that import cost.
+
+## 2026-08-15
+
+Test-only update for Phase 2 of the user-controlled-keys plan: the bare realizer's `agent_endpoint` now takes a host_id (per-host agent client keys in mngr_vps), so the GCP backend test calling it passes one.
+
+## 2026-08-03
+
+Merge main into the mithril-refactor stack (relay-based sharing, iframe desktop shell, Mithril SPA). The changes to this project arrive verbatim from main and are described by their original PRs' changelog entries; no project-specific conflict resolution was needed here.
+
+No code changes in this project. This PR lands the mithril-stack rewrite (relay-based sharing, single-iframe Electron shell, mithril SPA) into main; for this project that means only the per-PR changelog entries accumulated on the stack's development branches.
+
+## 2026-08-02
+
+Added the repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (synced into every project's `test_ratchets.py`): Modal images must install from a committed hash-locked requirements export instead of passing bare package names to `pip_install`/`uv_pip_install`. No violations in this project (count 0).
+
+## 2026-08-01
+
+No behavior change. This project's recorded async/await ratchet count was re-snapshotted from 1 to 0 alongside a fix to the shared rule (see the `imbue_common` entry). `mngr_gcp` has no async code and matched the rule under neither the old nor the new pattern, so the 1 was an unused grandfathered slot; the recorded count now reflects what the rule actually finds here.
+
+## 2026-07-29
+
+mngr_gcp: the session-end leak detector (`pytest_sessionfinish`) now *fails* the test session instead of skipping silently when `MNGR_GCP_RELEASE_TESTS=1` is set but GCP Application Default Credentials cannot be resolved, no default project is configured, or the GCE client cannot be built. It still no-ops on ordinary unit-only runs (opt-in unset). A release run that cannot authenticate cannot have scanned for leaked GCE instances, so skipping would silently green a run that did no cleanup; failing surfaces the misconfiguration.
+
+Add an out-of-band, age-based reaper for leaked test GCE instances labeled `mngr-pytest-launched=true` (which production instances never carry). A new CI job (`cleanup-gcp-instances`, via `scripts/cleanup_old_gcp_test_instances.py`) runs it on every push to main and pull request, so orphans from sessions killed before `pytest_sessionfinish` could run are still cleaned up.
+
+The reaper logic is the shared `imbue.mngr_vps.leak_cleanup`; `imbue.mngr_gcp.cleanup` now supplies only GCP's `CreatedAtExtractor`. Because GCE labels cannot hold an ISO timestamp, GCP reads `mngr-created-at` from instance *metadata* (surfaced by `list_instances()`) while requiring the `mngr-pytest-launched` label; an instance whose timestamp is missing or unparseable is left alone rather than crashing the scan (which runs inside `pytest_sessionfinish`). The session-end hook + standalone script are thin wrappers that build a `GcpVpsClient` and call the shared scan/destroy through it, and the hook fails the session on a scan error instead of silently passing.
+
+## 2026-07-24
+
+- `GcpProviderConfig` gained an optional `service_account_key_json` field (`SecretStr`): when set, credentials are built from the pasted service-account key directly (bypassing ADC) and the key's embedded `project_id` becomes the resolved-project fallback. Ambient ADC remains the unchanged default. Used by the Minds bring-your-own-account paste flow.
+
 ## 2026-07-01
 
 Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.

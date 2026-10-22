@@ -1,1 +1,0 @@
-The opencode plugin now writes its common transcript as the ATIF-shaped stream (`header` / `step` / `observation`) per `specs/atif-transcript-alignment/spec.md`: full-fidelity tool arguments and outputs, reasoning captured as `reasoning_content`, and a per-agent-unique header `event_id`. The per-layer `mngr-atif-*.md` entries in this PR carry the details.

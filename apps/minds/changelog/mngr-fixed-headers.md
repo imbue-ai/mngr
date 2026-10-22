@@ -1,1 +1,0 @@
-When you share a workspace, the desktop client now writes the owner's account email into the workspace at `data/.state/share/owner_email` (removed when you unshare), so in-workspace services can learn who owns the workspace. The owner's email is never exposed in a per-request header; its presence in that file also signals that sharing is currently active.

@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-codex"
-version = "0.1.4"
+version = "0.2.0"
 description = "Codex agent type plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.17",
+    "imbue-mngr==0.3.0",
     # WebSocket client for the per-agent ``codex app-server`` JSON-RPC connection
     # (see ``app_server_client``). The daemon speaks WebSocket over its unix socket.
     "websockets>=13",

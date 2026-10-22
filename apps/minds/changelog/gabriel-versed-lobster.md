@@ -1,3 +1,0 @@
-The system-interface health tracker now understands the forward plugin's new `STALLED` backend-failure reason, which reports a request the backend has not answered yet rather than one that failed. It enrolls a probe suspect exactly like the other status-less reasons: a wedged backend is indistinguishable from a slow one at that moment, and the background probe adjudicates. Enrolling a merely-slow backend costs one probe that answers 200 and clears the flag, whereas declining to enroll a wedged one would leave it undetected, since a healthy non-suspect agent is never probed.
-
-No behavior change for existing reasons, and no new path to STUCK: as before, only a sustained run of probe failures gets there.

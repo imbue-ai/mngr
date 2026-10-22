@@ -1,1 +1,0 @@
-Update doc references for the relocation of minds' operator docs to `apps/minds/docs/deploy/` (docstrings in `cli/server.py`, `slices/key_repair.py`, `slices/autostart_backfill.py`, `slices/bare_metal.py`, and the README).

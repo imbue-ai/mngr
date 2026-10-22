@@ -1,1 +1,0 @@
-The app-server websocket transport now raises its typed `TransportClosedError` from `send` as well as `receive`, so a request written to a connection that has closed surfaces as the same retryable transport error regardless of which side of the round-trip hits the closure first (previously a write-side closure escaped as a raw `websockets.ConnectionClosed`).

@@ -6,9 +6,17 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
+### Added
+
+- Added: `mngr list` reports a Vultr host's real vCPUs, RAM, and disk (recorded at create) instead of a 1 CPU / 1 GB placeholder; earlier hosts on the default `vc2-2c-4gb` plan answer from a table, others list the size as unknown.
+
 ### Changed
 
 - Changed: Unauthenticated Vultr provider now raises the shared `ProviderNotAuthorizedError` at construction, instead of printing an ad-hoc `WARNING: Vultr API key not configured` and returning an empty listing (exit 0). The bespoke warning print has been removed. Reported consistently with the other cloud providers in `mngr list` rather than vanishing.
+- Changed: Hosts are opened with a per-host VPS-root client key (`keys/host_keys/<hex>/vps_ssh_key`) minted at create instead of the provider-wide `keys/vps_ssh_key`, picked via the instance's `mngr-host-id` tag (instances without one are skipped with a warning); existing hosts fall back to the old key on the machine that created them.
+- Changed: Default OS is id `2625` (Debian 13) instead of `2136` (Debian 12).
 
 ## [v0.1.10] - 2026-06-18
 

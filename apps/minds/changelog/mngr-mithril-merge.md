@@ -1,1 +1,0 @@
-Merge main into the mithril-refactor stack. Main's changes (Modal image pinning, deploy freshness preflight, slice hardening docs) merged cleanly alongside this branch's relay-sharing and SPA work; the per-env deploy secret list now carries the `sharing` service next to main's connector preflight.

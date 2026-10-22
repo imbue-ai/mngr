@@ -1,1 +1,0 @@
-No behavior change. This project's recorded async/await ratchet count dropped because the shared rule no longer counts prose mentioning the `await-delivery` CLI subcommand as an async usage (see the `imbue_common` entry); the remaining count is genuine async code.

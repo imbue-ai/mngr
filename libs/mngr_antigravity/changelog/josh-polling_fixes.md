@@ -1,3 +1,0 @@
-Reduced the idle CPU cost of the per-agent common-transcript watcher.
-
-`common_transcript.sh` now skips a conversion pass entirely when the raw transcript has not changed since the last completed pass. Each pass spawns a Python interpreter that re-reads and re-parses both the whole input file and the whole output file, so on an idle agent that work was repeated every 5 seconds for no result. The change-detection state is held in memory only, so a restart still performs one full reconciling pass exactly as before, and a pass skipped because a concurrent `--single-pass` flush holds the convert lock is retried on the next cycle rather than being lost.

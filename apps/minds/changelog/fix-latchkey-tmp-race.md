@@ -1,1 +1,0 @@
-`LatchkeyAutoRegister._handle_pair` now also catches `OSError` (not just `LatchkeyStoreError`) when registering an agent in the host's latchkey permissions file, so a transient filesystem error logs a warning instead of crashing the whole `minds` CLI at startup.

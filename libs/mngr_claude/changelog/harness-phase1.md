@@ -1,1 +1,0 @@
-- Provisioning seeds minds_model_state.json from the launch settings (model, fastMode) so the chat model bar is populatable the moment readiness fires; the statusline's later writes reconcile the seed to claude's self-reported values.

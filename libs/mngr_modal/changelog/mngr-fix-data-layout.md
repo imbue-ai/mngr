@@ -1,1 +1,0 @@
-The modal provider now honors the new `host_log_dir` config: the activity watcher, volume sync, and generated shutdown-script plain-text logs are written there when it is set. Default unchanged (`<host_dir>/logs`).

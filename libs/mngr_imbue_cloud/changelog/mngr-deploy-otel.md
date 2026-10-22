@@ -1,1 +1,0 @@
-Deployment pass for the observability bring-up: this branch carries `mngr/log-and-telemetry-aggregation`, whose mngr_imbue_cloud change is the optional `--extra-prep-script <file>` hook on `mngr imbue_cloud admin server prep` (an additional idempotent root script appended to the box prep, used to roll the OpenTelemetry Collector out to bare-metal boxes).

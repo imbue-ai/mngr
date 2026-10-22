@@ -1,1 +1,0 @@
-The `dwt` paragraph in `apps/minds/CLAUDE.md` now states that the code-guardian stop hook reviews the nested `.external_worktrees/default-workspace-template` checkout alongside mngr, so stopping pushes that checkout's branch and blocks until its own PR exists.

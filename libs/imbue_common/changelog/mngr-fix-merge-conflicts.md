@@ -1,1 +1,0 @@
-This is the merge of `gabriel/tactful-swift` (the inner workspace-updates work) into current `main`. It carries no changes of its own beyond resolving the merge; see that branch's `gabriel-tactful-swift.md` entry for what actually changed.

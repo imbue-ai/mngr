@@ -1,5 +1,0 @@
-Reduced the idle CPU cost of the per-agent transcript watchers, which polled continuously whether or not the agent was producing output.
-
-`common_transcript.sh` now skips a conversion pass entirely when the raw rollout stream has not changed since the last completed pass. Each pass spawns a Python interpreter that re-reads and re-parses both the whole input file and the whole output file, so on an idle agent that work was repeated every 5 seconds for no result. The change-detection state is held in memory only, so a restart still performs one full reconciling pass exactly as before, and a pass skipped because a concurrent `--single-pass` flush holds the convert lock is retried on the next cycle rather than being lost.
-
-`stream_transcript.sh` no longer forks subprocesses to discover the active rollout on every poll. The hook-recorded rollout path is now read with the `read` builtin rather than `head`, and the offset key is derived with parameter expansion rather than `basename` piped through `tr`. Both are exact equivalents of what they replace; at a one-second poll interval they were most of an idle cycle's work.

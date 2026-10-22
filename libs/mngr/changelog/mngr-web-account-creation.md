@@ -1,1 +1,0 @@
-Regenerate the `mngr imbue_cloud` CLI docs for the reworked auth commands: the new browser-based `auth login` replaces `auth oauth`, `auth signout` gains `--all-devices` (device-scoped revoke by default), and the pending-verification flow is gone (`auth is-verified` is a plain status query).

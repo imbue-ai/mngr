@@ -1,1 +1,0 @@
-Replace Cloudflare tunnel management with workspace shares over the self-hosted relay: the `tunnels` CLI becomes `shares` (create / delete / status / list, printing the one-time relay token on create), and the connector client gains the shares endpoints. Tunnel quota entitlements are gone.

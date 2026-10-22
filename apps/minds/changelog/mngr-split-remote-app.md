@@ -1,1 +1,0 @@
-Updated the `_direct_migration_dsn` docstring cross-reference: its twin moved from apps/modal_litellm/app.py to `imbue.modal_app_kit.database.direct_database_url` in this PR, and the docstring now points there (and states the accurate reason for the remaining duplication: minds does not depend on the modal-app-kit library).

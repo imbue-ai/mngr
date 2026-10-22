@@ -6,6 +6,17 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
+### Fixed
+
+- Fixed: `mngr schedule remove` finds and stops the schedule's Modal app; it matched `modal app list --json` rows on the wrong keys, logged "Modal app not found in environment", and left the app running.
+- Fixed: `mngr schedule add --provider modal` creates the per-user Modal environment on a fresh install instead of failing with "Provider 'modal' has no state yet".
+- Fixed: Scheduled deploys no longer drop the deployer's `config.toml` and profile files when the mngr host dir is outside `$HOME`.
+- Fixed: `--include-project-settings` stages project-local settings from `.<root name>` instead of always `.mngr`, so they reach the container under a non-default `MNGR_ROOT_NAME`.
+- Fixed: Trigger verification no longer times out when the Modal container's `mngr list` reports an unreachable provider; the container's mngr no longer installs the docker plugin.
+- Fixed: EDITABLE/SKIP-mode deploys resolve the mngr Dockerfile from the installed `imbue.mngr` package, so they work when the monorepo is vendored inside another git repository.
+
 ## [v0.1.6] - 2026-06-18
 
 ## [v0.1.5] - 2026-06-16

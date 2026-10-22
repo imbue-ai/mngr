@@ -1,3 +1,0 @@
-Fix desktop-app sign-in with Google on tiers with a dedicated accounts domain (production/staging): the browser login page opened by the app now lands on the tier's accounts origin (`accounts_base_url` from `client.toml`, e.g. accounts.imbue.com) instead of the connector's Modal function URL. A Google flow started on the connector host always failed with "This sign-in attempt could not be verified" because its login-CSRF nonce cookie was stranded on the wrong host.
-
-The desktop client now passes `accounts_base_url` into every `mngr imbue_cloud` subprocess via `MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL`, which the plugin's `auth login` uses for the browser page. Tiers without an accounts domain (dev/CI) are unchanged.

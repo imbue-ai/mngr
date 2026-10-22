@@ -1,1 +1,0 @@
-Updated the `_load_private_key` docstring (and the corresponding test docstrings in `bootstrap_test.py`) to reflect that the base VPS provider now generates OpenSSH-format Ed25519 client keys (older installs still hold RSA PEM keys). No behavior change: the loader already tried each key type in turn.

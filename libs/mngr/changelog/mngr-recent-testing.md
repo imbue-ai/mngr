@@ -1,3 +1,0 @@
-Testing integration branch combining three in-flight changes (each branch's own entry sits beside this one in the projects it touches): Imbue Cloud machine resizing from the workspace settings page (`mngr-allow-imbue-resizing`), shared-workspace cleanup (`mngr-cleanup-shares`), and cloud connections backed by a local login instead of pasted keys (`mngr-allow-provider-profile-vars`).
-
-For this project: provider backends raise `ProviderCredentialSourceMissingError` when a block names a local login this machine lacks, `mngr observe` keeps re-checking such providers instead of ending their poller, and discovery snapshots carry the provider's short remediation.

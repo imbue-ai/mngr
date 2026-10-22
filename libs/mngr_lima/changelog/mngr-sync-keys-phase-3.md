@@ -1,3 +1,0 @@
-The cidata provisioning script's root `authorized_keys` step now appends its own line if absent instead of truncating the file (re-landed from PR 382). Lima replays provisioning on every VM start, so the old truncating `cat >` silently dropped every key added after the carve -- most damagingly the imbue_cloud connector's lease-time injection of the owner's key, locking them out of the VM for good while the workspace kept working over the container's separate sshd.
-
-New `patch_root_authorized_keys_block_in_lima_yaml`: rewrites an existing VM's stored `lima.yaml` from the historical truncating form to the appending one, used by the imbue_cloud `admin repair-keys` fleet sweep to fix slices carved before this change.

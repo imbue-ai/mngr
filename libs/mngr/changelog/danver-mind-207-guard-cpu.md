@@ -1,3 +1,0 @@
-The local provider's `get_host_resources` no longer crashes when `psutil.cpu_freq()` raises `SystemError`, a known psutil quirk on some macOS / Apple-Silicon setups. The failure is now treated as "frequency unknown" (`CpuResources.frequency_ghz=None`) instead of propagating, so host-detail collection -- and the acceptance tests that drive `fetch_board_snapshot` / `list_agents` against a real local host -- run on affected Macs instead of only on Linux CI.
-
-The sibling `disk_usage` failure path in the same method now logs at debug when it falls back to `disk_gb=None`, instead of swallowing the `OSError` silently.

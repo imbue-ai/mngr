@@ -1,1 +1,0 @@
-Added Russell's WireGuard operator keys to the dev (`10.112.0.6`), staging (`10.96.0.5`), and production (`10.64.0.5`) management-plane peer lists, so he can reach those tiers' boxes once an existing operator runs `minds-admin wireguard sync-peers`.

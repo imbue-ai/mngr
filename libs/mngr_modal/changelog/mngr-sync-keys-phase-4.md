@@ -1,1 +1,0 @@
-Marked `test_mngr_create_transfers_git_repo_with_untracked_files` as flaky (matching its siblings in the same file), so offload auto-retries it through transient Modal-service failures: function-deploy API errors and SSH transport EOFs during the initial sandbox snapshot.

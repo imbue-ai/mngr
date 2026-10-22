@@ -1,1 +1,0 @@
-Add the generated CLI documentation page for the new `mngr tmr-behaviors` command (`docs/commands/secondary/tmr-behaviors.md`), the behavior-anchored test map-reduce recipe registered by the `imbue-mngr-tmr` plugin.

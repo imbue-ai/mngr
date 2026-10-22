@@ -1,1 +1,0 @@
-Remove the `minds-workspaces-sharing` workspace permission verb: sharing moved from a per-service, gateway-proxied workspace sub-resource to a machine-level desktop-only API, so it no longer needs a per-workspace latchkey grant.

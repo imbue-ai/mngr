@@ -1,1 +1,0 @@
-The forward plugin's discovery stream consumer now uses mngr's deduplicating schema-mismatch warner: discovery lines written by a different mngr version are skipped with one warning per distinct failure (instead of one warning per line), and additive fields from newer versions parse cleanly. Part of the forward-compatible event parsing work (mngr-internal#422).

@@ -1,7 +1,0 @@
-- Workspaces can now route an outbound third-party request through the latchkey gateway on the user's own computer, so it reaches the destination from a residential connection rather than from the workspace's VPS. Some destinations (Cloudflare-fronted ones especially) block datacenter IP ranges outright, where TLS impersonation does not help because the address itself is refused.
-
-- Every workspace now gets a `MINDS_VIA_DESKTOP_URL_PREFIX` env var naming the prefix to put in front of a target URL to ask for this. It is `https://latchkey-self.invalid/via-desktop` for VPS-gateway workspaces and empty for desktop-gateway ones, whose gateway already runs on the user's machine -- so in-workspace tooling concatenates it without branching on topology and gets the right behavior in both.
-
-- The VPS gateway's forwarding extension now serves that prefix, handing the request to the desktop gateway's own outbound proxy with the prefix swapped for `/gateway/`. The target must be an absolute `http(s)` URL and is passed through byte-for-byte; a malformed one is rejected on the VPS with a clear 400 rather than failing opaquely a hop later.
-
-- This route grants nothing new. Credentials are injected, and the permission check runs, on the desktop against the same per-host permissions file a direct request uses, so a service the user has granted is reachable both ways with one grant and a service they have not granted is reachable neither way. The agent baseline opens the route by default and it never appears as its own permission prompt.

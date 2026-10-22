@@ -6,9 +6,17 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
+### Added
+
+- Added: `mngr list` reports an OVH host's real vCores, RAM, and disk (recorded at create) instead of a 1 CPU / 1 GB placeholder; earlier hosts on the default `vps-2025-model1` plan answer from a table, others list the size as unknown.
+
 ### Changed
 
 - Changed: Unauthenticated OVH provider now raises the shared `ProviderNotAuthorizedError` at construction, instead of silently returning an empty listing (exit 0). Reported consistently with the other cloud providers (one consistent error line in `mngr list`, contributing a non-zero exit) rather than vanishing.
+- Changed: Hosts are opened with a per-host VPS-root client key (`keys/host_keys/<hex>/vps_ssh_key`) installed at rebuild instead of the provider-wide `keys/vps_ssh_key`, picked via the `mngr-host-id` IAM tag; the TOFU host-key pin is removed with the host. Existing hosts fall back to the old key on the machine that created them.
+- Changed: Default image is plain `Debian 13` instead of `Debian 12 - Docker` (the shared host setup installs Docker); not yet exercised end to end.
 
 ## [v0.1.6] - 2026-06-18
 

@@ -1,5 +1,0 @@
-- The VPS (outer-host) latchkey gateway now installs datalib v0.26.0's curl release (was v0.25.0), and fetches the statically linked musl build rather than the glibc one. The glibc build only runs where glibc is at least as new as datalib's build host; the musl build has no such requirement, so the Chrome-impersonating curl works on any Linux VPS image.
-
-- Provisioning now replaces an out-of-date curl pair instead of skipping the install whenever the binaries merely exist. An already-provisioned VPS therefore picks up this (and any future) curl bump on its next provisioning pass -- previously it kept the release it was first provisioned with forever, which is exactly the case the musl switch needed to reach.
-
-- The replacement is done by staging both binaries and renaming them into place, so a bump applied to a live VPS cannot fail with "Text file busy" when the gateway happens to be running a request through the curl being replaced, and an interrupted install leaves the previous pair intact rather than a new dispatch curl fronting an old impersonator.

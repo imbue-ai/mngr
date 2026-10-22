@@ -1,1 +1,0 @@
-Recorded the minds-v0.6.1 cut in `docs/deploy/history/minds-v0.6.1.md` (tag SHAs, build id, the CI and release-test runs that verified the pair, and the ToDesktop pnpm-cooldown bug the cut fixed) and noted the cut in `docs/deploy/next_deploy.md`.

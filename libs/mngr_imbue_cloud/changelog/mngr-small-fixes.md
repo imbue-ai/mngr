@@ -1,3 +1,0 @@
-- The connector client now follows HTTP redirects on every call (`follow_redirects=True`), so Modal's `303 See Other` long-request redirect is followed to the attempt-token URL and slow-but-successful operations (e.g. `mngr imbue_cloud hosts release` of a slow destroy) no longer report spurious failures (mngr-internal#446).
-
-- Slice provisioning now passes `--timeout 25m` to `limactl start`, overriding lima's default 10-minute instance-running deadline. Fresh slice VMs booting on a heavily loaded box (~8-12 minutes to sshd) no longer die of the default deadline and trigger destroy+recreate retry storms during bakes (mngr-internal#469).

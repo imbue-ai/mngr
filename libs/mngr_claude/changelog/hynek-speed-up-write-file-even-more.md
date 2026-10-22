@@ -1,1 +1,0 @@
-Test doubles that implement the host file-write interface (`FakeHost` subclasses in the compaction and skill-agent tests) now accept `write_text_file`'s `is_atomic` parameter, matching the interface: `write_file` and `write_text_file` are atomic by default on every host and take `is_atomic=False` to write in place. No behavior change in this project's own code.

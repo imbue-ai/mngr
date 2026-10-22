@@ -1,1 +1,0 @@
-Merged the download-attribution feature branch, which carried a fix classifying the "Function fu-<id> not found" wire shape of the Modal concurrent-deploy race as the same retryable transient as the app lock. The fix is described in `mngr-download-attribution.md` in this directory, which lands in the same PR; this branch adds nothing further to modal_proxy.

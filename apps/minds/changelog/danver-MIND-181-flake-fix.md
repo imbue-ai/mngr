@@ -1,5 +1,0 @@
-# Warm mngr processes now exit promptly when the minds backend disconnects (MIND-181)
-
-Fixed the warm-process teardown lifecycle in `MngrCaller` (`utils/mngr_caller.py`). Previously, a pre-warmed `mngr` process only noticed that its parent (the minds backend) had gone away after it finished the multi-second `imbue.mngr.main` warm-up import, because the socket `recv` that observes the disconnect only ran after the import. Under CI load the import alone could exceed 30s, which both left near-orphan processes doing useless work and caused the flaky `test_warm_process_exits_when_parent_disconnects` timeout.
-
-A dedicated receiver thread in the warm process now performs the single socket `recv` starting before the import and exits the process immediately (`os._exit`) if the parent disconnects first; the parent-death watcher continues to cover the busy window after a request has been read. Measured exit-after-disconnect latency dropped from ~5s (warm cache) / ~29s (cold cache) to ~0.1s. The `@pytest.mark.flaky` marker on the test was removed, and the parent-death-watcher wiring test was reworked to hold the serve path mid-command instead of blocking on `recv`.

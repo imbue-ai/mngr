@@ -1,3 +1,0 @@
-Deploy docs: the dev tier now has a standing box registry (`minds-dev-infra`, at `secrets/minds/dev/neon/DATABASE_URL`) like the CI tier's, documented in host-pool-setup.md ("Box registry"), and the management-plane runbook's peer-change section describes the one-edit-plus-one-run flow for adding an operator (`minds-admin wireguard sync-peers --tier dev`).
-
-The minds config loader gained `committed_deploy_config_tiers()`, the sorted list of tiers with a committed `imbue/minds/config/envs/<tier>/deploy.toml`, so tooling that offers a tier choice (such as `minds-admin wireguard --tier`) can pin its choices to the committed tiers.

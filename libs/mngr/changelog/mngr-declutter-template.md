@@ -1,1 +1,0 @@
-The regenerated `imbue_cloud` CLI reference (`docs/commands/secondary/imbue_cloud.md`) follows the default-workspace-template root declutter: the `mngr imbue_cloud admin pool create --mngr-source` option is now documented as rsyncing into the template's `system/vendor/mngr/` (previously `vendor/mngr/`).

@@ -1,1 +1,0 @@
-Workspace apps can now ask for an audio input. Before, the frame Studio puts a workspace in refused the microphone to every page inside it, so an app that listens to the built-in mic, a headset on the audio port, or a USB interface got "Permission denied" before macOS was ever asked. macOS still asks before any app hears anything.

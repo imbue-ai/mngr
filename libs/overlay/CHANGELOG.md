@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.0] - 2026-10-22
+
 ### Added
 
-- Initial extraction of the layered config-merge algebra out of mngr into a standalone, dependency-free library: the key-suffix operators (`__extend` / `__assign`), the `Static*` atomic-value markers, the typed-node merge algebra (`lift` / `lower` / `combine` / `finalize` / `apply_extend` / `extend_plain_value`, plus the public `merge`, which raises `NarrowingError`, and `merge_narrowing_allowed`), and recursive narrowing detection (`would_assignment_narrow` / `narrowing_paths`).
+- Added: Initial extraction of the layered config-merge algebra out of mngr into a standalone, dependency-free library, distributed as `imbue-overlay` (the PyPI name `overlay` is an unrelated project) with the import path `imbue.overlay`: the key-suffix operators (`__extend` / `__assign`), the `Static*` atomic-value markers, the typed-node merge algebra (`lift` / `lower` / `combine` / `finalize` / `apply_extend` / `extend_plain_value`, plus the public `merge`, which raises `NarrowingError`, and `merge_narrowing_allowed`), and recursive narrowing detection (`would_assignment_narrow` / `narrowing_paths`).

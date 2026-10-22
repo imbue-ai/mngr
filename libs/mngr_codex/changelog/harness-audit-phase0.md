@@ -1,1 +1,0 @@
-- Reformatted `codex_config_test.py` with ruff (no behavior change).

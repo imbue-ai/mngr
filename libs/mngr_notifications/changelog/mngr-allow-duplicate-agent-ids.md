@@ -1,1 +1,0 @@
-The notifications watcher's RUNNING-before-UNKNOWN tracking is now keyed by the agent instance (`<agent_id>@<host_id>`) instead of the bare agent id, so two same-id agents on different hosts (agent ids are unique per host, not globally) no longer share the notification-suppression bit. Old event lines without host details fall back to the previous bare-id behavior.

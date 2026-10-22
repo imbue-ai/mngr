@@ -1,1 +1,0 @@
-Updated the hardcoded `-S` override in `UNATTENDED_SETTINGS` for the `auto_dismiss_dialogs` → `auto_dismiss_dialogs_at_startup` rename. A `-S` key is a string, so it does not follow a field rename on its own.

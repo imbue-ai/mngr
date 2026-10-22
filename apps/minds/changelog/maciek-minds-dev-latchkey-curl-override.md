@@ -1,1 +1,0 @@
-- In dev mode (`pnpm start`), a `MINDS_LATCHKEY_CURL` exported in the shell that starts the app names the curl the latchkey gateway runs, in place of the bundled curl router: the app hands it to latchkey as `LATCHKEY_CURL`. A packaged build ignores the variable and always uses the bundled router.

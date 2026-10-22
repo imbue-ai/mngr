@@ -1,1 +1,0 @@
-- The connector client gains the admin signup-code methods (`admin_create_signup_code`, `admin_list_signup_codes`, `admin_revoke_signup_code`) with their wire models (`SignupCodeCreated`, `SignupCodeInfo`), and `AccountEntitlementValues` carries the new `max_shared_workspaces` entitlement (None against an older connector). See `specs/minds-waitlist-signup-codes/spec.md`.

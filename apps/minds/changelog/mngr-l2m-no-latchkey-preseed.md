@@ -1,1 +1,0 @@
-- The launch-to-msg e2e no longer creates the canonical latchkey store (and its encryption key) before the app's first launch; doing so made the legacy-state migration fixture's latchkey token check fail on every run.

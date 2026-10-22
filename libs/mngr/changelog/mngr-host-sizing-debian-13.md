@@ -1,1 +1,0 @@
-The generated `mngr create` help docs for the AWS `--aws-ami=` build arg now say the fallback is the newest Debian 13 AMI for the instance type's architecture, resolved from EC2 at create time, instead of the pinned per-region default that the AWS provider no longer ships.

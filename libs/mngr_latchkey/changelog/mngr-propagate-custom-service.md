@@ -1,5 +1,0 @@
-Custom services (the ones minds ships itself, currently `claude.ai`) now work in remote workspaces. Their latchkey registration is written into the config of every gateway that serves minds agents, including the VPS-resident one, so it travels with the credentials that are synchronized there. Previously only the desktop gateway knew these services, so a remote workspace received the credentials but its gateway could not match a request to the service and never injected them.
-
-Signing in to Claude no longer needs hand-written credentials: `claude.ai` is registered with a browser sign-in that opens the claude.ai login page and captures the `sessionKey` session cookie, so the connectors page and the permission dialog can offer it like any other service.
-
-A custom service's registration is also kept up to date now. It used to be written once, when the service was first seen, so a definition that changed in a later release (a new base URL, or a newly-added sign-in like the one above) never reached installs that already carried the old one.

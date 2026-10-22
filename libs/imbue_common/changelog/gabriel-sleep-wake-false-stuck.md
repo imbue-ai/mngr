@@ -1,1 +1,0 @@
-Added `imbue.imbue_common.suspension`, which answers whether the machine was suspended between an earlier moment and now by comparing how far the wall clock outran the monotonic one (which stops during a suspension). Used by mngr and the `mngr forward` plugin to retire SSH connections that outlived a sleep, since such a connection is dead whatever the socket claims.

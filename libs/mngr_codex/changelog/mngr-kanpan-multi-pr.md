@@ -1,1 +1,0 @@
-Tightened the recorded `trailing comments` ratchet count from 14 to 12. The two that went away were never trailing comments: they are `openai/codex #15269` issue references inside prose, which the rule now exempts.

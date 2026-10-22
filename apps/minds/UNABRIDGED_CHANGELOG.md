@@ -4,6 +4,5378 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-22
+
+Imbue Studio no longer pins a CPU core when a workspace keeps re-announcing its apps.
+
+- An update to the backend's view of workspaces that changes nothing -- a workspace re-announcing services it already announced, a discovered-agents snapshot identical to the last one -- no longer wakes the backend's listeners (the UI channel, the update detector, latchkey auto-register and the rest). A workspace still running the retired `app-watcher` re-announces every app every few seconds, and replaying its multi-gigabyte services log used to trigger a full UI re-derive per line.
+
+- The output of `mngr forward` is read through a buffer instead of one byte per system call.
+
+- Each UI update reads the pending permission requests from the latchkey gateway once, shared by the inbox badge and the notification feed, instead of twice.
+
+- Requests to the latchkey gateway reuse one TLS context per client instead of parsing the certificate bundle every time a client is built.
+
+- UI updates are spaced at least 100 ms apart. A change arriving inside that gap is folded into the next update, not dropped.
+
+Changed: the bundled Python environment installs the config-merge library as `imbue-overlay` (renamed from `overlay`); the build and the launch-time reinstall list use the new name.
+
+## 2026-10-21
+
+- The pre-push `ty` check passes on macOS again for pushes that change Python. The desktop app's API socket now picks its peer-credential read by checking `sys.platform` (`LOCAL_PEERCRED` on macOS, `SO_PEERCRED` on Linux), which type checkers read per platform, so a Mac no longer type-checks the Linux-only `socket.SO_PEERCRED`. On any other platform the read refuses the connection with `PeerCredentialsError` instead of failing with an `AttributeError`. The read no longer takes a `platform` argument, since it can only ever read the running machine's option.
+
+The report-a-bug dialog an agent opens can be closed again. When an agent asked to file a report twice in quick succession, the dialog's close X (and Escape) stopped working. Closing it, and pressing Done after sending, now always returns to the machine the report is about. Before, Done could land on a stale screen such as an already answered permission request.
+
+## 2026-10-21
+
+When an invitation is refused because the granter has reached their invitation email limit, the share panel row now says "Access granted, but you've reached your invitation email limit for now." instead of "You have reached your invitation limit for now." Granters read the old wording as the share itself having failed; the grant is saved either way, and only the invitation email is held back.
+
+A refused invitation's message now appears in full on its own line under the person's name, wrapping as needed. It used to share the row's single line, where a long message was cut short and pushed the person's name out of view.
+
+When a share panel row is short of room, the gray note beside the name ("(hasn't signed up yet)", or an account's email beside its display name) now shortens first, and the name keeps its full width until the note is gone.
+
+Fixed the share panel showing no people at all, even with someone granted, once the Visiting agents section was added under the list: the list scrolled on its own, so it was the one block the section could squeeze, and it was squeezed to no height. The whole right side of the panel now scrolls as one (heading, link, add row, people, then visiting agents), so neither part can squeeze the other out of sight and each gets the full height of the panel. `apps/minds/scripts/share_panel_renders.py` scrolls that column instead of the list, answers the visiting agents request with an empty list, and waits for a scroll to land before hovering for a tooltip.
+
+Bump Latchkey to 3.19.3.
+
+`apps/minds/scripts/start-desktop.sh --reopen` starts Electron from the checkout without the dependency sync and UI build. When the app is already running from that checkout, the new process hands its launch to the running instance through the single-instance lock (which brings a window forward, or reopens one when none is open) and exits. This is the dev-mode equivalent of launching a packaged install's shortcut again, and the way back to a window on a desktop with no tray icon. The bare launch moved into a `start:prebuilt` package script that `start` (and its prestart build) wraps, so both paths run the same command. Any other argument to the script is an error.
+
+The dialog shown when quitting Imbue Studio with local workspaces still running no longer offers to leave them running. It now warns that quitting will stop the listed workspaces and offers only **Cancel** (stay open) and **Quit and stop workspaces**. The option was removed because the app's `mngr latchkey forward` now stops together with the app, so agents in a workspace left running would lose their credential gateway and could no longer work while the workspace kept using the computer's resources.
+
+A workspace agent's notification can now open a page of a workspace app instead of a chat. `POST /api/v1/agents/<agent_id>/notifications` takes an optional `destination`: a workspace message `{"type": "<prefix:kebab-name>", ...string fields}` (for example `{"type": "minds:show-routine", "routine_id": "inbox-digest"}`; the type is lowercase and never `shell:`, every other field a string, else 422). The feed entry, its toast, its feed row and its OS banner carry the destination, and opening the entry raises the workspace and posts the message into the workspace frame once its page is listening, the way a chat notification's `minds:focus-chat` is posted, so the workspace shell shows the page of the app whose manifest registers the type. Old clients send no destination and keep landing in the chat.
+
+A notification from a workspace's primary (services) agent, which is not a chat, no longer tries to focus a chat: its entry carries no chat, opening it only raises the workspace (or delivers its destination), and clearing it is the only acknowledgement, since there is no chat to be read in. Such an entry is headed by the request's `title` when one is given (the primary agent's own name means nothing to the user), with the message alone as the body. Chat agents' notifications keep their read receipts, `watched_by` handling, and their headline (the chat's name, with the title folded into the body).
+
+The SPA's focus-chat relay is now a general workspace-message send (`ShellState.requestWorkspaceMessage`, held until the frame's page announces itself); `requestFocusChat` is one message kind of it.
+
+A workspace whose version Imbue Studio has not been able to read yet now shows "Version unknown" instead of the version it was created at. Before, if the first version check after launch failed (offline at launch, just woken from sleep, a stopped workspace, or the first check after an app upgrade), the app showed the creation version and offered an update the workspace usually already had. The creation version is still used for workspaces created before v0.3.10, which can't have been updated in place and still show as needing a new workspace. A failed version check now also logs mngr's error output.
+
+Fixed backup provisioning failing with "bucket destroy failed: Bucket not found" when an account is at its bucket quota: the quota evictor now recognizes a destroyed workspace whose bucket is already gone (the plugin CLI reports its own `ImbueCloudBucketNotFoundError` class, not the connector's `R2BucketNotFoundError` the desktop client was matching), cleans up that workspace's stale record and env, and moves on to evict the next oldest backup so the new workspace's bucket can be created. Before this, enabling backups on a new workspace retried for five minutes and then gave up whenever the oldest destroyed-workspace backup's bucket had already been removed.
+
+- `mac-runner-reset.sh` quits, removes and checks only `Imbue Studio.app` and its three canonical roots, and kills only the processes with a file under them, `legacy_minds_state_fixture.sh` clears an earlier run's `~/.minds` before seeding and removes it after verifying, the launch-to-msg e2e matches only the `Imbue Studio login URL` line, and the macos_launch Playwright fixture captures failure logs from the tier's canonical logs root instead of `~/.minds/logs`.
+
+A workspace create that the account's quota refuses (for example, an account still on the waitlist) is now logged at INFO and no longer reported as an error. The creating page still shows mngr's refusal sentence and the attempt still ends FAILED. Every other create failure is still logged at ERROR.
+
+Fix SSH access grants failing with "its authorized_keys kept changing while the
+key was added" on every grant after the first. The write guard compared a
+digest of the body read through `mngr exec --format json` (trailing newline
+stripped) with a digest of the file on disk (trailing newline kept), so it
+never matched once the file ended in a newline, which every grant's own write
+leaves. Both sides now hash the body with trailing newlines stripped.
+
+The `earlyoom-gvisor-shed-order` rollout page (`docs/deploy/history/rollouts/`) now opens with a note that the rollout is complete and that `minds-admin hotpatch-earlyoom`, which the page drives, has been removed; the rest of the page stays as the record.
+
+`gvisor-oom-headroom.md`'s rollout procedure now says its earlyoom step (`hotpatch-earlyoom`) is gone and that a workspace on an older bake gets imbue.3 from its next update alone.
+
+## 2026-10-20
+
+Fixed a flake in the snapshot-resume backup tests (`test_backup_enable_repair_and_destination_change_on_resumed_workspace` and `test_backup_restore_rewinds_the_resumed_workspace_in_place`, MIND-259) that failed with `BackupProvisioningError: Failed to write data/.secrets/restic.env`. Offload reuses a snapshot sandbox across test batches, and the Electron create-and-chat test left its own workspace container running there under the snapshot workspace's name prefix, because its teardown could never find the workspace it created. The resume fixture took the newest container with that prefix, so the backup tests went on to provision an agent the snapshot's mngr state had never seen.
+
+- The resume fixture and the recovery test now pick the workspace from the container states the sandbox recorded at resume, and fail if that recording does not name exactly one workspace container. A new snapshot-lane test pins this by running a newer container under the same prefix.
+
+- The Electron create-and-chat test now runs under a minds root of its own and removes that root's containers when it finishes, raising if docker cannot remove them.
+
+- `test_backup_enable_repair_and_destination_change_on_resumed_workspace` is no longer marked flaky, since MIND-259 was its only recorded cause. `test_backup_restore_rewinds_the_resumed_workspace_in_place` keeps its mark for the separate `xvfb: ERROR (spawn error)` race.
+
+Marked `test_backup_enable_repair_and_destination_change_on_resumed_workspace` `@pytest.mark.flaky`, which routes it into the snapshot-resume suite's retrying offload group. Backup provisioning's `mngr exec` intermittently fails to find the resumed workspace's agent in discovery, and the test fails with `BackupProvisioningError`. It recovered on a retry on two branches that do not touch backups or discovery. The marker is triage while MIND-259 is open.
+
+- Promote minds 0.8.7 to the beta channels: the desktop beta channel serves ToDesktop build `2610201g64a1ugu` (mac and Linux, 100%), and browser-created beta workspaces pin to `minds-v0.8.7`. Stable stays on 0.8.5.
+
+- Record the minds 0.8.7 release (`apps/minds/docs/deploy/history/minds-v0.8.7.md`) and reset `next_deploy.md` after it: alpha serves 0.8.7, beta and stable 0.8.5, and the background-mode check, the production fast-path lease and the beta and stable promotion carry over.
+
+- Correct the release runbooks where 0.8.7 found them stale: `just dwt-mngr-pin` also vendors the studio skill into the pin commit, a launch-to-msg marker skip is identified by its skipped jobs rather than its duration, the scheduled run's pin push lands right after step 4, a local agent can run the Vault OIDC login, the production desktop check needs the installed app quit first, and `services.md`'s deploy block covers both tiers with the Modal Secret names it actually pushes.
+
+The unexpected-exit report for the `mngr forward` subprocess now also records:
+
+- the error class and message (scrubbed) that mngr's CLI reported for the failed plugin command;
+
+- whether the backend had already received SIGTERM or SIGINT when the plugin died, and how long before.
+
+That second fact tells a plugin that died alongside its parent, both stopped by one process-group signal, from one that crashed on its own. Backend Sentry events now carry an `is_under_pytest` tag, so failures from test runs (each of which counts as a new anonymous install) can be separated from real installs.
+
+The report's `seconds_since_spawn` is now measured at the moment the plugin exited, not after the up-to-2-second wait for its pipes to drain.
+
+## 2026-10-19
+
+A new workspace now gets its welcome chat even when the creation page was left before the workspace was ready. The page used to seed the onboarding conversation only if it was still open when the create finished, so a user who went elsewhere while the workspace was built and then entered it from the workspace list landed with no chat. The page now hands the conversation to the desktop client as soon as it knows the attempt's settings (`POST /ui/api/create/attempts/<id>/welcome-chat` answers 202 while the attempt is still being built), and the desktop client seeds it the moment the attempt finishes (`WelcomeChatSeeder`, run from the agent creator's new `on_create_attempt_done` hook). A page still open at that point waits on the same seed, so the workspace never gets a second chat, and a failed seed is tried again on the next ask.
+
+Record which `default-workspace-template` tree a minds snapshot e2e run built its
+workspace from, and report it on the job that fails.
+
+The snapshot lane clones the template branch paired by name with the mngr
+branch, shallowly, from a branch that keeps moving -- so the branch name alone
+never identified the tree a failure actually ran against, and the name was only
+logged into the build job, not the test job that goes red.
+`materialize_paired_default_workspace_template_worktree` now returns that tree's
+ref and the commit it resolved to alongside its path, and
+`snapshot_minds_e2e_state.py --template-coordinate-output <file>` writes the
+pair out for CI to forward into the `Minds Snapshot Resume Tests` check-run
+summary.
+
+Nothing about which template a run builds from has changed; it is now recorded.
+A later CI flake sweep can tell whether two failures on two mngr branches
+reproduced each other or ran against two different authors' unmerged template
+branches.
+
+Bump Latchkey to 3.19.0.
+
+The Chrome cookie import now says what to do when macOS refuses it, and the one-time offer no longer makes importing the default.
+
+- On macOS 27 and later the OS lets no application without Full Disk Access read Google Chrome's profile, so `latchkey auth import-chrome` fails with a bare `EPERM` and no prompt. Latchkey 3.19 reports that as a coded failure (`CHROME_PROFILE_NOT_READABLE`); the desktop client now passes the code through as `error_code` on `POST /ui/api/settings/browser-import`, together with `is_full_disk_access_needed` (that code, on a Mac: latchkey gives the same code to a plain permission problem on Linux), and both the permission dialog's offer and the Settings > Browser cookies panel then show a guided notice instead of the raw error. Off macOS the notice says to make Chrome's profile folder readable by the account running the app and shows latchkey's sentence (which names the folder) underneath; on a Mac it says: open System Settings > Privacy & Security > Full Disk Access, turn on Imbue Studio, quit and reopen the app, then run the import again from Settings. In the desktop app on a Mac the notice carries an "Open System Settings" button that opens the Full Disk Access list directly (a new `open-full-disk-access-settings` IPC, exposed to the page as `openFullDiskAccessSettings`). The dialog leaves out "Try again" in that case, since nothing changes until the relaunch.
+
+- The one-time "import your Chrome cookies" offer the first sign-in Approve makes is reworded ("Import your Chrome cookies?", stating the import is optional) and its default answer is now going on without importing: "Skip import" is the primary button, "Import from Chrome" the secondary one. After a failed import, the dialog shows only the outcome (headed "Couldn't import your Chrome cookies", without the offer's pitch) and "Continue to sign in" is likewise the primary action.
+
+On macOS the menu bar icon is now a single-color template image, tinted by macOS to match the menu bar like every other menu bar item, instead of the full-color app icon. Non-production tiers show the same shape as a dotted outline. Linux keeps the color icon.
+
+The development icon (the unpackaged Dock icon and the Linux tray icon on non-production tiers) is now the olive tile with the same dotted outline drawn in cream, in place of the filled figure and its `dev` label.
+
+- Cut the minds 0.8.7 release: the app version is 0.8.7 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.8.7`, carrying everything that landed on `main` since `minds-v0.8.6`. Highlights for workspace owners: your own cloud accounts (AWS, GCP, Azure, Modal) connect from the create form and sync across devices, Imbue Studio keeps running in the background with a tray icon, workspace creates and new connections show real progress, onboarding recommends Imbue Cloud and offers three ways to start, the Share panel lists visiting agents, a Shared workspaces page cleans up old shares, folder sync works in packaged builds, and an agent waiting on its own background task is no longer reported as waiting for you.
+
+The creation page's boot wait now shows the template bootstrap's steps on a Docker workspace. The desktop follows the booting workspace's bootstrap events with an address that names the agent, its host and its provider by id, which `mngr event` resolves without discovery; the follow used to spend longer resolving the agent than the boot took, so no step ever arrived. The follow now reads the whole events file and keeps only the events stamped after the create began (less a ten-minute clock skew allowance), in place of replaying the last event only, so a follow that attaches after the boot has started still shows and learns the steps that already ran, and an adopted pool host's earlier boots are still ignored.
+
+The shipped AWS, GCP and Azure seeds are restated from the creates recorded in this machine's logs: a cloud create takes about 15 minutes on AWS, 18 on GCP and 11 on Azure, where the seeds said 9 to 10, so a fresh install's first cloud create read "about a minute remaining" for most of its build.
+
+A step whose known sub-steps all finished early (an image build served from a warm cache) now reads as nearly done, instead of still claiming what its own expectation had left; only a step that runs past its expectation with no sub-step running lengthens the estimate, by half its overrun.
+
+- Promote minds 0.8.7 to the alpha channels: the desktop alpha channel serves ToDesktop build `2610201g64a1ugu` (mac and Linux, 100%), and browser-created alpha workspaces pin to `minds-v0.8.7`. Beta and stable stay on 0.8.5.
+
+Added Russell's WireGuard operator keys to the dev (`10.112.0.6`), staging (`10.96.0.5`), and production (`10.64.0.5`) management-plane peer lists, so he can reach those tiers' boxes once an existing operator runs `minds-admin wireguard sync-peers`.
+
+The desktop app now logs every GPU-process death with its reason, exit code, how many GPU deaths the run has seen, whether a shutdown or a SIGTERM/SIGINT had already happened, the app's uptime, and the GPU feature status. The termination-signal log lines now include the uptime too. This is diagnostics for the app aborting with "GPU process isn't usable. Goodbye.".
+
+Sentry events from an app launched by the e2e workspace harness are tagged `launched_by=e2e_harness`, so they can be told apart from a developer's own install.
+
+The e2e workspace harness forwards the app's GPU-death, termination-signal, and signal-exit output lines at info level instead of debug, and logs how the app's teardown went: whether it had already exited, and its exit code after SIGTERM or SIGKILL.
+
+Workspace creation from the default workspace template no longer fails with "Unknown fields in plugins.autocompact: ['mode']". The template configures the autocompact mngr plugin, but neither the packaged desktop app nor minds run from source installed it, so mngr parsed that section against the bare plugin schema and rejected every `mngr create`. minds now depends on `imbue-mngr-autocompact`, and the bundled-plugin guard test also checks the template's `[plugins.*]` sections against both install lists, not only its `[agent_types.*]` sections.
+
+Stop `minds run` from reporting a spurious error when it is closed while the startup host reconcile is still running. Starting an `mngr` command on a shutting-down (or already-failed) concurrency group raised an exception group that slipped past the shared runner's error handling, escaped the reconcile thread, and was logged as an error. The shared runner now turns it into the same command error every caller already handles, so the reconcile logs a warning and exits cleanly.
+
+When a machine refuses the bare `mngr create` that the app falls back to for an `/update-self` or get-help chat, the error log now says why the fallback was taken and what the machine had. It records the reason the chat app gave no verdict, whether the machine has `.mngr/settings.local.toml`, whether that file names a create type (only whether, never which), and whether the template has the account resolver script. When the resolver is present, the app also asks it which account it would bind and logs that answer (`BOUND`, `UNAVAILABLE`, `NOT_REQUIRED` or `UNREACHABLE`) next to the refusal. That question costs one more `mngr exec`, and only on this failure path. On a machine that writes no settings file and is bound through the resolver in a second `mngr exec`, a refusal of that create now also logs the binding the resolver gave. The refusal shown to the user is unchanged.
+
+The Share panel's visiting-agent code (the panel model, its view, and the desktop API tests) marks its visiting-agent sections with plain sentences in place of dash dividers; no behaviour changes. The spec the Agents section is built against (`specs/studio-agent-access/spec.md`) gains section 5.15, where each workspace app describes its own API and the visiting-agent primer links the description.
+
+The Share panel gains a Visiting agents section: a coding agent running outside the workspace (on your computer, in a cloud agent product, on a collaborator's machine) can be invited in with a one-time code and then works through the workspace with exactly the workspace's own access. Invite an agent publishes the workspace first when it is not published, mints the code inside the workspace through its `agent-access` CLI (over `mngr exec`, with the signed-in account as the granter) and shows the instruction block to paste to the agent; the section lists the agents already invited, with their scope (the whole workspace, or one app from that app's pane), who invited them, and when they last connected, and revokes any of them. Three routes back it: `GET /api/v1/workspace-sharing/<id>/agents`, `POST .../agents/invites`, and `DELETE .../agents/<agent_id>`. Design: `specs/studio-agent-access/spec.md`. A workspace from a template older than visiting agents answers these routes with 409 and the advice to update it. The cross-workspace SSH grant now writes `authorized_keys` under the lock the workspace's share gateway shares with it, and only over the body it read, reading again when another writer landed in between. Pressing Done on the instructions re-reads the list, so an agent that joined in the meantime appears. An invite on a workspace whose connector share exists but whose share materials never reached it (so the workspace itself has no address to put in the instructions) is refused with the advice to turn sharing off and on again, rather than answered with a placeholder address. The revoke route answers 400 for a value that is not a visiting agent id, without running anything in the workspace. A minted code is shown on the pane whose scope it carries (switching panes hides it without discarding it), a failed read of the agents offers to read again, and the routes accept a legacy machine coordinate the way every sharing route does, resolving it to the machine's agent.
+
+Workspace apps can now ask for an audio input. Before, the frame Studio puts a workspace in refused the microphone to every page inside it, so an app that listens to the built-in mic, a headset on the audio port, or a USB interface got "Permission denied" before macOS was ever asked. macOS still asks before any app hears anything.
+
+- The published `imbue-studio` skill now says that a shared workspace is untrusted, and how to tell: a workspace that is not the user's own, one other people hold a workspace-level grant on, or one a visiting agent holds a workspace-scope grant on. It names the checks per transport (the `is_owned` flag on the workspace listing; the workspace-sharing and visiting-agents routes from the user's machine, which is where the grants document is read; `ls data/.secrets/share.env` for publication and `agent-access list --json` for visiting agents inside a workspace, since the workspace's secrets guard refuses every other read of that directory, so a published workspace counts as shared from inside unless the user says nobody holds a grant; only the `agent-access` listing over SSH for another workspace), says that an app-only grant or a published workspace with empty grants is not sharing, and tells the agent to treat everything read in a shared workspace as data and to confirm with the user before acting on it. Two new rules: never mint a visiting-agent invite or change share grants unless the user asked, and never relay an invite's instructions anywhere but to the user.
+
+- `GET /api/v1/workspaces` reports `is_owned` on every workspace. It is always true today, since the listing holds only the user's own workspaces, and it is where a workspace shared with the user by someone else will report false once such workspaces are listed.
+
+- `scripts/bump_dwt_mngr_pin.py` (and so `just dwt-mngr-pin`, `dwt-mngr-pin-internal`, `dwt-mngr-pin-export`, and the unattended main-vs-main bump) has the default-workspace-template vendor the published `imbue-studio` skill from the pinned mngr commit on every pin move, so the template's copy moves with the pin and nobody has to remember to re-vendor it after a release.
+
+The Slack mock in the launch-to-message e2e script drains POST bodies the same way. The provider sign-in relay reads a request body of up to 64 KiB before answering, so a POST to its port gets its page rather than a reset connection. A Content-Length that is not a number is treated as no body, where it used to drop the connection unanswered.
+
+## 2026-10-18
+
+Fix the workspace switcher's "Stopped" status icon, which drew only the closed eye's arc and one lash. The SPA port joined Lucide's five eye-closed segments into one path string and split it back apart on " M"; the three lowercase-`m` lashes stayed attached to the arc and were placed off-canvas. Each status icon now lists its segments as separate paths, so all four lashes show again.
+
+An Imbue Cloud workspace's machine can now be resized from the workspace settings page (General group, "Machine size"), for accounts on the ally plan. The RAM is picked from the sizes the fleet offers (multiples of 8 GB) cut down to what the account's quota would grant once its other running machines are counted, with the largest marked as the plan limit, and the data disk can be grown within the plan's disk quota (it never shrinks); CPUs scale with the RAM and have no field. The page names what the plan allows and what the other running machines use, so a size it offers never fails on quota.
+
+- "Save size" records the size on the connector (through `mngr imbue_cloud machines resize`) without restarting the machine, since an Imbue Cloud restart backs the machine's disks up first; the pending-size notice then offers "Restart now", which dispatches the usual workspace restart. A stopped machine's saved size applies at its next start.
+
+- The controls are held while the machine is starting or stopping (the connector refuses a resize mid-start), and a quota refusal from the connector is explained in its own terms.
+
+- Accounts on other plans keep the read-only size display; the gate is client-side only (`IMBUE_CLOUD_RESIZE_PLAN_NAMES`), and every plan's quotas bound the size the same way. `GET /ui/api/workspaces/<id>/machine-size` now also reports the plan-bounded choices and limits for an Imbue Cloud machine, and `POST /api/v1/workspaces/<id>/machine-size` accepts an Imbue Cloud machine (`memory_gb`, `disk_gb`), answering `is_restart_dispatched: false`.
+
+A cloud connection can now use a login installed on this device instead of pasted keys. The add-connection modal gains a "Credentials" switch for AWS, Azure, and Modal connections: "Use an AWS profile on this device" (a profile from `~/.aws/config`), "Use my az login on this device" (the tenant and subscription of an `az login`), or "Use a Modal profile on this device" (a profile from `~/.modal.toml`), with the logins found on this device listed and free text allowed. Such a connection carries no secret: the login's name rides the connection's plaintext metadata, the synced document has no encrypted payload, and the mngr provider block names the login (`aws_profile`, `use_azure_cli_login` with `tenant_id` and `subscription_id`, or `modal_profile`) rather than keys. GCP keeps the paste-the-key flow only. Editing a connection can switch it between pasted keys and a local login while keeping its id, instance, and machines.
+
+Because nothing is encrypted, an account's local-profile connections are usable (and their blocks written) on a device where the account is locked, too; adding one to an account still needs the account unlocked with a master password, like any synced connection.
+
+A device that lacks the named login sees the connection as "Set up on this device" in the providers panel, with the command that sets it up (`aws configure --profile <name>`, `az login --tenant <tenant>`, `modal token new --profile <name>`) and a "Check now" button that re-checks the connection at once; discovery also re-checks such a connection every two minutes on its own, so setting the login up outside the app recovers the connection without a restart. The panel's error rows now carry the provider's own fix beside the message when it named one.
+
+New routes: `GET /api/v1/desktop/cloud-accounts/local-profiles?backend=...` lists this device's logins for a backend; `POST /api/v1/desktop/cloud-accounts/<instance>/recheck` bounces discovery for a connection. The add and update bodies accept `credential_source` with the login fields, connection summaries and panel rows report `credential_source`, the form defaults' backend options report `is_local_profile_supported`, and panel rows gain `remediation`.
+
+Shared-workspace cleanup (issue #1952): a way to see the shares an account holds and retire the leaked ones, which the sharing default of the create form makes worth having.
+
+- A new **Shared workspaces** page (`/workspaces/shared`) lists every share each signed-in account holds that counts toward its shared-workspaces limit, joined to the account's workspace records: the workspace's name and device, when the share was created, when its tunnel was last connected (from the connector's new heartbeat stamp), and whether the workspace still exists. A share whose workspace was destroyed or is unknown is flagged as likely leaked. Each row has a Remove action (an inline confirm) that frees the slot: a workspace this device runs is unpublished (its materials cleared, who may open it kept), any other share is deleted at the connector.
+
+- The account card's plan section gains a "Shared workspaces N of M" usage row and, while the account holds a share, a "Review shared workspaces" link to the page.
+
+- A publish the connector refuses because the share quota is full now answers with a structured `quota_exceeded` code (403) naming the page, and the share panel's error links there; the "Sharing was not enabled" notification card a failed post-create publish leaves also opens the page when the quota was the reason.
+
+- A share removed from another device, or retired by the connector, while the app runs no longer leaves a workspace this device hosts retrying a dead relay token forever: the sync pass that finds the workspace stopped being shared since the previous pass asks the connector to confirm and then clears the workspace's `share.env`. (A retirement that happened while the app was closed is not noticed this way.)
+
+- `GET /api/v1/account-shares/<account_id>` and `DELETE /api/v1/account-shares/<account_id>/<host_id>` back the page (cookie or bearer auth, in a namespace of their own like `workspace-sharing`, which no agent verb maps: the gateway's `minds-accounts-read` permission covers the whole `/api/v1/accounts` subtree, and an account's share inventory is more than that permission lets an agent see). A system-event notification entry may name the route its click opens (`link_path`).
+
+The progress bars on the creation page and in the add-connection dialog are no longer clocks. Both used to ease toward a fixed percentage over a hard-coded guess per compute mode, whatever was actually happening; now they draw the real state of the operation.
+
+A create is tracked as a tree of steps: the desktop's own steps (fetching the template, checking out the branch, the `mngr create` call, waiting for the workspace to boot), the skeleton phases mngr announces for the create nested under that call, the provider's finer steps (the Docker image build counted by Dockerfile stage, the VM boot, the pool-host lease) nested under those, and the template bootstrap's own steps (followed from the booting workspace's `bootstrap` events through one `mngr event --follow --tail 1` subprocess for the length of the wait, so an adopted pool host's earlier boots are not replayed as the live one, their durations taken from the events themselves) nested under the boot wait. Every step is weighed by how long it is expected to take, so the bar is the expected-duration-weighted share of completed work; within the running step the fraction comes from its counter when it has one and from elapsed time otherwise. The bar never moves backwards and never reaches 100 before the operation is done. The stage line under it names the innermost running step, and a coarse remaining time is said next to it ("About 3 minutes remaining", "Less than a minute remaining", "Almost there..."). The estimate errs long: a step that has run past its expectation is assumed to need half again what it has already taken (its share of the bar holds rather than creeping to done), a counted step is never read as faster than its observed pace, a step whose last known sub-step has finished but which keeps running lengthens the estimate instead of ending it, the wording rounds up to the next minute, and it lengthens at once but only shortens once the shorter estimate has persisted.
+
+The Docker image build is tracked stage by stage: each Dockerfile stage mngr reports (named by its instruction, so a stage keeps its history when stages are added around it), plus the image export that follows the last stage, is a step under the build with its own learned duration, so the remaining time during a build comes from the stages still ahead rather than treating every stage as equal. A stage the build cache skips counts as done but teaches no duration; the history records it as skipped (`step_skipped`), so a seed sync can tell a stage the build still has from one that is gone.
+
+Expected durations are learned per device: every completed step appends its duration to `events/create_progress/events.jsonl` under the data directory, and the next operation of the same kind (per compute mode for creates, per backend for connections) weighs its bar by the median of the last five measurements of each step. The shipped seeds in `create_progress_defaults.toml` only decide the first bar a fresh install draws (the Docker seeds are the hosted runner's cold measurement: about seven minutes for the image build), and `just sync-create-progress-defaults` restates them from a recorded history, dropping a seed nested under a measured step (a build stage, a post-host-create command) that the history never mentions; a weekly job measures a Docker create and opens a pull request when a seed has drifted.
+
+The create operation status and the connection operation status both carry a `progress` object (percent, the cap and rate the page extrapolates between polls with, the remaining-time text, the running step's caption, and the top-level step list); the `expected_duration_seconds` field of the creation page's live detail is gone. Connection setups run their provider `prepare` with `--format jsonl` so its step reports drive the dialog's bar; a Modal connection's single check is its one step.
+
+Imbue Studio can now be driven by any coding agent running on the user's machine, and keeps running in the background so that access does not depend on a window being open. The design is `specs/imbue-studio-agent-access/spec.md`.
+
+- The desktop app runs behind a tray icon on macOS and Linux. Closing the last window never quits the app on either platform; quitting is explicit, from the tray's Quit, `Cmd+Q` / `Ctrl+Q`, the new Quit button on Settings > Updates, or a SIGTERM, and runs the usual running-workspaces prompt. On macOS the dock icon shows only while a window is open. A Linux desktop with no appindicator runs the same way without the icon.
+
+- `--background` starts the app for an agent: the backend and the tray come up with no window, and a second launch carrying `--background` while the app is running does nothing. The shell records the detached command that does this (`open -g -n -a` on macOS, a `nohup` shell form on Linux) and the backend publishes it in `app.json`.
+
+- The backend serves its API on a same-machine Unix domain socket (`<state root>/api.sock`, with a runtime-directory fallback when the path is too long and a `MINDS_API_SOCKET` override) whose listener admits only processes running as the user, checked against the kernel's peer credentials. At startup a second backend for the tier finds the socket answering and refuses to start, a stale socket file is cleared, a path occupied by anything that is not a socket is refused rather than removed, and a path longer than the platform's socket paths may be (an explicit `MINDS_API_SOCKET`, say) is refused there too instead of failing at bind time. A request over it counts as the signed-in user for every auth check, so an agent on the machine needs no token and nothing secret is written to disk. `GET /api/schema` now describes what its caller can reach: everything under `/api/` over the socket (where its `security` clause declares that no credential is required), the gateway-reachable subset through the proxy. A verdict given over the socket records the agent's self-declared `X-Imbue-Studio-Agent` label as `decided_by` on the response event (`local agent` when it sent none).
+
+- The backend writes `<state root>/app.json` while it runs (tier, version, pid, socket path, HTTP origin, launch command) and removes it on a clean exit.
+
+- The `mngr latchkey forward` supervisor no longer outlives the app: it is a coupled child, stopped on shutdown and watching the backend's pid, so the gateway, its observe child, and the reverse tunnels go down with it.
+
+- New `apps/minds/skills_plugin/`: the `imbue-studio-skills` Claude Code and Codex plugin with the `imbue-studio` skill, exported to the `imbue-ai/imbue-skills` marketplace on every push to `main`, with a test that every API path and `mngr` command it names exists.
+
+- The published `imbue-studio` skill now also carries what an agent needs from inside a workspace: the gateway's permission verbs and which of them are targeted at one workspace, the grant-free routes, the `type: "workspace"` permission request, the rules for creating a workspace from a workspace (send the branch from `GET /api/v1/app/version`, leave backups unconfigured), the SSH flow and its local-target tunnel, backup export, and the note that a migration is a workspace skill's job. This is what the default workspace template's own `minds-api` skill used to teach, so the template can retire that skill and carry one copy. A new drift test holds the skill's verb table to the gateway's `workspace_permissions.json`.
+
+Testing integration branch combining three in-flight changes (each branch's own entry sits beside this one in the projects it touches): Imbue Cloud machine resizing from the workspace settings page (`mngr-allow-imbue-resizing`), shared-workspace cleanup (`mngr-cleanup-shares`), and cloud connections backed by a local login instead of pasted keys (`mngr-allow-provider-profile-vars`).
+
+For this project: the workspace settings page resizes an Imbue Cloud machine (RAM and grow-only disk, within the plan's quotas) for ally accounts; a new Shared workspaces page lists an account's shares, flags leaked ones, and removes them, with the account card showing share usage and quota refusals linking there; the add-connection modal lets AWS, Azure, and Modal connections use a profile or login already on this device.
+
+Found while testing the combination on a dev environment, and fixed here: the workspace settings page's "Machine size" section is now always present. It shows the current size as soon as the machine's size is read and a loading state in place of the controls until the account's plan says whether the size can be changed (the two come from separate connector reads, and the second can take tens of seconds; before, the whole section was missing until both had answered). The machine-size route answers the size alone by default and the plan-bounded controls on a second read with `include_resize_offer=1`. The section also has one status notice instead of two: once "Restart now" is accepted it reads "The machine is restarting to apply the new size" with the controls held and no second restart offered, following the app's own record of the running restart (which the app already deduplicated) rather than the connector's not-yet-updated machine status, and re-reading until the restart is over. A size the app could not read is reported as unreadable rather than as not reported, and a restart started elsewhere (the recovery card, a stopped machine's start) holds the controls with plain restarting wording.
+
+## 2026-10-17
+
+An update run whose agent has ended its turn to wait on a background task (a command it started through `run_in_background.py`, or a Claude background command) is no longer reported as "Waiting for you". The update probe now also runs the workspace template's `system/scripts/background_tasks.py list --format tsv` in the same `mngr exec` as its agent listing, and reads the update agent as waiting only when it is idle, its chat is not busy (no turn in flight and no background task pending), and its named worker is not moving; a worker that is idle but busy counts as moving. Busy agents are matched by name, or, when the CLI could not reach the chat app and read the task markers itself, by id or by the agent's `chat_id` label (so an agent the chat was handed off to still counts). The CLI runs under a 10-second limit inside the probe, and one cut off reports nothing busy. A workspace whose template predates the CLI reports nothing busy, and the run is read as before.
+
+The backup and restore chat gate, its "Stop all chats and retry" path, and the quiet-workspace check that gates scheduled updates now count a chat that is idle but busy as running. Stopping chats for a backup-service update or a restore also ends the `run_in_background.py` commands of each chat it stops, since a surviving command's report would wake the chat again mid-operation; Claude's own background commands end with Claude. A workspace without the CLI is gated on `mngr list` alone, as before.
+
+Adds the `workspace-updates.idle-lead-on-a-background-task-is-not-waiting` behavior example.
+
+Account-owned remote providers, part 4 (`specs/account-owned-providers/spec.md` section 6): the account selects the providers, the providers panel lists accounts and their connections, and a workspace's host access material follows every backend across devices.
+
+- The create form asks for the account first. The compute options are the device providers (docker, lima, vultr), the selected account's Imbue Cloud, and the connections that account owns (or the local profile's when no account is selected), labeled `<alias> (<backend>)`. The selected account is the workspace's association; `POST /api/v1/workspaces` refuses (400 on `cloud_account`) a connection that belongs to a different owner than the selected account. Associate and disassociate answer 403 for any workspace on an account-owned provider (the account instance or one of its connections), extending the rule leased imbue_cloud hosts already followed.
+
+- Whether the region is fixed on the connection or picked per create is a property of the backend: aws, gcp, and azure pin it when the connection is added (the form shows it as a note), while imbue_cloud, vultr, and Modal pick it per create. Modal gains a region picker over Modal's broad region names (`us-east`, `eu-west`, ...), defaulting to the nearest, and the create passes it to the sandbox.
+
+- The providers panel is now one section per account (plus "This device only") with an Add connection button each: the account's Imbue Cloud instance and each connection with its status (OK, error with the provider's message, starting, locked, no credentials, or needs a newer app) and a Remove button disabled "in use by N" while machines use it. An account with local machines but no session still appears, signed out. docker, lima, and vultr form a device section. The `/ui/ws` providers frame changed shape accordingly (`accounts` and `device_providers`; UI schema version 26).
+
+- The add-connection modal gains an owner selector (each signed-in, unlocked account with a master password, and "This device only") and the Modal backend (token id and secret, no region). It opens from every section's Add connection button and from the create form's compute select.
+
+- Workspace records now carry the per-host access material of every backend (secrets payload format 2, `host_access` with the backend's layout: imbue_cloud, vps for aws/gcp/azure/vultr, modal, lima, docker). Another device that unlocks the account lays the material down under its own copy of the provider instance (the account instance, or a connection whose credentials are usable there), so a machine on an account-owned connection is reachable from every such device; the imbue_cloud key fields are still written so a previous app version keeps reaching imbue_cloud hosts. docker and lima material rides the record for a future cross-device connection but is not laid down elsewhere yet (only per-host material is ever collected; lima's legacy provider-wide root key stays out). Rows on account-owned connections carry no hosting device; rows on docker, lima, vultr, and local-profile connections keep theirs.
+
+- Remote tiles gain `locked` (no master password entered here yet) and `connection removed` states beside connecting, unreachable, and error.
+
+- The bring-your-own-clouds feature flag (`FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS`) is gone; connections are on by default. The accounts page no longer carries the always-true `is_enabled` remnant of the enable/disable toggle.
+
+- The `apps/minds` dependency on the Modal provider plugin is described as what it is now: one of the cloud backends minds writes connection provider blocks for, not the backend of an ambient enabled `modal` block.
+
+- `GET /ui/api/workspaces/<id>/options` reports `is_account_owned_provider` (formerly `is_leased_imbue_cloud`): true for a workspace on an account instance or an account-owned connection, which is what fixes its account link.
+
+- A fresh device that has pulled an account's connections but none of its workspace records now counts the account as locked (the encrypted credentials prove a master password), so the unlock banner and `POST /_chrome/sync-unlock` install its DEK and the connections open; before, its connections stayed "Locked" in the providers panel with no way to unlock them.
+
+Account-owned remote providers, part 3 (`specs/account-owned-providers/spec.md`): the imbue cloud account now owns its remote providers, and the mngr profile's provider blocks are derived from the signed-in accounts and their **connections** instead of being edited in place.
+
+- A connection is one set of cloud credentials (aws, gcp, azure, or now also modal) plus placement defaults. It is a synced per-account document: plaintext metadata plus a credentials payload encrypted under the account's DEK, so it follows the user to every device that unlocks the account. Adding one to an account needs the account unlocked here with a master password set (409 otherwise); a connection can instead be added to the device's local profile (`owner: "local"`), which is stored plaintext under the minds data dir and never pushed. `POST /api/v1/desktop/cloud-accounts` gains `owner` and a `modal` backend; its `name` is now the connection instance name `<backend>_<hex>`, and `DELETE` refuses (409) while any active workspace on the connection exists in local discovery or in the owning account's workspace-record replica.
+
+- Provider instance names use stable ids, never emails: the account instance is `imbue_cloud_<full SuperTokens user id>` and a connection instance is `<backend>_<connection id hex>`. On first start the `providers/imbue_cloud/imbue_cloud_<email-slug>/` state dir (per-host keys, known_hosts, lease caches) is renamed to the user-id spelling for every signed-in account, and the legacy email-slug and `byok-*` blocks are removed; synced records keep the email spelling and every reader accepts both.
+
+- Modal is a connection like the other clouds, not an ambient provider using the machine's own token: the ambient `[providers.modal]` DIRECT block becomes a suppression block, and the Modal sizing and ~24h sandbox timeout that lived in the default-workspace-template's `[create_templates.modal]` now ride the connection block (a create that wants a shorter sandbox, as the eval harness does, names it as the create request's `modal_sandbox_timeout_seconds`). Creating a Modal workspace requires a Modal connection.
+
+- One materializer writes every managed block (replacing it whole, deleting stale ones) from startup, signin, signout, unlock, the sync pass (which also pulls every account's connections), and the connection routes, bouncing discovery when the file changed. Startup runs it from the plugin's session index before `mngr forward` or the latchkey supervisor start, so no startup bounce is needed. A locked account contributes its account instance but none of its connections until unlocked.
+
+- There is no enable/disable flag any more: `PATCH /api/v1/desktop/providers/<name>` is gone, the providers panel's Enable/Disable button and its "Disabled" status are removed (along with the workspace list's "Signed out" chip, which only a disabled account instance produced), and the five suppressed default instances (`imbue_cloud`, `aws`, `gcp`, `azure`, `modal`) are hidden from the panel. Signing out removes the account's provider instances from the machine (its DEK and workspace records stay).
+
+- Expired sessions: when discovery reports an auth error for an account instance, the sync pass forces one token refresh; a refresh the connector refuses signs the account out locally (removing its providers), while a transient failure leaves it active. The open windows are woken when that happens, so the account launcher drops the retired account immediately instead of at the next discovery change.
+
+- Clearing the master password first re-homes the account's decryptable connections into the local profile (same ids, so their instances and hosts stay attributed) before the server-side scrub strips every connection payload.
+
+Lands the account-owned remote providers program (parts 1 through 4 of `specs/account-owned-providers/spec.md`, previously the stacked PRs #816, #836, and #845) on current main. The carried entries `mngr-fix-provider-storage.md` and `mngr-account-owned-providers-part-4.md` in this directory describe the user-visible changes (part 1 did not touch minds); this entry records what the catch-up merge changed on top of them.
+
+- The deploy checklist (`docs/deploy/next_deploy.md`) carries this program's rollout steps: deploy the connector with migration 056 before the minds release that adds connections, give the first release that calls `/sync/documents/*` its own compat snapshot module, expect the per-account `imbue_cloud_<email-slug>` state-dir rename on first start, and switch the connector's lease stub to `imbue_cloud_<user id>` once no older client remains.
+
+- Rebased onto the main-side desktop client as of 2026-10-11: the connections model (account instances, `<backend>_<hex>` connection instances, the providers panel sections, host access material for every backend) now coexists with the folder sync manager, the forward identity publisher, the provider sign-in relay, the local-prerequisite probes on the create form, the machine-size route, and the Imbue Studio naming. The UI schema version is bumped past main's.
+
+- Every cloud connection block (aws, gcp, azure) carries the gen-2 container-host hardening main's bring-your-own-key blocks gained (`install_gvisor_runtime`, `docker_runtime = "runsc"`); AWS no longer writes `default_start_args`, since `mngr_vps` mounts the tmpfs itself.
+
+- Review fixes on top of the merge: a workspace created on an aws/gcp/azure/modal connection is seeded under that connection (not the account's Imbue Cloud instance) with its per-host material; the secrets payload digest no longer depends on per-host file order, so cross-device parity stamps work for modal/vps/lima hosts; a malformed `sync documents pull` is refused instead of wiping the connection replica; the profile `settings.toml` is written at 0600 on every update; an ownerless connection registration settles the default account rather than failing on a retired one; the create form falls back to the machine's own local mode (not always Lima) when a connection loses its owner; and stale descriptions, warnings, and retired names were updated.
+
+- The expired-session detection signs an account out only when the plugin's `auth refresh` reports the connector refused the refresh; an unreachable connector or a server error during the refresh (now reported under the plugin's connector error classes) leaves the account signed in.
+
+- A lima host healed onto the legacy provider-wide root key (its per-host root key slots are symlinks to that key) no longer has that key collected into its workspace record's secrets, and materialization never writes synced material through such a link.
+
+- Retrying a failed create whose connection no longer belongs to the selected account (it was re-homed to the local profile, or its account signed out) falls back to a compute option the account can use instead of pre-selecting one the server would refuse.
+
+- Adding a connection while the plugin's account listing fails answers 503 ("Could not read the signed-in accounts ...; try again") and drops the half-added row, instead of validating against a block that was never written and blaming the pasted credentials with a 502. A sync pass that runs while a new account-owned connection's credentials are still being validated no longer pushes it to the account ahead of that validation; the add route's own push does, once the credentials passed.
+
+- The create form's Imbue Cloud compute option is labelled through the same helper as the other modes, so it reads the way the creation transcript names it.
+
+- A plugin accounts index that exists but cannot be read at startup (unreadable file, malformed JSON) no longer materializes as "no accounts", which deleted every account and connection provider block until the next sign-in or restart; the startup pass leaves the settings as they are and the next trigger writes them.
+
+- The settings materializer no longer deletes every provider block when the profile's `[providers.*]` tables are split around another section (a hand-added block at the end of `settings.toml` used to make the next materialization drop the suppression blocks and the user's own blocks); the pre-import reconcile's tolerance for that layout now applies to the managed blocks too.
+
+- A connection whose credentials payload this device cannot decrypt or parse shows as "No credentials" and stays removable; only a payload written by a newer app version reads "Needs a newer app". A connection push whose revision conflict names no stored row is never re-pushed as a new document: an edit stays queued for the next sync pass, and a removal is complete (the server already holds nothing), so its tombstone no longer retries on every pass.
+
+- The creation page names a connection the way the compute select does (`<alias> (<Backend>)`), falling back to the instance name when the connection is gone, and the providers panel offers Add connection only under an owner the modal would keep (not under a locked account). Adding a connection answers 503 only when the account listing actually failed, not when the settings file was already converged. The workspace settings page asks for a machine size only on a leased Imbue Cloud machine.
+
+- Retrying a failed AWS, GCP, Azure or Modal create whose connection has since been removed falls back to Imbue Cloud (or this device without an account) instead of leaving the compute select empty and the submit refused.
+
+- A connection's Remove button stays disabled while its removal is in flight, so a second press no longer sends a second request that fails with "Unknown cloud account".
+
+- Removing or re-pushing a connection never overwrites a copy that a newer app version rewrote on another device in the meantime: the push is refused, and the next pull shows that connection as "Needs a newer app".
+
+- A connection whose backend this app version does not know (one a newer version added) shows in the providers panel as "Needs a newer app" instead of being left out.
+
+- A this-device-only connection saved by a newer app version (with fields this version does not know) is kept when this version next writes the connection file, instead of being dropped together with its credentials.
+
+- Signing out first pushes any connection removal that is still queued from a moment the connector was unreachable, so the removed connection no longer comes back on the next sign-in.
+
+- A broken mngr settings file no longer stops background sync for the rest of the session: the sync pass that re-writes the provider settings logs the error and the next pass retries.
+
+- A failed add-connection request whose answer carries no message (a non-JSON error page, a dropped body) is reported as "Could not set up the connection." instead of the create form's "Could not create the workspace.".
+
+- A cloud workspace whose connection is held here but whose credentials are unusable on this device (scrubbed after a master-password clear elsewhere, or written by a newer app version) shows a "no credentials" or "needs a newer app" chip instead of staying plain with no explanation.
+
+- Signing in from the create form no longer auto-creates on a compute the account cannot use: when the selection was a device-only connection, it is reset and the form asks for a review instead of submitting a create the server would refuse. Adding a connection under an account also clears the "Pick an account" error it satisfies.
+
+- Merges the per-provider machine sizing branch (`mngr/per-provider-sizing`, PR #1750): the create form's CPUs / memory / disk fields and the settings page's size display and resize now coexist with the connections model. The settings page reads a machine's size from discovery for every provider that reports one, so the account-owned-provider gate that this branch had put in front of the machine-size request is gone; a Modal create passes both its per-create region and its size.
+
+- The account lifecycle helpers that re-derive the provider blocks from the plugin's session list and apply an account's signout (interactive, and the sync pass's dead-session retirement) now live in the `connections` package (`account_lifecycle.py`) rather than in the SuperTokens routes module and the `minds run` entry point; a pure relocation.
+
+- The sweep of orphaned per-host SSH key dirs now covers every synced key layout (Imbue Cloud, the aws/gcp/azure/vultr VPS layout, Modal, Lima, docker) and runs on positive evidence only: a dir is removed when its workspace's record is a tombstone, never because no active record names it, so a long cloud create that has not pushed its record yet can no longer lose its keys to the sweep. A dir holding a lease this device owns is still kept, and only the layouts sync lays down on the device (the account instance and the connection instances) are swept: a lima, docker or vultr host's dir, which exists on its hosting device alone, is left to the provider's own destroy.
+
+- `POST /api/v1/workspaces` takes `modal_sandbox_timeout_seconds` for a Modal create: the sandbox lifetime for that one workspace, passed to `mngr create` as the Modal build arg `-b --timeout=<seconds>` (the per-create form of the connection block's `default_sandbox_timeout`); any other mode drops it. The `MINDS_MODAL_SANDBOX_TIMEOUT_SECONDS` process override, which rewrote every Modal connection block, is gone: the connection block always carries the day-long default and a create that wants less says so itself.
+
+- The create form-defaults document's `machine_size_defaults_by_launch_mode` entries are the shared `MachineSizeSelection` model (the one the create request and the resize route use) instead of a private copy of its three fields; the JSON shape is unchanged.
+
+- `WorkspaceRecordStore.imbue_cloud_host_state_dir`, left without a caller once the key-dir sweep walked the tombstoned records through the shared per-host path helper, is removed; the imbue_cloud per-host path is derived in one place (`host_access_material.host_access_paths`).
+
+- The key-dir sweep leaves every row this device hosts alone, including a workspace on a "this device only" connection: such a row is tombstoned by local discovery alone and may still be resurrected on the next pass, and its per-host dir is the provider's own destroy's to remove, so the sweep can no longer cost a live local-connection host its only client key. It still removes the dirs of workspaces destroyed on another device.
+
+- The create form's default Docker CPU count is lowered to what the local Docker daemon can give (read from `docker info` once the daemon is known to answer): the form submits the size it shows as an explicit `--cpus` cap, which the daemon refuses above its own CPU count, so a machine with fewer than 4 CPUs (a 2-CPU Docker Desktop) no longer has its default Docker create fail where the template's own clamped default used to work.
+
+- `modal_sandbox_timeout_seconds` on the create request is capped at 86310 (Modal's 24h sandbox limit less the provider's shutdown buffer, the same figure the connection block's default is built from) and a longer value is refused up front (422) instead of failing in the background create.
+
+- Picking "No account (private workspace)" in the create form's simple view while the Imbue Cloud card is selected no longer leaves that card highlighted over a compute that fell back to this device: a compute selection the account change moves clears the preset card, as a pick in the advanced compute select already did.
+
+- A retry prefill's CPUs / memory / disk are restored only when the attempt's compute mode survived the account check: when the attempt's connection is gone and the form falls back to Imbue Cloud or this device, the next Docker or Lima pick starts from that mode's own defaults instead of the Modal attempt's size.
+
+- A connection registration the app died inside (killed while the pasted credentials were being validated) no longer leaves a connection that this device offers as usable but never syncs to the account: on the next start the store drops the row the add never finished, and the user adds the connection again.
+
+- The glossary's machine-size entry and the machine-size and machine-lifecycle behavior READMEs name the aws, gcp, and azure connection modes instead of the retired "bring-your-own-key" cloud modes.
+
+- Signing an account out while the plugin's account listing fails transiently no longer tears the local half down: the account is still signed in, so its connection replica (and any queued connection change), its provider blocks and the default account are left as they are, with a warning, instead of the replica being discarded for nothing.
+
+- The host access material module no longer restates the five per-host key layouts: each is read from the manifest its provider publishes (`VPS_HOST_ACCESS_MANIFEST`, `MODAL_...`, `DOCKER_...`, `LIMA_...`, `IMBUE_CLOUD_...`), so a provider that renames a key file or moves a store changes what the workspace record carries in one place. minds now declares `imbue-mngr-lima` as a dependency, as it already did the docker, modal and vps plugins.
+
+- A connection's credentials can be updated in place from `PUT /api/v1/desktop/cloud-accounts/<instance>`: the connection keeps its id, instance name, owner, backend and placement, so rotating a cloud key no longer means remove and re-add (which orphaned every machine tagged with the old instance). The new credentials are validated like a new connection's and, for an account owner, pushed; a failure puts the previous credentials back, and an update whose connection was meanwhile removed on another device answers 409 instead of resurrecting it. An app killed mid-update restores the previous credentials on its next start, and no sync pass pushes or overwrites a row whose new credentials are still being validated; removing the connection, or starting a second update, while that validation runs is refused (409, `connection_in_use`) instead of leaving a tombstone that the next start would turn back into the previous connection. An account that signs out while one of its connections is being updated no longer leaves that update's request failing with a server error: the route answers 409 saying the connection is no longer on this device.
+
+- Removing a connection, signing an account out, and the sync pass's retirement of an account whose session expired all wait for a workspace still being created on the connection (or on any of the account's providers): the create's later `mngr` calls need the provider block, and removing it mid-create left a VM in the user's cloud with no record and no block. The providers panel counts such creates into the connection's "in use by N".
+
+- A sync pass no longer writes back an account that signed out (or was retired) while the pass was busy pulling: the provider blocks are derived from the account list the materializer reads itself, under its own lock, on every pass.
+
+- A connection removal queued while the connector was unreachable now survives signing the account out: the tombstone is kept and lands on the first reachable pass after re-signin, instead of the connection coming back on the next pull.
+
+- A "this device only" connection is a device provider like docker and lima: the create form may use it under any account (the selected account stays the workspace's association), and removing it is refused while a workspace recorded under any account still uses it. The create form's account options now say whether an account is locked here and whether it can own a synced connection.
+
+- The add, update and delete connection routes answer with a `code` (`master_password_required`, `connection_in_use`, `connection_removed_elsewhere`, `credentials_rejected`, `sync_failed`, `account_listing_failed`) beside the message, so the add-connection modal can say what actually went wrong instead of blaming the keys for every failure.
+
+- Retrying a failed create whose connection has since been removed says so ("The connection this attempt used was removed, so it cannot be retried.") instead of silently falling back to Imbue Cloud or the local mode.
+
+- The create form defaults carry the connection backends with their labels and whether their region is pinned, and each providers-panel connection row carries its backend label, so the frontend no longer restates that table.
+
+- A remote machine tile's state now travels with the detail behind an `error` state, so the chip can show why the machine's key could not be materialized. The UI schema version is 27.
+
+- The first start after this release clears the `is_enabled = false` the retired providers-panel toggle could have written into the docker, lima and vultr blocks of the minds profile, once; a later deliberate hand edit is left alone.
+
+- A this-device-only Modal connection may name its Modal namespace (`modal_user_id`, up to 48 characters) when it is added, so the evals harness's trial environments carry the run stamp the scheduled sweep matches; under an account owner the field is refused, since a synced connection must derive the same environment on every device.
+
+- A new integration test runs the real `mngr observe` against an account block whose connector refuses the session refresh and pins that the plugin's auth error reaches the sync pass with the type name it matches.
+
+- The create form's "add a ... connection" rows, the add-connection modal's provider list and its region rule, and the providers panel's backend labels all come from the server's backend table (`connection_backends` on the form defaults, `backend_label` on each connection row) instead of a copy kept in the frontend; the creation page names a connection's backend by the label the attempt detail now carries (`cloud_account_backend_label`, in place of the raw backend name).
+
+- The Modal notes on the create form and in the add-connection modal now read "Modal sandboxes stop after about a day."
+
+- A remote machine's access chip on the home screen carries a tooltip: the failure detail behind a "sync error", "Enter your master password to reach this machine" for a locked one, "The connection this machine runs on was removed; re-add it or remove this machine from the list" for one whose connection is gone, and the chip's label spelled out for the rest.
+
+- The create form's compute select lists this device's connections under every account, after the account's own, suffixed "(this device only)"; adding a connection from the form never changes the account picked for the workspace (a connection added under another owner is offered once that owner is picked), and a locked account says so under the compute select ("Locked: enter your master password to use this account's connections"). The add-connection modal keeps an eligible preselected owner and otherwise selects "This device only" with a note naming the account that cannot own a synced connection here.
+
+- The add-connection modal says what actually went wrong, by the error code the connection routes now send: a missing master password points at Settings (or this device only), rejected credentials keep the provider's message above "Nothing was saved; fix the keys or permissions and try again.", a failed account sync blames the network rather than the keys, a failed account listing asks for a retry in a moment, and anything else reads "Could not set up the connection." with the server's message when one came back.
+
+- Retrying a create whose connection has since been removed: the create form shows the reason as an error banner and applies none of the recorded settings (it opens as a fresh form), and the creation page's record view disables Retry with the same reason while Discard (or Dismiss) stays available; the attempt detail carries the reason (`retry_unavailable_reason`) beside the form prefill's `unavailable_reason`.
+
+- Each connection row in the providers panel gains an Edit button (enabled while the connection's credentials are usable here and no removal is in flight) that opens the connection modal in an edit mode: owner, provider and region fixed and shown, the alias prefilled, every credential field empty and required, saved with `PUT /api/v1/desktop/cloud-accounts/<instance>`; the panel refreshes from the next providers frame.
+
+- Signing out is also refused (409, the same message) while a workspace is still being created on a device provider (docker, lima, a this-device-only connection) under the account: the create associates its workspace with the account when it finishes, which a signout in between silently lost, leaving a private workspace the user did not ask for.
+
+- A connection row's placement in the providers panel omits keys without a value (a Modal connection no longer carries a `user_id` of "None").
+
+- When a managed provider instance leaves this device (a connection removed or re-homed on another device, an account signed out), discovery forgets its hosts at once, including the persisted last-good topology, and ignores any later discovery event for the instance (the events-file replay keeps a vanished instance's last snapshot in its window forever): those machines otherwise stayed on the home screen as running, local machines of this device, and came back on every start.
+
+- A workspace record another device hosts is never rewritten by this device, even while a stale discovery view still lists its machine here; before, two devices could stamp themselves as the host in turn and push a new revision of the same record on every sync pass.
+
+- Selecting text inside a dialog no longer dismisses it: a press that starts inside the card and ends on the backdrop (a text selection dragged past the card's edge) used to count as a backdrop click, which closed the connection modal while the user was copying its error message. A dialog now closes only when the press, the release, and the click itself all land on the backdrop, so a press on the dim that is released over the card keeps it open too, and a right-click on the dim does not arm a later keyboard click inside the card to close it.
+
+- A connection whose credentials the provider rejects, or whose document could not be pushed to the account, now leaves the provider's message in the backend log as a warning beside the 502 the modal shows.
+
+- The create form's "Your own cloud" preset (from the onboarding's three where-to-run answers) opens the advanced view on the first connection the compute select offers under the selected owner (the account's own connections, then this device's), or on Vultr when there is none; the Create from Template page's compute select lists the same rows as the create form's (Imbue Cloud is offered but unusable without an account) and, like the create form's, moves off a connection the newly picked account cannot use.
+
+- The add-connection and edit-connection dialog opens on a "This is an alpha feature" callout: launching remote machines on AWS, GCP, Azure and Modal is still being tested, and the callout links to the Imbue Discord so users can tell us how it went.
+
+- The create form and the Create from Template page warn, beside the Create button, that a workspace on any compute other than Imbue Cloud (this device's Docker or Lima, Vultr, or a cloud connection) can take at least ten minutes to start.
+
+- A Modal create no longer pins a region by default: the region picker leads with "Any (cheapest)", which passes no region so Modal places the sandbox wherever it has room, and "Nearest to me", which resolves the nearest of Modal's broad regions at create time, ahead of the named regions. Any is the default; the choice (not the region it resolved to) is remembered as the last-used pick, and `POST /api/v1/workspaces` accepts `any` and `nearest` as the Modal `region` beside the region names.
+
+- The create form's "Enable sharing and web access" switch and the Imbue Cloud backup provider are on by default whenever an account is selected, and the "This computer" and "Your own cloud" presets no longer switch backups to "configure later". Picking "No account" turns both off (the server refuses either without an account); picking an account again turns them back on unless the user had set them by hand. A retry of a failed attempt keeps the attempt's backup provider the same way (its restic repository is not replaced by the account's Imbue backups default). The Create from Template page and the first-run cloud create follow the same defaults.
+
+- A share that could not be brought up right after a create (the connector refused it, the quota is full, the network dropped) is reported in the notification feed, naming the workspace and pointing at its Share panel, instead of only a log line.
+
+- Discovery now drops events, and the startup replay, for every provider this device does not poll, not only for a removed account or connection instance: the five suppressed defaults (`aws`, `gcp`, `azure`, `modal`, `imbue_cloud`, pinned `is_enabled = false`) and any derived instance without a block. The persisted last-good topology is pruned of such providers' hosts at startup too, so a machine of a provider that stopped being polled before this release (or whose block an older build removed) no longer comes back on every start as a row that reads "Status unknown". Backend defaults such as `local`, `docker` and `lima` are polled without a block and keep passing through.
+
+- A live machine whose host refused this device's access key (discovery reports it unauthenticated) carries an "Access refused from this device" chip beside its unknown status, saying that a restart will not help and to open it from the device that created it or re-sync its record.
+
+- Adding or updating a cloud connection now streams the cloud setup's output into the dialog: `POST /api/v1/desktop/cloud-accounts` and `PUT /api/v1/desktop/cloud-accounts/<instance>` answer 202 with an operation handle (the connection's instance name) once the row and its block exist, a worker runs the `mngr <backend> prepare` (or Modal listing) and the push, `GET /api/v1/desktop/cloud-accounts/operations/<instance>` reports the outcome (with the `code` and the status the synchronous route used to answer), and `.../logs` streams the command's output as server-sent events through the same replayable log buffer the create flow uses. The add-connection dialog's progress view gains "Show details" with the live output, so a 10-minute Azure first-time setup no longer looks like a frozen spinner, and the request no longer holds a server thread for that long. Callers of the bearer API poll the handle like a create. While a registration or an update is still validating, a removal or another update of that connection is refused (409, `connection_in_use`) before it touches the row.
+
+## 2026-10-16
+
+Finishes calling the user's workspace a "workspace" in the app's copy:
+
+- Onboarding and the creation screen no longer describe a workspace as a "virtual computer" or "private computer"; a workspace is "a private place where you and your agent work together". The creation screen now says the workspace is set up "on its own machine", and no longer says you can change the computer it runs on in Settings.
+
+- A provider sign-in that cannot be passed on now says "Couldn't reach your workspace" and asks you to make sure the workspace is running (was "your machine").
+
+- A custom-service permission request for an origin this computer already connects to says approving stores credentials "for this workspace as well" (was "this workspace's machine").
+
+- Freeing up backup space now lists the backups "not reachable from this computer" (was "this machine").
+
+- The create form's Modal note says Modal creates sandboxes "from this computer" (was "this machine").
+
+The desktop app no longer ships a test-only module to users.
+
+`imbue/minds/utils/snapshot_container_states.py` exists only so the snapshot-resume CI suite can record what the pre-baked snapshot image captured; nothing the app runs imports it. Because its name did not mark it test-only, the wheel `exclude` rules did not catch it and it was packaged into every install. It is now `snapshot_container_states_testing.py` and named in the `exclude` list, so it stays in the checkout and out of the bundle.
+
+A new wheel-contract check, `test_minds_wheel_excludes_test_only_helper_modules`, builds the minds wheel and fails if it contains any module whose name marks it test-only. The existing check only looked for test *files* (`test_*.py`, `*_test.py`, `conftest.py`), which is why this module went unnoticed.
+
+The permission request's account dropdown now labels its trailing new-account choice "Add account" instead of "+ Add account". Which choice is preselected is unchanged: the account the agent asked for when it named one, otherwise the first signed-in account, and the new-account choice only when nothing is signed in to the service yet (where it is the only option and reads "Sign in" or "Connect" rather than "Add account").
+
+The permission request's Approve button now reads "Sign in & approve" whenever the selected account has no usable credentials, not only on "Add account". Previously an account the agent asked for that was not connected here (shown as "<name> (needs sign-in)"), or a stored account whose credentials went bad, read plain "Approve" even though approving opened a browser sign-in.
+
+- Imbue Cloud is now clearly the recommended place to run a workspace, in both the start flow and the Create Workspace form, which offer the same three answers in the same order.
+
+- The start flow's where-to-run question recommends Imbue Cloud, lists its points, and offers "Use Imbue Cloud" as its only button. "Run it on this computer" and "Use your own cloud" are small links under it, replacing the side-by-side "Custom setup" column and button. Each link opens the create form on its own choice, and closing the form asks again with the same three answers.
+
+- The Create Workspace form (and the Create from Template page) shows one large Imbue Cloud card with two smaller cards under it, "This computer" and "Your own cloud". "Your own cloud" was previously reachable only through Advanced Configuration; picking it now selects your first added cloud account (or Vultr) and opens the provider settings it needs.
+
+The creation page's closing turn now offers three ways to start instead of five, since the old "Start with an app" and "Make something new" read as the same thing. It reads "Your workspace is ready! What do you want to do first?", followed by "Make something.", "Connect your tools.", and "Take a task off your plate.", each with a line under it in the first person, as the agent the user is about to message, and ends with "If you’re not sure where to start, I can explain how your workspace works and what you control." The same turn ends the conversation the workspace's first chat is seeded with.
+
+The start flow's "never strand the user" property test gets a 30-second timeout: it takes a quarter second alone but overran vitest's five-second default under the full parallel suite, so it failed intermittently.
+
+Folder sync ("Keep a synchronized copy") no longer fails in the packaged app with "No such command 'pair'". The sync runs `mngr pair`, and the plugin that provides it (`imbue-mngr-pair`) was never bundled into the app or declared as a `minds` dependency; it is now in both.
+
+Studio now also bundles the `unison` and `unison-fsmonitor` that folder sync runs, and puts both on the backend's `PATH` in the packaged app and in dev (`pnpm start`), so the sync no longer needs either installed on the machine. macOS (arm64, and x86_64 for dev) gets the upstream unison 2.54.0 build plus autozimu's unison-fsmonitor 0.3.9; Linux x86_64 gets upstream's static unison 2.54.0 build and its watcher. Each is SHA256-pinned and ships with its license and a NOTICE naming its source. Linux arm64 (the Raspberry Pi dev setup) is not provisioned and still needs both on the system `PATH`. The Linux artifact check (`scripts/verify-linux-artifacts.sh`) runs the bundled `unison -version` and format-checks the watcher, and new `build_test.py` guards keep both binaries provisioned for every shipped target and both directories on `PATH`, ahead of the developer's own in dev.
+
+Relocking the packaged app's bundled `uv.lock` for `imbue-mngr-pair` also brings its Azure SDK in line with what `imbue-mngr-azure` declares: it now ships azure-mgmt-network 30.2.0 and azure-mgmt-resource 25.0.0 instead of 32.0.0 and 26.0.0, which are outside the `<31` and `<26` ranges the Azure provider is written against.
+
+Running minds from source now installs `imbue-mngr-lima`, the Lima compute provider: resizing a Lima workspace runs `mngr lima resize`, which failed with "No such command 'lima'" outside the packaged app and the fully synced monorepo venv.
+
+New guard `apps/minds/test_bundled_mngr_commands.py` (runs on every PR): it finds every mngr argv minds builds -- `[mngr_binary, "<command>", ...]` and the binary-less argv handed to `MngrCaller` -- and fails when the package providing a plugin command is not a dependency of the packaged app or of `minds` itself. The install descriptions, fix instructions and dependency parsing it shares with `test_bundled_agent_types.py` now live in `imbue.minds.testing`.
+
+- An in-place backup restore now brings the workspace's services back the way the workspace's own startup would. It reloads supervisord from the restored files instead of restarting every program it had loaded before, so a service the restored snapshot adds is started, one the snapshot lacks is gone, and a service configured not to start on its own (`autostart=false`, such as the Datalib app before its first use) stays stopped. Such a service is no longer named in the "these services have not come back up" warning.
+
+- If the restored service configuration cannot be read, the restore restarts the services from the configuration in use before the restore and says so in its result, warning that the workspace will not start its services on its next restart until that configuration is fixed. Reloading a configuration supervisord cannot parse would stop supervisord and every service with it.
+
+- The same reload is used when a restore fails after stopping the services, and when the desktop brings the services back after a restore that died without reporting a result.
+
+- This composes with the earlier change that reports only services that were up before the restore: a service is now named in the warning only if it was up when the restore started and is not configured `autostart=false`. A service configured not to start on its own that had been started by hand stays stopped after a restore and is not named.
+
+## 2026-10-15
+
+A backup restore no longer warns that a service "has not come back up" when that service was already not running before the restore started, and no longer spends the full 60-second service-recovery wait on one.
+
+The restore's post-restore check used to compare the workspace's services against a single absolute standard: anything supervisord did not report as running or cleanly exited was a service that failed to come back. A program that was already down when the restore began -- one that is crash-looping, or one shipped switched off and started for the first time by the restore's own `supervisorctl restart all` -- therefore ended every restore with a warning naming it, and made the "everything is back" sample the recovery wait polls for unreachable, so each restore burned the whole wait before reporting.
+
+The check now takes a reading of the services before it stops anything, and reports only the ones that were up then and are not up afterwards. The system interface is unaffected: it must be up after a restore whatever its state before, and a restore still fails if it is not.
+
+## 2026-10-14
+
+Fixed a flaky CI check in the minds snapshot-resume test suite (MIND-273).
+
+`test_workspace_docker_container_is_present_and_stopped` verifies that the pre-baked snapshot image captured its workspace Docker containers stopped. It used to answer that by reading the live Docker daemon at test time, which is not the same question: the CI test runner reuses one snapshot sandbox for several test batches, so a batch that had already resumed the workspace left those containers running, and the next batch to run this check saw `running` and failed.
+
+The container states dockerd restores from the snapshot are now recorded once per sandbox, just after dockerd first comes up and before any test can start a container, and the check reads that recording. The check no longer depends on which tests ran before it in the same sandbox, and it no longer carries `@pytest.mark.flaky`.
+
+Container states are now typed: `DockerContainerState` is an enum of the seven states the Docker daemon reports (`created`, `running`, `paused`, `restarting`, `removing`, `exited`, `dead`), and the check compares against `DockerContainerState.EXITED` rather than the string `"exited"`. The recording on disk stays Docker's raw wire format and is resolved to the enum when read, so a state Docker adds in future fails only the tests that read the states -- with a message naming the unrecognized value -- instead of the fixture every test in the module needs.
+
+# Attribute the lucide icon set the UI is drawn from
+
+Every glyph the desktop client draws through `Icon16` -- titlebar and sidebar
+marks, workspace-row actions, form chevrons, status badges -- is
+[lucide](https://lucide.dev) artwork, but nothing shipped said so. Fourteen of
+them are lucide's path data unchanged; the rest were traced from the lucide
+glyph of the same name in Figma. Lucide is licensed under ISC, which requires
+its copyright and permission notice to appear in every copy, and part of the
+set is additionally covered by Feather's MIT license.
+
+Both notices now ship, by the two routes a copy can travel:
+
+- `imbue/minds/desktop_client/static/ATTRIBUTION.md` records where the artwork
+  came from and reproduces lucide's `LICENSE` in full. It sits inside the
+  package, so it is in the wheel beside the bundle it credits, next to the
+  existing `service_icons/ATTRIBUTION.md` for the service brand marks.
+
+- A `/*! ... @license ... */` banner at the top of the icon source carries the
+  same notice into the minified SPA bundle itself, which is what reaches a
+  user who has only the built assets.
+
+No icon changed.
+
+Bump Latchkey to 3.18.3.
+
+The latchkey permissions doc now records that the per-agent Minds API gate (`minds-api-proxy-per-agent-unauthorized`) runs on the desktop gateway only: a remote workspace's machine enforces the host's policy minus that rule, and forwards every per-agent route to a desktop that runs the gate. An agent created while the desktop is away is answered with the forwarder's 502 rather than a 403 "not permitted by the user"; one created while the desktop runs still waits for discovery to register it.
+
+- The next-deploy checklist's analytics backfill item now sizes the backfill from the ingest's 72-hour per-run cap and records the staging rehearsal of 2026-10-14: how to drive the backfill on demand without overlapping runs, and why no manual `lake_maintenance` call is needed between runs now that a backfill-sized run merges the lake's per-hour files itself.
+
+- The next-deploy checklist's analytics backfill item now sizes production's backfill from the ingest's nine-minute per-run budget (about thirty-five runs for the 1366 hour folders of 2026-10-14) rather than from a fixed hour count.
+
+- Promoted minds 0.8.6 to the alpha channel: the desktop alpha entry serves ToDesktop build `2610143magb5chk` (mac and Linux, 100% rollout) and the web alpha pin moves to `minds-v0.8.6`, which the production pool holds verified rows at in both regions. Beta and stable stay on 0.8.5.
+
+## 2026-10-13
+
+The Accounts page's email notifications setting now asks "Receive email notifications?" and answers with the app's shared switch and its Yes/No word, the same control the share panel and the create form use, instead of a hand-drawn switch reading On/Off. It still spins beside the switch and holds it inert while the preference is being written.
+
+The "keep a synchronized copy" setting of a shared folder, and the per-permission rows behind Adjust in a permission request, now draw the same switch button as every other setting. Both were real checkboxes styled as switches; nothing read them as form fields, so the checkbox styling (`perm-switch-input`) is gone and the app has one switch element.
+
+Every switch in the desktop app now waits the same way while its change is written: a ring spins inside the knob, which stays at the last known value. The Permissions tab's grant switches, the Accounts page's email notifications switch, and a shared folder's sync switch drew a spinner beside a dimmed switch instead; the spinner is gone, and a switch a pane holds inert during its write keeps the ring and dims. The share panel's switch is unchanged.
+
+The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that grouped the 59 tests that sat above the file's first header (the file had none), creating the groups they belong to. No ratchet, recorded count, or test name changes.
+
+A link or popup a workspace page opens (`target="_blank"`, `window.open`) to a local address or one of the workspace's app addresses now opens inside the workspace, on workspace templates that announce they handle it: a local URL in the in-workspace browser, or in an app's own window when its host is that app's `<label>.localhost` or that app is registered at the URL's port; an app address in that app's own window. Such a popup no longer opens a bare Imbue Studio window. Workspaces on older templates keep today's window.
+
+External links a workspace's own pages open (web, `mailto:`, `tel:`) go to the workspace first, so an app of it can take them; one no app takes comes back and opens in the default browser, or in the system's mail or phone app. Imbue Studio now asks before opening a `mailto:` or `tel:` link ("Open this email address in your mail app?"); Cancel opens nothing.
+
+Under the hood: the embed contract moves to version 8 with `minds:open-link {url}` (embedder to workspace; an absolute http(s), `mailto:` or `tel:` URL), `minds:open-external {url}` (workspace to embedder), an optional `opensLinks` field on `minds:workspace-ready`, and an optional `opensExternalLinks` field on `minds:embedder-capabilities`; its compatibility rule now allows adding optional fields to a shipped type. The Electron decision moves to `electron/link-routing.js`: each window's page reports its mounted workspace and whether it announced `opensLinks` to main, which denies that workspace's local popups and its own external popups and frame navigations, and hands their URLs back to send as `minds:open-link`. `electron/link-externality-vectors.json` pins which URLs Electron treats as external, for the workspace template's link classifier to agree with.
+
+The Share tab now takes from the workspace how it lists each app. Each service registration carries `system` and `internal` (default-workspace-template's `system` and `internal` manifest keys), and they decide whatever the app is called:
+
+- An ordinary app is listed as before.
+
+- A system app (the chat, terminal, browser, and Getting Started) is listed after the apps, under a "System apps" group that starts closed. It starts open when a system app is selected or already has a grant, so an existing grant is never hidden. A system app can be granted like any other app. Before this change, the chat, terminal, and browser could only be shared as part of the whole workspace, and Getting Started was listed with the ordinary apps.
+
+- An internal service (the terminal's `terminal-pty`, `owner-exec`, `vm-exec`) is never listed. This removes `terminal-pty`, and on a slice or VPS workspace `vm-exec`, both of which the tab used to offer.
+
+Workspaces that predate the fields are sorted by a hardcoded list of names: chat, terminal, browser, and Getting Started are system apps, and `owner-exec`, `vm-exec`, and `terminal-pty` are internal. The list is marked for removal once no supported workspace predates the fields.
+
+The workspace glossary gains a "system app" entry, and its grant entry now says a per-app grant admits system apps too, but never an internal service.
+
+Tests: the `/ui/ws` tests now use a websocket client that also delivers server frames arriving together with the handshake response. The stock `simple_websocket` client left them unread, which intermittently failed `test_ws_connect_receives_hello_then_full_snapshot` under load (MIND-398).
+
+- Cut the minds 0.8.6 release: the app version is 0.8.6 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.8.6`, carrying everything that landed on `main` since `minds-v0.8.5`. Highlights for workspace owners: a granter can invite the people an app's share names by email and see each invitation's outcome, a workspace's owner can mail themselves its link for a phone, the account card switches between accounts, workspace links route into the app, and the chat composer, the wallpaper, and the share panel take their October fixes.
+
+- The template-alignment release tests (the Claude Code version pin and the restore excludes) send the shell's `GH_TOKEN` or `GITHUB_TOKEN` with their GitHub contents-API fetch when one is set, and log a failed fetch at warning level instead of trace, so a run that hits GitHub's anonymous rate limit says so.
+
+- Recorded the minds 0.8.6 cut, verification, staging deploy and bake in `docs/deploy/history/minds-v0.8.6.md`, reset `docs/deploy/next_deploy.md`, and added to the runbooks the scheduled launch-to-msg pin race on template `main`, the API route around `gh run download`'s path-traversal refusal, and what a slice whose bake-time finalize failed looks like at verification.
+
+- Recorded the 0.8.6 staging rehearsal (fast path confirmed), the staging and production analytics backfills, the production deploys (`20261014T220319Z`, `20261015T004118Z`), the production bake (5 US-EAST-VA, 10 US-WEST-OR, all verified) and the alpha promotion in `docs/deploy/history/minds-v0.8.6.md`, and reset `docs/deploy/next_deploy.md` for what remains (beta and stable, the backfill's clean-up deploy, the fast-path desktop check).
+
+- Recorded the completed production analytics backfill (1381 hour folders, done 2026-10-15 06:37Z) and its clean-up deploy `20261015T063834Z` in the 0.8.6 record, and replaced the checklist's backfill item with the aggregation-versus-collection-poll commit race it exposed.
+
+When the `mngr forward` subprocess exits unexpectedly, the error report now says how it exited: the exit code, the signal name if a signal killed it, whether it had already reported a listening port, how long after spawn it died, and the last 20 relayed stderr messages. The stderr messages are scrubbed of secret flag values, URL credentials, email addresses, and the home directory before they are reported. Over-long messages keep both their start and their end, so a folded traceback still shows its exception line.
+
+`minds run` no longer waits out the full listen timeout when `mngr forward` dies during startup. The wait ends as soon as the plugin has exited, and logs its exit code. The startup error no longer claims the full timeout elapsed. A port the plugin reports just before exiting is still picked up, and the unexpected-exit report is still logged before `minds run` shuts the plugin down.
+
+## 2026-10-12
+
+Bump Latchkey to 3.18.1.
+
+The create form's advanced view now takes a machine size for every compute mode that accepts one at create, in the terms that mode's provider accepts. The local docker and modal modes take CPUs and memory; the local lima mode takes CPUs, memory, and the size of the data disk the workspace's data lives on. Each field starts at the template's own default (4 CPUs and 8 GB for docker; 2 CPUs, 4 GB, and a 100 GB disk for lima; 2 CPUs and 4 GB for modal), a pick is kept per mode, and a retry of an interrupted create restores the size it was submitted with. The cloud modes keep their instance-shape dropdowns. The `POST /api/v1/workspaces` create takes the same size as `cpu_count`, `memory_gb`, and `disk_gb`; a dimension a mode does not take is dropped.
+
+The workspace settings page now shows the recorded size of every machine whose provider reports one (CPUs, memory, and disk, as `mngr list` reports `host.resource`), read from discovery rather than from a provider-specific command; memory and disk are shown to one decimal, since a provider reports an uncapped dimension as the machine's own total. An Imbue Cloud machine keeps its memory and disk and its restart-to-apply note for a pending resize; its vCPU count is no longer shown, since it does not follow a resize.
+
+The settings page can now resize a local docker machine (CPUs, memory) or a local lima machine (CPUs, memory, and a disk that only grows) through `mngr docker resize` / `mngr lima resize`, and restarts a running machine so the new size takes effect; a stopped machine keeps the recorded size for its next start. The new `POST /api/v1/workspaces/<id>/machine-size` route does this for agents too; it refuses a machine its provider cannot resize, a resize under a running operation, and quotes the provider's own refusal of a size.
+
+A new `apps/minds/behaviors/machine-size/` corpus folder specifies the create-form fields, the display, and the resize.
+
+## 2026-10-11
+
+The create form's post-create publish option and the share panel's publish switch are one feature, and now read as one. Both are labelled "Enable sharing and web access", and both carry the same sentence under the control: "Sharing gives this workspace an address on the internet, which allows you to access it over the web and on mobile. No one else will get access to your workspace unless you explicitly grant them access." The form's option was labelled "Enable web access" and claimed "only you are granted", which has not been true since publishing stopped granting the owner: ticking it does exactly what the panel's switch does, for the workspace just created. The form's inline warning and the create route's refusal of that option with no account selected now say "Sharing requires a selected account."
+
+The owner-side docs (overview, design, getting started) name the option and the switch by their shared label and no longer say the create-time publish grants the owner.
+
+The create form's option is now the share panel's own switch rather than a checkbox, with the same Yes/No word beside it, so the two controls look alike as well as read alike. The switch, the placeholder the panel shows while a workspace's sharing state is still unknown, and the Yes/No word now live in one component module (`frontend/src/views/components/Switch.ts`); the panel, the create form, and the permission switches all draw theirs from it.
+
+## 2026-10-09
+
+Bump Latchkey to 3.18.0.
+
+Bump Latchkey to 3.17.0.
+
+Connecting a Google account (Gmail, Google Docs, ...) through the permission dialog or the settings page now fails, with a message naming the permissions that were not granted, when some of the consent checkboxes are left unticked. Previously the partial credential was stored and the agent's requests failed later. Other services are unaffected.
+
+- In dev mode (`pnpm start`), a `MINDS_LATCHKEY_CURL` exported in the shell that starts the app names the curl the latchkey gateway runs, in place of the bundled curl router: the app hands it to latchkey as `LATCHKEY_CURL`. A packaged build ignores the variable and always uses the bundled router.
+
+Added an operator runbook for bringing up a self-hosted macOS GitHub Actions runner for `minds-launch-to-msg`, kept with the other deployment docs that the public mirror excludes.
+
+## 2026-10-08
+
+Creating an Imbue Cloud workspace from a local template checkout whose path contains a space (for example one under "Imbue Dropbox") now uses the fast path instead of always falling back to a full rebuild. `mngr create` shell-tokenizes every `-b` value, so the template path was cut at its first space and the fast path could not find the checkout's `origin` remote. Imbue Studio now shell-quotes every `-b` value it passes.
+
+An invitation email now names a shared app the way the share panel does.
+
+The desktop already resolves each share target's display name from the workspace's service registry for the panel; it now sends that name with the invitation, so mail about a shared app says `the app "World of Nonsense"` rather than `the world-of-nonsense app`, which was the hostname label behind it. An app that registered no display name is still named by its service name, and a whole-workspace share is named for the workspace, never after the shell app that serves it.
+
+Inviting someone now needs your own email address verified, since the invitation is mail Imbue sends in your name. The share panel reports the refusal as a prompt to verify your address and retry; publishing, granting and every other part of sharing are unaffected.
+
+- The Sharing panel now carries an "Email me a Mobile Access Link" button, which has Imbue Studio mail you the workspace's link so you can open it on your phone or in another browser. The message always goes to your own account's email address: the panel does not choose where it goes, because Imbue Cloud reads the address off your session.
+
+- The button is shown whether or not sharing is on, so you can see the feature exists; while sharing is off it is dimmed and says "Enable sharing and web access to access this link on mobile". Asking for the link before the workspace has an address answers "This workspace does not have a secure access point yet", with the suggestion to wait a few minutes.
+
+- The permissions side of the Sharing panel now shows a loading placeholder until it has heard from Imbue Cloud, instead of answering from defaults. Previously, for the several seconds the read can take, it claimed the workspace was unshared, that nobody had been granted access, and that every app had no link yet -- none of which it knew. The app list keeps its names and icons throughout and holds a placeholder where each count will be.
+
+Corrected the update apply window's description of what unattended recovery does to a machine that goes STUCK mid-apply: it aims an idempotent `mngr start` at it, which no-ops against a running host, never a container bounce. The module docstring previously said recovery "restarts a healthy machine mid-apply", and the window's hand-off callback was named `dispatch_restart`; it is now `dispatch_recovery`, matching the rest of the recovery machinery, with the log line and docstrings to match. No behavior change.
+
+The workspace template docs no longer list `layout.py` among the template's scripts: the template replaced it with the `uv run --no-sync workspace-layout` command of its `system/libs/workspace_layout` library (default-workspace-template#759).
+
+- A permission request from a remote workspace now reaches Imbue Studio on every computer you have running (the agent sends it with `X-Latchkey-Device: *`), and answering it on one computer dismisses it on the others: the computer that answered asks the workspace's machine to forget the request, off the request path and best-effort, and the machine withdraws it from every connected computer. The app's gateway stream now reports such withdrawals (`PermissionRequestDeleted`), and the permission-requests consumer's signal is `on_change`, fired for them as well as for new requests.
+
+- An agent can file a permission request while none of your computers is running: the machine keeps it, and the app shows it when it next opens. At startup, whenever a remote machine appears in discovery, and every ten minutes, `MachineRequestSync` compares the app's pending requests for each remote host against the host's machine: it files here what the machine keeps for this computer and the app lacks (under the machine's id, against the workspace's permissions file), drops what another computer answered, and asks the machine to forget a request this computer answered or its gateway refuses. A verdict given on another computer is not shown here; the request simply stops being pending.
+
+- `LatchkeyGatewayClient.file_permission_request_as_filed_elsewhere` files a request under a given id and target (a 409 is success; a refusal is `PermissionRequestRefusedError`), and `FakeLatchkeyGatewayClient` records such filings in `filed_elsewhere`.
+
+Removed the "create your own Google project" fallback when connecting a Google service (Gmail, Calendar, Drive, Docs, Sheets, Slides, People, Analytics). Signing in now always goes through the Imbue Studio consent screen, and a sign-in that does not complete there (such as closing the browser window) is reported in the permission dialog or settings page so you can retry, instead of a second browser window opening to set up an ad-hoc Google Cloud project. The fallback was only needed while the Imbue Studio Google project was unverified and limited to 100 test users; it has since been verified.
+
+# Notifications surface once, and a workspace keeps one main window
+
+- A new notification now surfaces in one way the user is expected to see: while any main window has focus it flashes as an in-app toast in every main window and no OS banner appears; with no main window focused (the app in the background, minimized, or only a pulled-out window in front) the OS banner fires. The `os` delivery style still gets the banner while focused, and a locked screen (macOS and Windows) always gets it.
+
+- A chat agent's notification may carry `watched_by`, the chat pages the workspace says are showing that chat to a focused reader. A watched notification is recorded already read: no toast, no banner, no bell or dock count, only a receipt in the feed. A locked screen overrides it. Workspaces that do not send the field get the rules above.
+
+- Agent messages are no longer deleted when read, and only the chat actually being read is read. Watched on arrival, or read later through the new `POST /api/v1/agents/<agent_id>/notifications/read` route (which the workspace's chat app calls when a chat becomes watched), they stay in the feed as receipts below everything unread. Showing a workspace no longer marks all its agents' messages read; a workspace on an older template never reports a chat read, so its messages stay unread until opened or cleared. Reading a chat also closes the OS banners still showing for it.
+
+- Pulled-out windows no longer show the feed's toasts.
+
+- A workspace has at most one main window. "Open in new window", navigating a window onto a workspace another window shows (history steps back and forward included), notification clicks, and session restore all raise the workspace's existing window instead of opening or retargeting another. A notification for a workspace with no window opens a new window for it rather than taking over a window showing another workspace. Blank windows and pulled-out windows are not limited; browser mode is unchanged.
+
+The app calls each of your workspaces a "workspace" again instead of a "machine": the list, the switcher, "New workspace", workspace settings, start/stop/restart, recovery, maintenance and retirement notices, updates, backups, sharing, the plan's remote-workspace quota, and the notices and errors about them all say workspace. "Machine" now means the compute a workspace runs on, and stays where that is what the text is about: machine size, the cloud lease, and connecting to the machine's host.
+
+- Queue the one-time analytics log backfill in `docs/deploy/next_deploy.md` (imbue-ai/mngr-internal#1160): the analytics aggregation now keeps parsed copies of the Modal access-log lines in the metrics lake and ingests only the hour folders that changed, so the first production deploy carrying it needs `ANALYTICS_AGGREGATION_WINDOW_DAYS` widened once (to reach back to the bucket's start) and then restored, with the completion signal (`log_hours_deferred` and `log_hours_failed` both 0) and the reports README follow-up recorded alongside.
+
+A pulled-out workspace window's popout is sized, and follows the cursor, by the window's size and grab point scaled by the display zoom: the shell measures them in its own CSS pixels, and at 175% the popouts came out 1.75 times too small.
+
+The Electron create-and-chat e2e (`test_snapshot_resume.py`) and `scripts/launch_to_msg_e2e.py` sign in through the provider chooser before sending the welcome chat's first message, instead of sending first. The workspace template now keeps the chat composer disabled, with the chooser open, until a provider is signed in, so typing the first message before signing in timed out on the disabled composer.
+
+The migration failure dialog now names the product: its title and body read
+"Imbue Studio could not move its data" / "Imbue Studio could not finish moving
+its data out of ...", where both said "Minds". Both now read the name from
+`PRODUCT_DISPLAY_NAME` rather than repeating the literal, so neither can drift
+from the app's own name again. The same text is what gets written to
+`migration-failure.log`.
+
+The SPA dev-preview page and the visual-diff harness's rendered index page both
+had stale document titles ("minds frontend dev preview", "Mind"); the harness
+now matches the title the real page serves. The build script's header and
+console output, the uv-shim comment in `scripts/download-binaries.js`, the
+launch-to-msg screenshot comment, the single-instance note in the e2e
+fixtures, and the Desktops section of `docs/latchkey-permissions.md` say Imbue
+Studio too.
+
+`electron/product-name.js` carried a comment claiming `package.json`'s
+`productName` "carries no space" and was distinct from the display name; it has
+held `Imbue Studio` since 0.8.0, identical to the display name, so the comment
+now states what the two are for instead.
+
+Review follow-up to the Imbue Studio prose sweep.
+
+`test/e2e/fixtures.js` called the same running app "Imbue Studio.app" twice in
+its header and then "a prior Minds" mid-sentence; it now reads Imbue Studio
+throughout. This project's sweep entry also now accounts for that file and for
+`scripts/build.js`'s module header, which it had left out.
+
+- New `start-flow/` area in the minds behavior corpus: the start flow's terms, its invariants (the user is never stranded, a cloud create runs under the account the account step settled on, only that account's email is asked to be verified, an answer replaces whatever the flow was waiting on, changeable answers stay changeable until a create goes out), and scenarios for the account step, where to run, email verification, and showing the flow afresh.
+
+- The start flow's account step can no longer strand a user on an account they abandoned. Creating or signing in to a second account after taking back the first (for example, a first sign-up whose email was never verified) now settles on the new account: an account that was already signed in no longer answers the press, and the cloud create and its email-verification check run under the account the flow settled on rather than the install's default account.
+
+- With an account already signed in, choosing Imbue Cloud now asks the account question, naming the signed-in account's email in bold and offering "Continue" and "Use a different account" (which opens the browser sign-in, where the user can sign in or create an account), instead of silently using that account, so the answer has a "Change answer" undo like every other one.
+
+- A cloud create from the start flow whose request fails to build no longer leaves every "Change answer" button hidden; it is reported as a failed attempt and the where-to-run question is asked again.
+
+- Answering the account question after starting and closing a sign-in (for example, pressing "Use a different account", closing the dialog, then "Continue") now replaces that sign-in, so a browser sign-up that completes later no longer re-answers the question and sends a second cloud create.
+
+- Pressing "Continue" on the account step after the offered account was signed out elsewhere now asks the account question again about the account signed in now, instead of creating the workspace under an account that is no longer signed in.
+
+- A cloud create whose account was signed out after the account step settled on it (for example while the flow waited on that account's email verification) is no longer sent; the flow says the account is no longer signed in and asks again where to run the workspace.
+
+- An email-verification check still in flight when the account step switches to another account no longer decides the new account's create; the new account's email is checked on its own.
+
+- The start flow leaves more room under its latest turn when it scrolls a new one into view, so the last question's buttons no longer sit tight against the bottom of the window.
+
+- The start flow's "Change answer" undo now sits just after an answer's bubble, on the page, instead of inside the grey bubble.
+
+- The start flow's first answer, to "Is it ok if we report errors to help improve Studio?", can now be taken back like the others: its undo asks the question again, and the new answer is saved as the error-reporting setting.
+
+## 2026-10-07
+
+Lifted the `<1.60` cap on playwright, so the app resolves 1.62.0 again.
+
+The cap was added because 1.62 prefixes an aria snapshot's element refs with the ordinal of the frame the element sits in -- `[ref=f3e9]` where 1.59 printed `[ref=e9]` -- which the UI-flow step script read as the whole page having changed. That script now accepts the prefixed form, so the cap has done its job; see apps/minds_evals' entry for what had to learn the new shape.
+
+Nothing in this app changes behaviour. It declares `playwright>=1.40.0` as it did before the cap, and the box installs whatever the root lock resolves.
+
+- Each desktop serves shared files under its own device id: the WebDAV file server now answers at `/api/v1/files/<device id>/<path>`, and with a 404 for any other device id. The device-less `/api/v1/files/<path>` is still served, for workspaces built before this change.
+
+- File-sharing grants name the desktop whose file they share. The grant and deny messages an agent receives name the device, and a desktop's Local files pane lists only its own shared paths, not those another of the user's desktops shared with the same remote workspace, and refuses to switch another desktop's shared path on or off.
+
+- The header a workspace names one of the user's desktops with is now `X-Latchkey-Device`; it was `X-Latchkey-Desktop`, and the old name is no longer read.
+
+- Grants made before this change keep working at the device-less URL, and each gains a twin for the desktop that first reads the workspace's policy afterwards, so the same share is reachable at the new URL too. New grants always name a desktop. In the Local files pane an old grant is part of its path's row, and removing the row (or narrowing it to read) revokes the old grant as well.
+
+- **Proxy through my desktop** is now a route rather than an on/off toggle. A remote workspace's requests to a service can be sent through one particular computer or through several in a chosen order, and can fall back to the workspace's own machine when none of them is connected. Every computer on a route is named explicitly.
+
+- The switch in a connection's panel shows three states: off (the workspace's own machine), on (this computer alone), and custom (any other route, spelled out beside the switch). Turning the switch on sets the route to this computer alone.
+
+- An **Adjust** link opens the route for editing: reorder and remove its places, and add this computer, the other computers the workspace's routes already name (shown by device id), and the workspace's own machine, which always comes last. The editor adds a computer to a route only from Imbue Studio on that computer (approving an agent's request for a proxy on that computer is the other way in); after that, any of your computers can reorder or remove it.
+
+- The setting now belongs to the workspace's machine instead of to each computer, so all of your computers show and edit the same route. Each computer still forwards a service's requests only when the route names it. A service that was turned on before this change reads as a route through the computers that had turned it on.
+
+- An agent can ask in its permission request (`"proxy": true` on a `predefined` request) for a service to be proxied through your desktop. The approval dialog then shows the **Proxy through my desktop** switch, turned on, with the route the service would have: the computer you approve on first, then the places its route already names. Approve first reads the workspace's machine, so that routes set from your other computers are kept, and then sends the permission, the account's credential and the new route to the machine as a single change; turn the switch off to approve the permissions alone. If the machine cannot be read or the route cannot be set, the request stays pending and nothing is granted on the machine. The agent is told where the service's requests now leave from, or that the proxy was not set up and why.
+
+- The desktop app bundles `latchkey-curl-shims` v0.6.0 (was v0.5.0), matching the release the workspace's machine installs. That release's curl router is the first to follow routes: a request goes to the first computer on the route that the machine has heard from in the last three minutes, or to the workspace's own machine when the route reaches it. A machine set up before this change follows routes once it is provisioned again; until then it sends a routed service's requests to the most recently connected computer.
+
+- Connecting a machine to Claude or ChatGPT no longer needs a pasted code. The machine hands the app the provider's sign-in URL (embed contract v7: `minds:provider-sign-in`, its ack, and `minds:provider-sign-in-end`), and the app listens on the sign-in's loopback callback port on this computer, relays the callback into the machine's sign-in flow through the local forward channel, opens the page in the chosen browser, and raises the window showing that machine once the machine has answered. The browser ends on a page from the app saying how the sign-in went (signed in, didn't finish and why, still finishing, out of date, no longer waiting, or couldn't reach the machine), never on anything the machine sent.
+
+- The relay only listens for a provider URL on a known host with a loopback callback on a port the provider CLIs use, and refuses URLs a browser could read as another host. It never takes a port another program holds or another machine's sign-in is still waiting on (a relay whose callback was answered gives its port to the next sign-in), keeps at most one port per machine, opens pages at most once a second per machine, and gives the port up 15 minutes after arming, 60 seconds after the callback, or when the machine says the sign-in ended.
+
+- New **Settings > Sign-ins** setting, "Open sign-ins in": the default browser or any browser found installed.
+
+- Record the minds 0.8.5 cut, its release-test runs, and its staging deploy and bake in `docs/deploy/history/minds-v0.8.5.md`, and queue the remaining production steps in `docs/deploy/next_deploy.md`.
+
+## 2026-10-06
+
+The share panel now lists every app, and calls each one what the workspace calls it.
+
+An app whose registered name was not already a hostname label was dropped from the panel's per-app list, with no row and no explanation: the only way to share it was to share the whole workspace. The rule dated from when a per-app share link was built out of the app's name, so the name had to be DNS-safe. Links have since been built from the app's own origin label (`<name>-<rand>`), which is DNS-safe whatever the app is called, so the rule protected nothing and only hid apps. It is gone, and an app named `my_app` is now a share target like any other.
+
+The panel also shows the name a person reads rather than the identifier underneath it: "File Viewer", not "files". The name travels from the app's manifest through the workspace's services event stream (a change that ships in default-workspace-template), so an older workspace, and an app registered with no manifest at all, still show the registered name. Two apps may be called the same thing; when they are, each shows its own name beside it so the rows can be told apart, and a name nothing collides with stands alone.
+
+The app's registered name remains the identifier everywhere a machine reads one: the key of its share grants, the `?target=` the in-workspace Share button deep-links to, and the origin its link is built from. Nothing about who may open a share changed.
+
+- Promote minds 0.8.5 to the alpha channels: the desktop alpha channel serves ToDesktop build `2610066k8bzbhej` (mac and Linux, 100%), and browser-created alpha workspaces pin to `minds-v0.8.5`. Beta and stable stay on 0.8.4.
+
+- Promote minds 0.8.5 to the beta and stable channels: both desktop channels serve ToDesktop build `2610066k8bzbhej` (mac and Linux, 100%), and browser-created beta and stable workspaces pin to `minds-v0.8.5`. Every channel now serves 0.8.5.
+
+## 2026-10-05
+
+Every collapsible section in the app -- the manifesto's points and the creation page's reading material, the share panel's inherited permissions, the machine-recovery card's error details and SSH block, and the settings pane's "Update to a specific version" -- now answers to a screen reader and a keyboard the same way.
+
+Each had been written out separately, so each had drifted. All of them said whether they were open; none said *which* block it opened, none let a screen reader move from a summary to the block it controls, and none drew a focus ring for a reader using the keyboard. One of them was a copy of another, made because the shared version hardcoded every class it drew and so could not be dressed for a second place.
+
+They are now one component that holds the behaviour -- the box, the summary, the panel, the wiring between them, and the rule that a shut panel is not drawn at all rather than hidden, so what it holds is out of reach rather than merely out of sight. Each place supplies only what makes it look like itself: its summary and its classes.
+
+They also now open the same way. Three of them had drawn three different markers -- one chevron turned, two chevrons swapped, and two text glyphs swapped -- which rendered as a difference of a few dozen pixels in a thirteen-by-nine box. The turning chevron is now what a collapsible draws unless it asks for otherwise, so opening reads as a turn rather than a cut wherever you meet one. Nothing else moves on screen.
+
+The dev-setup checklist and the environments reference now point at
+`#project-studio-internal-product` when telling developers where to ask for a
+`minds-dev` Modal workspace invite. The Slack channel was renamed from
+`#project-minds-internal-product` as part of the Minds-to-Studio rename, so the
+old name no longer resolves to anything.
+
+Added invitations to the share panel (`specs/inviting-granted-visitors/spec.md`). A granter can invite the person behind a user grant or an email grant; Imbue sends the invitation email on its notification stream, and the row shows what the granter may learn: invited (with when), could not invite, or joined (with the first and latest visit). Nobody at a domain grant is notified, as the panel already says.
+
+- Every save of the grants document while the workspace is published, every publish, and every load of the panel push the parsed document to Imbue Cloud's centralized grants table, which invitations are made from. The sharing status document carries `grants_synced`: false when the push did not land (the next save or load retries), null while unpublished; the panel offers no Invite until the grants are synced.
+
+- Desktop API: `POST /api/v1/workspace-sharing/<id>/invitations` (body `{"email": ...}` or `{"user_id": ...}`, plus an optional `app`) invites one grantee and answers `{outcome, invited_at}` with `outcome` one of `invited`, `could_not_invite`, `over_allowance`, `too_soon`, or 409 `{"error": <code>}` with the connector's refusal (`grants_out_of_date` is retried once after a push, `not_invitable` means the person has already joined). `GET /api/v1/workspace-sharing/<id>/invitation-outcomes` lists each open user or email grant's outcome.
+
+- Granting a person now requests their invitation on its own: there is no separate Invite button for the first send, and the connector still applies the cooldown, the allowance, and the suppression list. Each row's invitation status indicator is one typed value (nothing, inviting, invited with when, could not invite, the refusal a cooldown or an allowance gives, or joined with the visits), so exactly one of them ever shows, with a re-invite offered only when another send can be made. The row clips its own content, so the re-invite never floats outside it.
+
+- Settings: an account's notification email can be turned off and on from the Accounts page (`GET`/`POST /ui/api/accounts/<user_id>/notification-preferences`); the switch governs invitations and other notification email, never the email an account needs such as password resets.
+
+- Corrected the workspace glossary for the invitation rulings of 2026-09-30: the suppression list governs the notification stream only (verification and password-reset mail never consult it), and the email provider is named as Postmark.
+
+- An invitation now carries the workspace's own display name, as the app shows it, rather than the internal name of its primary agent (`system-services` on every workspace), which is what the invitation email had been naming the workspace. A workspace with no display name sends none, and the email says so in words instead of inventing one.
+
+The share panel's "Enable sharing" switch no longer reads No while the panel is still finding out. Reading a workspace's sharing status takes seconds (a connector lookup plus an exec into the workspace), and the switch used to render off until that read answered, so a shared workspace opened its panel on the wrong answer.
+
+- Every wait is shown in the switch itself, with no label beside it: a small ring spinning in the spot the knob sits in. Until the first answer of a session arrives there is no knob, only the ring at the off side, so nothing reads as off before it is known to be. If that read fails with nothing to show, the bare switch is greyed out over the existing error notice.
+
+- Opening the panel again draws what it showed last time at once (the switch, the grant list, the link) and reads afresh behind it, the ring spinning in the knob meanwhile. The answers live in a shared TanStack Query cache (`@tanstack/query-core`, new frontend dependency) for thirty minutes after the panel closes.
+
+- Throwing the switch cancels the status read still out, so a stale answer can no longer flip the switch back, and the ring spins in the knob on the side the switch was thrown to, in place of the dimmed switch shown before. The toggle runs as a mutation in the same client's ledger: a panel closed and reopened while a toggle is in flight shows it in flight and takes its answer, and the answer is written through to the cache so the next panel starts from it.
+
+- Imbue Studio now prompts a workspace to update only when a newer minor release of the workspace template is available. With the app on 0.8.4, workspaces on 0.7.x and older show "Update available" and are covered by "Update all" / "Schedule all", while workspaces on 0.8.0-0.8.3 are not badged, bannered, or bulk-updated. A prerelease counts as the minor release it precedes.
+
+- A workspace behind only by a patch release can still be updated or scheduled by hand from its Settings > Updates, and a schedule the user armed for it runs in the update window like any other.
+
+- The release runbook (`docs/deploy/ops/app-release.md`) now explains that choosing a patch or a minor bump decides whether existing workspaces are prompted to update.
+
+- Cut the minds 0.8.5 release: the app version is 0.8.5 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.8.5`, carrying everything that landed on `main` since `minds-v0.8.4`. Existing workspaces are prompted to update only when a new minor template release is available (a patch release stays quiet), the share panel's switch shows a loading state while its status is unknown, the verification and password-reset emails carry the Imbue Studio brand, and the latchkey relay no longer leaks gevent hub descriptors on mngr threads.
+
+- The realistic-signup deployment test no longer expects `send-verification` to report `sent: true` right after signup: signup sends the verification email itself (since 0.8.0), so that send lands in the per-user cooldown. The LiteLLM spend deployment test now explains a missed spend in its failure message: the key's token row, the proxy's per-request spend logs for it, and the proxy's readiness.
+
+Adopted the new repo-wide `raw ConcurrencyGroup.start_new_thread calls` ratchet (`test_prevent_raw_start_new_thread`). It flags production code that calls `ConcurrencyGroup.start_new_thread` directly instead of `start_mngr_thread`, the mngr helper that destroys the thread's gevent Hub when its target returns. No production code change in this project.
+
+- Promoted minds 0.8.4 to Linux on every desktop channel: `[channels.stable]`, `[channels.beta]` and `[channels.alpha]` now list `platforms = ["mac", "linux"]` on the same ToDesktop build `261003ret49em92` (100%), so `stable-linux.yml`, `beta-linux.yml` and `alpha-linux.yml` move from 0.7.3 (0.7.4 on alpha) to 0.8.4. The web channels are unchanged.
+
+- The 0.8.x `.deb` is still named `imbue-studio` with no `Replaces`/`Conflicts: minds`, and ToDesktop exposes no way to set those fields, so a 0.7.x `.deb` install does not update in place. `docs/desktop-app.md` (Linux) now documents the manual upgrade (`apt remove minds`, then install the new `.deb`; data in `~/.minds` is kept), `docs/deploy/ops/app-release.md` step 9 records why the metadata cannot be fixed on our side, and `docs/deploy/next_deploy.md` queues the connector deploy and the post-deploy checks. AppImage installs update in place as before.
+
+- Recorded the minds 0.8.4 release in `docs/deploy/history/minds-v0.8.4.md`: the thorough-path cut on the latest mngr and template, both green launch-to-msg runs, the ROLLOVER deploys on both tiers, the bakes (4 rows on staging, 20 on production), the promotion of mac and web to alpha, beta and stable (Linux stays on 0.7.4 for alpha and 0.7.3 for beta and stable), the production services redeploy that makes the stable mac download fallback serve 0.8.4, and the production pool work that followed: a retirement that destroyed 140 never-leased `available` rows at older tags, then headroom bakes that brought `minds-v0.8.4` to 60 available rows.
+
+- Reset `next_deploy.md` for the next release: the state lines describe 0.8.4 and production's retired pool; Stage F and the device-login check now name 0.8.4; the release-notes item targets the next beta and stable promotion; the pool-retirement item now covers only staging, whose boxes the 0.8.4 bake filled; and the `feb11eae` item counts 0.8.4 among the bakes that avoided the box.
+
+- The fast-path check in `docs/deploy/ops/app-release.md` ("Verifying a release in a running workspace") now greps the desktop's actual log directory: `~/Library/Logs/Imbue Studio/<tier>/` on macOS and `~/.<MINDS_ROOT_NAME>/logs/` on Linux. It grepped `~/.<MINDS_ROOT_NAME>/logs/` on every platform, which is empty on macOS since the desktop moved to the platform-canonical directories.
+
+- The dependency table in `docs/deploy/ops/services.md` now says Postmark carries account-management email to every recipient while `POSTMARK_ENABLED=1`, and SuperTokens' hosted delivery only while it is off. [PR #1480](https://github.com/imbue-ai/mngr-internal/pull/1480) removed the `imbue.com`-only rule the row still described.
+
+Add `weishi` to the dev tier's management-plane operator list, so gen-2 box access (slice bakes, `server` commands) works from the dev tier.
+
+## 2026-10-04
+
+- Manage Accounts shows each account's plan and usage right away when reopened: the last figures loaded in this session appear at once, with a small spinner beside the plan name while a fresh read replaces them. If that read cannot reach Imbue Cloud, the earlier figures stay on screen, marked as not refreshed, instead of the section switching to "unavailable". A signed-out account shows as unavailable rather than with its earlier figures, which come back once it signs in again.
+
+## 2026-10-03
+
+Follow the hosted signup page's plan cards and the free plan's new "Limited" label.
+
+- The Accounts page shows the `free` plan as "Limited", in both the current-plan line and the plan switcher; the stored plan name is unchanged. The switcher's Limited description matches the signup page's notice.
+
+- `test_hosted_pages_signup_via_playwright` asserts Explorer is preselected by checking that the Explorer card's radio is marked checked (`aria-checked`), instead of the old dropdown's value.
+
+- `test_hosted_pages_signup_via_playwright` checks the create-account tab's "By continuing, you agree to ..." notice instead of ticking the removed terms checkbox (and no longer expects a submit without it to be refused).
+
+## 2026-10-02
+
+The desktop client now passes its device id to the `mngr latchkey forward` supervisor, which announces this computer under that id to every remote workspace's machine, each desktop over a tunnel of its own. Using two desktops at once no longer makes them fight over one tunnel, and a workspace can list the user's desktops (`GET /devices` on its gateway) and address one or several of them with the `X-Latchkey-Device` header on the desktop-owned routes, on local and remote workspaces alike. Requests without the header behave as before.
+
+The desktop app bundles `latchkey-curl-shims` v0.5.0, matching the release the VPS gateway installs.
+
+Updated the machine-operations test double for the new `permissions_format_version` field on `FetchedMachineState` (see the `mngr_latchkey` entry: per-host permissions migrations). No behavior change in minds itself; a remote workspace's Permissions tab now reads a policy the machine holds in an older format only after it has been migrated and handed back to the machine.
+
+- Cut the minds 0.8.4 release: the app version is 0.8.4 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.8.4`, carrying everything that landed on `main` since `minds-v0.8.3`. Two desktops signed in to the same account each get their own latchkey tunnel to a remote workspace instead of fighting over one, a workspace's latchkey permissions are migrated per host before the Permissions tab reads them, an app's share pane lists the permissions it inherits from the whole workspace, and mngr's docker provider ships as the separate `imbue-mngr-docker` plugin.
+
+- Promoted minds 0.8.4 to the alpha channels: the desktop channel moves to ToDesktop build `261003ret49em92` (100%, mac only) and the web channel pins browser creates to `minds-v0.8.4`. Linux stays on 0.7.4, because the 0.8.x `.deb` is still a differently named package (`imbue-studio`) with no `Replaces`/`Conflicts: minds`. Beta and stable stay on 0.8.3, as do their web channels.
+
+- Promoted minds 0.8.4 to the beta and stable channels: both desktop channels move to ToDesktop build `261003ret49em92` (100%, mac only) and both web channels pin browser creates to `minds-v0.8.4`. Linux on beta and stable keeps serving 0.7.3, because the 0.8.x `.deb` is still a differently named package (`imbue-studio`) with no `Replaces`/`Conflicts: minds`.
+
+- minds and the packaged desktop app now depend on the new `imbue-mngr-docker` plugin, which is where mngr's docker provider (the `LaunchMode.DOCKER` compute provider) lives after being split out of the core `imbue-mngr` package. No behavior change.
+
+- Comment-only: the workspace-recovery docstring's pointer to mngr's docker usage page now names `mngr help docker_usage`, since that page moved into the plugin.
+
+- Regenerated the packaged desktop app's `apps/minds/electron/pyproject/uv.lock` so it records the new `imbue-mngr-docker` dependency.
+
+## 2026-10-01
+
+Changed: the deploy queue (`docs/deploy/next_deploy.md`) no longer asks for the ci tier's `postmark` Vault entry, which has been pushed. It carries all four keys of `.minds/template/postmark.sh` with the switch left empty and the token of Postmark server 21045229 ("Imbue Studio CI", delivery type Sandbox, which accepts a send and delivers nothing), so ci deploys Postmark-free.
+
+The rollout record (`docs/deploy/history/rollouts/postmark-transport.md`) adds two things to what it already recorded for the 0.8.2 deploys. The password-reset workload is now proven on production: a reset for `danver+test@imbue.com` on 2026-10-01, after the every-recipient deploy, and the mail arrived. That is the second of the transport's two workloads, alongside the verification-email rows already recorded. The ci tier's entry and its Sandbox server are described there too.
+
+The record's one open item is now turning the ci transport on, which needs a Postmark Return-Path and DKIM on `studio-ci.imbue.com`; that domain carries neither, while `studio.imbue.com`, `studio-staging.imbue.com` and `studio-dev.imbue.com` all do.
+
+click 8.5 declares `ClickException.exit_code` as a ClassVar. `ImbueCloudCliError` deliberately overrides it per instance -- every raise site sets the code from the `mngr imbue_cloud` subprocess's return code -- which is now marked as the intentional override it is.
+
+Capped `playwright` below 1.60 during the repo-wide dependency refresh. The UI-flow step script reads a page's state as playwright's aria snapshot, and 1.62 prefixes that snapshot's element refs with a frame id -- `[ref=f3e1]` where 1.59 printed `[ref=e1]` -- on some snapshots of a page but not others. The tree itself is unchanged. Two regexes in `apps/minds_evals` (which pins itself to whatever this resolves to, so its flow lab drives the same browser as the box) match only the unprefixed form: the volatile-attribute strip that keeps renumbered refs from reading as content, and the validator for a ref an agent names. With refs no longer stripped, 7 of the 17 flow-lab tests report `most of the page changed: 18 lines gone, 18 new, of 22` for reads that should say nothing happened. Teaching those two patterns the prefixed form is left to its own change (MIND-299).
+
+`apps/minds/docs/dev-setup.md`'s Imbue-internal prerequisite checklist now includes connecting Linear to latchkey, alongside Vault, Modal, and gen-2 box access. Agents reach Linear only through `latchkey curl`, so a developer who skips it gets flake skills (`/report-incidental-flakes`, `/detect-flakes`) that silently skip filing MIND tickets, and `/work-on-linear` and `/deflake-mngr-ci` that cannot run at all. The entry covers the CLI version floor, both auth paths (`latchkey auth browser linear` and a personal API key), and verification via `uv run python scripts/flake_reconcile.py list-tickets` -- rather than `latchkey services info linear`, whose `credentialStatus` field latchkey 3.x dropped, so it reads as unset whether or not the credential works.
+
+Rebuilt the desktop client's share panel around publish, then grant. The panel is now titled "Share <workspace>" and opens from the same titlebar button and the same in-workspace Share button.
+
+- One switch, "Enable sharing", publishes the whole workspace: it gives the workspace an address on the internet and admits nobody by itself. The sentence saying what sharing does stays under the switch whether it is on or off, and a rule separates the switch from the per-target body below it. Turning it on asks for confirmation ("Enable sharing?") and then, while the link is generated, says so and names the step under way beside a spinner ("Creating link", "Setting up encryption", "Connecting to the relay", "Verifying end to end"). The per-app sharing switches, the staged list, and the requirement to name someone before enabling are gone.
+
+- Permissions are granted per target: the whole workspace first, then each app, each with its own link and its own list. A grant is to one person by email or to everyone at a domain, chosen before typing. Public mail providers cannot be granted as a domain. Malformed entries, duplicates, and the granter's own address are refused before a row appears, and the same rules run in the backend for entries a save adds.
+
+- Adds and removals apply the moment they are made and save behind the panel. A row says "Securely granting access" beside a spinner while its write runs, so the wait reads as the work it is, and reports why it failed when it does -- in the workspace's own words where there are any -- with Retry. Nothing in the panel locks during a write or during publishing, and grants can be added while the link is still being prepared. Writes are coalesced per workspace, and the list is its own scroll region with rows of one fixed height.
+
+- Turning sharing off keeps the list of permissions, visible and removable but inactive ("This workspace cannot be accessed while sharing is off"): the rows are drawn grey and dim, alike whatever they grant, until sharing is turned back on and the list comes back live. Unlinking the account from a workspace clears the list.
+
+- Desktop API: `PUT /api/v1/workspace-sharing/<id>` now publishes and ignores any body, `DELETE` unpublishes and keeps the grants document, `PUT /api/v1/workspace-sharing/<id>/grants` saves the document and refuses invalid entries with `400 {"error": "grant_refused", "refusals": [...]}`, and `GET` reports the grants whether or not the workspace is published. The host-keyed `PUT /machines/<host_id>/sharing` keeps its combined contract, publishing then saving in one transaction, and accepts an empty document. A stored grants document that cannot be parsed is treated as absent by every read and write, so a save or a publish replaces it instead of failing. A web-created workspace is published without seeding the owner's own address, since the gateway admits the owner without a grant. The options payload carries `public_email_domains`.
+
+- Updated the owner-side docs (getting started, overview, design, workspace README, embed contract, deploy notes) to describe publishing and grants, and added glossary entries for stream, grant reason, kind, and strikes.
+
+- Added `apps/minds/scripts/share_panel_renders.py`, which builds the frontend, serves it with the visual-diff fixture bootstrap, answers the panel's routes with fixture JSON, drives the panel into each of the seven states of the share panel mock, and screenshots it. `visual_diff.py`'s bundle build, fixture bootstrap, index renderer, route server, and chromium launcher are now named without a leading underscore so both tools can share them.
+
+- The saving status gives way rather than crowding the address beside it: an address cannot shrink below its own text, so the status shrinks instead, down to the spinner alone when a long one leaves no room at all.
+
+The desktop app no longer sends a verification email of its own when a cloud create is held on an unverified address, and no longer claims an email was sent when it was not.
+
+The connector now sends the link when the account is created, so the create form and the first-run start flow stop originating a duplicate send that only burned the cooldown the user's own "Resend" press needs.
+
+Both surfaces used to state "the link we sent to <address>" whatever had happened, and to report a resend that never went out as "an email was sent a moment ago". A resend now reports which of three things occurred -- sent, suppressed because one went out moments ago, or failed -- and only the first two point the user at an inbox.
+
+An app's share pane now shows the permissions it inherits from the whole workspace, instead of counting them in a sentence.
+
+The sentence that said "1 domain and 2 individuals have been granted access" is gone. In its place, the first entry of the app's permission list is a row that reads "3 permissions inherited from the whole workspace" and opens to show them. It starts closed, so the pane still opens on what the app itself grants; expanded, the inherited rows sit directly under it and are drawn exactly like the app's own. Its header stays at the top of the list while those rows are on screen and scrolls away with them, so a reader is never left with a heading for rows that have gone.
+
+Expanded, the inherited rows are set in from the left and railed down their edge, so they read as the whole workspace's rather than this app's even once the header they hang from has scrolled away. The indent beside the rail still lands a row's contents directly under the words of the summary. Their surfaces are untouched: a domain grant still reads as a domain among them, because the rail says whose the row is while the surface goes on saying what it grants.
+
+An inherited row carries no remove control. The grant belongs to the whole workspace, so a control here would either do nothing or revoke it somewhere the reader is not looking; the whole workspace's own pane is where it comes off. The row keeps the width the control would have taken, so it still lines up with the app's own rows.
+
+Every grant list in the panel is now drawn in one order: domains first, then people, each group alphabetical by what its row reads as. Domains lead because one of them admits more people than any row below it. Sorting on the rendered text is what makes a long list scannable -- a row showing an account's display name sorts under that name rather than under the address or the id behind it. Previously rows kept the order they arrived in, so a newly added one landed at the end of its group; it now lands where its name puts it.
+
+The disclosure behaviour behind the new row -- a control that says whether it is open and what it opens, a panel that names its control back, and a panel that is not drawn at all while closed rather than merely hidden -- is now shared with the app's other collapsible sections rather than written again. Those sections gain the parts they were missing: a control and panel that name each other for a screen reader, and a focus ring for keyboard users.
+
+Also removed with the sentence: the link in it that jumped to the whole workspace's own pane. The inherited permissions are readable in place now, which is what that link was for.
+
+A pulled-out workspace window that Imbue Studio reopens (a restored session at launch or when the app is reopened, a reload after a backend retry or a backed-out quit, a reload from the crash strip) is now marked as reopened: its URL carries `?reopened=1`, which the popout page passes to the workspace shell beside `solo`. The shell then trusts the stored layout, so a popout whose window was brought back to the desktop while the app was away closes instead of pulling the window out again. A tear-out and the window menu's "Open in its own window" are not marked, and their shell still waits for the desktop's save as before.
+
+Bump Latchkey to 3.16.2.
+
+Approving a permission request can now start from the sign-ins the user already has in Google Chrome.
+
+- The first time Approve is about to open a browser for a sign-in (nothing signed in to the service yet, "+ Add account" selected, or a custom service with a login URL), the permission dialog first asks "Want to skip logging in?" and offers to import the user's cookies and site logins from Chrome's default profile into latchkey's browser state, so the browser window that then opens (and every later one) is already logged in. "Import from Chrome" runs `latchkey auth import-chrome` (tens of seconds, with progress shown) and goes on to the sign-in when it completes; a failed import shows latchkey's reason and offers to continue to the sign-in anyway. "Not now" goes straight on to the sign-in; clicking the backdrop approves nothing.
+
+- The offer is made once per installation, whatever the answer: `is_browser_import_offered` in `~/.minds/config.toml` records that it was shown, and the dialog does not ask again. A computer whose latchkey already holds a browser session from a completed sign-in (an install upgraded after its user had logged in through the browser) counts as already offered, so the offer only ever reaches a user who has not logged in through the browser yet. Without settings storage it is never made.
+
+- Settings gains a **Browser cookies** section with an "Import from Chrome" button that runs the same import on demand, for a user who declined the offer or has since signed in to something new in Chrome. The outcome (success, or why nothing was imported) is shown beside the button.
+
+- New routes on the desktop client: `GET /ui/api/settings/browser-import` (whether the offer is still due, and whether an import can run at all), `POST /ui/api/settings/browser-import` (runs the import, blocking for its duration, and counts as the offer having been made), and `POST /ui/api/settings/browser-import/offered` (records the offer as shown).
+
+- Cut the minds 0.8.2 release: the app version is 0.8.2 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.8.2`, carrying everything that landed on `main` since `minds-v0.8.1`. It reports an update install by whether the install started rather than by a transient Squirrel error, lets a permission approval start from the user's Google Chrome sign-ins, stops pulled-out windows piling up behind the main window or popping out again after being dragged back, lands a reopened window's route only after its loading screen has loaded, keeps a briefly unreachable workspace from flipping to "Updating...", and bumps Latchkey to 3.16.1.
+
+- Cut the minds 0.8.3 release: the app version is 0.8.3 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.8.3`, carrying everything that landed on `main` since `minds-v0.8.2`. It shows workspace versions as `v0.8.3` rather than `minds-v0.8.3`, stops sending its own verification email now that the connector sends one at signup, gives a fresh install's first workspace a working latchkey gateway without a restart, gives the macOS icon a flat material, bumps Latchkey to 3.16.2, and relocks every Python dependency at the latest release the cooldown admits.
+
+- The desktop app now logs `[startup] env-setup finished in Ns` once its first-launch dependency setup (`uv sync`) succeeds, so electron.log records how long setup took.
+
+- The macOS launch smoke test (`macos-launch.spec.js`) gives first-launch dependency setup its own 5-minute budget before its existing 3-minute budget for the backend and first page. A first launch on a CI runner downloads about 112 MB of wheels from PyPI, whose CDN intermittently stalls for minutes from GitHub's macOS runners. When setup runs out of time or fails, the test now fails with that reason and the tail of uv's log, not a generic "no content window" timeout.
+
+Marked the minds `test_prevent_if_elif_without_else` ratchet `@pytest.mark.flaky`. Its tree-wide AST parse can exceed the 10s pytest-timeout on a loaded offload sandbox, and it failed CI that way on an unrelated PR. The scan cost itself is tracked in MIND-182. Also removed the `# --- ... ---` section dividers from that ratchet file.
+
+On a fresh install, the app's first workspace now gets a working latchkey gateway without a restart. The fix is in mngr's settings loader; see the libs/mngr and libs/mngr_latchkey changelog entries.
+
+A window reopened from the dock, or opened while startup is still working out where the first window goes, now finishes loading its loading screen before it navigates to the restored session or the start flow. Starting that navigation while the loading screen was still loading could hide the window from tools that drive the app over the DevTools protocol, which intermittently failed the macOS launch tests' dock-reopen checks. Those checks now assert the order directly.
+
+- Promoted minds 0.8.2 to the alpha channels: the desktop channel moves to ToDesktop build `261001kde332ql9` (100%, mac only) and the web channel pins browser creates to `minds-v0.8.2`. Linux stays on 0.7.4, because the 0.8.x `.deb` is still a differently named package (`imbue-studio`) with no `Replaces`/`Conflicts: minds`. Beta and stable stay on 0.7.3, as do their web channels.
+
+- Promoted minds 0.8.3 to the alpha channels: the desktop channel moves to ToDesktop build `2610016vw4mdxi8` (100%, mac only) and the web channel pins browser creates to `minds-v0.8.3`. Linux stays on 0.7.4, because the 0.8.x `.deb` is still a differently named package (`imbue-studio`) with no `Replaces`/`Conflicts: minds`. Beta and stable stay on 0.7.3, as do their web channels.
+
+- Promoted minds 0.8.3 to the beta and stable channels: both desktop channels move to ToDesktop build `2610016vw4mdxi8` (100%, mac only) and both web channels pin browser creates to `minds-v0.8.3`. Linux on beta and stable keeps serving 0.7.3, because the 0.8.x `.deb` is still a differently named package (`imbue-studio`) with no `Replaces`/`Conflicts: minds`.
+
+- `docs/deploy/history/minds-v0.8.3.md` records the headroom bake for the promotion (20 more production rows at `minds-v0.8.3`, all verified) and the promotion itself; `next_deploy.md` drops the staging-rehearsal item, turns the promotion item into the release-notes note about opening each shared workspace's share panel, and adds a production services deploy so the stable mac download fallback goes live.
+
+The packaged app's Python lock now requires a wheel or an sdist of every package on each shipped target (macOS arm64, Linux x86_64), via `[tool.uv] required-environments` in `electron/pyproject/pyproject.toml`. A build whose `uv lock` ran while a dependency release was only partly uploaded at the 14-day cooldown cutoff used to ship a lock that could not install on Linux (gevent 26.9.0: macOS and Windows wheels visible, Linux wheels and sdist not yet), which failed launch-to-msg's `linux_artifacts`. uv now resolves such a target to the newest version it can install there.
+
+- Recorded the minds 0.8.3 beta and stable promotion in `docs/deploy/history/minds-v0.8.3.md`: the published feeds, and production deploy `20261002T005351Z` from `main` `8906c93efa`, which puts the 0.8.3 mac download fallback live. `next_deploy.md` drops the now-done production deploy item and names the tree each tier runs.
+
+- Recorded the minds 0.8.2 release in `docs/deploy/history/minds-v0.8.2.md`: the thorough-path cut, its stop on Apple's lapsed developer agreement and its re-freeze on the latest mngr and template, the bundle-lock check that accepted filelock 4.0.0, every launch-to-msg run and what it proved, the ROLLOVER deploys that put every user's account mail on Postmark, the bakes on both tiers, and the alpha promotion (mac and web; Linux held on 0.7.4).
+
+- Reset `next_deploy.md` for the next release: the decisions on PR #1256 (merged, in 0.8.2) and PR #1500 (closed unmerged) and both Postmark items are discharged; the staging rehearsal, Stage F, the beta/stable promotion and the device-login check now target 0.8.2; the pool keep-list gains `minds-v0.8.2`; and a new item asks to prune or extend the 0.4.0 wire-compat snapshot before its support window ends on 2026-10-22.
+
+- `docs/deploy/history/rollouts/postmark-transport.md` records the proven production send and the 2026-10-01 deploys that shipped PR #1480 to both tiers.
+
+- The app-release runbook now says how to name the template checkout's branch when a second cut runs from the same mngr checkout, to re-create a release checkout made before a template history rewrite, and that a major moving only in the bundle lock is exercised only by launch-to-msg.
+
+- Recorded the minds 0.8.3 release in `docs/deploy/history/minds-v0.8.3.md`: the thorough-path cut on the latest mngr and template, the bundle-lock check that accepted three deliberate downgrades from the dependency relock, both launch-to-msg runs, the ROLLOVER deploys that ship the signup-time verification email, the bakes on both tiers, and the alpha promotion (mac and web; Linux held on 0.7.4).
+
+- Reset `next_deploy.md` for the next release: the staging rehearsal, Stage F, the beta/stable promotion and the device-login check now target 0.8.3, and the rehearsal list gains 0.8.3's own changes; the pool keep-list gains `minds-v0.8.3` and notes that staging has no free machine left; and the `feb11eae` item now asks to investigate its slice ordinal 3 by resetting that slot cleanly outside a bake.
+
+- The pool-hosts runbook now names the symptom of an `IdentityAgent` pointing at a locked agent: every box `unaudited` with `slice disk list failed (exit code -15)`, fixed by running with `-o IdentityAgent=none`.
+
+- The app-release runbook's failure modes now cover a ToDesktop Mac build failing at signing or notarization because Apple's developer agreement needs signing (HTTP 403 "A required agreement is missing or has expired"), and how to cancel a ToDesktop build with `scripts/cancel-todesktop-build.sh`, where its credentials come from, and what its `FAILED_PRECONDITION` answer means.
+
+Replaced the brand lockup with the new "studio" wordmark. The loading document's
+intro lockup, the mark it parks in the titlebar band, and the running app's start
+titlebar all draw the new shape, in the same brand green on the same white page as
+before. `mind-wordmark.svg` is gone; the artwork ships as `studio-wordmark.svg`.
+
+The intro's schedule is untouched -- only the lockup's box changed, from 32% of the
+page at 577 x 139 to 27.5% at 1035 x 290, which holds the wider drawing at the
+height the old one had.
+
+The intro's second line now reads "honest software" in place of the
+ungrammatical "An honest software".
+
+The intro now plays on the brand's brown rather than a white page: the lockup and
+the two lines are cream on `#492222`. Once the mark has parked in the titlebar
+band the page settles over 600ms -- the brown goes white while the mark goes
+brown with it, so the drawing never loses contrast against the page, and the
+state it lands on is the one every later launch opens on at once.
+
+The intro is no longer a fixed film. The wordmark's six letters now pop in one
+after the next on a spring rig (ported from the splash-page sketch), and once
+they have landed the loader fades in under them and the page waits there for
+however long starting up takes. When the app is ready the loader goes, *honest
+software* plays, and only then does the lockup travel up to the titlebar -- so
+that move always means the same thing: the app is ready for you. The opening
+line, "Create an intentional life", is gone.
+
+The mark is bigger on the splash -- 48% of the window's width rather than 27.5%
+-- and no longer clipped while it animates: a letter squashing and ringing on
+arrival reaches outside the drawing's own bounds, and the box it is drawn in now
+leaves room for that.
+
+The splash holds its page empty for a second before the first letter lands, so
+the mark arrives onto a page that is already there.
+
+Fixed the loader reappearing for a moment at the very end of the intro. It
+reports what startup is doing, and the intro now only finishes once startup is
+over, so there was nothing left for it to say.
+
+Nothing jumps when the loader gives way to the line: the slot under the mark
+reserves a line's height whether or not anything is in it, and the loader's
+status line sits exactly where *honest software* will be.
+
+The loader also stops flashing past on a quick start. A launch that is ready
+within half a second of the mark landing never shows it, and one that does show
+it holds it for at least a second and a half, so what it says can be read.
+
+Clicking or pressing a key no longer cuts the intro short. The page waits on the
+loader for as long as starting up takes, and the controls on screen during that
+wait -- "Show details" in particular -- are meant to be pressed.
+
+The *honest software* line is gone from the splash, and with it everything that
+served only it. The departure is now the loader leaving, the mark travelling and
+the page settling -- 1.65s after the app is ready, down from 3.95s.
+
+The loader is restyled: a 14px status line, a 12px bar with fully rounded ends on
+both the track and the slider inside it, and a 12px "Show details".
+
+The startup log is now opened from the status line itself, which underlines on
+hover. The separate "Show details" link is gone.
+
+The mark and the loader are also one centred column now, so opening the log lifts
+the mark rather than pushing the log off the bottom of the window -- and because
+the loader holds its place in that column from the first frame, nothing shifts
+when it appears.
+
+The loader sits closer under the mark, and its bar is 160px wide.
+
+The splash survives a short window now. The mark is capped against the window's
+height as well as its width, and the startup log shrinks to fit rather than
+running off the bottom -- previously a wide, short window cropped the mark's top
+and the log's bottom at the same time.
+
+The progress bar and the status line are one target now -- pressing either opens
+the startup log.
+
+Under "reduce motion" the bar no longer slides: an indeterminate indicator loops
+forever, which is the case that setting is most clearly about. The phase line
+carries the progress instead. A long phase line also wraps rather than running
+past the edge of the window.
+
+Every launch now shows the same screen. There is no longer a first-launch intro
+and a plainer screen for every launch after it: the app has to start either way,
+so the quitting screen and the error screen are on the brand's page under the
+mark too, and the wordmark animates in whatever brought you here.
+
+What a later launch skips is the mark's travel to the titlebar, which only means
+anything when the start flow is about to hold it there. Every other route paints
+over the page as it stands.
+
+The wordmark is redrawn from the latest artwork -- the s and the t have changed
+slightly. The flat asset the parked mark shows is now built from the same six
+letter paths as the animation, so the two can no longer drift apart.
+
+The quitting screen no longer fades its report in -- it is there from the first
+frame. A quit is not waiting for anything to become worth saying.
+
+The start flow now opens with the agent saying the thing the exchange is about:
+"Imbue Studio is honest software." Two seconds later -- a beat long enough to
+read it and be brought up short by it -- your side asks "Wait.. what is honest
+software?", which the five points answer. The exchange used to start
+mid-thought, with a question about a phrase nobody had said. The same opening
+leads the workspace's seeded first chat and the creation page's restatement of
+the conversation, so all three still match.
+
+The mark in the start flow's titlebar is 20px tall rather than 16px, and the
+loading page's mark travels to that height, so the hand-off between the two
+documents is still a substitution rather than a resize.
+
+The app icon is redrawn from the new artwork -- the cream figure on the brand's
+brown, in place of the old head-and-circles mark.
+
+Each platform now gets the corner it expects, rather than one file for all of
+them. macOS takes the brand's squircle on Apple's grid: an 824x824 body centred
+in the 1024 canvas, where before the icon bled to all 1024 and so sat visibly
+larger in the Dock than every native app beside it. Linux takes a full-bleed
+rounded square instead, since no Linux desktop masks the icon to a shape of its
+own -- what the file holds is what is drawn. The dev dock icon keeps its olive
+and its `dev` label on the new figure.
+
+The quitting screen runs the loader bar too. A quit is a wait like any other --
+the backend gets a SIGTERM and up to five seconds to go, and local workspaces
+may be stopping -- so the screen moves while it waits instead of holding a
+line of text still. The startup log stays off it: there is nothing to disclose.
+
+Fixed a flash of no logo between the loading page and the start flow. The mark
+reached the titlebar and then vanished for 714ms before the app's own mark
+appeared. Two things caused it: the page swapped the animated lockup for the
+flat one at the *start* of the settle rather than at its end, and the flat one
+was painted underneath the layer carrying the page's colour, so for that stretch
+neither was on screen. The mark now stays on the page throughout, crossing from
+cream to brown as the page goes the other way, which is what the settle was
+always meant to look like. What is left is the 62ms the next document takes to
+paint its own.
+
+The start flow's opening line sets *honest software* in italics -- the phrase
+the rest of the exchange is about, picked out where it is first said. The
+workspace's seeded copy of the conversation matches. The streaming is
+untouched: every character still lands exactly when it did.
+
+Fixed the mark shifting by up to half a pixel as the loading page gives way to
+the start flow. The travel to the titlebar was aimed with `offsetTop` and
+`offsetHeight`, which round to whole pixels, so where the mark came to rest
+depended on how the window's width happened to round -- it parked a fraction
+high in some windows and a fraction low in others, and the app's own mark then
+snapped to the right place. The travel now measures in fractions of a pixel and
+lands on it exactly, at every window size.
+
+The start flow now closes its manifesto by asking about error reporting, and
+that answer is what starts the questions:
+
+> Is it ok if we report errors to help improve Studio?
+> *See more*
+
+"See more" opens, in italics under the question, what the reports carry and
+where the answer can be changed. "No" and "Sounds great" answer it, and whichever
+is pressed is saved and becomes the user's turn.
+
+This replaces two things. The "Sounds great, let's continue" button is gone: the
+exchange now ends by asking rather than by inviting a press. And the
+error-reporting checkbox that sat above the where-to-run answers is gone with
+it. That checkbox was where nearly every install actually consented, yet it was
+the one screen that said nothing about what is collected -- no explanation, no
+link -- while the `/consent` screen, which carries both, is reached only by an
+install that got past onboarding without answering. The question is now asked
+once, on its own, in the exchange that has just finished promising transparency.
+
+Workspace versions now read as `v0.8.2` rather than the release tag `minds-v0.8.2` wherever the app shows them: the update dialog's version rows and messages, the workspace's Updates settings, and the "Updated to ..." note on the landing page. The git tags and everything that reads them are unchanged; only the displayed text drops the `minds-` prefix. Branch names and other refs (a dev build's `main`, an explicit commit) still show as they are.
+
+The macOS app icon is flat again.
+
+macOS 26 treats a flat `.icns` as artwork to light: it separates the cream figure from the brown plate and applies the Liquid Glass material, so the redrawn icon arrived in the Dock bevelled, glossy and shaded top to bottom, nothing like the flat tile the brand draws. No build setting caused this and none could turn it off -- the shipped artwork was pixel-uniform, and the previous icon escaped only because the detail inside its head defeated the system's segmentation.
+
+macOS now gets `electron/assets/icon.icon`, an Icon Composer package that states the material instead of leaving it to be guessed: the figure as its own layer with `specular: false`, `glass: false`, no shadow and no translucency. The system still draws the squircle and lights the plate's edge, as it does for every icon on the platform, but it no longer embosses the figure. Linux and the dev dock icon are unchanged.
+
+Building the macOS app now needs Xcode 26 or newer on the build machine, which is what compiles the package.
+
+## 2026-09-30
+
+Removed the 123 comment lines that had accumulated inside `apps/minds/imbue/minds/test_ratchets.py` explaining why individual ratchet counts had been raised.
+
+A ratchet file records counts, not history. The reason a count moved now goes in the commit message and the changelog entry, the reason a particular code site is allowed goes in that module's docstring, and the set of exempt files goes in the `excluded_patterns=(...)` argument -- all places that stay correct as the code changes, which the comments did not.
+
+- The two operational docs tracking the Postmark rollout now read as if the `imbue.com`-only rule is gone, because it is. In `docs/deploy/next_deploy.md` the item is no longer "decide PR #1480" but the thing the next deployment actually does: send every user's account mail through Postmark. In `docs/deploy/history/rollouts/postmark-transport.md` that PR leaves the "Open" list for a new "Landed since, not yet deployed" section, which records that the rule is gone from the code while both tiers still enforce it until their next services deploy.
+
+- `postmark` joins `[secrets] services` in every tier's `deploy.toml` (ci, dev, staging, production), so `minds-admin env deploy` pushes the new `postmark-<env>` Modal secret from Vault. Before a tier's next deploy its Vault entry `secrets/minds/<tier>/postmark` must declare the four keys of `.minds/template/postmark.sh`; empty values are fine, and an unset `POSTMARK_ENABLED` keeps SuperTokens' hosted email delivery. The deploy checklist (`docs/deploy/next_deploy.md`) carries that step.
+
+The MIND-361 item in `docs/deploy/next_deploy.md` now records the per-tier state of the `postmark` Vault entries as of 2026-09-29: dev pushed with the switch empty and validated end to end, production and staging pushed with `POSTMARK_ENABLED=1` once `studio.imbue.com` was verified in Postmark, and ci filled locally against a Sandbox server pending its push.
+
+A workspace that is still preparing an update no longer flips to "Updating..." whenever it briefly stops answering.
+The app's recovery guard used to mark the row as applying for six minutes whenever it could not read the workspace's update record, which on a heavily loaded workspace happened on every short outage.
+It now still holds off restarting that workspace but leaves the row showing where the run actually is (still preparing, or waiting on the user), and it only reports an apply when the workspace says one is under way.
+The guard also no longer holds off (or later restarts) a workspace that answered again while the guard was still asking it about its update.
+
+A restore's pre-restore safety snapshot and its "restored" snapshot now match the workspace's hourly backups more closely. Both skip the contents of a directory an app marked rebuildable with a `.nobackup` file (keeping only that file), honor `backup.toml`'s new `extra_excludes` on top of the excludes, and the built-in excludes they fall back to now include a throwaway instance's data copies and scratch directories, as the backup service's do. Without this, a workspace whose hourly backups skip a large cache would still copy it into the safety snapshot before every restore.
+
+The `workspace-tmp-exec.md` rollout guide now covers available pool hosts, which `minds-admin repair-tmp-exec` can now repair: how the repair differs on a parked host, what a lease landing mid-repair does, and the survey and canary steps that include them.
+
+Both rollout guides (`workspace-tmp-exec.md` and `gvisor-oom-headroom.md`) now record the 2026-09-30 production sweep of `install-vm-memory-units`, `hotpatch-earlyoom` and `repair-tmp-exec` over all 305 leased and available rows, including the workspaces it could not repair and why, and what the sweep showed the `/tmp` repair still needs (a check that the container can relaunch its services agent, and a record of hand-started programs the restart ends).
+
+Bump Latchkey to 3.16.1.
+
+A pre-warmed `mngr` process that is slow to exit on SIGTERM is now killed after a 2 second grace instead of 30 seconds, and stopping one may take up to 10 seconds before it is reported as stuck. Previously such a process could outlive its concurrency group's 10 second exit timeout, which failed teardown with `ConcurrencyExceptionGroup: 1 strands did not finish in time and were terminated` (seen in `mngr_caller_test.py::test_call_times_out_and_reports_timed_out` on a loaded machine).
+
+Pulled-out windows no longer pile up behind the Imbue Studio window. A window you drag back also no longer pops out again on its own a few seconds later.
+
+- A popout dropped back onto the Studio window closes as soon as that window's desktop has the window back, or after two seconds. Before, it waited for its own page to notice. A popout whose page had not loaded yet stayed open, and once loaded it pulled the window back out. Those leftover popouts also made popping the same window out again take about 20 seconds, because they held Chromium's cache lock on the popout's address.
+
+- A window is out in at most one popout. Tearing a window out, or opening it in its own window from its menu, while an earlier popout of it is still on its way back closes the earlier one first. Different windows of a workspace can still each have their own popout.
+
+- A popout torn out of a Studio window that closes mid-drag now stays where it is, focused. Before, it kept following the cursor.
+
+- A fast drag out now pulls the window out every time. The release could reach the workspace before the word that the window had gone out. Depending on which side heard the release first, the window then showed both in its popout and on the desktop for a few seconds, or the popout flashed and closed. `minds:window-drag-ended` now says whether the drag was cancelled. On any release, the app keeps a popout that is out and says `released`, and the workspace takes that word even after its own release.
+
+- The Electron log records tear-out steps, the end of each title-bar drag, and every popout close with its reason.
+
+- The embed contract now says `minds:reattach-window`'s frame is in fractions of the workspace surface, which is what the chrome has always sent. It used to say fractions of the backdrop.
+
+- `mac-runner-reset.sh` now SIGKILLs every process with a file under the app bundles or the data roots (its executable, a mapped library, its cwd, or an open file) and waits for each to exit before it removes the roots, using the new `kill-processes-under.sh`. Previously it killed only processes whose command line named an app bundle, so the detached `mngr latchkey forward` supervisor's `mngr observe` child, which runs from the state root's venv under a `setproctitle` name, could outlive the reset and recreate `<tier>/mngr/{profiles,events}` after the removal, failing the launch-to-msg post-test cleanup with "survived cleanup". The reset fails if such a process cannot be stopped, and the removal no longer retries on a timer.
+
+- Promoted minds 0.8.1 to the alpha channels: the desktop channel moves to ToDesktop build `2609303soipfevu` (100%, mac only) and the web channel pins browser creates to `minds-v0.8.1`. Linux stays on 0.7.4, because the 0.8.x `.deb` is still a differently named package (`imbue-studio`) with no `Replaces`/`Conflicts: minds`. Beta and stable stay on 0.7.3, as do their web channels.
+
+- Recorded the minds 0.8.1 release in `docs/deploy/history/minds-v0.8.1.md`: the thorough-path cut and its re-pin to the latest mngr and template, every launch-to-msg run and what it proved, the ROLLOVER deploys and bakes on both tiers (including the production box that failed every attempt at one slice ordinal), and the alpha promotion (mac and web; Linux held on 0.7.4).
+
+- Reset `next_deploy.md` for the next release: PR #1357 is discharged (closed on purpose), the Stage F upgrade check and the beta/stable promotion now target 0.8.1, the pool keep-list gains `minds-v0.8.1` and `minds-v0.8.0`, and two items are new before 0.8.1 goes to beta or stable: decide on PR #1500, which 0.8.1 does not carry, and run the staging rehearsal 0.8.1 skipped. A third new item gates the next bake on production box `feb11eae`, whose slice ordinal 3 failed every 0.8.1 attempt.
+
+- The pool-hosts runbook now says which audit fields are per box and which are top-level in `server-audit`'s JSON, and that `status` comes from `server-list`.
+
+- The app-release runbook now says that a launch-to-msg dispatch's `-r` picks the workflow and e2e harness while `commit_sha` picks the binary, and lists two more launch-to-msg failure modes: the post-test cleanup's "survived cleanup" and "no backend login URL after 120s".
+
+- Updated the `next_deploy.md` Postmark item after staging took #1409 (`20260930T184917Z`): it now asks for a real Postmark send proven on staging, `studio.imbue.com` verified in Postmark, and a decision on #1480 before the production deploy, and lists the deploy-shell overrides to unset.
+
+- Recorded the staging (`20260930T184917Z`) and production (`20260930T203452Z`) services deploys that shipped #1409's Postmark transport in `docs/deploy/history/rollouts/postmark-transport.md`, with the Vault state checked beforehand, Danver's staging send, and the rollback.
+
+- `next_deploy.md` now asks for a real production send through Postmark, a decision on #1480 before the next services deploy, and the ci tier's `postmark` entry push, in place of the pre-deploy Postmark item.
+
+- The services runbook lists Postmark among the connector's dependencies and names the four shell variables a staging or production deploy must not carry.
+
+The `earlyoom-gvisor-shed-order` rollout page now lists the memory-pressure block among the reasons `minds-admin hotpatch-earlyoom --apply` leaves a workspace alone: a leased workspace whose available memory is within 5 points of earlyoom's `-m` kill line is `blocked` unless `--force` is passed.
+
+Fixed: installing an update from the Settings panel no longer reports "Installing the update failed" for an update that is installing. On macOS, asking to install while Squirrel is still taking the downloaded zip makes electron-updater arm the install for when Squirrel has it and kick Squirrel with a native call that answers "The command is disabled and cannot be executed"; the app read that error as the verdict and told the user their update had failed, seconds before it installed.
+
+The install's verdict is now the `before-quit-for-update` the install itself raises -- the one signal every platform gives, whether Squirrel is swapping the bundle or a Linux installer has just run -- rather than whether an error was reported along the way. An install that never starts, such as a cancelled password prompt on a `.deb`, still fails and still names the cause.
+
+## 2026-09-29
+
+- Remote workspaces' `/tmp` is now capped at an eighth of the VM's RAM (a little under 1 GiB on the default machine). A write past the cap fails with "No space left on device" instead of taking the whole workspace down. The workspace README says so, and the `repair-tmp-exec` rollout guide covers capping existing workspaces.
+
+New rollout page `docs/deploy/history/rollouts/gvisor-oom-headroom.md` covers whole-sandbox OOM kills that earlyoom never prevented. It gives the four causes (the fork signalling a gVisor zombie in a loop, gVisor's own memory being invisible inside the sandbox, MemTotal frozen at sandbox start, and a bake cap that differed from the reconcile oneshot's), the fixes, and how to roll out `minds-admin install-vm-memory-units`. The page also covers the rest of the imbue.3 hardening, where earlyoom now counts the smaps `Anonymous:` total under gVisor because gVisor's VmRSS counts whole mapped ranges. It records what the audit of every `/proc` file and syscall earlyoom uses found under gVisor, and lists an AWS release test of the OOM drill as still owed. It also records live reboot tests on testtest showing the reconcile oneshot now re-caps and restarts the container before `minds-autostart`, and a production survey of which running workspaces' sandboxes read a MemTotal above their cgroup cap.
+
+`test_apply_update_converges_new_layout_code_to_the_tag` is marked `@pytest.mark.flaky`: on CI a `git checkout -b` in its setup once ran past the 10 s test timeout.
+
+The gVisor OOM headroom rollout page records the long-running perl meminfo publisher's install on testtest's VM through `minds-admin install-vm-memory-units`, with its CPU use measured against the bash version it replaced.
+
+# The recovery panel leads with Close once the machine is answering again
+
+When a machine comes back while its recovery panel is open, the panel now offers a primary "Close" button as its first action, and "Restart Machine" and "Report a problem" step back to secondary buttons. Before, the panel said nothing further was needed while still leading with a solid "Restart Machine" button, so the most prominent thing on it was the one action nobody should take. Both remain available. The recovery page already worked this way with its "Open machine" button; the panel now matches it.
+
+- A workspace's view now reloads onto the updated build when an update finishes while the laptop is asleep. The update's own refresh fires once, at the moment it lands, so a sleeping laptop never received it: the window woke up still running the old page against the new backend, and sending a chat message failed with "Extra inputs are not permitted". Studio now reloads the view itself when it reads the result of an update that landed while the laptop slept, but only for a page that last loaded before the update ended, so a window you already reloaded or opened afterwards is left alone. The reload waits for the network to settle after a wake, like the other automatic reloads.
+
+An update that never went out now says why on the machine itself. Before, if pressing Update now failed (the machine couldn't be reached, couldn't be started, or refused the update agent), the reason only reached the modal that sent the request. If that modal closed or reset while it waited, which happens on a slow machine, the update just silently didn't happen. Now the machine's update row records the reason, with the underlying error message when there was one. The row badge reads "Update didn't start", the band over the machine says its update didn't start, and reopening the update modal or the machine's Updates settings shows the reason. It clears once an update goes out or is scheduled, or the user dismisses it. A machine skipped by a bulk "update now" also records why on its row. A machine that fails to start is now reported separately from one that still couldn't be reached after starting.
+
+Bump Latchkey to 3.16.0.
+
+`test_clone_git_repo_checks_out_working_tree` is marked flaky, like its sibling clone tests: under a loaded parallel run its local `git clone` can exceed the 10 s per-test budget.
+
+The embed contract's `minds:focus-chat` message no longer prescribes which window a chat notification lands in: that choice now belongs to the workspace, which hands it to the app that holds the chat.
+
+The welcome chat calls the thing you talk to "your agent".
+
+It called it "your Mind" in eleven places: the messages shown while a workspace is being created, the "what would you like to do first?" options, and the four screens explaining who the agent works for, what it does with what you tell it, what you can see it doing, and where it runs.
+
+"Mind" was the app's name as well as the word for the agent, so the two read as one thing. The app is now called Imbue Studio, and the rest of the interface already says "agent" when it describes what these things are doing -- "Agents in this machine are waiting on an answer" -- so the welcome chat says it too.
+
+- Cut the minds 0.8.0 release: the app version is 0.8.0 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.8.0`, carrying everything that landed on `main` since `minds-v0.7.4`. It is the first build after the Imbue Studio rename: the app installs as `Imbue Studio.app`, says Imbue Studio throughout, and talks to the `studio.<apex>` hosts. It also moves its data out of `~/.minds` into the platform-canonical directories (migrated on first launch), and carries the waitlist and signup-code onboarding, the browser sign-in handoff fixes, pull-out workspace windows, the display zoom setting, and the SSH command in machine settings.
+
+- Cut the minds 0.8.1 release: the app version is 0.8.1 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.8.1`, carrying everything that landed on `main` since `minds-v0.8.0`. It restores latchkey for workspaces created before the 0.8.0 data-folder move (via a `~/.minds/latchkey` symlink), reloads a workspace's view onto the updated build when an update landed while the laptop slept, records on the machine why an update never started, turns the error-reporting screen into a real choice asked during onboarding, and bumps Latchkey to 3.16.0.
+
+Bring-your-own-key GCP and Azure workspaces now run the agent container under gVisor (runsc), exactly as AWS workspaces do: the account writer sets `install_gvisor_runtime` and `docker_runtime = "runsc"` on every BYOK cloud account block. Prototyped on both clouds first (Debian 13 VMs, gVisor's systrap platform); both passed the gVisor, tmpfs, socket hard-link, and stop/start checks. Existing account blocks keep their settings; re-add the account to pick up the new shape.
+
+- The AWS account block no longer carries `default_start_args = ["--tmpfs", "/run"]`: mngr_vps now mounts `/run` and `/tmp` on tmpfs itself whenever the runtime is runsc, on every cloud.
+
+- Every cloud workspace container is now memory-capped at the VM's RAM minus 1 GiB and its VM has hardened sshd and bounded Docker logs, build cache, and journal (the gen-2 slice lessons, issue #976; see `libs/mngr_vps/changelog/mngr-cloud-provider-updates.md`).
+
+- New release tests `apps/minds/test_gcp_workspace_release.py` and `apps/minds/test_azure_workspace_release.py` mirror the AWS one; all three now also assert the tmpfs mounts and the memory cap. Their shared driving and assertions live in `imbue.minds.testing`. minds now depends on the `imbue-mngr-gcp` and `imbue-mngr-azure` plugins, the two BYOK backends it writes blocks for that were not yet listed.
+
+`FolderSyncManager.wait_until_started` now waits for the background converger to settle before it looks for the sync's run. Previously, if the converger thread had not yet been scheduled, it returned `None` immediately, or returned the status of a run that was about to be replaced. That made the folder-sync and file-sharing tests flaky under parallel load, including a teardown error from a `mngr pair` that was spawned after `stop_all()` had already run.
+
+Fix a leaked warm `mngr` process when the in-app mngr caller is stopped while its pre-warm spawn is still in flight. The late process used to be parked as the idle one after `stop()` had cleared it, so nothing terminated it and shutdown waited out its full timeout. It is now terminated instead, which also removes the source of the flaky `test_call_times_out_and_reports_timed_out` teardown failure.
+
+Nothing in the desktop client reads the `mngr latchkey forward` supervisor's legacy `latchkey_forward.json` record, which no longer exists.
+
+The wait-for-gateway-port loop already asked the ownership lock who owns the latchkey directory; this drops the last references to the record's type from its documentation.
+
+`test_the_probe_script_frames_a_record_with_no_trailing_newline` no longer runs a real `mngr list` in CI. The probe script puts the workspace image's tool directory (`/root/.local/bin`) first on `PATH`, and the CI image installs `mngr` there, so the test's bare `PATH` did not keep the listing half from starting the real CLI, which could outlast the 10s test timeout on a loaded sandbox. The test now shadows `mngr` with a failing shell function, so the listing fails at once on any machine. No product change.
+
+The comment on `CONFIGURED_AWS_REGIONS` no longer says the region list is constrained by mngr_aws's pinned per-region AMI table: that table is gone, and mngr_aws now resolves the newest Debian 13 AMI in the configured region at create time, so widening the list needs no mngr_aws change. The region list itself is unchanged.
+
+- The release checklist's Debian-trixie guest-image reminder (`docs/deploy/ops/app-release.md`) now lists every place the mirrored cloud-image release is pinned: the default-workspace-template `[providers.lima]` URLs, the `mngr_lima` library defaults (with the Lima bake script and CI image probe that embed the same URL), and the minds_admin mirror manifest.
+
+- The Azure machine-size list in the create form now offers the v6 D-series (`Standard_D2s_v6` is the new recommended default, plus `D2ads_v6`, `D4s_v6`, `D4ads_v6`, `D8s_v6`) and labels the B-series sizes and the previous-generation `Standard_D2s_v5` as often barred on new subscriptions. A fresh pay-as-you-go subscription is refused (`SkuNotAvailable`) every size the form used to offer in popular regions, even with unused vCPU quota; the v6 families are what it is allowed to launch. New BYOK Azure accounts get the v6 default in their provider block; existing account blocks keep the size they were written with.
+
+The rest of the app's own copy now says Imbue Studio, and the noun for a workspace is consistent with the UI.
+
+`minds run --help` now names the product ("Host/Port to bind the Imbue Studio bare-origin server to", "Do not open the Imbue Studio UI in the system browser"). The create form's web-access and backup-password helpers, the missing-restic error, the backup validation errors, and the cloud-accounts failure message all name Imbue Studio, as do about fourteen field descriptions in the OpenAPI document served at `GET /api/schema`. The `restic.env` written into every backed-up workspace is now headed "# Managed by Imbue Studio."
+
+The wordmark announced itself to screen readers as "mind" -- in the shell's `alt` text and inside both copies of `mind-wordmark.svg` as the SVG's own `<title>`. All three now say Imbue Studio. The artwork and the asset filenames are untouched.
+
+Where the old name meant the *workspace* rather than the agent, the word is now "machine", matching the Start/Stop vocabulary the landing page already shows: "Shutdown-capable machines" in the overview, and the shutdown-prompt and liveness code that produces it. The user's own computer stays "computer", so the two senses no longer share a word.
+
+Two strings the product-name pass took too far are corrected to the agent noun: it is your agent, not the application, that asks you to connect an account, and that helps with the information in a service you connect.
+
+The hello-world example's page -- the one you open in a browser to check forwarding works -- says "Hello World Agent". Doc page titles name the product ("Imbue Studio testing overview", "Running Imbue Studio on a Raspberry Pi", "Running Imbue Studio under WSL2"), the workspace glossary defines a template as a snapshot of what an agent built that another agent can be created from, and the latchkey doc's quoted sync copy again matches the shipped dialog word for word.
+
+The app calls itself Imbue Studio everywhere a person reads it.
+
+The previous rename set the app's identity -- the bundle, the menu bar, the About panel, the window title -- but left the in-app copy saying "Mind", and in places the older "Minds". The settings panes, the update and recovery cards, the permission and credential dialogs, the notification copy, the folder-sync copy, and the sign-in page now all say Imbue Studio.
+
+The file-system name is unchanged and still carries no space: the bundle, the Linux install directory, and Electron's own directories keep `ImbueStudio`.
+
+The end-to-end harness reads the backend's login-URL log line by name, and accepts the old and new spellings both, so it works against a build from either side of the rename.
+
+A second pass caught the copy the first sweep could not see. The create-progress log the user watches while a workspace is built prefixed all 24 of its lines with `[minds]`, and nothing strips that prefix before the page renders it. The Linux installer's own output -- including the final "minds is installed." line, which no word-boundary search can find because the ANSI colour code's trailing `m` abuts it -- the `minds --help` summary, the device-id and data-directory errors, the delete-account confirmation, the notification-settings instructions, the wordmark's accessible name, and the artwork attribution notice shipped with the app all said the old name too.
+
+The behavior corpus said one thing while the app said another: `home-page.feature` asserted the user sees a "Help improve Mind" consent screen that the app had already renamed. The corpus and its READMEs now match the shipped copy.
+
+One factual error is fixed rather than renamed: the API documented an omitted workspace name as auto-assigned `mind-N`, but the default has been `workspace-N` since the host-name base changed. That description is published in the OpenAPI document served at `GET /api/schema`.
+
+- The launch-to-msg e2e no longer creates the canonical latchkey store (and its encryption key) before the app's first launch; doing so made the legacy-state migration fixture's latchkey token check fail on every run.
+
+Merges the gen-2 learnings series (issues #974, #975, #976 and the stopped-container recovery follow-up) into one branch; see the `mngr-host-sizing-debian-13` and `mngr-cloud-provider-updates` entries for the details. In short: bring-your-own-key GCP and Azure workspaces now run their agent container under gVisor like AWS workspaces, the AWS account block no longer carries its own `--tmpfs /run` (mngr_vps mounts `/run` and `/tmp` itself under runsc), every cloud workspace container is memory-capped at the VM's RAM minus 1 GiB, the Azure create form offers the v6 D-series with `Standard_D2s_v6` as the default, and new GCP and Azure workspace release tests mirror the AWS one.
+
+- The three cloud workspace release tests now also assert the container's `/tmp` is executable and capped at the mngr_vps fraction of the VM's RAM.
+
+Workspaces created before the 0.8.0 data-folder move can reach latchkey again. Every lima, docker, and Modal workspace created before it carries a latchkey permissions token naming a file under `~/.minds/latchkey/`. The move put that file under `~/Library/Application Support/Imbue Studio/<tier>/latchkey/`, and nothing can reissue a token a workspace already holds. So every latchkey call from those workspaces failed with 400 `Permissions override references missing or invalid file`, including updates, `notify_user`, and permission requests.
+
+- The app now keeps `~/.minds/latchkey` (`~/.minds-<tier>/latchkey` for other tiers) as a symlink to the moved latchkey directory. It is created on every launch that finds it missing or dangling, but only for an install whose data the migration actually moved.
+
+- Installs that already migrated on 0.8.0 are repaired on their next launch, and the token resolves again on the next request with no workspace restart. The symlink also repairs the permission handles that pointed into `~/.minds` by absolute path, and pending permission requests filed before the move.
+
+- If approving a pre-move permission request on 0.8.0 recreated `~/.minds/latchkey` as a partial directory, it is renamed to `~/.minds/latchkey.orphaned-<timestamp>` and the symlink made in its place; a grant approved into it on 0.8.0 has to be approved again. Anything else already there that does not resolve to the moved directory (a full latchkey store, a file, a link to another store) is left untouched and the problem is logged to `electron.log`.
+
+- The launch-to-msg migration fixture now seeds a pre-move latchkey handle and checks that its legacy path still resolves after the upgrade.
+
+- A SIGTERM or SIGINT to the desktop app (as `just minds-stop` and other headless stops send) now quits without the running-workspaces prompt, leaving workspaces running. The app's own handler for them was registered before Electron installed its signal handling during startup, which replaced it, so it never ran: with a local workspace running, the quit went through the interactive prompt and waited on a click that never came. It is now registered once the app is ready, and ignores a signal that arrives while a quit is already under way (the electron CLI shim forwards a process-group signal, so it arrives twice).
+
+Added `MINDS_WINDOW_CONTROLS=mac`: off macOS, every window's bar (the main window's and a pulled-out window's) draws macOS-style traffic lights at its left, wired to close, minimize and maximize, in place of its own buttons at the right. The demo box sets it so recordings of the app on its mac-styled desktop look like the Mac app; nothing changes for anyone who does not set it, and macOS keeps its native traffic lights. A value other than `mac` refuses to launch.
+
+Minds now stores its files where macOS expects them, instead of all in one hidden `~/.minds` folder. Your existing data moves automatically the first time you launch this version; nothing is deleted, and you should not have to sign in again.
+
+Each env (production, staging, your dev env) gets three directories instead of one:
+
+- `~/Library/Application Support/Imbue Studio/<env>/` -- sessions, keys, agent state, the Python environment
+
+- `~/Library/Caches/Imbue Studio/<env>/` -- caches that can be rebuilt from scratch
+
+- `~/Library/Logs/Imbue Studio/<env>/` -- logs
+
+Why it is worth doing: `~/.minds` reached about 3.8 GB on a working install, roughly half of it regenerable cache, and because it sat in your home directory Time Machine backed up every byte. macOS excludes `~/Library/Caches` and `~/Library/Logs` from backups automatically, so filing those files correctly takes around 1.5 GB out of every backup. Your application data is also now reachable in Finder (Go -> Library); `~/.minds` was hidden, so Finder would not show it to you at all.
+
+Two things this fixes along the way. Crash reports and queued error reports were being written outside your env's directory and shared across every env. And `rm -rf ~/.minds` to clear a cache also destroyed your saved sessions and SSH keys -- the three roots can now be cleared independently.
+
+The old `~/.minds` folder is left behind, emptied, so you can see where things used to be; delete it once you are satisfied everything works. Anything that recorded a path into the old folder is rewritten as it moves, so your agents' SSH keys keep working. `mngr` shell completion is the exception: it is regenerated rather than rewritten, so tab completion returns the first time `mngr` reinstalls it. If the move fails partway, the app refuses to start rather than running with your files split across two layouts; it writes what went wrong to `~/Library/Logs/Imbue Studio/<env>/migration-failure.log`, shows it to you, and relaunching retries the move.
+
+This change is macOS-only. On every other platform the app keeps the single `~/.minds` folder exactly as before, down to each file's path, so nothing moves and there is nothing to migrate. The XDG layout Linux would want is a separate change, and it needs a Linux launch test first: nothing today runs the app on Linux, so a migration there would move real data on a path no test has ever exercised.
+
+- Promoted minds 0.8.0 to the alpha channels: the desktop channel moves to ToDesktop build `260929e39fu5842` (100%, mac only) and the web channel pins browser creates to `minds-v0.8.0`. Linux stays on 0.7.4 because the 0.8.0 `.deb` is a differently named package (`imbue-studio` rather than `minds`) with no `Replaces`/`Conflicts`, so a 0.7.4 `.deb` install would install it alongside itself and keep relaunching the old binary. Beta and stable stay on 0.7.3, as do their web channels.
+
+- Recorded the minds 0.8.0 release in `docs/deploy/history/minds-v0.8.0.md`: the fast-path cut, the staging and production deploys that applied migrations 050 to 052 and turned the waitlist on, the bakes on both tiers, and the alpha promotion (mac and web; Linux held on 0.7.4 because the renamed `.deb` package cannot update a `minds` install).
+
+- Moved the Imbue Studio cutover's finished server stages from `next_deploy.md` into `docs/deploy/history/rollouts/imbue-studio-cutover.md`, and reset `next_deploy.md` for the next release: the `.deb` package rename, the two open macOS update-install fixes (PRs #1256 and #1357), the rest of Stage F including the real upgrade check, and the device-login and invite-link checks the new deploys owe.
+
+- The app-release runbook now makes the bundle-lock diff a standing pre-tag check (kept on the fast path too), and says to check the `.deb` package name before listing `linux` on a channel; it no longer says stable stays mac-only.
+
+The one-time error-reporting screen is now a real choice instead of a notice. Titled "Help improve Imbue Studio", it asks "Is it ok if we report data to help improve Studio?" with a checkbox that starts checked, and its button reads Continue. Continuing as it is keeps error reporting on. Unchecking the box first turns error reporting off, which Settings → Error reporting then shows. Before, the screen only said reporting was on, and turning it off meant finding the setting. `POST /ui/api/onboarding/consent` now takes the answer as `report_unexpected_errors`; a request without it still just marks the screen answered, and a body that is not a JSON object with a boolean answer is refused with a 400.
+
+A new install is now asked during onboarding. The start flow's "How do you want to run it?" question carries the same pre-checked checkbox just above its answers; every way out of onboarding passes through that question. Choosing Imbue Cloud, Custom setup, or "I already have a workspace (log in)" saves the answer, so a new user is never sent through their first session without being asked. The one-time screen stays for installs that finished onboarding before this change and never answered.
+
+The app now installs as `Imbue Studio.app` rather than `ImbueStudio.app`, matching how it is written everywhere else and how other macOS apps name themselves (`Google Chrome.app`, `Visual Studio Code.app`). On Linux it installs to `/opt/Imbue Studio/`.
+
+The `CFBundleName` override is gone, so it defaults to `productName` and the two can no longer drift apart. This also fixes the app failing to launch. Electron finds its helper processes at `Contents/Frameworks/<CFBundleName> Helper.app`, while the builder names those helpers after `productName`. Since the rename those two disagreed by exactly one space -- `Imbue Studio` against `ImbueStudio` -- so every macOS build exited at startup with `Unable to find helper app`. Giving `productName` the space makes all three agree.
+
+The package is renamed too, from `minds` to `imbue-studio`, which is what the Linux executable is named after: it is now `/opt/Imbue Studio/imbue-studio` rather than `.../minds`, and the `.deb` is `imbue-studio`. Two side effects, both harmless before a public release: the update cache moves to `~/Library/Caches/imbue-studio-updater`, so a staged update downloads once more, and a `.deb` installed under the old package name is not seen as the same package.
+
+Upgrading replaces the old bundle: the installer removes `ImbueStudio.app` alongside the older `Mind.app` and `Minds.app`. Your data is not affected -- it lives under `~/.minds`, which is keyed on the env name and not on the app's display name.
+
+## 2026-09-28
+
+The mouse pointer now hides while you type into a field in the app's own screens (the start flow, the create form, settings, share grants) and comes back the moment the mouse moves, is pressed, or scrolls, so it never sits over the words being entered. Only keystrokes that insert or delete text hide it; shortcuts such as Cmd+C, bare modifier presses, and keys pressed outside a text field leave it alone. The workspace's own pages get the same behavior from the default-workspace-template.
+
+Combines the waitlist and signup-code work from `mngr/release-onboarding` with the browser sign-in handoff fixes from `mngr/signin-handoff-followup` (PR #1371); see this project's `mngr-release-onboarding.md` and `mngr-signin-handoff-followup.md` entries (where present) for the details of each.
+
+- The next-deploy checklist's device-login-attempts item now names migration 052.
+
+- When Imbue Cloud refuses a workspace create on a quota (the waitlist message for a guest, or "N of M used"), the desktop app now shows just that sentence instead of the whole `mngr create` transcript; the transcript stays in the error log record.
+
+- The start flow's account step now leads with "Sign in" (the emphasized button) and keeps "Create an account" as the quieter option, with copy that points at the account the app was downloaded with (`specs/minds-waitlist-signup-codes/spec.md`).
+
+- Every tier's `deploy.toml` gains the zero-quota `[plans.guest]` block, `max_shared_workspaces` on every plan, and a `[waitlist] is_enabled` switch (true on production and staging, false on dev and ci) that `minds-admin env deploy` stamps into the connector as `MINDS_WAITLIST_ENABLED`.
+
+The browser sign-in to your Imbue account explains what went wrong instead of always blaming the connection.
+
+- When a sign-in times out, when the browser's handoff back to the app can't be confirmed, or when the browser signed you in but the app couldn't finish, the sign-in dialog now says which one happened and that Try again will fix it (usually in a single click, since the browser remembers you). Before, all of these showed "We could not reach the Imbue sign-in service. Check your internet connection", even though nothing was wrong with the connection.
+
+- A sign-in that finished in the browser but failed in the app is now logged as an error, so it reaches error reporting instead of passing unnoticed.
+
+- Every Sign in / Add account click opens the sign-in page in your browser. If an earlier sign-in is still waiting (say you closed the dialog), the click reopens that same sign-in's page rather than starting a second one to race it, so a tab you left open still works too.
+
+- While the dialog waits, it offers "Reopen sign-in page", for a browser tab that never opened or was closed.
+
+- The app now keeps waiting for the browser for up to an hour, instead of ten minutes, so a slow sign-in (a long Google account chooser, two-factor, a first-time Google sign-in) no longer strands the browser on a "refused to connect" page.
+
+- If the sign-in stops unexpectedly inside the app, the dialog shows an error with Try again, and the next Sign in click starts a fresh sign-in.
+
+- Closing a window no longer risks stranding the app in the dock with no way back. Electron keeps its own visibility listener on a `BrowserWindow` after the window is destroyed, and that listener reads the window it no longer has, so a show/hide/minimize event arriving during teardown raised an uncaught error in the main process. The app now drops a window's listeners once it reports itself closed, so a late event reaches nothing.
+
+## 2026-09-27
+
+Added the agreed vocabulary for the upcoming invitation work to the workspace glossary (`apps/minds/docs/workspace/glossary.md`): granter, user grant, email grant, domain grant, grantee, invitee, registered address, share panel, joined, and, marked [future], invitation, invitation content, channel, delivery, delivery outcome, notification preferences, suppression list, email provider, invitation allowance, and granter-visible invitation outcome. The workspace README now says email grant where it said invite, since invitation means only the message.
+
+Added `too soon` as a fifth granter-visible invitation outcome and delivery outcome in the workspace glossary, for an invitation refused by the per-grant cooldown, so that `over allowance` keeps its one precise meaning.
+
+Added **to publish**, **grant**, and **visitor** to the workspace glossary (`apps/minds/docs/workspace/glossary.md`). The verb for making a workspace reachable is now *publish* (the code still says share). A grant admits a party to one app, with the system interface as the app whose grant admits the entire workspace. *Visitor* is defined in its strict sense: a role a person holds toward one published workspace, never the account that published it, distinct from download attribution's anonymous visitor id and the relay's visitor connection.
+
+Machine settings now show the machine's SSH command under General > "Connect over SSH", the same copyable command the recovery card's Troubleshooting block offers. It is available whenever discovery reports an SSH endpoint for the machine, so a healthy machine can be reached for debugging without first landing on the recovery screen. A machine with no SSH endpoint shows no section.
+
+The copied command (in both places) now matches the one mngr prints: when mngr reports a pinned known_hosts file for the machine, the command verifies the host against it (`-o UserKnownHostsFile=... -o StrictHostKeyChecking=yes`) instead of falling back to `~/.ssh/known_hosts`, and shell-quotes paths so a key path containing a space pastes correctly.
+
+Added a **Display** section to Mind Settings with a **Zoom** control (80% to 200%, default 100%). Changing it applies to every open window of the desktop app at once, including the workspace inside each window, and persists across launches in `display-zoom.json` in the data root. No keyboard shortcut is bound to it. In a browser the section points at the browser's own zoom.
+
+The Electron end-to-end driver (`e2e_workspace_runner.py`) now exposes its create-flow, backend-origin and workspace-coordinate helpers, its launcher-opener, chat, terminal and desktop-backdrop selectors, and the chat page URL pattern publicly, and lets `electron_app_session` carry extra environment and a persistent profile directory into every launch, so the demo harness in `minds_admin` can reuse them.
+
+The deploy checklist (`docs/deploy/next_deploy.md`) records where the Imbue Studio cutover stands after the rename PRs merged: the dev verification and the staging preparation are done, staging is deployed (deploy id `20260928T020641Z`) with the checks that need no desktop passed, and the remaining items are the desktop-side staging checks, the production preparation and deploy, and the release stage. It adds two things learned on the way: Cloudflare applies a token policy change with a delay of about ten minutes, so the `add-zone` re-check can print `DENIED` at first, and a desktop older than the rename never repairs a share left on the old content domain, whose certificate the connector can no longer renew, so such shares go dark within 60 to 90 days unless re-shared.
+
+Fixed the desktop shell treating an in-page navigation inside the workspace iframe (a pushState in the workspace shell or a chat page) as a navigation of the window itself. That cleared the window's recorded workspace, so a pulled-out window could not be dropped back onto its desktop (the drop found no window showing its workspace), and a popout open at quit was persisted as a plain window at the home page and restored as one at the next launch.
+
+- Promoted minds 0.7.4 to the alpha channels: the desktop channel moves to ToDesktop build `260927vk4gsv6no` (100%, mac and linux) and the web channel pins browser creates to `minds-v0.7.4`, which the production pool holds 12 available rows at, six in each region. Beta and stable stay on 0.7.3, as do their web channels.
+
+Carries the fix from `mngr/fix-subframe-in-page-nav` (PR #1410): the desktop shell no longer treats an in-page navigation inside the workspace iframe as a navigation of the window itself, which had cleared the window's recorded workspace so a pulled-out window could not be dropped back onto its desktop and a popout open at quit was restored as a home-page window. The pull-out-windows demo depends on it.
+
+Workspace windows can be pulled out of the Mind window into desktop windows of their own.
+
+Drag a window's title bar past the edge of the Mind window and it tears out into a *popout*: a desktop window of its own framed by the workspace's accent, holding that one window edge to edge, that follows the cursor until you let go. "Open in its own window" in the window's menu does the same without a drag. The desktop keeps a ghost of the window where it was.
+
+A popout comes back two ways: drag it over a Mind window showing the same workspace (the surface offers the drop) and release, or close it (`Cmd+W` / `Ctrl+W`, the bar's close control, the traffic lights on macOS, `File > Close Window`), which returns the window to the desktop first. On macOS a popout carries the window's own traffic lights, as the Mind window does. Every return runs through the Mind window showing the workspace (the one dropped onto, else the most recent), whose workspace shell is the desktop's one writer during a drag and a return, so a quick drop back cannot race a save of the popout's own and leave a ghost behind, and a window dragged in and out keeps its place on top of the stack; the popout closes once its own shell sees the window back. Only with no Mind window showing the workspace does the popout's own page take the window back before it goes. Popouts are saved with the other windows and restored at their bounds on relaunch (a popout of a workspace that no longer exists is dropped, like any window of it); a restored popout whose window is gone from the workspace keeps its OS window and shows the ordinary empty state.
+
+Under the hood: the SPA gains the `/popout/<workspace-id>/<window-id>` route and a popout bar in place of the titlebar; the embed contract moves to version 6 with `pop-out-window`, `window-drag-started`, `window-drag-ended`, `detached-windows`, `embedder-capabilities`, `reattach-window`, and `tear-out`; the Electron main process gains a popout window kind (never a navigation target), a watch on every title-bar drag the shell announces (main samples the cursor and opens the popout once it leaves the window by the tear-out distance, since the shell's own pointer events stop at the window's edge on some platforms, such as X11 with an absolute-axis virtual mouse), a cursor-follow loop for the tear-out and the drag back, and a close handshake that returns the window through a main window's shell (`reattach-popout-window`) before the popout goes. Design: `specs/pull-out-window/spec.md`.
+
+Dragging a popout flush against the top or left edge of the leftmost display no longer raises an uncaught-exception dialog: with a fractional grab offset (a HiDPI pointer) the follow loop could round the window's position to negative zero, which Electron's `setPosition` refuses.
+
+- `docs/overview.md` now describes the workspace's agents as they are: the primary `system-services` agent is a plain `command`-type agent whose window 0 runs `sleep infinity` (no Claude Code), and chats run as separate `mngr` agents the chat app creates on demand. The telegram-bot bullet is gone; users reach chat agents through the chat app, and agents notify the user through the desktop client's notification feed.
+
+- The overview's workspace URLs use the current origin scheme: `agent-<hex>.localhost` (the workspace id), `<name>-<rand>` service labels, and a bare origin that redirects page loads to the system interface's own origin. Share URLs likewise carry the service label, and new shares' domains lead with a random share label and a hashed user segment.
+
+- The overview's create instructions point at `POST /api/v1/workspaces` and its operation polling instead of the removed `/api/create-agent` routes, list the create form's actual compute providers (there is no `CLOUD` mode), and mention the form's "Enable web access" option.
+
+- Smaller corrections in the overview: Lima workspaces run directly in the VM, supervisord programs live one per file under `system/supervisord.conf.d/`, the empty landing page shows a Create button, and `share.env` carries the share's domain and relay token but no relay endpoints (the share gateway fetches its relay assignment from the connector).
+
+- Whenever any account is signed in, one of them is now the default. With several accounts signed in and no valid stored default (a config from before sign-in set one, or a sign-out that could not hand the default on), the first signed-in account becomes the default and is saved, so Manage Accounts, the home screen's account launcher, and the create form always agree on one. Signing in with no other account signed in still makes that account the default.
+
+- A machine leased from Imbue Cloud no longer shows a greyed-out Unlink button in its Account settings. The section now says "Machines running in Imbue Cloud can't be moved to a different account. This machine is owned by <email>.", naming the owner even when the machine has no stored account link, from the signed-in account whose Imbue Cloud provider hosts it.
+
+The tier deploy config can now declare its full origin layout in git, groundwork for the Imbue Studio rename. `[origins]` gains three optional fields: `legacy_chrome_origins` (former chrome hosts the connector redirects to the current one), `api_origin` (the connector's API hostname), and `llm_origin` (the LiteLLM proxy's hostname); every value must be an https bare origin under `cookie_domain`, a legacy origin may not be a current one, and the API and LLM hosts may not collide with each other or the browser-facing hosts. A new top-level `content_domain` names the user-content apex shared workspaces live under, validated as lowercase DNS labels (the `ContentDomain` primitive), and `cloudflare_domain` is now documented as the tier's ops zone (telemetry, errors, the R2 setup scripts) rather than the content domain. No committed `deploy.toml` sets any of the new fields yet, so every deployed tier behaves as before.
+
+Opening a workspace's Share tab now repairs a share the connector flags as left on a content domain the tier has moved away from: the read re-shares the workspace (the connector mints the new address in the share's own region) and rewrites only `share.env`, leaving who has access untouched. The tab shows "Sharing moved to a new address; links you shared before no longer work" beside the new link, which then goes through the usual provisioning wait until the workspace's share stack is back up on it. The sharing document and `MachineSharingResponse` gain `migrated_domain_from`, set only on the read that moved the share. A repair that fails after the connector already moved the share reports that the machine's links stay down until sharing is disabled and enabled again for it.
+
+Marked `test_imbue_common_testing_extra_installs_its_test_library` flaky with a 90-second timeout: its two network-bound installs timed out once on a loaded CI runner; no behavior change.
+
+The desktop app is now named Imbue Studio. The bundle on disk is `ImbueStudio.app` (executable `Contents/MacOS/ImbueStudio`; `/opt/ImbueStudio` for the Linux `.deb`), deliberately without a space because electron-builder derives every packaging path from `productName`, while the menu bar, About panel, window titles, notifications, and the loading and error screens read "Imbue Studio" (`PRODUCT_DISPLAY_NAME` in `electron/product-name.js`, and `CFBundleName` / `CFBundleDisplayName` through `todesktop.js`). Finder, the Dock, and the browser's open-external-app prompt show the on-disk name. The first launch of this build removes the per-user scratch directories the previous names (`Mind`, `Minds`) owned.
+
+The deep link scheme is now `imbue-studio://`; `minds://` links keep working for a soak and are marked for removal. Both schemes are registered with the OS on every platform (ToDesktop's `appProtocolScheme` list, `setAsDefaultProtocolClient` for each, and both `x-scheme-handler` MIME types in the AppImage's desktop entry). The browser sign-in success page now links back with `imbue-studio://`.
+
+CI installs, drives, and resets `ImbueStudio.app`: the launch-to-msg and runner-reset workflows, the runner reset script (which also removes any leftover `Mind.app` or `Minds.app`), the launch-to-msg script, and the Playwright e2e harness follow the new bundle name. The Linux installer's Raspberry Pi menu entry and WSL desktop shortcut are named "Imbue Studio".
+
+`apps/minds/style_guide.md` records the product-name wording rule ("Imbue Studio" at first mention on a surface, "Studio" thereafter, never in an identifier); the sweep of the remaining "Mind" prose is a separate PR.
+
+Every tier's committed configuration now names the Imbue Studio origins and content domains (PR 4 of the rename, `specs/imbue-studio-rename/04_cutover_rollout.md`): staging and production set `chrome_origin` to `studio.<apex>`, list the old `minds.<apex>` host as a legacy chrome origin that redirects, and attach `api.studio.<apex>` and `llm.studio.<apex>` as the connector's and the LiteLLM proxy's custom domains; every tier sets `content_domain` (`personal-imbue.com`, `personal-imbue-staging.com`, and `personal-imbue-dev.com` for dev and ci). The production and staging `client.toml` point the desktop at the new api and llm origins. The update feed stays at `updates.imbueminds.com`: each tier's ops zone is permanent and keeps the feed, telemetry, errors, and R2 hostnames.
+
+Nothing changes on a deployed tier until it is redeployed with this configuration; the rollout order, the Modal and Cloudflare preparation each stage needs, and the dev verification that precedes the merge are recorded in the spec and in `docs/deploy/next_deploy.md`. No stage edits Vault: zone ids are now looked up by domain name (`content_domain` and `cloudflare_domain` in `deploy.toml`), so the tier bring-up doc's Vault `cloudflare` entry lists credentials only, the bring-up doc states that the ops zone must be a two-label apex (the ops-zone DNS writers derive the zone from a hostname's last two labels), and the environments reference says where zones come from. The attribution contract, the app-release doc, and the desktop-app doc name the new hosts; the desktop-app doc's open updater question points at the release stage of the rollout.
+
+## 2026-09-26
+
+The snapshot-resume Electron test (`test_create_workspace_and_sign_in_via_modal_then_chat_via_electron`) now raises the welcome chat's window before clicking through the provider chooser, as the launch-to-message e2e already did. A fresh workspace opens the welcome chat and Getting Started together, and when Getting Started landed on top its shield took every click, so the test failed all its retries. The provider-chooser sign-in, with its shield-pressing helpers, moved from `scripts/launch_to_msg_e2e.py` into `e2e_workspace_runner.py`, and the test's own copy of that flow is gone, so both use one.
+
+Two fixes to restoring a workspace from a backup, both seen on a staging workspace:
+
+- A restore no longer locks the app out of a remote workspace. Backups leave out `.ssh/authorized_keys`, and on remote workspaces that file (in `/home/user`, root's home) holds the key the app uses to reach the machine. The restore deletes whatever the backup lacks, so it deleted the key, and the restore's last step failed with "Failed to write data/.secrets/restic.env ... Authentication failed". The workspace had in fact been restored, but the app reported a failure and could no longer run anything on the machine. The restore now leaves `authorized_keys` as it is.
+
+- Restoring the newest backup of the current hour no longer fails with "failed to find snapshot". Just before it runs, a restore makes sure the workspace has the right backup credentials, and it rewrote them even when they were already correct. That started a new backup whose hourly cleanup forgot the snapshot being restored. The credentials are now only written when they differ. The workspace's backup service also stops forgetting snapshots from the last hour (default-workspace-template, same branch name).
+
+The restore's fallback exclude list, used for its safety snapshots when the workspace has no readable `backup.toml`, now matches the backup service's defaults again (it was missing the Rust caches, `authorized_keys` and the update-apply copies). A restore on a workspace that uses the restore's own downloaded restic (when `/usr/local/bin` is not writable) also no longer deletes that restic, which left the restored state missing from the backup timeline.
+
+The slow-path home-layout rollout record now points at `minds-admin workspaces start` for starting a stopped workspace without its owner, instead of saying no operator start route exists. The watchdog DB nudge that run used is kept as a record of what was done.
+
+A default workspace template branch may now pin mngr from the private mngr-internal repo while a paired change is being iterated on, so it builds against an unmerged mngr commit; before merging, the pin moves to a public export of the mngr branch (`just dwt-mngr-pin-export`), and template `main` never pins the private repo (`specs/internal-mngr-pin/spec.md`).
+
+The desktop create path reads the template's pin and, for a private pin, delivers a credential to the workspace build: `MNGR_INTERNAL_GIT_TOKEN` in the `mngr create` environment (else the shared read-only token in Vault at `secrets/minds/dev/mngr-internal-git`, read with your own `vault login`, when launched with the local-worktree opt-in), plus an uploaded token file for the Lima and Modal templates. A private pin with no credential fails before the build starts, naming the remedy. A public pin needs no credential and no `docker buildx`.
+
+The CI snapshot bake and the launch-to-msg run hand their job token to the workspace build the same way, and the launch-to-msg pin bump leaves a template `main` alone while its pin was exported from an mngr commit that has not merged, instead of rewriting it to a mirror commit that lacks the change.
+
+`apps/minds/docs/dwt-mngr-pin.md` documents the iteration flow (`just dwt-mngr-pin-internal`), the export before merging (`just dwt-mngr-pin-export`), and the rewrite to the mirror of `main` afterwards.
+
+- Cut the minds 0.7.4 release: the app version is 0.7.4 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.7.4`, carrying everything that landed on `main` since `minds-v0.7.3`. It carries the sharing fixes (shared-workspace certificates issued through Google Trust Services first, with Let's Encrypt as the fallback), restic incremental backups whose restore keeps the workspace's keys and targets the chosen snapshot, the docker bind check at provider build time, the request-sync and chat send-order fixes, and the gen-1 slice-fleet column cleanup on the connector.
+
+- Recorded the minds 0.7.4 cut and staging rehearsal in `docs/deploy/history/minds-v0.7.4.md`, noted the staging state of the migration 048 and 049 checklist items in `next_deploy.md`, and added two failure modes to the app-release runbook (the release PR's `check-changelog` after a fast-forward, and the `macos_launch` window-timeout flake).
+
+- Recorded the production deploy and bake for minds 0.7.4 in the history entry, discharged the migration 048 and download-link items from `next_deploy.md` (both tiers have them), and narrowed the migration 049 item to the production GTS confirmation that remains.
+
+The Share pane now explains a share that is not coming up. While the link is not live, the readiness poll reads the workspace gateway's own status file (`data/.state/share_gateway/status.json`, written by the updated default-workspace-template gateway) and the readiness response carries `gateway_state`, `gateway_error`, `gateway_failed_attempt_count`, and `gateway_next_retry_at`. A retrying gateway shows the last error and when it tries again under the provisioning checklist; a halted one (the connector refused the certificate request permanently) turns the notice into an error, stops the poll, and tells the user to turn sharing off and on again. Gateway-status reads are cached per machine for 15 seconds, like the connector share lookups, and invalidated by the sharing PUT/DELETE handlers. Turning sharing off also removes the gateway's status file from the workspace, so turning it back on before the gateway's next watch tick does not show the previous share's verdict.
+
+New operator doc `docs/deploy/setup/acme-accounts.md`: how shared-workspace certificate issuance is bounded (per-CA weekly budgets, per-share attempt throttling, the orphaned-challenge sweep), how ACME accounts are registered once per tier into Vault, and the Google Trust Services project setup.
+
+The next-deploy checklist records that the staging and production `sharing` Vault entries were prepared for Google Trust Services (accounts registered, Let's Encrypt accounts migrated, GTS first in `ACME_CA_LIST`), and now lists only what the next connector deploy has to confirm.
+
+The permission request's account dropdown no longer explains the sign-in in parentheses: "+ Add account" and an account the agent asked for that is not connected here read plainly, with the "Sign in & approve" button saying when a browser sign-in will happen. An account whose stored credentials went bad still carries "(needs sign-in)" or "(needs credentials)".
+
+The first-notification prompt's last choice reads "Disable notifications" instead of "Only the bell".
+
+## 2026-09-25
+
+The custom-service approval dialog shows, behind a collapsed "How this will be sent" disclosure, the header every request to the service will carry the pasted token in, so a user asked for an `X-Api-Key` can check it against the provider's docs. The desktop registers the header a request names (`payload.header`), shows the existing registration's header for a service this computer already has, and stores the token the user types under that header rather than as a bearer, whatever latchkey's generic credential example says. A request with no header keeps the bearer default; a browser sign-in shows no disclosure. The Permissions tab and the ordinary permission dialog (the one a re-auth or a service with no stored credential goes through) read the same header off the registration, so a token typed into either for such a service is stored under it too. The credential form also shows the agent's note on where to find the token (`payload.credential_instructions`), under "From the agent" and as plain text, between Mind's own instruction and the input, and keeps it up after a rejected attempt. And the form's first appearance, in answer to the Approve that registers the service, now reads as an instruction rather than a red error notice; only an attempt that sent a token and was rejected shows as a failure.
+
+Restore now recognizes backups that store the machine at the root of the snapshot. A workspace's hourly backup used to record the whole timestamped snapshot path it read from, which forced restic to re-read and re-hash every file each hour. The template's backup service now backs up from inside that path instead (default-workspace-template, same branch), so the machine's `workspace/` sits at the snapshot root while the snapshot's recorded path points at an empty spot. Restore still looks in the recorded path first, so older snapshots resolve exactly as before, and falls back to the snapshot root (`<snapshot>:/`) when `workspace/` is there. Without this, restoring one of the new snapshots fails with "does not contain a machine", so this change has to ship before the template change reaches workspaces.
+
+Approving a Notion MCP permission request (or connecting Notion MCP from a workspace's Permissions tab) now signs in through the Minds-hosted OAuth callback page: before the sign-in that registers Notion's OAuth client, the app pins the client's redirect URI with `latchkey auth prepare notion-mcp '{"redirectUri": ...}'`, the way it already prefers the Minds OAuth client for Google services. If the pin fails, the approval fails with latchkey's reason and the request stays pending for a retry, exactly like a failed sign-in.
+
+Documented in `docs/latchkey-permissions.md` (step 6 of the approval flow).
+
+Removed the placeholder "read more" links from the reading material on the workspace creation page. All five pointed at the same product page instead of anything about their section. They are also gone from the Welcome chat seeded into the new workspace.
+
+Removed stale comments in the workspace create path and its test that said the default workspace template sends `/welcome`; the template no longer greets new chats.
+
+Phase 6 of the slice-fleet cutover: the gen-1 slice fleet is gone, and the minds side follows.
+
+- `pool-ssh` is no longer one of the per-env secret services: it is dropped from `_PER_ENV_SECRET_SERVICES` and from every tier's `deploy.toml` `[secrets].services`, so `minds-admin env deploy` stops pushing a `pool-ssh-<tier>` Modal secret.
+
+- Deploy docs: `gen2-cutover.md` moves to `docs/deploy/history/rollouts/` as the historical record of the migration (the `minds-admin cutover` tooling it drives is deleted); `gen2-management-plane.md` and `gen2-telemetry.md` move to `docs/deploy/reference/management-plane.md` and `reference/box-telemetry.md`; `host-pool-setup.md` moves to `docs/deploy/setup/`. Every runbook drops its gen-1 branches (the pool key, `repair-home-layout`, `backfill-host-keys`, `cutover repave`, slot counting); capacity is now described in default-size machines and the two-budget accounting.
+
+- `next_deploy.md` carries connector migration 048 (the gen-1 column drop), the manual `pool-ssh` secret deletion, the one-time box re-prep for the collector pattern change, and the decision to keep the 70 retired gen-1 rows in production until their owners' archives are dropped.
+
+- Deployment tests: `test_machine_resize.py` no longer skips on a gen-1 tier (there is none); docstrings describe the gen-2 cycle only.
+
+- The desktop bundle lock (`apps/minds/electron/pyproject/uv.lock`) drops `imbue-mngr-lima` from `imbue-mngr-imbue-cloud`'s dependencies, matching the plugin's `pyproject.toml`.
+
+An agent can now ask for a synchronized copy of a folder in the same file-sharing request that asks for access to it: the request payload takes an optional `sync` object naming the clash rule. Until now only you could turn syncing on, from the Local files card, after approving the request.
+
+The approval dialog draws the same sync band the Local files card does, from one shared component, so the two cannot drift the way the dialog's earlier copy did. The switch starts on when the agent asked and the folder can be synced; a line under it says the agent asked. You can flip it either way before approving. A folder that cannot be synced greys the switch out with the reason, exactly as the card would.
+
+A sync that cannot be started is refused before anything is granted, so the request stays pending with the reason and you can turn the switch off or pick another folder. The notice the agent receives names where the copy lands on its machine, or says the copy was not enabled when you turned off a sync it asked for.
+
+The "keep a synchronized copy" control is a switch now, like every other on/off control in the Permissions pane, rather than a checkbox.
+
+The desktop app's native right-click menu (Cut, Copy, Paste, Select All over the chrome's own fields) no longer pops for a right-click inside the workspace frame: workspace pages draw their own element context menu (the default-workspace-template's element-reference-menu plan), which the native one would otherwise cover. The chrome page's own fields keep the native menu.
+
+- Promoted minds 0.7.3 to the alpha channels: the desktop channel moves to ToDesktop build `260925cpjm6e86d` (100%, mac and linux) and the web channel pins browser creates to `minds-v0.7.3`, which the production pool holds 20 available rows at, ten in each region. Beta and stable stay on 0.6.2, and their web channels stay on `minds-v0.7.0`.
+
+- Promoted minds 0.7.3 to the beta channels: the desktop channel moves from 0.6.2 to ToDesktop build `260925cpjm6e86d` (100%), and beta now publishes Linux as well as mac, the first Linux-capable build to reach it. The beta web channel pins browser creates to `minds-v0.7.3`, which the production pool holds 20 available rows at. Stable stays on 0.6.2 with its web channel on `minds-v0.7.0`.
+
+- Promoted minds 0.7.3 to the stable desktop channel (build `260925cpjm6e86d`) at 100% rollout, and to the stable web channel (`minds-v0.7.3`), with Josh's sign-off.
+
+- Stable now publishes a Linux manifest: its `platforms` list gained `linux`, so `stable-linux.yml` exists and Linux desktops update from the feed rather than from ToDesktop's own.
+
+- `release-channels.toml`'s promotion instructions name every `_RELEASE_CHANNEL_PLATFORMS` fallback the connector pins, not just the mac one, and its `platforms` note no longer describes stable as mac-only.
+
+- Recorded the minds 0.7.3 release in `docs/deploy/history/minds-v0.7.3.md`: the tag pair and the mirror commit the template pins, the cut that spectree 3.0.0 broke and the before/after that proved the fix, both tiers' deploys and bakes with their slice verification, and the alpha promotion.
+
+- Reset `docs/deploy/next_deploy.md` for 0.7.3, and added the check this release earned: the shipped bundle lock is regenerated from scratch at build time, so a committed lockfile does not constrain a build and an unbounded requirement can take a newly published major. It also records that `minds-v0.7.1` and `minds-v0.7.2` are no longer named by any channel, so their unleased rows are retirable.
+
+## 2026-09-24
+
+A workspace whose provider's discovery poll only ran past its time limit no longer shows "Can't connect to <provider>". A timed-out poll shows that some part of the poll was slow, not that the provider could not be reached: an imbue_cloud poll also lists each leased host over SSH, so one workspace too loaded to answer held the poll open and the band blamed Imbue Cloud. The recovery card also hid its restart button on that verdict. Now the band and card describe the workspace's own condition and offer the restart. A provider that actually fails is still named, and so is one that rejected a recovery command, until a poll that actually finishes says otherwise. A timed-out poll, or a finished one that could not read the workspace's host in time, also no longer counts as a fresh look at the workspace, so a host state read before the outage is not trusted on its strength.
+
+New rollout page `docs/deploy/history/rollouts/earlyoom-gvisor-shed-order.md`: why earlyoom sheds the largest process first under gVisor whatever its priority band, who is affected and who `minds-admin hotpatch-earlyoom` cannot reach, what the hotpatch does, and the survey/canary/sweep procedure for a tier.
+
+New rollout page `docs/deploy/history/rollouts/workspace-tmp-exec.md`: why existing gen-2 workspace containers keep a `noexec` `/tmp` across restarts, how `minds-admin repair-tmp-exec` repairs them, the survey/canary/sweep procedure for a tier, and the 2026-09-24 staging record.
+
+The dev-time desktop bundle lock (`electron/pyproject/uv.lock`) records `urllib3` as a declared
+dependency of `imbue-common`, which this project resolves by path. `imbue-common` imports urllib3
+directly to configure the Sentry transport's retries. No resolved package version changed.
+
+Workspace diagnostics tail a remote workspace's gateway and tunnel logs at their new location, `/var/log/mngr-latchkey/`, where the `mngr-latchkey` package that now provisions the VPS gateway has supervisord write them, and still at `~/.latchkey/` for a host not yet re-provisioned by this build.
+
+The opt-in latchkey remote-workspace e2e test tears the "VPS" down by purging the `mngr-latchkey` package (which stops and unregisters its supervisord programs and drops the RAM-backed secrets and logs) instead of removing the supervisord drop-ins by hand.
+
+The gen-2 cutover runbook no longer describes a latchkey leg of the migrate: the migrate does not carry a workspace's latchkey state, the desktop's next provisioning pass stands the gateway up on the new VM, and the gateway's log is under `/var/log/mngr-latchkey/`.
+
+Starting an update or an `/assist` chat in a workspace is much faster. Before, each launch ran up to four separate `mngr exec` commands against the workspace: an unconditional host start, a check for the skill, a request to the workspace's chat app to create the chat, and a plain `mngr create` when the template's chat script had no create mode. Each of these took 20-50s on a workspace with many agents, so clicking "Update now" took over two minutes to open the chat. Now one `mngr exec` checks for the skill, asks the chat app, and falls back to the plain create in the same shell. The update starts the workspace only when that exec cannot reach it, then tries once more; a launch that timed out or lost its connection to the workspace partway is not retried, since it may already have created the chat. A running workspace no longer shows as "starting" when an update begins.
+
+Permission-resolution notices sent to agents also use one exec. On a template without the chat script, the in-workspace `mngr message` fallback now runs right after the script, in the same exec, instead of as a second command.
+
+Older workspaces that keep accounts but write no create defaults (minds-v0.5.0 through v0.5.2) still ask the template's resolver which account to use, which costs two extra execs.
+
+# Imbue Cloud creates sign in and verify first, the default account follows sign-outs, Manage Accounts and the color picker stay live, and reopening from the dock restores your windows
+
+- Pressing Create on the Imbue Cloud option while signed out now opens the sign-in and, once you are signed in, creates the machine and takes you to its creation page. Previously it sent you to the Accounts page, or failed with an account error that opened the advanced configuration.
+
+- An Imbue Cloud create from the create form now waits for the account's email to be verified. It sends the verification link and holds Create, with Resend and Cancel options, until the link is clicked. Previously an email sign-up's first create failed on the creation page with a raw `mngr create` error.
+
+- The create form no longer pre-selects an account that has been signed out, whether it is the default account or the account of a failed create being retried. That stale default was what made the signed-out create fail with "imbue_cloud backups require a selected account".
+
+- Signing out the default account now makes the first account still signed in the new default right away; you can change it on the Accounts page. Switching accounts (signing out of one and into another) no longer leaves the departed account as the default for new workspaces. A stored default only applies while its account is signed in; otherwise the sole signed-in account is the default, the Accounts page and the account launcher mark it as such, and signing in replaces a default whose account has signed out.
+
+- Changing a workspace's color in Machine settings no longer gets stuck on "Saving". A picked color shows right away and the swatches stay usable while the save runs. The save writes a label on the machine, and a slow or struggling machine could hold it for up to two minutes. If you pick again during a save, your latest pick is saved next. Only a failure of that latest pick is reported, and the swatch then returns to the saved color.
+
+- A picked workspace color now shows in the menu bar, the home page and every other window right away, every time, while the save to the machine finishes in the background. Each pick is sent the moment it is made; the machine is written one pick at a time, and a pick already replaced by a newer one is skipped rather than written. If the latest pick's save fails, the color changes back everywhere.
+
+- Manage Accounts now updates while it is open, from the same update that relabels the bottom-left account launcher: an account added through "Add account", signed back in with "Sign in again", signed out, or made the default shows up in the list at the same moment the launcher changes, instead of the dialog staying on "No accounts logged in" or the old list until it is reopened.
+
+- Signing in from Manage Accounts no longer ends on a "You're signed in" dialog: the sign-in dialog closes as soon as the sign-in lands, and the new account appears in the list. The sign-in dialog also now appears on top of Manage Accounts rather than hidden behind it, so "Add account" no longer sits stuck on "Opening browser…", and Escape closes that dialog first instead of closing Manage Accounts behind it.
+
+- On macOS, reopening Mind from the dock icon (or launching it again) after closing its last window now brings back the workspace windows that were open, instead of landing on the workspace selector. `Cmd+N`, `File > New Window`, and the dock menu's New Window still open a fresh window on the home page.
+
+- Creating a workspace works again on a build whose dependency resolve picked up spectree 3.0.0. spectree calls its `before` hook on every validated request, and 3.0.0 appended a fifth positional argument to it, so the hook raised `TypeError` before running and every `/api/v1` endpoint answered 500 -- including the create the desktop posts when you submit the form. The dependency is now capped below 3, and the hook absorbs any extra arguments spectree passes so a future change to that signature cannot take the API down again.
+
+- Promoted minds 0.7.2 to the alpha channels: the desktop channel moves to ToDesktop build `260924airug1s2b` (100%, mac and linux) and the web channel pins browser creates to `minds-v0.7.2`, which the production pool is baked at. Beta and stable stay on 0.6.2, and their web channels stay on `minds-v0.7.0`.
+
+- Recorded the minds 0.7.1 release in `docs/deploy/history/minds-v0.7.1.md`: the tag pair and the mirror commit the template pins, the three launch-to-msg runs, both tiers' deploys and bakes with their slice verification, the alpha promotion, and the verification of the connector concurrency reshape those deploys carried.
+
+- Recorded the minds 0.7.2 release in `docs/deploy/history/minds-v0.7.2.md`: the tag pair, which the unattended launch-to-msg run pinned on the template rather than a hand-made branch; the three connector migrations both tiers applied; the 18-slice production bake and the five-slice staging bake with their verification; the alpha promotion; the retirement of half of two dead pool generations; and the desktop crash that a `macos_launch` failure turned out to be hiding.
+
+- Reset `docs/deploy/next_deploy.md` for what the two releases discharged: the deploy-before-pin ordering and the concurrency reshape are done and gone from the list, and the connector migrations are applied on staging and production -- but the `dev-josh-1` database still has to be dropped and recreated, since it is the only one that ran 045 in its pre-rename form, so that half stays on the list, which now also names the `minds-v0.7.0` pool rows that only become retirable once the beta and stable web channels move off that tag.
+
+- Release runbook: step 8's tag run now passes `force=true`, without which it skips in under two minutes on a fast-forward cut, because the pair it names is the one step 4 already marked green.
+
+- Pool runbook: the slice-verification script no longer reports `SSH_FAILED` when the remote command merely exits non-zero -- `git config --get` does exactly that when the key is unset -- and the git-identity check now says a parked slice may carry `minds-bootstrap` or nothing at all, since both were seen on the same tag on different boxes. The only failure is seeing the operator's own name.
+
+- Cut the minds 0.7.3 release: the app version is 0.7.3 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.7.3`, carrying everything that landed on `main` since `minds-v0.7.2`. It carries the reworked Imbue Cloud create flow (sign in and verify first, the default account following sign-outs, windows restored when the app is reopened from the dock), much faster update and `/assist` chat launches in a workspace, gateway and tunnel logs moving to `/var/log/mngr-latchkey/` under the package that now provisions the VPS gateway, and a workspace whose discovery poll merely timed out no longer claiming it cannot connect to the provider.
+
+## 2026-09-23
+
+Move Minds project instructions to `AGENTS.md` so agents discover the DWT
+development workflow, with `CLAUDE.md` symlinked to the shared instructions.
+The docs now point at the canonical `.agents/skills/` home for the
+`behaviors`, `minds-dev-workflow`, and `release-minds` skills.
+
+The Share machine panel's heading now shows the person-with-plus icon beside
+"Share machine:", matching the titlebar button the panel opens from. It asked
+for a glyph named `share`, which the icon set does not carry, so the heading
+reserved the space and drew nothing into it.
+
+`Icon16` and `Icon12` now take a name typed to the glyphs that actually exist,
+so a name with no artwork is a build error rather than an invisible gap.
+
+The assist chat behind "Ask an agent" and the update chat behind "Update now" are now asked of the workspace's own chat app, through the template's `system/scripts/message_chat.py --create` run inside the workspace, so they are made exactly as a launcher-started chat is: the chat app mints the id, binds the default account and harness, labels the chat to surface its window, and answers once the create has finished, with the create's own reason when it failed. The app waits out that whole create, so a slow one now ends in the workspace's own "still being created; its window will show how that ends" rather than in a bare error from the app while the chat quietly goes on being made. A workspace whose template predates the script's create mode still gets the bare `mngr create` the app ran before.
+
+The permission-resolution nudge keeps going through the chat app first (phase 4 of the chat-agent split), through the same script run as those creates minus `--create`, and now reads the messaging script's own exit status back through the exec, so a notice delivered behind a dialog counts as delivered instead of being re-typed into the pane on every retry. Its backoff for a workspace without the script is an `mngr message` run inside that workspace rather than from the laptop: a laptop-side send reaches an agent only if its harness has a remote send path, and codex's does not, so every notice to a codex chat on such a workspace failed instantly and the agent sat waiting on a request the user had already approved (Sentry `02d08286dda04314b3ab2cbb7f06a9f0`). Undelivered notices also log the reason mngr gave.
+
+The app now addresses a workspace's agent as `AGENT@HOST_ID.PROVIDER` on every single-agent mngr call where discovery has placed that agent on exactly one host: skill, account, gate and run probes, chat spawns, the welcome chat, version reads, share materials, backups, folder sync, SSH grants, bug-report diagnostics, messages, labels, and workspace start/stop. For all of these but a workspace stop (which mngr resolves from its own record of the host), mngr then reads only that host instead of listing every host on the account, so an update-self probe or a new chat on a healthy workspace no longer times out because a sibling workspace is slow. Before the first discovery, or while an agent id is on more than one host, the call uses the bare id as before.
+
+Fixes the chain that left a running cloud machine described as "This machine stopped responding" for a whole day while its owner was working in it, and makes the next occurrence of the underlying probe failure diagnosable.
+
+- The unattended recovery's connectivity gate no longer starts a machine on a reading a laptop sleep voided. When the wake lands mid-probe the detector hands back a blank, and the gate used to treat the blank as "device fine"; it now probes again (up to three times) and only falls back to the no-evidence start when every attempt is voided.
+
+- A failed readiness probe is logged with what it got back (the HTTP status, or the transport failure's class and message) by both the background probe loop and the recovery's readiness wait, when it first appears, whenever it changes, and once a minute otherwise. Previously a probe failing against a machine already marked STUCK or RECOVERY_FAILED wrote nothing anywhere. The recovery's "did not respond within 300s" verdict, shown on the card and in error reports, now ends with the last probe's result.
+
+- A shell answer the mngr forward plugin observed clears a stale health verdict. The plugin reports the workspace's shell service answering a forwarded request, and minds records it as a probe success for any machine the tracker is watching: a probe suspect (its failure run and graces end, as on a probe 200), a STUCK or RECOVERY_FAILED one (it returns to healthy), and a RECOVERING one once its recovery has run its commands and is waiting for the interface (an answer during the stop phase is the machine before the bounce, and is ignored), or once a laptop sleep has left that recovery's own progress unverified -- the start-only recovery a sleep can block indefinitely, which has no stop phase for a premature answer to come from and which the tracker already hands back to the probe loop for the same reason. A machine the renderer is connected to through the plugin therefore stops reading as failed even when the tracker's own probe path is what is broken, and the log line for the edge names which of the two cleared it.
+
+- The recovery's readiness wait ends as READY as soon as the machine has been seen answering during the recovery, instead of running its full budget and reporting a false failure.
+
+- A burst of runtime errors from the mngr forward subprocess can no longer rotate the app's logs away in seconds. The plugin itself now reports what its serve loop is handed as one line per failure, rationed to one a minute per failure, instead of letting asyncio write the whole report to stderr; minds relays that stderr one message per log line, folding a traceback to its first and last lines plus a count and counting identical consecutive reports, as the backstop for output the plugin's own logging never sees.
+
+- `docs/sleep-wake-drill.md` describes the drill's new `gate-across-sleep` scenario, which stages this incident's morning against running apps on a spare Mac and reports whether the start was withheld while the device was offline, whether the failing probes were logged, and what card the user was left with. It also covers why the drill turns TCP keepalive off for that scenario, what a sleep too short for the apps to see means for a run, how the drill checks every app is loading its workspace before the sleep, which voided reading counts as the gate's, and why for an imbue_cloud workspace the drill sleeps only once the gate has given up on the connector's status.
+
+When an in-workspace agent files a bug report, the pre-filled report modal now floats over the machine that filed it instead of over the machines list. The agent-report route to `/help` did not name the machine (no `?workspace=`), which is the only thing that keeps a machine's surface mounted behind an app modal -- so the window navigated to Home, tore down the workspace frame it had been showing, and lost that machine's titlebar context and accent while the modal was up. It now names the machine the way the titlebar's own bug button does, and, raised over the options panel or the request popup, takes that surface's history entry rather than leaving it one Back away underneath.
+
+The /help page also merges the route's params over the launch staged for it field by field, rather than replacing it wholesale. The agent-report flow deliberately splits across both carriers -- the machine has to be in the route, while the diagnosis is far too large for a URL -- so a route that names the machine must not blank the description staged alongside it. Only a launch staged for the machine the route names is merged, so a report can never be addressed to one machine while holding what another one said, and a Help opened over no machine (the bug button on Home) no longer picks up a machine's report that was never shown.
+
+A second agent report arriving while the report modal is already up is now shown. Before, the modal kept the first report's form while the titlebar, accent and machine behind it moved to the second machine (a second report from the same machine did not show at all), and the unshown report could surface later on an unrelated Help open. The form now switches to the new report once the route names its machine, so the heading, the description and what Send posts all belong to it. It never replaces a report that is being sent or whose send failed, or a form the user has started writing in. In those cases, and while the first report's Thanks screen is up, the new report waits: Done on the Thanks screen shows it in place, and closing the modal or navigating away opens it again for its machine.
+
+Checking whether a workspace's backup is mid-run (before a backup-service update or a restore, and on every poll while one waits) now reads only the last 8 MB of the workspace's backup events log. It used to read the whole log into memory, and the log embeds restic's full output for every backup, so on an older workspace it had grown past a gigabyte.
+
+Working branch for shared workspace desktops: every desktop in the workspace shell is shared, and a user arriving for the first time gets a desktop seeded from the primary one. The branch carries the desktop-interface work (`mngr-desktop-ui-phase-4.md` through `mngr-desktop-ui-phase-6.md`, `mngr-desktop-ui-cleanup.md`) and the sharing identity cleanup (`mngr-sharing-cleanup.md`); those entries describe the changes in full.
+
+The desktop now owns the `X-Imbue-Identity` contract it hands in-workspace services over the local forward (`desktop_client/forward_identity.py`). Exactly two header forms leave the desktop: `{"owner":true}` for every workspace, and `{"owner":true,"user_id":"...","email":"..."}` for a shared workspace whose owning account is signed in here; the header no longer carries `display_name` or `profile_picture_url` (profiles are fetched from the connector by whoever needs them).
+
+The desktop writes that header into `mngr forward`'s new generic request-headers file at `<data_dir>/forward_headers.json` (passed as `--request-headers-file`), replacing `forward_identity.json` and `--identity-file`; a stale `forward_identity.json` is removed once at startup.
+
+The identity sync loop is gone: no five-minute timer, no `users show` profile refresh, no `shares list`. Which workspaces are shared now comes from the sync service's records listing (`mngr imbue_cloud sync records pull` reports `shared_agent_ids` beside the records; a listing without that key is read as nothing shared). The headers file is rebuilt after every workspace-record sync pass from the union of shared workspaces across signed-in accounts, and immediately when this desktop enables or disables a share.
+
+The Share tab's grantee list now lines up: every row leads with the same 24 px box. The owner row renders like an account entry (profile picture when the account has one, else the initial; the display name as the primary text with the email in parentheses, or the email alone) followed by " (you)", fed by two new fields on the workspace options payload (`account_display_name`, `account_profile_picture_url`) read from the signed-in account, with no connector fetch. An address that has not resolved to an account shows an empty dashed circle and reads " (hasn't signed up yet)" instead of " (invited)"; a domain entry shows a globe glyph.
+
+A user's "avatar" is now their "profile picture" everywhere in the minds desktop, matching the connector and the imbue_cloud plugin: the wire field `avatar_url` is `profile_picture_url` on `mngr imbue_cloud auth list`, `users show|resolve|profile` output, the desktop's `AccountSession` and `IdentityRecord`, the sharing status document's `identities` map, `POST /ui/api/users/resolve`, and the frontend's `IdentityRecord`. There is no compatibility shim; an `identity_cache.json` written with the old key fails validation and is rebuilt (with a warning), as any unreadable cache already was.
+
+Added a "Proxy through this desktop" toggle to the Permissions tab of a remote workspace. When it is on for a service, the requests that workspace makes to that service leave from this computer instead of from the workspace's machine. Some services refuse requests from the datacenter IP ranges a workspace's machine sits in, and accept them from the user's own computer.
+
+- The toggle is per service, not per account. It is shown in every connection panel of the service, with the same value in each.
+
+- The toggle is offered only when both of these hold: Minds knows this computer's device id, and the workspace runs on a machine of its own. Every catalog service can be routed.
+
+- Turning it on writes one grant per scope of the service into the workspace's permissions file. Each grant is limited to this computer's device id, so the user's other computers do not start forwarding. The machine's routing rules file, which is keyed by latchkey service name, is then rebuilt from every such grant in the file, and the permissions file and the rules file are pushed to the machine in one round trip.
+
+- Turning it off deletes only this computer's grants. The service stays routed while another of the user's computers still has a grant for it, and the entries of other services are left in place.
+
+- The machine routes a request by the service whose credentials latchkey used for it. Some addresses are used by several services: the Google Drive files API is used by Google Drive, Google Docs and Google Sheets. Turning the toggle on for Google Docs does not route a request that latchkey made with the Google Drive account's credentials.
+
+- Routing needs latchkey 3.15.0 on the workspace's machine, which is the version the app now installs there. A machine still on an older version routes nothing until its next provisioning pass upgrades it.
+
+- This computer has to be running and connected to the workspace for the forwarded requests to succeed.
+
+- Revoking or disconnecting an account does not remove these grants. The machine's gateway checks the account's own permissions before it routes a request, so a grant left behind allows nothing by itself.
+
+New route: `POST /ui/api/workspaces/<agent_id>/permissions/desktop-egress-toggle` with body `{ "service_name": str, "enabled": bool }`. Each connection in the permissions payload now carries `desktop_egress: { is_supported, is_enabled }`.
+
+The desktop app bundles `latchkey-curl-shims` v0.4.0, the release whose router reads rules keyed by service name.
+
+Sharing identity cleanup (design: `specs/share-identity-and-presence/spec.md`):
+
+- In-workspace services learn who is asking from one `X-Imbue-Identity` header on every request, over the relay and over the local forward alike. The desktop no longer writes the owner's email into the workspace (`data/.state/share/owner_email` is gone); instead it maintains `forward_identity.json` (the owner's account record per shared workspace) and hands it to `mngr forward`, so the owner's local requests to a shared workspace carry their id, email, name, and profile picture.
+
+- Grants are keyed by account: adding an address in the Share tab resolves it to an account (`POST /ui/api/users/resolve`) and stores the grant under `users`; an address with no account is stored as an invite the workspace gateway upgrades on first visit. User entries render with the person's profile picture, name, and email, and the grants document round-trips `users` so upgrades are never lost. Saving a share also mirrors its user-id grants to the connector's grantee index and the owner's contacts (best effort).
+
+- The desktop's grants writes into the workspace run under the same file lock the gateway takes, so the two never tear the document.
+
+- Account identity (display name, profile picture) is refreshed from the connector every five minutes, and the forward's identity file is reconciled against each account's active shares on the same schedule (and right after a sign-in or sign-out).
+
+- Promoted minds 0.7.1 to the alpha channels: the desktop channel moves to ToDesktop build `260923lbyqv5bxy` (100%, mac and linux) and the web channel pins browser creates to `minds-v0.7.1`, which the production pool holds 21 available rows at. Beta and stable stay on 0.6.2, and their web channels stay on `minds-v0.7.0`.
+
+- Cut the minds 0.7.2 release: the app version is 0.7.2 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.7.2`, carrying everything that landed on `main` since `minds-v0.7.1`. It carries the share identity and presence work (profiles, contacts, a grantee index, and profile pictures on shared machines), a "Proxy through this desktop" toggle for services that refuse a datacenter IP, assist and update chats made through the workspace's own chat app, and the fix that reports an update install by whether it started rather than by the error a deferred install raises.
+
+## 2026-09-22
+
+# Latchkey remote-workspace release test follows the docker-bridge gateway route
+
+`test_latchkey_e2e.py` now expects a VPS workspace's gateway at
+`http://host.docker.internal:1989` and creates its fake-VPS container with the
+`--add-host host.docker.internal:host-gateway` mapping the VPS provider adds by
+default (the docker provider the test stands a VPS in with does not), so it
+exercises the route production remote workspaces take, and asserts that no
+VPS->container SSH tunnel is registered on the VPS and nothing is tunneled onto
+the container's own loopback port. No product code in minds changed; remote
+workspaces get the new URL from `mngr_latchkey` at create time.
+
+`docs/latchkey-permissions.md` no longer says every workspace sees its gateway
+at the same loopback URL: it now names the per-location URL (loopback for a
+local workspace, `host.docker.internal` for a remote one) and notes that a
+remote workspace whose container predates that mapping (one adopted from a
+pool host baked by an older mngr) keeps the loopback URL and the reverse SSH
+tunnel, which `mngr_latchkey` decides inside `mngr create`. Pool hosts need no
+re-bake before a desktop carrying this change is promoted.
+
+Bump Latchkey to 3.15.0.
+
+# Remote workspaces' VPS gateway port is fenced to the docker bridge
+
+The `mngr_latchkey` provisioning pass a remote workspace's VPS goes through now
+loads an nftables policy that drops traffic to the VPS-resident gateway's port
+(and the owner-exec daemon's) unless it arrives on the docker bridge or the
+VPS's own loopback, and drops any other new connection the workspace opens into
+its VPS over the bridge; the permissions doc says so, and the latchkey e2e
+release test asserts the policy is loaded on the VPS.
+
+# No more "supervisor has died" warning floods on startup
+
+Starting Minds no longer logs dozens of `Could not list pending permission
+requests from the gateway: The `mngr latchkey forward` supervisor we spawned
+has died before binding its gateway port` warnings in the first seconds of a
+startup that then works fine.
+
+Minds terminates and respawns the `mngr latchkey forward` supervisor on every
+start, and the terminated forward's on-disk record -- bound gateway port and
+all -- survives until the new forward claims the latchkey directory an `mngr`
+cold start later. The gateway client read that record directly and treated
+"the forward it names is not the one holding the directory" as fatal, so every
+gateway read landing in the restart window failed at once; the chrome publisher
+reads pending requests twice per tick, which turned the window into a burst of
+warnings.
+
+The client now waits on the record published by the *live* forward, so an
+unowned latchkey directory is waited out like any other not-yet-bound state and
+only the existing 30s deadline is fatal (its message now names the supervisor
+log to check).
+
+Fixed a machine reading as its previous version after a successful update. When an update run landed its changes with an ordinary merge instead of a fast-forward, the version read found the previous run's `update-self:` marker commit, because it only follows the first-parent line, and ignored the newer release tag. Mind then offered the same update again while the update dialog said the update had already landed. When the marker and the nearest release tag both name a release, the version read now reports the newer one. A marker that names a branch such as `main` still takes precedence.
+
+default-workspace-template installs mngr from the public mirror at a pinned commit instead of
+vendoring this monorepo, so a workspace built anywhere -- the dev desktop app, a pool bake, the
+paired-branch CI harness -- runs the mngr the template pins, never a local checkout.
+`just minds-start` no longer copies this checkout into the template worktree, and
+`apps/minds/scripts/propagate_changes` syncs only the template into a running agent. The
+paired-branch CI worktree (`default_workspace_template_worktree.py`) clones the template branch and
+builds against its pin. Getting an mngr change into workspaces is: land on `main`, wait for the
+mirror, `just dwt-mngr-pin`.
+
+`propagate_changes` is now the only sync needing GNU rsync's `--filter=':- .gitignore'`, so it
+carries the openrsync fail-fast check (with the `brew install rsync` fix) that `just minds-start`
+used to run before every launch.
+
+The desktop client `propagate_changes` restarts now carries the same `MINDS_WORKSPACE_*` env as
+`just minds-start` (branch and the local-defaults opt-in, not just the git URL), so the restarted
+client's create form points at the template worktree instead of the released `FALLBACK_BRANCH` tag.
+The branch comes from an exported `MINDS_WORKSPACE_BRANCH` when there is one, else from the
+worktree itself; a worktree whose branch cannot be read (detached HEAD, or a path that is not a git
+repo) is reported with both remedies rather than restarting the client against nothing.
+
+Docs (`docs/dwt-mngr-pin.md`, renamed from `vendor-mngr-sync.md`, `docs/deploy/ops/app-release.md`, `docs/deploy/ops/pool-hosts.md`,
+`docs/dev-setup.md`, `docs/embed-contract.md`, `docs/wsl.md`) describe the pin; the release runbook's
+vendor-match check becomes a pin-match check. Its step 3 now owns landing the mngr branch by
+fast-forward, since nothing can be pinned until the mirror has exported that SHA, and step 6 lands
+only the template.
+
+- The release runbooks now create the release's own default-workspace-template checkout at `.external_worktrees/default-workspace-template` (via `just default-workspace-template-worktree`, based on the release tag) instead of pointing at a personal clone, derive `GH_TOKEN` from whichever account is logged in rather than a hardcoded one, and name the real `deploy-share-relay` recipe.
+
+- `next_deploy.md` is pruned back to a checklist in one-sentence-per-line style: the gen-2 production migration log moved to `docs/deploy/history/rollouts/gen2-production-migration.md`, items already done on every tier were discharged there, and a new `test_next_deploy_checklist_stays_a_checklist` enforces the file's shape (one sentence per line, no checked items, a size cap, a `Last reset:` stamp, no Vault token files named).
+
+- `history/minds-v0.7.0.md` records the whole 0.7.0 release: the tag pair and its verification runs, the staging rehearsal finding and the template tag move, the staging and production services deploys and bakes, the alpha and web promotions, the record-id repairs, the WireGuard peer syncs, the gen-2 repaves that made every tier's fleet gen-2, and the three September deploys that no earlier entry named. `next_deploy.md` is reset for the next deployment.
+
+- Retiring an old pool generation is no longer described as a release step anywhere in the runbooks or the `release-minds` skill; it is a separate pool operation (`pool-hosts.md`, "Retire a generation") run on request. Channel promotion now requires asking the deploying user which channels to move. `release-channels.toml`'s header comment and `docs/desktop-app.md` no longer describe the completed manual Linux pass as what stable's `linux` listing waits on; like `app-release.md`, they point at what that promotion carries. `gen2-cutover.md`'s retirement step points at the gen-2 rollout record for the dated archive-deletion reminder instead of at `next_deploy.md`, which no longer carries it.
+
+The desktop app now bundles its curl shims from the `imbue-ai/latchkey-curl-shims` release (pinned at v0.4.0) instead of the datalib release. The desktop latchkey gateway's `LATCHKEY_CURL` is the bundled `latchkey-curl-router`, which fronts `curl-impersonate`. Chrome TLS impersonation for marked requests behaves as before.
+
+The shims are now bundled on every macOS and Linux platform the app builds for, which adds Intel Macs. Only Windows still has none, because the release has no Windows build; latchkey uses the system curl there, without Chrome TLS impersonation.
+
+The Electron e2e runner starts a chat and opens a terminal from the desktop's launcher menu rather than its retired tiles: it presses the menu's rows (`[data-launch="chat:new"]`, `[data-launch="terminal:new"]`), and the chat's `new` row is the menu's primary free-text row, which with nothing typed starts an empty chat in the chat's pinned window. The glossary lists Getting Started among the built-in apps.
+
+The launcher's field became a text area (Shift+Enter breaks the line), so the runner opens the launcher through `[data-launcher-field] textarea`.
+
+`test_latchkey_version_alignment.py` now checks only that the bundled latchkey CLI satisfies `LATCHKEY_MIN_VERSION`.
+
+- Recorded night 3 of the production gen-1 to gen-2 box sweeps (2026-09-21, the remaining hil boxes) in `docs/deploy/next_deploy.md`: the step-0 checks, the four never-leased `available` rows destroyed, and per source box the target, the timings, every migrated workspace with its new port and latchkey detail, the owner-added programs the health probe reported, and each repave.
+
+- Tried to add Gabriel as a production management-plane operator with the public key his dev-tier entry (PR #1185) carries; that key is not a valid WireGuard key (45 characters, `wg` refuses it), so `wireguard sync-peers --tier production` left `wg0` down on the 16 boxes it reached before it was stopped, and the entry was removed again. The dev tier's entry carries the same invalid key.
+
+- Restored operator WireGuard on the 16 production gen-2 boxes the invalid key had taken down, using the runbook's break-glass Modal-sandbox bounce host (a sandbox on the connector's Modal Proxy, so its egress is allowlisted on box `:22`): each box's `wg0.conf` was backed up, the bad `[Peer]` block removed, and `wg-quick@wg0` restarted; a follow-up `sync-peers` converged 31/31 with no restarts. Recorded in `docs/deploy/next_deploy.md`.
+
+- The `[[management_plane.wireguard.operators]]` loader now rejects a `public_key` that is not a WireGuard key (the canonical base64 form of exactly 32 bytes, the same rule `wg` applies) instead of only checking the base64 character set, so a malformed key can no longer be committed and pushed to the fleet. Removed the dev tier's invalid `gabriel` entry (it has to be re-added with a re-derived key).
+
+- Added Gabriel as a management-plane WireGuard operator on the dev (`10.112.0.4`), staging (`10.96.0.3`) and production (`10.64.0.3`) tiers with his corrected key, synced tier by tier with verification between each; recorded in `docs/deploy/next_deploy.md`.
+
+- Promote minds 0.7.0 (ToDesktop build `260922up2yn3io8`) to the alpha desktop channel at 100%, listing both `mac` and `linux` (the first Linux-capable build), and point all three web channels (stable, beta, alpha) at `minds-v0.7.0`. Beta and stable desktop channels stay on 0.6.2.
+
+- Add `weishi` to the list of production operators, at `10.64.0.4`.
+
+- Add `gabriel` (`10.64.0.3`, already live on the production boxes) to the committed production operator list, so a `sync-peers` run from `main` keeps his peer.
+
+- The launch-to-first-message end-to-end test now raises the welcome chat's window before clicking into its page. A freshly created workspace opens two windows (the welcome chat and the Getting Started app) and which one ends up focused is a race; the shell shields every unfocused window, so the provider-chooser click was intercepted and the run failed after 30 seconds of retries. The test takes the shell's own two-step -- press the shield, then act on the page -- and retries a shielded click once.
+
+- Cut the minds 0.7.1 release: the app version is 0.7.1 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.7.1`, carrying everything that landed on `main` since `minds-v0.7.0`. It is the first release whose workspaces install mngr as wheels from the public mirror at the commit the template pins, rather than from a vendored `system/vendor/mngr` tree, and it also carries the launcher menu and Getting Started app and the fix for a workspace reporting the wrong version after an update.
+
+## 2026-09-21
+
+Add `gabriel` to the list of dev operators.
+
+The notification feed is now the one pipeline every notification goes through. Besides permission requests, it carries chat agents' messages (from the existing `POST /api/v1/agents/<id>/notifications` route) and system events (a workspace's backup setup failing; an account's backup cleanup finishing or failing). The bell badge and the dock badge count every unresolved entry of any kind; the key tab's red dot stays requests-only. The feed page gains filter tabs (all, requests, messages, system), a kind mark per row, a clear button per row, and clear-all. Clicking an agent message lands in that chat (the workspace is asked to show it over a new `minds:focus-chat` embed-contract message, which names the chat by `chatId`). The workspace now announces `minds:workspace-ready` when its page starts listening (contract v5), and the app holds the ask until then instead of guessing when a freshly-mounted frame is live; clicking a system event opens the workspace's backups page, or the accounts page for an account-level one. Agent messages and system events leave the feed when read or cleared and never become receipts; agent messages also read when you navigate to their workspace, and drop out when their workspace leaves the list.
+
+The agent notifications route's body is now free text plus an optional title (rendered as a `<title>: ` prefix); the `urgency` field is gone. The app derives the chat's name and its workspace itself.
+
+Notification requests use the sending runtime agent's id in the URL for Latchkey authorization. The app derives the notification's stable chat destination from that agent's `chat_id` label (falling back to the agent id for older chats), so notifications keep opening the same conversation after it moves between agents.
+
+Both in-app cards and system banners remain the default. After the first notification, a non-blocking card in the focused desktop window asks users without saved notification preferences how they want future notifications delivered. Their choice persists across windows and restarts; existing saved preferences are preserved. Clicking a card or feed entry focuses another window already showing its workspace and opens the relevant chat, request, or backups page there, keeping the current window in place.
+
+Native banners, cards, and feed entries share one desktop click router for destination lookup, window selection, focus, and navigation. In-app clicks retain their local renderer gesture when the chosen window is the source, preserving in-place request dialogs and chat focus.
+
+Native banners also carry their feed entry into the same renderer open action used by cards and feed rows. Opening any notification dismisses its toast, clears its reminder from the shared feed in every window, and closes the notification menu before opening the destination. Clearing a permission reminder does not approve or deny its request; it remains available in the workspace's Permissions view. Cleared reminders now stay cleared across restarts. Restarting the app also no longer re-sends a system banner for every request that was still pending: the app was stamping each request with the time it first saw it instead of when it was filed, so every relaunch treated them all as new. Clicks received while a window is loading wait until the renderer is ready.
+
+OS banners are laid out like Slack's: the workspace (or, for an account-level event, the account) as the title, the headline as the subtitle, the detail as the body. The focus gate that suppresses a banner when a focused window is showing the asking workspace now reads a focus signal relayed from Electron main's own window events, so it is right while keyboard focus sits inside the workspace iframe and after switching to another app; before, the page only re-reported focus on the top-level window's own events, which Chromium does not fire in that case, so banners could stay silent after alt-tabbing away. Account-level entries always fire. Settings gains a "Send test notification" button that pushes one banner through the real path.
+
+In-app toast cards now flash in every open window immediately, including for the workspace on screen and in unfocused windows; the focus gate and the catch-up queue that held flashes until a window regained focus are gone (issue #740). A card in a background window may expire on its own timer before you return; the bell and the OS banner still cover that case.
+
+Delivery is desktop-only: the browser-mode Web Notification path, the "Enable system notifications?" hint under the bell, its dismissed-flag preference, and the osascript and tkinter fallback channels are removed. A bare `minds run` outside Electron delivers nothing to the OS. "Couldn't open link" (a `mailto:` or `tel:` link with no handler) is now an in-app toast in the window where the click happened, with the address still copied to the clipboard, instead of a system notification.
+
+The Permissions button keeps its pending-request badge after a notification reminder is opened or cleared. Both the titlebar and raised menu button read the live pending request state independently of the notification tray, and remove the badge once the workspace has no unanswered requests.
+
+Dismissing a workspace's "Updated to X" note, or the badge reporting how its last update run ended, now survives an app restart. Before, both dismissals lived only in memory, so every relaunch re-read each workspace's last update run and brought the note or badge back. Dismissals are now saved under the app's data directory, keyed by the run they were about, so a newer run still shows its own result.
+
+- Cut the minds 0.7.0 release: the app version is 0.7.0 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.7.0`, carrying everything that landed on `main` since `minds-v0.6.2` (the workspace desktop interface that replaces the tabbed shell, Linux x86_64 `.deb` and AppImage builds, the unified notification feed, the retired-workspace badge and notice, persisted update dismissals, the digest-pinned workspace base image, and the rest of the changes since that tag).
+
+A permission verdict's nudge no longer goes around the workspace's chat app when mngr's output mentions an unrelated missing file. Before, any "No such file or directory" on stderr was read as the workspace lacking the chat messaging script, so the nudge fell back to a direct `mngr message`. That could land on an agent the chat had just left. Now only python's own complaint that it cannot open `system/scripts/message_chat.py` counts, and any other failure is retried through the chat app.
+
+- Recorded the 2026-09-19 staging services deploy (`20260919T235027Z`) and the 2026-09-20 production services deploy (`20260920T002726Z`) in `docs/deploy/next_deploy.md`: both applied connector migration 044 (the `retired` workspace stop kind), so the archive/retire admin flow is now usable on every tier. The flow was exercised end to end on a staging workspace first, which surfaced the `minds-admin archives create` fix for gVisor workspaces recorded in `apps/minds_admin`'s changelog.
+
+- Recorded the first production retirements: the 54 already-archived gen-1 workspaces below the cutover version floor were retired on 2026-09-20 (every live probe `RETIRE`, every archive present), all reaching `stopped` / `retired`, with a 7-day download-links report minted for their owners, plus one already-stopped workspace whose stop artifact is unrecoverable (retired without an archive; its owner's restic bucket is the remaining copy). None has been released yet.
+
+- Recorded the first night of the production gen-1 to gen-2 box sweeps (2026-09-20) in `docs/deploy/next_deploy.md`: per source box, the target, the timings, every migrated workspace with its new port and latchkey detail, the owner-added programs that do not run under gVisor, and the two migrate tooling gaps the sweep found (recorded in `apps/minds_admin`'s changelog).
+
+- Recorded the 2026-09-20 daytime cleanup between the production box sweeps (night-1 validation, six home-layout repairs, the suspended and departed accounts' rows and buckets removed, the first stopped-row migrations) and the evening's work in `docs/deploy/next_deploy.md`: the last stopped hil row of an external owner migrated onto `3841df6d`, the seven emptied hil gen-1 boxes repaved gen-2 (every one `ready`, encrypted, keys 0/0, CA correct), the quarantined never-leased row on `5f099257` destroyed, and the two leased workspaces the night sweeps could not take as they were: one whose `update-self` had left it with no `mngr` tool and no services (the vendored mngr reinstalled, services back), and one that was a failed slow-path create with no container and an empty volume (released).
+
+- Recorded the archive-and-retire of the 22 stopped gen-1 workspaces of one internal owner at his request (2026-09-20/21, the retire flow run on stopped rows with `archives create --start-stopped`), the 7-day download-links report minted for him, and the two rows that needed a re-run.
+
+- Recorded the 2026-09-21 vin sweep in `docs/deploy/next_deploy.md`: the eight leased gen-1 workspaces of `c011f511`, `d157ec61` and `642c2c1c` migrated onto the vin gen-2 boxes `f763270e` and `8797d3ae`, every one verified, with the one in-place fix (a workspace whose self-updated vendored mngr no longer imported in its stale tool environment) and the resume that finished it.
+
+- Recorded the 2026-09-21 vin repaves (`d157ec61`, `8cade5fa`, `642c2c1c` gen-2; `c011f511` stuck at `installing` because its TPM refuses to seal the storage key), the 19 never-leased rows destroyed to empty two of them, and the archive-and-retire of the last three gen-1 workspaces below the version floor.
+
+- Recorded the 2026-09-21 vin sweep of `d04e8224` (10 workspaces onto `8cade5fa`) and `68069cdb` (7 onto `d157ec61`), plus the one default-size row of `a7828ee9` onto `642c2c1c`, in `docs/deploy/next_deploy.md`: every workspace verified, the 11 never-leased rows destroyed first, both emptied boxes repaved gen-2, and the one failure (a rolled-back self-update whose tool environment no longer matched its vendored mngr) that the migrate now repairs itself (see `apps/minds_admin`'s changelog).
+
+- Recorded the rest of the 2026-09-21 vin sweep in `docs/deploy/next_deploy.md`: the five oversized-disk workspaces of `a7828ee9` shrunk onto `642c2c1c` (the first live use of `cutover migrate --shrink-oversized-disks`, one proving row then the other four), the one failure the migrate now repairs itself (a harvested latchkey run script naming a curl shim under another build's name; see `apps/minds_admin`'s changelog), the last never-leased row destroyed, and `a7828ee9` repaved gen-2 as a 29-slot box. Vin now has no gen-1 box holding rows.
+
+The minds design doc's "Relationship to mngr" section records the one exception to interacting with mngr only through its CLI: the default workspace template's desktop shell reads the `mngr observe` agents event file (`$MNGR_HOST_DIR/events/mngr/agents/events.jsonl`) to show, on the chat's avatar, whether any agent is working, with plain JSON parsing and no mngr import, and why that read rather than the CLI. The pinned taskbar entries and the avatar themselves land in the default-workspace-template repo (its `mngr/desktop-avatars` branch).
+
+The desktop client's chrome page no longer includes the minds embed contract as a classic `<script>` tag. The contract (`/_static/embed_contract.js`) is an ES module that the workspace frame imports when it mounts, so the tag could never parse it and every window load logged `Uncaught SyntaxError: Unexpected token 'export'` to the console (and into the console tail that bug reports carry). The page now preloads the module (`<link rel="modulepreload">`) instead, so the frame's import is served from cache and nothing is logged.
+
+The default-workspace-template gains phase 4 of the desktop interface plan (`docs/system/blueprint/desktop-interface/plan-desktop-interface.md` in that repository): the workspace shell's backend now keeps desktops, shared windows, and per-client placements beside the tabbed shell's projects and layouts, serves the desktop routes and socket messages, and speaks the desktop verbs on the agent op route. No mngr code changes; the template PR is `imbue-ai/default-workspace-template` branch `mngr/desktop-ui-phase-4`.
+
+The default-workspace-template gains phase 5 of the desktop interface plan (`docs/system/blueprint/desktop-interface/plan-desktop-interface.md` in that repository): the workspace shell's frontend is now a desktop (windows over a wallpaper, shortcuts, a taskbar with a launcher and a system tray) reading only the desktop routes phase 4 added, the chat app opens its pages by path and its agent-side auto-open speaks the desktop's `open` op, and the end-to-end suite is rewritten for the desktop. On the mngr side, the minds desktop client's Electron e2e runner and scripts drive the desktop rather than the deleted tabbed shell: they wait for the desktop's backdrop, open chats and terminals from the launcher's tiles, and find a chat's page among every frame under the workspace (the chat app's root now frames it). The template PR is `imbue-ai/default-workspace-template` branch `mngr/desktop-ui-phase-5`.
+
+The default-workspace-template gains phases 6 and 7 of the desktop interface plan (`docs/system/blueprint/desktop-interface/plan-desktop-interface.md` in that repository): the tabbed shell is deleted (the instance relay, projects, layouts, and migration in the shell; every app's instances API, nudge, and sidecar; the `app_instances` library; the contract module's `open(address)`), `layout.py` and the one `manage-desktop` skill speak the desktop's verbs, the update apply probes every critical app's `/api/health`, and the ratchets refuse the tabbed shell's vocabulary. On the mngr side this entry is prose only: the minds docs, README, glossary, and the desktop client's README and skill-chat comment describe the workspace as a desktop (windows, a taskbar, a launcher) where they still said "dockview UI", "tabs", or "the New Tab page". The template PR is `imbue-ai/default-workspace-template` branch `mngr/desktop-ui-phase-6`.
+
+Production and staging tier deploys now hold burst-added Modal containers for ten minutes before retiring them (`[scaledown_window] connector = 600, litellm_proxy = 600` in each tier's `deploy.toml`), and production keeps two warm connector containers (`[min_containers] connector = 2`). Modal's 60 s default retired hundreds of one-minute containers a day on the production connector, each with requests still in flight, which the share relays saw as 500s on their frps heartbeat auth (imbue-ai/mngr-internal#1158). Both take effect at each tier's next `minds-admin env deploy`.
+
+The deploy checklist (`docs/deploy/next_deploy.md`) gains the post-deploy step that runs `minds-admin workspaces repair-record-ids` on staging and production, repairing the pool leases whose services agent id drifted from their workspace record before the imbue_cloud slow path pinned it, with a CLEANUP item to retire the command once no older client remains (imbue-ai/mngr-internal#1159).
+
+Adopted the new repo-wide `raw ConcurrencyGroupExecutor construction` ratchet (`test_prevent_raw_concurrency_group_executor`). The two connectivity-probe executors in `environment_signals.py` are kept at their current count: they make plain socket connections and never touch gevent. The `mngr observe` memory leak minds users hit is fixed in mngr_imbue_cloud and reaches the app with the next re-vendored mngr release.
+
+# One-command Linux bring-up from the public repo
+
+Added `apps/minds/scripts/install-linux.sh`, the single Linux installer for running the minds desktop app from source. It replaces `install-wsl.sh` and `setup-raspberry-pi.sh`: WSL2 is detected automatically (systemd check, `/mnt/` refusal, Docker Desktop refusal, the Windows desktop shortcut), and `--raspberry-pi` switches on the Pi 5 always-on steps (gVisor runsc, the kernel and boot changes it needs, desktop autologin, wayvnc, menu and autostart entries). Run it curl-piped to clone the public repo to `~/mngr`, or from inside a checkout to use that checkout as-is. `--version latest` picks the newest public `minds-v*` tag and `--version <ref>` any ref; without it an existing checkout is untouched and a fresh clone lands on `main`. The toolchain under `$HOME` (uv, nvm, the pinned Node and pnpm) installs after one confirmation, and the checkout's venv and `node_modules` are synced on every run without asking; anything needing sudo shows its exact command and asks first, `--yes` runs every step unprompted, and `--non-interactive` never prompts and instead names the command for any privileged step still needed. `--skip-docker` and `--no-launch` are for CI-style runs. The launcher it writes, `~/.local/bin/minds-desktop`, starts the app from the checkout against production through the new `apps/minds/scripts/start-desktop.sh`, the one script that launches the dev app: run from any directory, it selects the pinned Node, requires the pinned pnpm (erroring with the install command rather than installing it), runs `pnpm install --frozen-lockfile`, and execs `pnpm start`. The docs' macOS instructions and the internal `just minds-start` recipes use it too, so `cd apps/minds && pnpm install && pnpm start` no longer appears anywhere and a failed launch never leaves a shell in another directory. The global `latchkey` install is gone (dev-mode `pnpm start` uses the one under `node_modules`), and so is the contributor `--dev` layout, which depended on private tooling.
+
+Production is now the default env for a source run: when neither `--config-file` nor `MINDS_CLIENT_CONFIG_PATH` is set and `MINDS_ROOT_NAME` is unset (or `minds`), `minds run` loads the in-repo production `client.toml`, the same file a packaged build embeds, so `pnpm start` from a checkout needs nothing exported. The `minds` CLI seeds `MINDS_ROOT_NAME=minds` before its bootstrap when the var is unset, so such a run also gets the production mngr host dir (`~/.minds/mngr`), the `minds-` prefix, the reconciled mngr settings, and the production Sentry target, exactly like the Electron launcher and a packaged build; `minds-admin` still treats an unset var as no activation. It still refuses when `MINDS_ROOT_NAME` names another env and nothing says where that env's config lives. Public error text no longer points at the private `minds-admin env activate`.
+
+`pnpm install` in `apps/minds` no longer prints pnpm's "Ignored build scripts / run pnpm approve-builds" warning: `@firebase/util`, `dtrace-provider`, and `protobufjs` (transitive deps whose install scripts the app never needed) are listed under `ignoredBuiltDependencies`.
+
+`docs/dev-setup.md`, `docs/wsl.md`, and `docs/raspberry-pi.md` describe the one-script path and separate the Imbue-internal dev-env tooling from what a public contributor needs.
+
+Changed: the create form and create API now default the Docker container runtime to `runc` on every platform. Linux previously defaulted to gVisor's `runsc`, which is only registered with the Docker daemon when the machine's owner installed it, so the very first create on a fresh Linux install failed with "Docker runtime 'runsc' is not registered". gVisor remains a per-create opt-in under the form's advanced settings, and the `MINDS_DOCKER_RUNTIME_DEFAULT` override still forces either value. `install-wsl.sh` (since folded into `scripts/install-linux.sh`, which detects WSL itself; see `mngr-linux-dev-packaging.md`) no longer needs to export that override for its launcher, and `docs/wsl.md` describes the platform-wide default. The release runbook (`docs/deploy/ops/app-release.md`, step 7) now notes that pushing the mngr tag triggers the `Mirror tags` workflow, and that a corrected tag must be re-pointed on the mirror by dispatching it with `force=true`.
+
+# Linux packaging and Linux dev packaging, merged
+
+Merges the two Linux branches so the packaged Linux app and the from-source Linux bring-up ship together:
+
+- `mngr/linux-packaging` (see `mngr-linux-packaging.md`): ToDesktop builds a Linux x86_64 `.deb` and AppImage from one upload, with one complete resources tree staged per shipped target and its executables checked against the target's format; Linux updates install only on an explicit click (with the `.deb`'s password prompt named on the update card); the AppImage registers its own desktop entry and `minds://` handler; the create form probes Docker, gVisor, and QEMU/KVM and shows the install command for whatever is missing; `release-channels.toml` entries declare `platforms`.
+
+- `mngr/linux-dev-packaging` (see `mngr-linux-dev-packaging.md` and `mngr-setup-vnc.md`): `scripts/install-linux.sh` is the one Linux installer for running from source (Debian/Ubuntu, WSL2, Raspberry Pi 5), `scripts/start-desktop.sh` is the one dev-app launcher, a source run defaults to production, and `download-binaries.js` provisions linux/arm64 dev binaries.
+
+The merged `docs/desktop-app.md` and `docs/raspberry-pi.md` now say that the packaged Linux artifacts are x86_64 only and that linux/arm64 remains a dev-mode (Raspberry Pi) target.
+
+The create form's Lima prerequisite now probes the host architecture's QEMU (`qemu-system-aarch64` on arm64 Linux, `qemu-system-x86_64` elsewhere) and offers the matching apt package, instead of always looking for the x86 emulator.
+
+`scripts/install-linux.sh` refuses `--raspberry-pi` together with `--skip-docker`, since the Pi setup registers runsc with Docker and would otherwise fail partway through.
+
+A Linux install that does not go through (the `.deb` password prompt cancelled, `dpkg` refusing the package) is now reported on the update card and in Settings, with the download kept for another try; before, the click looked ignored while the app stayed up.
+
+`scripts/install-linux.sh` resolves a relative `--install-dir` to an absolute path before using it, so the generated launcher and the Raspberry Pi desktop entry work from any directory rather than only the one the installer ran in.
+
+`scripts/install-linux.sh` no longer rewrites the nvm `default` alias: the launcher selects the pinned Node itself (`select_node_version.sh`), so a developer who uses nvm for other projects keeps their own default.
+
+The create form's Docker prerequisite offers `sudo systemctl start docker && sudo usermod -aG docker "$USER"` when Docker is installed but its daemon does not answer, instead of the installer one-liner that its summary was not asking for; the installer stays the command for a machine without Docker.
+
+The update card drops a failed install's message once a different update is offered, and "Check again" on a prerequisite notice re-checks the machine name's availability when the re-probe moves the local preset to another compute mode.
+
+A Linux install whose quit was cancelled at the running-workspaces prompt no longer makes the next click on the update card a silent no-op: the package on disk is already the new version, so that click quits into it instead of re-running the installer.
+
+The create form's Lima prerequisite tells a `/dev/kvm` that does not exist (no KVM on this machine) apart from one this user cannot open: only the latter says to join the kvm group and offers the `usermod` command.
+
+The Create-from-Template page now shows the same local-prerequisite notice as the create page (under the local preset card, and on the confirm step above the create button, where picking the local card lands), with its Check again re-probe. `install-linux.sh` quotes the launcher path wherever it hands it to a shell, so a home directory with a space no longer breaks the WSL shortcut, the `sg docker` launch, or the Pi desktop entry.
+
+`playwright` and `playwright-core` join `latchkey` in `pnpm-workspace.yaml`'s `minimumReleaseAgeExclude`: latchkey pins playwright to an exact version, and the 3.13.0 bump pinned a playwright nine days old, so ToDesktop's re-resolving `pnpm install --no-frozen-lockfile` refused it and every desktop build failed at "Configuring App" while CI's frozen installs passed. The dependency-cooldown section of `docs/desktop-app.md` now says that ToDesktop re-resolves on every build and lists the exceptions.
+
+`builder-util-runtime` 9.7.0 is now a direct dependency of the desktop app. ToDesktop's Linux build packed electron-updater 6.8.9 next to the 8.9.2 copy that `@todesktop/runtime`'s old electron-updater needs (the macOS build nests the right one), so every Linux update download finished and then failed at electron-updater's final rename with `retry is not a function`; the update card never appeared. Found while exercising the Linux update flow on the test box. `test_electron_updater_dependency_alignment.py` keeps the direct pin equal to the builder-util-runtime the lockfile resolved for the pinned electron-updater, so an electron-updater bump that leaves the pin behind fails CI instead of the next Linux update.
+
+On Ubuntu 24.04 and later the `.deb` now runs with Chromium's process sandbox. ToDesktop's `noSandbox: probe` launcher passes `--no-sandbox` there because its `unshare` probe runs from an unconfined shell, but the `.deb`'s post-install script loads an AppArmor profile that lets the app itself create user namespaces, so on startup the app relaunches without the flag when it finds that profile (or a root-owned setuid `chrome-sandbox`) and logs `[sandbox]` lines to `electron.log`; a marker switch keeps it from ever relaunching twice. The replacement is spawned by a detached shell rather than Electron's `app.relaunch`, whose relauncher helper (started with `no_new_privs`, Chromium's default for the processes it launches) would hand it `no_new_privs` and thereby break the `.deb` updater's `pkexec` install ("pkexec must be setuid root"). The AppImage still runs without the sandbox on those distributions, since nothing can install a profile for it; `docs/desktop-app.md` describes both. Found during the manual Linux pass.
+
+The restart after a `.deb` update now goes through that same detached shell instead of electron-updater's `app.relaunch`. The first update-driven restart on the test box came back with `no_new_privs` set, which would have made the next update's `pkexec dpkg -i` fail with "pkexec must be setuid root" until the app was next started from the launcher. The install policy table names who restarts the app (`relaunchedBy`): the app itself for every Linux install (the AppImage joined the `.deb` there, see below), electron-updater's Squirrel on macOS.
+
+The Linux surfaces this branch adds follow the app's rename to Mind: the AppImage's own desktop entry takes its `Name` and `StartupWMClass` from the app's product name (the `WM_CLASS` Electron sets) rather than spelling it out, and the from-source desktop entry and WSL shortcut `install-linux.sh` writes and the Settings notice for a downloaded update say Mind. After the rename the `.deb` installs under `/opt/Mind` (the executable, package, desktop file, icon, and AppArmor profile keep the `minds` name, and the updater cache stays `minds-updater`); the docs and spec name that path, and it was verified on the test box with ToDesktop build 260916i6n0xrgga: the sandbox relaunch, the update download, and the staged install all behave as before.
+
+The update card and the Settings panel now show an installing state from the click on "Install and restart" until the app quits: the button is held and the copy says what is happening ("Installing Mind 0.6.2" and, on a `.deb`, "Enter your password when asked; Mind restarts when it's done"). Before, the card kept offering a live button for the whole of the `.deb` install, whose `dpkg` run blocks the main process for tens of seconds, so the click looked ignored. The state is set in the renderer before the main process is asked, and the main process settles the install call only when the app is staying up: a failed install settles it with the reason, and a successful install settles it only if the quit is then cancelled at the running-workspaces prompt. The control comes back in those two cases and stays held while the app quits.
+
+The restart after an AppImage update now also goes through the app's own detached shell. electron-updater's AppImage installer started the replaced file the moment it was in place, before the old app had quit: on the test box the new instance died on the single-instance lock, its arrival brought the old window forward over the running-workspaces prompt (so the click looked like a hang), and nothing came back once the prompt was answered. `electron/appimage-updater.js` keeps that installer's file replacement and drops its start; the app starts the AppImage file itself once the old process has exited. The running-workspaces prompt and the other quit-time dialogs are now owned by the app's most recent window, which is brought forward first, so neither a raise of that window nor its being minimized can hide them.
+
+The create form no longer submits while the selection it would send has an unmet prerequisite: the Create button (and Create from Template) is held while the local preset's backend, a compute mode picked in Advanced, or the runsc runtime is missing something, and a submit that still arrives is refused; the simple view's notice names whatever holds the button, so a compute mode or runtime picked in Advanced is still explained after "Back to simple configuration". Before, a create on a machine whose notice said Docker was not running went through and failed minutes later. A failed create's error now lands in the creation transcript whole instead of being streamed a character at a time; a long error streamed that way read as the app hanging.
+
+The import block of `desktop_client/ui_models_test.py` is sorted again; a merge on main left it unsorted, which failed the repo's ruff check.
+
+The manual Linux pass the release checklist asks for is recorded as done in `docs/deploy/next_deploy.md` (Ubuntu 26.04 and Debian 12, both artifacts, every local backend, a cloud create, a `minds://` link, and both in-app update paths), leaving the alpha/beta and stable promotions as the remaining release steps; `docs/desktop-app.md` now says that Debian 12 needs no sandbox relaunch at all.
+
+# Working Linux x86_64 desktop builds: `.deb` and AppImage
+
+Every ToDesktop build now ships a Linux x86_64 `.deb` and AppImage whose bundled tools actually run on Linux. `scripts/build.js` stages one complete tree per shipped target (`resources/darwin-arm64/payload/`, `resources/linux-x64/payload/`): the native tools plus a copy of the shared wheels, runtime pyproject, and latchkey bundle. `todesktop.js` selects the right tree per target through `targetOverrides` (the build service never delivered a `platformOverrides` Linux list); every source is a directory named `payload` because ToDesktop pairs the per-target lists by `to` plus source name. A new format assertion reads each staged executable's ELF or Mach-O header and refuses a directory whose tools cannot run on its target, which is the check that would have caught the earlier AppImage that shipped arm64 Mach-O binaries. `uploadSizeLimit` covers both targets, and the upload estimator prices every platform's list.
+
+`todesktop.js` gains a `linux` block (`category: Development`, `noSandbox: "probe"`) with `appBuilderLibVersion` pinned so the sandbox probe is honoured, and `@todesktop/cli` moves to 1.28.
+
+On Linux, updates install only when the user clicks **Install and restart** on the update-ready card, never at quit; for a `.deb` install the card says the password prompt is coming, since electron-updater installs it with `dpkg -i` under `pkexec`. The updater reports itself unavailable when it cannot work (an AppImage run without the `APPIMAGE` variable, an unpackaged app). A packaged AppImage registers a desktop entry, its icon, and the `minds://` scheme handler under `~/.local/share` on launch.
+
+The create form's defaults now report, per local backend, whether this machine has what it needs (a reachable Docker daemon, gVisor's `runsc` registered with it, Lima with `qemu-system-x86_64` and a usable `/dev/kvm`), and the form shows a copyable install command, a link to the install guide, and a **Check again** button under whichever local backend is selected when something is missing. Every backend stays selectable. The local preset now prefers Docker on Linux and Lima on macOS.
+
+`release-channels.toml` entries gain a required `platforms` list (`mac`, `linux`); alpha and beta will publish Linux manifests, stable stays mac-only until a Linux build passes the manual pass recorded in `docs/deploy/next_deploy.md`. Docs updated (`docs/desktop-app.md` Linux section and the per-target staging layout, `docs/deploy/ops/app-release.md`, `docs/deploy/setup/update-feed.md`). The stale root `ELECTRON_BUNDLING_AUDIT.md` is deleted; its findings were already fixed by the wheel-staging build.
+
+# Linux arm64 (Raspberry Pi 5) support for running the desktop client from source
+
+`scripts/download-binaries.js` now recognizes `linux/arm64` and provisions the pinned, SHA256-verified binaries for it: uv (`uv-aarch64-unknown-linux-gnu`), restic (`linux_arm64`), the latchkey Chrome-impersonating curl (`curl-aarch64-unknown-linux-musl`, which the datalib release already ships), plus the lima, desync, and dugite-native git payloads whose arm64 hashes were already pinned. Previously `pnpm start` on a 64-bit Raspberry Pi died in the `prestart` hook with `Unsupported platform/arch: linux/arm64`.
+
+Added `docs/raspberry-pi.md` and `scripts/setup-raspberry-pi.sh` (since folded into `scripts/install-linux.sh --raspberry-pi`; see `mngr-linux-dev-packaging.md`): an idempotent, run-over-ssh setup that turns a stock Raspberry Pi OS (bookworm, Pi 5) into an always-on host for the production-tier minds desktop client -- Docker CE with the pinned gVisor `runsc` runtime (which needs the 4K-page `kernel8.img` and `cgroup_enable=memory`), uv, the pinned Node/pnpm toolchain, the source checkout, a `minds-desktop` launcher plus desktop/autostart entries, and the Pi OS desktop + wayvnc for remote-desktop access.
+
+`electron/build-metadata.js` no longer forwards git's stderr when resolving the dev-mode git SHA. Node forwards even an empty stderr buffer to the process's stderr, and that zero-length write fails with `EFAULT` under Electron on linux/arm64, which crashed the main process at startup on the Pi.
+
+Add `weishi` to the list of staging operators.
+
+## 2026-09-20
+
+Deploy docs: `setup/order-boxes.md` records that the 2x960 NVMe `24sys03-v1-us` is no longer orderable in `hil` (2x1920 NVMe is), documents the two-drive NVMe mirror restriction that `minds-admin server pricing` / `order` now enforce (with their `--any-storage` / `--allow-unsupported-storage` escape hatches), and adds the TPM 2.0 hardware precondition the gen-2 prep now checks up front, with the OVH-ticket remedy, and a section excluding OVH's GAME ranges and 1 Gbit/s ports: the Game anti-DDoS firewall drops the management WireGuard's inbound UDP (the first such box in `hil` ended `ready` but unreachable) and the restore fetch collapsed on the 1G port (856 s against 59 s on a 10G box for the same artifact). `host-pool-setup.md` cross-references both.
+
+## 2026-09-19
+
+- A cloud workspace an operator retired (its version cannot run on the new fleet; its data was archived) shows a "Retired" badge, no Start control, and a notice saying it cannot be started again and pointing at its backups (or at support when it has none). The desktop's own start and recovery paths stand down for it exactly as for a maintenance hold.
+
+- Runbook: `docs/deploy/gen2-cutover.md` gains "Retiring the workspaces the migrate cannot take" (`minds-admin archives` + `workspaces retire`), and `next_deploy.md` carries connector migration 044 and the dated cleanup of the `archives/` prefix.
+
+- Recorded the minds 0.6.2 release in `docs/deploy/history/minds-v0.6.2.md` (tag pair, build id, verification runs, the staging deploy `20260917T054239Z` and the three staging bakes) and updated `docs/deploy/next_deploy.md` for what the staging rehearsal discharged (connector migration 043 applied on staging; 0.6.2 baked on every staging box).
+
+Release runbook step 0 now requires the default-workspace-template Dockerfile's base-image digest to be bumped in the same commit as `.mngr/apt-snapshot-timestamp`, with the `apt_mirror` release test (`DEFAULT_WORKSPACE_TEMPLATE_REF=<branch>`) proving the pair agrees before it lands; imbue-ai/mngr-internal#1138 is what a floating tag did. `next_deploy.md` records the fix (DWT PR #634) and that no release is required for it: production keeps baking `minds-v0.6.2` by copying the verified image tar between boxes.
+
+Runbooks updated for the seed-side base-image override (imbue-ai/mngr-internal#1143): the gen-2 cutover runbook and the pool-hosts runbook say that a first-of-tag seed of a tag through `minds-v0.6.2` builds against the base its snapshot covers, and `next_deploy.md` drops the interim tar-copy workaround for `minds-v0.6.2` bakes.
+
+## 2026-09-18
+
+# Entering the master password no longer reports success when it unlocked nothing (MIND-249)
+
+`POST /_chrome/sync-unlock` -- the request the landing page's "Enter your master password" banner sends -- reported `{"ok": true}` even when it had unlocked nothing at all. It only tries accounts that read as locked on this device, and an account whose encrypted material (a secret-carrying workspace record, or a synced cloud connection) has not been pulled down yet does not read as locked. With nothing to try, the route fell through to the success response: the banner cleared, the typed password was discarded, no data-encryption key was installed, and the account's synced secrets stayed unreachable with nothing prompting a retry.
+
+The route now succeeds only when this device actually ends up holding a key: it reports `ok: false` with "No account on this device is waiting to be unlocked yet. Try again in a moment." when the unlock had nothing to act on. Wrong-password, partial-unlock, and already-unlocked outcomes are unchanged, so a re-submitted password on an account that is already open still reports success.
+
+This was also the root cause of a CI flake in the cross-device cloud-connection sync end-to-end test: it posted an unlock before the connection document had reached the second device, was told the unlock succeeded, and then timed out 180 seconds later waiting for a provider block that could never be written without the key.
+
+Fixed: a workspace's Permissions tab, its credential connects/disconnects, and its permission approvals no longer fail wholesale because your mngr settings configure a provider whose plugin this app does not ship.
+
+The desktop app reads the same settings files the `mngr` CLI does, including the project settings of whatever checkout it was launched from, but it carries only the provider plugins it depends on. A `[providers.<name>]` block naming a backend it has no plugin for (azure and gcp are both configured in the mngr monorepo's own `.mngr/settings.toml`) was a parse error that took the whole settings load down with it, so every remote workspace reported "Could not load the mngr settings that name your workspaces' machines: Provider 'azure' references unknown backend 'azure'" and had no reachable machine.
+
+Such a block is now skipped with a warning, and the workspaces whose providers this app does have keep working.
+
+Fixed remote workspaces of an account signed in after the app started being unreachable from the Permissions tab. Approving a connection for such a workspace (or reading its connections, or changing a toggle) failed with `Could not reach the machine of host <id>: Unknown provider backend: imbue_cloud_<account>`.
+
+Signing in registers a provider instance for the account in mngr's settings, but the app loaded its provider set once at startup and kept it, so a set taken before the sign-in knew that provider only as a name. Creating a workspace was unaffected, because that runs `mngr` in a fresh process -- only the operations the app performs in-process failed, and they kept failing until the app was restarted.
+
+The app now reloads its provider set whenever mngr's settings file changes, which also picks up an account signed out, a cloud account added or removed, and an edit made to the settings by hand while the app runs. A reloaded-away provider set is retired in full -- every instance in it closed and dropped, and its suspension watchdog stopped -- so a long session of sign-ins and provider toggles does not accumulate either.
+
+Settings that will not load -- a hand edit with a typo, a provider block naming a backend this install has not got -- leave the provider set the app already holds in place rather than failing every Permissions operation, and the app picks the settings up as soon as they parse again.
+
+Fixed `test_broadcast_after_connect_reaches_the_ws_client`, which failed once under a parallel run of the whole desktop-client suite. It drained the connect sequence by counting frames, and the count it used need not match what the connection received; it now waits for its connection to be registered and reads until the pushed frame arrives.
+
+The desktop latchkey gateway is now started with this install's device id as detent custom metadata (`customMetadata.deviceId`), so a permission rule can be limited to one of the user's computers. No rule uses it yet; this prepares for routing a remote workspace's requests through the desktop.
+
+## 2026-09-17
+
+The beta and alpha desktop channels move to minds 0.6.2 (ToDesktop build `260917ohslvgoyj`, rollout 100%), and the beta and alpha web channels pin browser creates to `minds-v0.6.2`, which the production pool is baked at on gen-2 boxes in both regions. Stable stays on 0.6.1.
+
+The stable desktop channel moves to minds 0.6.2 (ToDesktop build `260917ohslvgoyj`, rollout 100%), and the stable web channel pins browser creates to `minds-v0.6.2`, which the production pool is baked at on gen-2 boxes in both regions. Every channel now serves 0.6.2.
+
+## 2026-09-16
+
+Documented why the two pnpm supply-chain cooldown exemptions in
+`apps/minds/pnpm-workspace.yaml` (`minimumReleaseAgeExclude`: `latchkey`,
+`@imbue-ai/detent`) are standing rather than temporary: both are Imbue-published, so
+they are trusted on release instead of after the 14-day minimum release age, and a
+latchkey bump lands here within days of publish. No behavior change; a repo-wide audit
+of cooldown exceptions found these two still load-bearing and the comment keeps a
+later audit from removing them.
+
+- The start flow's comparison table now labels the second column "Custom setup" and gives it an "Advanced" badge, matching the "Recommended" badge on Imbue Cloud. The badge takes its color from the column: accent for the recommended one, grayscale for the rest, so the two do not read as competing recommendations.
+
+- Modal backdrops now dim the titlebar too, instead of stopping at the 38px strip and leaving it bright above the dimmed page. This covers the custom-create and sign-in modals along with every other one.
+
+- Modal content that overflows is now clipped by the card's own bottom edge rather than by its padding. A long form previously cut off a padding's width above the bottom, leaving a band of blank card beneath a half-sliced Create button.
+
+- Modals are 72px shorter, 36px off the top and bottom, so a tall one no longer stretches the window's full height.
+
+- The sign-in modal is wider, and its fallback link sits on one line (truncated, click-to-copy) instead of wrapping over several -- the same treatment the workspace share link already had.
+
+- The "Change answer" tooltip on a start-flow answer now opens above the button rather than below it. Tooltips can request a side via `data-tooltip-placement`, and still flip to the other side when the preferred one has no room.
+
+- Clicking "Change answer" now leaves 16px of clearance under the last turn when the transcript auto-scrolls, rather than parking the button flush against the bottom edge.
+
+- The "Custom setup" name now carries through the whole start flow: the answer button, what the transcript records you as having said, the question that introduces the two options, and the follow-up when that dialog is closed unfinished.
+
+- The comparison table uses the check marks themselves rather than icon-set glyphs -- a filled mark for Imbue Cloud, a plain one for Custom setup.
+
+- A manifesto point's marker is a chevron that turns as the point opens, and it takes its color from the row: primary alongside the label, and accent with the label on hover, instead of sitting a shade apart in tertiary. The marker holds a fixed-width column, so an open point's explanation starts flush under its label rather than a few pixels further in, and the explanation keeps a gap under it so it does not sit against the next point's label.
+
+- The markers now fade in with their own line as the list streams, rather than all standing there at once in front of rows whose labels have yet to type themselves in.
+
+- An open manifesto point sets its label bold and its explanation in primary.
+
+- Fixed opening a manifesto point part-way up the transcript scrolling the column to the end, which threw the reader off the row they had just opened. Auto-scroll now follows the number of turns -- a turn arriving or being undone -- rather than the anchor's layout position, which a disclosure also moves.
+
+- Tightened the start flow's turn spacing from 48px to 40px, and the quieter answer button is now a bordered secondary rather than a borderless ghost. Its label stays primary -- only its weight is lighter -- so the border does not make it read as disabled.
+
+- A create started from the start flow's Imbue Cloud answer now restates itself as "Create on Imbue Cloud" rather than listing the seven settings behind it. That answer submits the remote preset without ever showing the form, so reading its region, backup, template and branch back made one choice look like several. Every other create still restates each setting, including one that picks Imbue Cloud from inside the form -- there the settings are yours. Reloading mid-create falls back to the settings list, along with the rest of the transcript.
+
+- Signing in, creating an account, and verifying your email now bring the app back to the front on their own. All three finish in your browser, which takes focus with it, so the app used to sit behind it having already moved on -- the only way back was the "Open app" link on the browser's success page. The app now raises itself as soon as it sees the sign-in land or the address come back verified. This existed before sign-up moved to the hosted browser page and was lost in that move; the "Open app" link stays as the fallback for when the app is not running.
+
+- The start flow's aside now reads "I already have a workspace (log in)" rather than "I already have one", and the account step's quieter answer is "Sign in" -- each naming the thing you already have at the point it is offered.
+
+- An answer row coming to rest now leaves 32px under it instead of 16px, so a new set of buttons does not sit almost against the window's bottom edge.
+
+- A transcript turn now breaks a long unbreakable token instead of running out past its bubble. A create summary restating a local repository path -- which has no space to wrap at -- overflowed the grey pill and carried on across the page.
+
+- Fixed the app not coming back to the front when you sign in by picking an account the browser already had signed in. That path is the fastest one, so the account often landed on the app's own channel before the sign-in poller had run even once -- and dismissing the wait stopped the poller that was going to raise the window. The signal now comes from whichever gets there first.
+
+- The first-launch intro's two lines now fade in whole rather than typing themselves out a character at a time. Each line arrives on the same curve the lockup resolves on, the italic words come into focus instead of only brightening, and a line blurs as it rises away -- so the type reads as the same gesture as the mark above it rather than as a different animation underneath it. The film runs about a second longer as a result: 8.0s from launch to the parked mark, against 6.9s before.
+
+- The brand color is now the app's success green (`#0c8106`) rather than the blue it was. It carries the lockup -- in the first-launch intro, in the titlebar the intro parks it in, and in the start route's titlebar the app takes over with -- along with the intro's two serif lines.
+
+Corrected the glossary's "template base" definition. For a workspace that has run update-self, the base is the upstream template commit its `update-self:` merge brought in, not the merge commit itself. The merge also holds everything the workspace built before the update, and treating it as the base made publish-template ship a user's other apps and commit history inside their template. The fix to the skills is in the paired default-workspace-template change.
+
+No behavior change. The bug-report release tests plant a chat transcript into a real workspace agent and then assert on the archive the collector produces; the records they planted were in the shape harnesses wrote before mngr's ATIF cutover, which the collector no longer reads, so the plant described a conversation no agent writes any more. They now plant ATIF step records, and the archive assertion matches the marker the plant carries rather than the exact bytes it wrote, since what lands in the archive is mngr's own serialization of the record.
+
+A destroy that succeeded no longer reads as "Destroy failed" while discovery catches up. The status check keys on the host reading DESTROYED, but the shared aggregator used to forget the host on the destroy event, so for up to a full provider poll interval the host had no state and the last clean snapshot (which still listed it) made the finished destroy read as failed. The aggregator now keeps a DESTROYED tombstone, so the check passes as soon as the event lands.
+
+The detached `mngr destroy` now records its exit status beside its pid file, written by the process itself so it survives a desktop-client restart. A non-zero exit status reads as FAILED regardless of whether the host is still listed, so a destroy that reported a leaked lease or another cleanup failure stays visible with its log instead of being finalized. When the host is already gone by then, the home page lists the failure as its own "Destroy failed" row, since the workspace no longer has a row to carry the badge. A zero exit status keeps the existing host-gone gate for DONE. A retry clears the previous run's status and drops its pid first, so a status check running while the retry starts cannot mistake the finished run for a completed destroy and close the row out from under it.
+
+Destroying a stopped Imbue Cloud workspace now releases its lease (the desktop then sees the host gone and finalizes the destroy). Before, the release was skipped for a stopped workspace, the lease leaked and kept counting against the quota, and every retry reported "Destroy failed".
+
+The remove-from-list control (the X) on a greyed remote row now works. The row's entry omitted the record's host id, so the click handler returned before sending anything. When the removal is refused or fails, the row now shows the server's explanation (a record whose machine still holds its cloud lease points at destroying the workspace instead) or the status, instead of silently reverting.
+
+Destroying an Imbue Cloud machine whose VM cannot be reached over SSH (for example after its host-key pin went stale) now completes and releases the lease; before, the destroy failed before the release was attempted, and the machine stayed on the home page as unreachable.
+
+Running minds from source no longer fails every workspace create with "Unknown fields in agent_types.<name>". The `minds` package now depends on the agent-type plugins the default workspace template configures (claude, codex, pi-coding, opencode, antigravity) and on the modal provider plugin, whose provider block minds enables in its own mngr settings. Before, only the packaged desktop app installed them, so dev-mode Electron (`uv run --package minds`) and other minds-scoped installs got a venv without them. That is the only way to run minds on Linux, which has no packaged build.
+
+Add `hynek` to the list of dev operators.
+
+Bump Latchkey to 3.14.0.
+
+Rotate the key for `hynek`.
+
+Deploy docs: the dev tier now has a standing box registry (`minds-dev-infra`, at `secrets/minds/dev/neon/DATABASE_URL`) like the CI tier's, documented in host-pool-setup.md ("Box registry"), and the management-plane runbook's peer-change section describes the one-edit-plus-one-run flow for adding an operator (`minds-admin wireguard sync-peers --tier dev`).
+
+The minds config loader gained `committed_deploy_config_tiers()`, the sorted list of tiers with a committed `imbue/minds/config/envs/<tier>/deploy.toml`, so tooling that offers a tier choice (such as `minds-admin wireguard --tier`) can pin its choices to the committed tiers.
+
+- Cut the minds 0.6.2 release: the app version is 0.6.2 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.6.2`, carrying everything that landed on `main` since `minds-v0.6.1` (the welcome-chat onboarding flow, the start-flow and modal polish, the brand color change, and the rest of that day's changes).
+
+- Added the `minds-v0.6.2` deploy history entry and reset `next_deploy.md` for the items the 0.6.2 staging rehearsal discharged.
+
+- Fixed latchkey permission requests from a workspace's seeded welcome chat: the request names the chat, and a seeded chat's id belongs to its seed rather than to any agent, so the desktop could not find the chat's host (approvals answered 503) and its resolution nudge (`mngr exec` of the workspace's `message_chat.py`, then `mngr message`) retried forever, leaving the in-chat card pending. The desktop now resolves a chat id to the chat's newest member through the `chat_id` label the chat app stamps on every member, runs the nudge script on that agent while still addressing the chat by id, and no longer mistakes an mngr provider warning's "No such file or directory" for a missing script.
+
+The latchkey-permissions doc now describes denial the way it describes a grant: both verdicts go to the request's chat by the same route, since both are delivered by the one shared resolve epilogue. Before, only the grant step had been updated when the nudge moved to the workspace's chat app, so the deny step still said the message went to the agent.
+
+Deploy docs: describe the dev tier's standing box registry end to end -- how to stand one up for a dynamic tier (tier-bringup.md 3b), that box commands on dev/ci run from the `<tier>-infra` registry activation rather than a personal env (host-pool-setup.md Step 5), that `env deploy` imports the registry's boxes into every fresh env (environments.md), which Vault OIDC role each tier needs (vault.md), and the new-developer steps for gen-2 box access: WireGuard key, deploy.toml PR, `wireguard sync-peers --tier dev`, `install-onetun` (dev-setup.md).
+
+The onboarding conversation continues inside the new workspace as its first chat.
+
+- When a create attempt is ready, the creation page's closing line is "Your workspace is ready! What would you like to do first?" with a numbered list of five ways to start, each a title with a line under it, and the whole conversation so far is handed to the workspace: the manifesto exchange, the start flow's questions and answers, the settings the user chose, the setup line with its reading material (as toggles), and the ready line with its list. The new `POST /ui/api/create/attempts/<attempt-id>/welcome-chat` runs the template's `system/scripts/seed_welcome_chat.py` inside the workspace through `mngr exec` and answers the seeded chat's id; the page waits for it, then the wash carries the app in and the workspace opens on that chat, where the user's first message picks the provider account and starts the first agent. A workspace that cannot take the chat is entered all the same, on its plain landing page; leaving the creation page while the hand-off is still in flight cancels the entry.
+
+- The creation page always opens with the "what is honest software" exchange, already on the page, so a create from the home page's Create button gets the same opening as one from the start flow, on the page and in the workspace's first chat.
+
+- The Electron create-and-chat e2e (`test_snapshot_resume.py`) messages the seeded welcome chat instead of starting a chat from the New Tab page's tile (which the docked welcome chat now covers): the first send is what opens the provider chooser, the test signs in through it, then awaits the reply. `e2e_workspace_runner.py` splits its message helper into `wait_for_chat_input`, `send_chat_message` and `await_chat_reply` so the sign-in can sit between sending and the reply; `_send_message_and_await_reply` is their composition and still serves the full workspace flow.
+
+- The release-only Electron harnesses follow the workspace opening on the welcome chat: the full workspace flow (`e2e_workspace_runner.run_full_workspace_flow`, behind `scripts/electron_full_flow_e2e.py`) and the launch-to-first-message harness (`scripts/launch_to_msg_e2e.py`) message that chat instead of starting the first chat from the New Tab page's tile, which the docked welcome chat now covers. The full flow then starts a second chat from the tile as its own step, and `start_new_chat_from_new_tab` returns the chat the press docked rather than the first chat frame in the workspace.
+
+- `apps/minds/scripts/propagate_changes` protects `data/***` and `.mngr/***` from its `rsync --delete`. The earlier `protect data/` rule kept only the directory entry: because the template tracks README files under `data/`, rsync descended into it and deleted every runtime file the template does not carry (chat records and seeded transcripts, `data/.state/apps.toml`, secrets), which is how a staging workspace lost its seeded welcome chat.
+
+The first-run experience is a conversation. A fresh install's loading screen plays an intro -- the new "mind" lockup resolves, two lines type in beneath it, and the lockup travels up to the titlebar -- and, once the backend is up, lands on the new start flow (`/start`): a chat that asks "Wait.. what is honest software?", answers itself, and then asks the first workspace's questions one at a time. Where to run it is a two-column comparison of Imbue Cloud (recommended) and Custom, with "I already have one (log in)" as the way out for a returning user; the cloud answer asks for an Imbue account through the existing browser sign-in and then creates the workspace with the remote preset, while Custom opens the full create form as a modal. Every answer can be taken back until a create is submitted.
+
+The creation page is the tail of that conversation, in the normal app frame: the settings the user chose as their own message, "Setting up your workspace", and a full-width loading box with the progress bar, the stage caption, and the expandable log. The permissions, settings, and share buttons open a "check back here after the workspace is created" dialog until the workspace exists. When the attempt is ready, the workspace's color washes over the window and the app enters the workspace. Later creates from the home page's Create button land on the same page without the preceding conversation, and a failed or interrupted attempt's Retry reopens the create form as a modal prefilled from the attempt.
+
+The welcome splash (`/welcome`, with its "Continue without an account" choice) and the nine-step creating walkthrough are gone. Whether an install is past onboarding is persisted (`is_onboarding_complete` in `config.toml`, written when any create starts or when the user signs in from the start flow) and reported by `/ui/api/app-status` and the bootstrap seed; Electron's startup router routes on it instead of on whether an account is signed in, and in plain-browser mode the home page redirects to `/start` itself. The loading document shows a status line and progress bar under the parked mark on every launch, replacing the maroon letter-fade splash.
+
+The create attempt detail (`/ui/api/create/attempts/<id>`) now carries the attempt's persisted request (`request`) so the creation page can restate the settings after a reload, and no longer carries the walkthrough's service list.
+
+The desktop shell no longer reloads its windows when a browser sign-in completes. The accounts channel already carries the new identity to every open window, and the reload was throwing away in-progress state such as the start flow's conversation.
+
+A cloud workspace from the start flow now waits for the account's email to be verified before it is submitted, since the connector refuses one otherwise: the flow sends the verification email, asks for the click on its link (with "I verified it" and "Send the email again"), polls while it waits, and continues by itself once the link is clicked. The desktop client gained `GET`/`POST /accounts/verification?email=` for the check and the resend.
+
+The manifesto's five points and the creation page's new reading material ("What a workspace is", "What is happening right now", and so on, each linking out to the product page) open behind chevron toggles. "I already have one (log in)" sits on the same row as the answer buttons.
+
+The loading screen's status line now names the startup phase instead of flashing every console line, and a "Show details" toggle under it opens the full startup log, like the creation page's.
+
+`scripts/build_test.py` gains an acceptance test that installs the built `imbue-common` wheel into a
+scratch venv: plain, it must pull in no pytest; with `[testing]`, its test library must import.
+
+**Local files** is now a list of the paths you have shared, one card each. Under the path are the two ways an agent can reach it, as a choice:
+
+- **Allow agents to do these on-demand** — the file server, reachable while your computer is awake and Minds is running. Its dropdown is the access: *Read*, or *Read and write*.
+
+- **Keep a copy on the machine** — the machine gets its own copy, so agents can still reach it while your computer is asleep or offline. Changes are carried across while Minds is running.
+
+Picking the second does not switch the first off. The choice marks which one agents will normally use.
+
+Only folders can be kept in sync. A shared file says so instead of offering the option.
+
+A synced folder lands under `~/synced_folders/<device id>/` on the machine, mirroring its whole path on your computer — so `/Users/me/notes` becomes `~/synced_folders/host-abc/Users/me/notes`. The whole path keeps two folders with the same name apart, the device id keeps two computers' folders apart, and the home directory keeps synced files out of the machine's git checkout.
+
+The status now distinguishes **Syncing** (turning arrows, while changes are actually being carried across) from **Synced** (a check, once everything is up to date) — which is where a sync spends nearly all its time. Turning sync on shows **Starting** straight away rather than holding the pane while the machine is contacted.
+
+The two questions a sync raises — which way changes are copied, and which side wins when both changed the same thing — appear only once you turn it on, and changing either restarts the sync on the new setting.
+
+The same choice is offered when you approve an agent's request for a path.
+
+**Add file** and **Add folder** at the foot of the list open the native picker and share what you choose, read-only to begin with. Or tell an agent to request access, as before.
+
+Syncing never touches git, and syncs stop when Minds quits.
+
+The round trip that makes room for a sync on the machine is now timed in the logs, so a slow start can be attributed rather than guessed at.
+
+Syncing now pairs with the machine a workspace runs on rather than with the workspace itself, and never starts a stopped machine to do it. Turning sync on for a workspace whose machine is stopped reports that instead of quietly starting it.
+
+Folders you keep synced now come back when you reopen Minds. The choice is remembered per workspace; turning sync off, or stopping sharing the folder, forgets it. Restoring never starts a stopped machine — a folder whose machine is off says so on its row and is tried again next time.
+
+Turning off syncing for a folder no longer throws away the machine's copy of it. The copy is set aside, and turning syncing back on picks up where it left off rather than re-fetching everything. While syncing is off the row says the copy is still there and offers to delete it, which is a separate, deliberate step because it cannot be undone.
+
+Turning syncing on and off, and deleting a copy, all return straight away: the switch shows what you asked for and the status beside it says how far along it is (Starting, Deactivating, Deleting).
+
+Fixed: a folder added from the Local files pane disappeared from it moments later. The grant was written on this computer but never handed to the workspace's own machine, and the next time the pane was opened it adopted the machine's policy — which had never heard of the folder — back over it.
+
+The copy a stopped sync left behind now sits in an indented panel under the option it belongs to, rather than looking like a second section of the row, and its Delete button now uses a soft red fill instead of a solid one — Remove, which takes the whole path away, is the row's one solid red button.
+
+A folder that is syncing now says how far through it is — `Syncing · 12.0 MB of 17.0 MB` — which matters for a big folder that would otherwise just say it was busy. The numbers are unison's own, so showing them costs no extra reading of the disk on either side.
+
+Fixed: turning syncing off for a folder, deleting the machine's copy, then turning syncing back on left the sync unable to start at all — unison still held a record of the copy that had been deleted, and stopped rather than risk deleting the local folder to match. It now starts cleanly and re-copies the files.
+
+Fixed: while a folder was syncing, the Permissions pane made a connection to the workspace's machine every two seconds, which made clicks in the pane stutter and put steady load on the machine. The sync status was never on the machine to begin with — it comes from the syncing process running on this computer — so the pane now asks for it without leaving this computer.
+
+The Local files row is simpler. Access (**Read** / **Read and write**) is now a plain setting, and keeping a synchronized copy is a checkbox beneath it — an extra thing a shared folder can have, rather than an alternative to sharing it.
+
+Which way changes travel is no longer a question, because it said the same thing as the access twice. Read means changes go from your computer to the workspace; read and write means both directions. The row states which, in those words. Changing the access moves a running sync with it.
+
+The workspace-to-this-computer-only direction is gone. A synced folder is always seeded from a folder on your computer, so a sync that only ever copied the other way would begin by emptying it.
+
+Clicking the checkbox repeatedly no longer queues up one operation per click, or drops the ones that arrive while Minds is busy. Each click records where you want the folder to end up; when the move in flight finishes, Minds goes wherever the last click asked for.
+
+Changing the clash rule on a running sync now replaces just the syncing process, instead of stopping the sync (which renamed the copy on the machine out of the way) and starting it again.
+
+Removing a shared folder from the Local files list now deletes the machine's copy of it as well. Nothing is left to offer that from once the row is gone, so a copy left behind would simply sit on the machine's disk, invisible. The button says which it will do: **Revoke access** when the machine holds no copy, **Revoke access and remove copy** when it does.
+
+The Local files row is drawn as bands now — the path, then one per setting, divided by rules that reach both edges — instead of a stack of controls with an indented grey panel hanging off one of them. Everything the sync checkbox has to say sits behind a short rule under it, at one left edge rather than two that were three pixels apart.
+
+Wording: the access setting reads "Agents on this machine may *read only* / *read and write*". What syncing does is now said in those same words: "Since agents on this machine may both **read and write** the folder, Minds synchronizes changes between your computer and this machine in both directions." Deleting the machine's copy is "Remove copy" throughout, in the same words the row's own button uses.
+
+Starting a sync and restarting one now read differently. A restart is what a changed setting needs, and the files are already on the machine, so the row says **Restarting** rather than **Starting** — the wait is a handshake, not a folder being copied across.
+
+**Deactivating** is now **Stopping**, and a sync that is simply off shows no status at all: the unticked checkbox already says so, and a "Stopped" badge beside it only asked you to reconcile the two.
+
+The clash dropdown names what it keeps rather than where it is: **The change from your computer** / **The change from this machine**, in place of "This computer" / "The workspace".
+
+The remove button keeps its wording while it works — **Revoking...** or **Revoking and removing...**, matching whichever it set out to do.
+
+While a folder is syncing, the pane now refreshes once a second instead of once every two. That is how often `mngr pair` reports a transfer's progress, so the byte counts on a big folder now move as fast as they are measured. It costs nothing extra on the machine: the endpoint behind it answers from the desktop app alone, and nothing refreshes at all while no sync is live.
+
+The folder-sync API moved out from under the permissions routes. It now lives at `/api/workspaces/<id>/folder-syncs` — `toggle`, `discard-copy`, and a `GET` on the collection for the pane's poll — because a sync is not a permission and none of the three touch latchkey. The naming is consistent with it: the routes said "path" where the feature only ever accepts folders, and their request models followed.
+
+Two folders that overlap can no longer both be synced with the same workspace. Their copies would nest on the machine, and then each sync's ordinary housekeeping would look like a deletion to the other — turning the inner one off renames its copy aside, the outer sync reads that as the folder being deleted, and propagates the deletion back to your computer. Whichever folder you turn on first keeps the sync; the other says so instead of starting.
+
+Overlapping folders synced with *different* workspaces are still allowed — the copies land on different machines and cannot collide — but the row now says what it costs: the same files cross the network once per workspace, and because each sync settles clashes on its own, the result may not be the one that folder's clash setting names. Syncing the exact same folder with two workspaces is still refused, for now.
+
+Symlinks inside a synced folder now stay on the side they are on rather than being copied across. The two sides are different computers, so an absolute link names a path that need not exist on the other one, and a relative link can point outside the folder, where the two sides do not agree what it reaches.
+
+Fixed: clicking the sync checkbox many times in a row could make Minds stop moving the folder altogether. The worker had a budget of moves per folder, and a user who kept flipping could spend it — after which the folder stayed where it was, the checkbox showed what had been asked for, and nothing would ever reconcile the two. The budget now counts moves towards *one* destination, so each click starts it again; it still stops a folder that is genuinely going nowhere, and says so in the log.
+
+Two workspaces can now each keep their own synchronized copy of the same folder. They land under different machines' home directories and cannot collide, so the only thing that stopped it was bookkeeping — Minds held one sync per folder rather than one per folder-and-workspace. The row still warns that the same files then cross the network once per workspace, and that each sync settles clashes on its own.
+
+The three folder-sync API routes moved into a module of their own, next to the permissions routes they used to share a file with. No behaviour changed.
+
+Fixed: on macOS, where the filesystem usually treats `~/Work` and `~/work` as one folder, the check that stops two overlapping folders syncing with the same workspace compared them as different. Two copies would then nest on the machine, and turning the inner one off would delete the folder on your computer.
+
+A synced folder that is a git repository arrives on the machine without its history, and the row now says so. That was already true — `mngr pair` excluded `.git` whatever you asked for — but it was a side effect of a flag about something else rather than a decision, and nothing told you. Minds now asks for the exclusion by name: `.git` is a database whose invariants span files, and a live two-way file sync has no notion of a transaction, so copying it would carry `index.lock` across and block git on the other side, and land refs pointing at objects that had not arrived yet.
+
+Fixed three things about a sync that could not be brought back when Minds restarted. The row showed a ticked checkbox with no status at all, unticking it failed with "is not syncing", and there was no way to try again.
+
+- A sync Minds could not restore now says so on its row, with the reason, instead of only in the log.
+
+- Turning syncing off always works. It is a wish about where the folder ends up, and the user is entitled to it whatever state the app has got into — including one where there was never a sync to stop.
+
+- A status is always shown for a folder whose checkbox is ticked. Only a sync that is *settled* off shows nothing, because the unticked checkbox already says it; a ticked box over a stopped sync is the app saying one thing and doing another, which is when you most need telling.
+
+- A sync that failed now offers **Try again**. Flipping the checkbox off and on would have worked, but it sets the machine's copy aside and fetches it back for nothing.
+
+A folder that should be syncing and is not now says **Not running** rather than **Stopped**. The two had been spelled the same, which is why a sync Minds could not bring back showed no status at all: *stopped* means the sync ended because it was asked to, and a row whose checkbox is unticked needs no badge to say so. A folder you still want synced with nothing running is a different thing, and says so.
+
+A folder that cannot be synced now says so before you click. The checkbox is greyed out and the explanation beneath it is replaced by the reason — the folder is a file, it is inside another folder this workspace already syncs, Minds cannot yet tell which machine the workspace runs on. Ticking it used to be the only way to find out, and the refusal arrived as a message at the top of the pane. The reason shown is the one starting the sync would have given, asked of the same code, so the pane can never grey out a folder that would have worked or offer one that would not.
+
+The warning about a folder another workspace also syncs is now yellow rather than red, says "the result may be unpredictable" rather than naming the clash setting, and stays current: it used to be fetched only when the pane opened, so the workspace that started syncing *first* would not hear about the second one until its pane was reopened.
+
+Fixed: no synced folder came back when Minds restarted, and the row said "Minds does not know which machine this workspace runs on yet". Which machine a workspace runs on comes from the discovery pass, which has not run when the app starts, so restoring asked before there was an answer and gave up. It now waits for the answer — on its own thread, holding nothing up — and only gives up if it never arrives.
+
+A folder whose sync is turned *off* now also blocks syncing a folder inside it, where before only a running sync did. Turning a sync off renames its copy rather than deleting it, into a tree that mirrors the live one — so two overlapping folders nest there too, and turning the outer one back on would move its whole directory across with the inner one's copy inside it. Removing the copy is what gets it out of the way, and the row says so.
+
+Fixed: a folder inside one this workspace already syncs was still offered the option, if it had ever been synced itself. Having been synced before says nothing about whether it may be synced now, and a folder whose copy was removed while its parent started syncing is exactly the row that must not be offered.
+
+The note about `.git` not being copied is gone from the row — it was making an already long explanation longer. The warning about another workspace syncing the same folder now appears only while this folder is actually syncing, since it describes what two running syncs do to each other.
+
+The permission approval dialog no longer offers to keep the granted folder in sync. It had its own checkbox and its own pair of dropdowns, and they drifted: it still asked which way changes should travel, months after the Permissions pane stopped asking — so it would offer "Both ways" on a read-only grant, which the pane would never do. One place to configure a sync is better than two that disagree, and the Permissions pane is that place.
+
+Starting a sync no longer re-runs the checks a shared path goes through. It checks what the next step actually needs — an absolute path, to a folder that exists — and nothing more. The other checks read as a security boundary and were not one: the caller they would most need to police is the restore at launch, which reads a file sitting beside Minds' own signing key and latchkey credentials, so anything able to edit it can read those and reach the workspace directly. A check that stops nobody but implies a perimeter is worse than no check.
+
+Adding a shared folder, and changing what agents may do with one, now show the same spinner every other write in the pane shows. Both are a round trip to the workspace's own machine — the grant is not made until that machine has taken it — so a dropdown that showed the new value the instant you picked it was showing something that was not true yet. They lock the other controls while in flight for the same reason the rest do: a write answers with the whole pane, and two at once would fight over what is on screen.
+
+The access dropdown now looks unavailable while its change is on its way to the machine, rather than only behaving that way. It was already disabled, but a plain disabled `<select>` goes on looking exactly as it did, so waiting read as a click that had not landed.
+
+The production tier's `deploy.toml` now commits its SSH certificate authority (`[ssh_ca] public_key`, the public half of the Vault `minds-production-ssh` CA), which gen-2 box prep, slice bakes and the connector's management-certificate refresh require; the pinned test that kept production CA-less until its bring-up is removed, since every tier now carries one.
+
+The deploy queue (`next_deploy.md`) gains the connector migration 043 item (the overlay-address unique index and the duplicate check each tier needs before applying it).
+
+The app-release runbook's release-channels section no longer claims beta is listed for nobody: production builds offer stable, beta and alpha, each a user's own choice in Settings.
+
+The stable desktop channel moves to minds 0.6.1 (ToDesktop build `260915wjcyd06bp`, rollout 100%), and the stable web channel pins browser creates to `minds-v0.6.1`, which the production pool is baked at on gen-2 boxes. Every channel now serves 0.6.1.
+
+When tkinter is unavailable, a desktop notification that falls back to the tkinter toast now logs its "tkinter not available" warning immediately instead of from a background thread, so the warning can no longer surface in an unrelated test.
+
+## 2026-09-15
+
+Fixed the deterministic failure of the snapshot-resume Electron e2e (`test_create_workspace_and_sign_in_via_modal_then_chat_via_electron`) that turned `main` CI red on 2026-09-14 (MIND-285). The workspace template's dockview shell made the New Tab page an ordinary tab (default-workspace-template #581): the add-tab button is now always shown and every press opens another New Tab page, while a background page keeps its tiles hidden in the DOM. The e2e harness still assumed a visible add button meant no New Tab page, so it always opened a second page and then waited on the first (hidden) tile in DOM order until the 60s timeout.
+
+The harness (`e2e_workspace_runner._press_new_tab_tile` and the mirrored logic in `scripts/launch_to_msg_e2e.py`) now presses the add button only when no New Tab page is showing, and scopes the tile wait and click to the visible page (`.new-tab-launcher:visible ...`), the same idiom the template's own e2e uses. Timeouts and the visibility requirement are unchanged.
+
+Also corrected the stale `@pytest.mark.flaky` justification comment on the test, which described a sign-in click timeout that is not this failure.
+
+The minds behavior corpus is witnessed by `mngr witness` instead of `mngr tmr-behaviors`: the project's prompt variant moves from `tmr/behaviors_mapper.j2` to `witness/mapper.j2`, where the new command discovers it, the `tmr-behaviors-minds` just recipe becomes `witness-minds`, and every corpus README's incipit now names the `behaviors` skill.
+
+A workspace whose machine recovered while the laptop was asleep no longer comes back as a blank white pane after the wake.
+
+Before, the reload the app owes a recovered machine was held until the device's network had been back for a settle interval, but a laptop that went to sleep inside that interval ended it at the instant of the next wake, which is exactly the interface transition the hold exists to outlast. The reload went out into that transition, the frame failed to load, and nothing retried it, so both open windows stayed white until the user navigated away and back.
+
+Now a wake opens a settle window of its own, so a machine whose recovery lands in the seconds after the lid opens is held like one raised at a network transition, and the settle worker records the wake itself when its wait returns, so the window it slept through is superseded by one that starts from the wake.
+
+Workspaces created from a published template now report their version instead of badging "Version unknown" forever.
+
+Such a workspace is a clone of the template's snapshot commit, so it carries the whole history of the release it was cut from but none of that release's tags, and the app's version read -- the `update-self` marker, else `git describe --tags --match 'minds-v*'` -- had nothing to answer with. It now fetches the `minds-v*` tags from the official default-workspace-template (through the same `official` remote the backup service already uses) when it finds neither a marker nor a tag, then describes again. The fetch is skipped once a version can be read, and it is time-bounded, so a slow or missing network just means no version this sweep. It is a one-time cost for the workspace (measured at 17 MB of git objects into a workspace published from `minds-v0.5.0`, since the tag pattern also brings the releases made after it), and it adds an `official` remote to the workspace's git config if the backup service has not already. It only runs where it can actually answer: a workspace whose tree did not come from the workspace template, or whose clone is too shallow for a release tag to describe it, is left alone rather than paying for a fetch that cannot name its version.
+
+Because the version read outranks the create-time label, this also fixes the local-provider version of the same gap, where a template-derived workspace was stamped with the app's own pin and read as up to date.
+
+Bump Latchkey to 3.13.1.
+
+Recorded the minds-v0.6.1 cut in `docs/deploy/history/minds-v0.6.1.md` (tag SHAs, build id, the CI and release-test runs that verified the pair, and the ToDesktop pnpm-cooldown bug the cut fixed) and noted the cut in `docs/deploy/next_deploy.md`.
+
+Version bumped to 0.6.1 and `FALLBACK_BRANCH` pinned to `minds-v0.6.1`: the second release of the gen-2 slice-fleet line, carrying everything that landed on `main` since `minds-v0.6.0` (workspace stop kinds, the migrate's latchkey-state replay, the chat-agent refactor, proactive compaction, the new-tab chat tile, and the latchkey 3.13.0 bump among others).
+
+`playwright` and `playwright-core` join `latchkey` in `pnpm-workspace.yaml`'s `minimumReleaseAgeExclude`. latchkey pins playwright to an exact version, and the 3.13.0 bump pinned a playwright published inside the 14-day cooldown window; CI's frozen-lockfile installs never noticed, but ToDesktop's agents run `pnpm install --no-frozen-lockfile`, which re-resolves and refused it, so every desktop build from `main` had failed at "Configuring App" since that bump.
+
+The deploy runbooks (`ops/services.md`, `ops/app-release.md` step 9b) no longer tell operators to bake the pool before deploying the services on staging and dev envs. The order is deploy first, then bake, on every tier; on a tier with no update feed the deploy moves the browser-create pin at once and browser-chrome creates answer 503 until the bake lands, which is accepted there.
+
+The 0.6.1 deploy history records the staging deploy, bakes, and the migration of every staging workspace onto gen-2 with the findings it produced; `next_deploy.md` discharges the staging items and names a working check for the Modal region pin; the gen-2 cutover runbook gains the prerequisites the sweep taught (the `home/` layout, the tolerant seed for pre-0.5.0 templates, the restamp of rows migration 039 could not measure).
+
+The beta and alpha desktop channels move to minds 0.6.1 (ToDesktop build `260915wjcyd06bp`, rollout 100%), and the beta and alpha web channels pin browser creates to `minds-v0.6.1`, which the production pool is baked at on gen-2 boxes. Stable stays on 0.5.2.
+
+The app is now called Mind.
+
+`productName` is `Mind`, so the bundle, its helpers, the macOS menu and About panel, and the published installer all carry the new name. The window title, the launch and crash screens, and the backend start-up status say "Mind" too.
+
+The first launch after the change removes the application-support, logs, and cache directories the previous name owned, instead of stranding them. They hold crash-reporter scratch, so nothing is moved into the new locations -- which the app has already opened by then. The updater cache is untouched: its name comes from the package name rather than the product name, so it did not move, and it can hold a staged update.
+
+The quit dialogs now say "workspace". Quitting with workspaces still running used to say "1 local mind is still running", naming them with a word that appears nowhere else in the app, and the dialog lists workspace names.
+
+The frontend test helper `settle()` now waits a timer turn instead of three microtask hops. A real `Response.json()` takes eight hops to land, so a page that owns its own model could be asserted on before its payload arrived; three tests were failing on it.
+
+More places say Mind: the first onboarding screen's caption, the credential-permission dialogs, and the WSL installer's desktop shortcut.
+
+## 2026-09-14
+
+Documentation only: the workspace docs no longer describe `system/supervisord.conf` as the one file a template's `[program:*]` sections live in. A template may instead give each program its own file under `system/supervisord.conf.d/`, pulled in by an `[include]` glob, and anything reading that config from outside the workspace has to read that directory too -- `configparser` does not follow `[include]`, since that is a supervisord feature rather than a configparser one. The reader that does so today is the evals evidence capture, which now reads the drop-ins as well (see the minds_evals changelog).
+
+Bump Latchkey to 3.13.0.
+
+Phase 6 of the chat-agent split (the default-workspace-template's `docs/system/blueprint/chat-agent-split/`): a workspace chat can change account in place. Switching a chat to another account on its own harness and lane restarts the same agent on the new account, with its transcript, tk steps, and model settings kept; the provider menu offers every signed-in account, and the switch confirm offers "Start a new chat instead". The paired template PR carries that code; in the minds app only the glossary changes.
+
+Paired branch for phase 7 of the default-workspace-template's chat-agent split (`docs/system/blueprint/chat-agent-split/plan-chat-agent-split.md` there), the cleanup: the chat app's `/api/agents/...` aliases are gone, every new chat is named "Chat N", and the browser fleet addresses the chat that holds a browser.
+
+- The LiteLLM-via-workspace deployment test creates its chat through `POST /api/chats/create` and reads the chat's id from `chat_id`. It is a release test that mints a real cloud environment, so it was edited but not run here.
+
+- Merge after the template is tagged, as the app-model arc's paired branch did.
+
+The gen-2 cutover runbook's per-workspace verification now includes latchkey: a 0.6.1+ desktop follows a migrated workspace's new coordinates within one discovery cycle, while a <= 0.6.0 desktop needs an app restart before latchkey works again, so 0.6.1+ cohorts should be migrated first.
+
+Fixed the Share tab showing a share link that could never work. Right after the desktop app started, enabling sharing (or opening the Share tab of an already-shared machine) could display and copy the bare workspace domain (`https://<share-label>.<user-hash>.<region>.<domain>/`) as the link. That address is deliberately unrouted (only `https://<label>.<domain>/` origins are served over a share), so visitors got a TLS "unrecognized name" error even though the share was up. The tab built the link from a one-shot snapshot of the workspace's service labels taken when it opened, and fell back to the bare domain when the shell's label had not reached the app yet.
+
+The Share tab now never falls back: a target whose label is not known shows a "Preparing the share link..." pill with copy disabled, for the whole machine and for per-app targets alike. The sharing document and the readiness poll now carry the current label per share target, so a tab opened before the labels arrived learns them within a poll interval and switches to the real link on its own.
+
+Deploy docs for the minds-v0.6.0 cut: the release history entry (tag pair, ToDesktop build, the dev and CI gen-2 rollout, what was deliberately deferred), the discharged and newly owed items in `next_deploy.md` (staging and production need a gen-2 box before they can hold 0.6.0 rows), and the cutover runbook's note that ci envs are guarded by `--yes-i-mean-dev`.
+
+Staging and production gen-2 bring-up config: the staging tier's `[ssh_ca]` public key (the `minds-staging-ssh` Vault CA) and both shared tiers' `[management_plane]` tables (Josh's operator WireGuard peer and the tier's Modal Proxy `mind-connector-east`, created in Modal's us-east region on 2026-09-13) are committed in their `deploy.toml`, so the staging connector deploy egresses from the proxy's static IP and staging gen-2 box prep can render CA trust. Production's `[ssh_ca]` stays pending its Vault role.
+
+The 0.6.0 history entry records the staging services deploy of 2026-09-13 (deploy id `20260913T160033Z`, migrations 034-041, the proxy egress verified) and `next_deploy.md` discharges the staging SSH-certificate and management-plane steps it completed, marks production's proxy and table as committed, and adds an item to pin the Modal apps to a US region (unpinned containers were observed running in Europe).
+
+Staging and production now set the workspace stop retention window to 600 seconds (`[storage] stop_retention_seconds` in their `deploy.toml`) instead of inheriting the connector's hour-long default: the parked-VM window is a restart-latency optimization only, and an hour pinned a box slot per stopped workspace and held a drained box for an hour before it could be repaved. Live on staging since the `20260913T171558Z` deploy, on production from its first.
+
+The pool-hosts runbook's slice content check now greps the vendored `FALLBACK_BRANCH` line for the baked tag (the old `provider-chooser` grep pointed at a path that does not exist at 0.5.2 and reported correct content as stale), and the 0.6.0 history entry records the staging beachhead: the 0.5.2 bakes and old-client adopts, the drain and gen-2 repave of `21ae4720` with the tier's first `:22` lockdown, and the second staging deploy (`20260913T171558Z`) that carries the ten-minute retention window.
+
+The cutover runbook's migrate step and "Verify" list cover the latchkey state the migrate now carries (the VM-side `latchkey-gateway` / `latchkey-tunnel` check, the credential store's presence, a previously granted service usable without re-granting, and the report's per-workspace plan), plus the note that old (<= 0.6.0) clients need an app restart after a migration for their desktop-forwarded latchkey routes (the imbue-ai/mngr-internal#970 fix lands on this branch, after the 0.6.0 tag); the 0.6.0 history entry records the staging beachhead's 0.6.0 bake, the preflight's finding on hynek's `08bb40d7`, and the old-client migration drill (both migrations' coordinates and timings, what passed, and the two failures with their causes).
+
+Workspace stop kinds (`specs/workspace-stop-kinds.md`): the desktop reads why each stopped cloud machine is stopped from the connector (through `mngr imbue_cloud machines show`, only while some cloud machine is stopping, stopped or starting, at the discovery cadence) and shows a machine an operator is holding as "Maintenance" with no Start control and a row that is not clickable, its notice band saying "This machine is undergoing maintenance and will be back shortly."; the recovery page's start intent shows the same sentence instead of dispatching (until the machine answers, when the recovery panel takes over), and a machine whose stop kind this build does not know is shown but not startable. The unattended recovery asks the connector live before starting a network-dependent machine and never starts one whose lifecycle is stopping, stopped or starting (someone asked for that stop -- an owner on another device, an operator, a migration); a start the connector refuses as a hold ends the recovery as a declined operation carrying the connector's sentence -- shown as a notice, neither a failure card nor a success the recovery page would leave on (the machine goes back to being probed, so the operator's start is noticed), and the settings page's Start answers the same refusal with that sentence alone. The recovery notices are withheld from any machine in one of those states, as the machines list already withholds their health badge. Written after the 2026-09-13 staging re-test, in which this desktop's unattended recovery restarted `workspace-3` between the migrate's stop and its park.
+
+The 0.6.0 history entry records the staging services deploy of 2026-09-14 (deploy id `20260914T135700Z`, connector migration 042 applied, the stop-kind route verified live) and `next_deploy.md` marks the 042 item done for staging, leaving production to pick it up with its first phase-5.5 connector deploy.
+
+The 0.6.0 history entry records the first staging migration to pass with the desktop open (2026-09-14, `workspace-3` onto the gen-2 beachhead, resumed from the previous day's failed record): the row timeline under the `maintenance` hold, the watchdog's refused start, the supervisor following the host move, and the latchkey state and GitHub sign-in arriving on the new VM.
+
+## 2026-09-13
+
+The `_PASTE_LANES` list in the workspace sign-in deployment test now says accurately which sign-ins need a human at a browser. The `openai` lane offers a pasted-key method of its own -- a raw key written into codex's `auth.json` -- so the comment names it as a paste lane and says why it stays out of the list: the test runs against whatever template ref the deployment orchestrator prepared, and a released template that predates the method would 404 on it. The `anthropic` lane's own paste method is named there too, along with the reason it is absent -- `test_litellm_spend_tracking_via_local_workspace` already drives that lane end to end, including a real turn.
+
+Phase 4 of the chat-agent split (the default-workspace-template's `docs/system/blueprint/chat-agent-split/`): the workspace's chat app can move a chat to another harness (a handoff), archiving the agent it leaves and creating a successor with a summary. The paired template PR carries that code.
+
+On the minds side, the desktop client's nudge to an agent whose latchkey permission request was resolved now goes to the request's chat through the workspace's chat app (`mngr exec <chat id> 'python3 system/scripts/message_chat.py <chat id> -m ...'`), so a chat that has moved to a new agent still hears its verdict; the direct `mngr message` remains the backoff for a workspace whose template has no such script. The glossary's "chat" entry describes the handoff.
+
+Phase 5 of the chat-agent split (the default-workspace-template's `docs/system/blueprint/chat-agent-split/`): the workspace's chat page can move a chat to another harness, with a pending lane on the provider menu, "Switch and send", a cancel while the old agent wraps up, and a retry on any account when the new agent could not be started. The paired template PR carries that code; nothing in the minds app changes.
+
+`test_latchkey_e2e` no longer fails with `Unknown provider backend: docker` in the release job: it resets the backend registry (which the autouse plugin-manager fixture had loaded in local-only mode) before building its in-process mngr context, so the singleton's own load registers the docker backend its provider block names.
+
+Version bumped to 0.6.0 and `FALLBACK_BRANCH` pinned to `minds-v0.6.0`: the first release line that runs on gen-2 slice boxes (the bake-time guard pairs `minds-v0.6+` tags with gen-2 boxes and older tags with gen-1).
+
+`test_workspace_stop_start` is no longer behind the `MINDS_STOP_START_RELEASE_TEST=1` opt-in: with the CI boxes on gen-2 the stop upload rides the S3 IPv4 pin at ~100 MB/s, so the full cycle takes minutes and the test runs in every release dispatch (its stop deadline is now 30 minutes instead of 3.5 hours).
+
+`test_web_chrome`'s poolless loop now reveals the seeded tombstone through the overview's "Show N destroyed workspaces" toggle before asserting on it: the chrome has hidden destroyed workspaces by default since 2026-08-13, and the test had skipped in every CI run since (no Chromium on the runner), so the drift was never seen.
+
+`test_workspace_docker_container_is_present_and_stopped` (snapshot-resume suite) is marked flaky: its "every workspace container is exited" reading races other tests in the same offload sandbox that start containers, and the batch order is not fixed.
+
+`test_storage_cleanup_grant_cycle` is marked flaky and the quota-enforcement tests' HTTP timeout is 120 s: the storage recheck is a live Cloudflare round trip (object listing plus token policy rewrites) that exceeded 60 s once. `test_web_chrome`'s re-unlock check reveals the two tombstones through the same toggle before asserting on their decrypted names.
+
+Browser-created workspaces (the hosted web chrome's create) now pin their template tag through the release channels instead of the connector's deploy-time `FALLBACK_BRANCH`: `apps/minds/release-channels.toml` gains `[web_channels.<channel>] template_ref = "minds-vX.Y.Z"` entries, published as `<channel>-web.json` on the update feed beside the desktop manifests. Repointing a web channel is a promotion PR and takes effect within about a minute, with no connector deploy; the entries are independent of the desktop channels so a web-only template fix can move ahead of (or behind) the desktop. The publish refuses a tag that is not on the default-workspace-template remote. Bake the pool at a tag before an entry names it: web creates lease an exact match and have no rebuild fallback.
+
+An empty Branch field on the create form no longer resolves the default template's newest plain `v*` tag (which is older than the in-place update floor): it now resolves to the template version this app was released with, the same tag the pool is baked at and the ceiling `update-self` honors. Other repos still resolve their newest release tag, preferring `minds-v*` over plain `v*`. The form's helper text says so.
+
+The deploy runbooks (`services.md`, `pool-hosts.md`, `app-release.md`, `update-feed.md`, `next_deploy.md`) describe the new web pin and the deploy-then-bake-then-promote order it enables.
+
+`app-release.md` gains step 9b (repoint the web channels), and `services.md` / `pool-hosts.md` state the production order the feed-driven pin enables: deploy the connector, bake the pool at the tag, then repoint `[web_channels.*]`; tiers with no update feed keep baking before they deploy.
+
+## 2026-09-12
+
+Paired branch for phase 2 of the default-workspace-template's chat-agent-split plan (`docs/system/blueprint/chat-agent-split/plan-chat-agent-split.md` there): the template names a chat apart from the agent it runs on, every chat-app-created agent carries `MINDS_CHAT_ID`, and the chat app's routes move under `/api/chats` with the `/api/agents` spellings kept as aliases, so the minds e2e and deployment suites run unchanged.
+
+The workspace glossary's "chat agent" entry now names the agent a chat currently runs on, beside a new "chat" entry for the conversation itself. No code in this repository changes.
+
+Phase 3 of the chat-agent split (the default-workspace-template's `docs/system/blueprint/chat-agent-split/`): the workspace's chat app can read a chat that has run on several agents, from a chat record naming its agents in order. The glossary's "chat" entry no longer says every chat runs on exactly one agent. Nothing in the minds app changes; the paired template PR carries the code.
+
+Deploy docs: gen-2 boxes now encrypt their slice storage at rest. `host-pool-setup.md` documents the LUKS storage volume (TPM unlock, the per-box recovery passphrase in Vault, the header backup in the tier bucket, the root-partition relocations, and the `minds-admin server unlock` recovery path), `setup/vault.md` lists the `box-storage/<ovh-service-name>` entries, and the security-boundaries audit addendum states what the encryption does and does not protect against.
+
+`management_plane.toml`'s `[modal_proxy]` block gains an optional `environment_name`: the Modal environment the tier's shared proxy lives in. Needed because proxy lookup is Modal-environment-scoped while a workspace holds at most one proxy, so per-env tiers (dev) keep the shared proxy in one environment (`main`).
+
+The dev tier's `management_plane.toml` is now filled in (gen-2 management-plane activation): the `minds-dev-connector` Modal proxy (environment `main`, static egress IP allowlisted for box `:22`) and Josh's operator WireGuard public key at 10.202.0.2.
+
+The machine-resize release test raises the test account's machine-size entitlements (through the pool DSN, the quota-enforcement test's precedent) before recording the resize: a fresh account's plan allows exactly the default 8-unit machine, so the 16-unit resize was refused by the very quota machinery under test.
+
+New opt-in migration release test (`test_machine_migration.py`, `MINDS_MACHINE_MIGRATION_RELEASE_TEST=1`): leases a gen-1 machine, plants a workspace marker, force-restores it off its origin box, and asserts the gen-1 -> gen-2 conversion end to end (gen-2 placement, trixie guest, byte-identical host key, surviving marker, stamped sizes). Phase 3 of specs/slice-fleet enables it against the CI split fleet.
+
+Integration branch for the imbue_cloud slice-fleet generation 2 program (raw qemu slices with routed-tap networking on Debian 13 boxes, replacing lima), merged together with `main` and the three pre-cutover fix PRs: imbue-ai/mngr-internal#857 (SSH certificates from Vault, #850), #855 (DHCP placement, #849) and #856 (the upstream artifact mirror, #851). The per-change details live in this directory's constituent entries, listed below.
+
+Deploy docs for the gen-2 fleet (cutover runbook, management plane, telemetry, host-pool setup, the next-deploy checklist), the per-tier `deploy.toml` additions (`[ssh_ca]`, the `ssh-ca` service, management-plane config), and the read-only machine-size display in the desktop client.
+
+Constituent entries: `new-fleet-base.md`, `new-fleet-runsc-prototype.md`, `new-fleet-phase-2.md`, `new-fleet-phase-4-impl.md`, `new-fleet-phase-5.5.md`, `mngr-variable-sizing.md`, `mngr-machine-size-display.md`, `mngr-slice-fleet-gen2-phase-3.md`, `mngr-slice-fleet-gen2-phase-4.md`, `mngr-new-fleet-testing.md`, `mngr-slice-fleet-canary-followups.md`, `mngr-finish-new-fleet-canary-testing.md`, `mngr-identify-new-fleet-issues.md`, `mngr-onetun-install-and-canary.md`, `mngr-lima-rename.md`, `mngr-ssh-authority-in-vault.md`, `mngr-remove-init-via-dhcp.md`, `mngr-mirror-upstream-artifacts.md`
+
+Gen-2 small follow-ups: the deploy docs, the `[ssh_ca]` field descriptions, and the commented `[ssh_ca]` blocks in every tier's `deploy.toml` now name the tier's Vault SSH CA mount `minds-<tier>-ssh` (was `ssh-<tier>`; imbue-ai/vault#11 after review), e.g. `vault read -field=public_key minds-dev-ssh/config/ca`; the `vault_reader` SSH signing test fixtures use the new name too.
+
+Gen-2 small follow-ups: the per-tier `management_plane.toml` is gone; a tier's gen-2 management plane (operator WireGuard peers and the Modal Proxy whose static IPs the box `:22` lockdown allowlists) is now the optional `[management_plane]` table of its `deploy.toml` (`[management_plane.wireguard]`, `[[management_plane.wireguard.operators]]`, `[management_plane.modal_proxy]`; `DeployEnvConfig.management_plane`, None when absent, exactly like `[ssh_ca]`). The dev tier's table moved over verbatim; ci, staging, and production carry a commented pointer. `load_management_plane_config_or_none` is removed: read `load_deploy_config(tier).management_plane`, and the operator-address block check now runs inside `load_deploy_config`.
+
+Gen-2 small follow-ups: the `[management_plane]` validation errors (duplicate operator names, addresses, or public keys; an out-of-range `listen_port`; a named proxy with no `static_ips`) name the nested `[management_plane.wireguard]` / `[management_plane.modal_proxy]` tables they refer to.
+
+Dev and ci tier bring-up (2026-09-09): `envs/dev/deploy.toml` and `envs/ci/deploy.toml` now carry the `[ssh_ca]` public keys of the `minds-dev-ssh` and `minds-ci-ssh` Vault mounts created by imbue-ai/vault#11, so gen-2 box prep and slice bakes on those tiers no longer refuse; the no-CA pin test now covers staging and production only, and a new test pins each committed key.
+
+Fixed (found on the dev-tier test pass): the deployment tests that lease a pool host directly (`test_pool_lease`, `test_workspace_stop_start`, `test_machine_resize`, `test_quota_enforcement`) now send `max_box_generation` (the shared `LEASE_MAX_BOX_GENERATION` in `deployment_tests/helpers.py`); without it the connector treats the caller as a pre-gen-2 client and confines the lease to gen-1 rows, so against a gen-2-only pool every one of them reported "no capacity" and skipped.
+
+Docs (found during the gen-2 final test pass, 2026-09-10): the box-ordering runbook and the `server-order` recipe comment name the production box plan as `24sys03-v1-us` (Xeon-E 2288G, 128 GB, `softraid-2x960nvme`, 14 slices); OVH's eco catalog no longer lists the `24sys032-us` code they used to name, so a copy-pasted order failed with "plan not found". The option families (`bandwidth-1000-24sys-us`, `vrack-bandwidth-500-24sys-us`) and the $160 first-month price are unchanged.
+
+`next_deploy.md`: recorded that the CI infra DB and the dev envs have applied the gen-2 connector migrations (028-041 on CI infra, 034-041 via `env deploy` on dev-josh-2 / dev-gen2mig).
+
+`gen2-cutover.md`: the rollback section now mentions that a mid-migration rollback re-stamps the harvested host keys onto the row.
+
+`gen2-cutover.md`: says that a running cutover stage can be killed with Ctrl-C or SIGTERM and re-run to resume, and corrects the `--keep-origin-vm` note: the kept origin VM is never collected by the orphan reap (it still carries the migrated row's instance name) and must be destroyed by hand.
+
+Docs: the glossary's "adoption" entry and the lost-device runbook's `hosts rotate` description now say that the client remembers the endpoints it last pinned an adopted workspace's host keys at and moves the pins to the connector's current endpoints before every connection, so the workspace stays reachable after a restore driven by an operator, a rollback, or another device, and that a rotation's synced pins retire the previous host keys on every device; the behavior itself is in the `mngr_imbue_cloud` entry.
+
+`test_create_workspace_and_sign_in_via_modal_then_chat_via_electron` (the snapshot-resume Electron sign-in test) is marked flaky: on 2026-09-10 it failed one PR run with a playwright `Frame.click` timeout and passed on re-run, with no change to the flow under test.
+
+
+Fixed (found on the 2026-09-12 desktop test pass): a second device signed in to the same account could see a freshly created cloud machine before it could open it. The create path seeded the synced record with no provider and no secrets, and the SSH key only followed with the reconcile's refresh up to a sync tick later; a device that pulled in that window read the account as not locked (so no unlock banner) and offered the machine as openable, which then hung on a blank surface until the forward gave up. Three changes: the create-path seed now carries the cloud provider and, when the account is unlocked, the SSH key and pins the lease already wrote (the first push is complete); the reconcile mirrors the account's key bundle from the connector on a device that holds none, so the account reads as locked from its first sync and the unlock needs no further round trip; and a live cloud row this device holds no key for is not clickable and carries a chip saying why (`Enter your master password to open`, `Syncing access…`, or `No access from this device`), with its open-in-new-window button withheld. The row's new `key_state` field rides the `workspaces` channel message.
+
+Docs: the environments reference's desktop-client and destroy sections and the testing overview now state that one machine must never run two minds instances against the same env at once (see the `minds-admin env stop-local` entry in `apps/minds_admin`), and that the destroy preflight recognizes a dev launch.
+
+
+`gen2-telemetry.md`: the prep-artifact integrity list now includes the S3 IPv4 pin refresher script and its service and timer.
+
+`next_deploy.md`: the provisional `minds-v0.6.0` tags were deleted rather than re-pointed; the real tag is cut from `main`.
+
+Pre-cutover fleet fixes (`blueprint/pre-cutover-fleet-fixes/`), docs.
+
+- `host-pool-setup.md` gains a "Box maintenance" section (`server drain` -> maintenance -> `server undrain`).
+
+- `gen2-cutover.md`'s per-tier prerequisites include the staging/production management-plane lockdown steps (Modal proxy, per-tier `management_plane.toml`, connector deploy, then box prep), gated on imbue-ai/mngr-internal#850.
+
+- `next_deploy.md` covers connector migration 040 (uplink NOT NULL; deploy minds-admin and the connector together) and lists the staging and production lockdown as must-happen items.
+
+Gen-2 deploy docs follow the slice identifier rename (imbue-ai/mngr-internal#848): the gen-2 service user is `slicehost`, connector migration 041 adds the `slice_*` columns, `gen2-cutover.md` gains the re-prep prerequisite for dev boxes prepped before the rename (plus the pre-rename cutover state-dir note), and `next_deploy.md` carries the 041 / CI infra DB / canary re-prep items and the eventual `lima_*` column CLEANUP.
+
+The workspace settings page (General group) now shows a leased machine's size read-only: current RAM (1 unit = 1 GB) and data-disk GB, plus a passive "restart to apply" note when a resize is pending (specs/slice-fleet phase 1's deferred display item). The size loads lazily through a new `GET /ui/api/workspaces/<id>/machine-size` endpoint backed by `mngr imbue_cloud machines show`; workspaces that are not imbue_cloud leases (or whose size cannot be fetched) simply hide the section. There are no UI controls to change the size -- the CLI remains the write surface.
+
+- Deploy docs: the release checklist gains the upload-before-bump rule for mirrored artifacts (`minds-admin artifacts upload` / `verify`) and notes that the apt-mirror cut now covers the `docker` archive the gen-2 guest images install from; the guest-image pin check points at the artifact manifest. The gen-2 cutover prerequisites require a clean `artifacts verify` and `apt-mirror verify`.
+
+Variable machine sizing (specs/slice-fleet, phase 1). The tier `deploy.toml` `[plans]` blocks gain the two machine-sizing quotas (`max_active_machine_units`: free 8 / explorer 16 / ally 80; `max_total_machine_disk_gb`: free 140 / explorer 280 / ally 1400), written into the connector's plans table on deploy.
+
+New opt-in release test (`deployment_tests/test_machine_resize.py`, `MINDS_MACHINE_RESIZE_RELEASE_TEST=1`): leases a default machine, records a units + disk resize, restarts through stop/start, and verifies the applied size from both the connector's recorded state and the machine itself over SSH (visible RAM + the grown data filesystem).
+
+Docs: the new `specs/slice-fleet/spec.md` supersedes `specs/slice-fleet-gen2/spec.md` (pointer header added); glossary gains a "machine size" entry; host-pool-setup and workspace-stop-start document the two-budget accounting, eviction, and ordering validation.
+
+This branch also carries the earlier slice-fleet gen-2 phase 1-4 work; see the `mngr-slice-fleet-gen2-phase-*` and `mngr-variable-sizing` entries in this same PR.
+
+The gen-2 management-plane runbook (`docs/deploy/gen2-management-plane.md`) now documents installing the pinned onetun userspace WireGuard transport via `minds-admin wireguard install-onetun`, and no longer mentions the removed `sync-peers --via-wireguard` flag (the automatic dial resolver covers every case). It also documents `minds-admin server ssh` as the no-root interactive path onto locked-down boxes.
+
+Updated the workspace stop/start doc's "Known constraint" note with the resolved root cause of the slow artifact uploads (issue #385): the in-DC IPv6 path from OVH dedicated servers to the Object Storage VIP intermittently blackholes TCP flows (OVH ticket #723301). Box prep now pins the S3 endpoints to IPv4 (see the minds_admin changelog), restoring the full 1 Gbps uplink, so a ~13 GB stop artifact uploads in about 2 minutes.
+
+Added a rollout page (`docs/deploy/history/rollouts/s3-ipv4-pin.md`) recording the root-cause evidence and the 2026-09-12 rollout of the pin to the staging (3 boxes) and production (23 boxes) fleets.
+
+Docs for the gen-2 DHCP placement change (imbue-ai/mngr-internal#849), under which a gen-2 slice's cloud-init runs exactly once and a restore onto another ordinal or box never replays it.
+
+- `docs/deploy/host-pool-setup.md` gains a "Networking on a gen-2 box" section (the per-slice routed taps, the box-side dnsmasq DHCP server and its config/unit/lease-file locations, why the cidata is written once and copied verbatim by restores, and how the server is confined: the unprivileged `mngr-dhcp` user, the systemd sandbox and its single `CAP_NET_BIND_SERVICE` capability, and the box-level policy keeping udp/67 tap-only). `docs/deploy/gen2-management-plane.md` notes the `nftables.service` persistence plumbing is shared with that policy.
+
+- `docs/deploy/gen2-cutover.md` prerequisites and `docs/deploy/next_deploy.md` add the re-prep every gen-2 box needs before restores land on it, the restore-onto-a-different-ordinal verification (adopted host key unchanged, `cloud-init status` shows no rerun, root's `authorized_keys` unchanged), and the retirement of the pre-DHCP dev gen-2 slices, whose static netplan cannot follow a placement change.
+
+- The glossary's adoption entry marks the every-boot cloud-init replay the reconciler heals as a gen-1 behavior.
+
+- `docs/deploy/gen2-telemetry.md` lists the slice DHCP server's config, unit and udp/67 policy among the prep artifacts the integrity check watches.
+
+The gen-2 management-plane and telemetry runbooks (and the management-plane config's constants/comments) spell out WireGuard instead of "wg", matching the renamed `minds-admin wireguard` commands and the renamed `wireguard_address` / `wireguard_public_key` columns.
+
+The machine-migration release test leases its gen-1 machine through the connector's new `box_generation` lease filter instead of a bounded lease-and-release retry loop: the gen-1 lease is now deterministic, and an ineligible row costs at most one release before the skip.
+
+The management-overlay addressing plan moves into the minds config as a per-tier allocation table (`MANAGEMENT_OVERLAY_CIDR_BY_TIER`, carved disjointly from a reserved `10.64.0.0/10` supernet and pinned by tests); the loader validates each committed operator address against its tier's operator block, the dev tier's operator address renumbers to `10.112.0.2`, and rendered operator client configs pin their `Address` to `/32` so only per-box routes ever land on an operator machine. The gen-2 management-plane runbook documents the new addressing plan and the automatic operator transport (userspace onetun tunnel -> kernel-route overlay -> public address).
+
+Slice-fleet-gen2 phase 3 (management-plane lockdown machinery):
+
+- New per-tier `management_plane.toml` (committed under `imbue/minds/config/envs/<tier>/`, loader + models in `imbue/minds/config`): the tier's operator WireGuard public keys/addresses and its Modal Proxy name + static IPs -- all public values, PR-reviewed. The dev tier ships a commented scaffold; a tier without the file has no management plane configured.
+
+- New operator runbook `docs/deploy/gen2-management-plane.md`: bring-up ordering, peer changes, rollback, and the break-glass paths (OVH rescue console; a Modal-sandbox bounce host behind the same proxy). The release checklist now carries a reminder to bump the DWT trixie image pin and the gen-2 slice guest image pin together.
+
+Slice-fleet gen-2 phase 4: new operator runbook `docs/deploy/gen2-telemetry.md` covering the on-box telemetry collector, the signal vocabulary, `observability provision-alerts`, and the end-to-end verification checklist.
+
+Per-tier SSH certificate authority for gen-2 slice-fleet management (imbue-ai/mngr-internal#850).
+
+- `deploy.toml` gains an optional `[ssh_ca] public_key` block (the tier's Vault `ssh-<tier>` CA public key, which every gen-2 box, VM, and container pins) and an `ssh-ca` Vault-backed service holding the connector's AppRole credentials (`VAULT_SSH_APPROLE_ROLE_ID` / `VAULT_SSH_APPROLE_SECRET_ID`; template `.minds/template/ssh-ca.sh`).
+
+- The Vault reader can sign an SSH public key through a mount's role and read a mount's CA public key.
+
+- Docs: the Vault setup doc describes the CA, its roles, and the operator bring-up; the gen-2 management-plane, host-pool, tier-bringup, pool-hosts, environments, services, telemetry, and cutover docs describe certificate-based management access, the new audit fields (`expected_authorized_key_count`, `is_trusted_ca_correct`), and the operator identity directory `~/.mindsadmin/<tier>/` (WireGuard key and SSH key). The next-deploy checklist carries the rollout order, including repaving the existing gen-2 dev canary boxes.
+
+- The dev-time desktop bundle lock (`electron/pyproject/uv.lock`) records `imbue-mngr`'s paramiko floor moving to 3.2 for the certificate-aware SSH key loader.
+
+This branch carries the slice-fleet gen2 phase 1-4 work by merging `mngr/slice-fleet-gen2-phase-4` as the base for the upcoming variable-workspace-sizing spec; the substantive changes are described by that branch's own `mngr-slice-fleet-gen2-phase-*` entries in this same PR. No additional changes to this project yet.
+
+`new-fleet-base` is the integration base for the in-progress slice-fleet generation-2 program (specs/slice-fleet-gen2 and specs/slice-fleet): the squash of the formerly stacked PRs #571, #573, #574, #581, #609, and #614. It is deployed only to dev canaries and must not be deployed or merged as-is; follow-up PRs stack on it and the whole program lands on `main` as one change.
+
+For this project it carries:
+
+- The per-tier `management_plane.toml` (operator WireGuard public keys and addresses, the tier's Modal Proxy name, static IPs, and Modal environment), its loader and models, the per-tier management-overlay allocation table (`MANAGEMENT_OVERLAY_CIDR_BY_TIER`, disjoint carves of `10.64.0.0/10`), and the dev tier's filled-in config.
+
+- The tier `deploy.toml` `[plans]` blocks' two machine-sizing quotas (`max_active_machine_units`, `max_total_machine_disk_gb`).
+
+- The read-only machine-size display on the workspace settings page, backed by `GET /ui/api/workspaces/<id>/machine-size` (over `mngr imbue_cloud machines show`).
+
+- Operator runbooks: `docs/deploy/gen2-management-plane.md` (lockdown, WireGuard, onetun transport, `server ssh`, break-glass), `docs/deploy/gen2-telemetry.md`, and the two-budget accounting / eviction / ordering-validation updates to `host-pool-setup.md` and `workspace-stop-start.md`; a "machine size" glossary entry; the release checklist's trixie image pin reminder.
+
+- Two opt-in release tests: `deployment_tests/test_machine_resize.py` and `deployment_tests/test_machine_migration.py` (the latter covers the in-supervisor gen-1 -> gen-2 conversion, which the follow-up work replaces with a one-time migration).
+
+The detailed per-phase history is in this directory's `mngr-slice-fleet-gen2-phase-*`, `mngr-variable-sizing`, `mngr-new-fleet-testing`, `mngr-finish-new-fleet-canary-testing`, `mngr-slice-fleet-canary-followups`, `mngr-onetun-install-and-canary`, and `mngr-machine-size-display` entries.
+
+Slice-fleet cutover phase 2 (mngr-internal `new-fleet-phase-2`):
+
+- `deployment_tests/test_machine_migration.py` is deleted with the in-supervisor gen-1 -> gen-2 conversion it exercised; the cutover is proven by the rehearsal checklist in `blueprint/slice-fleet-cutover`.
+
+- `deployment_tests/test_machine_resize.py` no longer needs `MINDS_MACHINE_RESIZE_RELEASE_TEST=1`; it runs whenever the minds release tier runs. The stop/start test keeps its opt-in until the CI boxes are gen-2 (cutover phase 5).
+
+- Docs: `host-pool-setup.md` explains that the backup snapshot relies on the data disk's 4 GiB system reserve (a workspace at quota can still be snapshotted) and why `host_backup` deletes its snapshot as soon as restic has read it; `next_deploy.md` gains the checklist item for connector migrations 034-039 (039 requires deploying the bake and the connector together); `workspace-stop-start.md` drops the retired lazy `disk_gb` backfill.
+
+- `deployment_tests/test_analytics_collection.py` stamps `memory_units` / `disk_gb` on the placeholder `pool_hosts` row it inserts, since migration 039 makes both columns NOT NULL.
+
+Phase 4 of the slice-fleet cutover: operator docs.
+
+- New runbook `docs/deploy/gen2-cutover.md` for the per-tier gen-1 -> gen-2 cutover window (`minds-admin cutover`): prerequisites, announcement text, the pre-window preflight loop, the drain / repave / restore sequence with `--dry-run`, the verification checklist, what to do with a `FAILED` workspace, accepted noise, and the post-cutover cleanup. `next_deploy.md` carries the cutover order and the archive-deletion cleanup line.
+
+- `docs/deploy/host-pool-setup.md` describes the gen-2 disk layout and the measured-partition disk budget (64 GiB reserve); `docs/deploy/reference/workspace-stop-start.md` documents `minds-admin workspaces start`.
+
+The gen-2 rollout docs (`docs/deploy/gen2-cutover.md`, `next_deploy.md`) are rewritten around the incremental migration model: 0.5.x releases pair with gen-1 boxes and 0.6.x+ with gen-2, existing workspaces move per-workspace via `minds-admin cutover migrate` (with `cutover rollback` as the escape hatch), and boxes are repaved as they empty -- no per-tier downtime windows.
+
+Docs: remote workspaces run their container under gVisor (`runsc`) with `/run` and `/tmp` on tmpfs from the bake; `docs/workspace/README.md` documents what does not work inside the sandbox (ptrace tooling, eBPF, FUSE, io_uring, nested container runtimes, unusual ioctls) and the filesystem-metadata slowdown. `docs/deploy/host-pool-setup.md` follows the 20 GiB gen-2 boot disk and describes the runsc gen-2 bake plus the dev-only `pool create --docker-runtime runc` comparison override; `docs/deploy/gen2-telemetry.md` lists the new `SLICE_UNIT_OOM_KILLED` signal and the collector's `systemd` journal scan.
+
+- `docs/deploy/host-pool-setup.md` documents the `baking` pool status, the orphan reap's running/age guards, and `pool reap-orphans`.
+
+- `docs/deploy/host-pool-setup.md` describes the gen-2 slice disk layout (10 GiB boot, 16 + 3.5 GiB/unit data disk, the single workspace quota and its 4 GiB system reserve).
+
+## 2026-09-11
+
+# App-launched chats run on the machine's own default account and harness
+
+The two chats the app starts inside a machine from outside -- the `/update-self` chat behind "Update now" and the get-help chat behind "Ask an agent" -- no longer ask the machine which account to bind and splice the answer into their `mngr create`. Their create now names no harness and no account, and the machine resolves both the way it resolves a New Tab chat: from `.mngr/settings.local.toml`, which the machine's chat app writes from its account store (the pinned default account, else the most recently used one). A user signed in to codex alone gets a codex update chat, and a machine with no provider account signed in refuses the create in its own words, which the app shows as the machine's verdict; the update's run slot is released, so signing in and pressing Update again works. The app's "no signed-in Anthropic account" refusal, and the coupling on the shape of the template resolver's output that came with it, are gone.
+
+Both creates now also carry `user_created=true`, which puts the chat in the machine's chat memory band like the chats its own UI makes, and `-S agent_types.claude.check_installation=false`, so a machine whose claude binary no longer matches its template's pin can still start the update that would fix it.
+
+Machines from minds-v0.5.0 through v0.5.2 keep accounts but write no such file. For their one update the app keeps the previous release's fallback: it asks the template's resolver and binds the chat through it, only when the file is absent. A machine that resolves no account is no longer refused up front; its create runs unbound and the first turn shows the provider's error in the tab. Machines older than v0.5.0 are launched as before. The fallback is marked for removal once the release that ships the writer has been the minimum updatable template for one release cycle.
+
+This pairs with the default-workspace-template change of the same branch name, which writes the file, gates creates on it, and surfaces the chat's tab; the mngr change on this branch lets a local `[commands.create]` table add to the project's create defaults rather than replace them.
+
+Minds 0.5.2 (build `260909wnd3gb4z1`) is now the stable release, moving stable from 0.5.0 (`260902shwco3ynx`) at 100%. Alpha and beta were already serving it.
+
+For stable users this is a two-release jump: 0.5.1 went to alpha only and was never promoted further.
+
+## 2026-09-10
+
+Fixed the machine version briefly showing the create-time label (for example minds-v0.3.10 on a machine actually running minds-v0.5.0) after pressing Update, and after a version read timed out. Before, the detection sweep threw away the version it had read the moment a machine was announced as anything but running, and fell back to the `original_minds_version` label, so the no-op start the update dispatch announces on a running machine flipped the modal to the birth version for the length of that announcement; a read that timed out under slow discovery did the same. Now a version read this session outranks the label for as long as the machine is known: it is served through an unreadable stretch and past a failed read, and re-read as soon as the machine is readable again. The label only answers for a machine that has not been read at all this session.
+
+The backup history page no longer gives up on a machine with a long backup history. Listing snapshots means reading the whole repository index, which grows with the number of backups kept, and the page was sharing the short budget the landing-page backup badges use: a machine with a large history measured 25-40 seconds cold against R2, so the page just said "Couldn't load your backup history right now." History you asked for now gets a budget of its own, while the badges keep the short one so a slow repository still cannot stall the landing page. A restic call that does blow its budget now says so, instead of reporting the signal that killed it as an unexplained "exit 130".
+
+"Update backup service" is now refused on a machine created before minds-v0.3.10, the same floor the full machine update already had. Today's backup service reads the backup root out of a place only newer machines keep it, so installing it on an older machine left every backup failing from then on -- strictly worse than the outdated service it replaced. The action now says the machine is too old and to move the work to a new one; a restore of such a machine still restores the data and reports the skipped update as a warning.
+
+The Backup section of Machine settings works again. The move to the new interface left it as a placeholder reading "The backups section is being rebuilt and is not available here yet", which meant there was no longer anywhere in the app to update a machine's backup software, turn its verification on or off, or change where its backups are kept -- only the backup history page survived the move. The section is back: what the machine's backups are doing, its five most recent backups (with Download, Restore and a link to the full history), where they are stored, the verification toggle, and the "Update backup software" button every reported problem points at. The button is not offered on a machine that is offline, or on one too old for today's backup software.
+
+Added a release test covering the imbue_cloud slow (rebuild) path, which had no end-to-end coverage: the only pool create test drove `fast_mode=require`, the adopt path, which never runs the rebuild at all. `test_pool_slow_path_create.py` leases a real slice with `fast_mode=prevent`, lets the rebuild rebuild the container, and then reads the realized layout inside it -- `/home/user` must resolve onto the persistent volume's `home/` subtree, with mngr's data dir inside it and the configured `host_log_dir` present. That assertion is the point: a rebuild that drops the layout knobs still creates a workspace that runs, so only reading the layout catches it.
+
+The create-a-workspace-through-a-real-pool helpers the fast-path test had grown (template clone, mngr subprocess env, headless signin, created-event parsing, connector lease listing, workspace teardown and lease release) moved to `deployment_tests/testing.py` so both tests share one copy. The clone helper now takes the provider block as a parameter, because the two paths need different ones: the fast path adopts a pre-baked container and reads only the account binding, while the slow path rebuilds from the block and so needs the full one minds writes.
+
+New rollout page `docs/deploy/history/rollouts/slow-path-rebuild-legacy-home-layout.md` on the workspaces the imbue_cloud slow path rebuilt on the legacy volume layout: the symptom (host_backup failing every tick on a missing `<snapshot>/home`), the two layouts and which hosts have which, the root cause in the rebuild's provider config, what is and is not at risk (stop and start keep everything; a restore from backup loses the home tree), how to recognize an affected host, and the `minds-admin repair-home-layout` procedure with its rollback and cleanup.
+
+Bump Latchkey to 3.11.1.
+
+In dev mode, the Electron shell now honors an existing `MINDS_LATCHKEY_BINARY` instead of always overwriting it with the bundled copy, so the app can be run against a latchkey checkout for testing an unreleased latchkey. The path reaches every latchkey subprocess minds spawns, the gateway included. A packaged build still ignores the variable, mirroring how `MINDS_ROOT_NAME` is handled, so a stale export from a parent shell cannot redirect a shipped binary.
+
+Agents can now ask to store credentials for a third-party service Minds does not ship, securely. The agent names a domain and, optionally, that the service signs in by cookie; the request arrives in the same permission popup as every other kind, and one Approve creates the connection and grants the asking machine access to it.
+
+The dialog is the simplest of the kinds. It shows the domain, what approving does, the sign-in URL when there is one, and the agent's reason. There is no account picker -- the service is being created, so it has none to choose between -- and no permission editor, since the grant is all-or-nothing. A service with no browser sign-in still needs credentials, and asks for them through the same form an AWS or Coolify connection uses -- but one step later: the service does not exist until Approve registers it, so it has no credential command to build inputs from until then. The first Approve registers and comes back asking; the second supplies the values.
+
+The agent supplies no display text at all: a custom service is labelled by its origin everywhere it is named, so it cannot be presented as something it is not. Once created it behaves like any other connection, appearing in the Permissions tab and on the Connectors page, where its access can be revoked. Services with no brand mark now show a globe rather than a box.
+
+
+A custom service approved mid-session now appears immediately in the Permissions tab and on the Connectors page. The services catalog held its first read for the life of the process, so until minds was restarted the connection worked while every surface that names services claimed it did not exist.
+
+The custom-service dialog shows the origin the connection will cover -- scheme and domain -- rather than the bare domain, and says outright when it is plain http, since that is the difference between credentials sent encrypted and in the clear. The messages the agent receives name the origin too.
+
+Asking to store credentials for an origin that is already a connection on this computer no longer fails. That is what a second workspace wanting the same service sees -- its own gateway has no service for it -- so the dialog now says the connection exists, names the sign-in it actually has, and Approve connects the asking workspace to it as it is.
+
+The custom-service dialog now warns, in one line, when the domain is a reserved name nothing answers to, a local or private name the workspace machine resolves itself, an IP address, or a punycode look-alike. Nothing is blocked; the line says what to check before approving.
+
+The custom-service dialog is now titled "Storing credentials for <origin>", and its summary says plainly what approving does: the credentials stay in Minds' encrypted store without being exposed to the agent directly, and the agent's access can always be revoked.
+
+A custom service is now labelled by its origin (`https://httpbin.org`) rather than its bare domain in the Permissions tab, on the Connectors page and on inbox cards, so an http and an https service on one domain no longer look identical.
+
+## 2026-09-09
+
+Fixed "Couldn't start the update agent in this machine" on workspaces that carry a stale second copy of mngr. Before, the app's in-workspace commands (the update spawn and the update run probe) ran bare `mngr` through the workspace's login shell, and on a workspace that a pre-minds-v0.4.3 update had left with a second install under `/home/user/.local/bin`, the shell resolved that stale copy, which no later update refreshes and which dies at import once mngr gains a dependency. Now those commands put the image's `/root/.local/bin` first on PATH, the copy every update refreshes and the workspace's own chat agents run.
+
+The failure detail shown in the update modal now names the inner command's actual error (for example `ModuleNotFoundError: No module named 'watchdog'`) instead of the outer wrapper's "Command failed on agent system-services" when the inner command died without a verdict of its own.
+
+Minds no longer reports that it lost the connection to a machine that is up in the minutes after a laptop wakes.
+
+A sleep kills the SSH tunnels Minds reaches a workspace through, and until the tunnel is rebuilt on the next request every health probe fails no matter how healthy the machine is. Five seconds of those failures was enough to call the machine stuck and start it unasked; one laptop did this seven times in an overnight session. Probe failures that begin in the first minute after a wake now have to keep failing for a full twenty seconds before a machine is called stuck -- a minute, because the run does not begin at the wake but whenever the app next asks the machine for something, which in both reports was around half a minute later. Outside that window nothing changes.
+
+A recovery caught by a sleep no longer pins the machine in "Reconnecting...". The `mngr start` it runs can block on a connection the sleep killed, and every deadline on it is measured on a clock that stops during the sleep, so the machine sat in "Lost connection to this machine. Reconnecting..." for fourteen minutes while answering normally. On wake, Minds now goes back to probing a machine whose unattended start was still running and clears the notice as soon as it answers; the restart you asked for is still narrated by the restart itself.
+
+Both changes were checked on a real laptop against a build from main running beside them, with `scripts/sleep_wake_drill.py`; `docs/sleep-wake-drill.md` explains how to run that drill and read its report, for anyone changing this area later.
+
+Fixed a crash on startup on a computer that had not yet registered its workspaces' agents in their hosts' latchkey permissions files. Auto-registration pushes the changed policy to the workspace's own machine from a background thread, and that push resolved the discovery state through the Flask app state, which only exists on a request thread -- so the push died with `RuntimeError: Working outside of application context` and the registration was silently left unpushed (and so lost the next time the machine's copy of the policy was read). The machine-access layer now holds the resolver directly instead of looking it up per call.
+
+Cut the minds-v0.5.2 release: bumped the app version to 0.5.2 and pinned `FALLBACK_BRANCH` to the `minds-v0.5.2` default-workspace-template tag, shipping everything landed on main since minds-v0.5.1.
+
+This release is mostly about a laptop that went to sleep. A sleep kills the SSH tunnels Minds reaches a workspace through, and until a tunnel is rebuilt every health probe fails no matter how healthy the machine is -- five seconds of that was enough to declare a machine stuck and restart it unasked, which one laptop did seven times in a single overnight session. Probes that start failing in the first minute after a wake now have to keep failing for a full twenty seconds before the machine is called stuck. Relatedly, a recovery interrupted by a sleep no longer pins a machine in "Lost connection to this machine. Reconnecting..." -- one sat there for fourteen minutes while answering normally, because the deadlines on it were measured on a clock that stops during sleep.
+
+Fixed a startup crash on a computer that had not yet registered its workspaces' agents in their hosts' latchkey permissions files. The background push died with `RuntimeError: Working outside of application context` and the registration was silently lost, to be re-lost on every subsequent read.
+
+The update and get-help chats Minds starts on your behalf now run on your signed-in account. A machine keeps one config dir per provider account, and a chat created without being told which account to use landed on a directory holding no credential -- which the machine's own UI never hit, but the two chats Minds starts from outside did.
+
+Waiting for the `mngr latchkey forward` supervisor is no longer a guess: the supervisor publishes its pid and gateway port into the ownership lock it holds for its whole life, so a supervisor that dies between spawn and port-bind is detected by the lock releasing rather than by inspecting a record on disk. A slow supervisor is no longer mistaken for a dead one, or the reverse.
+
+The desktop client asks which process owns the latchkey directory, rather than reading a separate record, when it waits for the `mngr latchkey forward` supervisor's gateway port.
+
+The supervisor now publishes its pid and its gateway port into the ownership lock it holds for its whole life, so a supervisor that dies between spawn and port-bind is detected by the lock being released rather than by inspecting a pid recorded on disk. A slow supervisor is never mistaken for a dead one, and a dead one is never mistaken for slow. A supervisor caught in the instant between claiming the directory and publishing its record counts as slow, not dead, so the client waits for it instead of failing.
+
+Promoted minds 0.5.1 to the alpha channel (build `260908p5hzq053h`, `minds-v0.5.1`), at 100% of the channel. Beta and stable stay on 0.5.0 build `260902shwco3ynx`.
+
+The production pool is baked at `minds-v0.5.1` ahead of this: 11 slices in US-WEST-OR and 7 in US-EAST-VA, all verified container-side. US-WEST-OR had no leasable rows at any version beforehand, so every create there was taking the slow rebuild path.
+
+The production services are still the 0.4.3 deploy, so browser creates (`/hosts/claim`) remain pinned to `minds-v0.4.3` while alpha desktop clients ask for `minds-v0.5.1`. That is why this stops at alpha: the services deploy is optional for alpha and required before beta or stable.
+
+Promoted minds 0.5.2 to the alpha channel (build `260909wnd3gb4z1`, `minds-v0.5.2`), at 100% of the channel, replacing 0.5.1. Beta and stable stay on 0.5.0 build `260902shwco3ynx`.
+
+The production pool is baked at `minds-v0.5.2` ahead of this -- 13 slices in US-WEST-OR and 7 in US-EAST-VA, all 20 verified container-side -- so alpha clients get the fast path rather than a slow rebuild. The production services were also deployed first (`deploy_id 20260909T225715Z`), which moved the web-create pin from `minds-v0.4.3` to `minds-v0.5.2`, so browser and desktop creates now target the same tag for the first time since 0.4.3.
+
+Promoted minds 0.5.2 to the beta channel (build `260909wnd3gb4z1`, `minds-v0.5.2`), at 100%. Alpha is already on it; stable stays on 0.5.0 build `260902shwco3ynx`.
+
+Beta requires the tier services to be deployed, unlike alpha. That landed with 0.5.2 (`deploy_id 20260909T225715Z`), which moved the web-create pin from `minds-v0.4.3` to `minds-v0.5.2`, so browser and desktop creates target the same tag. The production pool holds 20 slices at the tag, so beta clients get the fast path rather than a rebuild.
+
+# The update and get-help chats Minds starts run on your signed-in account
+
+A machine keeps one config dir per provider account it is signed in to, and leaves the
+harness's own config-dir variable unset otherwise, so a chat created without being told which
+account to use lands on a directory that holds no credential. The machine's own UI tells every
+chat it creates; the two chats Minds starts from outside -- the `/update-self` chat behind
+"Update now", and the get-help chat behind "Ask an agent" -- did not, so on any machine built
+from `minds-v0.5.0` or newer they answered every turn "Not logged in - Please run /login" and
+the update could not begin. Machines older than that keep no per-account dirs and were never
+affected.
+
+Both now ask the machine which account a new chat should run on and bind the chat to it, so an
+update started from the app runs as the account the user is signed in with, and so does the
+worker the update hands its merge to. The question is put to the machine's own resolver rather
+than answered from out here, so the app and the machine cannot disagree about which account is
+the default one, and a machine too old to keep accounts answers that it keeps none and is
+launched exactly as before.
+
+A machine that keeps accounts but has none the chat could run on is now told so -- "This
+machine has no signed-in Anthropic account for the update agent to run on" -- instead of being
+handed a chat that cannot take a turn. The update's run slot is released when that happens, so
+signing in and pressing Update again works. A machine whose resolver broke rather than
+declined is reported as one the app could not get an answer out of, so nobody is sent to sign
+in over a fault signing in cannot fix.
+
+## 2026-09-08
+
+Fixed a flaky snapshot-resume release test (`test_backup_restore_rewinds_the_resumed_workspace_in_place`, MIND-197): its own restic verification commands could race the resumed workspace's live `host-backup` service on the shared repository lock (`repository is already locked exclusively`). The test now takes its source snapshot with the service quiesced and reads the restic timeline with `--no-lock`. A small typed repo capability enforces this: issuing a lock-taking restic command against a still-live repository is now a type error, so the same mistake cannot recur unnoticed.
+
+Fixed a flaky failure where minds snapshot-resume tests (`test_snapshot_resume.py`, `test_sync_e2e.py`) failed in setup because `start-dockerd.sh` timed out (exit 124) bringing dockerd back up in the resumed sandbox. The `snapshot_sandbox_dockerd` fixture budgeted 180s for startup but the script capped its own readiness wait at 60s, so that budget was never actually used -- and a dockerd recovering a populated `/var/lib/docker` under gVisor can need longer than a cold start. The fixture now hands the script its full readiness budget (via `DOCKERD_STARTUP_TIMEOUT_SECONDS`), and start-dockerd.sh now fails fast with a clear message if the daemon dies rather than polling until the timeout (MIND-215).
+
+Fixed an update that could never start, and stopped the app hiding why.
+
+A machine whose template merged an agent-type section for a plugin its own mngr did not have yet refused every command the app sent into it, at config parse, before doing anything. That included the update that would have installed the missing plugin, so the machine could not be updated from the app again -- the one thing that would have fixed it was the one thing it refused. The app now runs its in-machine commands the way the machine's own system interface already did, treating config written for a newer mngr as a warning rather than a fatal error. The same applies to the probe that asks whether an update is still running, which could not read the agent list in such a machine and so defaulted to "still running", and to the chat gate a scheduled update waits on, which could not list chats there and so declined every window as "agents were still working".
+
+When a machine does refuse to start an update agent, the update and get-help dialogs now show what it actually said instead of "please try again". The message drops the outer discovery warnings that appear first and read as the cause but are not.
+
+The workspace layout doc's `system/supervisord.conf` example shows the terminal program as `terminal-app` (phase 3 of the workspace app model in default-workspace-template turned the terminal into a Python package installed as its own uv tool) instead of the deleted `run_ttyd.sh` launcher script.
+
+The same doc lists `chat` among the tab-openable apps under `system/apps/` and shows its `[program:chat]` program (`chat-app`, which registers from inside the process like the terminal) in the `system/supervisord.conf` example, since phase 10 of the workspace app model runs the chat as its own app and program. Its "How apps register ports" section also shows the manifest form of a registration (`forward_port.py --manifest <app.toml> --url <url>`, which registers under the manifest's name), alongside the `--name` form.
+
+The e2e workspace runner's create-flow budget (`_CREATE_FORM_TIMEOUT_SECONDS` in `e2e_workspace_runner.py`) is 1200 seconds, above the 900 seconds the snapshot script now gives the workspace image's `docker build`, so the container boot after the build still fits inside it.
+
+Phase 6 of the workspace app model (chat as a document, in the paired default-workspace-template branch): every chat renders inside its own frame at the workspace's `chat` origin, so the Electron flow runner (`e2e_workspace_runner.py`) drives the composer and transcript through that frame. `_send_message_and_await_reply` resolves the chat frame first (`_chat_frame`: the workspace frame's child whose URL path is the chat's agent id, waited for within the first-chat timeout) and fills, presses, and waits inside it; the workspace-level selectors it used before would find no chat markup in the shell document any more.
+
+The litellm deployment test (`apps/minds/deployment_tests/test_litellm_via_workspace.py`) drives the workspace's sign-in, accounts, and create-chat routes on the chat app's port (8010) rather than the shell's, following phase 10 of the workspace app model.
+
+The Electron create-and-chat e2e (`test_snapshot_resume.py`), the full workspace flow (`run_full_workspace_flow`, behind `just minds-test-electron-flow`), and the launch-to-message script start the workspace's first chat from the New Tab page's tile (`start_new_chat_from_new_tab` in `e2e_workspace_runner.py`) and drive the provider chooser inside that chat's own frame, since phase 10 of the workspace app model moved the chooser out of the shell: a fresh workspace lands on New Tab with no chat, and the chat minted from the tile waits for an account and shows the chooser in its page.
+
+The launch-to-message script's reload history check and Slack flow read and drive the chat through that same docked frame (`find_docked_chat`, re-resolved each poll pass), rather than through the workspace shell frame, whose text and markup no longer include the chat's.
+
+The e2e workspace runner's terminal step (`_open_terminal`, step 3 of the full workspace flow) opens a terminal from the New Tab page's `terminal:new` tile, the way the chat step does, instead of expecting the dockview add button to open a dropdown with "New terminal", which phase 10 of the workspace app model removed; the New Tab step is shared as `_press_new_tab_tile` and the terminal helper is `open_terminal_from_new_tab`.
+
+The overview doc notes that the workspace's chat is a registered app at its own origin, and that the system interface frames app pages in its tabs.
+
+The workspace template doc's `system/supervisord.conf` example registers the system interface through its manifest (`forward_port.py --manifest system/apps/system_interface/app.toml`), the way the template does.
+
+Closing every window while Minds is still starting no longer kills the startup. The load of the loading screen is abandoned when its window goes away, and the sequence that owns the backend start and the one-time login code now runs on without it, so the app comes back on the next dock click instead of sitting dead with no backend.
+
+The launch-to-msg end-to-end test finds the in-chat permission card's "Review & respond" button by its label rather than by a CSS class the default workspace template no longer gives it. The class went away on 2026-09-06 and the test had timed out after 360s on every run since, without clicking Deny, so the Slack permission flow could not pass.
+
+A permission click that never lands now names the buttons the chat was actually showing, and a failed macOS launch test now saves the app's `electron.log` beside its `minds.log` snapshot. Both failures previously reported only that a wait had expired.
+
+The launch-to-msg test no longer gives up on a chat that is already there. The chat docks inside the workspace within about a tenth of a second, but the test watched a frame list that Electron only refreshes once something reaches into the workspace, so it waited out the full 60s beside a working chat. It now reaches in on every pass, and if it still finds nothing it names the workspace, the frames under it, and the iframes actually in its DOM.
+
+Hopping the workspace between two machines' chats now lands on the machine it is aiming at. The test took whichever chat it saw first after the hop, and the chat it was leaving stays listed for a moment and stays usable, so the follow-up could go to the previous machine -- whose agent answers with the word being waited for, letting the hop pass without ever being made. It now pins the chat to the machine it navigated to and waits for a composer it can type into.
+
+Cut the minds-v0.5.1 release: bumped the app version to 0.5.1 and pinned `FALLBACK_BRANCH` to the `minds-v0.5.1` default-workspace-template tag, shipping everything landed on main since minds-v0.5.0.
+
+The headline change is that each machine now owns its own credentials and its own permission policy. This computer and every remote workspace maintain their own credential store and refresh it themselves; the desktop keeps a re-encrypted mirror and is a cache rather than the source of truth. Signing an account out of one workspace leaves it working in the others, and a refresh adopts the machine's policy over this computer's copy. Permissions-tab writes are now synchronous against the machine that owns them, so the row greys out and spins until the machine has actually applied the change. The app-level Settings sections for Connectors, Local files and Machines are gone; those controls live with the machine they act on. The bundled latchkey CLI floor moves to 3.11.0 alongside it.
+
+Inside the workspace, the chat is now its own registered app on its own origin rather than a route on the system interface. A workspace whose SSH port was re-mapped by a stop/start no longer strands the desktop's forward proxy on a dead event handle, which is what left a restarted workspace showing "Loading workspace" forever.
+
+Updates: a stored release channel that the running build could not serve made every update check, peek and channel switch throw, which silently broke updating altogether -- the channel is now narrowed to one the build can serve. The Updates pane also distinguishes being up to date from being outside a paced rollout, and names the channel you are on.
+
+A machine whose template merged an `[agent_types.<name>]` section for a plugin that machine's mngr did not have would hard-exit at config parse on every command, including the update that would have installed the plugin. In-workspace commands now tolerate unknown config, so such a machine can be updated instead of being permanently wedged, and the update and get-help dialogs surface the machine's own first verdict rather than "please try again".
+
+Outside the workspace: `mngr create` could not push the git repo to a fresh host when any path contained a space (a home directory like `/Users/Jane Doe`), since ssh splits its own option values on whitespace; SSH option values are now quoted for ssh as well as for the shell. `mngr list` now defaults to `--on-error continue`, so `--format json` no longer returns empty output whenever any one provider is down. Agent start is bounded rather than open-ended: a 90-second cap on the per-agent tmux launch, a 10-minute host-lock wait instead of forever, and SSH timeouts reported as timeouts -- which fixes a stale-process reap that could tear down a live agent's whole supervisord tree because a session probe was merely slow. The browser sign-in wait widened from about five minutes to about ten, so a slow Google leg no longer creates the account and then loses the sign-in. Closing every window while Minds is still starting no longer kills startup.
+
+## 2026-09-07
+
+`test_latchkey_version_alignment.py` now guards a second latchkey pin. Alongside the existing check that the CLI bundled with the Electron app is new enough for `LATCHKEY_MIN_VERSION`, it asserts that the nightly flake-sweep CI job (`.github/workflows/flake-sweep-scheduled.yml`) installs exactly the `LATCHKEY_VERSION` that remote hosts get.
+
+That job reaches Linear through `latchkey curl`, and its pin is only a literal in a workflow file, so a bump that missed it would have surfaced days later as a failed nightly sweep rather than at review time. The module docstring is retitled accordingly: the file is now about keeping the repo's latchkey pins aligned with each other, not solely about the bundled app binary.
+
+Bump Latchkey to 3.11.0.
+
+Credentials are now per machine. Your computer keeps one set for its local workspaces, and each remote workspace holds its own -- so a remote workspace can renew its own logins while your computer is offline, and two computers no longer fight over the same ones.
+
+A workspace's Permissions tab now shows what is connected *for that workspace*, and connecting, entering credentials, or signing out there applies to it alone. The browser still opens on your computer and reuses the session you are already signed in to, so connecting a service you have used elsewhere is usually one confirmation rather than a fresh login. Signing an account out of one workspace leaves it working in the others.
+
+Workspaces you already have keep the connections they have today: the first time each one is read, it starts from what your computer had, and diverges from there.
+
+Every change to a remote workspace's connections and permissions now happens *while you wait*, against that workspace's own machine -- connecting a service, entering credentials, signing out, a permission toggle, "Revoke all", and the permission dialog's Approve. While one is being applied the control you clicked shows a spinner and every other action in the pane grays out until the machine has taken it. A change the machine refuses leaves the pane exactly as it was, with the reason beside the row: the answer arrives where you made the change, rather than as a notification about a click you have long since forgotten.
+
+The Permissions tab also *reads* that machine when you open or refresh it, so it shows the accounts the machine is actually connected to and the policy its gateway is actually enforcing. A machine that cannot be reached shows the existing "permissions can't be loaded" notice rather than a stale answer presented as current. And if you use minds from more than one computer, a permission granted on one now shows up on the other.
+
+The permission dialog's Approve is reported as granted only once the workspace's machine holds both halves of the grant -- the credential and the rule, which travel as one change and are applied credential-first, so neither half can land without the other. A machine that will not take it reports FAILED and leaves the request pending for a retry, exactly as a cancelled sign-in does. Signing an account out of a remote workspace likewise fails outright if the machine will not clear it, rather than showing the account as gone while its agents can still use it.
+
+The app-level Settings page no longer has Connectors, Local files or Machines sections. With each machine holding its own credentials and grants, a single page could not answer "what is connected?" for all of them at once; each machine's Permissions tab answers it for that machine.
+
+The Permissions tab's Disconnect no longer claims that signing an account out reaches every machine. A workspace that holds its own credentials now says so -- only it loses the sign-in, and every other machine keeps its own -- while a workspace running on your computer says that all the machines on this computer share the one sign-in and lose it together. The confirmation dialog names the same scope ("Disconnect Slack from alpha?" against "... from this computer?").
+
+Revoking a workspace's permissions for an account no longer signs that account out of the workspace: the credential stays until you sign out of it, so re-granting is a click rather than another sign-in.
+
+Two Minds installs (e.g. on two of your computers) can now manage the same remote workspace without breaking each other's access: each adopts the encryption key the workspace's machine is already running under instead of inventing its own. If a workspace's machine was set up by a computer that is gone and the machine has rebooted since, its connections are reset (they need signing in again) rather than left permanently broken.
+
+Registering a newly-discovered agent in its host's permissions file (which also brings the host's baseline grants up to date) now pushes the changed file to the workspace's own machine, so a remote workspace's gateway admits the agent -- and enforces a newly-shipped baseline grant -- without waiting for someone to open its Permissions tab. The push runs on a background thread, coalesced per host, because the discovery callback it is triggered from must not block. A machine that refuses it is logged as an error and not caught up later: the machine owns the policy now, so the next read adopts the machine's copy over this one. Recover with `mngr latchkey register-agent` once the machine is reachable again.
+
+Fixed the Permissions pane showing pre-change toggle state after being closed and reopened. Pointing at the key prefetches the pane's overview, and that read was kept for up to 15 seconds -- so a read taken before a toggle was flipped could still answer the next open, and, because a live prefetch is never re-read, keep answering it until it aged out. Any permission write now drops the prefetch, both when it starts and when it lands, so reopening the pane reads the state the change actually left behind.
+
+Internal: the desktop app loads mngr's provider set in-process and opens a workspace's outer host itself (`desktop_client/latchkey/machine_access.py`), which is what lets these operations be synchronous at all. The load happens once, on a background thread at startup, so the first Permissions tab open does not pay for it. `machine_operations.py` is the single class every change to a machine goes through, and `machine_latchkey.py` decides which machine store a read or write belongs to. The two callerless bulk-revoke helpers in `permission_overview` (`revoke_file_sharing_for_workspace`, `revoke_workspace_verb_for_workspace`) are deleted -- the Permissions tab revokes a shared path or a cross-workspace verb through the ordinary self-toggle, one permission at a time. The bundled `latchkey` npm dependency is 3.10.1. `docs/latchkey-permissions.md`'s per-machine section is corrected to say that the machine owns its policy as well as its credentials -- a read adopts what the machine holds, and only a machine with no policy at all is seeded from this computer's copy.
+
+## 2026-09-04
+
+Minds 0.5.0 (build `260902shwco3ynx`) now ships on every channel: stable moves from 0.4.2 (`260825un55i8ix7`) and beta widens from half its installs to all of them. Alpha was already there.
+
+For stable users this is a two-release jump: 0.4.3 was deployed but never promoted, and 0.4.4 was cut and never deployed.
+
+The Updates panel now answers "where am I?" in two fixed lines and lets each channel row answer "where is it?".
+
+The header reads `You're on Minds <version>.` and, below it, where you stand with your channel -- `You're up to date with Stable.` when nothing is waiting, and something else in the states where that would be false: a download in flight, a check that failed, and running ahead of your own channel. A finished download keeps its own notice, since it is the one state asking you to act rather than reporting where you are.
+
+Each channel's version moves out of its heading and into its blurb: `Stable / Ready for everyday use. Currently on 0.5.0.` A channel that is mid-rollout says `Currently rolling out 0.5.0.` instead, because a build being staged by `rollout_percentage` means the channel serves two versions at once -- one to the installs inside the bucket and another to the rest -- so `Stable (0.4.2)` beside the name is wrong for whichever group is not being described. Neither form ever shows a percentage.
+
+Being ahead of your channel now reads `You're ahead of Stable and will get updates when it catches up.` rather than naming both versions in a sentence, since the channel's own row already states what it serves.
+
+Fixed: a stored channel this build cannot serve stopped updates entirely. A tier that configures no `update_feed_base_url` serves stable alone and `feedForChannel` raises by name for any other, so a preference stored while on a tier that did serve it made every later check, peek and channel switch throw -- surfacing as a broken feed rather than as a preference that no longer applies. The stored channel now falls back to one the build serves, and says why in the log, which is what an unrecognised channel name already did.
+
+## 2026-09-03
+
+Browser sign-in (Google and email) now waits longer for you to finish in your browser. The desktop kept its local sign-in listener open for only ~5 minutes, so a slower Google step (account chooser, consent, two-factor, or a first-time Google sign-in) could quietly lose the sign-in -- the account was created but the desktop had already given up. The wait is now ~10 minutes, and the coupled subprocess and flow-status deadlines were lifted to match so the longer wait actually takes effect and you never see a spurious "sign-in flow expired".
+
+`apps/minds/docs/deploy/` is restructured around the three things minds ships, each on its own cadence: the **app release** (a tag pair and a build, promoted to a channel), the **pool hosts** (pre-baked machines a create can lease), and the **tier services** (the connector, LiteLLM proxy and analytics Modal apps). `ops/` holds one runbook per lifecycle and nothing else, so the hot path is three files; `setup/` holds the one-time per-environment bring-ups previously interleaved with them; `reference/` holds the concepts the runbooks cite; finished rollout and incident write-ups move under `history/rollouts/`.
+
+`production-release-deployment.md` is gone. It was a second home for both the pool bake and the services deploy, and the main source of contradiction -- it said to order two boxes per release while the release doc said to fill free slots. Its box-ordering half, the only content unique to it, is now `setup/order-boxes.md`, which states both policies and says to decide from the live audit.
+
+The `release-minds` skill is now the orchestrator rather than a pointer. It owns the phase sequence, the couplings between phases, and the handoffs; each `ops/` doc owns one lifecycle's mechanics. It also opens by establishing where the release already is -- version, tags on both repos, launch-to-msg verdict, channel state -- so an agent asked to finish a part-done release resumes instead of restarting.
+
+Each `ops/` doc says up front what a deploy would change and what is safe to redo. A pool bake is additive and safe to repeat; a services deploy is usually safe but moves the web-create pin, overwrites the plans table and arms a five-second database rollback. Both bake steps now bake *before* deploying, because a deploy freezes the browser-create pin from `FALLBACK_BRANCH` and `/hosts/claim` matches that tag with no rebuild fallback.
+
+Tag immutability is stated as a rule: never move `minds-v<version>` once anything has run against it -- fix forward and take the next number, since version numbers are free and gaps are harmless. Downstream caches key on the tag *name* rather than its content, so a moved tag makes a later pool bake report success while baking the previous code.
+
+The runbooks now open by disabling the code-guardian stop hook. It merges and pushes `origin/main` on every stop, in the mngr checkout and in the `default-workspace-template` checkout holding the release's frozen `system/vendor/mngr`. A release pins a tree to one commit and a deploy ships the working tree rather than a tag, so a live hook silently rewrites what is being shipped and publishes the rewrite.
+
+A staging rehearsal is now the fourth thing that gates a release, alongside the three CI gates: it is the only one covering an existing workspace's upgrade, sharing, terminals and latchkey, where launch-to-msg only ever builds a clean machine and sends it one message.
+
+The minds `just` recipes are renamed `<noun>-<verb>`, so the noun matches the CLI they wrap and `just --list` groups by lifecycle: `services-deploy` (was the ambiguous `deploy`), `pool-bake` / `pool-bake-from-worktree` (was `bake-slice-prod` / `-dev`, whose suffix named the bake source rather than the tier), `pool-list`, `pool-destroy`, `pool-backfill-host-keys`, and `server-list` / `server-audit` / `server-order` / `server-await-delivery` / `server-setup` / `server-prep`. The old names remain as aliases.
+
+`ops/services.md` now describes what a deploy ships, read from `deploy.toml`: three Modal apps and eight Vault-backed Modal Secrets, provisioning none of the infrastructure behind them (`creates_resources = false` on both tiers). The dependencies those secrets carry are named -- SuperTokens for auth, Neon for Postgres including the `pool_hosts` table the lease path reads, Cloudflare for R2 and DNS, OVH object storage for stop/start artifacts, the pool SSH key, the sharing coordinates, and the Sentry DSNs pointing at the tier's own Bugsink. Share relays, Bugsink and OpenObserve are separate and untouched by `env deploy`.
+
+`pool-hosts.md`'s status table is rebuilt from the code. It listed five statuses; `pool_hosts.status` has nine -- it was missing `stopping`, `starting`, `crashed` and `unreachable` -- and its "retirable" column did not match what `pool-destroy` accepts. The table now names the real domain and, per status, whether a destroy is allowed: `available`, `unreachable`, `removing` and `released` are claimable; `leased` needs `--force`; and `stopped`, `stopping`, `starting` and `crashed` are refused outright, since `--force` only adds `leased`. It also records that a `stopped` row's slot is freed only when its retention window closes -- until then the row keeps its halted VM and its box link -- which is part of why free capacity is read from a box audit of physical disks rather than from row statuses.
+
+Retirement is filtered on `available` **and** never-leased, which is what actually proves a row never carried user data -- releasing a lease sets `status='removing'` and never returns a row to `available`, so the only writer of `available` is the bake's insert.
+
+Instructions that were wrong when executed are corrected against real staging and production runs: `pool-bake` is the right recipe on every tier because its suffix names the bake source; the bake's exit code is read from `$PIPESTATUS`/`$pipestatus` rather than through `tee`; the fast-path check greps for `adopted pre-baked agent` rather than `FAST PATH`, which is logged before the lease attempt and so appears on a miss too; the baked container's git identity is expected to hold the bootstrap's neutral value rather than none at all; the workspace checkout is a fresh repo, so comparing its HEAD to the release tag proves nothing and is replaced by grepping the built frontend bundle; the verification SSH uses a throwaway `known_hosts`, since slices reuse a box:port pair; and seed and fill times scale with box load rather than being fixed per-slice budgets.
+
+A cold-start readthrough -- agents executing the runbooks with no context beyond the files -- found they leaked staging values into production through their own back-references. "Verify exactly as in staging" reached a step that read the pool key from `minds/staging/pool-ssh` and grepped `~/.minds-staging/logs/`; run verbatim on production the first fetches the wrong tier's key, while the second silently *passes* on the staging rehearsal's own log lines, so the one gate proving production creates use the bake would have confirmed nothing. Tier-dependent paths are now derived from the activated tier, and the Vault path is explicitly the single place a tier is typed by hand.
+
+The state-establishing commands now guard the default-workspace-template path. `git -C "$DEFAULT_WORKSPACE_TEMPLATE" tag -l` with the variable unset does not fail -- `git -C ""` runs in the current directory and exits 0, so the check silently reports mngr's tags as dwt's, and an agent reading "both tags exist" skips the cut it was supposed to perform. The skill now resolves the path from `apps/minds/.env` and both call sites fail loudly when it cannot be resolved.
+
+`next_deploy.md` is cut from 172 lines to 81 and declared a queue rather than an archive: items discharged several releases ago are gone, and shipped items belong in the release's `history/` entry. `history/minds-v0.5.0.md` records that release -- the tag pair, the build, the production bake and retirement, the alpha promotion, and the fact that the production services deploy was deliberately not done, which leaves browser creates pinned to `minds-v0.4.3` while desktop 0.5.0 clients ask for `minds-v0.5.0`.
+
+The alpha release channel now serves minds 0.5.0 (ToDesktop build `260902shwco3ynx`), replacing 0.4.2. Stable and beta stay on 0.4.2.
+
+0.5.0 is a minor bump because the workspace changed shape: signing in is a provider chooser over named provider accounts rather than a single Claude login modal, a workspace no longer creates a chat at boot -- it opens on its new-tab screen and the first chat is one you start on the account you picked -- and harness availability follows from the accounts you signed in to rather than from host feature flags. Outside the workspace, terminal panes no longer steal focus on websocket reconnect, and `mngr list` no longer stalls on one slow host.
+
+Production pool hosts are baked at `minds-v0.5.0` (15 slices, 7 US-EAST-VA and 8 US-WEST-OR), so a 0.5.0 create leases a pre-baked machine rather than rebuilding one.
+
+The connector's download fallback is deliberately untouched: it is what the public download link serves while the update feed is unreadable, and it tracks `stable`.
+
+The beta channel now serves minds 0.5.0 (build `260902shwco3ynx`) to 50% of installs, up from 0.4.2 (`260825un55i8ix7`) at 100%. The remaining half stays on 0.4.2 until the rollout widens. Alpha has been on this build since 2026-09-03; stable stays on 0.4.2.
+
+`_DEFAULT_TARGET_BY_PLATFORM` in `accounts_web.py` is deliberately unchanged. It backs the public download link while the feed is unreadable, and must never lead stable, since `allowDowngrade` is false.
+
+The generated ssh config in the latchkey end-to-end test now quotes its `IdentityFile` and `UserKnownHostsFile` paths.
+
+ssh tokenizes each config line on whitespace exactly as it does an `-o` value, so a temp directory containing a space would have made the test's ssh config point at several nonexistent files.
+
+## 2026-09-02
+
+Cut the minds-v0.5.0 release: bumped the app version to 0.5.0 and pinned `FALLBACK_BRANCH` to the `minds-v0.5.0` default-workspace-template tag, shipping everything landed on main since minds-v0.4.4.
+
+This is a minor bump because the workspace itself changed shape. Signing in is now a provider chooser over named provider accounts rather than a single Claude login modal, and a workspace no longer creates a chat at boot -- it opens on its new-tab screen and the first chat is the one you start, on the account you picked. Which harnesses are available follows from which providers you signed in to, rather than from host feature flags. The chat transcript rendering was reworked alongside it.
+
+Outside the workspace: terminal panes no longer steal focus when their websocket reconnects, `mngr list` and the board no longer stall on one slow host (per-host detail reads are now bounded), and accounts with many workspaces no longer time out the out-of-date-machine probe because imbue_cloud discovery runs per-host reads concurrently.
+
+The launch-to-first-message end-to-end script no longer writes the Anthropic API key it signs in with into its uploaded CI log.
+
+The workflow tees the script's output to a file and uploads it as a build artifact. loguru annotates each traceback frame with the values of the variables on that line, so any failing run wrote the live key into that file. GitHub's secret masking rewrites the console log only -- it never touches an uploaded file -- so the key was readable by anyone who could download the artifact.
+
+The key is now held as a `SecretStr` from the moment it is read, so every frame that names it renders `**********` instead, and the tracebacks the script logs no longer carry frame values at all. Stack frames, source lines and the exception message are unchanged, so a failure is still diagnosable from the artifact.
+
+## 2026-09-01
+
+- Added `release` + `minds_services` end-to-end tests for the real account-signup flow (`apps/minds/deployment_tests/test_account_signup_e2e.py`), driving `POST /accounts/api/signup` on the live connector rather than the admin `test-signup` bypass. Coverage: a brand-new account receives and clicks through a real verification email via the mail.tm `signup_email` seam (unverified -> verified), the `/accounts/authorize` device handoff refuses to mint a code without both a session and explicit confirmation (loopback-only `redirect_uri`, required PKCE/state, the `?next=` bounce to `/login`), and the hosted `/signup` page renders the Google-vs-email paths per the tier's `/accounts/api/config`.
+
+- Fixed the never-exercised mail.tm verification seam: `MailtmInbox.wait_for_verification_token` filtered inbox subjects on `"verify"`, but the connector's verification email is subject-lined "Email verification instructions" (contains "verification", not "verify"), so the poll would have silently timed out. It now matches the shared `"verif"` prefix.
+
+- Added the `register_signup_user_for_cleanup` deployment-test fixture, which deletes accounts created through the real signup flow (including mail.tm `+<uuid>` addresses that do not match the session sweep's `test-<hex>@example.test` pattern) via the shared env's SuperTokens admin API on teardown.
+
+- The verification test is marked `flaky` and resends after the send cooldown on a missed round: the verification email rides SuperTokens' best-effort hosted service and the SDK swallows send failures (`send-verification` returns `sent:true` regardless), so delivery is not guaranteed. Direct probes confirm it delivers reliably from the connector's Modal workspace, so misses are rare, but a sustained hosted-email outage can still fail the run.
+
+- Documented the real-signup e2e recipe in `apps/minds/deployment_tests/real-signup-e2e-pattern.md` as a template for the account-signup behavioral swarm.
+
+Bump Latchkey to 3.10.0.
+
+Fix `test_litellm_via_workspace` for the workspace's account-based sign-in.
+
+`/api/claude-auth/submit-credentials` now mints a provider account instead of overwriting
+the workspace's shared claude login, and an agent binds to an account when it is CREATED
+(the credential rides `mngr create`'s own flags). So the boot chat the test used to reuse
+is still running on whatever it was created with, and never sees the minted key.
+
+The test now creates a chat on the returned `account_id` and waits for mngr to register it
+before messaging. It also asserts the submit response carries that id. `auth_mode` is
+unchanged and still asserted.
+
+Add `test_every_paste_lane_binds_a_chat_to_its_own_account`, and assert the binding in the
+existing litellm test. Between them they are the workspace's sign-in artifact: one lane proven
+end to end including a real turn and a spend row, and every lane that can be driven without a
+browser proven through the part they share -- account minted, credential written where the
+harness looks, chat created against it, and the agent actually pointed at that folder.
+
+That last step is the one that fails silently. A chat bound to nothing is indistinguishable
+from a working one until its first turn, and for codex a credential that lands in an OS keyring
+rather than the account leaves a dangling symlink while `codex login status` still reports
+success. The check resolves the binding the way each harness does: CLAUDE_CONFIG_DIR out of the
+agent's env file for claude, a credential symlink under the agent's state directory otherwise.
+
+The keys are deliberately fake. What is being tested is the join, not the provider.
+
+The Electron first-boot e2e drove `.claude-login-modal`, which this branch deletes. It now
+drives the provider chooser through the same API-key path, keyed on `data-e2e` attributes rather
+than on copy or tailwind classes -- it reaches into the template's UI from this repo, so anything
+it targets has to survive a wording change or a re-port.
+
+Signing in there mints an ACCOUNT rather than writing a shared settings block, so nothing is
+restarted mid-flow; the generous success wait stays because the verdict is the harness's own
+probe answering.
+
+`test_prevent_bare_print` excludes `test_litellm_via_workspace.py`: it builds Python scripts as
+STRINGS and runs them inside a workspace container, and those `print` calls are the script's
+return protocol, read back off stdout. The rule's regex cannot tell a string literal from code.
+The count stays at 5 -- the genuine output primitives -- rather than being bumped to cover it.
+
+The LiteLLM workspace deployment test polls `mngr transcript --role agent` for the agent's echo, dropping the retired `--role assistant` spelling that pre-ATIF streams used.
+
+The litellm-via-workspace deployment test now filters the chat agent's transcript with `--role assistant --role agent`, so it still finds the echoed token on agents whose transcript is ATIF-shaped (which name that role `agent`).
+
+The LiteLLM workspace deployment test polls `mngr transcript --role agent` for the agent's echo, following the ATIF role vocabulary (the retired pre-ATIF spelling was `--role assistant`).
+
+Staging branch for the chat data-model simplification work. So far it carries no simplification changes of its own: it merges `mngr/update-auth-pr` (the provider-accounts sign-in refactor) as its base -- see that branch's `mngr-update-auth-pr.md` and `minh-auth-provider-lanes.md` entries for what actually changed in this project.
+
+A `@pytest.mark.flaky` marker briefly added to `test_create_workspace_and_sign_in_via_modal_then_chat_via_electron` on this branch was removed again: the CI failure it reacted to was not flakiness but a deterministic pairing gap -- the snapshot bake pairs the workspace template by branch name and fell back to the released `minds-v0.4.3` tag (which predates the provider chooser) because no `mngr/simplify-chat` branch existed on the template remote yet. The fix was pushing the paired template branch, not marking the test.
+
+This is the merge of `minh/auth-provider-lanes` (fixing the workspace deployment tests for the provider-accounts sign-in) into current `main`; see that branch's `minh-auth-provider-lanes.md` entry for the bulk of what changed.
+
+On top of the merge, this PR fixes the merged branch's chat-account binding check in `test_litellm_via_workspace.py`: its in-container script parsed `mngr list --format json` as a bare list and read a `state_dir` field the rows do not carry, so the assertion could never pass. The state dir is now resolved via `mngr config get default_host_dir` plus mngr's `agents/<id>` layout.
+
+It also deduplicates the two lane tests' workspace bring-up/teardown into a `_local_docker_workspace` context manager (which now also owns the template clone whose scratch dir it removes) plus a shared env-ready/skip preamble helper, and refreshes docstrings that still described the pre-provider-accounts sign-in (shared Claude settings write + agent restart) -- including the Electron test's in `test_snapshot_resume.py`.
+
+It also ports `scripts/launch_to_msg_e2e.py`'s sign-in step to the provider chooser: the script still drove the deleted `.claude-login-modal` UI, so the scheduled launch-to-msg health check would have hung at sign-in once the template's chooser landed on main. The helper now mirrors `test_snapshot_resume._sign_in_with_api_key_via_modal`'s `data-e2e` selectors.
+
+Finally, it refreshes `apps/minds/README.md`'s workspace description for the provider-accounts world: chats are created on demand and bind to a provider account (a folder under `~/.minds/accounts`) at creation, rather than a bootstrap-created `Chat-1` on first boot sharing a workspace-wide `~/.claude`; the first-boot initial-chat bullet (gated by `data/.state/initial_chat_created`) is gone with the boot chat itself.
+
+The lane tests' binding check also requires the credential symlink's target to exist: a dangling symlink into the account folder (the codex keyring failure mode the check documents) no longer counts as bound.
+
+Remaining apps/minds documentation that still described the deleted Claude sign-in modal or the boot-created chat is refreshed for the chooser world: `docs/testing-overview.md`'s Electron-test row, `desktop_client/e2e_workspace_runner.py`'s comments and chat-input wait log, `desktop_client/laptop_agent_types_seed.py`'s chat-type description, and the `ai_keys.py` / `agent_creator_test.py` sign-in surface mentions.
+
+## 2026-08-31
+
+MIND-189: Fixed a CI flake in the master-password lifecycle sync test (`test_master_password_lifecycle_rewraps_scrubs_and_restores`).
+
+The test asserted that changing the master password is rewrap-only by reading the workspace record's revision just after the rewrap and comparing it to a baseline captured moments earlier. But a freshly-created row's metadata is enriched once by the background reconcile loop as discovery catches up, which legitimately advances the revision; when that push landed inside the compare window, the assertion tripped even though the rewrap changed nothing.
+
+The assertion no longer reads the revision at all. A rewrap re-wraps only the account key bundle and never writes the workspace record, so the test now asserts exactly what a rewrap must preserve: the secrets blob and the record's identity and lifecycle are byte-identical across the change. The metadata (and revision) the background enrichment may still be filling in are simply not read, so however the enrichment interleaves with the rewrap the check holds -- no waiting, no ordering, no count.
+
+Cut the minds-v0.4.4 release: bumped the app version to 0.4.4 and pinned `FALLBACK_BRANCH` to the `minds-v0.4.4` default-workspace-template tag, shipping everything landed on main since minds-v0.4.3.
+
+The headline fix is the leased-here trust-material staleness fix: a device that leased a cloud workspace before another device adopted it (rotating the slice's sshd keys) no longer spins forever on "Loading workspace" -- the record-secrets materializer applies the synced adopted keys, and a bootstrap-drift escape hatch re-applies record known_hosts pins whose endpoints still hold only absent-or-bootstrap material.
+
+Desktop-created shares now stamp the connector-reported chrome origin into the workspace's `share.env` (`SHARE_CHROME_ORIGIN`) instead of hardcoding the bare connector URL, so the hosted `/web` chrome can frame desktop-shared workspaces on tiers with a custom chrome domain (issue #746).
+
+Fixed leased-here cloud workspaces becoming permanently unreachable after another install adopted them: the record-secrets materializer no longer skips the SSH half for hosts this install leased (the lease granted no standing authority over trust material once the synced record advanced past this device's contribution), and a new bootstrap-drift escape hatch re-applies record known_hosts pins whose endpoints still hold only absent-or-bootstrap material even when the revision gate was already stamped shut by an older client. Without this, a device that leased a workspace before a second device adopted it (rotating the slice's sshd keys) kept refusing the rotated keys forever, and every workspace stuck at "Loading workspace".
+
+Recorded the minds-v0.4.3 deployment in the deploy docs: new history entry (staging rehearsal, the workspace-keyed-share origin bug + dwt PR #522 + tag re-cut, the tag-keyed bake-cache lesson, the FRPS secret rotation, production deploy ids, the box 0b24ee94 RAID rebuild onto a smaller replacement disk, and the leased-here trust-material fix), and reset next_deploy.md with the remaining open items and the new mixed-fleet notes.
+
+## 2026-08-30
+
+The minds behavior corpus's per-folder `overview.md` files are renamed to `README.md`, each now opening with the mandated incipit that points any reader to the tmr-behaviors skill. Their prose is otherwise unchanged.
+
+Desktop-created shares now stamp the connector-reported chrome origin into the workspace's `share.env` (`SHARE_CHROME_ORIGIN`), instead of hardcoding the bare connector URL (issue #746). On tiers whose web chrome lives on a custom domain (`deploy.toml [origins].chrome_origin`, e.g. `https://minds.imbue-staging.com`), a desktop-shared workspace's `frame-ancestors` CSP previously only allowed the connector's modal.run origin, so the `/web` chrome showed blocked frames and its health probes failed.
+
+When the connector reports no chrome origin (an older connector, or a tier with no hosted chrome configured), the previous behavior is preserved: the bare connector origin is stamped, which is where dev tiers path-serve the chrome.
+
+Already-shared workspaces are not healed in place; they pick up the correct origin the next time sharing is re-enabled from an updated client (a grants-only edit deliberately never rewrites `share.env`).
+
+## 2026-08-29
+
+# Minds tells you when a machine is behind, and can update it for you
+
+Minds compares each machine's template version against the version this build supports and shows the result on the machines list (a badge that is also a button), in a notice band over the machine, in the machine's Settings -> Updates pane, and in an update modal with both versions. "Update all now" and "Schedule all updates" appear once more than one machine is behind.
+
+Detection is a positive read only. A machine is out of date when a `minds-v*` version can be read for it and it sorts below the supported version. A machine whose version sorts below `minds-v0.3.10`, the oldest release an update can be applied to in place, is badged "Recreate to update" instead, with no update offered: the modal, the band over the machine, and its Settings -> Updates group explain that the way forward is to create a new machine and ask its agent to run `/migrate-workspace from <old machine>`. The cutoff is a fact about the machine, so a development build reads it too. A running machine is read from its own git (the version its last `/update-self` run recorded, else the nearest release tag); a machine whose git names neither falls back to its create-time label, the one version fact readable while it is stopped. A machine newer than the app says so and suggests updating the app. Everything else is "version unknown", and the explainer names which side had no version: a custom-template machine is unreadable, while a build pinned to a branch rather than a release has no version of its own and reads every machine as unknown. An unknown machine is never called behind and "Update all now" passes over it, but the update buttons remain, because pressing one only sends the machine's own update agent in to look; a run that finds nothing to do reports that rather than a failure.
+
+Detection runs when the set of machines or a host state changes, not on a loop; stopped machines are read from their label with no exec; readings are cached until an update lands, the machine restarts, or a backstop elapses; and reads within a sweep run concurrently.
+
+"Update now" enters the machine, then starts it if stopped and spawns the machine's `/update-self` agent as a chat. Starting it runs the same action the machine's own start button does, so the row shows the machine coming up, and a machine the app had previously stopped is left as recoverable afterwards as one the user started by hand. Starting it any other way did not clear the mark that a stop from inside the app leaves behind, and nothing else would have: a machine woken by an update would go on looking healthy, then be passed over by unattended recovery the moment it did break. Entering first matters: the machine's interface opens the chat's tab only for clients connected when the agent appears. The chat carries the `auto_open` label (alongside `assist`). The modal stays up with a spinner through the dispatch and closes once the agent exists, or shows the refusal in place. "Schedule update" is the default offer everywhere the buttons appear, because the apply takes the machine's services down; it records the intent and runs it in a local update window (2:00-5:00 AM by default, configured in the Machine updates section of Settings -> Updates, which is shown in the browser build too). The window can be set to any hours, so the app never calls it a night: the modal says "Scheduled to update in the next update window (2:00 AM-5:00 AM)" and a skip is explained "during the last update window". Scheduled runs are opportunistic: an unreachable machine or one with agents working in it is skipped, re-armed for the next window, and the reason is shown in the modal. "Update all now" runs through the same gate. A run that fails cancels the schedule. A scheduled run whose machine turns out to be up to date already is dropped -- unless the intent named a version of its own, which is measured only by the run itself: "up to date" is a reading against the release this build supports, and a named version is how the user reaches past that reading, so an armed branch or tag is no longer cancelled the moment the machine already matches the newest release. A machine in that state still wears the scheduled badge on its row, so the intent can be seen and cancelled from the machines list rather than only from the machine's settings. Pressing Update now or Schedule update on a machine without backups asks in place whether to go ahead without them, and that go-ahead is carried into the run's seed message so the update agent does not stop to ask for it a second time: the update flow inside a machine only became unattended in a template newer than any machine now in the wild, and the flow a machine is still on stops at its own missing-restore-point question, with nobody necessarily there to answer it. Whether the machine has backups is read at dispatch rather than carried from the press, so a schedule armed days ago does not speak for the backups the run is actually about to go without. Beyond that answer and a named version, every run is started with the same seed message however it was started: the update flow carries no consent tier of its own.
+
+An update's apply step deliberately restarts the machine's system services, which used to read as a wedged machine: marked stuck, restarted unasked, with a "Restarting" banner. Minds now stands back for that step only, in a deadline-bounded window armed when a probe sights the apply in the machine's own run record and sized off the apply's restamp time plus the template's recovery grace. Health and recovery are untouched for the rest of a run, so a machine that dies while preparing is still a normal outage, and an apply that really wedges still gets a restart once the window expires. Because a machine that is merely preparing is left to normal recovery, the stand-back is asked again at the moment each unattended start actually runs rather than once when the machine is first marked stuck: a start held back behind this device's own network outage can wait a long time, and an apply that began in the meantime must not be restarted out from under. The restart an expired window hands back is itself held behind that same network reading, and is released when connectivity returns, so a machine whose update died mid-apply during a local outage still gets its start rather than sitting stuck until the app is relaunched.
+
+A run's two halves are named apart. Most of a run is preparation in the agent's own branch and worktree, with the live machine untouched: the row reads "Preparing update...", and the machine's stop, start and restart stay available through it. Only the apply changes the machine, and the row reads "Updating..."; stopping or restarting a machine mid-apply asks first, warning that it can leave the machine half-updated, rather than withholding the actions (an unreachable machine could otherwise keep its lock forever). Over the machine itself the apply is an undismissable card that leaves the titlebar and machine switcher reachable. The notice band reports the run's phase, that it has stopped to ask something, and how the last run ended if it left something behind; the apply is the one update state that outranks the machine's health conditions, since the outage is one the app asked for. The update modal no longer opens itself; it is opened from the band or the row badge. All three surfaces ask one function whether a machine is behind, so they cannot disagree. Their state reaches the SPA as a new required `workspace_updates` snapshot frame, so `UI_SCHEMA_VERSION` goes to 9 and a window held open across the upgrade reloads once instead of reading the update state off a field its server does not send.
+
+The status contract between the app and a run is one file the machine writes, `data/.state/update-apply/run.json`: the run's start (chat name), its apply phase and last restamp, whether it is holding for the user and its one line saying what on, the worker it handed the merge to, and its one terminal verdict. The app reads it over `mngr exec` in the same probe as the chat agent's lifecycle state, every ~20 seconds per in-flight run. There is no `update` chat label: a run launched by hand in any chat is discovered from the same file, and a verdict written while the app was closed is picked up on the next sweep. The probe frames its end sentinel on its own line, since the skill writes the record without a trailing newline. The paired default-workspace-template change is the producer half (the `run-status` subcommand and the apply's mirroring).
+
+From that probe: an agent gone without a verdict moves the row to the failure badge at once. An agent alive but idle across two consecutive polls flips the badge to "Waiting for you", with the modal and band naming the chat tab; a single idle reading is not surfaced, and an idle lead whose named worker is still moving is still preparing. A recorded hold (something the user built that the update cannot keep) is surfaced on the next poll, leading with the run's own line about what it is waiting on. An update that lands with something the user must act on keeps a neutral "Updated, with a note" badge rather than vanishing behind the next sweep's up-to-date reading; the modal shows the agent's note. Every run that lands leaves a dismissible "Updated to X" note under the machine's row, whether or not it was watched. Both that note and the modal's verdict line name the version the run itself reported landing, rather than whatever detection has caught up to: the sweep behind detection is an exec into a machine whose services are still coming back from the apply, so for a while after a verdict it still reads the version the run moved off. A finished run's verdict can be dismissed from the modal; dismissing the note does not take an unread failure with it. The get-help and update chats are spawned through one shared path (probe for the skill, then `mngr create` inside the machine), differing only in their seed message; the assist chat carries the `auto_open` label as well. Behind the surfaces, a machine's update state is composed on read from the detection sweep, the run's own record, and the armed schedule on disk, rather than copied between several models, so the row and the schedule file cannot disagree.
+
+The user can name the exact version an update targets from the machine's Settings -> Updates group, available on every machine: a release tag, `main`, or a git ref. The field carries the warning that such a target may not be a tested release, and pressing it is the confirmation; the agent does not ask again (it still offers a rollback). The named version can be run now or scheduled for the next update window; the schedule records it and the modal names it. Once a machine is armed at a named version, that version is what every later press runs: "Update now", a re-press of "Schedule update", and both bulk actions all keep it, so a blanket "Update all now" or "Schedule all updates" cannot quietly put the machine back on the default target. Cancelling the schedule is what clears it. On a development build the field is prefilled with the build's branch. A run with an explicit target names it wherever the app says what the run is doing. The field is not shown on a machine that needs recreation, since a named version is applied by the same in-place run.
+
+A run that ends short of landing, whatever the agent's reason (stuck, refused, or its own finding that the update cannot be applied in place), is one "Update failed" outcome: the modal and band say to check in with the update agent in its chat tab. The app offers no migration machinery of its own.
+
+Every modal is now bounded by the window and scrolls what does not fit, with its close X pinned to the card's corner. A modal asks the shared component for a width instead of passing one alongside the component's own default: two competing width classes were settled by their order in the generated stylesheet rather than by the caller, which had been quietly holding the update modal to the narrowest size. The update modal is wider for it, and its buttons now wrap onto a second row on a narrow window instead of pushing the card into a sideways scroll that clipped the title and the last button.
+
+Adds a `workspace-updates` behavior corpus folder covering detection, the update run, scheduling, run liveness, and the apply step's expected outage.
+
+The minds snapshot-resume CI suite now re-runs the workspace template's provisioner (`system/scripts/setup_system.sh`) live inside the resumed workspace, with the pinned restic binary executed and the provision guard cleared, so the two live-re-run bugs that broke real updates (a Claude pin installing into the wrong home; a restic install hitting ETXTBSY under the running backup service) fail the PR that introduces them.
+
+Cut the minds-v0.4.3 release: bumped the app version to 0.4.3 and pinned `FALLBACK_BRANCH` to the `minds-v0.4.3` default-workspace-template tag, shipping everything landed on main since minds-v0.4.2.
+
+Machine updates: minds now compares each machine's template version against the version the build supports and surfaces the result everywhere (a badge on the machines list, a notice band, Settings -> Updates, and an update modal), with "Update all now" and "Schedule all updates" once more than one machine is behind. Machines older than minds-v0.3.10 are badged "Recreate to update" instead of being offered in-place migration machinery.
+
+Titlebar unification: the five popup icons (Permissions, Machine settings, Share machine, notifications, bug report) now behave as one strip -- only one surface open at a time, one click between any two, and Back no longer walks through every popup visited.
+
+Permission-request verdicts now pair with the right card by request id, so resolving two pending requests out of order can no longer swap their verdicts.
+
+Right-clicking now opens a standard clipboard context menu (Cut/Copy/Paste/Select All in editable fields, Copy on text selections).
+
+Stopped cloud workspaces are no longer dead-end "on <device>" tiles: cloud records are badged "Imbue Cloud", and only machines hosted by another install are badged with the device name.
+
+Locality is decided by the address a workspace connects to, not its provider type, so a Docker daemon on another machine is treated as remote; held restarts are released one machine at a time when the network returns, and the connectivity check's worst case drops from ~16.5s to ~7.5s.
+
+The packaged app now bundles the opencode and antigravity mngr plugins, ships a `uv-shims/install_name_tool` so first launch on a Mac without Xcode Command Line Tools no longer raises the developer-tools alert, and uploads rotated mngr CLI/latchkey event logs in bug reports.
+
+Workspace destroy targets the host directly (`mngr destroy @<host_id>.<provider> --force`) instead of piping a discovery-derived agent listing, closing the partial-destroy failure mode.
+
+Latchkey is bumped to 3.9.0.
+
+This is the merge of `gabriel/tactful-swift` (the inner workspace-updates work) into current `main`. It carries no changes of its own beyond resolving the merge; see that branch's `gabriel-tactful-swift.md` entry for what actually changed.
+
+## 2026-08-28
+
+Bump Latchkey to 3.9.0.
+
+- Fixed: first launch on a Mac without Xcode Command Line Tools no longer raises the system alert "The `install_name_tool` command requires the command line developer tools."
+
+  After downloading its managed CPython, uv unconditionally execs a bare `install_name_tool` to rewrite libpython's Mach-O install name (astral-sh/uv#14893). Resolved from `/usr/bin`, that is the xcselect stub, which asks macOS to offer the developer-tools install. The packaged app now ships a `uv-shims/install_name_tool` that runs Apple's real tool wherever one is present and otherwise exits nonzero, and puts it ahead of `/usr/bin` on the PATH of both uv spawn sites (`env-setup.js`, which fetches the interpreter on first launch, and `backend.js`, which fetches it whenever no matching interpreter is installed).
+
+  Where no real tool exists, the shim names both locations it probed on stderr and exits nonzero. uv reports that as a non-fatal warning ("Failed to patch the install name of the dynamic library") and carries on, and libpython keeps its as-shipped `@rpath/libpython3.12.dylib` install name. That field is only read by a program that links libpython; Minds runs `bin/python3.12`, which links it statically, and none of the bundled packages link it either.
+
+Documentation only. `docs/latchkey-permissions.md` now describes additional (custom) latchkey services as shipping their detent schemas *inlined* into every host permissions file, rather than through a shared `minds_shared_schemas.json` that each file referenced via detent's `include` directive.
+
+The include was reverted because detent resolves a bare include relative to the referencing file's own directory, and a host's permissions file is read through several directories (its canonical `hosts/<host_id>/` path, the opaque handle a desktop workspace's JWT names, and `~/.latchkey/permissions.json` on a VPS) -- so the shared file had to be copied next to each of them, and an include that failed to resolve failed the whole permission check for that host. Granting a custom-service scope is unchanged from a user's point of view.
+
+Recorded the pending hardware maintenance for production box 0b24ee94 (ns1010092.ip-51-81-185.us) in the next-deploy checklist: OVH disk-replacement ticket #724677 (filed with any-time intervention authorization after the box's second NVMe failure), the no-rebake guard while the RAID arrays are degraded, and the post-intervention rebuild steps. The box's 12 available slices were destroyed so no new workspaces land there before the repair.
+
+The next-deploy checklist also gains operational notes from the 2026-08-25 review: the Modal audit-log enterprise-plan dependency, the two never-yet-observed production log channels to confirm, and the dev/staging verification steps for this branch's connector-side changes (the R2 sweep's orphan-pending-reap metric and the modal-client Bugsink ignore) before the production connector redeploy.
+
+Both staging's and production's deploy.toml now set [analytics] is_deployed = true: the analytics bringup ran on both tiers 2026-08-26 (per-tier Neon project, R2 buckets/tokens, column-scoped analytics_reader role, Vault entry, ops migrations, and the analytics-<tier> Modal app pinned to the tier's live deploy id -- staging 20260825T134133Z, production 20260825T172411Z), so future unified deploys keep maintaining the apps instead of letting them drift on stale stamped secrets.
+
+A new stable build is now rolled out to a percentage of installs at a time instead of all at once. `apps/minds/release-channels.toml` gains a required `rollout_percentage` on every channel entry; stable ramps a new build over several days — 10% → 50% → 100% is a guideline rather than a rule, and nothing enforces it — one merged PR per step, and alpha and beta stay at 100.
+
+Every update check is gated by the percentage, including one started from Settings. A user who wants a build the ramp has not reached yet switches to a channel that is not ramping, takes it there, and switches back — parking on their current version until stable catches up, which the Updates panel already explains. The public download link is the one exception: it always serves the newest stable build, since a fresh install has no existing `~/.minds` that a bad build could endanger.
+
+Lowering the percentage is how a bad build is stopped part-way through a ramp. Each install is bucketed off a fixed id and the percentage is re-read on every check, so a narrower band is a strictly smaller one: whoever has not polled yet stops being offered the build, and `0` stops it reaching anyone new. It is a partial halt rather than a rollback — nobody who already took the build is pulled back, since `allowDowngrade` is false and the updater arms the install before the download finishes — so moving those users still needs a new build. Reverting a ramp step restores the previous, smaller band.
+
+Each install buckets itself off the UUID at `~/.minds/.updaterId`, so widening only ever adds installs and nobody is offered a build that then disappears. The bucket does not rotate with the version, so the same installs are early for every release — and are also the first offered the fix when one goes wrong.
+
+Evaluating a ramp needs Sentry's crash-free-*users* rate per release, which until recently missed exactly the launch failures a ramp exists to catch. That fix ships in the change this one is stacked on, not here.
+
+The Release channels section of `apps/minds/docs/deploy/ops/app-release.md` documents the ladder, lowering the percentage as the partial halt, and `git revert` as the undo for either dial — a ramp step or a version bump.
+
+## 2026-08-27
+
+# Say "start" for the recovery that starts a machine, and "restart" only for the one that stops it
+
+Minds recovers a wedged machine two ways, and the code called both a restart. On the stuck edge it runs `mngr start` alone -- idempotent, a no-op against a host that is already up, and unable to bounce a live container. Only the recovery card's "Restart machine" click stops the host first. One name for both meant the code claimed the app had taken a machine down and brought it back when it had not.
+
+The two are now one enum, `HostRecoveryKind` (`START` / `RESTART`), replacing the `skip_stop` / `start_only` / `restart_is_start_only` booleans through the dispatch, the worker, the health tracker, the `/ui` health frame, and the card, badge and notice band. The generic path is named for what it does (`dispatch_host_recovery`, `AgentHealth.RECOVERING` / `RECOVERY_FAILED`, `mark_recovering`, and so on), leaving "restart" only where the machine is really stopped. Behavior is unchanged.
+
+The agent-facing wire is untouched, because agents inside workspaces call it: the `/api/v1/workspaces/<id>/restart` route, its `start_only` field, the `kind: "restart"` handle, and the two model names published at `/api/schema` all keep their spelling, with no compatibility shim.
+
+The SPA's own `/ui` channel is versioned rather than frozen, so its health frame does change. `is_restart_start_only` becomes `recovery_kind` (`"start"` / `"restart"` / null), `is_restart_a_no_op` becomes `is_recovery_a_no_op`, and the two health values themselves become `"recovering"` and `"recovery_failed"` -- they reach no agent-facing surface, so all three of their consumers (the SPA, the recovery-info payload, and the Electron shell) ship from this repo. `UI_SCHEMA_VERSION` goes to 8, so a window held open across the upgrade reloads once instead of matching neither recovery value.
+
+Bump Latchkey to 3.8.0.
+
+- "Remove from list" on a cloud workspace that still holds its lease is now refused by the connector (tombstone-first); the desktop surfaces it as a 409 with a hint to destroy the workspace instead of a generic sync error.
+
+- Docs: the backup-retention doc notes that a destroyed cloud workspace's record stays until its lease is released; the stop/start deploy doc's Operations section lists the new `minds-admin workspaces release` operator escape hatch; the workspace-sync spec records the new lease invariant (lease-time record stub, release-time record retirement, tombstone-first deletes, the connector sweep).
+
+`docs/deploy/setup/observability.md` gains a "Querying Modal app logs by severity" section: Modal's OTEL exporter stamps every `modal_logs` line `INFO`, so the real level lives inside our apps' JSON log lines -- `spath(body, 'level')` -- with the other useful body fields (`type`, `minds_env`, `exception`), the `MINDS_LOG_LEVEL=DEBUG` deploy-time knob for a dev env's DEBUG lines, and the deliberately deferred VRL pipeline noted (mngr-internal#656).
+
+# Stopped cloud workspaces are no longer dead-end "on <device>" tiles
+
+A cloud (Imbue Cloud) workspace that this device's discovery cannot currently see -- most visibly a stopped one -- used to render on the Machines list as a greyed remote tile badged "on <hostname>" (the hostname of whichever device happened to create it), with no chip explaining why and no way to reach its backups.
+
+- The tile's badge now names the provider ("Imbue Cloud") for cloud records; only machines hosted by another install are badged "on <device>". The wire entry carries the distinction as `remote_kind` (`cloud` / `other_device`).
+
+- When the account's Imbue Cloud provider is disabled ("Signed out" on the Accounts page), the tile now shows a "Signed out" chip that links to the Accounts page instead of silently suppressing every chip.
+
+- Remote tiles and stopped machines get a small Backups button that opens the existing per-machine backups page (`/workspace/<id>/backups`), which runs restic from this device and so works without the machine being reachable. The button is disabled with an explanation when the credentials are locked behind the master password on this device, or never synced here (no master password set on the device that created the machine). The wire entry carries this as `backup_access`.
+
+- `UI_SCHEMA_VERSION` bumped to 7 for the two new `UiWorkspaceEntry` fields.
+
+The staging bring-up runbook's relay deploy step now passes the frps plugin secret via the `FRPS_AUTH_SECRET` environment variable with a secret-free `--plugin-auth-url` (`https://<connector>/frps/auth`), matching the new `share-relay` CLI where the secret is rendered into the plugin `addr`'s URL userinfo instead of the callback URL path (issue #616).
+
+`next_deploy.md` gains the per-tier rollout checklist for the change: connector first, relay fleet redeploys, the comma-set secret rotation, and the eventual legacy-route cleanup.
+
+# Permission-request state can no longer go stale or show the wrong verdict
+
+One PR landing (and then simplifying) the rework planned in `specs/permission_state.md`, paired with a default-workspace-template PR on the same branch name.
+
+Verdicts pair with the right card. Resolution nudges now carry a machine-readable `(resolution: granted, request_id: ...)` tag, so the chat harness attaches each verdict by id instead of guessing from arrival order -- previously, resolving two pending requests out of creation order silently swapped the two cards' verdicts -- and no longer needs to recognise the handler-authored English phrasing.
+
+Cards are hydrated on every page build. Embed contract v3 replaces the one-shot `minds:permission-request-resolved` push with a single `minds:permission-resolutions` message carrying both the live one-entry flip and a recent-verdicts snapshot the chrome pushes whenever it (re)loads a workspace frame, read via the new `/ui/api/inbox/resolutions` route and scoped to that workspace's own requests. A verdict given while the page was not live now flips the card on the next build instead of leaving Approve/Deny up.
+
+Resolution nudges are never abandoned mid-run. `mngr message` delivery used to give up for good after a ~2 minute backoff; it now keeps retrying at the final interval until it lands or the app exits.
+
+There is no mirrored pending-request inbox to go wrong. The latchkey gateway's own persisted queue is the pending set, read on demand minus recorded verdicts (`latchkey/pending_requests.py`); the verdict index is append-only, so the lost-update race that could silently undo a grant or deny -- and the lock that guarded it -- are gone by construction. The stream consumer is now only a change signal, host-permissions recovery runs at grant time (the moment it matters), the four grant handlers share one resolve epilogue, and the legacy agent-written JSONL request channel (dead since latchkey 2.9.0) is deleted end to end.
+
+The desktop client consumes the gateway's own request shape directly. The parallel `RequestEvent` class hierarchy (four `Latchkey*PermissionRequestEvent` subclasses plus a per-read translation step that fabricated request timestamps) is deleted; routes, handlers, and the inbox UI read `StreamedPermissionRequest` and dispatch on its typed payload, and handlers claim requests by the wire `request_type` strings (`predefined`, `file-sharing`, `workspace`, `accounts`).
+
+Shared route plumbing is deduplicated and the response event is slimmed: one `make_json_error_response` (responses.py) and one `resolve_workspace_display_name` (backend_resolver.py) replace the copies each handler and route module carried, and `RequestResponseEvent` drops the event-envelope ceremony (fabricated `event_id`/`type`/`source` that nothing read) down to timestamp, request id, status, and agent id -- historical log lines still parse, and the writer keeps emitting the retired fields (CLEANUP-marked) so an older desktop client can still read new verdicts. What is left of the old request-inbox module is only the permission-verdict log, so it now lives at `desktop_client/latchkey/response_events.py`.
+
+## 2026-08-26
+
+Right-clicking in the Minds desktop app now opens a context menu with the standard clipboard actions. In the chat input box -- and any editable field -- it offers Cut, Copy, Paste, and Select All, each greyed unless it applies: Paste when the clipboard holds text, Cut and Copy when text is selected. Right-clicking a text selection elsewhere (for example in the chat transcript) offers Copy on its own. Right-clicking with nothing selected outside an editable field shows no menu, matching the previous behavior.
+
+Minds now decides whether a workspace runs on this device by the address it connects to, not by its provider type. A Docker provider pointed at a daemon on another machine (`host = "ssh://box"` in its config) used to count as local, so with the network down Minds would still try to restart its containers and would not show them as waiting for the network. Those containers are now handled like any other remote workspace. The same address rule keeps loopback endpoints out of the SSH connectivity check, so a workspace that answers with the wifi off can no longer make a network that blocks SSH look fine.
+
+When the network comes back, restarts that were held while offline are now released one machine at a time. Previously, an unexpected failure while releasing one machine silently dropped every machine after it, and those stayed stuck behind a "waiting for network" card with nothing to retry them.
+
+The connectivity check is faster: its worst case drops from about 16.5s to about 7.5s. Each host now gets one 1.5s budget shared across all the addresses it resolves to (it used to get 1.5s per address), and the three public hosts used for the internet check are asked at the same time instead of one after another. This mostly affects how long a restart waits on the check, and quitting Minds mid-check: the one connection in flight at quit could take up to 6s before and takes at most 3s now.
+
+A discovery poll that was frozen by a laptop sleep is no longer read as a provider outage. The poll opened its connection before the lid closed and timed out after it opened, so its error described the laptop going away, not Imbue Cloud; Minds recorded it as the provider's last word and showed "Can't connect to Imbue Cloud" over a healthy machine. Such a snapshot now has its error dropped and advances no freshness, the way the pre-start replay already did, so every reader of provider freshness is covered at once.
+
+The app's own start-only reconnect no longer hides the device's condition. The notice band and the recovery card used to blank "No network connection." whenever a restart was running, but the unattended reconnect enters that state on its own within seconds of any network flap and stays there for as long as the network is down -- the whole of the episode the message exists for. Only the user's own stop+start bounce keeps narrating itself over the device's condition now.
+
+The surfaces distinguish an unmeasured device from a fine one. Before the first connectivity probe, and after a wake until the next one, the device's condition reaches the frontend as UNKNOWN rather than NONE; the band and the card then name nobody -- the generic "Lost connection to this machine. Reconnecting..." line stays -- instead of blaming the provider on the strength of no measurement. This widens the wire enum (UI schema version 7), so a window held open across the upgrade reloads once.
+
+Two corpus-wide behavior invariants record the rules behind these fixes: no negative verdict rests on time this process was not running, and nothing on the far side of this device's network is blamed while the device's own reach is confirmed bad or unmeasured.
+
+Bug reports now also upload the newest rotated per-command mngr CLI events log (`events/logs/mngr/events.jsonl.<ts>`), not just the current file. The current file rotates by size and can cover only a few hours on a busy install, and it is where a spawned `mngr forward`'s stream diagnostics land -- the MINDS-PRODUCTION-6E report's copy held none of them, leaving the events-stream wedge undiagnosable from the bundle.
+
+The same gap is closed for the `mngr latchkey forward` daemon's structured log, whose rotated files the bundle also skipped: it rotates on the same size-based scheme (measured at 5-6 hours per file on a busy install), and the daemon's own error reports already carried them. Its raw stdout/stderr capture stays excluded when rotated, as it is in the daemon's config -- that one only ever rotates because it grew oversized.
+
+The packaged desktop app now bundles the opencode and antigravity mngr plugins. Without them, a workspace whose settings declare either agent type would fail every `mngr create` from the shipped binary with "Unknown fields in agent_types.antigravity" -- the plugin that owns those fields was not present to parse them. They are added to all four mirrored workspace-package lists, so the build, the dev env setup, and the packaged pyproject agree.
+
+Promoting **stable** now has one more step in the release doc: bump the
+connector's hardcoded download fallback to the build being promoted.
+
+That fallback is what `https://minds.imbue.com/download?platform=mac-arm64`
+serves while the update feed cannot be read. Leaving it behind stable means an
+outage hands people an older build; leaving it *ahead* is the one to avoid,
+because `allowDowngrade` is false, so those installs never come back down.
+
+It also changes what the doc's feed-versus-link check can tell you. The two used
+to name different builds, so a disagreement meant an outage. Now they agree
+whether or not the feed was read, and a disagreement outlasting the connector's
+cache means both: the feed could not be read, and the connector has not been
+redeployed since the last promotion.
+
+A crash in the first 60 seconds of a launch now reaches Sentry with the install's anonymous id attached, so it counts towards crash-free *users* for its release rather than only towards crash-free sessions.
+
+The id was set just after `Sentry.init`. The session integration opens the release-health session during `init` and writes its first snapshot to disk there; a crash is reported on the next run from the last snapshot written, and that snapshot is only rewritten every 60 seconds. So a crash before the first rewrite went out without an id — which is precisely a startup crash, the failure a release most needs attributed.
+
+The id is now passed as `initialScope` on `Sentry.init` instead, which is what Sentry's Electron docs prescribe for exactly this: *"To receive data on user adoption, such as users crash free rate percentage ... set the user on the `initialScope` when initializing the SDK."* Events pick the id up from there just as they did from `Sentry.setUser`, so that call is gone rather than duplicated.
+
+A bug report's workspace attachments now cover everything in the workspace, not a curated subset. With recent chats included, every agent's conversation is a candidate -- chats, background workers, and the primary services agent alike -- where previously only human-opened chats were considered. With workspace logs included, every program's log rides along -- app or service, user-created or built-in, stdout and stderr both -- where previously user-created apps' logs were excluded as workspace content. Everything still passes the in-workspace secret scan before it leaves, and both checkboxes remain opt-out consent.
+
+The bug report's attachment selection is now bounded by recency in both directions. With recent chats included, a report always carries at least the five newest conversations when the workspace has that many (all of them when it has fewer), on top of everything written to in the last two hours -- previously a quiet workspace sent only its single newest chat. With workspace logs included, only service logs written to in the last day are attached: a service silent for longer describes an earlier state of the workspace, not the one the bug was filed from. (The chat and service-log halves ship with the workspace template's resident collector; workspaces on older templates keep their previous behavior.)
+
+Bug reports now also carry the workspace's latchkey gateway logs, when those logs were written to in the last day. Remote workspaces run their gateway on the machine hosting the container, outside what the in-workspace collector can see, so collection runs one extra `mngr exec --outer` that tails the gateway's `gateway.log` and `tunnel.log` and mirrors the result into the latchkey plugin data dir -- where the existing latchkey log attachment groups sweep it onto every report, exactly like the desktop gateway's own logs (which were already attached this way and are unchanged). The mirror refreshes on each workspace-scoped report and is removed when a fresh look finds nothing, so a stale tail never impersonates a current one.
+
+The bug-report collection code was also simplified to reuse the desktop client's existing systems, with no user-visible behavior change beyond the above:
+
+- The three copies of the "run an mngr subprocess and inspect the outcome" helper (in `mngr_command`, `workspace_recovery`, and `workspace_diagnostics`) are now one shared `run_mngr_capturing` in `mngr_command`, which `run_mngr_to_completion` builds on.
+
+- Collection resolves the `mngr` binary via PATH and reads `MNGR_HOST_DIR` from the process environment, exactly like every other desktop-client exec path (backups, share materials, recovery), instead of threading its own binary/host-dir parameters through.
+
+- The renderer console tail is staged in exactly one place, at submit-planning time, instead of once inside the workspace collection and again for the paths that never collect. It still rides the logs checkbox and still attaches unscanned; on a report whose workspace collection runs in the background, the console now attaches immediately with the event rather than waiting on the collection it never needed.
+
+- The background collection's parameters travel as a typed model rather than a loose kwargs dictionary, and the request-body submit path is one function instead of three layered ones.
+
+- A report's staged files (the workspace archive and the console tail) now live in a private per-report temp directory instead of the shared logs folder. The hourly stale-file sweep that guarded the shared folder is gone -- there is nothing shared to guard -- and any number of reports can run at once without touching each other's files.
+
+- The per-attachment reason-code ledger is gone. A report now records the two request flags and, when there is anything to say about the workspace archive, one plain-words `collection_note` sentence; anything the in-workspace collector withheld is a `collection-notes.txt` member inside the archive itself, so the archive explains itself. The background path's status document likewise shrank to one line: attached, or not attached and why.
+
+- The collection exec now rides `mngr exec --format json`, reusing mngr's own output envelope (and the same helper the share-materials flow already used to unwrap it) instead of a bespoke sentinel protocol; the collector's stdout is exactly one line of base64. The in-workspace collector also scopes its mngr calls to the local provider, skipping the cloud-provider probing that used to consume most of the collection budget.
+
+- Per PR feedback: the console capture drops its per-message character cap and the report's console excerpt drops its line cap -- the rolling file is bounded by the shared 10MB rotation and the excerpt by one byte cap, like every other log. The report form's two checkboxes now share one reason line ("We'll need these to diagnose the issue."), the "We will never access them without your consent" sentence is gone (ticking the box is the consent), and the sent screen no longer carries the background-upload caveat.
+
+- The sent screen's report ID is now a click-to-copy chip, matching the workspace share-link chip: clicking it copies the ID and flashes a check.
+
+Removed the titlebar back button. It was the chevron that appeared on the "Create a machine" page and on "Recently destroyed"; nothing shows a back arrow in the chrome any more. Named navigation inside a flow (for example "Back to simple configuration" on the create form) is unchanged.
+
+The desktop app no longer posts its "Notifications enabled" banner — the one
+reading "minds will notify you here when a machine needs your attention." It
+existed to ask macOS for notification permission, which Electron can only do
+by posting a notification, and it fired on every launch and every
+notification-settings save.
+
+Nothing needed it. Real notifications are posted whenever you have system
+delivery selected, without consulting any stored permission state, and the
+first of them prompts the OS for permission by itself. So macOS now asks the
+first time a machine actually needs your attention, in context, instead of at
+launch.
+
+Two smaller changes come with it. Declining permission no longer switches
+your delivery style to in-app cards behind your back — your setting is left
+as you set it. And the settings panel's "Open System Settings" button now
+stands whenever system notifications are selected, rather than appearing only
+when the app believed permission was missing; it never had a reliable way to
+know that.
+
+# Share button deep link (embedder side)
+
+The embed contract gains a workspace -> embedder message type,
+`minds:open-share-settings` (contract version 3): clicking Share on an app
+inside a workspace now opens the minds shell's workspace-options panel on its
+Share tab, focused on that app, instead of the workspace showing an
+instructional popup. The workspace iframe stays mounted; the panel floats over
+it like the other option panes.
+
+The options panel also applies a share-target deep link whenever the target
+parameter's value changes, not only on first load, so a deep link that arrives
+while the panel is already open still selects the right app.
+
+The sharing surfaces now use the standard lucide user-plus icon (the titlebar
+Share tab and the options overlay strip), replacing the custom person glyph.
+
+The Share tab's per-app entries now wear each app's own icon: the SVG the app
+registered in the workspace (carried through the services event log and
+sanitized before it is inlined in the shell), or a per-app monogram when it
+registered none -- matching how the workspace itself draws its apps. An older
+workspace that predates icon-carrying service events falls back to monograms.
+
+The titlebar's five popup icons — Permissions, Machine settings, Share machine, the notification bell, and the bug-report button — now behave as one strip.
+
+Whichever of their surfaces is open (the docked options panel, the permission-request popup, the notification feed, or Get help), all five icons are drawn on the raised layer over it. Any of the five is one click from any other: you can go from the feed straight to Get help, or from the options panel straight to the feed, without clicking out first. Previously each surface raised only its own icon (or only its own group of three), so opening one took the other four off screen for as long as it was up.
+
+Only ever one of them at a time, and switching never stacks: every switch between two of the five surfaces puts the current one away by replacing its history entry, so the surface you left is never still standing underneath the new one and never sitting one Back away. Switching from Get help to the feed returns to the machine it was opened over rather than to the panel you may have opened it from; switching from Get help (or the request popup) to a machine tab replaces the same way. Previously each route-backed switch pushed on top of the surface it was leaving, so Back walked you back through every popup you had visited — and switching from the request popup to Get help left the options panel it was opened from painted underneath, with its own backdrop and its own raised strip.
+
+Switching from the request popup to a machine tab hands the options panel its window back exactly as it was left — same tab group and section — rather than a fresh open.
+
+The titlebar bell now puts an open centered modal (Minds settings, Accounts) away before raising the feed. Previously the feed opened beneath the modal's backdrop, dimmed and unclickable (reachable by keyboard focus, since the backdrop covers the bell for the mouse).
+
+The notification feed and the Get help form now share a box: both are 400px wide (the feed was 360, the form 460) and both hang from the right edge of the bug-report button, so switching between them swaps the contents of a window that does not move or resize. They share a header too: Get help's "Ran into a bug?" title now sits in the same 56px row the feed's title does — icon to the left of the label, hairline below, form scrolling underneath — so the switch keeps one header line.
+
+The key icon's waiting-on-you dot (shown when the current machine has an unresolved request) now also appears on the raised copy of the key that every open surface draws, so the cue survives having the feed, Get help, or another tab open.
+
+There is now one overlay. Minds settings, Accounts, the AI-keys dialog, the New machine stepper, the docked machine-options panel, the permission-request popup, the notification feed and Get help are all the same component at one of three placements (centered, docked under the machine tabs, or anchored under the right-hand pair). One backdrop, one card, one close X, one raised icon strip, written once. The request popup's box animation (growing out of the panel it took over) is an option of that same component.
+
+And one overlay slot: the Shell mounts that component at a single position, so switching surfaces reuses the same backdrop, strip, and card DOM nodes and just swaps the card's contents. Previously each surface mounted its own copy, and a switch (bug report to notifications, say) tore one down while the other mounted — a visible flash of doubled or missing backdrop for the frames in between.
+
+Fixed: on macOS the notification feed's and Get help's backdrops did not subtract the titlebar's Electron drag region, so every click in the top strip dragged the window instead of reaching the button under it. Their raised icons were unclickable; the left-hand panels were unaffected because their backdrop already declared it.
+
+Fixed: the SPA visual-diff capture (`apps/minds/scripts/visual_diff.py capture-spa`) crashed on startup because its fixture bootstrap was missing the notification feed the wire model now requires.
+
+Marked `test_restore_script_resumes_services_when_the_restic_restore_fails` flaky so offload retries it: it failed once under a full parallel run and passed alone and with its whole file. The underlying flakiness is not yet diagnosed and is unrelated to this change.
+
+## 2026-08-25
+
+Bump Latchkey to 3.6.0.
+
+Documented the minds-v0.4.2 staging and production deployments
+(2026-08-25): new deploy-history entry
+(`docs/deploy/history/minds-v0.4.2.md`) covering the staging deploy
+`20260825T134133Z` and the production deploy `20260825T171504Z` plus its
+`20260825T173747Z` ROLLOVER re-deploy that published the corrected policy
+pages (migrations 028-030, RECREATE, both apps healthy in both tiers), the
+post-connector redeploy of all 4 relays per tier (activating the ~10s
+live-tunnel kill for suspend/unshare), the signup-IP-hardening `client_ip`
+verification behind the custom domains in both tiers, the completed
+post-deploy verifications (desktop fast path and the share/suspend
+end-to-end pass on staging; Bugsink error reporting proven end to end on
+production), and the minds-v0.4.2 staging pool bake.
+
+Annotated `docs/deploy/next_deploy.md` checklist items (policy pages,
+signup IP hardening, stop/start wedge fix, account suspension, Bugsink
+bring-up) with their staging and production pass status.
+
+The history entry also records the same-evening production pool fill (82
+minds-v0.4.2 slices baked into the fleet's existing free slots instead of
+buying new boxes: 27/27 US-EAST-VA, 55/56 US-WEST-OR with the one
+phantom-slot refusal rolled back cleanly; fleet after 337/337 slots used)
+and the desktop release-channel promotion (PR #602: stable, beta, and
+alpha all serve the 0.4.2 build `260825un55i8ix7`).
+
+Machine/workspace identity cleanup (see `specs/machine-workspace-naming/`): a workspace is identified by its `system-services` agent id (its workspace id); the machine it runs on (host id) is a swappable attribute.
+
+The synced workspace-record replica is keyed by workspace id (host_id becomes the record's mutable current-machine attribute); the backup reaper, quota eviction, and remove-from-list address records by workspace id, dual-accepting legacy host ids.
+
+New backup buckets are named by workspace id (existing host-named buckets are grandfathered), and the record carries an explicit `backup_bucket` for the server-side reaper.
+
+Sharing passes the workspace id to the connector so new shares get minted, persisted share labels (no internal id in the public domain); the sharing API moves to `/api/v1/workspace-sharing/<workspace_id>` (the `/machines/<host_id>/sharing` routes remain as compat shims).
+
+Workspace content URLs (`/goto/<id>/` and the `.localhost` origin family) are keyed by the workspace id, so they survive machine changes; legacy host-keyed URLs redirect. The AI-key mint page keys on the workspace id and dual-accepts host ids from older in-workspace deep links.
+
+Renames: `WorkspacePaths` -> `InstallationPaths`, the `workspace-id` host label -> `create-attempt-id` (legacy label still read), the install device id gets its own `DeviceId` type, and the create form's name-validation error says "Workspace name".
+
+Promoted the minds 0.4.2 build (ToDesktop `260825un55i8ix7`) to the stable, beta, and alpha release channels, moving all three off 0.4.1. The pair was proven end-to-end by launch-to-msg on the `minds-v0.4.2` tags in both repos.
+
+The desktop client's workspace destroy now targets the host directly (`mngr destroy @<host_id>.<provider> --force`, falling back to the bare host id when discovery did not report the owning provider) instead of piping an agent listing into `mngr destroy -f -`. Teardown completeness no longer depends on a discovery snapshot being complete at spawn time -- the fragile dependency behind the 2026-07-14 partial workspace-destroy incident, where a torn host-record read produced a one-agent listing and the teardown left the container (and a live chat agent) running. This matches the whole-host destroy primitive the startup reconcile already uses.
+
+Merged the machine/workspace naming cleanup branch (`mngr/fix-machine-workspace-naming`, PR #436) into this branch and resolved the merge conflicts against main. The changes themselves are described in this project's `mngr-fix-machine-workspace-naming` changelog entry.
+
+## 2026-08-24
+
+Added two entries to the workspace glossary (`apps/minds/docs/workspace/glossary.md`):
+
+**environment** -- a single deployed instance of the minds system, owning a data root, a Modal environment, a Neon project, and a SuperTokens app; every environment belongs to exactly one tier.
+
+**tier** -- a category of environment that determines account credentials and deploy configuration; bare-metal boxes belong exclusively to one tier, production and staging contain exactly one environment each, and the CI and Dev tiers may contain many.
+
+Also reformatted the glossary to one sentence per line (pure reflow, no content changes), in a separate commit ahead of the additions.
+
+# Document the restore download lock in the stop/start operations guide
+
+`docs/deploy/reference/workspace-stop-start.md` now describes the per-box download lock restores queue on (`STAGE=waiting-for-lock`, the bounded wait and its `transition_error`), how to find a leaked holder, and the safe remediation for a box wedged by a pre-fix restore.
+
+Minds now tells your laptop's own condition apart from a broken machine, instead of convicting the machine of both.
+
+Sleep: a background heartbeat records the wall-clock windows in which minds was not running at all, and the two places that reason over elapsed time subtract them. A machine's "stopped responding" countdown restarts at the wake rather than counting seconds nobody was watching, so the time your laptop spent asleep can no longer convict a machine on its own -- opening the lid can still raise a recovery card while the connection to a machine is being rebuilt, which outlasts the countdown, but the sleep itself is no longer what put it there; and the discovery watchdog ages its staleness from the wake rather than from the last event before the machine went down, so waking up no longer triggers a needless re-kick of the discovery pipeline or an escalating restart of it. A machine that really did die during the sleep is still started back up automatically, within seconds of being probed after the wake.
+
+Connectivity: when a machine on a remote backend stops answering, minds now checks whether this device can reach anything at all before automatically restarting it. On a confirmed dead network -- or one that passes web traffic but blocks SSH, as some public and corporate wifi does -- the restart is withheld rather than run and failed, and it runs by itself once connectivity comes back (for whichever machines have not already recovered on their own). While that holds, the machine's notice band and recovery card name which of the two conditions it is rather than blaming the machine or its backend, and the card offers a waiting-for-network state in place of the Restart button -- a restart routed over the same dead network is not a decision worth offering. The button comes back with the network. Dropping the wifi therefore no longer turns every remote machine into a failed-restart card and a burst of error reports. Machines running on this device (docker, lima, local) are unaffected throughout: they are reachable with the network unplugged, so nothing about connectivity gates them, explains them, or is said about them on their recovery card and notice band -- one of these going wrong while your wifi is off is still offered its restart, unconditionally. For the same reason their addresses are not among the ones the check measures the network against. Restarting a machine also now names which backend it lives on, so only that backend has to be reachable for the restart to run. Previously the command searched every backend you had configured, which made it slower and let an unrelated one that happened to be unreachable -- a stopped Docker, an account this device could not currently reach -- both fail the restart and be named as the reason it failed. Where the machine's own backend is the unreachable one, the restart still fails, as it must. The SSH check asks the addresses Minds actually connects to on its remote machines (which are rarely on the standard SSH port), falling back to well-known public servers only to tell a network that blocks SSH apart from machines that are simply unreachable. The network is only ever probed when a decision depends on the answer, and repeatedly only while a bad answer is outstanding. Those addresses are asked all at once rather than one after another, so the check takes about as long as its slowest address instead of as long as all of them added together -- which is what a restart held up waiting for the answer used to pay. And when a machine does come back as the network does, the repaint of its workspace view waits until the network has been back for a few seconds, rather than being issued at the transition itself -- where the reload it asks for loses the scripts that would have drawn the page, and leaves a blank workspace in place of a stale one.
+
+Opening Minds while your network is down now says so straight away, on whichever page you land on, instead of waiting for you to click into a machine and watch it fail to load. Discovery's own failed poll of a remote backend is enough to check -- nothing has to be diagnosed as broken first.
+
+Recovery restart failures are no longer a black box, from the `mngr start` slowness investigation (`specs/mngr-start-slowness-investigation.md`):
+
+- An `mngr` subprocess that fails now carries bounded tails of its captured stdout/stderr on `MngrCommandError`, and the restart-failure error record includes them -- naming the step the command died in. Previously the killed subprocess's output was discarded entirely. This applies to every `mngr` minds runs, not just the recovery restart: the same failure policy covers the label / destroy / gc / listing commands too.
+
+- The recovery argv now passes `-v` instead of `--quiet`, so the captured stderr contains mngr's step-by-step DEBUG timeline (the output goes to the capture pipe, not a terminal). That timeline stays on the tail: the error *message* is narrowed to mngr's own verdict, so the restart-failure text the user reads stays short, and the checks that read it -- "this provider cannot stop hosts", and whether the command was rejected at the machine's backend -- see only what mngr actually failed on, never a provider it skipped and carried on past.
+
+- The bug-report attachment sweep now uploads the per-command mngr CLI event log (`<mngr_host_dir>/events/logs/mngr/events.jsonl`). The investigation found the bundle only carried the latchkey forward daemon's separate log file, so the hanging starts' timelines never reached Sentry.
+
+Cut the minds-v0.4.2 release: bumped the app version to 0.4.2 and pinned `FALLBACK_BRANCH` to the `minds-v0.4.2` default-workspace-template tag, shipping everything landed on main since minds-v0.4.1.
+
+User-selectable release channels, chosen from a new Updates section in Settings: Stable, Beta, and Alpha, with the app updating from the channel you pick.
+
+In-app notifications: a bell button in the titlebar carries an unresolved-count badge, mirrored on the macOS dock and Linux taskbar icon.
+
+Bug reports now carry machine diagnostics. "Report a bug" gains "Include workspace logs" and "Include recent chats", both checked by default.
+
+Recovery no longer blames the machine for device-side faults: failures the forward previously reported as one CONNECT_ERROR are split, so a tunnel this device could not build is attributed to the device rather than the machine.
+
+Sleep and network awareness: a background heartbeat records the windows in which minds was not running, and both the "stopped responding" countdown and the discovery watchdog subtract them, so a laptop that slept is not treated as a stalled machine.
+
+Fixed four macOS windowless dead-ends. Re-opening from the dock, Cmd+N, File > New Window, the dock menu, and relaunching all now produce a window showing real state.
+
+Fixed desktop sign-in with Google on tiers with a dedicated accounts domain: the browser login page now opens on the tier's `accounts_base_url` origin.
+
+Added a `free` plan (1 remote workspace, 5 total workspaces, 25 GB backup storage, no Imbue-Cloud LLM budget, no in-workspace analytics collection) alongside explorer and ally.
+
+Removed the operator CLI surface from `minds`: the `minds env`, `minds pool`, `minds server`, and `minds paid` command groups are deleted outright and moved to a new private `minds-admin` operator CLI.
+
+The release procedure documents the public download link,
+`https://minds.imbue.com/download?platform=mac-arm64`, which now follows whatever
+the stable channel serves. Promoting stable moves it; there is no release step.
+
+The "Share machine" surfaces (the titlebar button, the workspace options overlay's nav, and the share pane's heading) now use a person-with-plus icon instead of the paper-airplane "send" glyph, better matching what sharing does (granting people access by email).
+
+A bug report filed from a machine can now carry that machine's own diagnostics, so a report no longer has to start with a round-trip asking you to go fetch logs.
+
+The "Report a bug" form gained two checkboxes above the remote-access one — "Include workspace logs" and "Include recent chats". Both are checked by default and remember their setting for next time, and both are hidden when the help overlay was opened outside a machine. Unchecking one means those files are genuinely absent from that report rather than collected and quietly ignored. The text below the form says what is always attached regardless: the app's own logs, which go with every report either way.
+
+With workspace logs included, the machine gathers its host health (disk, memory, uptime and load, and recent memory-shed events), its `supervisorctl status`, and the tail of each system service's log. Services you created are identified through the machine's own service definitions rather than a hardcoded list of names, so your app's logs — your content, not diagnostics — are never collected. The report also records which commit the machine's checkout is on and whether it has uncommitted changes.
+
+With recent chats included, every conversation written to in the last two hours rides along, newest first; when none is that recent, the one you last spoke in still does. They arrive as a zip holding one conversation per file, each keeping the `.jsonl` its harness wrote so it opens in whatever already reads a transcript, and carrying the time that chat was last written to. Which agent and which harness a conversation came from is in its filename rather than injected into the transcript text.
+
+Nothing leaves the machine unscanned. Two secret scanners read the logs, every conversation, and the filenames they will be packed under — as plain text, before anything is compressed — and a report ships only what they cleared. One conversation with a finding withholds all of them rather than quietly sending the rest, because a partial set is indistinguishable from a complete one. If a scanner cannot run, nothing is attached. Whatever is withheld is replaced by a short reason recorded on the report, so a reader can tell "there were none" from "we would not send them".
+
+The machine's captured console output attaches too, and the app's own logs as always. Both are attached unscanned, which is what they have always been.
+
+Sending is immediate: the report id appears as soon as the report is filed, and the machine's diagnostics are collected and uploaded behind it. The report says where each attachment will be readable and, when it lands, records what each one ended up doing — attached, or the reason it was not. A collection that fails afterwards cannot take the filed report back. While a report is sending the help window stays up until the id (or an error) appears, so a second submission cannot race the first.
+
+A report's files are attached only to the report they were collected for. Previously they sat in the log folder every automatic error report also sweeps, so an unrelated crash between two reports would have carried the earlier report's chats and logs along with it.
+
+Machines built before this shipped report that plainly: their template has no collector, so a report from one says so rather than appearing to have found nothing.
+
+Added an in-app notification system to the minds chrome, ported from the minds-options design prototype.
+
+- A bell button in the titlebar right cluster carries a red unresolved-count badge (the macOS dock / Linux taskbar icon mirrors the same count). The count is resolution-based: a permission request counts until it is approved or denied, and opening the feed never clears it.
+
+- Clicking the bell opens an anchored notification feed: unresolved entries first, then resolved receipts faded to grey with Approved / Denied chips (or a neutral Closed chip when a request vanished, e.g. its workspace was destroyed). The feed is server-side, bounded, seeded into every window via the existing /ui/ws snapshot, and survives reloads.
+
+- Every new permission request flashes as a floating toast card under the titlebar (stacked with peek-and-fan choreography, 15s auto-dismiss that pauses while the pointer hovers the stack, honoring prefers-reduced-motion) -- including one from the workspace already on screen, whose in-chat card shows the same ask inline; the toast is still its own worthwhile nudge, so it is not suppressed there. Per preference, requests also nudge as native OS notifications, which -- unlike the toast -- stay scoped to workspaces not already on screen (redundant with the in-chat card there) and, on desktop, to windows that also have OS focus (see the focus-aware OS-dispatch entry below). Clicking a toast, a feed row, or an OS notification jumps to the asking workspace and opens the review popup; a machine that is still setting up lands on its own creating page instead, and when the machine is already on screen (or not enterable yet) the popup simply opens over the current surface rather than navigating away.
+
+- A new Notifications section in Settings holds a master on/off toggle and a delivery-style choice (in-app cards, system notifications, or both; default both). The master toggle also silences the pre-existing OS notifications (agent-sent and backup-failure ones). In plain-browser mode, system delivery uses Web Notifications with a gesture-driven permission prompt. The preference record is persisted atomically, so two settings windows saving at once can never interleave into a mixed record.
+
+- OS banners only fire for requests filed after the app launched (relaunching the app no longer re-fires banners for requests that were already pending), never for a workspace currently on screen (checked across every window in the desktop app; a plain-browser tab checks only its own view), at most once per request, and only through the active delivery channel (in plain-browser mode the page's Web Notification is the sole system nudge). Feed entries are stamped with the request's own timestamp, so ordering and relative times ("2 hours ago" rather than "just now") survive restarts.
+
+- Hardened the macOS osascript notification path against AppleScript injection from notification text (backslashes are now escaped along with quotes, so agent-controlled text cannot break out of the string literal).
+
+- The Permissions key icon in a workspace's titlebar tab strip carries its own red dot whenever THAT workspace has an unresolved request -- the one on-screen cue for an ask that never toasts (a request from the workspace you're already viewing is deliberately silent, since the in-chat card already shows it).
+
+- Fixed a reentrant navigation bug that could leave a stale duplicate review popup on screen after answering a notification for another machine.
+
+- Notification dispatch decisions (and, for native OS banners, whether the OS actually presented one) are now logged, so a banner that silently doesn't appear is diagnosable instead of a dead end.
+
+- Fixed the review popup landing on the wrong (original) workspace after dismissal for a notification about a different machine, and a stuck popup that kept re-submitting on repeat clicks; dismissal now routes to the workspace the popup actually names instead of trusting browser history depth.
+
+- The Permissions-tab badge dot now sits precisely on the key icon's corner rather than floating below it.
+
+- A toast card that would have flashed while the window was not OS-focused (Alt-Tabbed away, glanced at another app) no longer vanishes silently -- it now flashes as soon as focus returns, unless it resolved or the feed overlay is open by then.
+
+- Toast cards no longer auto-dismiss while the pointer is over the stack: hovering freezes each card's countdown, and it resumes with whatever time was left once the pointer leaves (a card that arrives already under the pointer starts frozen rather than ticking down unseen). Also bumped the auto-dismiss timer itself from 5s to 15s.
+
+- `ToastLayer`/`ToastCard` no longer take the whole shell (`shell: ShellState`) or reach into the notification model's global singleton directly; they now take a narrow, explicit props interface (the toasts to show, dismiss/review callbacks, a reconnecting flag) like the rest of the notification system's dependency-injected pieces.
+
+- Fixed the toast stack visibly flapping open/closed while moving the pointer between two open cards -- the gap between them was not actually hit-testable, so crossing it briefly registered as leaving the stack entirely.
+
+- The collapsed stack's "N more" count now counts everything but the front card, including the peeking slivers behind it (previously it only counted the fully-hidden ones): only the front card is actually readable while collapsed.
+
+- The desktop app now actively asks the OS for native notification permission instead of only firing a notification and hoping. Electron exposes no separate "request permission" or "check status" call on macOS, so the app treats posting a notification as the request itself: it probes on every launch and again whenever the Notifications settings panel picks a style that reaches the OS, and whether the OS actually displayed that probe is the only signal available for whether permission is granted. It always re-probes, even if an earlier probe already confirmed permission granted -- the reader can revoke it in System Settings at any time with the app none the wiser, so a stale "yes" would otherwise strand OS delivery with no way to recover except manually visiting Settings. A probe that goes unconfirmed falls the delivery style back to "In-app cards" automatically, rather than silently retrying a channel the OS declined forever. Default delivery stays "both".
+
+- Backend: extracted a shared If-Match-guarded write-handler skeleton for the error-reporting and notification-prefs settings writes (the frontend got this consolidation earlier; the backend handlers had each duplicated the same ~25-line skeleton). Notification-prefs reads now use one atomic read-modify-write acquisition instead of three separate locked reads, matching the write path's existing atomicity guarantee. `notification_style`'s stored value is now parsed with the idiomatic `NotificationStyle(value)` construction rather than a manual enum-matching loop.
+
+- The Notifications settings panel now offers an "Open System Settings" button whenever the desktop app wants OS-delivered notifications but permission isn't confirmed granted -- no app can force the OS to re-prompt once declined, so this is the way back.
+
+- Titlebar polish: 4px more breathing room between the bell/bug-report cluster and the window's right edge, a 4px gap between the bell and bug-report buttons (previously touching), and the bell's unresolved-count badge repositioned closer to the bell glyph (its wrapper had the same missing-`flex`/inherited-line-height bug the permissions-tab dot had before an earlier fix). The badge still has a few px of corner overlap with the glyph -- the titlebar only gives the button 5px of clearance above it, less than the 14px badge needs to fully clear the icon without going off screen.
+
+- The count badge (bell, permissions tab) is now a perfect circle for a single digit and only widens into a pill once the count needs two or more characters (10-99+) -- previously always a pill, which read as slightly oval even for one digit.
+
+- Minds settings, Accounts, and the AI-keys mint dialog now all hang from the same 16px gap under the window's top edge instead of centering vertically, which previously read inconsistently (a tall card landed near the top just because it filled most of the height, while a short one floated with an uneven gap top and bottom). The docked workspace-options overlay (Permissions/Settings/Share tabs) is unaffected -- it is intentionally a different, still-centered kind of surface.
+
+- The bell and bug-report buttons now draw a raised copy of themselves, filled with the card's own light surface, directly over their own popup while it is open -- the same technique the permission-request popup's raised key tab and the docked workspace-options panel's own tab strip already use, rather than re-coloring the real titlebar button in place. The real button is hidden by visibility underneath (matching how the workspace-options tabs hide while their own docked panel is up). This sidesteps two problems the in-place approach had: the titlebar's hover/active tint classes no longer have a chance to fight the highlight for the background, and the icon can no longer go invisible (white-on-white) against a dark workspace color, since the raised copy lives outside the titlebar's per-workspace color scoping entirely. Both bottom corners of the raised button are squared (not just the one touching corner), since the popup's flat top edge runs the full width beneath it, not just under one side.
+
+- Get help / report a bug now hangs from the bug-report button itself, right-aligned and flush beneath it, instead of floating centered in the window -- the same anchored-panel treatment the bell's notification feed already has.
+
+- The notification feed now has a close (X) button matching every other modal, and its own header bar grew from 40px to 56px so the title text sits level with the button (whose own vertical center is 28px down) instead of reading high or hanging below the border. Both the feed and the Get Help modal dropped their border and now paint their raised button after (on top of) the panel below, so the popup's own drop shadow no longer bleeds a faint darker tint onto the bottom of the button it hangs from -- the two now read as one continuous shape with a tab, not two cards seamed together.
+
+- Fixed notifications not bringing the app forward when clicked: focusing the app's own window is not the same as macOS actually activating the app over whichever other app currently has focus (the same reason the renderer's own "bring app to front" action already paired the two) -- notification clicks now do both.
+
+- The Notifications settings master toggle now reads "Notify me when a machine needs me" (was "needs you") -- addressed to the reader as "me", not "you", matching the rest of the label's own first-person phrasing ("Notify me...").
+
+- Widened the wait for the OS to confirm a notification was displayed from 4 to 10 seconds, and the probe now also listens for Electron's `failed` event so a definitive OS-reported failure resolves immediately rather than waiting out the full timeout. Per Electron's own docs, macOS's underlying UNNotification API requires the app to be code-signed for delivery confirmation to work reliably at all: an unsigned build (any local dev run, including via `pnpm start`) gets an intermittent mix of a delayed `show`, an explicit `failed`, or neither, even when the OS's own notification permission is genuinely granted and a banner visibly appears. Production builds are code-signed (see `apps/minds/todesktop.js`), so this flakiness is specific to local dev testing and does not reflect how the shipped app behaves. No well-established library (including `macos-notification-state`, which Electron's docs point at for this but which actually only reports Do Not Disturb / screen-lock state, not notification permission) exposes real authorization status, so `show`/`failed`/timeout remains the only available signal.
+
+- Fixed OS banners going silent too often: the dispatch gate previously stayed quiet whenever a connected window was merely *displaying* the asking workspace, regardless of whether that window had OS/browser focus -- so a request for the workspace you were just looking at stayed silent even after you alt-tabbed away or the window was covered by another app, since nothing else would prompt the SPA to re-navigate and clear the "on screen" state. Windows now also report their live focus (resent on every focus/blur, not just on navigation) over the client_state frame, and the gate requires both displayed AND focused before staying silent -- distinct from the in-app toast's own on-screen check, which intentionally does not require focus.
+
+- The in-app toast now flashes for every new request unconditionally (previously suppressed for the workspace already on screen, on the reasoning that its in-chat card already shows the same ask inline) -- the toast is a worthwhile nudge in its own right even then, so it no longer stays silent just because you happen to already be looking at the right machine. The native OS banner is unaffected by this and keeps its existing on-screen/focus scoping: a system-level banner for something already visible in the window would be actual noise, not a second useful cue.
+
+- Fixed the OS-permission hint's dismissal and the desktop permission probe's own delivery-style downgrade so each can no longer silently revert another notification-preference change that happened to be saving at the same time (e.g. a settings-panel save landing while the probe's downgrade write is still in flight) -- both now merge onto the current preferences rather than the snapshot they started from.
+
+## 2026-08-23
+
+Plan selection updates alongside the new "free" plan:
+
+- Every tier's deploy.toml now defines a "free" plan (1 remote workspace, 5 total workspaces, 25 GB backup storage, no Imbue-Cloud LLM budget) next to explorer and ally.
+
+- The desktop Accounts page's plan switcher now shows a short description of the plan being switched to (with a "Learn more" privacy-policy link), and switching to Explorer requires checking an explicit agreement to the Explorer edition's product-data sharing before the Switch plan button activates.
+
+- The Switch plan button is disabled while the selected plan equals the current one, and shows a disabled busy spinner while the switch request is in flight (double-clicks are swallowed).
+
+- The plan payload from the desktop client's UI API now carries the tier's privacy-policy URL (accounts origin, falling back to the connector host).
+
+## 2026-08-22
+
+Add a `minds_services` deployment test for the analytics collection loop (`deployment_tests/test_analytics_collection.py`): runs the real poll against a shared env's live Postgres -- analytics ops migrations applied in a per-test schema over the direct Neon endpoint, a fixture explorer account plus a leased-but-unreachable workspace row, a genuinely refused SSH hop landing in the real `collection_runs` audit, and the at-most-hourly gate on a second poll. Verified passing against a live dev env.
+
+`minds env deploy` can now deploy the analytics app (`analytics-<tier>`): every tier's deploy.toml gains an `[analytics]` block (`is_deployed = false` everywhere until the tier's bringup runbook has run), and dynamic dev envs can opt in per-env with the sticky `--with-analytics` / `--without-analytics` flag (persisted in the env root's `analytics_override` file).
+
+When enabled, the deploy pushes the `analytics-<tier>-<deploy_id>` Modal Secret from the tier's Vault `analytics` entry (always required -- a missing/incomplete entry aborts with a pointer at apps/analytics/docs/bringup.md), applies `apps/analytics/migrations/` to the analytics ops DB via the schema_migrations runner, and `modal deploy`s the cron-only app (no URL assertion or health-check participation, since it has no web endpoint). Tier destroys stop `analytics-<tier>` alongside the other apps (idempotent when absent).
+
+The machines list now shows honest transitional states for cloud workspaces (imbue-ai/mngr-internal#547): a workspace whose stop upload is still in flight renders as "Stopping…" (and a backend-observed start as "Starting…") instead of an already-startable "Stopped" row whose Start button the server would refuse. Backend-observed STOPPING/STARTING host states flow through `MindLiveness` to the existing frontend badges, and the recovery card treats a mid-stop host as expectedly offline.
+
+The ci and dev tiers' `deploy.toml` now declare a short workspace stop/start retention window (`[storage] stop_retention_seconds`: 60s on ci, 300s on dev), so the retention finalize — and the tests that wait for it — completes in minutes on those tiers instead of the default hour.
+
+The workspace stop/start deploy doc now notes that box prep provides `zstd` (from apt) in addition to the pinned `age` + `s5cmd` transfer tooling.
+
+Fix desktop-app sign-in with Google on tiers with a dedicated accounts domain (production/staging): the browser login page opened by the app now lands on the tier's accounts origin (`accounts_base_url` from `client.toml`, e.g. accounts.imbue.com) instead of the connector's Modal function URL. A Google flow started on the connector host always failed with "This sign-in attempt could not be verified" because its login-CSRF nonce cookie was stranded on the wrong host.
+
+The desktop client now passes `accounts_base_url` into every `mngr imbue_cloud` subprocess via `MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL`, which the plugin's `auth login` uses for the browser page. Tiers without an accounts domain (dev/CI) are unchanged.
+
+# Deploy checklist: signup IP hardening prerequisites
+
+- Added the signup-IP-hardening items to the next-deployment checklist (`docs/deploy/next_deploy.md`): add the new `IPINFO_TOKEN` key to every tier's Vault `supertokens` entry before deploying (the deploy aborts on a missing template-declared key; staging/production get the IPinfo Max token), and spot-check the access log's `client_ip` field behind the custom domains after the first deploy.
+
+New release-level deployment test `deployment_tests/test_account_suspension.py` (minds_services tier): suspends a fresh account on a real ci env and asserts sign-in is blocked with the structured `ACCOUNT_SUSPENDED` status, the held session's state-modifying access dies within one request, the admin view reports the suspension, and unsuspend restores sign-in end to end.
+
+The next-deploy checklist gains the suspension rollout entry: per-tier relay redeploys (connector first) for the new frps `Ping` subscription, the no-new-secrets note, and the staging tunnel-kill verification steps.
+
+## 2026-08-21
+
+Deflaked the snapshot-resume backup-update gate test (`test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it`). It previously held a chat agent RUNNING by prompting a real LLM for "a really long story", so its RUNNING window lasted only as long as that nondeterministic generation; a short, refused, or rate-limited turn cleared the agent's `active` marker before the gate probe and apply-update scripts observed it, tripping the assertions. The test now stands in a controllable `command` agent that blocks in `sleep` and is marked active through the public `mngr exec` interface, so the RUNNING window is bounded only by the gate itself. No production behavior changed; the backup-update gate logic was already correct.
+
+Minds no longer blames a machine for connection failures that happened on this device. The forward now tells three causes apart that used to arrive as one, and two of them (a tunnel this device could not build, its own connection pool running out) are raised against this device's own filesystem, socket table and connection pool rather than against the machine, so neither is evidence about it. The recovery card and notice band report those as "Can't connect to this machine from this device", offer Restart Minds rather than Restart Machine (on the desktop client, where there is an app to restart), and show the underlying error behind an expandable Error details row -- instead of reporting a machine that is very likely running fine as broken and restarting it. The machines list badges the row "Can't connect from this device" for the same reason, so it stops reporting a failed restart for a machine the card behind it exonerates. The verdict outranks whatever the restart episode concluded, because the restart is an effect of the same fault, and it clears the moment the machine answers -- or is displaced by a plain connection failure once the device-side cause has gone quiet for a short deference window, so a momentary pool exhaustion during a real machine outage stops blaming the device shortly after the forward stops reporting it. The window is a rule about the next report rather than a timer, so a cause recorded just before a restart keeps speaking for the length of the stop and start, where nothing crosses the forward at all, and is displaced by the first probe after them.
+
+The recovery page -- the full-page card a machines-list click-through lands on, as opposed to the card that layers over a machine already on screen -- now offers an "Open machine" button once the machine is answering again. That page normally returns the reader to where they were headed on its own, but a page opened without a destination (a hand-typed or stale link) had nowhere to return to, and left the reader on a card saying "nothing further is needed here" with no way into the machine it was saying it about. The layered card is unchanged: it has an X, and the machine behind it.
+
+Recovery surfaces also stop claiming a restart they have no evidence for. The app restarts an unresponsive machine on its own with an idempotent start-only command, which leaves a host that is already up alone -- so the recovery card now reads "Reconnecting to <machine>…" for that case (it keeps "Bringing <machine> back online…" for a stopped host, and "Restarting <machine>…" for a bounce the user asked for). The machines list draws the same distinction from the same evidence, badging a row "Reconnecting…" or "Restarting…" to match, so a row and the card opened from it never describe one restart differently. When that start reports it booted no host and the machine still does not answer, the list badge says "Not responding" rather than "Restart failed": the machine was up throughout, so it was never taken down and brought back.
+
+The forward's loopback-refusal shape -- tunnel established, host refused the connection to the inner port -- is now recorded as its own cause, so logs and bug reports can tell a dead service inside a reachable container apart from a container that cannot be reached. It changes no copy and no behavior on its own.
+
+Removed the recovery diagnostics probe. Nothing has fetched `GET /api/v1/workspaces/<id>/health` since the SPA port, so the in-container `mngr exec` it ran never fired in production and its probe rows were rendered nowhere; the route, the exec machinery and the plugin resolver-snapshot mirror that fed its last row are all gone. The passive backend-unreachable verdict the recovery card actually reads is unchanged.
+
+A failure envelope whose reason this build does not recognize is now read as a generic connection failure instead of being dropped, so an outage still enrolls the machine for probing.
+
+The log line (and Sentry breadcrumb) naming the classified cause is written at most once per cause every five minutes per machine. The forward reports a failure per *machine*, not per service, so any service on a healthy machine that stops listening -- a dev server the user shut down, say -- otherwise produced a line every couple of seconds for as long as its tab stayed open, burying the device-side failures the line exists to make measurable. A cause that differs from the one last named is still written immediately, and the recovery surfaces read the same evidence they always did.
+
+The machine-recovery page no longer strands you on a machine that came back. It followed the click-through's `?return_to` only when the restart operation itself reported success, so a restart that errored while the machine recovered anyway left the reader on a card reading "This machine is answering again. Nothing further is needed here." with no way into the machine it was talking about -- the only way in was going Home and clicking back in. It now follows that destination once the machine answers, whatever the restart reported, and still waits while a restart is running, on a machine that is only stopped, and until the restart the click-through itself asked for has been dispatched.
+
+Report a problem no longer swaps the page out from under you. Opened from the recovery page it forwards `?workspace=` so the report names the right machine, and that param was also what told the shell to paint that machine's surface behind the form -- the surface the recovery page exists because it would not load. The shell now keeps the recovery page painted behind the form, dismisses back to it when there is no history to go back through, and holds the page's own return until the form is closed, so a machine coming back mid-report cannot navigate away from what is being written.
+
+The stranded-host issue behind this recovery flow is written up in `apps/minds/docs/deploy/history/rollouts/slice-hostkey-revert-stranding.md`: what reverts a slice's SSH host key, why an affected machine cannot recover on its own, how many production machines were affected, and the operator sweep that repaired them.
+
+Add the deployment history entry for the minds-v0.4.1 production deployment (connector + LiteLLM deploy id 20260819T020036Z, two new 24sys032-us boxes -- one per US region -- and 61 minds-v0.4.1 pool slices baked across the new boxes and four spare-slot fills).
+
+The Updates panel now lists beta, and holds alpha behind an "Internal channels"
+disclosure.
+
+Beta also gets a build to serve. It was declared publishable but had no entry,
+so its feed resolved to nothing -- listing a channel in that state would have
+shown people one that reads as permanently broken. It now carries the same build
+stable does, so the two are identical until someone promotes them apart.
+
+Beta was hidden because nothing had decided who it was for. It is now the
+channel for trying new features before they are final, so it is listed like any
+other. Alpha is where internal development lands, and it is about to move much
+faster; a radio button sitting directly under the one most people want is too
+easy to hit on the way past. It stays one click away rather than none -- and the
+disclosure opens on its own when alpha is the channel in effect, so what you are
+running is never hidden behind something you have to open first.
+
+The channel descriptions say what each channel is, in one line each:
+
+- Stable -- Ready for everyday use.
+
+- Beta -- Test new features early.
+
+- Alpha -- Internal development builds.
+
+The panel also no longer drops the channel you are on. A preference written by a
+build that could reach the faster channels survives into one that cannot, and
+the list is built from what this build serves -- so that channel used to vanish
+from its own list, leaving every radio unselected and nothing naming what was
+actually in use.
+
+`just sync-vendor-mngr` now regenerates default-workspace-template's root `uv.lock` and commits it with the vendor snapshot, matching the `sync_vendor` CI job.
+
+The template's root `uv.lock` pins the vendored mngr libraries as editable path dependencies and records their resolved dependencies, so a snapshot that moves any of them strands it. Every template build path installs with `uv sync --frozen`, which takes the lock as the source of truth without checking it against the manifests, so the workspace venv silently gets the previous dependency set.
+
+The relock writes the template root's own lock, never the `system/vendor/mngr/uv.lock` inside the snapshot, so the vendor-match invariant that the release flow checks in step 6 is unaffected.
+
+`docs/deploy/ops/app-release.md` and `docs/vendor-mngr-sync.md` describe the added step.
+
+Carries the Bugsink bring-up's deploy plumbing for minds (the `sentry` service in every tier's `deploy.toml` secrets list, the bugsink/sentry Vault templates, and the bring-up runbooks) via a merge of `mngr/env-tier-sentry`, so that the error-reporting conversion work on this branch can build on it before that branch lands on main.
+
+Adds the `minds_services` deployment test `test_error_reporting.py`: drives the connector's new dev/ci-only `GET /health/reporting-probe` and asserts the `internal_error` response contract including a well-formed, non-empty Bugsink `event_id` -- the end-to-end proof the tier's `sentry` secret plumbing and SDK capture keep working after any deploy change.
+
+Added release channels to the desktop app, chosen from a new Updates section in Settings. **Stable** and **Alpha** are offered; Beta exists in the machinery but has no audience decided, so it is not put in front of anyone yet. One installed app, one ToDesktop app id -- switching channel never means installing a different app.
+
+Every channel is a pointer to an already-signed, already-notarized ToDesktop build, named in `apps/minds/release-channels.toml`. Editing that file and merging is how a channel moves, so `git log -p` on it answers "what was alpha on the 12th". The manifests we publish name ToDesktop URLs, so the artifacts are never re-hosted and the digests are never recomputed.
+
+Switching to a slower channel never downgrades you. You keep the version you are running and receive nothing until that channel catches up, which the app confirms before you commit to it. It does not warn about the resulting state: being ahead of your channel is temporary and self-correcting, and every channel already shows the version it serves. One update can still arrive after such a switch -- anything already downloaded has been handed to the installer and goes in on your next restart, which the confirmation says rather than promising a silence it cannot keep.
+
+Nothing interrupts you to announce an update. No dialog, no OS notification: a downloaded update is offered as a small card in the corner of the window, and installs on the next restart whether or not it is ever acknowledged. The panel also reports when a check last ran, because the common outcomes -- up to date, and ahead of your channel -- both leave the screen unchanged, so a check that worked was otherwise indistinguishable from a button that did nothing.
+
+A channel nobody has promoted a build to yet, and any channel whose feed is unreachable at the moment you look, is shown as "Unavailable right now" and cannot be selected, so a click cannot leave you on a channel that serves nothing.
+
+The auto-updater drives `electron-updater` directly instead of `@todesktop/runtime`'s wrapper, which cannot serve channels: it deactivates itself on any build ToDesktop has not released, which is every build a fast channel serves. `electron-updater` moves from 4.6.5 to 6.8.9 at the same time. Two bugs fell out of that swap and are fixed here:
+
+- Downgrades were permitted. `electron-updater`'s `channel` setter forces `allowDowngrade = true`, and ToDesktop's agent set it explicitly; nothing in `~/.minds` has a down-migration, so a downgrade was a data hazard rather than an inconvenience.
+
+- "Check for Updates..." would have reported an update on every check, because the field it tested is populated on every successful check whether or not one exists.
+
+The updater does not run when the app runs from source: an unpackaged build has no signed bundle to swap, so there is nothing for it to do, and an update offering to restart the app mid-edit is an interruption rather than a service. The update card is catalogued in the dev styleguide so its appearance can be worked on without an update existing.
+
+Tiers opt in by setting `update_feed_base_url` in their `client.toml`, next to `lima_image_base_url`. Production is wired to `https://updates.imbueminds.com`. Reaching the installs already in the field takes one more Release in ToDesktop: nothing shipped so far carries this code, so they update through `@todesktop/runtime` until they are handed a build that reads our manifests.
+
+"Check for Updates..." in the menu bar opens the Updates panel and checks there,
+rather than answering in dialogs of its own. That panel opens even when the rest
+of Settings cannot be loaded, since none of it comes from the backend -- a
+machine that is not answering is when taking a different build is most likely to
+be the fix.
+
+Being parked -- running a version your channel has not reached yet -- is now
+stated in the panel: "Stable is at 0.3.11, so you will stay on 0.3.12 until it
+catches up." It is a plain line rather than a warning, because being ahead of a
+channel is temporary and self-correcting. But it could not go unsaid: with
+nothing on screen the panel redrew exactly as it does when up to date, so
+switching to a slower channel looked like a click that did nothing.
+
+The panel offers "Restart now" whenever a build is downloaded. That control
+previously existed only on the floating card, which can be dismissed and does not
+return for a version already dismissed -- so a finished download could be left
+with no way to install it short of quitting the app by hand.
+
+The confirmation for switching to a slower channel now says where the next
+restart lands. A completed download is handed to the OS installer as it arrives,
+so switching cannot take it back: the restart moves forward to the staged build
+and the wait for the slower channel gets longer, not shorter. It also reads that
+fact from the staged version rather than from the update status, which any later
+check overwrites -- so a failed check no longer retracts a true promise at the
+moment the user is weighing it. Both surfaces name a channel the way its own
+radio does ("Stable"), never the bare feed name.
+
+The Updates panel no longer reads as still checking while a download runs. The
+check itself answers quickly, but the panel then asked what every channel serves
+-- and the main process runs one updater task at a time, so that question was
+queued behind the download the check had just started. Held under the same busy
+flag, it left "Checking..." on a disabled button for the whole transfer of a
+several-hundred-megabyte build. The channel query now runs after the button is
+released and updates the panel when it lands. "Check now" is instead refused
+while the download is in flight, which is the honest reason: a check clicked then
+would queue behind the same transfer and answer minutes later.
+
+The same build is no longer downloaded twice. An update stays "available" until
+it is installed, so two checks that queue together -- the menu item and the
+ten-minute interval, say -- each concluded an update was available and each
+appended a download, and the second still saw it available after the first had
+finished. The guard against re-downloading what is already staged now runs where
+the bytes are actually fetched as well as in the check, and lives in the
+electron-free channel module where it is unit-tested rather than inline in two
+places.
+
+A docked-options-panel test expected the tab order that the panel had before it
+was reordered to match the titlebar (Permissions, Machine settings, Share
+machine). The order it asserted no longer existed anywhere, so it failed on any
+branch that ran the minds JS suites.
+
+Both channels now point at 0.4.1 (build `26081836c9ajpkh`). This is the first
+entry that is not inert: merging it publishes, moving stable from 0.3.11 and
+alpha from 0.3.12.
+
+## 2026-08-20
+
+Every tier's `[secrets].services` now includes `sentry`: the error-reporting DSNs the remote services (the connector and the LiteLLM proxy) initialize sentry-sdk with, pushed from Vault as the stamped `sentry-<tier>-<deploy-id>` Modal Secret on each deploy. All-empty values are fine and simply leave reporting disabled, so tiers bring up in any order.
+
+The `sentry-sdk` floor moves to 2.63.0 (the version that fixes the per-request FastAPI sync-endpoint wrapper leak, mngr-internal#493).
+
+Release tests now exercise real remote workspace allocation against pre-baked CI pool slices (specs/remote-workspaces-in-ci.md):
+
+- New `minds_services` tests: `test_pool_lease.py` (lease / cross-user isolation / terminal release against a real slice) and `test_pool_fast_path_create.py` (the desktop client's `mngr create` fast-path adopt of a pre-baked slice, with a live exec probe and destroy-releases-the-lease assertions).
+
+- Empty-pool leases now FAIL by default instead of skipping (a broken bake stage must not turn the suite green); `MINDS_ALLOW_EMPTY_POOL=1` restores the skip for envs that legitimately have no pool (set automatically by `just minds-test-services-against`). `test_workspace_stop_start` adopts the same semantics.
+
+- `DeploymentEnvsConfig` gains an optional `pool` block (`repo_branch_or_tag`, region, slice count) recorded by the bake stage so tests lease fast-path against exactly the run's own bake.
+
+- `test_workspace_stop_start` is additionally gated behind `MINDS_STOP_START_RELEASE_TEST=1`: the measured full cycle against the standing CI box was ~2.6 hours (upload-bound at ~1.4 MB/s effective), which no CI job budget fits; the spec's open questions track raising the ci tier's upload throughput or shrinking the test artifact. Its stop-poll deadline and pytest timeout are budgeted to that measured cycle (3.5h / 4h), so an opted-in run can actually complete.
+
+- `test_latchkey_e2e`'s in-workspace `printenv` probe now reads only the first stdout line: `mngr exec` appends a "Command succeeded on agent ..." status line to stdout, which broke the strict-equality assertion (latent since the exec status line landed; surfaced by the first release-tier dispatch in a while).
+
+- `deployment_tests/helpers.py` gains the per-env pool-secrets Vault path (`minds/ci/runs/<env>/pool`) plus publish/delete helpers: the bake stage republishes the template repo's read-only deploy key there so the CI test job's narrower Vault role can read it.
+
+- `test_sync_e2e`'s host-to-agent-id lookup scopes `mngr list` to the docker provider: the offload sandbox runs as root, where limactl refuses to start, so an unscoped list aborted with the provider-inaccessible exit code (latent since the sync e2e tests landed; surfaced by the first release-tier dispatch in a while).
+
+- `ci_admin_auth_header` prefers an injected `$MINDS_ADMIN_KEY` over its Vault read (the CI test job's Vault role cannot read the tier's static supertokens entry); the relay-fleet tests skip on per-run `ci-*` envs, which by design carry no relay fleet; `test_sync_e2e`'s agent lookup uses `mngr list --on-error continue` (tolerating the provider-inaccessible exit code) instead of docker-provider scoping, and includes the list output in its failure message.
+
+- Three more latent release-test fixes surfaced by the release-tier dispatches: `test_sync_e2e`'s host-to-agent lookup now uses the app's own `MNGR_HOST_DIR` (it pointed at the isolated config root, so the listing was always empty) with the config root as cwd, matching the sign-in helper; `test_sse_redirect` asserts the completion navigation itself (the SPA's in-app route change to `/workspace/<agent-id>`, the workspace surface) instead of waiting on a `data-ready` stamp the SPA creating page never sets; `test_litellm_via_workspace` strips `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` from the `mngr create` env so the workspace cannot bypass the minted litellm key (the template's `pass_host_env` would otherwise forward the CI job's real key).
+
+- `test_latchkey_e2e` carries `@pytest.mark.rsync`: creating the workspace's new remote docker host uploads mngr's collected deploy files (the isolated profile's config/settings) with one rsync, observed by the resource guard on the first CI run to reach that point (the work-dir transfer itself still resolves to a git push, and the latchkey state sync ships state over SFTP).
+
+- The desktop client's account identity cache (`MultiAccountSessionStore`) now validates itself against a stat-level fingerprint of the imbue_cloud plugin's on-disk sessions directory, so sign-ins and sign-outs performed outside the app (e.g. a headless `mngr imbue_cloud auth signin` in a terminal under the app's `MNGR_HOST_DIR`) surface on the next read instead of never (previously only the app's own web-login/sign-out flows invalidated the cache, so an out-of-band signin stayed invisible until an app restart). This is also what un-blocks the three `test_sync_e2e` release tests, whose headless sign-in helper waits for the signed-in account to appear on /accounts.
+
+- `test_litellm_via_workspace` keeps the env's litellm proxy awake (cheap liveness pings) across its chat + spend-poll window. LiteLLM persists spend via a ~10s scheduled batch writer, and the CI env's scale-to-zero Modal container is CPU-throttled whenever no request is in flight -- so the chat's spend sat unflushed in memory until the ~60s-idle scaledown, whose teardown-time flush fails ("DB connection error writing spend logs ... All connection attempts failed") and silently drops it. Verified against a live CI env: the same proxied call records no spend when the proxy idles afterward and full spend when traffic keeps the container unthrottled. (The chat model itself was never the problem: Claude Code's `opus[1m]` goes on the wire as `claude-opus-5`, which litellm prices correctly.)
+
+- The three `test_sync_e2e` release tests' UI drivers are ported to the SPA frontend: they were written against the legacy JinjaX pages (deleted in the mithril cutover), so every phase after sign-in drove DOM that no longer exists -- the associate step waited forever for `#associate-form` while the real Account group offers "Link to <email>" buttons. Association, the post-migration linked-state assertion (now polled, since the SPA fills the account section asynchronously), the master-password panel (reached via `/settings?section=backups`), the unlock banner's error alert, the remote row's remove control, and the first-backup + download gates (now the `/workspace/<id>/backups` snapshot table -- the landing rows' backup badge is an unwired placeholder slot) all target the current DOM. Backup configuration posts the product's own `/api/v1/.../backup-service/configure` request from the page and polls its operation, because the SPA's Machine settings Backup group is still the "being rebuilt" placeholder with no configure form to drive.
+
+`docs/deploy/history/rollouts/reboot-resilience.md` is now marked complete (both sweeps ran fleet-wide at minds-v0.3.17): the removed `backfill-autostart` sweep references were rewritten as historical record, and the post-reboot recovery section now documents the manual per-VM re-apply of the template's installer block instead of the removed sweep tool.
+
+Comment-only: the backend resolver's empty-`label` tolerance for legacy service rows (written before minds-v0.3.12 minted `<name>-<rand>` origin labels) is now marked with a `CLEANUP:` comment stating when it can be removed.
+
+## 2026-08-19
+
+Hardened the desktop-client browser-authorization tests that check a tampered session cookie is rejected, removing a lingering source of CI flakiness (MIND-190).
+
+Two tests each hand-built a "tampered" cookie by flipping one base64 character, each with its own delicate reasoning about which character was safe to touch. A session cookie is an itsdangerous token whose signature is an HMAC over the encoded signed-content string, and the signature is the only segment a verifier base64-decodes before comparing -- so a flip in the signature's base64 tail can be absorbed by its spare bits and still authenticate (~7% of cookies), which is what made `test_tampered_session_cookie_is_unauthenticated` fail intermittently with `assert '/' == '/login'`.
+
+Both tests now build the tampered cookie through a single shared helper that alters the signed content instead of the signature. Any change there changes the HMAC input and is rejected with certainty, whatever the payload, so the tamper is provably invalidating by construction rather than by a per-test argument. The now-redundant guard assertions the earlier fix added are gone.
+
+Test-only: the tampered-cookie rejection under test was always correct, and no product behavior changes.
+
+# Prune a bug-narrative clause from the restart-step-failure docstring
+
+A crispy-comments pass over the `gabriel/recovery-backend-unreachable-inband` branch (PR #304). Trimmed `_report_restart_step_failure`'s docstring so it states why the backend reason is recorded (the first live observation of the outage) and when (before the `RESTART_FAILED` transition), without re-narrating the pre-fix behavior it corrected -- the recovery card opening on a ruled-out verdict and correcting itself a poll later. Comments only; no behavior change.
+
+Fixed four ways the macOS desktop app could dead-end after every window was closed (the keep-the-app-running behavior added in the previous release).
+
+Re-opening a window from the dock, `Cmd+N`, `File > New Window`, the dock menu, or by launching the app again now always produces a window, showing the app's real state: the home page when the backend is serving, the loading screen while it is still starting, and the error screen with its **Retry** button when startup failed or the backend died. Previously, an app whose backend had failed to start could never open a window again and sat inert in the dock until `Cmd+Q`.
+
+A backend that crashes while no window is open is now reported and recoverable. Before, nothing was logged or shown, and the next window opened onto the dead port with a Reload button that only re-loaded it.
+
+Closing the window while the app is still starting no longer strands it: the backend finishes coming up and signs you in as usual (previously every window opened afterwards landed on a sign-in page asking for a one-time link that a packaged app never prints). The landing that launch owed you -- your restored session, or the welcome / error-reporting screens -- is applied to the next window you open, instead of being skipped or popping windows up unprompted. It is worked out afresh at that point, so a session restored much later reflects the machines you actually have.
+
+A `minds://` deeplink that arrives while no window is open now opens one instead of being silently dropped. This restores the browser sign-in flow's "Open app" link.
+
+The `minds env`, `minds pool`, `minds server`, and `minds paid` command groups moved to the new private `minds-admin` operator CLI (deleted outright here, no stubs); `minds` keeps only the app surface (`minds run`). Error messages and docs now point at `minds-admin env activate`.
+
+The operator-only envs machinery (provisioning, per-env deploy, providers, secret lifecycle, recover, migrations, generation, local_store, health_check, mngr_agent_cleanup, r2_cleanup) moved to `apps/minds_admin`; `envs/` keeps only what the app runtime and public test surface use (docker_cleanup, primitives, paths, vault_reader). New public homes for pieces the deployment-test helpers need: `config/modal_profile.py`, `vault_reader.admin_key_from_supertokens_secret`, `config.loader.per_env_secret_services`.
+
+The committed per-tier deploy.toml comments now reference the `minds-admin account` commands.
+
+Deploy runbooks updated for the Phase 3 server lifecycle convergence (issue #496): `production-release-deployment.md` is rewritten around the env-aware `just order-server` / `await-delivery` / `setup-server` recipes -- the Step 0 credential export block is gone (activate the tier instead), each box step is one command, and `setup-server` now installs + verifies the observability collector fail-closed. Also removed stray markup left at the end of the file, and resolved the runbook's open TODO about first-class lifecycle recipes.
+
+`host-pool-setup.md` Step 5 and the observability bring-up doc now describe the in-process collector install (Vault boxes credential; clean skip when absent) instead of the old `--extra-prep-script` shell assembly.
+
+## 2026-08-18
+
+# Warm mngr processes now exit promptly when the minds backend disconnects (MIND-181)
+
+Fixed the warm-process teardown lifecycle in `MngrCaller` (`utils/mngr_caller.py`). Previously, a pre-warmed `mngr` process only noticed that its parent (the minds backend) had gone away after it finished the multi-second `imbue.mngr.main` warm-up import, because the socket `recv` that observes the disconnect only ran after the import. Under CI load the import alone could exceed 30s, which both left near-orphan processes doing useless work and caused the flaky `test_warm_process_exits_when_parent_disconnects` timeout.
+
+A dedicated receiver thread in the warm process now performs the single socket `recv` starting before the import and exits the process immediately (`os._exit`) if the parent disconnects first; the parent-death watcher continues to cover the busy window after a request has been read. Measured exit-after-disconnect latency dropped from ~5s (warm cache) / ~29s (cold cache) to ~0.1s. The `@pytest.mark.flaky` marker on the test was removed, and the parent-death-watcher wiring test was reworked to hold the serve path mid-command instead of blocking on `recv`.
+
+The live-working-tree sync into a default-workspace-template worktree's `system/vendor/mngr/` is now its own recipe, `just sync-vendor-mngr-live`, rather than being inlined in `just minds-start`. `minds-start` calls it at launch exactly as before; the point of splitting it out is that you can now re-sync mid-session without relaunching the app (the desktop client picks the new copy up on the next Create). `apps/minds/docs/vendor-mngr-sync.md` documents it as the dev-loop rsync path.
+
+That doc also now covers what to do when the vendored copy blocks a base-branch merge in the worktree. The copy is meant to sit uncommitted, and the code-guardian stop hook exempts it from its commit check, but git still refuses to merge over it whenever the base branch carries a vendor refresh. The hook reports that case distinctly instead of calling it a merge conflict; the fix is to drop the copy, merge, and re-run `just sync-vendor-mngr-live` -- not to commit it, and not to resolve it as a conflict.
+
+On macOS, closing all windows no longer quits the app. It keeps running with no windows (the dock icon stays), matching standard macOS apps; re-open a window by clicking the dock icon or pressing `Cmd+N` (it lands on the home page). Quit explicitly with `Cmd+Q`. The "you have local minds running" shutdown prompt now appears only on an actual quit, never on closing a window. Windows/Linux keep the previous behavior of quitting when the last window closes.
+
+# Name the backend that is unreachable, and read its error in-band
+
+When it is the machine's backend that is unreachable -- a stopped Docker daemon, a cloud provider you cannot currently reach -- recovery now says so, and names both the machine and the backend: "my-machine unreachable: Can't connect to Docker", followed by the provider's own explanation of what went wrong and the assurance that minds reconnects you as soon as the machine can be reached again. It offers no Restart button, because a restart is routed through that same backend and cannot get through either. Previously this read as an ordinary unresponsive machine and offered a restart that could not work. The band over the machine carries the cause alone -- "Can't connect to Docker" -- so the reason is on screen without opening anything. Both surfaces speak only for a machine that has actually stopped answering: a provider whose poll errored while its machines keep answering is not a machine you cannot reach, and recovery goes on reporting that one as responding.
+
+Error text quoted from elsewhere no longer spills out of the notice that holds it: a long unbroken token (Docker's failing URL, a socket path) now wraps inside the box instead of running past its edge and pushing a horizontal scrollbar onto the card.
+
+The verdict is read at a poll's cost -- no command is run for it -- so the open card keeps up with an outage that lands (or clears) after it opened. It does not wait on discovery to notice the outage, though. Minds restarts a machine the moment it wedges, and a stop or start that mngr rejected over the backend carries a `ProviderUnavailableError`, whose reason is recovered from the subprocess's stderr (via the new mngr parser): that rejection lands within seconds of the outage, where the backend's next poll can be half a minute away, so it is what the card and the band say. Without it the card opened on the one verdict the failed restart had already ruled out -- an unresponsive machine, offering a restart routed through the backend that had just refused one -- and corrected itself while you read it. The rejection's authority ends at that provider's next poll, whichever way the poll reads: still down and the poll says the same thing, back up and there is nothing left for the rejection to claim. This covers a stopped Docker daemon as well as a cloud provider that is out of reach, because mngr now blames the backend it could not construct instead of calling the machine missing. The `/api/v1/workspaces/<id>/health` route reads the same reason off an `mngr exec` the provider rejected, so its verdict and its log name the backend instead of calling the machine wedged. A failed restart step is logged with the verdict it was reported under as well as the command's own output, since those are no longer the same sentence.
+
+Recovery no longer explains a new outage with an old one. A backend's error is remembered until that backend is next polled -- up to half a minute -- so a machine that wedged for reasons entirely its own, moments after an unrelated backend blip had cleared, was reported as "Can't connect to Docker" on the strength of a reading taken before it wedged. The backend's error now has to have been observed since the machine stopped answering before it is allowed to explain it, which is the rule the rest of recovery already followed. Where the backend really is down nothing is lost: the restart minds attempts the moment a machine wedges is rejected by that backend, and that rejection carries the verdict itself, so "Can't connect to Docker" appears just as promptly as before -- on evidence gathered during this outage rather than before it. That restart no longer lets the old error back in, either -- how long a machine has been unreachable is now measured from when it stopped answering rather than from the last attempt to fix it, so an attempt part-way through an outage does not make evidence from before the outage current again. The band and the card reach this verdict the same way, so they can no longer disagree about which of the two is wrong with your machine.
+
+A machine whose backend is slow to poll is also no longer reported as unverified between its own perfectly ordinary polls: how long a reading stays good is now measured against that backend's own polling rate rather than a fixed one.
+
+The recovery-info payload gains `is_backend_unreachable`, `provider_label` and `unreachable_reason`, and workspace entries carry the provider's friendly label for the band alongside `is_backend_unreachable` (replacing `is_stale`, which said only that a poll had errored). That label is now the single one: the machines list reads its provider badge off the same entry instead of fetching a parallel copy from `/ui/api/create/landing-extras`, so the badge paints with the list rather than one request later.
+
+The quit-time shutdown prompt again covers only local minds. When cloud workspaces (`aws` / `gcp` / `azure`, then `imbue_cloud`) gained Start/Stop support they joined the single shutdown-capable provider gate, which the quit prompt shares -- so quitting listed running cloud workspaces as "local minds" that were "using your computer's resources", and offered to shut them down by default. Cloud minds keep running with the app closed, so quitting no longer counts or stops them; they are stopped deliberately from their own Start/Stop control.
+
+Made the desktop client forward compatible with newer imbue cloud deployments, per the connector-forward-compat plan.
+
+Workspace records carry a `record_format`: a record written by a newer app version stays visible (and its workspace connectable), but pushes, destroy/tombstone, disassociate, and removal are refused with "update the app to manage this machine" (the destroy API refuses up front with a 409). When a pull finds the server row at a newer format than a locally-dirty copy, the server row wins (the pending local change could never be pushed) and the record becomes read-only here. Encrypted secrets blobs likewise carry a `payload_format`: a blob written by a newer version is never rewritten, and rewrites round-trip unknown payload keys verbatim so newer clients' material is never dropped.
+
+The CLI-output models the desktop parses from the bundled imbue_cloud plugin now use the plugin's tolerant `WireModel` base, and the connector's structured "client too old" (HTTP 426) refusal surfaces as a typed error with the update message.
+
+`minds env deploy` now bakes the deploy id into both connector frontend bundles (their `X-Imbue-Client` build stamp) and the release process gains a wire-compat snapshot corpus step (see docs/release.md).
+
+New `remote-compatibility` behaviors corpus folder specifies the forward-compatibility contract, with witnessing tests.
+
+Cut the minds 0.4.0 release: bumped the desktop app version to 0.4.0 and pinned the baked default-workspace-template tag (`FALLBACK_BRANCH`) to `minds-v0.4.0`.
+
+Cut the minds-v0.4.1 release: bumped the app version to 0.4.1 and pinned `FALLBACK_BRANCH` to the `minds-v0.4.1` default-workspace-template tag, shipping everything landed on main since minds-v0.4.0 (slice reconciler boot-cycle and destroy-finalization fixes, forward-proxy SSE pool leak fix, chat tab naming fix, macOS keep-running-on-window-close behavior, and the observability bring-up tooling).
+
+Merge the codex/pi-coding plugin bundling fix from `mngr/build-0-3-17` (see `mngr-build-0-3-17.md`): the packaged desktop app now carries the `imbue-mngr-codex` and `imbue-mngr-pi-coding` mngr plugins, fixing "Unknown fields in agent_types.codex" on every workspace create against the minds-v0.3.17 default-workspace-template. This branch independently found and fixed the same bug from the failed minds-v0.3.17 tag launch-to-msg run; the two fixes were content-identical and the `mngr/build-0-3-17` version was kept.
+
+Reset `docs/next_deploy.md` after the minds-v0.3.17 staging + production deployment: completed checklist items removed; the still-open post-deploy cleanup items and the accepted mixed-fleet states carry over.
+
+Relocate the deployment/operations docs into `apps/minds/docs/deploy/` (tier runbooks, Vault layout, pool/box operations, release procedure, environments, incident runbooks), which is now excluded from the public mirror -- see `docs/deploy/README.md`. Adds `docs/deploy/history/` with one distilled record per shipped release (minds-v0.3.15 through v0.3.17).
+
+Add `test_bundled_agent_types.py` (snapshot-resume suite): asserts every plugin-provided agent type declared by the default-workspace-template's `.mngr/settings.toml` is bundled into the packaged desktop app's workspace-package lists, with an actionable failure naming all four mirrored lists -- the minds-v0.3.17 release blocker class, previously caught only by the tag-time launch-to-msg run.
+
+Deployed minds-v0.4.0 to the staging tier and recorded the deployment in the deploy history.
+
+- Staging connector (`rsc-staging`) and LiteLLM proxy (`llm-staging`) redeployed from this branch (deploy id `20260818T165239Z`; pool-hosts migration 027 applied; RECREATE strategy; both health checks green; deployed URLs match the committed `staging/client.toml`).
+
+- Added two staging `24sys032-us` bare-metal boxes (one per US region, matching the production box standard) and baked minds-v0.4.0 slices on each so staging leases land on the fast path.
+
+- Added `apps/minds/docs/deploy/history/minds-v0.4.0.md` documenting the staging deployment coordinates.
+
+- Fixed a startup race that finalized a FAILED workspace destroy as DONE: the destroy-status check treated "this host's provider has not produced a discovery snapshot yet" the same as "the host is gone", so an app restart after a failed destroy tombstoned the workspace record while the host (and its imbue_cloud lease) lived on. Finalization now requires positive evidence of gone-ness -- the host's state is DESTROYED, or the owning provider (recorded with the destroy marker) produced a clean discovery snapshot this session that omits the host. Until then the destroy stays visible as failed and retryable.
+
+Deployment pass for the observability bring-up: this branch carries `mngr/log-and-telemetry-aggregation` (the `minds server prep --extra-prep-script` forwarding and the `apps/minds/docs/deploy/setup/observability.md` operator runbook) and is the working branch for executing that runbook, starting with the shared dev tier.
+
+Runbook updates from the dev-tier validation pass land here as their own commits.
+
+Documentation only: the minds README now describes the workspace's first chat by its real name pair (`Chat-1` with a "Chat 1" `display_name` label -- the same display-name/canonical-name pairing minds uses for hosts) instead of the retired "named after the host" behavior. The naming work itself lands in default-workspace-template (imbue-ai/default-workspace-template#445): chat and browser tabs there now pair a human-readable display name with a canonical true name, chats are renameable again (routed through `mngr rename` so the pair never drifts), and daemon-minted browsers are numbered `browser-<N>` instead of random english names.
+
+`minds server prep` gained an optional `--extra-prep-script <file>`, forwarded verbatim to `mngr imbue_cloud admin server prep`.
+
+Part of the log/telemetry aggregation rollout (`specs/minds-openobserve-telemetry.md`): `just prep-server` renders the observability collector install script and passes it through this flag whenever the tier's `secrets/minds/<tier>/observability` Vault entry carries a boxes ingest credential, so re-prepping a box is also how the OpenTelemetry Collector rolls out to the existing fleet.
+
+The per-tier observability bring-up is documented in the operator runbook `apps/minds/docs/deploy/setup/observability.md` (resource creation, Vault population, provisioning, the manual Modal workspace step, the dev-tier validation gates, fleet collector rollout, and ongoing operations), with checklist pointers recorded in `apps/minds/docs/deploy/next_deploy.md` for the next deployment.
+
+The workspace titlebar's icon-tab strip is now ordered Permissions, Machine settings, Share machine (previously Permissions, Share machine, Machine settings). The docked options panel that hangs from that strip -- its own tab strip and its pane title icon -- was reordered and re-iconed to match, since it is a separate rendering of the same three tabs.
+
+The Share machine tab's icon changed from Lucide's boxed up-arrow "share" glyph to Lucide's "send" (paper-plane) glyph, in both places it appears. The tab's id, tooltip, and behavior are unchanged.
+
+Fixed: GitHub and GitLab connections are now labelled "GitHub" and "GitLab" instead of "GitHub (REST API)" and "GitLab (REST API)".
+
+Both services expose several latchkey scopes (GitHub: REST, GraphQL, and git), and one stored credential backs all of them, so a single connection covers every scope. The workspace Permissions tab, the Connectors settings page, Add connection, and the messages of the dialog that takes a service's credentials were labelling that whole connection with its *first* scope's name -- which read as though GraphQL and git access sat beneath a "REST API" permission, when the three are separate and independently grantable.
+
+The per-scope labels are unchanged where they identify one scope: the dividers inside a connection's panel and the permission-request dialog still read "GitHub (REST API)", "GitHub (GraphQL API)", and "GitHub (git)".
+
+## 2026-08-17
+
+Cut the minds-v0.3.17 release: bump the app version to 0.3.17 and pin `FALLBACK_BRANCH` to the `minds-v0.3.17` default-workspace-template tag.
+
+Bundle the `imbue-mngr-codex` and `imbue-mngr-pi-coding` plugins into the desktop app (build.js, env-setup.js, electron pyproject, and the drift-guard list). The default workspace template's `.mngr/settings.toml` now declares `[agent_types.codex]` and `[agent_types.pi-coding]`, and without these plugins the app's bundled mngr rejected those sections as unknown fields, failing every workspace create ("Unknown fields in agent_types.codex").
+
+Regenerate the dev-time `electron/pyproject/uv.lock`, which had also drifted (it was missing mngr's new `python-frontmatter` dependency).
+
+Remove the committed `template_ref` pin from the dev tier's `[web_workspaces]` deploy config (and drop the field from `WebWorkspacesConfig` entirely). A committed ref silently goes stale the moment the pool is re-baked at a newer version: the dev tier still pinned `mngr/hopefully-last-web-details`, so every dev-env web create 503'd with "No pre-created agents match" against pools baked at `minds-v0.3.16`.
+
+Dev-tier deploys with web workspaces enabled now refuse up front (before any cloud resource is touched) unless `MINDS_WEB_TEMPLATE_REF=<branch-or-tag>` is set explicitly, so the operator always states the ref their dev pool is actually baked at. Shared tiers (staging / production) are unchanged: they keep tracking the release tag (`FALLBACK_BRANCH`) automatically, and the env var still overrides everywhere.
+
+"Waiting on you" is a section of the Permissions pane, listing every request this machine's agents are waiting on — alongside the connections those answers create, in the column that scrolls. Opening Permissions with something pending starts there rather than on a connection, since a pending request is the one thing in the pane waiting on an answer, and the section goes away once nothing is.
+
+Clicking one opens it as its own page, hanging from the same key the pane does. Opened from the pane it starts at the pane's size and settles into its own, so it reads as that window resizing into the request rather than as a second card dropped on top; the pane stays underneath with its scroll and section intact, and a back arrow returns to it. Opened from the in-chat card's "Review & respond" — or a notification, or a link — it goes straight there, over the machine you were in.
+
+An answered request leaves the list the moment you answer it, rather than when the next read comes back from the machine. What is pending is the machine's to say, but the answer was given right there, and a row that sits still after Approve or Deny reads as an answer that did not take. The read that follows reconciles, so a request the machine still considers pending would come back.
+
+Answering it also ends the review. You opened one request — the one you clicked — so that request having a verdict is the whole of what you came to do, and the next pending one is not swapped in under the click that finished the first. Where you land is where you came from: back on the pane's list while other requests are still waiting, on Add connection once none are (the list you came back for has just emptied), and back to the machine you were in when you came from the chat. A request answered somewhere else meanwhile — another window, or the agent giving up on it — closes the page the same way, rather than leaving a form up that can no longer be submitted.
+
+The way back up is the same size as the way out. The back arrow and the close X are the two things you can do to that window from its top corners, and the arrow being the smaller of the two read as the lesser of the two. The key icon is gone from the line beside it — the window hangs from the key already.
+
+A request that stops waiting while you are reading it — answered by you in another window, withdrawn by the agent — closes the page and leaves the list, the same as one you answer here.
+
+Opening a request is quick. The details behind one — which accounts a service has, what it can be granted — are answered by running latchkey against that service, and that used to start when the request was opened, so you watched it. It now starts as soon as the app learns a request is pending, and again when you point at its row. What is fetched is kept for as long as the request is pending, so opening the same request again is just as quick.
+
+The Permissions pane opens on its answer too, for the same reason. It read what a machine allows on its first mount, so "Loading permissions..." was however long that read took, started at the moment the pane appeared. Pointing at the key that opens it starts the read instead. Entering a machine deliberately does not — the read asks that machine's latchkey gateway what it holds, and machines are entered far more often than their permissions are read.
+
+- The workspace content frame now runs flush to the window's left, right, and bottom edges instead of floating with a 4px gap on every side -- the shell's background no longer shows as a border around the workspace, only as a band above it. Only the top stays inset, clearing the titlebar. All four corners stay rounded, so the machine still reads as one card tucked under the titlebar, and the bottom pair now land exactly on the OS window's own rounded corners. The failure notice band, which is deliberately sized to the surface it sits on, goes flush with it and carries the card's top corners while it is up (the surface squares its own to meet it), so the two still stack as one card rather than the band overhanging the machine below it.
+- The titlebar's Share button (and the Share machine tab in the machine-options panel, which draws the same glyph) now uses Lucide's "share" icon -- an up-arrow lifting out of an open box -- instead of the filled curved-arrow it carried before. It is drawn as a stroked outline on Lucide's 24x24 grid scaled into this set's 16x16 box, matching every other stroked glyph in the shared icon set rather than being the one filled exception.
+
+## 2026-08-16
+
+Adapted to mngr's new per-host agent-id model (the same agent id may exist on multiple hosts, e.g. while a workspace migrates between machines): the desktop client consumes the instance-keyed discovery aggregator API, tolerates both bare-id and instance-keyed `resolver_snapshot` envelope keys from the forward plugin, and logs a warning when a workspace agent id resolves to multiple machines instead of silently first-matching.
+
+Workspace-level policy for duplicates (routing to the ACTIVE record's machine) is deliberately deferred to the migration work; see specs/allow-duplicate-agent-ids.md.
+
+The desktop client's forward-envelope observe consumer now uses mngr's deduplicating schema-mismatch warner: discovery payloads written by a different mngr version are skipped with one warning per distinct failure, and additive fields from newer versions parse cleanly. Together with the mngr-side changes (tolerant event models, per-line fail-open parsing), this fixes the incident where an older minds client hung forever on "Waiting for system interface to be ready..." after a newer mngr had written to the shared discovery log (mngr-internal#422).
+
+Set `accounts_base_url` in the committed staging and production `client.toml` files to the tiers' dedicated accounts hosts (`https://accounts.imbue-staging.com` / `https://accounts.imbue.com`), so desktop-generated shared-workspace visitor links point at the accounts custom domain instead of the connector's modal.run URL.
+
+The desktop client's tunnel SSH info now carries the explicit `known_hosts_path` that host SSH info gained in this release: both the discovery-event consumer and the `mngr list --format json` parser populate it, so the client's forward tunnels verify host keys against the named pin file instead of relying solely on the key-sibling `known_hosts` convention.
+
+Fixed four deployment tests that had never been executed (release-tier tests do not run in CI automatically): the relay-fleet, backup-retention, and workspace-stop-start tests treated the `shared_env` factory fixture as the env handle itself, and the litellm-via-workspace test minted its key as a fresh unverified-domain user that can never switch to the ally plan -- it now uses the fixed paid-listed CI test user like its sibling test.
+
+Enabling sharing is much faster: the desktop now reads the workspace's share state (gateway presence, share.env presence, and the current grants document) in ONE `mngr exec` round trip and writes all the share files (grants, owner email, then share.env last) in ONE more -- previously four separate execs, each paying a full mngr process + SSH connection on remote hosts. The enable path also no longer consults the connector's share status at all in the common enable-from-off case (`shares create` is the source of truth there); status is read only when materials are already present, to distinguish a grants-only update from stale materials. A re-share after a disable now sends a measured relay-region preference, which the connector ignores for hosts whose region it already knows.
+
+The sharing readiness poll no longer runs a `mngr imbue_cloud shares status` subprocess on every 2-second tick: the connector share lookup (whose answer, the share's domain, never changes for a live share) rides a short-TTL cache invalidated by enable/disable, and each tick only performs the fast TLS probe of the shared hostname.
+
+Cut the minds-v0.3.16 release: bump the desktop app version to 0.3.16 and pin `FALLBACK_BRANCH` to the `minds-v0.3.16` default-workspace-template tag.
+
+Fix a ruff formatting error in `desktop_client/share_materials_injection.py` that landed on main via a merge and made `test_no_ruff_errors` fail (formatting only, no behavior change).
+
+## 2026-08-15
+
+# Deployment test updated for the Google-first signup page
+
+- The hosted-pages Playwright deployment test now clicks the sign-up tab's "Use email and password instead" reveal link when present: with Google configured on a tier, the accounts page keeps the email/password fields collapsed behind it (part of the sign-up abuse mitigation work in the connector).
+
+Minds 0.3.15.
+
+The app version is now `0.3.15`, and a shipped binary clones the `minds-v0.3.15` default-workspace-template tag when it creates a workspace.
+
+Updated the next-deploy runbook (docs/next_deploy.md) with corrections discovered while preparing the 0.3.14 staging rollout rehearsal:
+
+- Relay fleet sequencing: relays can only be *provisioned* before the connector deploy -- registration and frps deploy need the new connector's relays table/endpoints (migration 025), so they run immediately after each tier's deploy, with a short accepted gap where new shares cannot be created.
+
+- Public-Suffix-List entries for the share content domains are explicitly deferred until user volume justifies them; regions run on their wildcard DNS record sets alone for now.
+
+- The staging deploy runs migrations 018-025 (not 018-023): 024 adds workspace stop/start (requires the tier `storage` Vault entry, now called out in the Phase 0 Vault checklist) and 025 creates the relays table.
+
+- The OAuth redirector item is marked dev/CI-only (staging/production register their stable accounts domain directly), and the chrome-domain section is rewritten as the full two-host origin cutover for BOTH tiers (see below).
+
+Added the `[origins]` deploy.toml block (accounts_origin / chrome_origin / cookie_domain): staging and production now commit their user-facing origin layout (accounts.imbue-staging.com + minds.imbue-staging.com on the imbue-staging.com apex; accounts.imbue.com + minds.imbue.com on imbue.com), and `minds env deploy` attaches both hosts as Modal custom domains on the connector and stamps AUTH_WEBSITE_DOMAIN, ACCOUNTS_BASE_URL, ACCOUNTS_COOKIE_DOMAIN, and SHARE_CHROME_ORIGIN from the block (winning over Vault). Tiers without the block (dev/ci) are unchanged.
+
+Hardened `minds env deploy` secret handling after the staging rehearsal caught a silent failure (a lingering `vault kv delete` tombstone made the whole `sharing` directory read fail, and the deploy shipped a placeholder secret while exiting 0):
+
+- The Vault reader now skips soft-deleted leaves (listed but dataless) with a warning instead of failing the entire service read.
+
+- On staging/production, every service declared in `[secrets].services` is required: an unreadable Vault entry or one missing template-declared keys (per `.minds/template/<service>.sh`; empty values still allowed) aborts the deploy before anything is pushed. Dev/ci envs keep the bootstrap placeholder path, now logged at error level.
+
+- The deploy log states how many values each pushed Modal Secret carries, so a gutted secret is visible at a glance.
+
+- vault-setup.md and workspace-stop-start.md updated to match (the previously documented template validation did not actually exist).
+
+Multi-relay sharing, phase 1 (blueprint/multi-relay), minds side.
+
+`share.env` no longer carries a relay endpoint: the workspace's share gateway fetches its relay set from the connector's assignment endpoint, so server-side fleet changes never require re-injecting materials.
+
+The latency-based relay region picker scores each region by its best endpoint (regions now expose several).
+
+`minds env deploy` stops pinning `SHARE_DEFAULT_REGION` / `SHARE_RELAY_ENDPOINTS` into dev/ci sharing secrets -- the connector's `relays` table is the fleet's source of truth, and `just provision-dev-relay` now registers the relay it provisions.
+
+New deployment test (`test_relay_fleet.py`): fleet registration + health, the share assignment contract, and relay failover on multi-relay regions (skipped on single-relay dev/ci envs).
+
+Staging bring-up / next-deploy docs describe the two-relay-per-region flow.
+
+Minds 0.3.14.
+
+The app version is now `0.3.14`, and a shipped binary clones the `minds-v0.3.14` default-workspace-template tag when it creates a workspace.
+
+imbue_cloud workspaces gain the desktop Start/Stop control (the same gate as local docker/lima workspaces): Stop halts the slice VM and uploads it to the tier's storage bucket, freeing the paid bare-metal slot; Start restores it. The start timeout now accommodates the restore-from-storage path.
+
+New per-tier workspace-storage secret (`.minds/template/storage.sh`, pushed as the `storage-<env>` Modal secret via the `deploy.toml` services list); dev envs share the dev tier's bucket with an automatic per-env key prefix. Provisioning runbook: `docs/workspace-stop-start.md`. The dev tier's Vault entry is populated (bucket `mngr-workspaces-dev`).
+
+Plans gain `max_total_workspaces` (running + stopped; explorer 10 / ally 50) alongside `max_remote_workspaces` (running only).
+
+New end-to-end deployment test `deployment_tests/test_workspace_stop_start.py` exercises the full lease -> stop -> start -> release cycle against a real env (skips cleanly without a baked slice or storage config).
+
+Clicking a stopped workspace tile starts it through the recovery flow (with progress and logs) for every shutdown-capable backend, including imbue_cloud: the recovery restart's host stop/start steps now share the Start/Stop buttons' generous budgets, so a cloud restore taking minutes no longer times out into a spurious failure.
+
+`minds env destroy` now deletes the env's workspace stop/start artifacts from the tier's storage bucket (the env's stamped key prefix for dev/ci envs, the whole keyspace for shared tiers), so destroyed envs no longer orphan paid storage. Skipped when the tier's `storage` Vault entry is unpopulated.
+
+Re-landed the slice-restart key-wipe investigation doc from PR 382 (`docs/slice-restart-wipes-owner-ssh-key.md`), updated for the shipped remediation: the connector-side reconcile cron that PR proposed is replaced by client-side slice adoption (an in-VM reconciler unit that re-asserts the owner's `authorized_keys` and host key on every boot) plus the operator-run `mngr imbue_cloud admin repair-keys` sweep for already-wiped hosts.
+
+Workspace-sync SSH semantics move onto the host-key pin store (user-controlled keys, Phase 4).
+
+Producers now render a record's `ssh_known_hosts` from the store's clean current pins (one per endpoint and keytype) instead of slurping the known_hosts file, so stale or duplicated lines can no longer enter a synced record; the broken lima provider-wide key fallback is gone, and provider-wide keys can never enter a record.
+
+Importers parse the synced `ssh_known_hosts` into pins and apply them through the store as user-origin material (replace per endpoint and keytype), gated on the record's revision via a new local-only `last_applied_secrets_revision` replica field: a record this device already applied -- or an older one -- can neither clobber nor re-stamp newer local material (e.g. a key rotation run on this machine), and the synced private key is only (re)written under the same gate. The leasing device's lease.json skip is unchanged.
+
+A successful materialization now also stamps the local secrets parity digest, so a key rotation (`mngr imbue_cloud hosts rotate`) run from any device that synced the workspace -- not just the machine that leased it -- is re-pushed by the next sync pass and propagates to the other devices.
+
+The backup env converges under the same gate, for every provider kind: a device holding a restic env that differs from the record's picks up the record's version on its next sync pass (previously a drifted local env was kept forever, so backup status/export there could silently use outdated credentials). A locally-newer env is protected exactly like a local key rotation -- the producer's parity stamp keeps the gate closed until its own change is pushed -- and a payload without an env never deletes a local one.
+
+The standalone RSA -> Ed25519 client-key migration (the background scheduler and the `minds migrate-ssh-keys` CLI, both unreleased) is removed: slice adoption in the imbue_cloud plugin now rotates legacy RSA client keys to Ed25519 through the reconciler desired state, which survives VM restarts (the standalone migration's raw `authorized_keys` append was reverted by cidata replay, and by the reconciler on adopted hosts) and de-authorizes the retired RSA key. `mngr imbue_cloud hosts rotate` is the manual path.
+
+Docs: new lost-device runbook (`docs/lost-device-runbook.md`), an "adoption" glossary entry, and a security-boundaries-audit addendum covering the adoption trust-model change and the operator-decryptability of stopped-workspace artifacts.
+
+Desktop-driven workspace sharing is now client-side for every row (Phase 1 of the user-controlled-keys plan, `blueprint/user-controlled-keys/`): enabling sharing on an imbue_cloud workspace uses the same connector `shares create` + materials-injection-over-the-user's-own-SSH path that local (docker/lima) workspaces already used, instead of the connector's server-side enable-sharing primitive. That server-side primitive now serves only web-created workspaces, which have no desktop client to inject from.
+
+Cloud rows skip the relay-region latency measurement (the desktop's latency says nothing about the pool host's); the connector applies its default region for them.
+
+Caveat during rollout: an older minds version enabling sharing on a workspace whose keys were later adopted (a future phase) would still call the server-side primitive and fail; upgrading minds resolves it.
+
+Workspace-sync SSH key correctness fixes (Phase 0 of the user-controlled-keys plan, `blueprint/user-controlled-keys/`):
+
+- Synced known_hosts material now replaces the existing pin for the same `[host]:port` and keytype instead of appending behind it. Previously a stale pin ordered first permanently shadowed the live key (paramiko takes the first entry of a keytype), which could wedge a synced workspace on a new machine forever.
+
+- The decrypted workspace-secrets payload now tolerates unknown fields, so a future minds version can add payload fields without making older installs reject the entire blob (which would have cost them the DR-critical restic env too).
+
+## 2026-08-14
+
+Revert https://github.com/imbue-ai/mngr-internal/pull/395.
+
+Fixed a flaky test in the desktop client's browser-authorization suite.
+
+`test_tampered_session_cookie_is_unauthenticated` altered the last character of a valid session cookie and asserted the result is rejected. But the cookie's signature is a 20-byte HMAC-SHA1 rendered as 27 base64url characters, so that final character carries only 4 significant bits: several distinct characters there decode to the identical signature. Roughly 6-10% of runs therefore produced a "tampered" cookie that was in fact byte-identical after decoding, authenticated normally, and failed the assertion with `assert '/' == '/login'`.
+
+The test now alters the first character of the signature segment, where all 6 bits are significant, and asserts up front that the mutated cookie actually fails `verify_session_cookie` -- so any future mutation that decodes to the same bytes fails at the mutation rather than as a confusing redirect mismatch.
+
+Test-only: the tampered-cookie rejection under test was always correct, and no product behavior changes.
+
+Updated the minds TMR mapper prompt (`apps/minds/tmr/mapper.j2`) for the reworked escalation schema, keeping it in step with the packaged template it mirrors.
+
+Escalation kinds now name the work rather than what happened to the reporting agent: `UNCAUGHT_BUG`, `FIX_DIRECTION_AMBIGUOUS`, `HARNESS_DEFECT`, and `SUITE_DUPLICATION` replace `BLOCKER` and `SHARED_PATTERN`. The minds-specific infrastructure guidance -- a Docker daemon and workspace snapshot, a deployed Modal env, or secrets being absent from the environment -- now sits under `HARNESS_DEFECT`.
+
+Each escalation carries one `description_markdown` (first line a one-sentence summary) plus `locations` naming the paths it concerns, and its prose is capped at 120 words for a suite duplication and 250 otherwise. Agents are told not to withhold escalations to keep the list short: many agents reporting one problem is the signal that surfaces it.
+
+# Reboot-resilience runbook: backfill sweep semantics updated
+
+Updated `docs/reboot-resilience-rollout.md` Step 2 for the fixed backfill sweep: the installer now explicitly fires the workspace start (starting the path unit alone never re-runs a latched-active service), the sweep verifies the fired run actually succeeded before reporting a VM as `backfilled`, and containers that predate `minds_start_services_agent.sh` (minds-v0.3.1) degrade to a container+sshd start with a journal notice instead of retrigger-looping the unit.
+
+Raised the e2e workspace-create readiness budget (`_CREATE_FORM_TIMEOUT_SECONDS`) from 600s to 900s: the budget covers a full docker build of the workspace image inside the CI sandbox, which legitimately takes ~8-10.5 minutes, so the old deadline had no headroom and failed the `build-minds-snapshot` job on roughly alternating runs (a healthy run measured 625s).
+
+next_deploy.md: the Phase 2 `just prep-server` sweep now also notes that prep retires the unmirrored per-disk swap partitions (the 2026-08-07 nvme-failure blast radius), so the sweep must run even on boxes already prepped for the reboot-resilience autostart unit, with per-box verification via `cat /proc/swaps` and the new `raw_swap_devices` / `degraded_md_arrays` fields in `just audit-boxes`.
+
+Desktop sharing improvements:
+
+- The Share tab now shows per-step provisioning progress while a new share link comes up (link registered / TLS certificate issued / tunnel connected / end-to-end check) instead of a static "this can take a minute" message. The signals ride the existing readiness poll, which now also returns `cert_not_after` and `last_tunnel_login_at`; the tunnel step is detected by the login stamp changing during the wait.
+
+- First-time shares of local (docker/lima) workspaces now pick the relay region by measured TCP connect latency from the user's machine instead of always landing on the tier's default region. Re-shares keep their existing region (the region is baked into the share's domain).
+
+Custom services (the ones minds ships itself, currently `claude.ai`) now work in remote workspaces: their latchkey registration is written into the config of every gateway that serves minds agents, including the VPS-resident one, so it travels with the credentials that are synchronized there. Previously a remote workspace received the credentials but its gateway could not match a request to the service and never injected them.
+
+Claude can now be connected from the Connectors tab and the permission dialog like any other service: `claude.ai` signs in through the browser (capturing its session cookie) instead of requiring hand-written credentials.
+
+The additional-services section of `docs/latchkey-permissions.md` is updated for both.
+
+Minds 0.3.13.
+
+The app version is now `0.3.13`, and a shipped binary clones the `minds-v0.3.13` default-workspace-template tag when it creates a workspace.
+
+A machine restart no longer reports itself as failed just because the machine booted slowly. The restart worker waited 30s for the system interface to answer, but a cold boot regularly takes 90-180s, so an ordinary restart showed "restart failed" on the recovery card (and reported an error) moments before the machine came back healthy on its own. The wait is now sized from the same cold-boot budget the create flow already uses, so only a restart that genuinely does not converge is reported as a failure. Quitting the app mid-restart also no longer reports a failure it never observed, and no longer leaves the restart thread sleeping past shutdown.
+
+## 2026-08-13
+
+# Start a wedged machine back up without waiting to be asked
+
+A machine that stops answering now gets one automatic `mngr start`. The pre-SPA app did this from the renderer -- the chrome navigated a stuck machine to the recovery page, whose entry script dispatched the restart -- and the rewrite dropped it, leaving a wedged machine wedged until someone noticed. The dispatch now hangs off the health tracker's probe-confirmed stuck edge, so it fires once per outage, does not duplicate across windows, and keeps working once the window that was watching the machine has closed.
+
+It is start-only: a pure `mngr start` checks ground truth at commit time and no-ops against a running host, so it can cold-boot a stopped machine but never bounce a live one. Bouncing a running-but-wedged machine stays the user's decision, on the recovery card.
+
+`dispatch_host_restart` now backs both this and the `/api/v1` restart route, so one place claims the restart, opens the operation record, and spawns the worker. The claim is the workspace's own operation slot, taken atomically, which also serializes restarts against backups: a restore stops the machine's services for minutes -- exactly what drives a machine stuck -- and a restart that took over the restore's record would strand its poller and misreport both. The unattended dispatch is what makes that race real, since it runs off the probe loop rather than a request.
+
+If the automatic restart runs and the machine still does not answer, the recovery panel raises itself. That is the end of the automatic path, and a one-line band is too quiet for it; every other condition leaves the band as the only surface and waits to be asked. Only a live transition raises the panel -- a window opened onto a machine already in that state gets the band, since "Open recovery" is one click. A panel nobody asked for closes itself once the machine answers, and is dropped on reconnect, when the window can no longer know the failure still stands. A panel you opened yourself stays, and tells you how it ended.
+
+A machine that comes back gets its view rebuilt in every window showing it. Each window went on painting whatever it last served -- an error page, or a half-loaded one -- and recovering does not change that view's address, so it would sit there until you navigated away and back. This hangs off the recovery rather than the panel, so it also covers the ordinary case, where the restart works and no panel is ever raised.
+
+A machine you stopped yourself stays stopped while Minds runs. Its interface is unreachable either way, which probing cannot tell apart from a wedge, so an in-app stop marks it as deliberate -- otherwise stopping a machine would drive it stuck and the app would start it straight back up, billing you for it on a metered provider. The mark is dropped as soon as the machine answers a probe, so it lasts exactly as long as the machine is down, however you bring it back -- including by clicking its row, which starts it without going through the start button. The exception is the stop itself: a machine keeps answering for the first seconds of one, and a cloud stop takes minutes, so the mark holds until the stop returns.
+
+Quitting marks the machines it shuts down too. A partial stop offers Cancel quit, which puts you back in the app with those machines down, so the mark has to outlive the stop. It still dies with the process: the next launch restores your windows and brings those machines back with them, which is the point.
+
+So does destroying one. A machine being torn down looks exactly like a wedged one from the outside, and the app would otherwise try to start it back up seconds into the destroy. That mark is never taken off: a destroyed machine has no answer left to give, and one whose destroy failed is yours to sort out rather than something to cold-boot.
+
+The system-interface health tracker now understands the forward plugin's new `STALLED` backend-failure reason, which reports a request the backend has not answered yet rather than one that failed. It enrolls a probe suspect exactly like the other status-less reasons: a wedged backend is indistinguishable from a slow one at that moment, and the background probe adjudicates. Enrolling a merely-slow backend costs one probe that answers 200 and clears the flag, whereas declining to enroll a wedged one would leave it undetected, since a healthy non-suspect agent is never probed.
+
+No behavior change for existing reasons, and no new path to STUCK: as before, only a sustained run of probe failures gets there.
+
+Bump Latchkey to 3.5.0.
+
+Restructured `docs/next_deploy.md` from a raw scratchpad into the actual
+deployment checklist for the next staging/production release, based on a
+completed audit of every change since `minds-v0.3.11` (per-project changelogs
+in this repo and in default-workspace-template, plus targeted diff
+verification).
+
+The checklist is now organized so that everything independent is prepared and
+verified BEFORE any change that could affect existing staging or production
+users: a "code that must land before the release" section (the connector
+`/account` compat fields for v0.3.11 clients, the desktop guard that refuses
+to share a pre-share-gateway workspace with an update-self pointer, and the
+cloudflared state cleanup in the workspace template), a Phase 0 of
+independent preparation (relays + PSL, Vault entries, the oauth redirector,
+pinned-image preflights, the Cloudflare R2 token migration, a dev-tier
+rehearsal, an old-workspace compatibility smoke test, and the
+reboot-resilience in-VM backfill script), then staging, then production
+(including the pool re-bake and the fleet sweeps), then a post-deploy cleanup
+list (the old `dev1` relay, orphaned Cloudflare tunnel-era resources, and
+removal of the temporary `/account` compat fields).
+
+Also records the audit's accepted no-action outcomes: old label-less service
+registrations self-heal on `update-self`, v0.3.11 installs that never update
+cannot materialize Ed25519-keyed records (fixed by updating), and lima's
+shared client key stays RSA for now. (The checklist was subsequently revised
+as decisions landed: the web surface IS active -- unadvertised -- on staging
+and production, and the code items below shipped on this branch.)
+
+Deployment-prep code changes on the same branch:
+
+One-off RSA -> Ed25519 client SSH key migration: the desktop client now
+rotates per-host-keyed (imbue_cloud layout) workspaces' RSA client keys to
+Ed25519 in the background -- the owner-exec channel the hosted web chrome
+drives only accepts Ed25519 signatures. The new public key is authorized on
+both layers (container via `mngr exec`, outer host via `mngr exec --outer`)
+before the local files are swapped, with an end-to-end verify and automatic
+rollback to the preserved RSA pair, so the rotation can never lock the
+install out. Runs against RUNNING hosts only, once per host (marker under
+the minds data dir, per-session attempt cap); `minds migrate-ssh-keys` runs
+the same pass manually. The lima provider's shared root key is deliberately
+out of scope (its VMs overwrite authorized_keys from the baked lima.yaml on
+every boot).
+
+Enabling sharing on a workspace created from a pre-share-gateway template
+(minds-v0.3.11 and older) is now refused up front with an actionable message
+(update the workspace via update-self, then share again) instead of going
+active on the connector and silently never becoming reachable. Marked
+CLEANUP for removal once no supported workspaces predate the share gateway.
+
+The `[web_workspaces]` deploy.toml pins are now optional: `minds env deploy`
+resolves the web-create template as `MINDS_WEB_TEMPLATE_REPO`/`REF` env vars
+> the deploy.toml pin > the defaults (the canonical default-workspace-template
+repo key and the app's pinned release tag). `FALLBACK_BRANCH` moved to
+`build_info.py` (re-exported via `desktop_client/workspace_defaults.py`) so
+deploy-time code shares the desktop app's pin without importing the desktop
+client.
+Staging and production now carry `[web_workspaces]` blocks, so web create is
+active (unadvertised) on both tiers.
+
+New `minds server backfill-autostart` (and `just backfill-autostart`):
+env-aware wrapper for the reboot-resilience in-VM backfill sweep (see
+`docs/reboot-resilience-rollout.md`, which now points at the sweep instead of
+saying it must be written).
+
+When you share a workspace, the desktop client now writes the owner's account email into the workspace at `data/.state/share/owner_email` (removed when you unshare), so in-workspace services can learn who owns the workspace. The owner's email is never exposed in a per-request header; its presence in that file also signals that sharing is currently active.
+
+Minds 0.3.12.
+
+The app version is now `0.3.12`, and a shipped binary clones the `minds-v0.3.12` default-workspace-template tag when it creates a workspace.
+
+The launch-to-msg end-to-end test now drives the permission request the way a person does: it clicks the in-chat card's "Review & respond" button to open the review popup, then answers the request there. The test previously waited for the popup to appear on its own and timed out after 360s without ever clicking Deny, so the Slack permission flow could not pass.
+
+Changed: documented (in `docs/next_deploy.md`) the old-workspace terminal
+regression found during the dev-josh-1 deployment rehearsal: pre-update
+workspaces' system_interface serves terminal/browser panels through a
+`/service/<name>/` service-worker bootstrap that loops forever under the new
+desktop client's partitioned content embedding. The fix is a compat redirect
+in the forward proxy (see `libs/mngr_forward`'s changelog entry); old
+workspaces now keep working terminals without `update-self`.
+
+Added a per-machine Permissions screen to the workspace options panel, joining Share machine and Machine settings as a third tab (key icon) in both the titlebar icon-tabs and the panel itself.
+
+The screen renders every permission as a toggle, grouped per connection: one left-nav entry per connected (service, account) pair with grouped per-permission switches (Full access, then per-area groups, then an unrestricted-access Extras group), an Add connection entry that runs the existing browser sign-in for services with no account yet, plus Local files (shared-path grants) and Other machines (cross-workspace management verbs) sections. Each connection also gets a Revoke all action scoped to this machine.
+
+Flipping a toggle posts that single flip; the desktop client recomputes the affected rule's complete permission set server-side and writes the full set through the latchkey gateway's permissions extension, never a diff. Turning a connector rule's last permission off deletes the rule; latchkey-self rewrites preserve unrelated baseline permissions, and revoked path/verb grants whose schemas are still in the host file can be toggled back on. Every write returns the refreshed screen, so what you see is always what the server actually wrote, and a refused write leaves the screen exactly as it was.
+
+The Permissions pane loads independently of the panel's other tabs: a latchkey gateway that cannot be reached shows as "can't load permissions" instead of an empty, misleading "nothing granted", and no longer takes Share and Machine settings down with it (nor the reverse).
+
+The pane leads with a "Waiting on you" strip when this machine's agents have pending permission requests: plain rows carrying the service mark, the request title and the agent's reason, oldest first, with the first three shown and the rest behind a "+N more" reveal. Each row opens the review popup on that request.
+
+Permission requests are now popup-only, and the popup opens only when you ask for it. A pending request waits: the "Review & respond" button on the machine's in-chat permission card and the "Waiting on you" rows in its Permissions tab are the two ways in, and either one floats the review as a centered popup over whatever you are looking at, headed "Permission request for <machine>". Resolving it advances to the next pending request and the popup closes when none remain; a request resolved somewhere else drops out rather than leaving a stale form on screen. The master/detail request list is gone, and so are the titlebar Requests button and count badge.
+
+Nothing opens the permission popup over your work any more. A request arriving while you were mid-sentence used to pop the review dialog on top of you and pull the window to the front; now it just sits and waits until you go and look at it. The "Open this automatically when a new request arrives" checkbox is gone with it, along with the stored preference behind it and the window-focusing ask it used to send.
+
+The popup is one of the app-level modals, so it behaves like Minds settings, Accounts and Get help do: it floats over the surface it was opened from, which stays live behind it — the machine you were in keeps running, and the workspace options panel keeps its scroll, its selected section and its in-flight edits. Escape and a backdrop click dismiss the popup alone and put you back exactly where you were, so a request reviewed from the Permissions pane leaves that pane standing.
+
+The grant dialog no longer lists raw permission schema names as a flat checkbox list. It leads with a plain-English "Approving will let the agent" summary of what is about to be granted, with the full editor behind an Adjust link: every offered permission grouped under its heading, rendered as toggles, with the catch-all last and marked. A schema name is never shown as visible text. Adjust now sits under the summary, indented to the same column as the list it edits, rather than floating off to the right; and the editor has a way back — "Back to agent's picks" restores exactly what the request asked for and returns you to the summary, where before opening the editor was a one-way door.
+
+The grant dialog reads as one thing now instead of a stack of boxes. It opens with the service's own mark in a rounded square beside its name — "Slack", not "Slack permissions" — and drops the "Requested by an agent in <machine>" line, since the popup's own heading already names the machine. The agent's reason moved out of an unlabelled grey card into a plain "Reason" section, and Deny and Approve moved to the bottom right in that order, in red and green, instead of sitting left-aligned with a black Approve leading. Requests that name no service — local files, other machines, device accounts — now carry those names as their titles, matching what the Waiting on you rows call them.
+
+The account a grant rides on is a dropdown now, not a column of radio buttons, and the dialog has two shapes rather than three. With nothing signed in there is no picker at all and the button reads "Sign in & approve", so the browser hop is not a surprise. With anything signed in — one account or several — the dropdown appears under an "Account" heading, the account the grant will ride on already selected and "+ Add account" last, each account carrying its own note (needs sign-in, not connected yet) in parentheses. A single account is not a third arrangement: it gets the same dropdown, because a service you hold several accounts on should never leave which one unsaid. Choosing "+ Add account" flips the button back to "Sign in & approve" — it stages a new sign-in rather than picking an account, and nothing is signed in until you approve — and leaves the dropdown in place, so the choice can be taken back.
+
+Granting a permission request can no longer submit a specific permission alongside the catch-all one. The specific toggles disable while the catch-all is on, but a permission turned on before it stayed in the submitted set and quietly granted more than the dialog showed; the catch-all is now exclusive on submission whatever the order of clicks.
+
+"Review & respond" on a workspace's in-chat permission card now opens the request you clicked instead of dropping you at the top of the request list. The request id the workspace sends is re-checked against its server-issued shape before it is used.
+
+Resolving a request in the popup flips that workspace's in-chat permission card to Approved or Denied immediately, instead of the card waiting for the resolution message to travel back through the agent's transcript. The verdict is delivered over the shell/workspace embed contract, so it behaves the same in the desktop app and in a plain browser, and it is addressed to the workspace the request belongs to rather than to the agent that filed it (latchkey requests are filed by a workspace's system-services sibling agent, so those are different agents).
+
+Resolution messages to the agent now retry with backoff for about two minutes when the agent is stopped or mid-restart, instead of being silently lost. Previously a resolution that raced the agent's lifecycle left the chat card stuck on "Review & respond" with the agent never resuming. The retry aborts promptly on app shutdown.
+
+Connector sign-in failures no longer dump a raw Node.js stack trace into the UI: the latchkey CLI's failure output is condensed to its meaningful error line, with the full output still going to the log.
+
+Add connection now also lists the services this machine is already connected to, under "Add another account" and above the services with no account yet, so a second account for a service is added from the same place as the first. A completed sign-in — whether it connected a new service or added another account — moves the pane to the connection it produced, so its permissions can be set straight away; a sign-in that produced no new connection leaves the pane where it was.
+
+A connection's heading is a size smaller, and the account beside it now matches the service name's size while staying lighter, so the two read as one title rather than a heading with a footnote.
+
+The workspace options panel no longer stretches with the window. It caps at 880px, hangs from the titlebar tabs rather than sitting centered, and keeps at least 24px of breathing room on each side at small window sizes. Permission rows highlight on hover with a soft background that extends slightly past the text.
+
+Service marks are each service's real logo now, instead of a flat silhouette tinted with the brand's hex. Slack is the four-colour hash, Gmail the red-and-white envelope, Google Drive the three-colour triangle. Where a brand draws its own mark in a single colour — GitHub, Linear, Sentry, Dropbox, Discord and Yelp — that is what shows, because that is the logo, not a monochrome treatment. Calendly and Umami are the two exceptions: no colour artwork for either exists in the icon sets Minds draws from, so they keep the flat silhouette the whole set used to be, in the brand's own colour. The left nav, connection headings, Add connection and Waiting on you all draw from the same set, and a service with no mark at all still falls back to its plain glyph. Colour is what says a service is connected on this machine: a mark is drained to grey wherever it is not, so the left nav's disconnected rows and the whole "Connect a new service" list read grey, while "Add another account" — services that already have an account here — keeps its colour.
+
+A connection that is no longer connected shows its own logo drained of colour and dimmed, rather than the mark turning grey — the row reads as inactive without the service losing its identity.
+
+Every service in the catalog now has its real mark — the last four holdouts (Claude, Coolify, ngrok and Ramp) are filled in, the latter two straight from the vendors' own brand kits since no open icon set carries them.
+
+Seven marks are near-black and would disappear on the dark theme's surface: AWS, GitHub, Linear, ngrok, Ramp, Sentry and Umami. Each of those now ships the vendor's own published white version of the logo as a second file, and the theme picks between the two. Nothing is recoloured to suit the theme — several of these brands' usage rules forbid exactly that, and the previous release notes' "render as a light neutral there instead" was that alteration. For the same reason the onboarding carousel no longer inverts its icons on the dark theme, which was turning Google's blue orange and Gmail's red cyan.
+
+The artwork comes from two open icon sets — SVG Logos by Gil Barbara (CC0) and selfh.st/icons (CC BY 4.0) — plus the official ngrok and Ramp brand kits for the two marks no set carries. The CC BY set's attribution and the brand-kit provenance ship with the app, next to the artwork itself, in `static/service_icons/ATTRIBUTION.md`.
+
+Add connection in the Permissions tab no longer offers a browser sign-in to a service that has none. Every service it lists now travels with how its next account is connected, so AWS, Coolify and the like open a credential form — one labeled input per value the service's own command asks for, plus a name for the account when the service already has one — instead of a Connect button that fired a browser flow that could never succeed. The credentials are stored by running the service's own command, exactly as approving a permission request does; a credential the service refuses is reported next to the fields, with everything typed left in place so one wrong value can be corrected. A connection made this way lands on its new entry with nothing granted, the same ending as a completed sign-in. A service Minds cannot work out any credentials for offers no action at all, and says why on hover.
+
+Permission requests open as an app-level modal over whatever you are looking at, sharing the same overlay the Minds settings, Accounts and Get help dialogs use, rather than a second popup mechanism of their own. Reviewing a request from the Permissions pane leaves that pane mounted underneath and returns you to it, still on the connection you were reading, and Escape closes the request first and the pane only on a second press.
+
+A connection attempt that a service refuses now opens as a popup instead of a line of text above the pane. What these say is usually an errand somewhere else entirely — "your Zoom user is not allowed to create apps in the Zoom App Marketplace; ask an administrator of your Zoom account to grant you the developer privilege, then try again" — and runs to several lines, which is easy to miss as a thin banner at the top of a pane you have scrolled down. It stays up until you close it. A pane that cannot load, and a permission toggle the server refuses, keep the inline notice they had: the first explains the empty pane it sits on, and the second belongs next to the row that would not move.
+
+The permission request dialog always names the account the grant will ride on when there is one. A service can hold several accounts and the grant lands on exactly one of them, so a dialog headed only "Slack" left which one unsaid. Naming it is the Account dropdown's job in every signed-in case, which is why the header carries the service and nothing else; with nothing signed in yet there is no account to name.
+
+A connection in the Permissions tab now has a Sign out button at the bottom of its panel. It asks first, naming the service and the account, and does nothing at all if you decline. Signing out is not limited to the machine you are looking at: it clears the stored credential itself, so the account is signed out everywhere, and its permissions are stripped from every machine that held them — reconnecting means signing in again from scratch. That makes it a different action from Revoke all in the panel heading, which only drops this machine's permissions and leaves the account signed in. Once the sign-out lands the pane moves off the connection that no longer exists, and a service whose last account was signed out reappears under Add connection. An account with leftover grants but no stored sign-in offers no Sign out, since there is nothing left to clear.
+
+A disconnected account's notice pointed at "Minds settings → Connectors" to reconnect it. Connections are added and reconnected from Add connection in this same pane now, so the notice says that instead of sending you to another screen to do what is one click away.
+
+Minds settings now uses the same two-column pane as a machine's Permissions, Share machine and Machine settings tabs: the section list on the left and the panel on the right scroll independently, so the list stays in view however far down a panel you read. Before, the whole settings card scrolled as one and the section list slid off the top of it. The settings card also takes a fixed height now, so switching between Connectors and Master password no longer resizes the window and moves the list out from under the cursor.
+
+The four panes share one layout component instead of four hand-rolled copies of it, so the settings list is the same width as the other three and its entries are styled the same way — the selected one filled and bold, the rest in the same weight and tone as every other pane's. Accounts, Get help and the permission request popup are unchanged: they are single columns and still scroll as a whole.
+
+A connector whose `latchkey services info` probe fails is asked again on the next load instead of being remembered as a browser sign-in. The probe degrades to a fallback whose empty `authOptions` reads as "signs in through a browser", and the Permissions pane was caching that guess for the life of the process: one transient failure (a locked keychain, a latchkey upgrade mid-flight) left Add connection offering a browser flow that AWS, Coolify and the like have no way to complete, with no way to recover short of restarting the app.
+
+Submitting credentials for a browser-less connector no longer waits on an online latchkey probe, and a probe that fails now says so. The probe was the only one in the pane that validated over the network, and its failure fallback reads as "signs in through a browser" — so a latchkey hiccup told you AWS is connected by signing in and threw away the key and secret you had just typed.
+
+The Permissions pane keeps up with requests resolved in the popup. Approving from a "Waiting on you" row used to leave the row on the pane behind it — clicking it again reopened the popup on a request that answers "no longer available" — and the permission just granted still read as off until the panel was closed and reopened. The pane now re-reads whenever the pending set changes, without blanking what is on screen and without racing a toggle mid-flight.
+
+A permission flipped while a connector sign-in is running is no longer undone by the sign-in finishing. The post-sign-in re-read now takes its turn in the same queue as the flips, so it can never answer with the view from before one of them.
+
+A connection's accounts are listed in the Permissions nav the way Minds settings lists them — the ones this machine is signed in to first, then grants left behind by an account that is not, with the unnamed default last — instead of alphabetically by label, which led with "Default account" and put a disconnected account above a connected one.
+
+Denying a request now moves the popup on to the next one, the way approving already did. Because a deny is marked in flight before the popup advances, the successor was being picked off the head of the queue instead of from the denied request's own position — so denying the third of four pending requests sent you back to the first, one you had already read past.
+
+A stale "Review & respond" link stays on its "no longer available" notice instead of being swapped for someone else's request. The popup advances off a selection that was resolved while you were looking at it, but it was doing the same for a request that was never pending in the first place — so the next unrelated request to arrive, for any machine, quietly replaced the notice with a live Approve/Deny form under a click aimed at dismissing it.
+
+The permission dialog's Approve button no longer promises a sign-in for a service that has none. AWS, Coolify and the like connect by the credentials the dialog asks for, so "Sign in & approve" sat directly above their credential form — and beside a "+ Add account (asks you for credentials)" option saying the opposite. Those read "Approve"; the services latchkey really does sign in to are unchanged.
+
+The Permissions pane's per-account "Sign out" action is now called "Disconnect", matching the settings page: it clears the credential Minds stored — on every machine — without signing the browser itself out, and the confirm dialog now says so. The backend route follows (connector-sign-out is now connector-disconnect).
+
+The plain-Notion icon is gone along with the service it belonged to: the catalog now lists only Notion (MCP), whose mark is the same artwork, so nothing changes visually. Desktop-client latchkey callers also now handle a failed `services info` probe explicitly instead of consuming a degraded stand-in object; user-visible behavior is unchanged.
+
+## 2026-08-12
+
+Added the pytest witnesses for the `apps/minds/behaviors` corpus (browser-authorization and home-page areas), generated by `tmr-behaviors` map-reduce runs over the corpus.
+
+Every unit's witness carries a `witnesses("<coordinate>", partial=...)` marker tying the test to its behavior coordinate, so `mngr behaviors matrix` reports per-unit coverage.
+New files `test_browser_authorization_invariants.py` and `test_home_page.py` hold the invariant and home-page witnesses; additions to `test_desktop_client.py`, `auth_test.py`, `responses_test.py`, and `ui_api_test.py` witness the remaining scenarios.
+
+Drove one incidental copy fix that the corpus surfaced.
+The `home-page.discovering` scenario mandates that the discovery progress page read "Discovering workspaces", but both render paths showed "Discovering agents"; a spec-ahead hedge in `home-page/overview.md` had been licensing the witness to defer that string rather than assert it.
+Removed the hedge so the overview states the requirement plainly, then a scoped `tmr-behaviors` re-witnessing run corrected the copy on both render paths -- the Mithril landing page (`frontend/src/views/pages/LandingPage.ts`) and the server-rendered template (`templates/pages/Landing.jinja`), plus the `render_landing_page` docstring and the desktop-client README -- and tightened the `@discovering` witness to assert the mandated copy and the progress block's self-refresh against real rendered output.
+(*Workspace* is the user-facing unit throughout minds; an *agent* is a process running inside one, so the screen now names what it is actually looking for.)
+
+The `launch-to-msg` e2e now captures the console errors and warnings the workspace pages emit, along with any exception they leave uncaught, so a UI failure can be diagnosed from the CI artifacts.
+
+Electron forwards only its main process's console to `electron.log` -- artifacts carry `[backend]`, `[lifecycle]`, `[nav]`, `[startup]` and nothing from the pages themselves. So when the app reported a failure of its own (`MessageInput.ts` logs `console.error` on a failed send, for instance), the message reached no artifact and the run could only be diagnosed by inferring from screenshots.
+
+Advanced the dev tier's pinned web-create template (`[web_workspaces].template_ref` in `envs/dev/deploy.toml`) to `mngr/final-web-details`, pairing the connector's `POST /hosts/claim` with pool slices baked from that default-workspace-template branch.
+
+Added an "Enable web access" toggle (default off) to the create form's advanced view: when on, the workspace is brought up shared post-create so it is reachable from the hosted web client. imbue_cloud rows delegate to the connector's server-side enable-sharing primitive; local docker/lima rows run the desktop share flow with the owning account as the sole grantee. Requires a selected account (the create is refused otherwise).
+
+Desktop-injected share materials now include `SHARE_CHROME_ORIGIN` (the connector origin, where the web chrome is served), so desktop-shared workspaces are embeddable and health-probeable from `/web` exactly like connector-shared ones.
+
+Fixed a latent workspace-breaking hazard in the backup scripts: the restore flow (and the backup-service update flow, including its rollback path) ran a plain root-closure `uv sync` inside the workspace before `supervisorctl restart all`. Because `uv sync` is exact, that pruned any uv workspace member that is not a root dependency from the venv, deleting its console script and turning its `uv run <name>` supervisord program into a spawn error on the restart -- this is what broke the `owner-exec` service (and the minds snapshot-resume test) on every restore. All three call sites now run `uv sync --all-packages`, matching the workspace's boot-time venv converge. The dwt-side half of the fix (making `owner-exec` a root dependency and re-enabling its supervisord program) landed on default-workspace-template branch `mngr/finish-web-only`.
+
+Added the web-client tombstone-safety test: a cloud (imbue_cloud) workspace record -- including web-created rows this device never materialized SSH keys for -- is never tombstoned by the "definitively absent from local discovery" pass; only lease state ends a cloud row's life. The equivalent locally-hosted row in the same conditions is still tombstoned (the pass itself keeps working).
+
+Updated the workspace record sync tests and docstrings for mngr's switch to Ed25519 client SSH keys: newly created workspaces sync OpenSSH-format Ed25519 keys, while records synced from older installs still carry RSA PEM keys (the materializer keeps handling both, with a dedicated legacy-compat test).
+
+Added a crossed-edit test crystallizing the desktop's CAS-rebase semantics when the desktop and the web client edit one workspace record inside the same CAS window (the desktop rebases once and last-actor-wins, per the documented `_push_record` contract; the web side is the merging side).
+
+New `docs/next_deploy.md`: a running checklist of everything the next staging/production deployment must get right (the `[web_workspaces]` pins + pool re-bakes, the partitioned-cookie re-login, the production chrome domain, relay config), anchored on a required audit of all changes since `minds-v0.3.11`.
+
+Per-env dev share relays: on per-env Modal tiers (dev / ci), `minds env deploy` now pins the connector's sharing secret to the env's own relay -- region label = the env name (underscores mapped to hyphens), endpoint `relay.<env>.<domain>:7000` -- instead of every dev env competing for one shared dev relay whose frps plugin-auth URL can only serve a single env's connector. Staging / production keep their Vault-configured relay fleet. Stand an env's relay up with the new `just provision-dev-relay` (see `docs/environments.md`).
+
+Fixed the create form's "enable web access" toggle for local docker/lima workspaces: it crashed in the post-create worker thread with "Working outside of application context" (the connector/broker URLs were resolved via Flask's current_app, which is unbound off a request), so the share materials were never injected and the workspace's share-gateway never dialed the relay. The URLs are now captured in the request context and threaded into the post-create enabler. The enabler also now swallows any unexpected error (logging a traceback) instead of letting it crash the create's remaining post-create steps. Cloud (imbue_cloud) rows were unaffected -- they enable web access entirely connector-side.
+
+Hid the internal `owner-exec` service from the workspace Share dialog's per-app targets, alongside the chat/terminal/browser interfaces. owner-exec is the SSH-equivalent exec channel authorized by request signatures (never a share grant), so it should never be offered as an individually shareable app.
+
+Also hid `owner-exec` from the SPA workspace-options endpoint's share targets (`ui_api_options.py`), which carries its own copy of the interface-exclusion set that the desktop SPA's Share tab actually reads -- the earlier `templates.py` change only covered the legacy server-side options modal.
+
+Broadened the desktop's restic auth-propagation retry (`restic_cli.py`) to also match restic's rendered "The request signature we calculated does not match ..." phrasing, not just the bare `SignatureDoesNotMatch` S3 code -- the same not-yet-propagated-credential window the in-workspace provisioning handles.
+
+Added `docs/reboot-resilience-rollout.md`: a one-time operator runbook for deploying the August 2026 reboot-resilience fixes to the production fleet -- the box-level slice autostart + unattended-upgrades reboot pin (re-`prep-server` sweep, from this PR's mngr_imbue_cloud changes) and the in-VM volume-gated workspace autostart backfill (from default-workspace-template#381). Documents what is automatic vs. operator-driven, the per-VM backfill sweep script that must be written first (older slices bake a different services-agent path), verification commands, and that no database migrations are required. Deferred follow-ups are tracked in mngr-internal#333.
+
+Merge the web-only workspace/accounts work (`mngr/hopefully-last-web-details`) into main.
+
+Added an "Enable web access" toggle (default off) to the create form's advanced view: when on, the workspace is brought up shared post-create so it is reachable from the hosted web client (imbue_cloud rows delegate to the connector's enable-sharing primitive; local docker/lima rows run the desktop share flow with the owning account as the sole grantee, and the Flask app-context crash in that path is fixed). Desktop-injected share materials now include `SHARE_CHROME_ORIGIN` so desktop-shared workspaces are embeddable and health-probeable from `/web`.
+
+All sign-up/sign-in moves to the connector's hosted browser page: every auth entry point launches `mngr imbue_cloud auth login` with a new Mithril waiting modal (copy-the-link fallback), the legacy in-app JinjaX auth pages / `static/auth.js` / check-your-email flow are deleted, email verification is non-blocking, and signing out revokes only this device's session. `minds env deploy` now builds the connector's accounts + web-chrome frontend bundles before `modal deploy`.
+
+Per-env dev share relays: `minds env deploy` pins the connector's sharing secret to each dev/ci env's own relay (region label = env name; stand one up with `just provision-dev-relay`); staging/production keep their Vault-configured fleet. New `docs/next_deploy.md` deployment checklist.
+
+Hid the internal `owner-exec` service from the workspace Share dialog and SPA share-target endpoints. Fixed the backup restore/update scripts to run `uv sync --all-packages` (a plain root-closure `uv sync` pruned non-root workspace members and broke `owner-exec` on restore). Workspace records now sync Ed25519 client SSH keys (RSA PEM from older installs still supported), plus a tombstone-safety test for web-created cloud rows and a crossed desktop/web CAS-edit test.
+
+Removed the phantom `global = true` key from the `data/.state/apps.toml`
+example in `docs/overview.md` (ticket da-i0go). `system/scripts/forward_port.py`
+writes only a service's `name` and `url`, and nothing reads a `global` key, so
+the example documented a field that does not exist. Sharing is machine-level, so
+there is no per-app global flag to set.
+
+Removed the dead pre-SPA front end of the minds desktop client. The Mithril SPA (`apps/minds/frontend/`) has owned every page since the web-only merge; this deletes the unused JinjaX rendering layer (`desktop_client/templates/`, `templates.py`) and all template-only static assets (the legacy per-page vanilla JS, the Tailwind `app.css` and its entire build chain, `latchkey_logo.png`), along with the `jinja2`/`jinjax` dependencies. `static/` now holds only the embed contract module, the Sentry browser bundle + init, the service icons, and the built SPA bundle.
+
+Live logic that had been living in `templates.py` moved to dedicated modules: `workspace_defaults.py` (template repo URL/ref defaults, including the release-pinned `FALLBACK_BRANCH`), `host_names.py` (host-name slug/`workspace-N` derivation), `create_status.py` (create-attempt captions and progress durations), and `data_types.py` (`RemoteWorkspaceTile`). The release docs now point at `workspace_defaults.py` for the `FALLBACK_BRANCH` bump.
+
+Browser-side Sentry error reporting now works in the SPA: the index page emits the same Sentry bootstrap the deleted JinjaX layout used to (gated on the user's error-reporting setting). It had been silently absent since the SPA migration.
+
+The few remaining server-rendered responses are now dependency-free static documents (`static_pages.py`): the invalid one-time-code page and the friendly 404/405 navigation page; the unauthenticated `/welcome/skip` request now redirects to `/login`.
+
+The inbox's HTML-fragment path is gone: request handlers only expose their typed `build_request_detail_payload` (the SPA renders the dialogs), and the latchkey dialog vocabulary moved from `latchkey/handlers/templates.py` to `latchkey/handlers/account_choices.py`.
+
+The legacy `ChromeEventBroadcaster` (the fan-out for the deleted `/_chrome/events` SSE) was removed; producers publish `workspace_stopped` / `open_help` / `workspace_refresh` frames directly onto the `/ui/ws` channel via the UI state publisher.
+
+`scripts/visual_diff.py` lost its JinjaX `capture` mode; `capture-spa` and `compare` remain.
+
+`app.py` also shed the helpers the SPA route flip had orphaned: the legacy `POST /workspaces/destroyed/<agent_id>/delete-backup` form route (the SPA calls the `/ui/api/destroyed-workspaces/<agent_id>/delete-backup` twin) and a set of zero-reference private helpers whose live successors are the `ui_api_*` modules. The unit tests that had pinned the dead copies now target the live twins (the recovery SSH-command builder and workspace-coordinate resolver in `ui_api_lifecycle.py`, the host-coordinate helper in `ui_api_options.py`).
+
+`scripts/download-binaries.js` now retries failed downloads harder (8 attempts with backoff capped at 30s, up from 5 attempts / ~15s total): GitHub's release CDN resets connections for minute-plus windows from cloud-builder egress, which made the minds e2e Modal image bake fail on the dugite-native download once this branch's build-step change invalidated the cached layer.
+
+All sign-up/sign-in moves to the web: accounts are created and signed in on the connector's hosted browser page, not in the app.
+
+- Every auth entry point (the welcome splash, Add account, Sign in again, the create flow's Imbue Cloud preset, the sharing sign-in nudge) now launches `mngr imbue_cloud auth login` -- the hosted page in the system browser -- and the new Mithril waiting modal narrates the flow with a copy-the-sign-in-link fallback and error handling. Sign-in lands back in the app automatically.
+
+- The legacy JinjaX auth surface is deleted: the in-app sign-up/sign-in pages and modal, `static/auth.js`, the check-your-email verification flow (email verification is now non-blocking; only opening a workspace shared with you and the ally plan require a verified email), and the Electron shell's auth-page special-casing. The retired `/auth/login` / `/auth/signup` URLs redirect into the SPA, which starts the browser flow.
+
+- Signing out of the app now revokes only this device's session; the account's browser session and other devices stay signed in ("Sign out of all devices" lives on the hosted account page).
+
+- `minds env deploy` now builds the connector's accounts frontend bundle (`apps/remote_service_connector/frontend`, pnpm + Vite) before `modal deploy`, and fails fast with a clear error when pnpm is missing.
+
+- New deployment tests cover the hosted surface: an HTTP-level walk of the browser-login contract (cookie signup, confirmed authorize, PKCE code exchange, device-scoped sign-out) and a Playwright pass over the real pages.
+
+- Switching plans with an unverified email now shows a contextual prompt on the Accounts page: the app auto-sends the verification email on the connector's structured `email_not_verified` refusal and offers a resend button (new `POST /accounts/<user_id>/resend-verification` route).
+
+## 2026-08-11
+
+Added `POST /api/v1/agents/<agent_id>/refresh`, which lets an agent inside a workspace ask the app to rebuild that workspace's displayed view. The ask reaches every open window as a `workspace_refresh` frame on the UI channel, and each window whose content frame is mounted on that workspace re-navigates it.
+
+This closes a gap left by the system-interface health tracker. An agent that changes the workspace's own interface follows up with `mngr start --restart system-services`, which bounces the backend underneath the open view. A restart that finishes inside the tracker's stuck threshold never redirects the view to the recovery page, so nothing reloaded it and the user kept looking at the pre-change interface. The agent can now say so explicitly instead of relying on a restart being slow enough to be noticed.
+
+The route needs no new gateway permissions: the latchkey agent baseline already grants any method on the whole `/minds-api-proxy/api/v1/agents/<agent_id>/...` prefix for a host-registered agent id. Whether a window acts is asked of the frame itself rather than of the route, so a workspace floating under Get help, the Requests drawer or the AI-keys dialog -- kept mounted behind the card, and not remounted when the card closes -- is refreshed too. A window sitting on the recovery page is left alone, since it mounts no workspace frame at all and the app's own recovery machinery owns that screen until the workspace is healthy; a window on a hub page likewise has no workspace view to rebuild. The refresh lands on the workspace's root URL, because the content frame is cross-origin and the app cannot read where the workspace's own interface had routed itself.
+
+Fixed the agent-id registration that gates that prefix, which silently missed every freshly-created workspace. An agent is added to its host's gateway allowlist when discovery first reports it, but a brand-new workspace's agent reaches discovery *before* creation links the host's permissions file into place -- and the absence of that file was treated as final, so the agent was never added and stayed rejected with a 403 for the rest of the app's run. In practice that meant the very workspaces most likely to call a per-agent route were the ones that could not. Such an agent is now retried whenever discovery reports again and registers as soon as the file appears. Hosts that are genuinely not minds-managed still never get a permissions file conjured for them, and a host file that is present but malformed is still a one-shot failure recoverable with `mngr latchkey register-agent`.
+
+Corrected `docs/latchkey-permissions.md`, which described the agent baseline as granting only the notifications call. It has granted the full per-agent path prefix (gated on agent-id registration) for some time. Its description of *when* registration happens is corrected too: it is driven off discovery rather than agent creation, which is why it also covers the agents a workspace creates for itself.
+
+# Delete the server-rendered recovery page nothing serves
+
+The old Jinja recovery page has been unreachable since the Mithril SPA migration: `/agents/<id>/recovery` serves the SPA index, so `render_recovery_page` was called by nothing but its own tests. Its ~600-line inline JS controller included an unconditional start-only entry dispatch -- the pre-SPA auto-restart mechanism -- which had already stopped running when the page stopped being routed to; deleting the page removes only dead text, not live behavior. Forty-one tests asserting against the dead page go with it, including one pinning that entry dispatch: tests that pass while describing behavior that does not exist are worse than no tests.
+
+Removed along with `Recovery.jinja` and the page's CSS and driver script, and the ratchet counts the deletion lowered (one silent decode-error catch, one inline function) are locked in. Scoped strictly to the recovery slice: the bulk legacy-SSR deletion is reserved for its own PR and this must not collide with it.
+
+The failure band is also readable on every machine now. Its background is a translucent tint, and what lies behind it is the machine's own accent color, so the band was taking its color -- and its contrast -- from a color the user picked: on a muted purple accent the message sat at 1.6:1, and the intended pale yellow read as dirty mauve. The band now paints the app surface behind the tint, so it looks the same on any accent and the message holds 4.6:1. It also sits on the machine's card rather than over it: the band was a full-bleed strip with square corners overhanging a card that is inset and rounded, which left the accent showing as a stripe down each side of the band's edge and as wedges under its corners. Band and card now share the same inset and the same rounded top, so they read as one card with the accent bleeding evenly around it.
+
+That card's right margin was also four times its left one, on every page and since before this branch. The SPA reserved a scrollbar gutter on the document, which it inherited from the pre-SPA renderer -- where the pages that scrolled needed it and the chrome page opted back out. The SPA is only ever the chrome page: its document is locked to the viewport and can never scroll, so the gutter reserved 15px for a scrollbar that could not appear, and everything anchored to the window's right edge -- the machine card, its band, the titlebar's buttons -- stopped 15px short of it. The reservation is gone, so the accent border is now the same 4px on both sides.
+
+The `dwt` paragraph in `apps/minds/CLAUDE.md` now states that the code-guardian stop hook reviews the nested `.external_worktrees/default-workspace-template` checkout alongside mngr, so stopping pushes that checkout's branch and blocks until its own PR exists.
+
+# Layer machine failures over the app instead of on top of the machine
+
+The failure notice is now a band under the titlebar instead of a translucent card floated into the middle of the machine's screen. The old card sat on top of whatever the machine was showing -- often on top of the machine's own banners, which cut the sentence explaining what had happened in half. The band pushes the machine's view down by its own height instead of covering it, so the last thing on screen stays readable, and the message wraps instead of being clipped. What the band says is one pure decision shared with the hub-page notice, so the two surfaces cannot describe the same condition differently.
+
+Recovery details now open as a panel over the machine when there is something to keep behind it, and as the same panel on a page of its own when there is not. Either way the titlebar stays reachable, so a machine that will not come back can no longer trap a window. The two are the same card in two frames -- the panel has an X, the page has no corner button at all, since it is reached only because the machine would not load and a "Back to machine" button there pointed at the one destination known not to work. The panel opens when you ask for it -- the band's "Open recovery" -- and never on its own. Escape closes the topmost surface only, and the panel that is up when the machine comes back says so ("<machine> is responding again.") instead of contradicting itself.
+
+Losing the discovery consumer is no longer a full-app takeover. It becomes the same band, with the same Restart Minds action, and the machines keep running and the windows are left alone. While it is up, the machines list stops claiming to know a state it can no longer refresh: rows read "Status unknown" and their Start/Stop controls go away rather than acting on a frozen reading.
+
+Opening a stopped machine from the machines list now only starts it. It used to stop it first and then start it -- a full bounce of a machine that was not running. "Restart machine", where you are asking for the bounce, still bounces it.
+
+Fixed: `pnpm start` no longer re-downloads every bundled binary on each launch. `scripts/ensure-binaries.js` required `resources/lima/bin/limactl`, but `scripts/download-binaries.js` never provisioned lima -- only `build.js` did. On any checkout that had not run a full `pnpm build` (every fresh worktree, and the e2e snapshot image build) that path could never be satisfied, so each launch re-fetched every binary and ended in the same state -- 105MB over the wire, 257MB re-extracted on disk, measured per launch and identical on every repetition. The required set is now derived from a single `BINARIES` table in `download-binaries.js` instead of being restated, so it cannot name a path the downloader does not produce.
+
+Added: bundled binaries are provisioned into a shared per-user cache at `~/.cache/minds/binaries/<name>/<version>/<platform>-<arch>` (override with `MINDS_BINARY_CACHE_DIR`), and `resources/<name>` is symlinked at it. Every checkout on the machine shares one copy, so a fresh worktree's first `pnpm start` costs no network. Installs are staged and renamed into place, so parallel agents on one machine can never observe a half-extracted entry. Cache entries are keyed by pinned version, so bumping a version relinks rather than silently keeping the old bytes. In dev `resources/<name>` is always a symlink, so a checkout still holding real directories -- from `pnpm build`, or provisioned before the cache existed -- migrates on the next `pnpm start` rather than keeping those bytes indefinitely. Because the pinned version is a segment of the cache entry's path, a link resolving to it is by construction the pinned version: the per-payload staleness markers (`.dugite-tag`, `.datalib-curl-version`) are gone, replaced by that one comparison. An entry whose files were pruned out from under it -- what a cache cleaner leaves behind -- is re-provisioned rather than failing every later launch.
+
+Fixed: the bundled lima is now SHA256-verified against a pinned hash like every other bundled binary. It was the only download that ran unverified, in the shipped app as well as in dev.
+
+Fixed: dev mode now resolves the pinned `limactl` instead of whatever the developer has installed. `mngr_lima` resolves it from `PATH` and enforces only a minimum version, so a system lima 2.1.x passed the check and then hung agent creation forever at "Transferring git repository" -- the exact regression the pin exists to avoid. Developers who were relying on their own lima for minds agent creation will now get the pinned one.
+
+Changed: dev no longer downloads `uv`. Dev runs the monorepo workspace through the developer's own uv -- against the same `.venv` and `uv.lock` their shell drives -- so the bundled one was fetched and never resolved.
+
+The cache is safe under the concurrency this repo actually runs: many agents in many worktrees provisioning at once. Verified with six concurrent cold-cache processes -- all succeeded, exactly one entry per (name, version) was created, no staging directories leaked (including on a failed run), and all six resolved to the same physical copy. A bumped pinned version is a cache miss that fetches fresh and leaves the previous entry intact, since other checkouts are still reading from it through their symlinks.
+
+The loading screen shown while a machine is being created no longer grows a scrollbar. It is meant to shrink instead: the progress strip takes the height it needs and the walkthrough's illustration gives up the difference. That had stopped working when the page moved into the Mithril app -- nothing bounded the page to the window, so at the window size the app opens at it scrolled by 124px with the log panel closed and by 242px with it open.
+
+The page now fits the window at every size the app can be at, down to the smallest the window can be dragged to. The illustration is drawn at whatever height the layout leaves it rather than at one of two fixed sizes, so opening the details panel (now sized as a share of the window, as it was before) takes its room out of the picture instead of out of the page.
+
+Inspirations are now called templates. The deeplink page is "Create from
+Template" at `/create/template`, and the wording throughout the create flow, the
+glossary, and the styleguide follows.
+
+The command the add flow copies is now ` /use-template <url>`, with a leading
+space so pasting it into a chat input cannot be mistaken for a slash command. It needs the
+target machine to be on a post-rename workspace template -- a machine still on
+an older template only understands the previous command and should be updated
+before adding a template to it.
+
+## 2026-08-10
+
+Fixed create attempts crashing when a second create was started before the first finished.
+
+Every create attempt cloned its source repo into a single shared temp directory keyed on the repo name (`<tmp>/minds-clone-<repo_name>`), and deleted whatever was already there on the way in. That directory is the working directory of the attempt's `mngr create` subprocess, and the build context in every `[create_templates.*]` block is the relative path `"."`, which resolves against it. So starting a second create from the same template deleted the directory an in-flight create was standing in, and the older attempt died minutes later with an unreadable `FileNotFoundError` raised from `posixpath`.
+
+The collision did not depend on the two creates sharing a launch mode: the path was keyed on the repo name alone, so an AWS create and a local Docker create from the same template collided just as hard. AWS-family creates were the most visible victims because they spend minutes provisioning before they touch the build context, but every launch mode was affected.
+
+Each create attempt now gets its own private temp directory, removed when the attempt ends.
+
+Added a startup sweep that reclaims scratch clones left behind by a previous session. Per-attempt cleanup runs in the attempt's `finally`, which a force-quit or crash skips because the create worker is a daemon thread, and a full default-workspace-template clone is around 240MB. Only directories untouched for a day are removed, so a clone belonging to a concurrently running second Minds instance is never deleted out from under it.
+
+## 2026-08-08
+
+`LatchkeyAutoRegister._handle_pair` now also catches `OSError` (not just `LatchkeyStoreError`) when registering an agent in the host's latchkey permissions file, so a transient filesystem error logs a warning instead of crashing the whole `minds` CLI at startup.
+
+Fixed the workspace list showing a machine twice during long Lima builds: the live workspace row (discovered by mngr as soon as `mngr create` returns) and the "Creating..." create-attempt row appeared side by side for the whole build-in-VM ready wait. The create attempt now publishes its canonical agent id as soon as `mngr create` returns (instead of only at DONE), so the creating row hands off to the workspace row as soon as discovery confirms it.
+
+## 2026-08-06
+
+The in-place backup restore's verdict now gates on the workspace's
+*restore-critical* services and on nothing else. The contract is recorded in
+the new `behaviors/backup-restore/` area of the behavior corpus
+(`restore-verdict.feature`); the restore-critical set currently contains only
+the system interface. Full recovery reports plain success; non-critical
+services still down -- including the backup service itself, which is
+deliberately outside the set -- report success with a warning naming them;
+a restore-critical service that does not come back (RUNNING, or cleanly
+EXITED for one-shots, within the settle window) fails the operation.
+Previously the restore gated on `supervisorctl restart all`'s exit code, so
+any single unspawnable service -- even one that was already broken before
+the restore, or one the restore neither broke nor could fix -- reported the
+whole restore as FAILED even though the data restore had succeeded, while
+only `host-backup` was actually verified afterwards.
+
+Witness tests (generated via a scoped `tmr-behaviors` run against the corpus)
+back-link the contract to the test suite: a new test covers the
+backup-service-down example, and the full-recovery, system-interface-down,
+and restore-critical-set verdict tests carry `witnesses` markers tying each
+to its behavior unit, with `partial=` annotations where a single concrete
+case cannot witness a Rule clause's full quantifier.
+
+Fixed two independent regressions that together kept the nightly launch-to-first-message check red.
+
+Fixed the minds wheel build failing on checkouts whose Python environment has not been synced. The frontend's `pnpm generate` step dumps the `/ui` wire schema by shelling out to `uv run`, which resolved the workspace root project -- and that project does not depend on minds, so `imbue.minds` was not importable and the build died with `ModuleNotFoundError: No module named 'imbue.minds'`. The generator now runs as `uv run --package minds`, so it resolves the minds environment regardless of what is already installed. This unblocks the nightly launch-to-first-message build, which git-cleans the runner before every build and so always started from an empty environment.
+
+Fixed the launch-to-first-message e2e harness never finding the workspace after the SPA's iframe migration. The harness located the chat surface by scanning open pages for the workspace's `host-<hex>.localhost` origin, but the SPA window now sits on `/workspace/<agent_id>` and embeds that origin in a cross-origin iframe -- which Chromium puts out-of-process and Playwright exposes under `page.frames`, never `context.pages`. The workspace opened correctly; the harness just could not see it, and timed out after 180s with "the app never opened a workspace". It now searches frames (a page's main frame is included, so a page-level workspace still matches) and drives the frame it finds.
+
+## 2026-08-05
+
+Introduced behaviors for minds: a behavior corpus at `apps/minds/behaviors/browser-authorization/`, written in the language defined by the `behaviors` skill (Gherkin scenarios plus cross-cutting invariants), covering the desktop client's browser authorization component -- its session authentication (one-time codes), session (signed session-cookie lifetime and integrity), home-page routing, and post-login destination.
+
+The area holds `overview.md` (the area's component statement, session-authentication and session context, and out-of-scope list; established terms are referenced from the committed workspace glossary) plus four feature files -- `session-authentication.feature`, `session.feature`, `home-page.feature`, `post-login.feature` (20 tagged scenarios/outlines) -- and `invariants.feature`, whose seven subtree-scoped Rules carry the cross-cutting invariants (27 units total).
+Every unit's coordinate is `browser-authorization.<tag>` (e.g. `browser-authorization.fresh-code`).
+The forward server's session-bridge surface is specified separately in `libs/mngr_forward/behaviors/`; test-to-behavior links arrive as `witnesses` markers in a separate PR.
+
+The corpus is served by the corpus-generic `mngr behaviors` CLI (`validate`, `list`, `matrix`) from the `libs/mngr_behaviors` plugin library -- see that project's changelog entry for the CLI's shape.
+For the minds corpus, run from the repo root as `uv run mngr behaviors <subcommand> --root apps/minds/behaviors`.
+Minds itself carries no corpus tooling; it dev-depends on `imbue-mngr-behaviors` for its live-corpus guard test only (runtime deps may not point at unpublished workspace packages).
+
+Added a guard test (`imbue/minds/test_behavior_corpus.py::test_live_corpus_has_no_violations`) asserting that the live corpus at `apps/minds/behaviors/` always satisfies the behavior-language rules.
+It lives in minds rather than in the tooling library so it travels with the corpus (and any future spin-out).
+
+Added documentation: `docs/behaviors.md` (the corpus and the `mngr behaviors` CLI as used for it, linked from the README), and a `testing-overview.md` paragraph describing the `witnesses(coordinate, partial=...)` marker convention for linking tests to behavior units.
+
+Fixed documentation drift surfaced while writing the corpus: `desktop_client/README.md` claimed the session cookie was issued with `Domain=localhost` and that the landing page redirected straight to a sole agent (the cookie is host-only with subdomain access via the forward server's `/goto/` auth bridge, and the landing page lists workspaces even when there is exactly one); a test-helper docstring repeating the stale cookie claim was also corrected.
+
+Tightened the corpus's terminology for clarity and to avoid a near-future collision.
+Named the browser-facing surface the *browser authorization component* (the desktop client's browser-facing sub-component), and replaced the local session's sign-in/login vocabulary with *authenticating a session* / *authenticated* / *unauthenticated* -- leaving "sign in" / "log in" free for the separate imbue-cloud account handshake.
+Collapsed the credential's names to the *session cookie*, scoped the `single-credential` invariant to reaching workspaces through the browser authorization component, corrected "once per machine" to *once per installation*, and standardized *workspace* (never *agent*) as the user-facing unit -- which also makes the discovery progress page assert the intended "Discovering workspaces".
+Renamed `signin.feature` -> `session-authentication.feature` and `landing.feature` -> `home-page.feature`; some scenario coordinates changed accordingly (e.g. `browser-authorization.expired-token` -> `browser-authorization.expired-cookie`).
+
+Added a "What this protects" section to `overview.md` making the corpus's threat model explicit: the asset (the user's private data on the local origin), the adversaries (any unauthorized caller of the local origin, and naive cross-origin reads from the user's browser), and the session as the single gate.
+
+Kept the internal `imbue-mngr-behaviors` dev-dependency out of the public mirror: its dev-group and `uv.sources` entries in `pyproject.toml` are fenced with the mirror's internal-only markers so copybara strips them from the mirrored tree, and the corpus guard test (which needs that internal-only tooling) is excluded in `mirror/copy.bara.sky`. The mirrored `apps/minds` now builds without the behavior-corpus tooling.
+
+Split home-page routing out of `browser-authorization/` into its own behavior area, `apps/minds/behaviors/home-page/` (with its own `overview.md`): the consent gate, workspace-discovery progress, new-workspace form, and workspace list are post-authentication first-run UX rather than authorization behavior, so they now carry `home-page.*` coordinates (e.g. `home-page.consent-gate`). `browser-authorization/` keeps only the authorization boundary at "/", `@unauthenticated-home`, now an illustrating Example under the `no-data-without-session` invariant.
+
+Rewrote the corpus's descriptive prose for a pure, rot-resistant style: a category is now defined by the property that makes it that category, rather than by volunteering example members of it (which drift out of date and bias a reader into treating the sample as the specification).
+In `browser-authorization/overview.md` and the `invariants.feature` Rule descriptions, the protected asset is now *any response content specific to this user or this installation* (was an enumerated sample of data fields), the adversary is *any caller of the local origin that lacks a valid session, wherever it runs* (was an enumerated sample of callers), and the credential, refusal-shape, and open-redirect descriptions state the governing property instead of listing instances.
+The one example kept, for a non-obvious case (the browser-normalized `/\host` protocol-relative form), is marked *e.g. (wlog)* so a reader treats it as an illustration and not the spec.
+Made the prose DRY by hoisting corpus-wide material -- the workspace-vs-agent convention, the glossary pointer, and the Electron-shell out-of-scope item -- into a new corpus-root `apps/minds/behaviors/overview.md`, removing the copies that had been duplicated across the two folder overviews.
+No coordinates, unit names, or step assertions changed (one illustrative parenthetical was dropped from the `@prefetch` step); the corpus still validates at 27 units.
+
+Split the "/post-login" specification by responsibility rather than by route, on the principle that behaviors are grouped by what they are responsible for, not by which handler implements them.
+The route's two access-control facts stay in `browser-authorization/`, now folded under the invariants that own them: an arrival without a valid session is sent to authenticate (`browser-authorization.unauthenticated-arrival`, an illustrating Example of `no-data-without-session`), and a caller-supplied return destination is honored only when it stays on the origin (`browser-authorization.post-login-return-to-confined`, an illustrating Example of `no-open-redirects`).
+Its destination routing -- the consent-gate precedence, a safe return destination winning, and the workspace-count default -- moves to `home-page/` as a new `post-login-destination.feature` (coordinates `home-page.consent-first`, `home-page.safe-return-to`, `home-page.default-destination`), because deciding where a signed-in user lands is first-run routing, not authorization.
+`browser-authorization/post-login.feature` is deleted, and the two overviews now cross-reference the split: `browser-authorization/overview.md` gains a "Why /post-login is specified here" section that names the interaction between the return-destination redirect and the session gate and the open-redirect consequence of leaving it unconfined, while `home-page/`'s feature references the `no-open-redirects` predicate rather than restating it.
+The coordinates `browser-authorization.{consent-first,safe-return-to,default-destination}` are retired in favor of the `home-page.*` equivalents; `browser-authorization.unauthenticated-arrival` keeps its coordinate (it stayed in this folder).
+The corpus is now 28 units across 5 feature files.
+
+Added workspace-glossary terms grounding the minds desktop client's browser authorization.
+
+Defined *browser authorization component* -- the browser-facing part of the desktop client (the bare-origin web UI served by `minds run`) -- distinguishing it from the desktop client's other duties (agent/workspace creation, reverse proxying to workspaces).
+
+Defined *session* -- the authenticated state of a browser connected to the browser authorization component, carried by the *session cookie*: an HTTP cookie whose value is a token signed with the installation's session-signing key, so a tampered cookie, one minted under another installation, or one older than 30 days is rejected.
+It is the sole credential gating every page the component serves, covers all of the user's workspaces, and is distinct from the optional imbue-cloud account sign-in.
+
+Defined *installation* -- one copy of the desktop client's local state (a single data directory, e.g. `~/.minds`), which scopes the one-time code, session-signing key, sessions, and error-reporting consent.
+
+Bump Latchkey to 3.4.0.
+
+Permission dialogs no longer ask you to open a terminal when a service needs
+credentials set by hand (AWS, Coolify, ...).
+
+Instead of printing a `latchkey auth set-nocurl aws <access-key-id>
+<secret-access-key>` command to copy-paste, the dialog now shows one labeled
+input per value that command needs, at the top of the dialog, as soon as an
+account that needs credentials is selected. Approving fills the values in, runs
+the command inside Minds (against the account you selected and Minds' own
+credential store), re-checks the credentials, and completes the grant -- one
+click, no terminal. The command itself is never shown; it is not something you
+need to know about.
+
+Switching to an already-connected account hides the form again. If the
+credentials are rejected, or storing them fails, the form stays with everything
+you typed and explains what went wrong, so you can fix one field and retry.
+Adding a *second* account of such a service also asks for a name for it, since
+there is no browser sign-in to discover one.
+
+If Minds cannot work out which credentials a service wants, the dialog says so
+and offers no Approve button, leaving Deny as the only action.
+
+Account choices no longer promise "opens a browser sign-in" for services that
+have no browser sign-in; they say they will ask you for credentials instead.
+
+On the Settings page's Connectors tab, "+ Add account" is now disabled -- with
+the reason on hover -- for services that cannot be signed in to through a
+browser, instead of popping an error alert after you click it. Those services
+are connected from a permission dialog, which asks for their credentials
+directly.
+
+That per-service check costs one latchkey call each, so they all run at once
+rather than in series -- the Connectors tab does not get slower as you connect
+more services.
+
+When a service rejects what you typed, its own explanation is shown ("The
+provided access key ID doesn't look like an AWS access key ID...") without the
+usage lines latchkey appends after it -- those either restate a terminal
+command or, for AWS, print the placeholder itself as the "example", which is
+no help next to an input already labelled that way.
+
+Credentials that are the right shape but wrong -- mistyped, revoked, rotated or
+expired -- are stored by latchkey without complaint and only fail when the
+service is actually called, so Minds makes that call before granting anything
+and brings the form back if it fails, rather than granting a permission the
+agent could not use.
+
+A failed attempt is now shown the way every other error in the app is -- a red
+error notice (announced to screen readers) in place of the form's instruction --
+and is scrolled into view, so the reason cannot end up off-screen above the
+Approve button you just clicked. The same applies to an approval that fails
+outright.
+
+A connected account whose credentials stopped working is now hinted as "needs
+credentials" rather than "needs sign-in" when its service has no browser
+sign-in -- picking it opens the same credential form a new account does.
+
+- The per-workspace accent color now fills the entire app background instead of only the titlebar. The page body takes the accent, so it reads as one continuous field with the content card / workspace frame inset within it (restoring parity with the legacy renderer, whose body already tracked the accent). Neutral hub pages (Home, Create) are unaffected -- they have no workspace accent and fall back to the normal surface color.
+
+- Minds settings, Accounts, and Bug report (Get help) now open as centered modal overlays over a dimmed backdrop -- dismissed by the close button, a backdrop click, or Escape -- instead of full pages with a breadcrumb and back button. Each floats over the surface it was opened from: Home for settings/accounts, and the live workspace (kept mounted, no reload) for a bug report opened inside a machine. This restores the legacy overlay-layer design.
+
+- The Requests inbox opens as an overlay drawer now -- a full-height panel flush to the left edge with a square right corner, matching the legacy inbox -- rather than a full-window page. The other app modals (settings/accounts/help) are centered cards; all cover the full window height, and the Settings modal has a comfortable minimum height (capped so it still fits short windows).
+
+- The Share machine and Machine settings dialogs now open as a docked panel that hangs from the titlebar's Share/Settings icon-tabs -- with its own connected tab strip whose selected tab reads as joined to the panel below it -- instead of a plain centered card. It is a fixed-height card (so a long share or settings pane scrolls inside it) whose width and position track the titlebar tabs it drops from, matching the legacy docked options modal. The titlebar hides its own icon-tabs while the panel is up so the two do not double, and the panel carries a close X; a backdrop click or Escape still dismisses it back to the machine.
+
+- Fixed clicks landing in the titlebar strip while a full-window overlay (the docked options panel or an app modal) is open: the overlay backdrops now subtract the titlebar's Electron drag region, so switching between the docked Share/Settings tabs, and clicking the empty strip above the panel to dismiss it, work instead of being swallowed as a window drag (the same treatment the workspace-switcher popover already had).
+
+- The corner-radius scale was extended: radius-xl is now 12px (down from 16px) and a new radius-2xl = 16px was added, aligning the scale with the framework's conventional steps. All the floating modal cards -- Minds settings / Accounts / Get help and the docked options panel -- use radius-xl (12px) for a consistent corner; the small confirmation dialogs keep their tighter radius-lg (8px).
+
+- Opening the Requests inbox from inside a machine now floats the drawer over that live machine (kept mounted, showing through the dimmed area beside the drawer) instead of navigating the surface behind it to Home. The inbox forwards the displayed machine the same way Get help does; opened from Home, it still floats over Home. This applies to opening it from the titlebar, from a request raised inside the machine, and on auto-open when a new request arrives.
+
+- The "Sign in with Imbue" AI-keys dialog (opened from a machine's Claude sign-in dialog) now opens as a dismissible modal floating over that live machine -- with a close X, backdrop-click, and Escape -- instead of a full page that tore the machine down behind it. It forwards the machine so its context and accent stay behind the modal, restoring the legacy overlay behavior. This also fixes the dialog failing to load: it now carries the machine's host id, which the mint endpoint requires to resolve the owning account.
+
+- On the inspiration confirm step, the "Creating from" and "Account" field labels are now the plain label style (no uppercase / secondary treatment). The "Advanced settings" divider stays centered whether open or closed, so toggling it no longer shifts the label. And on the full page the centered content column is now pinned in place before the advanced panel expands, so opening advanced grows the content downward instead of yanking the whole column upward (matching the legacy behavior; the modal card, which scrolls itself, is unaffected).
+
+- The New machine "inspiration" flow (following a repo link, e.g. a minds:// deeplink) is now the full numbered stepper again, restoring the legacy /create/inspiration design (and its modal variant) that the SPA port had flattened. "You've opened an Inspiration" leads into a numbered vertical stepper that reveals one step at a time and collapses completed steps to a checkmark summary you can click to revisit: step 1 picks Create a new machine vs Add to an existing one; the create branch walks through preset -> confirm (account, an "I trust this Inspiration" acknowledgment, optional advanced provider/region settings, Create); the add branch copies the /use-inspiration message (the whole box, turning green) then, on the full page, picks the machine to open. Opened over a live machine it floats as a modal on that machine (kept mounted): the add branch targets that machine and just says to paste into its chat, and "Create a new machine" hands off to the full page. The step motion is back too -- each newly opened step slides + fades in, a completed step's number pops as it fills, the copy box lifts on hover with a solid green "Copied" button, and the advanced-settings divider reveals its dashed rules.
+
+- The dev styleguide (/_dev/styleguide) regained the layout it had before the SPA port: a sticky left table of contents beside the catalog, split into two groups (Design System and Patterns & Components) separated by a divider rule, with a scrollspy that highlights the entry for the section you are viewing. The page title and its "tokens live in ..." pointer are back, and the light/dark toggle floats at the top-right (clear of the titlebar) instead of sitting inline in the header. Each foundational-token section regained its one-line description under the header, and the Type ramp again shows each role as realistic sample text with a monospace size/weight spec beneath it, restoring the richer hierarchy the port had flattened.
+
+- Hover and keyboard-focus tooltips are back on the titlebar buttons (Back, Home, Switch machine, Share, Machine settings, Requests, Report a bug, the window controls) and every other chrome affordance carrying a label. The SPA port had lost them because the legacy script wired listeners once at page load, which never caught the elements the app re-renders as you navigate; the tooltips are now driven by a single delegated controller installed at startup, so they work on any element with a data-tooltip label no matter when it is mounted. The bubble looks and positions exactly as before (a short hover-intent delay, centered under the button and flipping above near the bottom edge), and now gets a subtle fade-and-slide on the way in and back out (80ms, 2px), honoring prefers-reduced-motion.
+
+## 2026-08-04
+
+Remote workspaces now use one Latchkey gateway URL. Minds selects the intended desktop or VPS gateway topology before workspace creation, so VPS-backed workspaces use the remote gateway's default permissions file while permissions, approval requests, and Minds API routes are transparently forwarded to the desktop gateway.
+
+The macOS download drops from 415MB to 296MB and the installed app from 1.1GB to 792MB, with no change to what the app can do.
+
+Every release since ToDesktop packaging began carried a second copy of `resources/` inside `app.asar` -- 304.9MB, none of it reachable, because `paths.getResourcesDir()` resolves `process.resourcesPath` and only `extraResources` fills that. 267.3MB of the copy was worse than dead: the `todesktop:beforeInstall` hook re-downloaded the binaries on ToDesktop's build server, which is x86_64, so an arm64 app shipped Intel `git`, `uv`, `restic`, and `desync` that could not have run even if something had looked for them.
+
+The hook is gone. `appFiles` now excludes `resources/` wholesale instead of enumerating subtrees, and `mac.additionalBinariesToSign` is dropped.
+
+The signing list turned out to be doing nothing. ToDesktop deep-signs every Mach-O under `Contents/Resources` with `mac.entitlements` whether or not it is listed -- verified against a build that declares no list, where all 42 ship with `Developer ID Application: Imbue, Inc. (LDDYAR29MP)`, the full entitlement set including `limactl`'s `com.apple.security.virtualization`, and a stapled notarization ticket. But every entry in that list had to stay in the `appFiles` upload or the builder's signing preflight failed, which is exactly what forced the subtree-by-subtree exclusions and kept lima duplicated in the asar.
+
+The ToDesktop upload also drops from 546.6MB to 443.0MB against its 650MB limit.
+
+## 2026-08-03
+
+The minds app collapses to a single web context per window: workspace content renders in a sandboxed cross-origin iframe inside the chrome page, identically in the desktop app and plain-browser mode -- the architectural step toward a hosted web version.
+
+- One chrome implementation for both modes: the page hosts the titlebar, the hub-page swap engine, the workspace iframe (entered through the new `/forward-bridge` cookie hop), and a new in-DOM overlay layer where every modal (workspace switcher, inbox, help, sign-in, settings, accounts, plan, inspiration, workspace options) is a same-origin iframe. `overlay_layer.js` assembles the full `window.minds` shell bridge from in-page implementations plus, in the desktop app, the slim native bridge (`window.mindsNative`); hosted modal iframes resolve the same bridge from their parent.
+
+- Chrome<->workspace messaging is reified into the embed contract: `desktop_client/static/embed_contract.js` (shared verbatim with the workspace UI via the vendored-mngr tree) + `docs/embed-contract.md`. A new allowlist-by-file ratchet forbids raw `postMessage` usage outside the contract. The Claude sign-in mint ack now means "a minds chrome is present" -- plain-browser chrome acks too.
+
+- The Electron main process drops the content/modal `WebContentsView`s, the caged content-relay preload, the workspace-content cookie partition + cookie sync, the view bounds/overlay IPC choreography, and the parked-workspace / one-window-per-workspace claim machinery (two windows may now show the same workspace, matching the web world). External-link enforcement now also cancels in-place iframe navigations to foreign sites. `minds run` passes the forward plugin a browser-bridge token and its own origins as allowed embedders, and serves `GET /forward-bridge` so plain browsers obtain a forward-plugin session from their minds session.
+
+- The stop-mind confirmation and the workspace context menu are DOM dialogs/menus in both modes; native surfaces remain only for the quit-time shutdown prompt and the file picker. The workspace iframe carries an explicit `sandbox` (no `allow-top-navigation`) and a permissions policy delegating clipboard/fullscreen.
+
+- e2e: the Electron workspace runner now targets the workspace as a frame of the chrome page; new renderer-contract Playwright specs (`embed-flow`, rewritten `local-swap` / `recovery-redirect`) drive the real shell scripts in a plain browser against a local harness server.
+
+Workspace content URLs are now keyed by host id and services own their origins.
+
+Local workspace origins become `[<service>.]host-<hex>.localhost:8421`: the bare origin serves the shell and each registered service is reached at its own `<service>.` origin (no more `/service/<name>/` path prefix). The `/goto/` bridge, sidebar/landing/inspiration links, the sharing editor's workspace link, and the create-flow redirect all navigate by host id.
+
+The Electron surface routing, window dedupe, accent tinting, and recovery redirect understand both workspace coordinates: content URLs carry host ids while minds records and SSE events stay agent-keyed, with alias maps (fed by the workspaces payload, which now carries `host_id`) translating between them. The recovery page and `/help` accept either coordinate. The `restorable_workspace_ids` restore-filter payload carries both coordinates too, so host-keyed persisted windows survive an app restart, and window entries persisted by older agent-keyed builds are migrated to the host coordinate on restore.
+
+Workspace health probes (create-flow readiness, background health loop, restart recovery) send the `host-<hex>.localhost` vhost in the Host header.
+
+The Cloudflare-tunnel sharing surface is removed in favor of the self-hosted shares relay: the desktop client's tunnel CLI wrappers (`TunnelInfo`, create/list/delete-tunnel, per-service auth), the env-teardown Cloudflare-tunnel cleanup provider, the `max_tunnels` / `max_services_per_tunnel` plan quotas (and their deploy.toml entries), and the account view's tunnel usage row are gone. Sharing goes through the new `shares` CLI wrappers and machine-sharing routes.
+
+Workspace content URLs are now keyed by host id and services own their origins.
+
+Local workspace origins become `[<service>.]host-<hex>.localhost:8421`: the bare origin serves the shell and each registered service is reached at its own `<service>.` origin (no more `/service/<name>/` path prefix). The `/goto/` bridge, sidebar/landing/inspiration links, the sharing editor's workspace link, and the create-flow redirect all navigate by host id.
+
+The Electron surface routing, window dedupe, accent tinting, and recovery redirect understand both workspace coordinates: content URLs carry host ids while minds records and SSE events stay agent-keyed, with alias maps (fed by the workspaces payload, which now carries `host_id`) translating between them. The recovery page and `/help` accept either coordinate. The `restorable_workspace_ids` restore-filter payload carries both coordinates too, so host-keyed persisted windows survive an app restart, and window entries persisted by older agent-keyed builds are migrated to the host coordinate on restore.
+
+Workspace health probes (create-flow readiness, background health loop, restart recovery) send the `host-<hex>.localhost` vhost in the Host header.
+
+The new Share machine tab (the workspace options panel from main) now drives the self-hosted machine-sharing backend, replacing its per-service Cloudflare wiring.
+
+The pane keeps its per-target model -- Whole machine plus one entry per registered app, each with its own access list, on/off state, and click-to-copy link -- and maps each target onto one scope of the machine's grants document: Whole machine is the workspace scope (admits every service; link is the machine domain) and each app is its own scope (admits only that app's origin at `<app>.<machine domain>`). One read fills every target at once; edits rewrite the grants document (serialized so targets cannot race), the first enabled target provisions the machine share, and disabling the last one deletes it.
+
+Access lists accept whole email domains alongside emails: a bare entry (no `@`) admits everyone at that domain, labeled as such in the list.
+
+The share-target list excludes service names that cannot be a hostname label (underscores, reserved `host-`/`agent-` prefixes) -- their links would have no origin -- and no longer excludes a service named `web` (the placeholder that exclusion was written for no longer exists).
+
+Enabling sharing is now idempotent: an enable that failed between the connector-side share create and the workspace materials injection used to leave a share the connector called active but whose tunnel could never come up, unrepairable by retrying. The enable path now verifies the materials actually exist in the workspace and re-provisions (rotating the relay token) when they are missing.
+
+The standalone `/sharing/<agent-id>` editor (full page, overlay modal, `sharing.js`, and its Electron IPC channel) is deleted; its URLs (the legacy `/modal` spelling included) redirect to the options panel's Share tab, with a trailing service segment preselecting that target.
+
+Destroying a machine and unlinking its account now tear down the machine share (previously the Cloudflare tunnel); provisioning and unlink copy stop referring to Cloudflare. Unlink teardown also covers a stopped (undiscovered) machine by resolving its host coordinate from the workspace record, so an active share cannot outlive the account association.
+
+The sharing readiness poll now reads only the connector-side share status instead of also exec-ing into the workspace for grants it discarded, so polling stays cheap on remote hosts.
+
+Further review fixes: the titlebar Share/Settings tabs translate the URL-derived (host-keyed) workspace id to its agent coordinate before opening the options panel, so the panel opens again from workspace content; the OS window title and the browser-mode switcher highlight match host-keyed ids; the recovery page's get-help relay accepts host-keyed ids; an empty grants document is rejected with 400 instead of 502; a concurrent discovery change during a sharing read no longer 500s; the e2e drivers and visual-diff script were migrated off deleted agent-keyed URLs and the deleted sharing editor; and the operator/workspace docs (staging bringup, vault setup, deployment tests, workspace getting-started/README/glossary, security-boundaries audit) were updated for the self-hosted sharing model.
+
+Second review pass: landing-page workspace rows link through the host-keyed `/goto/` route again (they still built agent-keyed URLs the plugin 404s); the chrome wrapper's first-paint accent/crumb seeds work for host-keyed workspace ids; the recovery page joins the in-place swap set under host-keyed URLs; the options panel's no-shell dismiss uses the host coordinate; a `?target=` naming an unrendered service no longer stages silently-dropped edits; and a machine-sharing status read whose grants exec fails now reports the grants as unknown (mapped to the pane's failed state) instead of masquerading as an empty access policy that a subsequent edit would publish.
+
+Third review pass: the workspace health probe and restart recovery require the real host coordinate shape (the resolver interface's placeholder would probe an unroutable vhost), and sharing resolution falls back to the machine's workspace record, so a stopped (undiscovered) machine's Share pane shows its active share and can disable it instead of reading "not shared" / failing with 502.
+
+Merge main into the mithril-refactor stack. Main's changes (Modal image pinning, deploy freshness preflight, slice hardening docs) merged cleanly alongside this branch's relay-sharing and SPA work; the per-env deploy secret list now carries the `sharing` service next to main's connector preflight.
+
+The minds desktop client's UI is being rebuilt as a client-rendered Mithril single-page app that talks to the backend over one long-lived WebSocket, replacing the server-rendered JinjaX pages and the per-window Server-Sent-Events stream.
+
+What lands in this change:
+
+- A new `apps/minds/frontend/` package (Mithril + TypeScript + Vite + Tailwind) whose bundle is built into the wheel at build time. It renders the whole app -- titlebar, sidebar/switcher, the workspace iframe, and every hub page (Home, Create, Creating, Settings, Accounts, AI keys, workspace options and settings, backups, destroying, recently-destroyed, recovery, requests inbox, get-help, welcome, consent) -- with client-side routing, so hub navigation is instant and the titlebar never rebuilds.
+
+- One WebSocket per window (`/ui/ws`) carries all live state (workspaces, accounts, providers, requests, per-workspace health, discovery health, one-shot events). Because a WebSocket does not count against the browser's six-connections-per-host limit, this removes the parallel-request contention that made page loads crawl under the old SSE + full-page-fetch model. The connection reconnects with backoff and re-syncs from a fresh snapshot; a schema-version mismatch triggers a single reload.
+
+- First paint is seeded from a bootstrap document inlined into the page, so workspace tiles and the accent color render with no extra round trips and no color pop-in.
+
+- Login is a minimal dependency-free page (the one-time-code flow is unchanged). Requests-inbox auto-open is now decided in the app rather than the Electron main process, which no longer consumes any HTTP/SSE stream of its own.
+
+- Recovery is now something you click into (logs plus a manual Restart) rather than a place the app throws you: the automatic stuck-workspace redirect, the redirect latches, the periodic re-assert timers, and the auto-restart-on-observe behavior are gone.
+
+Behavior parity with the old UI is preserved, including the latchkey permission dialogs, the file-sharing native picker (with a plain path field in browser mode), and the bug-report / agent-assist help flows.
+
+- The visual-diff harness (`apps/minds/scripts/visual_diff.py`) gains a `capture-spa` mode: it builds the frontend bundle, serves the SPA index per route with a deterministic fixture bootstrap built from the real wire models, and screenshots every route. SPA captures are namespaced separately from the legacy JinjaX captures so both coexist across the migration.
+
+Document share-relay bring-up in the staging checklist (new step 6b): mint + Vault-store the tier's relay SSH keypair (`secrets/minds/<tier>/relay-ssh`), provision/deploy/DNS one relay per configured region, and verify. Also list the new `relay-ssh` operator-only Vault entry and the `OVH_CLOUD_PROJECT_ID` key in vault-setup.md.
+
+Support random per-service origin hostname labels (`<name>-<rand>`) in the desktop client. The Share tab's per-app links now use each service's origin label instead of concatenating the bare service name, so a shared app link points at its real origin (`<label>.<machine domain>`). The `services` event's new `label` field is carried through the forward stream into the backend resolver and surfaced to the Share pane. The Electron full-flow test's terminal-iframe selector now matches the `terminal-<rand>` origin.
+
+Fix whole-machine sharing: the whole-machine share link and the readiness probe both used the bare machine domain, which no longer routes on a share (only explicit ``<label>.<domain>`` origins are claimed on the relay and served). The whole-machine link now targets the shell's ``system_interface`` label origin, and the readiness probe hits that same routable origin instead of the bare domain. Per-app links and per-service grants are unchanged.
+
+Fix a grants-file write race that could corrupt `share_grants.toml`: the exec'd write used one fixed `<path>.tmp` name, so two concurrent grant edits (Share pane open in two panes/windows) could interleave their bytes and publish a corrupted document. Writes now mint a unique tmp name via `mktemp` (the final `mv` stays atomic for readers), and the machine-sharing PUT/DELETE handlers serialize per machine behind a new per-host lock in the desktop backend.
+
+Treat a malformed grants document as UNKNOWN instead of empty. A malformed read previously rendered the Share pane as "no grants," and the next whole-document save would then permanently erase every real grant. The sharing status now reports `grants: null` for a malformed read (the pane already blocks edits on that), and a grants update now verifies the current document parses before replacing it, refusing the save with a pointer to disable/re-enable sharing as the reset path.
+
+Share pane: enabling/publishing a share with un-added text still sitting in the add-email box now blocks with an inline error ("click Add or clear the box") instead of silently dropping the typed address, and the Add button switches to the prominent primary style while the box holds text so it reads as the obvious next action.
+
+Fix the Share pane failing to load (and blocking edits) for every actively-shared machine: the grants read used `mngr exec`'s default human output, which appends its own "Command succeeded on agent ..." status line to stdout, so a perfectly valid grants document always read back as malformed. The read now rides `--format json` and unwraps the command's own stdout from the result envelope (the same pattern the authorized_keys read already used).
+
+Share pane load failures now say what actually still works and offer a real "Try again" button: a failed status read shows "This machine is shared and everyone granted access still has it, but the list of who that is could not be loaded" instead of the mechanical "select a target again to retry", and the retry affordance is a button rather than a hidden re-click gesture. Action failures (enable/disable/edit) are unchanged -- their retry is redoing the action.
+
+Fix all mouse input being dead (no clicks, no hover cursor, no text selection) in the desktop client on Linux after the mithril SPA conversion. Every Electron window first loads the shell.html splash, whose body is one full-window `-webkit-app-region: drag`; the SPA declared no app-region rules at all, so Chromium never recomputed the window's draggable regions after navigation and the splash's full-window drag region kept swallowing every mouse event. The SPA stylesheet now declares the regions the legacy ChromeShell.jinja had (titlebar drag, titlebar buttons no-drag, html/body no-drag base, sidebar backdrop no-drag), which also restores titlebar window-dragging on frameless Linux windows.
+
+Build the SPA bundle as part of `pnpm start` (and therefore `just minds-start`): a new `build:ui` script (frontend install, generated-types refresh, vite build) runs from `prestart`. Previously the bundle was only built by the wheel-build hook, so a fresh dev worktree served the 503 "Frontend not built" page until it was built by hand.
+
+Restore the first-run welcome splash to the legacy three-choice account gate (Sign Up as the primary action, an "Already have an account? Sign in" link, and "Continue without an account"). The mithril SPA conversion had reduced it to a single "Get started" button with no visible sign-up/sign-in path. Sign Up / Sign in navigate to the existing backend-served /auth pages (the same surface the Accounts page's "Add account" uses); the skip choice records the continue-without-account intent and lands on home, matching the legacy flow.
+
+Fix OAuth sign-in from the full-page auth surface dead-ending on a pristine Create-account page. On `auth_success` the Electron main process reloaded every window -- a legacy mechanism from the multi-context architecture, where the window could never itself be on an auth page. In the single-web-context app the reload landed the window back on a fresh `/auth/signup`, killing the page's own OAuth status poller (which loses deterministically: `auth_success` is emitted before the flow is marked done). Windows sitting on `/auth/*` are now navigated to `/post-login` (preserving `?return_to=`) instead of reloaded.
+
+Restore the workspace Share / Machine-settings surface to an overlay and fix its titlebar navigation. The mithril SPA conversion had turned the legacy docked options panel into a routed page that unmounted (and later reloaded) the workspace iframe, and the titlebar's Share/Settings tabs could not switch panes once the page was open (the page read `?tab` only at first mount, and mithril preserves the component across query-only navigation). The options panel is now a dismissable overlay floating over the still-mounted workspace surface (backdrop click / Esc / re-clicking the active titlebar tab closes it), tab and group selection are derived from the URL on every render, and the duplicate standalone `/workspace/<id>/settings` page is replaced by a redirect into the overlay's settings tab.
+
+Fix the desktop client's shutdown always stalling ~10 seconds and getting force-killed by `just minds-stop`. The teardown never triggered the root ConcurrencyGroup's shutdown event, so the two long-lived watcher strands (`system-interface-health-probe`, `discovery-health-watchdog`) -- which loop on `is_shutting_down()` -- could never wind down, and the group exit waited out its full 10s timeout on every shutdown before abandoning them. `_shutdown_desktop_client` now triggers the group before exiting it, and both loops sleep on the group's shutdown event (instead of a throwaway `threading.Event()`), so they wake immediately. The backend now exits within a few seconds of SIGTERM, inside Electron's 5s SIGKILL guard.
+
+## 2026-08-02
+
+`minds env deploy` now runs an image-requirements freshness preflight before deploying the connector or the LiteLLM proxy: it replays the offline `uv export` that generates each app's committed hash-locked `image_requirements.txt` and refuses to deploy when the committed export no longer matches `uv.lock` (run `just export-image-requirements` and commit the result). This prevents a stale checkout or a skipped-CI branch from shipping unreviewed package versions.
+
+The preflight's helpers come from `imbue.imbue_common.modal_image_requirements` (not `modal_app_kit`, which is absent from the public mirror). minds also picked up the new repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (count 0).
+
+Updated the `_direct_migration_dsn` docstring cross-reference: its twin moved from apps/modal_litellm/app.py to `imbue.modal_app_kit.database.direct_database_url` in this PR, and the docstring now points there (and states the accurate reason for the remaining duplication: minds does not depend on the modal-app-kit library).
+
+## 2026-08-01
+
+`minds server list` gains `--verify-occupancy`, which SSHes every bare-metal box for the activated env and reports its **real** occupancy -- every env's slices, not just this env's `pool_hosts` rows -- along with any cross-tier contamination (a slice stamped for another tier, or an extra key in the lima user's `authorized_keys`). The pool SSH key is resolved from the activated tier's Vault entry, so nothing is exported by hand. The default table is unchanged.
+
+A box that cannot be read -- down, mid-reinstall, no recorded address -- is listed as unaudited instead of ending the run, so one bad box never costs you the rest of the fleet's verdict, and unaudited is reported separately from clean.
+
+This closes a blind spot that had real consequences: the DB-derived slot columns count only the querying env's rows, so a box shared with another env reads as emptier than it is. Acting on that number meant discovering the truth only when a bake refused with "server ... has only N of M slot(s) free". Baking onto a cross-tier box now fails closed (see the `mngr_imbue_cloud` entry); `--verify-occupancy` is how you find such a box *without* a failed bake.
+
+`tier_for_env_name` now delegates to `mngr_imbue_cloud.primitives` rather than keeping its own copy of the env-name -> tier mapping, so the minds CLI and the new bake-time guard cannot disagree about which tier an env belongs to. Behavior is unchanged.
+
+Fixed a workspace on a cloud provider being shown as **unreachable** at startup when it was healthy and reachable the whole time.
+
+On startup the desktop client replays the discovery events-file backlog and deliberately drops the errors those pre-start snapshots carry, since they describe the gap while minds was closed rather than the present. It was still recording each dropped snapshot's timestamp as the provider's freshness, and the landing page reads "a snapshot newer than the host's key, with no provider error" as proof that discovery looked for the host and did not find it. A provider that had been failing for the entire gap therefore read as healthy-reporting-zero-hosts, and every workspace on it rendered the positive claim "unreachable" until the first genuine post-start snapshot arrived.
+
+Dropping the error now also withholds that snapshot's freshness, so such a workspace correctly shows "connecting" -- we do not know yet -- until real discovery data lands. A pre-start snapshot that carried no error is a real observation and still records freshness, unchanged.
+
+Minds 0.3.11.
+
+The app version is now `0.3.11`, and a shipped binary clones the `minds-v0.3.11` default-workspace-template tag when it creates a workspace.
+
+## 2026-07-31
+
+Add `apps/minds/tmr/behaviors_mapper.j2`, the minds variant prompt for the new `mngr tmr-behaviors` recipe (behavior-anchored test map-reduce over the corpus at `apps/minds/behaviors`).
+Unlike the docstring-TMR variant, it `{% extends %}` the packaged template and fills its two block slots -- the test-placement frame (witnesses default to integration tests; release when the flow needs the full stack; unit tests when observable in-process; acceptance reserved for core flows) and the minds host-capability blockers (Docker daemon, snapshot images, deployed envs, secrets) -- so the mapper contract lives in one place.
+Invoked via the `tmr-behaviors-minds` recipe in `private.just`.
+
+The minds e2e Modal-snapshot workflow no longer borrows the real `staging` tier as its default identity. The snapshot bake and the `minds_snapshot_resume` tests now boot under a dedicated, inert `minds-ci-snapshot` root name backed by a committed `ci-snapshot` client config whose connector / LiteLLM URLs are deliberately non-resolving `.invalid` placeholders.
+
+This makes the baked workspace and container names read `minds-ci-snapshot-*` instead of the misleading `minds-staging-*`, and guarantees CI is not even nominally pointed at the staging deployment. Behavior is otherwise unchanged: the snapshot path never contacts a live minds backend (the create+chat test signs in with a pasted Anthropic key and chats directly against Anthropic; the backup tests never touch the connector).
+
+The description a user writes in the in-app "Report a bug" flow is no longer thrown away in transit.
+
+Sentry's default data scrubber was replacing the whole description with `[Filtered]` whenever it contained a substring like `auth`, `secret`, or `password` anywhere in the text -- which ordinary prose does. Roughly one in nine reports reached us with nothing in it; in one case the word "authored" destroyed a 9,705-character report.
+
+The report collector now passes the description explicitly to the Sentry submitter, which uploads a verbatim copy to the same S3 bucket the log attachments already go to and records its URI on the event. Uploads are not scrubbed, so the body is recoverable even when the inline copy comes back `[Filtered]`. As with the log attachments, this needs a configured bucket -- `production` and `staging` have one, `development` does not.
+
+Each submitted report now lands as its own issue in Sentry rather than all of them stacking into one, so a report can be triaged, assigned and resolved on its own.
+
+The desktop client now opens Chromium's DevTools protocol (CDP) on 127.0.0.1 when the MINDS_REMOTE_DEBUGGING_PORT environment variable is set, so the real Electron app can be driven with Playwright/CDP during development. Set it via the new optional debug-port argument on `just minds-start` / `just minds-start-cloud`.
+
+minds now owns its device id instead of freeloading on the mngr local provider's `host_id` file.
+
+The id lives at `<minds data_dir>/device_id` and is read-or-created atomically at `minds run` startup, so an install has a real identity from its very first session. Previously the id was read (once, at startup) from `<mngr_host_dir>/host_id`, a file only mngr's local provider creates during discovery -- so fresh installs ran their whole first session with an empty device id: absent-host tombstoning was skipped with a warning, and locally-hosted workspace records were pushed with empty `hosting_device_id` provenance.
+
+On upgrade, the existing mngr `host_id` value is adopted (copied; the original file is left in place), so previously-synced workspace records stay attributed to the install. Fresh installs mint a new `HostId`-shaped id. If the device id file cannot be read, created, or validated, `minds run` exits with a clear error naming the file instead of running without identity.
+
+This removes minds' last dependency on the mngr local provider (a prerequisite for disabling that provider later).
+
+Bump the bundled Latchkey to version 3.3.0.
+
+The packaged app now ships the Chrome-impersonating curl it has always intended to use, so agent requests to services behind Cloudflare-style bot protection stop being blocked on TLS fingerprint.
+
+`build.js` stages every binary the packaged app reads from `resources/`; the `todesktop:beforeInstall` hook also downloads binaries, but it runs against `app-wrapper/app/`, so its output lands in `app.asar` where nothing reads it. The datalib curl was fetched only by the hook, so no release ever carried a usable copy -- the app fell back to system curl, silently, since `latchkeyCurlEnv()` treats an absent dispatch curl as "no override" rather than an error. Dev machines were unaffected, because `ensure-binaries.js` populates `resources/` there. This is the same trap `desync` fell into, and the guard added for that case did not cover curl.
+
+Only local (Lima) workspaces are affected. Their gateway runs on the desktop, so the outbound TLS handshake is made by the app's curl; remote workspaces run a gateway on the VPS and take their curl from `/usr/local/bin`.
+
+`build.js`'s downloader guard gains `downloadLatchkeyCurl`, so a future refactor cannot drop it back out.
+
+- The bundled Chrome-impersonating curl (which is how agents clear Cloudflare-style TLS fingerprinting on third-party services) is now datalib v0.26.0, was v0.25.0. On Linux the statically linked musl build is bundled instead of the glibc one, so it runs on any distro rather than only on those whose glibc is at least as new as datalib's build host.
+
+- `pnpm start` now re-downloads the bundled curl when the one on disk came from an older datalib release, instead of keeping whatever the dev machine already had. Previously a stale bundle silently survived every version bump.
+
+The desktop app now genuinely waits for email verification after creating an email/password account. Previously the "Check your email" page's poll endpoint hardcoded "verified", so it flashed "Email verified. Redirecting..." seconds after signup regardless of whether the link was clicked, and the unverified account was fully activated locally (default account, provider registration) while every Imbue Cloud call failed with a cryptic auth error.
+
+- An account no longer counts as signed in until its email is verified: signup/signin of an unverified account defers all local signin bookkeeping, and the check-email page polls the real verification status (via the new `mngr imbue_cloud auth is-verified` plugin command), completing the signin only once the link is clicked.
+
+- The "Resend verification email" button actually sends an email now (it previously reported "Sent" after a local no-op) and surfaces the server-side cooldown when one was sent moments ago. The forgot-password flow likewise sends a real reset email, and the legacy in-app reset link redirect points at the connector's reset page instead of a broken empty URL.
+
+- The verification flow is pinned to the explicit account email instead of a "latest account" heuristic that actually picked the alphabetically-last signed-in account; the auth status API and account settings page now prefer the plugin's active account.
+
+- The sign-in modal's panel-restore detour no longer skips the check-email page, auto-verified (paid-list) signups skip the verification detour entirely, and an OAuth sign-in that returns an unverified email fails with an actionable message instead of activating a broken account.
+
+- Post-sign-in navigation is smoother: every successful sign-in routes through /post-login so the consent gate and destination resolve in one hop (no more welcome-screen flash followed by a late consent screen), the sign-in modal stays up with a "Signing you in..." status until the destination page has actually committed, and the check-email page's copy was tightened ("Click the link sent to <address>", "Check your spam folder (if necessary)").
+
+Inspiration deeplinks (`minds://create?git_url=...`) now adapt to where you are. **When you're already inside a machine**, the deeplink opens a popup over it instead of yanking you to a full page, and you click through it in place:
+
+- **Add to {this machine}** walks you through copying the `/use-inspiration <repo>` message and then tells you to paste it into that machine's chat. Since you're already in the machine you'd be adding to, it skips the machine picker entirely. That last step waits for you to click **Done** -- it never closes on its own, so the instruction can't disappear before you've read it.
+
+- **Create a new machine** opens the full Create from Inspiration page (already past the first question), since setting up a new machine is more than a popup should hold.
+
+**When you're not in a machine** (the home screen), the deeplink opens the full Create from Inspiration page exactly as before, picker and all.
+
+## 2026-07-30
+
+Bump the bundled Latchkey to version 3.2.2.
+
+Extended the slice-hardening rollout runbook (`docs/slice-hardening-rollout.md`) with a tier-by-tier rollout section (dev -> staging -> production): how mixed-version fleets behave (leased slices cannot be destroyed; old rows fall back to the slow path), why prep must precede bake on each box, dev-tier caveats (shared boxes across dev envs, `--from-tag` bakes for fast-path testing against released binaries), and the staging procedure including where the 2.2.0-destroys-2.1.2 compatibility check runs.
+
+Also documented the stale-profile bake failure hit during the staging rollout: a tier whose laptop-side mngr profile was last seeded by a pre-cutover minds build fails every bake with `Cannot merge AgentTypeConfig with ClaudeAgentConfig` until the current app's seed migration runs against it.
+
+Also documented the stale-image bake failure hit during the production rollout: a box whose staged guest image pre-bakes docker-ce 29.5.1 (the pre-2026-07-30 pin) fails every bake under lima 2.2.0 with `unsupported protocol: Yunix`, and must have its image re-staged (delete `~limahost/.cache/mngr-slice-base/debian-base.qcow2`, re-run `just prep-server <id>`) now that the pin is 29.6.2.
+
+`minds pool create` now runs the laptop-side agent-type seed migration (the one minds.app runs at desktop startup) against the activated env's mngr host dir before invoking the admin bake, so an operator machine whose profile was last seeded by a pre-cutover build no longer fails every bake with `Cannot merge AgentTypeConfig with ClaudeAgentConfig` -- the migration happens automatically instead of requiring a manual app launch per tier per machine.
+
+Apply pool-hosts schema migrations over Neon's direct (non-pooled) host.
+
+The `host_pool` migration runner (`envs/migrations.py`) now strips Neon's `-pooler` suffix from the DSN hostname before applying schema migrations (and their bookkeeping in `schema_migrations`): migrations can rely on session-scoped behavior (advisory locks, `CREATE INDEX CONCURRENTLY`) that is unsafe through PgBouncer's transaction-mode pooling. The resolved host is logged at deploy time for verification.
+
+Plain DML seeding (plan definitions, paid-list defaults) intentionally stays on the pooled DSN.
+
+Marked `test_backup_restore_rewinds_the_resumed_workspace_in_place` as flaky so CI retries it.
+
+The restore itself succeeds, but restarting the workspace's services at the end intermittently fails with `xvfb: ERROR (spawn error)`, which fails the whole operation and so the test. Observed failing on one CI run and passing on a re-run of the same code. The retry is a stopgap; the underlying service-spawn race still needs fixing.
+
+Document the connector's new `ACCOUNT_EXISTS_WITH_OTHER_METHOD` auth status in the desktop client's `AuthResult` model.
+
+The connector now refuses signups that would create a second account for an email already registered under a different login method (password vs OAuth). The desktop client's sign-in/sign-up forms already surface the server's message for unrecognized statuses, so no behavior change was needed beyond the doc sync.
+
+## 2026-07-29
+
+`minds.log` -- the backend's stdout/stderr capture, uploaded with every bug report -- is now timestamped: each captured line is written with an ISO-8601 UTC prefix, matching `electron.log`. Previously the file carried no times at all (the backend's console format is tuned for an interactive terminal, where a timestamp would be noise), which made it impossible to line up against the timestamped logs uploaded beside it (`minds-events.jsonl`, `electron.log`, the discovery/latchkey event streams) when reconstructing when something happened.
+
+Backend stderr was also being written to the log in raw chunks rather than by line. Since a chunk boundary regularly falls mid-line, it is now split into whole lines first, so each line -- including every line of a multi-line traceback -- gets its own stamp. A trailing line with no newline (a backend dying mid-traceback, the output most worth having) is flushed to the log when the process exits instead of being dropped.
+
+The app's own console output in dev mode is deliberately left unstamped, so the interactive dev experience is unchanged.
+
+Startup no longer floods the log with one "Dropping pre-start provider error" line per replayed discovery cycle.
+
+While the events-file backlog replays at startup, minds drops the provider errors recorded while the app was closed (they describe the gap, not the present). A wedged provider errors on every discovery cycle of the downtime, so the log grew with however long minds was off. Those drops are now logged as one counted line per provider per distinct error, emitted once that provider's replay ends (or at shutdown, if a wedged provider never delivers a fresh snapshot): `Dropped pre-start provider errors for aws while replaying the events-file backlog (last at ...): 45x Provider 'aws' is not available: AWS credentials not configured...`. Replaying a real four-month backlog of 22663 events, whose 182 dropped errors previously logged 182 lines, now logs 5.
+
+Counting per distinct error also covers the provider whose discovery overruns its timeout, whose backlog alternates the timeout error with the underlying failure. Only a snapshot from after startup ends a provider's replay: a clean *pre-start* snapshot no longer does, which had made a provider whose backlog errors flap -- as they do across a multi-day gap -- log its error afresh after every clean cycle in between.
+
+Failed workspace SSH and start/stop requests now lead with what actually went wrong.
+
+Both reported `mngr`'s output in the order mngr emits it, which puts provider-level discovery warnings first -- and those routinely name unrelated hosts. An agent asking to reach another workspace was told "outer SSH unreachable for host `<some long-destroyed workspace>`" and reasonably concluded the target was down, when the real reason came later, or (for SSH) was not in stderr at all.
+
+The verdict now comes first and the rest of mngr's output is kept behind it: the warnings are real diagnostics, and the caller is an agent on another host that cannot read this one's logs, so dropping them would leave it no copy at all.
+
+- `POST /api/v1/workspaces/<id>/ssh` takes the per-agent reason from `mngr exec`'s JSON report -- where it lives, and where stderr alone never mentions it -- then appends stderr as labelled context, capped.
+
+- `POST /api/v1/workspaces/<id>/start` and `/stop` include the reason rather than only "Could not start the workspace host", with mngr's `ERROR:` lines promoted ahead of the warnings that precede them.
+
+- Both log mngr's complete output regardless, so the untruncated copy survives locally.
+
+Added `GET /api/v1/app/version`, reporting the newest workspace-template ref the running desktop app supports.
+
+A workspace's `update-self` flow reads this as the ceiling on how far it may upgrade, so a workspace never ends up running a template newer than the app driving it. The route is reachable by every in-workspace agent without a permission grant (see the matching `mngr_latchkey` baseline change): update-self resolves its target from a background worker, with nobody watching to approve a dialog.
+
+The response carries the template ref alone rather than also the app's version number. A released binary ships the `minds-v*` tag it was verified against, so the two are the same fact; a dev build reports a branch instead, which the update flow reads as "no ceiling." Reporting the ref is what stays correct in both cases. The route is `/app/version` rather than `/app` for the same reason the payload is narrow: the baseline grant is pinned by `const` to this exact path, so any field or sibling route added under it would become readable by every agent with no grant and no dialog.
+
+Bump the bundled Latchkey to version 3.2.1.
+
+Companion to the default-workspace-template's `~/.claude` cutover: minds workspaces now leave `CLAUDE_CONFIG_DIR` unset everywhere, so every claude in a workspace (mngr-launched agents and a bare `claude` in a terminal) shares claude's own default `~/.claude` config dir, and the `system-services` primary agent is a plain `command`-type agent (`sleep infinity`) instead of a claude-typed agent with an unreachable `&& claude`. Workspaces created from older template revisions must be re-created.
+
+The laptop-side agent-type seed (`laptop_agent_types_seed.py`) now seeds `[agent_types.main]` with `parent_type = "command"` to match the template, and migrates the old claude-parented seeded block in place -- the laptop profile outlives workspace re-creation, and a stale claude-parented `main` made `mngr create` fail with "Cannot merge AgentTypeConfig with ClaudeAgentConfig" against new-template workspaces. Hand-edited `main` blocks with extra fields are deliberately left untouched.
+
+Updated the minds README, design doc, workspace glossary, the swap-primary-agent spec (historical note), a desktop-client docstring, and stale snapshot-resume test comments to describe the new layout.
+
+- Chrome TLS impersonation now actually engages for requests made through the latchkey gateway, which is how agents reach third-party services. It previously only worked when the dispatch curl was invoked directly, so the case it was built for -- clearing Cloudflare-style fingerprinting from inside a workspace -- never benefited. Bundles the datalib v0.25.0 curl release that fixes it (was v0.22.0).
+
+- Three things were wrong, each enough on its own to break it. The marker header was value-less (`-H "X-Imbue-Impersonate:"`), which is curl's syntax for *removing* a header -- deliberately a no-op if it ever reached a real curl, but for the same reason it has no representation on the wire, so it never survived the hop to the gateway. The dispatch curl then matched the marker as one byte-exact string, so even a marker that did survive was ignored, because the gateway rebuilds headers in its own spelling. And the impersonator honored a caller-supplied `User-Agent`, which the gateway always forwards -- so a request that did get a Chrome TLS fingerprint still announced itself as `curl/8.7.1`, a louder tell than either alone.
+
+- A knock-on benefit for workspaces running datalib themselves: datalib no longer points `LATCHKEY_CURL` at its own bundled curl when a gateway is configured, so Cloudflare-walled sources such as claude.ai and chatgpt.com can now be mirrored from inside a workspace instead of needing an on-disk export.
+
+Added `docs/slice-hardening-rollout.md`: the one-time operator runbook for deploying the slice container memory cap and the boxes' lima 2.2.0 upgrade to production -- release step, per-box canary checklist (cap presence, guestagent FD flatness, old-instance compatibility), fleet rollout, interim mitigations for long-lived leased slices, a post-rollout verification sweep, and the wedged-slice recovery procedure.
+
+Combined-fixes integration PR (carries mngr/claude-config-dir): minds workspaces leave `CLAUDE_CONFIG_DIR` unset everywhere so all claudes in a workspace share the default `~/.claude`, the `system-services` primary agent becomes a plain `command`-type agent, and the laptop-side agent-type seed migrates old claude-parented `[agent_types.main]` blocks so `mngr create` works against new-template workspaces. See `mngr-claude-config-dir.md` in this directory for details.
+
+Fixed three account-related bugs in the desktop client.
+
+The home screen's bottom-left account launcher no longer keeps showing an account you just signed out of. The chrome-events stream now carries the signed-in identity (which account the launcher shows, and how many others are signed in) on every workspace update, and an auth change pushes it to every open window immediately. The launcher re-labels itself to the account that is now default -- or to "Log in" when none remain -- without a reload, after a sign-out, a sign-in, or a "Set default" switch in the Manage Accounts modal.
+
+Logging out of an account now shows that it is working. "Log out" in the Manage Accounts modal used to sit there looking untouched for the several seconds the sign-out actually takes, so a click read as if nothing had happened. The clicked button now switches to a spinner and "Logging out...", every account action is disabled while it runs so it cannot be double-submitted, and a sign-out that fails says so instead of quietly restoring the buttons. "Set default" gets the same treatment.
+
+Failed sign-ins now explain themselves instead of showing "auth signin failed (exit 1); see the desktop client logs for details". The auth backend's actual verdict is carried through to the form, so a rejected sign-in reads "Incorrect email or password. If you don't have an account yet, create one." -- where "create one" switches to the sign-up tab and carries the email you typed across. (The backend deliberately gives the same answer for a wrong password and an unknown email, so the message does not claim the account does not exist.) A duplicate-email sign-up likewise shows "An account with this email already exists", and failures the backend never judged -- a crashed subprocess, an unreachable service -- now show actionable copy instead of the raw command failure, on the sign-up and OAuth paths as well.
+
+The workspace-creation loading page now walks you through minds while the workspace is created.
+
+Top strip (always visible): a "Setting up your machine" title above the progress bar, the live stage caption, and the collapsible logs. The bar runs no wider than the illustration below it. The workspace is entered the moment it is ready, so there is no Begin button and the bar needs no separate finished colour.
+
+The stage caption and the details toggle appear once, in that strip. They had been showing twice -- again at the foot of the page, left and right -- because the walkthrough's strip and the page's original footer both carried them. Only the strip's pair was ever wired up, so the caption at the foot never advanced past the stage the page was first served with, and its toggle did nothing at all.
+
+Opening the details no longer pushes the page into a scroll. The logs take a fifth of the window, which the walkthrough at full size has no room for, so while they are open the walkthrough compacts: the illustration scales down and the spacing around it closes up, making room where the logs need it. The panel's height is a share of the window rather than a fixed 200px, since how much room there is to make depends on how tall the window is.
+
+The walkthrough plays itself: nine steps, held for 7 seconds each (10 for the chat, 9 for publishing, and 16 for the permissions step, which plays a longer sequence), with nothing to press to begin. Below the illustration sits a row of dots, one per step, each in a fixed-width slot so nothing shifts: the current step's dot stretches into a pill whose fill runs out as the step does. Any dot can be clicked to jump to its step.
+
+Each step leads with a large bold headline (the 24px heading role) over a line of supporting copy at 1rem -- the copy sits off the type scale deliberately, so the walkthrough's message is not the smallest text on the page.
+
+Steps:
+
+- "Minds is your personal AI operating system. / Learn your way around while your machine sets up.", over the minds mark.
+
+- "Your machine is where you create with agents.", with a second line and a picture per launch mode: a local machine says "This one runs right on your own computer." over this laptop with a star on its screen, and a cloud one says "This one runs in Imbue's secure cloud, but is dedicated to you." over the laptop (labelled Your device) linked by a two-headed arrow to a server rack (labelled Imbue's secure cloud), drawn in the same stroke system as everything else.
+
+- "Agents can help you make personal tools. / Describe what you need, and your agents will make you apps to get it done.", over a chat: the request types itself out, backspaces and tries another thing -- a custom "to do" app, filtering email, then a dashboard, which it stays on, since that is the app the next step opens. The agent answers "You've got it!". Advancing carries the exchange over: the same bubbles are what the window's chat pane contains, so the frame simply draws itself around them.
+
+- "Agents and tools run in tabs. / Get your TODOs done, clear out your email, make a dashboard.", over a workspace window where the agent pulls the app up beside the chat: no pointer and nothing clicked. "Pulling it up in a new tab." lands in the chat -- it is new on this screen, so it announces itself -- the chat column narrows, and the dashboard opens in the right half behind a clear vertical divider, its tab sitting over that half so each half carries its own tab. The dashboard is two charts that pop up in sequence, a bar chart growing out of its baseline and a line chart that draws itself on, with the area under it fading in and the endpoint dot popping last.
+
+- "Agents can get data from your other apps. / Connect to Slack, Notion, Gmail, or browse the web to complete tasks.", over a cloud spinning app icons from the bundled latchkey services catalog, inlined into the page so they appear with it.
+
+- "Your credentials remain safe. / Agents can only perform actions you approve.", over a scene that plays out: a dashed boundary sits between the machine and the cloud from the start, and a permission request waits on the left with Deny and Approve on it. A pointer crosses and approves; the green button holds a moment, then travels over and settles as a link through the boundary, which carries light pulses up and down as live traffic. The pointer then crosses back to Deny, which travels the same way and lands on the link as an X, closing it.
+
+- "Share access with your teammates, friends, or even your phone.", over a laptop with an arrow drawing across to a phone, where the laptop's interface then appears. The second line depends on where the machine runs: a cloud machine can be reached with the laptop closed, a local one only while this computer is on.
+
+- "You can publish your apps, or adapt what others have made. / Find others' apps in the Inspirations catalog here.", over two identical machines either side of a cloud. The app inside each is tinted differently, so what differs reads as the app rather than the computer; an arrow draws up to the cloud and only then does the published copy appear there, then an arrow draws down and only then does their version appear. Both arrows stay once drawn.
+
+- A closing step for the rotating tips, on a screen of their own with no illustration: a large "Hang tight — your machine is nearly ready." takes the graphic's place.
+
+Anything in the walkthrough can be hovered for a short explanation: the minds mark, the machine drawings, each demo tab and pane, the app cloud, and the credential-protection line.
+
+Workspace color selection is unchanged: the create form's auto-chosen hidden color is used as before (no picker anywhere in this flow).
+
+The page no longer scrolls: it was sized to a full viewport height on top of the titlebar's 38px offset, so it always overflowed by exactly the titlebar's height and could be scrolled with nothing to scroll to. It is now sized to the region below the titlebar and sits still; windows too short to fit the nav can still scroll the content area so the buttons stay reachable.
+
+The tips change every 7 seconds, and the rotation starts when the last step is reached rather than at page load, so the first tip gets its full turn instead of being swapped out moments after it appears.
+
+The rotating tips on the last step say what you can do rather than where to click -- running several agents at once, running them in the background or on a schedule, sharing a machine or a single app, viewing and revoking permission, keeping several machines, backups, stopping and restarting a machine, and reporting a bug. Naming menus and labels would go stale as soon as one moved.
+
+The pictures are drawn to one system. Each lives in its own viewBox at its own size, so a stroke declared once came out at a different thickness in each -- the cloud read at 1.5px beside a laptop at 4.2px, and the same laptop was heavier on one step than another. Every outline is now 2.5px and every inner detail 1.5px, held there by non-scaling-stroke so the weight does not follow the scale. Arrowheads are filled rather than stroked, so nothing overlaps a line end or doubles up where a semi-transparent cap crosses one. The clouds were also drawn to a viewBox tight against their own path, which clipped away half the outline at the top, bottom and sides (the "extra thin" edges), and were stretched out of their proportions; they now have room for their stroke and keep their shape.
+
+The drawings are inked in a flat gray rather than the theme's tertiary text and border tokens, which are translucent: a line crossing another compounded their alpha, so a join read darker than either line, which is what made the arrowheads look stuck on top of their lines.
+
+Follow-up fixes after the walkthrough merged:
+
+- The dive-into-the-picture zoom on entering the workspace keyed off the connections step, which stopped being the last picture when the walkthrough grew to eight steps, so it effectively never played. It now plays whenever the step on screen has a picture, and only the tips step (which has none) enters directly.
+
+- The sse-redirect release test still clicked the walkthrough's old Next/Begin buttons, which no longer exist; it now waits for the automatic entry. The launch-to-msg e2e script waited for the old "Setting up your workspace" heading; it now matches "Setting up your machine".
+
+- Dropped a data attribute and a CSS class that nothing read, and corrected comments describing the walkthrough's earlier seven-step form.
+
+Ported into the Mithril SPA, merging in the meantime migration off the legacy JinjaX pages:
+
+- Every step of the walkthrough above -- the nine scenes, the copy, the split-view dashboard, the permissions sequence, the app-cloud wheel, the rotating tips, the details-open compaction -- is now built as Mithril components under `frontend/src/views/pages/creating/`, driving the walkthrough CSS that had already been carried over into the SPA's `style.css` (which had drifted from the legacy version's later split-view rework; brought back in sync as part of this port). `frontend/src/models/walkthrough.ts` holds the four timer-driven pieces (the step auto-advance, the chat retyping, the tip rotation, the app-cloud wheel) as small, independently start()/stop()-able classes with unit tests of their own -- the SPA's page previously had none.
+
+- Each scene that replays its sequence on every visit (the chat retyping, the connections/sharing/publishing animations, the app wheel) now does so by mounting a fresh, freshly-keyed copy of itself rather than the legacy DOM version's remove-class/force-reflow/re-add-class dance: a newly created element always starts its CSS animations from the beginning, in every browser, so this is both simpler and more robust than replaying that dance against a node the legacy version kept reusing.
+
+- The shared `<symbol>`/`<use>` sprite sheet (the minds mark, the laptop, the miniature app interface) is now a small component mounted once, since Mithril's icon catalog had no prior precedent for a shared, referenced-by-id sprite sheet -- everywhere else inlines its glyph directly.
+
+- `GET /ui/api/create/attempts/<id>` now carries `is_remote`, `expected_duration_seconds`, and `onboarding_services` (the app-cloud icons, pre-inlined) alongside the existing live-attempt fields, so the walkthrough (which the Mithril tranche work had shipped as a bare progress view, deferred pending this port) can read the same context the legacy page's render call did.
+
+- The legacy JinjaX page, its static JS, and its own CSS section are unaffected by the port and still exist -- they are dead-routed (every page path now serves the SPA) but still exercised by `templates_test.py` and the visual-diff harness, which the Mithril migration has not yet removed.
+
+The workspace titlebar's icon-tabs now open a tabbed options panel docked under the titlebar, with two tabs: Share machine and Machine settings.
+
+The Workspace icon-tab is gone. In the desktop app the workspace is simply the view behind the panel, so a tab pointing at it did nothing; the remaining two tabs open the panel instead of navigating. The panel is anchored to the titlebar's icon-tab strip and draws its own tab strip exactly where that strip sits, so opening it reads as the strip growing into a panel rather than as a navigation. Switching tabs happens inside the panel and never reloads it.
+
+The new Share machine tab is the single place to share a machine. It lists every app the workspace has registered plus a Whole machine entry (the workspace's own web UI), and each target keeps its own independent state: who it is shared with, whether sharing is on, and its link. Adding or removing someone while sharing is on applies immediately; while it is off, the list is staged until Enable sharing. An enabled target shows a click-to-copy link, and says so while Cloudflare is still publishing that link rather than handing over one that does not resolve yet -- including after you switch to another target and come back, which picks the wait back up instead of leaving the warning stuck on screen. A target whose sharing status can't be read says so and offers no controls, rather than presenting itself as "not shared yet"; clicking it again retries.
+
+Links inside the panel (Machine settings' "View all backups", the sign-in prompt on an unassociated workspace) open in the app behind the panel and dismiss it, rather than loading a full page inside the panel itself.
+
+Machine settings groups the workspace's own settings behind a General / Account / Backup nav. The per-service sharing list that used to live on the settings page is gone -- the Share machine tab replaces it. The standalone `/sharing/<agent-id>/<service>` editor still works as a direct link.
+
+`/workspace/<agent-id>/options` is the browser-mode fallback for the whole panel and joins the in-place page-swap set. The workspace settings page keeps its own URL and now renders the same Machine settings content as the panel.
+
+The settings gear on a workspace card in the home list now opens the options panel over the list, instead of navigating into that workspace's settings page.
+
+The panel docks under the titlebar with its tab strip only when opened from inside a workspace, where that strip exists to hang from. Opened from the workspace list it is an ordinary centered dialog with no tabs, showing the tab it was opened on.
+
+Destroying a workspace now deletes its Cloudflare tunnel. Nothing downstream of the host teardown knew the tunnel existed, so every destroyed workspace left one behind -- keeping a proxied hostname answering and counting against a tunnel quota that is a ceiling on workspaces ever created rather than live ones. Existing orphans still need deleting by hand.
+
+Machine settings names the machine under its heading, so a panel opened from the workspace list says which one it is about before you press Remove machine.
+
+Failures coming back from the imbue_cloud connector now say what went wrong instead of "see the desktop client logs for details". An expired session says so and suggests logging out and back in.
+
+Both panel titles now read "Share machine: <name>" / "Machine settings: <name>", so a panel opened from the workspace list says which machine it is about. The name is part of the title rather than a caption under it, and truncates rather than wrapping it.
+
+The centered dialog every overlay modal draws -- backdrop, card, close button, dismiss-on-backdrop-click -- is now one OverlayDialog component. Sign-in, Accounts, a plan, Minds Settings and sharing each had their own copy, which is how they had drifted apart.
+
+A long workspace name in the home list now truncates instead of pushing the badges and the settings gear past the edge of its row.
+
+Copying a share link flashes it green, the same confirmation the inspiration flow gives, since the clipboard offers none of its own. A refused copy still reports itself rather than flashing.
+
+The waits in the share pane now name what they are doing -- checking who a target is shared with, creating the link, updating who can open it, stopping sharing -- with a spinner, rather than a bare "Loading".
+
+An unshareable machine now says sharing runs through an Imbue account and offers a button to sign in or create one, instead of an inline text link.
+
+The share icon is the icon set's own filled glyph rather than a scaled stroked stand-in, and the account section in Machine settings says "machine" like the rest of the panel around it.
+
+The workspace options panel now keeps its title and its left-hand tab list in place and scrolls only the pane on the right, matching how the Minds Settings dialog already behaves. Previously the whole card body scrolled, so on a short window the title and the tabs slid out of view along with the content.
+
+A button that starts slow work now reports it in place: the button becomes a spinner and a sentence beside or below it names what is happening. Enabling sharing says "Creating the link and granting access..." next to the button; disabling takes the link away immediately and says "Stopping sharing and revoking the link..." until the link is really gone, at which point Enable sharing comes back. Associating and disassociating an account label their own buttons "Associating..." and "Disassociating..." instead of putting the status text beside them.
+
+Copying a share link now says so three ways at once: the link pill flashes green, its copy icon becomes a green check, and a "Copied" bubble appears above it.
+
+The share pane's progress no longer goes stale when you switch between share targets. Each target tracks its own in-flight change, so a wait started on one no longer follows you to another that is not doing anything, and returning to a target whose change is still running finds it still reported there.
+
+Disabling sharing also clears the "This link is not live yet" notice, which previously outlived the link it was about: the link came off screen immediately while a notice explaining that Cloudflare was still publishing it stayed behind. If the disable fails, the link and the notice both come back.
+
+The account association prompt is no longer boxed in a bordered card. It is a message and a button, which is all it ever was; the card framed it as a separate panel inside whichever pane it already sat in.
+
+Account association is now called linking throughout the interface: the buttons say "Link" and "Unlink", a machine with an account reads "Linked to <email>", and the waits say "Linking..." / "Unlinking...". A machine with no account now says "Link your machine to an Imbue account to enable sharing and cloud backups." on every surface that offers the prompt, replacing the two differently-worded sentences the Share pane and Machine settings each had.
+
+Signing in from the workspace options panel no longer closes it. The sign-in modal now opens *over* the panel, which stays on screen under its backdrop, and dismissing it -- by signing in, by Escape, or by closing -- reveals the panel exactly as it was, down to the share target you had selected. Previously the panel was destroyed the instant the sign-in opened, and a completed sign-in then navigated to the workspace list behind it. The one exception is the first-run error-reporting consent screen, which still takes priority.
+
+Signing in from the panel's Link prompt now leaves the panel showing the account you just added, instead of still asking you to add one. The panel stays mounted under the sign-in modal, so it was showing what it rendered before you signed in; a completed sign-in now re-renders it on the way back. Dismissing the sign-in without signing in still returns the panel untouched, with the share target you had selected.
+
+The panel's left-hand list scrolls on its own when it has more entries than fit, so a machine with twenty apps no longer runs them off the bottom of the card. Each side scrolls only when its own content overflows.
+
+Linking an account from Machine settings now leaves you on the Account group instead of dropping you back on General. Which group is open is carried in the panel's URL, the same way the tab already was, so the reload that follows a link (or a rename) comes back to the control you just used.
+
+Focus rings are no longer shaved off by the panel's scrolling areas. The accent ring sits 4px outside the control it marks, and a scroll container clipped it for anything against an edge -- the name field, the selected colour swatch, the add-email box, the account picker. Each scrolling area now keeps enough room for it, without moving any content.
+
+The machine name field is the design system's text input rather than a one-off pill. It previously had its own surface and corner radius and no focus ring at all, so it matched nothing else on the page and gave no keyboard-focus feedback.
+
+The options panel's outer padding is px-6 py-4. The scrolling area's negative margin tracks it, so the scrollbar still sits on the card's edge.
+
+Workspaces are called machines throughout the interface. The home screen lists Machines, Minds Settings groups permissions under Machines, and every message, tooltip, notice and error that referred to a workspace now refers to a machine. Minds Settings' Local files section says "on this computer" rather than "on this machine", which used to mean your own computer and would now read as one of your machines.
+
+Only the words changed. Routes, the v1 API and its fields, element ids, CSS variables and the workspace/ directory inside a backup keep their names.
+
+The machine name field is narrower rather than filling its row.
+
+Fixed two identifiers the rename should not have touched: the workspace/ directory the in-place restore looks for inside a snapshot (renaming it failed every restore), and the "workspace" permission-request type shared with the mngr latchkey extension.
+
+Unlinking an account is confirmed first, the way removing a machine is. Unlinking tears down every tunnel for the machine and cannot be undone by linking again -- sharing has to be set up from scratch -- so the button now opens a dialog that says so instead of acting immediately.
+
+The options panel opens immediately again. Reading a machine's account re-ran `mngr imbue_cloud auth list` -- a ~1.7s subprocess -- on every page render whenever a synced record named an account that was no longer signed in, because a cache miss always forced a refresh. That refresh now happens at most once per cache generation, which is all it was ever for (recovering from a sign-in that rotated to a new user id). Measured on the machine options panel: median render 1.664s to 0.003s.
+
+Reopening a modal that is already on screen (clicking the other titlebar tab) hands it the new URL instead of tearing the page down and loading it again, so a second click no longer discards a frame that was still loading.
+
+Signing up is now the default path into Minds, and signing in is always one deliberate click away.
+
+The first-run welcome splash leads with a single primary "Sign Up" button. The old equal-weight "Log In" button next to it is now the smaller "Already have an account? Sign in" link underneath, matching the wording the auth form already uses at the bottom of its own sign-up tab. "Continue without an account" is unchanged.
+
+Sign-up asks for the password twice. A "Confirm password" box sits under the password field on the sign-up tab only; if the two disagree, the form says "Passwords do not match" and sends nothing, so a typo can no longer create an account you cannot sign back in to. The confirmation is only ever compared in the page and is never sent to the server.
+
+Which tab you land on now depends only on where you clicked, never on whether this computer has signed in before. Pressing "Log in" on the workspaces screen, or any "Sign in" link, takes you to the sign-in form even on a machine you have never used; everything with no opinion about your intent -- the welcome splash's Sign Up, the Imbue Cloud prompt on the create screen, "Add account" -- opens sign-up. The previous release guessed from local sign-in history, which meant a returning user setting up a new laptop pressed "Log in" and got handed the sign-up form.
+
+Two smaller fixes that fell out of the above: the title bar reads "Create account" rather than "Sign in" while you are on the sign-up page, and the sign-in dialog now scrolls instead of clipping its top and bottom edges when the window is at its 800x600 minimum.
+
+The workspaces screen's bottom-left account launcher now opens sign-up rather than sign-in when no account is signed in. Someone with no account needs to create one, and the sign-up view still carries an "Already have an account? Sign in" link for returning users.
+
+## 2026-07-28
+
+Fixed approving a permission request no longer telling the agent it was approved (the agent sat waiting instead of retrying the tool call it had asked permission for).
+
+The laptop-side nudge is a `mngr message` to the workspace's chat agent, and mngr resolves an agent's type from config -- but the workspace's own `.mngr/settings.toml` (which declares `chat`, `main` and `worker` as `claude`-parented types) lives inside the workspace container and is never visible to a laptop-side mngr, which minds always runs with cwd=$HOME. minds seeds those type definitions into its own user-scope `settings.toml` at startup, but the seed only knew about `main` -- so user-facing chat agents (type `chat`, which is what every chat, including each "New Agent" and `/assist` chat, is created as) fell back to the type-less `BaseAgent`, and the nudge failed with `agent type 'chat' does not accept interactive messages`. The seed now covers `chat`, `main` and `worker`, checking (and appending) each type independently so an install seeded by an older build picks up the missing types on its next launch.
+
+Side effects of the same fix: those agents no longer show up in a laptop-side `mngr list` as `RUNNING_UNKNOWN_AGENT_TYPE`, and laptop-side mngr no longer logs `Agent <name> has type 'chat' which is no longer registered` on every command.
+
+Connector permissions are now granted per signed-in account rather than per service (Latchkey 3.2.0).
+
+- Changed: the permission-request dialog asks which account the grant applies to. It lists every account already signed in to the service plus a "new account" choice that runs a browser sign-in. When the agent names an account that is not connected here, that account is offered (and preselected) with a "not connected yet" note, so approving signs it in instead of quietly granting a different account while the agent stays blocked; approving writes a rule scoped to that one account, so the service's other accounts get nothing. The first sign-in for a service uses the normal browser session; adding a further account uses a fresh (ephemeral) one so it is not silently bound to an existing account's session. Which account a completed sign-in actually connected is read back from Latchkey rather than assumed, and an ambiguous result fails the approval instead of granting the wrong account.
+
+- Changed: the Connectors settings page shows one section per account instead of one per service. Each account carries its own "Disconnect" and "Revoke all" actions and its own per-workspace cards; a connected account with no grants is listed too, as is an account that only appears in a host's rules -- its credentials were cleared elsewhere, or it was granted before ever being connected -- flagged "not connected" so its (inert) grants stay visible and revocable. Disconnecting an account now also revokes that account's grants everywhere, so reconnecting it later starts from no permissions.
+
+- Changed: the revoke endpoints (`/settings/permissions/revoke`, `/settings/permissions/revoke-all`) take an `account` alongside the service name. Which rules those account-scoped names refer to is resolved from the permissions file's schemas (through the shared `mngr-latchkey` helper), not from the shape of a rule key, so accounts containing unusual characters behave like any other.
+
+- Note: existing permissions files are migrated automatically on startup -- each service grant becomes one grant per account currently signed in to that service, and grants for services with no signed-in account are dropped (agents can request them again).
+
+Changed: Hardened the snapshot-resume service-registration test (`test_resumed_workspace_registered_expected_apps`). It now polls the `data/.state/apps.toml` app registry (shell-side inside `docker exec`, no Python `time.sleep`) until the expected services appear or a deadline passes, instead of reading the file exactly once -- services re-register asynchronously after a resume, so a single read raced a service that registered a moment later and failed intermittently. It also restores coverage that `browser` re-registers: `browser` is now required unless there is positive evidence it was shed under memory pressure (supervisord recorded its program dying on an OOM signal -- `terminated by SIGKILL`/`SIGTERM`, or `exit status 137`/`143` when its `forward_port.py` child was killed and the bash wrapper propagated the status). A bare "never re-registered", with no shed signal, is treated as a real regression and fails. The always-on core set is `system_interface` and `terminal` (`web` was removed from the template).
+
+Agents can now request permission for `claude.ai`, the first of a hardcoded list of *additional* services minds supports beyond latchkey's builtin catalog. It appears and is granted in the permission dialog exactly like a builtin service (Slack, GitHub, ...), exposing a single `everything` permission that grants full access to the `claude.ai` domain.
+
+Because `claude.ai` is a custom, minds-registered service rather than a builtin latchkey one, authenticating it is a manual `latchkey auth set claude-ai -H "..."` (browser sign-in does not apply to registered services); granting the permission and supplying credentials are independent steps. See `docs/latchkey-permissions.md` for details.
+
+The launch-to-msg e2e watched the wrong latchkey pending-request directory, so its permission deny/retry phase failed on every run regardless of what the agent did.
+
+Latchkey stores each pending request as a JSON file under `<latchkey-dir>/permission_requests/<schema-version>/`, and a backwards incompatible change gets a new version directory rather than an in-place migration. The per-account permissions work moved that version to `v3`; the e2e still watched `v2`, which nothing writes to. Every read returned empty, so the retry wait ran its full 120s and then reported `Claude did not re-submit after deny` -- while the agent had in fact re-submitted five seconds after the kick, and the gateway had accepted the request and streamed it to the UI.
+
+`_list_permission_request_files` treated a missing directory as "no pending requests". It now distinguishes the two cases: nothing written yet stays empty, but a missing versioned directory alongside sibling versions raises immediately and names the versions it found, so the next schema bump fails in seconds with an accurate message instead of timing out against a plausible-looking wrong one.
+
+Inspiration deeplinks (`minds://create?git_url=...`) now land on a dedicated Create from Inspiration page instead of the plain create form. The page is a numbered vertical stepper that shows one step at a time: finishing a step collapses it to a summary of what you picked (the options you didn't choose disappear) and the next step slides up into place. The step numbers sit on the same line as each step's question, with a solid connector linking each step to the next and a short 3-dot "more to come" stub below the step you're currently on -- except on the final step, which has none, so the last number reads as the end; the step you're on is a solid black number bubble (white number, black title), while completed (previous) steps are a light-gray bubble with a dark-gray number and a grayed-out title, marked with a simple green check. The number bubbles carry no border, and the connector lines match the completed bubbles' fill exactly. A completed step can be clicked -- by its number or its title -- to go back and change it. Step 1 asks whether to create a new workspace from the Inspiration or add it to an existing one.
+
+Adding to an existing workspace walks through: (2) copy the `/use-inspiration <repo>` message -- the whole message box is clickable (with a pointer cursor over the message and a borderless Copy button), lifts on hover, and flashes green to confirm, and the workspace picker stays hidden until you copy -- then (3) pick one of your workspaces to open and paste it into that workspace's chat. Each workspace card carries a right-pointing arrow to signal that clicking selects it (stopped local workspaces are restarted on the way in, matching the landing page).
+
+Creating a new workspace is three steps: (2) cloud vs. local; then (3) the confirmation, which shows the Inspiration repository as read-only text and the account as a bordered dropdown under its label, and a required "I trust this Inspiration" acknowledgment (Inspirations are community content, not approved or verified by Imbue). The acknowledgment shows in red and the "Create from Inspiration" button stays grayed out and disabled until it is checked. A low-key "Advanced settings" toggle above Create starts as a plain label on the left; opening it smoothly animates into a full dashed divider -- the label slides to the center as the dashed rules grow outward from it (mirroring the dashed separator in the regular create form's advanced view) -- and expands the compute / AI / backup provider and region selects in place (laid out inline, no box) for anyone who wants them, without adding a fourth step. Opening it no longer yanks the page upward: the content stays put as the options open, then the page slowly scrolls down to reveal them and the Create button. Closing reverses the divider back to a plain label and collapses the options, so the Create button rises straight back up as they disappear.
+
+Separately, full-width buttons across the app now press with a gentler scale-down (the same percentage moved the wide edges too far, so it read as too much).
+
+Scrolling on local pages (Settings, Home, ...) now happens inside a per-page container pinned below the fixed titlebar, instead of scrolling the document: the scrollbar starts under the navbar and ends at the window bottom (it can never ride over the bar), it is removed together with the page on every in-place swap (nothing lingers after leaving Settings), and -- because the document never scrolls on any screen -- the titlebar spans the full window width everywhere, so its right-edge buttons no longer shift between pages with and without a scrollbar. The container keeps the native scrollbar (see below), with a stable gutter so page content doesn't shift sideways between scrolling and non-scrolling pages.
+
+Local pages now render inside the same inset rounded white card as the workspace content surface (4px insets, 12px corner radius), with the titlebar color bleeding around the card exactly as it does around a workspace -- so Settings, Home, and the workspace view all share one shape, and the page's scrollbar lives inside the card's rounded bounds.
+
+Scrollbars are left native (the OS overlay/auto-hiding bar) rather than custom-styled, so they match the platform, auto-align to each scroll container's edge, and adapt to light/dark; the document viewport-lock lives in app.css as a single universal rule instead of a per-mode class in a template <style>.
+
+Fixed short pages (Create, Creating, the auth flow) not centering after the switch to the scroll container: they had centered via body-level flex, which no longer applies now that page content lives inside the fixed local-page card. Centering moved to a wrapper inside the card (min-h-full flex), matching the other centered pages (Welcome, recovery, consent).
+
+The local-page scroll surface now matches whichever box the user perceives as its container: neutral all-white pages (Home, Create) are full-bleed to the window so the native scrollbar hugs the window's right edge, while workspace-scoped pages (with a colorful accent border) stay an inset rounded card so the scrollbar sits at the inner card's edge -- a constant distance from the relevant edge in both cases.
+
+Settings popup: the section nav stays pinned while only the right pane scrolls, with the native scrollbar at the popup's right edge.
+
+## 2026-07-27
+
+Fixed a flaky create-attempt test (`test_failed_create_attempt_marks_pending_record_failed_with_log_tail`). The worker flips a create attempt's in-memory status to FAILED before writing the FAILED pending-create-attempt record to the on-disk store (the store write is best-effort crash-safety), so a read taken the instant the in-memory status turned terminal could still observe the record as IN_FLIGHT and fail. The test now joins the worker thread via `wait_for_all()` before reading the record, establishing the happens-before edge that guarantees the store write is complete and visible. No production behavior changed.
+
+The snapshot-resume chat-gate test now recognizes the workspace's chat agent by either mngr type: `chat` (the type default-workspace-template#326 introduced for chat agents, parented on `claude` and carrying the Engineering Subordinate output style) or plain `claude` (snapshots baked before that split). The test previously matched only `claude`, so snapshot builds against a current template repo found "no claude chat agent" and failed before exercising the gate. The production gate itself was never affected — it classifies running chats by excluding the `main` type rather than matching `claude`.
+
+Modal workspace creation now supports an optional overlay template via the `MINDS_MODAL_EXTRA_TEMPLATE` env var: when set, the create command stacks `--template <name>` on top of `--template modal` (mirroring how `docker_runsc` overlays `docker`). Unset (the default) is unchanged. The eval harness uses this to select a shorter-timeout `modal_eval` template without touching the shared `modal` template.
+
+The create command now honors `MINDS_EXTRA_PASS_HOST_ENV` (a space-separated list of env var names): each becomes a `--pass-host-env <name>` so a creating host can forward extra env vars from its own environment onto every workspace it creates. Unset (the default) is unchanged. The eval harness uses this to push feature flags into eval workspaces.
+
+The workspace vocabulary was renamed around "creations": users make apps (opened as tabs), skills (an automation is a skill run on a schedule), data, and customizations; "service" now means a background supervisord program only, and "application"/"artifact"/"web service" are retired terms.
+
+The workspace glossary gains creation, app, service, automation (future), customization, inspiration, and template base entries. Minds docs describe the template's three-way system/ split (system/apps, system/services, system/libs) and the app registry's new name (data/.state/apps.toml).
+
+The minds docs no longer claim the app watcher reconciles with the Cloudflare forwarding API: the watcher only writes discovery events to events/services/events.jsonl, and Cloudflare forwarding registration happens from the desktop client's sharing flow.
+
+The backup workspace scripts resolve the backup-service code at system/services/host_backup first (falling back to the older system/libs/host_backup and libs/host_backup layouts), and the snapshot-resume release test reads the app registry at apps.toml with an applications.toml fallback, so both span template versions.
+
+Added `GET /api/v1/timezone`: the desktop client reports the IANA timezone of the machine it runs on (empty string when it cannot be determined). Workspace agents can fetch it through the latchkey gateway, so a workspace's recurring jobs (like the nightly Caretaker) can run in your local time and re-check your timezone whenever you schedule something -- instead of the desktop client pushing a timezone into each workspace at create time. The create request no longer carries a timezone field, and the create-time write into the workspace was removed.
+
+## 2026-07-26
+
+Adapt minds to the default-workspace-template root declutter: injected secrets move to `data/.secrets/` (restic.env, cloudflare_tunnel.env), user backup settings to `data/system/backup.toml`, the supervisord config to `/home/user/workspace/system/supervisord.conf` (recovery probe updated), the vendored mngr to `system/vendor/mngr/`, and the system interface to `system/libs/system_interface/` (worktree materializer, propagate_changes, e2e runner, and docs updated). `propagate_changes` also drops its stale pre-cutover `/code/` target in favor of `/home/user/workspace/`.
+
+The backup check/update scripts resolve the backup-service code path from the workspace's own layout (`system/libs/host_backup` on decluttered workspaces, `libs/host_backup` on pre-declutter ones), so backup verification and updates keep working on both layouts. The restore script likewise reads the user's snapshot excludes from whichever backup.toml the workspace has (`data/system/backup.toml`, falling back to the pre-declutter `runtime/backup.toml`).
+
+Integration branch combining the user-data-layout trains (`mngr/fix-data-layout`, `mngr/declutter-template`) with `mngr/fix-apt-mirror`; the full per-train details live in this project's sibling entries for those branches.
+
+For this project: minds adapts to the `/home/user` workspace layout and the decluttered template root (secrets at `data/.secrets/`, vendored mngr at `system/vendor/mngr/`, backup/restore and recovery probes on the new paths, layout knobs in minds-authored provider blocks), and the release runbook's step 0 cuts the apt snapshot mirror timestamp via the `apt-mirror` operator CLI instead of connector admin routes.
+
+The backup-service check/update scripts now converge across the declutter layout rename in both directions: pathspecs addressed at a target tag follow the tag's own tree layout (`libs/host_backup` on pre-declutter tags, `system/libs/host_backup` after), so a decluttered workspace can converge onto the shipped pre-declutter minimum tag and old-layout workspaces can accept future decluttered release tags. Previously the cross-layout `git checkout <tag> -- <workspace-path>` failed with an unmatched pathspec.
+
+The desktop client's "Manage Accounts" modal now surfaces per-account plan and usage. Previously the plan/quota view existed only on the full-page `/accounts` fallback, which the Electron account launcher never opens -- so the centered Manage Accounts modal showed only Set default / Log out with no way to see quotas.
+
+Clicking anywhere on an account card (except its Set default / Log out / Sign in again buttons) now opens a "Plan & Usage" modal for that one account. The modal appears instantly with a spinner and then fills in the plan, the switch-plan control, and all usage/limit rows (remote workspaces, shared links, backup storage, buckets, AI spend, synced workspaces) asynchronously from the existing plan-view fragment -- a single connector query, since it scopes to one account, versus the full page's query-per-account. The modal has a back affordance to the account list, and its switch-plan and free-up-backup-space actions keep working (intercepted to stay inside the overlay rather than navigating to the full page).
+
+New backend route `GET /accounts/<user_id>/plan-modal`, a matching Electron `openAccountPlan` bridge (with server-side user-id validation), and tests covering the route (auth, known account, unknown-account 404, connector-unavailable degrade), the rendered modal, and the clickable card.
+
+Destroyed workspaces' backups are now retained for 30 days and then reaped automatically (previously they were kept forever, silently exhausting the account's bucket quota). A client-side reaper runs every 30 minutes inside the sync loop (all provider types; BYO backends only lose the local env + record, never repository data), deleting bucket, record, and local `restic.env` in strict order; reap/evict events land under `events/backup_reaper/events.jsonl`. Tombstoned records carry a `destroyed_at` stamp, cleared on resurrection.
+
+Backup provisioning that hits a bucket-count or storage quota now silently evicts the oldest destroyed workspace's backup and retries (looping until it fits or nothing is left), so new workspaces no longer fail backup setup just because old leftovers hold the quota -- and the existing "enable backups" workspace-settings action self-heals the same way.
+
+New "Recently destroyed workspaces" page at `/workspaces/destroyed`: tombstoned workspaces newest-first with a days-until-deletion countdown, latest-snapshot download (with an unlock hint for rows needing the sync master password), inline-confirmed "Delete backup now", and "this device" rows for orphan backups. The destroy-workspace confirmation and the backups settings section explain the 30-day policy, and the Plan & Usage view links to the page when at/over quota. minds-managed mngr profiles now keep destroyed host records for 30 days to match. New docs: `docs/backup-retention.md`.
+
+Fixes to that page's first cut:
+
+- Each row's delete button (now labelled **Remove**, which reads correctly for workspaces with no backup too) shows its two-step confirm only after you arm it. The confirm was previously always visible on every row (its wrapper paired the `hidden` utility with `inline-flex`, which wins the Tailwind cascade over `.hidden`, so it never hid); it now uses `flex`, which `.hidden` beats.
+
+- Row buttons no longer wrap onto a second line when a workspace has a long name (e.g. the `unknown workspace (agent-<id>)` orphan rows): the name column shrinks/wraps and the actions stay on one row, and the confirm prompt stacks above its buttons so it never widens the row.
+
+- The page paints instantly and loads its rows asynchronously (new `GET /workspaces/destroyed/rows` fragment fetched by the shell), instead of collecting every destroyed record and inspecting local envs on the server before replying. The shell also no longer blocks on the connector: it reads the retention window from cache (30-day fallback) rather than making the synchronous policy fetch the first paint used to wait on, so clicking the link shows the page (and its loading spinner) immediately.
+
+- The link to the page moved from the fixed bottom-left launcher cluster to just below the workspace list (above the collapsed providers panel), where you naturally look for the backup of a workspace you just destroyed.
+
+The workspace list's per-row backup badges ("Backed up N ago", "Backing up…", "No backups") now load over a single streaming request instead of one `restic`-backed fetch per workspace. The old fan-out opened many connections at once and, because Chromium caps HTTP/1.1 at six connections per origin, saturated the pool so the next navigation (e.g. opening "Recently destroyed workspaces") queued behind it and appeared to hang. The new `GET /api/v1/workspaces/backups` endpoint streams one NDJSON line per workspace as each `restic` probe resolves (fast workspaces paint immediately; a single slow probe never blocks the rest), fanned out server-side with bounded concurrency. The page makes one request, applies each line as it arrives, and aborts the stream on navigation so it never holds a connection open.
+
+The backup badges can no longer go blank. The streaming endpoint now guarantees one line per requested workspace: a probe that crashes, cannot spawn its worker, or misses the per-row timeout is degraded to an `error` summary instead of being silently dropped (previously a wedged probe silently ended the stream, stranding the remaining rows). On the client, a badge whose line carries an error -- or that is still on "Checking backups…" when the stream ends -- resolves to "Backup status unknown" instead of being hidden, and each badge line is applied to every row carrying that workspace id (discovery churn can transiently render the same workspace as both a local tile and a synced-record row; only the first used to update).
+
+Workspace Settings no longer piles up slow backup-status requests when you navigate away. The settings page's `GET /workspaces/<id>/backups` fetch runs the backup-service check server-side -- an exec into the workspace that takes ~10s even when healthy (minutes when unreachable) -- and the page is swapped in place, so the fetch survived navigation. A few quick Settings visits pinned all six of Chromium's per-origin connections and every later request (including the next Settings page's own status fetch) queued behind them, leaving "Loading backup status…" stuck for a very long time. The fetch is now aborted on page teardown.
+
+The Workspace Settings backup section now loads in two phases: `GET /workspaces/<id>/backups` returns just the snapshot picture (fast -- restic runs from this machine, no exec), and the exec-based service verification moved to a new `GET /workspaces/<id>/backup-check` route that fills in asynchronously behind its own spinner. The snapshot list and status line paint in a couple of seconds instead of waiting ~10s (or minutes, for an unreachable workspace) on the check, and both loading states show explicit spinners. The sidebar's backup-health fan-out and the verification toggle use the new check route.
+
+New `BACKUPS_STALE` verdict: the backup check now flags a configured workspace whose newest snapshot is older than three hours (or that has none at all) while no backup is running and the workspace has been up for more than an hour -- the check script reports the workspace's uptime (PID 1 elapsed time) so a workspace that was stopped for days and just started is not flagged before its startup backup has had a chance to run. This catches any silently dead backup pipeline regardless of cause.
+
+The landing page now surfaces backup-service warnings: each workspace row shows the same warning dot (with the cause in its tooltip) that sidebar rows use, fed by the shared backup-health cache, and a "Backed up N ago" badge re-tones from green to a warning once the check reports the history stale -- green now means "recently backed up", not "has ever backed up".
+
+The "Recently destroyed workspaces" page's Download button now works: it previously rendered as a plain link to the POST-only export route, so clicking it navigated to a bare "Method Not Allowed" page. It now goes through the shared fetch-and-save download flow (inline "Downloading..." state, saves the zip). "Delete forever" also shows a "Deleting..." spinner and disables itself while the (slow, bucket-emptying) delete runs, instead of appearing dead.
+
+Navigation-level 404/405 errors no longer strand the user: a page navigation that hits a missing page or a method-mismatched route (detected via Sec-Fetch-Dest, so fetch/XHR callers still get raw statuses) renders a minds-styled error page with a "Back to workspaces" button instead of werkzeug's bare error page with no links.
+
+Session restore only re-opens pages that make sense: window state now persists workspace URLs as themselves and everything else as the workspace-list home page, so a restart can never re-open a transient page (like an error page a bad link navigated to) and strand the user there.
+
+Ctrl+Shift+C (Cmd+Opt+I on macOS) now opens DevTools for the surface that received the keystroke: from hub pages (landing, settings -- the chrome view) it opens detached DevTools for that view, where it previously targeted the workspace content view unconditionally -- invisible when no workspace was open.
+
+Release runbook step 0 (cutting the apt snapshot mirror timestamp) now uses the `apt-mirror` operator CLI (`uv run apt-mirror cut|warm|verify` with R2 credentials from Vault) instead of curling the connector's admin routes, and requires dwt's `.mngr/apt-snapshot-timestamp` to match the committed `apps/apt_mirror/current-timestamp` at T-bump time.
+
+Adaptations for the /home/user workspace data layout and env-converge:
+
+- The in-place backup restore rewinds the backup root (`/home/user`; legacy `/mngr` workspaces keep their old target), and its restart-all step re-runs the `env-converge` one-shot so a restored environment record converges installed packages as well as files.
+
+- minds-authored provider blocks (imbue_cloud accounts and byok aws/gcp/azure) now carry the layout knobs (`host_dir=/home/user/.mngr`, `volume_home_path=/home/user`, `host_log_dir=/var/log/mngr`).
+
+- The release runbook gains step 0: cut (and warm) the apt snapshot mirror for a new timestamp via the connector admin routes before landing a `.mngr/apt-snapshot-timestamp` bump.
+
+- Remote workspace hosts (docker, lima, vultr, aws, modal, gcp, azure launch modes) now receive `MNGR_HOST_DIR=/home/user/.mngr` (the new workspace layout's host_dir) instead of the legacy `/mngr`, and the snapshot-resume and litellm workspace tests exec against `/home/user/workspace` instead of `/code`.
+
+- The workspace-recovery probe checks supervisord via `/home/user/workspace/supervisord.conf`, and backup restore locates the workspace subtree in a snapshot by its `workspace/` checkout (falling back to `code/` for legacy snapshots).
+
+- The in-container recovery probe script and the in-workspace restore script's post-restore sanity check follow the new layout (`/home/user/workspace/supervisord.conf`; `workspace/` checkout marker with legacy `code/` fallback).
+
+Workspace create attempt on Lima/Docker is now crash-safe: a pending-create-attempt record (carrying the full create request) is persisted before `mngr create` spawns, and the new host is stamped with a `workspace-id` label. If the app quits or crashes mid-create, the next startup's reconcile either adopts the finished workspace (restoring its account association, or leaving it private when the record carried no account) or destroys a stale half-built host once it is older than a 60-minute grace window -- so orphaned VMs no longer burn CPU forever. Hosts without the label are never touched (a warning names the manual cleanup command), and stale FAILED/DESTROYED host records are swept via `mngr gc` scoped to the lima+docker providers (mngr's 7-day retention default).
+
+Duplicate workspace names can no longer race past the checks while a create is still invisible to discovery: the create form's availability check, the `workspace-N` auto-namer, and `start_create_attempt` itself now also consult live in-flight create attempts (provider-scoped, like mngr's own conflict check). A duplicate submit is rejected with a 409 naming the conflict.
+
+A Lima create with no pre-baked image (dev envs, or a prod fallback) now gets a 900s readiness window instead of 300s -- building the workspace in-VM at 2 vCPU/4 GB routinely takes 15+ minutes -- and while a create attempt is in flight the system-interface health tracker suppresses the STUCK/recovery-page takeover until the create attempt finishes or its readiness window expires, so users are no longer bounced to the recovery page while provisioning is still healthy.
+
+On success, the pending-create-attempt record is deleted only once the workspace appears in a discovery snapshot; on failure it retains the error plus the last 1000 create-attempt-log lines, backing the failed row across restarts (surfaced in the upcoming create-attempt-rows UI).
+
+Every workspace create attempt now appears as a row in the workspace list (landing page and workspace switcher) from the moment it starts, badged as Creating / Interrupted / Create failed, sitting inline with the finished workspaces. The row hands off to the real workspace row in place once discovery confirms the new workspace, with no flicker in between.
+
+Clicking a creating row returns to the create-attempt-progress view: the create attempt log is now buffered in memory (last 10,000 lines, with a truncation marker on longer creates), so re-entering the page replays the history before tailing live output. You can start a create, navigate away, and come back at any time.
+
+Interrupted rows (an app restart killed the create mid-flight) offer Retry and Discard. Retry reopens the create form pre-filled from the persisted create attempt request (`/create?retry=<id>`) -- repository, branch, name, compute provider (including a bring-your-own-cloud account and machine size), backup settings, region, and color; submitting it first destroys the previous attempt's leftover half-built host and record (provider-scoped implicit discard), then starts the new create. Discard destroys the leftover host via a detached `mngr destroy` whose output streams to the page (like workspace destroys), then removes the record; a failed cleanup keeps the row with the error and can be retried.
+
+Failed rows persist across restarts (backed by the pending-create-attempt record's stored error and log tail); the error and create-attempt-log tail stay viewable on the create attempt detail page until the row is dismissed. Dismiss is available right away: the live create attempt page's failure view carries the same Dismiss action as the record-backed detail page, so a failed row can be cleared without restarting the app.
+
+New API surface: `POST /api/v1/workspaces/create-attempts/<id>/discard`, `DELETE /api/v1/workspaces/create-attempts/<id>`, and the `create-attempt-discard` operation status/log resources under `/api/v1/workspaces/operations/`.
+
+Speed up the `build-minds-snapshot` -> `test-minds-snapshot` CI chain (the PR critical path) (MIND-141):
+
+- Scope the `minds_snapshot_resume` suite's offload discovery to just `apps/minds/test_snapshot_resume.py` and `apps/minds/test_sync_e2e.py`. Local `pytest --collect-only` on the CI runner drops from ~90s (full-monorepo collection) to ~50s cold (collection itself is under a second; the remainder is fixed interpreter/plugin startup); the tests themselves are unchanged.
+
+- Make the snapshot image's third-party dependency installs (uv + pnpm) cacheable across CI runs by staging them in manifests-only Modal layers, so source-only commits skip ~70s of reinstall in `build-minds-snapshot`.
+
+See `dev/changelog/mngr-mind-141-minds-snapshot-ci-speed.md` for details and the new guard tests.
+
+Fixed the desktop app going irrecoverably blank (a fully white, dead window) when a navigation on the chrome surface failed mid-flight -- most commonly `ERR_NETWORK_CHANGED` when destroying a Docker or Lima workspace removes its network interface while another page is loading, which aborts every in-flight request. A failed load commits Electron's blank error document over the entire UI (the chrome view hosts the titlebar and all local pages), and nothing recovered it.
+
+The chrome view now handles `did-fail-load` for backend-origin loads: it automatically retries the failed URL up to 2 times with an escalating pause (transient network flaps resolve within moments), and if retries are exhausted it shows the local error page ("This screen failed to load.") with a Reload button that re-loads the page the user was headed to (refilling the retry budget) instead of the bare `/_chrome` wrapper.
+
+Fixed every landing backup badge showing "Backup status unknown" whenever a create-attempt row was visible in the workspace list: the batched backup-status request included the create-attempt row's id, the server rejected the whole request (400, not an agent id), and the page degraded all badges. The landing page now only requests badges for real agent ids, and the server degrades individually-invalid ids to their own error line instead of failing the entire stream.
+
+"Create key & copy credentials" on the AI-keys page now rotates the workspace's LiteLLM key when its (deterministic, one-per-workspace) alias already exists: the existing key is deleted and a fresh one minted, so the button always yields working credentials. Previously a second click -- or any click after a mint whose response was lost (e.g. killed by the 90s subprocess deadline while the remote create had already committed) -- dead-ended forever on LiteLLM's "alias already exists" rejection, with no way to recover the never-shown secret. Rotation invalidates credentials previously issued for that workspace. The whole rotation runs inside one `mngr imbue_cloud keys litellm create --rotate-on-exists` invocation (each CLI subprocess pays a multi-second boot, so a desktop-side create/list/delete/create fan-out would multiply the wall time -- minutes instead of seconds on a loaded machine).
+
+## 2026-07-25
+
+Refactored the minds bootstrap layer (`imbue/minds/bootstrap.py`) into a minimal pre-mngr-import env-root module plus a new `imbue/minds/mngr_settings/` package holding all mngr settings.toml machinery (reconciliation, provider enable/disable, imbue_cloud account blocks, bring-your-own-key cloud accounts, and legacy migrations).
+
+Settings reconciliation is now declarative (desired blocks as data with pinned vs user-owned fields) and runs from `main.py` before any mngr import, with a runtime guard and import-linter contracts enforcing the ordering. Legacy cleanups (ssh provider block, ambient aws region blocks, dynamic_hosts artifacts) are quarantined in `mngr_settings/_migrations.py`.
+
+All settings writes now serialize on an inter-process file lock, fixing a last-writer-wins race between signin, startup reconciliation, and providers-panel toggles.
+
+Behavior change: a set-but-invalid `MINDS_ROOT_NAME` (e.g. a stale `devminds`) now fails every `minds` command with a clean one-line error instead of silently falling back to production; run `unset MINDS_ROOT_NAME` and re-activate. `is_minds_root_name_set_to_active_env()` is renamed `is_env_activated()`.
+
+The dev-env-name pattern is now defined once in the bootstrap module (suffix bound unified at `{0,34}`); `environments.md` and the desktop-client README were corrected (the client is Flask, not FastAPI), along with library-layer log levels (info -> debug).
+
+## 2026-07-24
+
+Minds now reports unexpected errors to Imbue by default for new installs, with an opt-out in Settings.
+
+Automatic error reporting (`report_unexpected_errors`) now defaults on, and the separate "include logs" preference has been removed: a single setting now gates both whether reports are sent and whether their logs/tracebacks are attached, so a report always carries its diagnostics.
+
+The first-launch consent screen is an informational notice: it explains that while Minds is pre-release it defaults to reporting errors and sharing logs with Imbue, notes that Imbue values privacy and transparency, and offers a single "I agree" button -- no opt-out checkbox there -- while pointing to Settings for turning it off and linking to Imbue's privacy policy. The Settings page "Error reporting" section carries a "Report unexpected errors" checkbox that turns automatic reporting off (or back on) for the device; the change takes effect live, without a restart. Both surfaces state that reports include diagnostic details that may identify you (for example, your signed-in account email).
+
+The "report a bug" form no longer has per-report "include logs" or "app diagnostics" checkboxes -- both are always included now (app diagnostics covers the app version, signed-in accounts, the list of workspaces, and system info, but never workspace contents). Details of the workspace the report was opened from (its id, name, host, and provider -- never workspace contents) are also always included now: the old "Details about the current workspace" opt-in was removed, since those details are already reconstructable from the attached logs so leaving it unchecked did not add any real anonymity. Remote access stays opt-in. The backend-down error takeover likewise no longer offers its "Include recent logs" checkbox.
+
+The Settings section and the bug-report form both state: "Imbue will never look into your workspaces without your consent."
+
+Installs that had previously opted out of error reporting keep their opt-out -- there is no migration that flips reporting back on.
+
+The "report a bug" form's report options have been tidied up: the "Included with every report" and "Optionally include" section headers are gone, the remaining "remote access" opt-in sits on its own, and the two helper notes (what diagnostics are always attached, and that Imbue never looks into your workspaces without consent) now sit together below it.
+
+The recovery page's restart is now dispatched unconditionally on page entry, as an idempotent start-only restart (`start_only` in the v1 restart API, renamed from `host_already_stopped`) -- with no host-state knowledge and no probe or classified verdict gating it. This is safe because `mngr start` checks ground truth at commit time: it no-ops on a live host and cold-boots a stopped one, and in-app stops close their windows first, so a window that reaches recovery over a stopped host implies an out-of-app stop whose revival is intended. A stopped workspace therefore revives on first entry -- at app startup, after a laptop reboot, or after an out-of-app stop -- with no discovery-freshness crawl. The manual "Restart workspace" button (recovery page and sidebar right-click) keeps the full stop+start bounce, dispatched only on click. The recovery classifier's tiers are now display-only and never gate the dispatch.
+
+Removed the recovery page's in-place ("surgical") system-services restart tier and its `INTERFACE_UNRESPONSIVE` classification: the auto-dispatched services-scope restart never fixed real user issues, and auto-restarting off a heuristic verdict violates the recovery principle that auto-action needs unambiguous evidence. The v1 restart API now accepts only `scope: "host"` (`"services"` returns 400), and the sidebar right-click menu no longer offers the now-defunct "Restart system interface" item. A container that is exec-reachable but whose interface is not answering `GET /` with 200 renders the consent-gated "Workspace unresponsive" page -- unless supervisord reports the interface `STARTING`/`BACKOFF` (self-heal in progress), in which case the page keeps checking.
+
+The recovery classifier now branches on the raw host state rather than a collapsed "is it running?" answer: `STOPPED`/`CRASHED` render as offline; `STOPPING` is transitional (keep checking); `FAILED` renders the consent page (a plain start on a failed-to-create host mostly re-fails); and `UNAUTHENTICATED` (the host rejected this machine at its access boundary) renders the terminal "Can't connect" page with retry/report only, since a restart routes through the same rejected credential.
+
+The recovery failure pages now stay live instead of dead-ending on their first verdict. Both the "Can't connect" (backend-unreachable) and consent-gated "Workspace unresponsive" pages re-probe on a slow cadence and re-classify when evidence changes -- so a transient provider error clears when the provider's next clean discovery snapshot lands, including the unattended offline restart when the container is in fact stopped. The re-probe timer is guarded so Retry cannot stack parallel probe chains; the verdict renders reset each other's elements (moving between states no longer leaves a stale Retry button or provider-error paragraph); and dispatching a restart silences the re-probe chain so a late probe result cannot overwrite the restart state. The "Reconnecting" state also no longer dead-ends when the discovery stream itself has stalled (e.g. a dead `mngr latchkey forward` supervisor, so no snapshot taken after the outage onset can land): an in-container exec probe that *completes* without reaching the container (dead inner sshd, container not running) is direct evidence and resolves straight to the consent-gated verdict, while a probe *timeout* keeps checking (the macOS-sleep protection). The exec probe runs whenever the host state is not yet trustworthy -- a stale pre-onset snapshot, or a dead discovery producer whose freshness gate can never open -- so a workspace under a dead producer reaches a resolved page immediately instead of spinning.
+
+The backend-unreachable "Can't connect" page's copy no longer contradicts itself for the `UNAUTHENTICATED` case. The shell text now describes only the page's own behavior (it re-probes and returns you the moment your workspace is reachable again) instead of asserting the outage is transient, and the canned access-rejected reason states the cause and remedy ("You may need to recreate the workspace or contact support") without the "retrying won't fix this" clause that fought the page's visible Retry action -- so the generic shell and the terminal access-rejected detail now read as one coherent message rather than two conflicting ones.
+
+The recovery page's in-flight copy now claims only what it knows. A manual "Restart workspace" click renders "Restarting your workspace". The unconditional entry dispatch stays on the neutral "Loading workspace" spinner -- except when the workspace's host currently reads offline (`STOPPED`/`CRASHED`), where a real cold boot is coming and the page renders "Bringing your workspace back online". That offline reading is a display-only hint from the resolver (`data-host-offline` at render time plus an `X-Workspace-Offline` header on each convergence-poll tick): it self-corrects once discovery lands the STOPPED observation and never dispatches or branches anything. The health tracker records each restart's flavor (start-only vs full stop+start) so the page can name a full manual bounce (`data-restart-start-only`) while keeping the neutral spinner for the entry dispatch; the flavor is read only while RESTARTING and never gates dispatch.
+
+Stopping a workspace through the agent-facing `/api/v1/workspaces/<id>/stop` route now closes any Electron window open to it (skipped mid-restart), the same way the landing-page Stop already did -- previously the open window would observe the dead interface, redirect to recovery, and auto-restart the host, silently undoing the stop. Both stop paths share one mechanism: a one-shot `workspace_stopped` chrome SSE event (browser mode navigates the content frame home). That one-shot chrome-events broadcaster now also carries the agent bug-report `open_help` event, replacing its near-identical standalone broker; both edge-triggered events fan out through a single per-connection queue.
+
+The recovery diagnostics list gains an "Is the system-services agent running?" row: the in-container probe scans `/proc/*/environ` for the agent's `MNGR_AGENT_ID` marker (the same marker mngr's stop path uses to find agent processes), so a workspace whose system-services agent was stopped (`mngr stop system-services`) names that cause directly instead of showing only downstream supervisorctl connection errors. Every restart-failure branch (stop step, start step, readiness timeout, services-agent-not-found, worker spawn failure) now logs at error level so it reaches error reporting -- the readiness-timeout and services-agent-not-found branches were previously unlogged -- and the health-probe log line includes the `unreachable_reason` for `backend_unreachable` verdicts.
+
+minds-side `mngr exec` calls that exist only for diagnostics or cleanup now pass `--no-start`, since `mngr exec` boots a stopped host by default: the backup-stack execs (periodic verification -- observed live cold-booting a stopped container it believed online off a stale RUNNING snapshot -- plus env injection and update scripts), the workspace version read, the assist support probe and chat create, and the tunnel-token cleanup. They now fast-fail against a stopped host instead of silently booting it and invalidating the recovery page's verdicts mid-probe. Two execs deliberately keep auto-start pending a design call: the tunnel-token inject behind share-enable and the agent-facing SSH-grant read/write. The workspace version read's exec was also repaired to actually reach the workspace -- it passed the git command as multiple tokens after a `--` separator, which `mngr exec` (whose CLI takes a single trailing COMMAND argument) parsed as extra agent names, so the read always errored and silently fell back to the creation-time version label; it now sends the command as one shell string and extracts output through the `--format json` envelope.
+
+A failed top-level load of a workspace URL in the desktop app (e.g. `ERR_CONNECTION_REFUSED` against a stale forwarded port restored from a previous session, or `ERR_NETWORK_CHANGED` across a network flap) no longer leaves the window permanently blank: the content view routes to that workspace's recovery page, whose liveness poll returns the user to the workspace on a freshly-built URL once it answers. Relatedly, a window sitting on a recovery page now persists and restores as the workspace itself: the `return_to` query embeds an absolute URL on the current session's `mngr_forward` origin (whose port changes every run), so a window quit on the recovery page no longer restores the recovery page, goes healthy, and 302s to the dead old port -- the source of the blank-white-window-on-startup reports.
+
+The sidebar right-click "Restart workspace" now returns you to the workspace once it comes back, instead of stranding the window on "Restarting your workspace". It was loading the recovery page directly into the caged content view, which -- unlike the automatic outage redirect and the home-page restart button -- has no `window.minds` bridge and blocks trusted backend-origin navigations; the recovery page could show its restart progress but its "go home" navigation was silently blocked. The restart now routes through the same surface-aware navigation the other paths use, so the recovery page lands on the trusted chrome surface and sends you back to the healthy workspace.
+
+Host lifecycle state is deliberately not persisted across a quit: host-state overrides remain in-memory-only UI optimism for lifecycle clicks, and the quit-time and per-workspace stop paths now log their targets and outcomes. The persisted topology reader tolerates unknown fields, so a topology file written by a different app version no longer voids the whole topology -- and with it the system-services fallback -- on the first launch after an upgrade. Finally, discovery snapshots replayed from before the minds backend started no longer surface their provider errors as current state: the detached discovery producer keeps polling while the app is closed and the quit flow stops the docker state container, so the pre-start backlog's last docker snapshot reliably carries a "Docker state container is stopped" error that the app then displayed at every startup even though it restarts that container before discovery runs; the replayed topology still merges (last-good retention) and a genuinely-broken provider re-asserts its error on the first fresh discovery cycle.
+
+- Added bring-your-own cloud accounts: paste AWS / GCP / Azure credentials in a new accounts modal on the create page, run a one-time `mngr <provider> prepare` as setup + credential validation (rolled back on failure), and create workspaces on your own cloud account. Accounts are stored as `byok-<backend>-<slug>` provider blocks (with a display-alias sidecar) that survive the boot reconciler; the compute dropdown, region/zone + machine-size pickers, and delete/rename flows all read from that one store.
+
+- AWS / GCP / Azure workspaces gained Stop / Start controls (real VM stop / deallocate, halting the user's own billing), with landing-page fixes for the slower cloud transitions: a workspace's row stays put through a stop/start even though the VM briefly drops out of discovery -- the backend retains the row for the transition, so it survives a page reload (not just an open tab) -- and the "Server not responding" badge is suppressed while a transition is in flight.
+
+- The bring-your-own-key cloud-accounts UI and routes are gated behind the `FEATURE_FLAG_BRING_YOUR_OWN_CLOUDS` env flag (off by default), so the feature ships dark until a build opts in.
+
+- The Stop / Start blocking-call timeout is now per-action: Stop keeps the long 20-minute cap (sized for a cloud VM's slow first-stop host_dir mirror), while Start uses a 5-minute cap, so a genuinely hung start surfaces as a failure quickly instead of holding the UI for 20 minutes.
+
+- Azure accounts are pinned to one region per entry (Azure's network scaffolding is region-locked); each entry gets its own resource group so multiple regions coexist as multiple entries. Region and machine-size offerings widened beyond US-only, with capacity-alternate machine families (t3a/m6i, n2, Dsv5/Dasv5) for fresh-subscription SkuNotAvailable restrictions.
+
+- Review-driven UI rework: the compute dropdown lists every provider flat (imbue_cloud / docker / lima / vultr / modal + each configured cloud account) with trailing "add AWS/GCP/Azure account…" entries that open the add-account dialog directly and return with the new account selected. The machine-credential (ambient) AWS path was removed from Minds entirely -- bring-your-own accounts are the only AWS path -- and legacy ambient `aws-<region>` blocks are cleaned up at boot. Account renaming was dropped; account deletion moved to the providers panel on the home screen, with the button disabled while the account still has active workspaces (the API's 409 guard remains the authority).
+
+Fixed the desktop app dropping window position changes made while the loading ("Starting Minds…") or quitting screens were showing. Both screens are just states of an ordinary window, and two separate code paths were discarding moves:
+
+- On the **quitting screen**, the single authoritative save ran before the takeover flipped in, and every later save was suppressed once the quit had committed -- so a window dragged while "Quitting…" / "Stopping N minds…" was up reverted to its pre-quit position on next launch. The quit sequence now captures window geometry one final time after backend teardown (windows are still alive then), so the last-seen position is what restores.
+
+- On the **loading screen**, restoring a saved session re-applied the initial window's saved bounds a second time after the backend was ready, snapping it back over any move made during startup. That redundant re-apply is now skipped when the window is already positioned at the entry being restored (the common case); it still runs in the rare case where the most-recent window's workspace no longer exists and a different saved window takes its place.
+
+- The latchkey gateway can now make Chrome-impersonating requests on demand. minds bundles a "dispatch curl" (plus the Chrome-TLS-impersonating curl it fronts) from the datalib release into `resources/curl/` and points the gateway's `LATCHKEY_CURL` at it. Requests that carry the marker header `X-Imbue-Impersonate:` are routed to the impersonator (to clear Cloudflare-style TLS fingerprinting); every other request passes through to the system curl unchanged, so existing callers and credential checks are unaffected.
+
+- The signature is a value-less, namespaced header (`-H "X-Imbue-Impersonate:"`). On a real curl it is a no-op (removing a header curl never sends), so it never alters a request even if it reaches a non-dispatch curl.
+
+- The bundled binaries are downloaded per platform by `scripts/download-binaries.js` (macOS arm64 and Linux x86_64; SHA256-verified). When the binaries aren't present (unsupported platform, or the download not yet pinned), minds falls back to the system curl exactly as before.
+
+Merged the contributed workspace backups stack (shiyanboxer/mngr Parts 2-5) and finished it with a substantial rework of the restore path:
+
+- Relabeled and reorganized the workspace Settings "Backups" section in plain language (Recent backups table, "Where your backups are stored", "Fix backup problems"), added a read-only backup history UI (Settings recent table + a full backup-history page with server-side paging), and added `limit`/`offset` + `snapshots_total` to `GET /api/v1/workspaces/<id>/backups` (snapshots newest-first; malformed or negative `limit`/`offset` now 400 instead of silently meaning "all").
+
+- In-place restore (`POST /api/v1/workspaces/<id>/backups/<snapshot_id>/restore`) now restores as a sync: `restic restore <snapshot>:<subpath> --target /mngr --delete --overwrite if-changed` -- no staging copy (no double disk), only changed files rewritten, and a failed restore converges when simply re-run. minds resolves the snapshot's host-dir subpath from its own view of the repository before dispatch.
+
+- The restore works fleet-wide: when the workspace's restic predates `restore --delete` (Debian bookworm ships 0.14), the script downloads the pinned sha256-verified restic 0.18.1 (amd64/arm64) and installs it persistently. The canonical `restic.env` is reinjected before dispatch so workspaces with lost or drifted credentials can still restore, stale repository locks are cleared with `restic unlock` + one retry, the safety snapshot honors the user's current `backup.toml` excludes, and the tick-in-flight check is self-healing (a stopped host-backup service cannot have a live tick).
+
+- The restore dialog gained an "Update the backup service afterwards" checkbox (default on) that chains the idempotent update converge onto a successful restore; a chained-update failure downgrades to a completion warning instead of failing the restore. The failure notice offers targeted retries: "Stop chats and try again", "Restore without backing up first" (after the safety snapshot failed), and "Force restore" (when the workspace can no longer answer the chat gate).
+
+- All tracked backup operations stream their full output live into a collapsible details panel (operation logs are stored server-side and replayed to any page attaching mid-operation), a running restore reports on its own table row with a Cancel withdrawn at the point of no return, and a user cancel now ends the operation in a neutral CANCELLED state instead of a red error.
+
+- The desktop bundled-binary downloader (`scripts/download-binaries.js`) now retries HTTP 5xx responses (GitHub's release CDN intermittently returns 504 bursts) instead of treating every non-200 as permanent, and the retry budget was raised from 3 to 5 attempts.
+
+- The discovery-health watchdog no longer treats discovery events that predate its own start as producer activity: at startup the consumer replays the previous session's discovery file, whose snapshots carry their original (possibly hours-old) timestamps, and a tick sampled mid-replay could read as a stall -- triggering a bounce that SIGHUP'd the still-booting `mngr latchkey forward` supervisor to death. Pre-watchdog timestamps now age from the watchdog's start, the same grace the no-event cold start gets. (Paired hardening on the latchkey side: see the `mngr_latchkey` changelog entry for this branch.)
+
+- Backup operations that run a workspace script (in-place restore, backup-service update) now stream their output live into the operation log instead of dumping it all at once when the command finishes. Minds runs these via `mngr exec --stream` so each phase and restic progress line appears as it happens. (Enabled by the new streaming `mngr exec`; see the `mngr` changelog entry for this branch.)
+
+See the individual `shiyan-backup-*.md` entries in this directory for the contributed base.
+
+`minds paid` now reads the operator admin key from the `MINDS_ADMIN_KEY` Vault field (in `<vault_prefix>/supertokens`), falling back to the deprecated `MINDS_PAID_ADMIN_KEY` field with a warning while Vault entries migrate. The key is injected into the `mngr imbue_cloud admin paid` subprocess under both spellings so older installed mngr versions keep working during the migration.
+
+Released minds 0.3.9: the app now clones the `minds-v0.3.9` default-workspace-template tag.
+
+Fixed the launch-to-first-message e2e harness, red since 2026-07-23. Two failures, one cause: the harness still modelled a window as a single page, and the persistent-chrome-shell work split it into two surfaces.
+
+It reported `no content page on backend origin` while the app was healthy and sitting on `/welcome`, because it matched pages against Playwright's cached `page.url`. main.js drives the window's WebContentsViews from the Electron main process (`webContents.loadURL` / `loadFile`), and those commits do not reliably reach a `connect_over_cdp` client, so Playwright can report the `shell.html` it saw at attach time forever while the view is really on `/welcome`. Page discovery now reads `location.href` from the live document.
+
+Past that, it failed with `net::ERR_CERT_AUTHORITY_INVALID` navigating the chrome view to a workspace, because only the workspace-content session trusts the forward proxy's self-signed loopback cert (and main.js's chrome guard blocks agent URLs there anyway). The harness now keeps local pages on the chrome view and drives chat on the content view, reaching workspaces the way a user does -- letting the app route them, or clicking the tile -- instead of navigating agent URLs itself.
+
+The workspace wait is pinned to the agent host the create returned. A window has one content view, so creating a second workspace repoints the very page the first is still showing; an unpinned wait could match the first workspace mid-handoff and check the second workspace's reply against the first one's transcript -- which already holds its own reply, so it would have passed spuriously.
+
+The slack flow no longer fails when latchkey has never encrypted anything. `<latchkey_directory>/encryption_key` is created lazily, and a local workspace can reach the slack step without any credential having been stored yet -- seeding the mock slack creds is that first use. The harness now ensures the key via latchkey's own `load_or_create_encryption_key` (idempotent, atomic, honours the `LATCHKEY_ENCRYPTION_KEY` override) instead of demanding it already exist.
+
+The consent screen is now dismissed wherever it appears, and the both-tiles home check asserts on the tiles. "Help improve Minds" is not once-per-run -- it can be back on a later navigation to `/`, and the run that hit it spent the rest of its time driving a dialog it believed was the home page. The check that should have caught this matched `document.body.innerText` for both host names, which the titlebar breadcrumb satisfies on any page (one host name is a prefix of the other), so it passed on the consent screen itself.
+
+The both-tiles home check retries consent dismissal and reports the page it actually got. Consent is served on whatever the page settles into, so a single dismissal racing the load can miss it and then spend the whole budget waiting for tiles the dialog is covering. On failure it now snaps the page and includes the URL and body text, instead of a bare locator timeout that says nothing about what was on screen.
+
+The tile checks wait for the element to be attached rather than geometrically visible. main.js collapses the chrome view to the titlebar strip while a workspace is displayed, so its home page can lay out with no usable bounding box and Playwright reports every element invisible even though the page is correct and both workspaces are listed.
+
+The workspace-tile click is dispatched as a DOM event rather than a synthetic mouse click. The collapsed chrome view gives its page no usable bounding box, so Playwright's actionability wait can never be satisfied there. The step exercises the tile's handler -- `/goto/<agent_id>/` through the navigate-content bridge -- which the dispatched event drives exactly the same way.
+
+The macos-launch smoke test reads page URLs from the live document too. It hit the same stale-bookkeeping failure as the Python harness -- `No content window settled on a backend URL ... observed: ["about:blank","about:blank",".../shell.html"]` -- while the app was up and on `/welcome`. It had been passing on the right side of a race rather than on correctness.
+
+Every chrome-view click goes through one geometry-independent helper. The collapsed chrome view (a titlebar strip while a workspace is displayed) leaves its page without a usable bounding box, so Playwright's ordinary click never satisfies its actionability wait even though the element is present and correct. The workspace tile, the settings "Back to workspaces" link, and the destroy/confirm/cancel buttons all dispatch the event instead, driving the same handlers a user's click would.
+
+The e2e leaves workspace settings through the titlebar Home crumb. It was clicking an in-page "Back to workspaces" link that WorkspaceSettings does not have -- that link lives on the app-level Settings page, and the workspace one lost it when the breadcrumb titlebar took over navigation. The test had been asserting on an affordance that no longer existed.
+
+Navigation waits read the live document instead of `page.wait_for_url`. That API matches against Playwright's cached URL -- the same bookkeeping main-process navigations fail to update -- so it could time out on a page that had already arrived.
+
+Raise the restic no-lock-retry test's timeout from 60s to 180s: the test runs two real restic invocations whose internal retry budget alone is 60 seconds, making the old timeout marginal by construction on slower shared CI runners (it timed out repeatedly on the public mirror's CI).
+
+Added a read-only backup history UI. The workspace Settings "Backups" section now shows a "Recent backups" table listing the newest snapshots, each with a relative timestamp and a per-snapshot Download action; when a workspace has more than five backups, a "View all N backups" footer opens a dedicated full backup-history page (its own route, template, and JS) that pages through every snapshot with client-side Newer/Older controls.
+
+Both surfaces load from the existing `GET /api/v1/workspaces/<id>/backups` response, which now returns snapshots newest-first so neither has to re-sort; the history page pages that list in the browser rather than calling a separate paged snapshots API. Listing and exporting snapshots run restic on this machine, so viewing history and downloading a backup work even while the workspace is offline. A shared row builder (`backup_table.js`) renders both tables so they cannot drift.
+
+Per-snapshot download now lives with the backup it belongs to: the stray "download" link on the Landing page workspace rows is removed, and downloading a specific backup happens from the Settings table or the history page.
+
+Added in-place backup restore. The workspace Settings "Recent backups" table (and the full backup-history page) now offers a per-row "Restore" action that rewinds the workspace to a chosen restic snapshot. A confirmation dialog guards it, and the restore runs as a tracked workspace operation (`BACKUP_RESTORE`) via a new API route (`POST /api/v1/workspaces/<id>/backups/<snapshot_id>/restore`) and a self-contained workspace script that takes a pre-restore safety snapshot, restores into staging, swaps it in (preserving `restic.env`), reinstalls dependencies, and restarts services.
+
+A running restore reports itself on its own table row -- the row's "Restore" reads "Restoring...", with a "Cancel" action beside it -- rather than in a separate status strip, on both the settings and history tables. Cancel disappears once the restore starts making changes and can no longer be stopped. The workspace-wide operations (backup software update, storage change) keep the strip, since they have no row to speak from.
+
+A single tracked operation runs per workspace at a time, and every page reattaches to a running one on load, so a restore started on either the settings or history page shows live on both. All backup operations now share one plain-language 409 conflict message, and the restored snapshot is labeled "Restored from <source time>" in the timeline.
+
+The workspace backups API (`GET /api/v1/workspaces/<id>/backups`) now accepts optional `limit` and `offset` query params and returns a new `snapshots_total` count alongside the snapshot window. `limit` absent still returns every snapshot (unchanged behavior); `limit=0` returns none, and both must be non-negative integers.
+
+The Settings "Backups" surfaces use this to only fetch the snapshots they render instead of the full list: the "Recent backups" table requests just the newest five (driving "View all N backups" off `snapshots_total`), and the full backup-history page pages server-side with `limit`/`offset` rather than loading every snapshot and slicing in the browser. The workspace-list badge surfaces (sidebar/chrome and the Landing page) request `limit=0` and `limit=1` respectively, since they read only verification status or the single newest snapshot.
+
+This is a payload optimization only: no change to how backups are created, listed, or restored.
+
+## 2026-07-23
+
+The desktop app's bundled git is now fully managed on macOS and Linux: a version-pinned, SHA256-verified dugite-native payload (git 2.53.0) downloaded per `scripts/git-manifest.json`, replacing the previous unpinned copy of the build machine's Xcode CLT git on macOS and the incomplete bare-binary copy on Linux. The payload is self-contained (binary, `libexec/git-core` helpers, templates, system gitconfig, and a Linux CA bundle) and ships with GPLv2 license and provenance notices. Windows keeps its already-pinned MinGit path.
+
+The backend child environment now exports the git environment contract (`GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, `GIT_CONFIG_SYSTEM`, plus `GIT_SSL_CAINFO` on Linux) in both dev and packaged modes, because the payload binaries bake in an empty prefix and a bare PATH prepend is insufficient (https clones would fail with "'remote-https' is not a git command"). Dev mode now also runs the bundled git itself, so the binary and its exec-path can never be version-skewed. The backend logs the bundled git version once at startup.
+
+`scripts/ensure-binaries.js` now replaces stale git payloads on dev machines via a `.dugite-tag` marker, and a new acceptance test (`test_bundled_git.py`) proves the payload end-to-end on the current platform, including a hermetic HTTPS clone through `git-remote-https` against a local TLS server. CI runs it on both shipped targets: linux-x64 via offload and darwin-arm64 via a GitHub-hosted macOS runner. Unit tests in `scripts/build_test.py` guard the manifest schema and its consistency with the downloader.
+
+The payload's symlinks (142 `libexec/git-core` builtins pointing at the multicall `git` binary, plus the `git-remote-https`/`ftp`/`ftps` helpers pointing at `git-remote-http`) are now replaced at download time with tiny POSIX-sh shims that exec their former targets. ToDesktop's app-files glob runs with `followSymbolicLinks: false, onlyFiles: true`, which silently DROPS symlinks from the upload -- the raw payload would arrive on the build servers missing all 145 entries (including the `git-remote-https` helper, breaking https clones); shims are regular files and survive every copier, globber, and signer. The acceptance test gains a phase that converts its extracted payload with the real production function and re-proves the HTTPS clone and dashed-builtin dispatch through the shims.
+
+The 701MB ToDesktop upload failures were caused by `resources/` uploading TWICE: once via the default `**` app-files glob (gitignored content is not excluded from it) and once whole via `extraResources` (which is priced separately and is also the only channel that delivers `resources/latchkey/node_modules` to the builder, since the app-files glob always strips `**/node_modules`). `todesktop.js` now excludes the heavy resources subtrees from the app-files upload (enumerated `!resources/<dir>/**` patterns rather than a blanket `!resources/**`: the builder's signing preflight fails with "The following `additionalBinariesToSign` are missing" when a `mac.additionalBinariesToSign` path such as `resources/lima/bin/limactl` is excluded, and nothing recreates lima cloud-side), cutting the app-source upload from ~701MB to ~467MB against the 600MB `uploadSizeLimit`. The new git payload's Mach-O binaries need no `additionalBinariesToSign` entries: the builder deep-signs every nested binary in the assembled Resources/ tree (main already shipped an unlisted `resources/git/bin/git` through notarization for years), and that list exists for binaries needing explicit entitlements, like limactl's virtualization entitlement. `build.js` now fails fast at build time with an upload estimate that mirrors the CLI's composition (app-files glob + extraResources priced whole, symlinks dropped/lstat'd respectively), warns above 85% of the limit, and separately keeps the payload symlink-free so symlink-dereferencing copiers (e.g. electron-builder's extraResources copy into the final app) cannot balloon the shipped app. New unit tests cover the shim conversion (including that a payload-escaping symlink aborts it), the upload estimator's selection semantics against a synthetic tree, rejection of glob shapes the estimator does not model, the limit enforcement, and drift guards pinning the `appFiles` exclusion, the `extraResources` channel, the conversion-before-`.dugite-tag` ordering, and the `build.js` guard calls.
+
+Documentation: `docs/desktop-app.md` now describes the managed payload accurately (the previous text about copying git from the build machine was stale) and gains an "Updating the bundled git" runbook. The design lives in `specs/minds-managed-git/concise.md`.
+
+The Settings page's Connectors tab now surfaces the signed-in accounts for each connected service.
+
+Under each service, minds lists the accounts you've connected (read from a single `latchkey auth list --offline` call), each with a "Disconnect" action, above the existing per-workspace permission list (now labelled "Allowed on all accounts:").
+
+A "+ Add account" button next to each service runs the same browser sign-in as approving a permission request, but in latchkey's ephemeral-browser mode so you land on a fresh sign-in screen and can add a new account rather than being re-authenticated as an existing one. For Google services, if signing in with the official Minds client does not succeed it falls back to a fresh self-setup step.
+
+"Disconnect" clears that one account's stored credentials. Disconnecting the last account for a service also revokes that service's permissions from every workspace in the background (the grants would otherwise have no credentials behind them).
+
+Workspace Claude auth moved out of the create flow: the AI-provider choice (and API-key field) is gone from the create form and `POST /api/v1/workspaces` (a stale `ai_provider` field from an old client is silently ignored), and the desktop client no longer mints LiteLLM keys or injects `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` at create time. Workspaces boot unauthenticated and sign in through their own in-workspace Claude sign-in modal (browser subscription sign-in, Imbue key, API key, long-lived token, or Anthropic Console).
+
+- New mint-only AI-key page at `/settings/ai-keys?workspace=<host_id>` (opened from the workspace modal's "Sign in with Imbue" option): resolves the workspace's owning account from the workspace-record store (errors with guidance when no account is associated), mints a LiteLLM key with the workspace host id fixed into the alias/metadata (100 USD / 1d rolling budget), and copies an env-var-style credential blob to the clipboard for pasting back into the modal.
+
+- The mint page opens as an overlay modal over the workspace's own window, requested through the content relay: the workspace's sign-in modal posts an allowlisted `minds:open-ai-keys-page` window message, the content-relay preload validates the host id and forwards it on a fixed IPC channel (acking back to the page), and the main process re-validates and opens `/settings/ai-keys` in the shared overlay surface. The workspace page never needs to know the backend's origin (a random per-run port) -- this replaces the previous broken attempt to compute it from the workspace's own URL, which produced a `{"detail":"Not Found"}` popup.
+
+- The Electron e2e chat test now exercises the new first-boot flow: create an unauthenticated workspace, sign in through the real modal UI (API-key path), then chat. The `test_litellm_via_workspace` deployment test is implemented for real: connector key mint, local Docker workspace creation, credential submission through the workspace's modal endpoint, a live chat through the litellm proxy, and a spend assertion against the env's litellm database.
+
+- Landing-page fixes for the "Discovering agents..." dead end: the discovering state now always shows the Create button (discovery may never surface remembered workspaces, and there was otherwise no way to create one), and a clean (error-free) provider discovery snapshot is now authoritative for its provider -- any host remembered in the last-good agent topology that the snapshot no longer reports is pruned. Topology records now carry the owning provider to support this; pre-existing topology files without provider attribution reset empty on load (live workspaces re-enter on the next snapshot).
+
+The pre-baked Lima image (issue #2306) is now downloaded and consumed as a **raw** image end to end, with no format conversion, so the desktop app bundles no `qemu-img`.
+
+Lima does not need one. `limactl` embeds `go-qcow2reader` and a pure-Go `nativeimgutil`; its `proxyimgutil` prefers a `qemu-img` binary but falls back to the Go implementation when it is absent, `EnsureDisk` auto-detects the base disk's format, and the `vz` driver's disk format defaults to raw. Verified by booting a Lima VM from a raw base disk with `qemu-img` absent from `PATH`. The previous design converted the assembled raw to qcow2, which Lima then converted straight back to raw.
+
+Removing the conversion also removes a second one: an upgrade used to convert the stored qcow2 back to raw to seed the next incremental download. The stored raw is now the seed directly, so a version bump does one multi-GB pass instead of three, and peak disk use drops (raw and qcow2 no longer coexist).
+
+Raw costs no extra space. On the real 20 GiB image the sparse raw takes 4.9 GiB on disk versus 5.1 GiB for the qcow2 -- qcow2's mapping and refcount tables plus its 64 KiB cluster granularity cost more than the filesystem's 4 KiB-granular holes. Only the apparent size differs (`ls` reports the full 20 GiB; `du` reports what is allocated).
+
+Raw is also what `desync` already chunks and what the signed manifest already hashes, so the bytes the manifest covers are now exactly the bytes Lima boots.
+
+Also fixed: `desync` was never staged by `scripts/build.js`, only by the ToDesktop `beforeInstall` hook. That hook's output is written where the packager folds it into `app.asar`, which the app never reads -- it resolves bundled binaries under `process.resourcesPath`. Every packaged app since desync was introduced has therefore carried an unreachable copy of it (an x86_64 one, since ToDesktop's mac agent is Intel) and no usable one, so the pre-baked image download could not work in any packaged build. `build.js` now stages desync, `ensure-binaries.js` requires it in dev, it is resolved by absolute path via `MINDS_DESYNC_BINARY` (dev mode inherits the developer's `PATH` untouched, so a bundled binary is only reachable that way), and it is signed for notarization under the hardened runtime like `limactl` and `restic`.
+
+Publishing a real image to a real R2 bucket, and then pulling it back down with the real client, corrected two pieces of infrastructure guidance in `docs/release.md` and `docs/lima-image.md` that would each have broken the fast path in production:
+
+The image must be **served from a custom domain, not the managed `r2.dev` origin**. Both docs previously called `r2.dev` fine for dev/test and treated a custom domain as a production preference. In fact a client extract fetches roughly 65,000 chunks, and `r2.dev` is rate-limited: the extract fails partway through with `unexpected status code 429` and the image never assembles, so the fast path is dead in *any* tier served that way. A custom domain is served through Cloudflare's CDN and is not throttled. Verified by re-running the same download against a custom domain, which completed and produced an image whose SHA-256 matched the published manifest.
+
+Relatedly, the publish must **upload over R2's S3 API, not the Cloudflare REST object API**, which is capped at 1200 requests per 5 minutes globally and so cannot carry a 65,000-chunk store at all.
+
+The image download now fetches chunks 32 at a time (desync `-n`) instead of desync's default of 10. An image is tens of thousands of small chunks and each fetch is dominated by round-trip latency rather than bandwidth, so throughput tracks how many requests are in flight: measured against the CDN, one worker moves about 3 chunks/second and 32 move about 180. This is the difference between a prefetch that takes many minutes and one that does not.
+
+The pre-baked image is now used for a create pinned to the release tag's *commit*, not only one naming the tag. The image is baked from a commit, so a create pinned to that commit is byte-identical content and equally safe -- but the gate compared refs by name, so any SHA-pinned create silently fell back to building the toolchain in-VM. CI pins a SHA for reproducibility, which meant the end-to-end run intended to exercise the fast path could never actually reach it. The release tag is now resolved to its commit once at startup (`git ls-remote`, peeling annotated tags) and either form is accepted; if the tag cannot be resolved, SHA-pinned creates keep building in-VM, which is the safe direction.
+
+`docs/release.md` now lists what a Linux bake host needs. Lima uses `vz` on macOS but `qemu` on Linux, where it boots the guest through UEFI, so the amd64 bake host needs the EDK2 firmware (`ovmf`) and the virtio option ROMs (`ipxe-qemu`) on top of `qemu-system-x86` -- and the bake user needs to be in the `kvm` group. Without the firmware, `limactl start` dies with `could not find firmware for "x86_64"` before the bake even begins. Found by running the bake end to end on a real Linux/KVM host.
+
+A create no longer hands Lima a path to an image that is no longer there. `READY` is a claim about the past, and the file can be deleted after it (a cleaned cache, a pruned disk); the create now checks and builds in-VM instead of failing on an obscure Lima error.
+
+A transient failure to fetch the pre-baked image no longer fails the create. The prefetch recorded every problem as one `FAILED` status, and a create that read it raised -- so a network blip mid-download, or a missing `desync` binary, killed the create outright during the retry-backoff window, even though nothing was wrong with the image and the ordinary in-VM build would have worked. Fetch failures now build in-VM (and keep retrying in the background) while a *verification* failure -- bytes that do not match the signed manifest -- is kept distinct (`UNTRUSTED`), still refuses to boot, and still fails loudly: quietly building in-VM there would hide someone serving an image we cannot vouch for. An untrusted image also stops the retry loop, which previously would have re-downloaded multiple GB only to reject them again.
+
+A create now gives up on a *stalled* download immediately rather than sitting out the rest of its wait. Waiting only pays off while the bytes are still arriving; once they stop, every further second is one the user could have spent building the workspace. If the download gains less than 32MiB in any two-minute window it is treated as dead (a working download moves that much every few seconds -- a measured cold pull writes ~5.8 GiB to disk in ~6 minutes), and the create builds in-VM at once. A merely slow link is not punished: it keeps advancing, so it keeps its full wait. The create log now also says which of these happened rather than just getting quietly slower.
+
+A create waiting on the pre-baked image now shows how much of it has downloaded (`Downloading pre-baked Lima image... 2.6 GB`). It previously sat silent: `desync` draws its progress bar only on a tty, so a packaged app got no output from the download at all, and a first create could block for minutes with nothing on screen. The image is sparse -- its apparent size is the full 20GiB the moment the file is created -- so the reported figure is the blocks actually allocated as the image assembles (~5.8 GiB for the full image). That is the decompressed data written to disk, which is larger than the ~1.8 GiB of compressed chunks actually pulled over the wire: the bar tracks assembly progress, not bytes transferred.
+
+The wait before a create gives up on the image and builds in-VM is now 10 minutes (was 30). A cold download of the real image measures ~6 minutes end to end (66,034 chunks at 32-way concurrency), so 30 minutes was five times longer than a healthy download needs, and the only thing it bought was a longer hang when a download was stuck rather than slow. Ten minutes still covers a link several times slower than the measured one, and past it, building in-VM (~5 min) gets the user a workspace sooner than waiting does. The download keeps running either way, so the next create takes the fast path.
+
+A create no longer fails when the pre-baked image is merely still downloading. The create waits for the background prefetch to finish, and if that wait ran out it raised a retryable error and produced no workspace at all -- so a user on a thin connection, for whom a multi-GB first download can outlast the wait, ended up worse off than before the feature existed, when the same create would simply have built the toolchain in-VM. Waiting-out now falls back to building in-VM (the download keeps running, so the next create gets the fast path), and only a *published* image that failed to fetch or verify still surfaces an error, since that is a real defect worth seeing.
+
+The desktop client now re-checks an already-downloaded Lima image against the signed manifest instead of trusting it on name alone. It previously short-circuited on `(version, arch)` plus "the file exists", so an image republished under an existing version could never reach a machine that had already cached the old one -- the only remedy was deleting the cache by hand. It now compares the hash the image was verified against at install time with the hash the signed manifest names (and the file's size, which catches a truncated image), and re-fetches when they disagree. It does not re-hash the image on every launch, so this catches a *replaced* image, not silent bit-rot in an installed one. An origin that cannot be reached still serves the installed image, so the app keeps working offline; only a signature or hash that fails to verify is fatal.
+
+Over-quota backup storage becomes self-service, and quota errors stop wasting retries.
+
+- New "Free up backup space" action on the Accounts page (shown when the account is over its backup-storage quota): under a connector cleanup grant it removes the oldest half of each locally-reachable workspace's backups (never the latest), prunes, re-measures, and repeats until the account is back under quota. Runs immediately on click with live progress on the page and an OS notification when done; backups that only exist on another machine are reported by name.
+
+- Backup provisioning treats the connector's structured quota refusal as terminal instead of retrying it for the whole retry budget, so the "backup setup failed" notification (now carrying the quota message) appears right away.
+
+- Restoring a backup with a storage-quota-downgraded (read-only) key now works: restic restore retries once with `--no-lock` when the failure is specifically the repository lock write.
+
+- The deploy.toml plans guard test now discovers tiers from disk (any new `envs/*/deploy.toml` is automatically covered) instead of a hardcoded list.
+
+- New deployment test exercising the full storage-enforcement cycle (downgrade, cleanup grant, settlement) against a live ci env.
+
+Merged the speed-up-sharing work into the cloud-quota branch stack: the desktop client's `find_tunnel_for_agent` now delegates to the connector's O(1) `tunnels find-by-agent` lookup instead of enumerating every tunnel, making the sharing-status and disable-sharing flows fast regardless of how many tunnels the account owns. Conflicts with the quota work were resolved by keeping both the new lookup and the structured quota-error signal.
+
+A Cloudflare Access-API 5xx that escapes the connector's new retries now surfaces as "Cloudflare had a temporary problem publishing this share ... try again" instead of a raw exit-code error. On page load of an already-enabled share, the not-live-yet warning no longer flashes: nothing extra renders until the first readiness probe answers, and the warning appears only if that probe reports the link not ready.
+
+While a freshly enabled share link is still propagating, the sharing page now shows a prominent warning box (warning icon, "This link is not live yet") and hides the URL and copy button entirely so nobody copies a link that does not work yet; a "Show anyway" button reveals it early for sending ahead. Opening the page for an already-live share still shows the URL immediately. A `triangle-alert` glyph was added to the icon catalog.
+
+The share-URL readiness probe is now two-stage: besides the edge's Access-login redirect, it fetches the login URL itself and holds off while Cloudflare Access serves its transient "Unable to find your Access application" page (a plain 200 that only the body distinguishes from the real login page), so the UI no longer declares the link live while clicking it still errors.
+
+Fixed the share-URL readiness probe never reporting ready for service names containing an underscore (e.g. `system_interface`): Python's TLS hostname verification refuses to wildcard-match a hostname label with an underscore, so the backend probe failed with a certificate error forever on links every browser accepts. The probe's dedicated HTTP client now skips TLS verification -- it reads only the redirect status/location (the Access-app "live" signal) and transfers nothing sensitive; the user's browser still fully verifies the real link. The duplicate dead probe helper in `app.py` was removed.
+
+Enabling sharing is now one connector call instead of five: the sharing flow uses the new `tunnels enable-sharing` subcommand (tunnel ensure + service add + Access policy in a single request), and the enable response carries the share URL, so the editor no longer reloads the page or refetches status afterward. The share-URL readiness wait is now honest: the URL and copy button appear immediately with an explicit "waiting for Cloudflare to publish this link (usually 1-2 minutes)" line, polling continues for up to 5 minutes (backing off after 30 seconds), and if the link still is not live at the deadline the page says so plainly instead of quietly presenting it as ready.
+
+The Manage Accounts page now renders instantly: each account's plan/usage section starts as a loading spinner and is filled in asynchronously from the new `GET /accounts/<user_id>/plan-view` fragment endpoint, instead of the page blocking on a connector round trip per account before returning any HTML (previously 20-50 seconds with many buckets, during which clicking "Manage account(s)" appeared to do nothing). While a backup trim runs, the page now re-fetches just that fragment every few seconds instead of reloading the whole page.
+
+Per-account plans and quotas (enforced by the remote service connector) surface in minds:
+
+- The Manage Accounts page shows each signed-in account's plan, quota limits, and live usage, with a plan selector ("explorer" / "ally"; switching to an ineligible plan shows the server's reason).
+
+- The "remote" create preset now defaults the AI provider to SUBSCRIPTION: imbue-cloud inference keys are quota-gated per plan (the explorer plan has a $0 LLM budget), so the user's own Claude subscription is the default that works for everyone.
+
+- Backup provisioning reuses an existing bucket by rolling its single key (`bucket roll-key`) instead of minting extra keys.
+
+- `minds env deploy` writes the committed `[plans]` blocks from each tier's deploy.toml into the connector's plans table after migrations (git-owned plan definitions; per-user rows are managed via the admin API).
+
+- New deployment tests cover explorer-plan behavior end to end: fresh accounts land on explorer, $0-budget key minting is refused, ally requires partner access, and under-quota leases reach the pool.
+
+Landed the multi-account connector management feature (from `hynek/multiple-accounts`) on top of the current settings architecture.
+
+The Connectors section now lists each service's signed-in accounts with per-account "Disconnect" and a "+ Add account" ephemeral-browser sign-in (see the `hynek-multiple-accounts` entry for the full feature description). Because app-level settings moved into the shared `AppSettingsSections.jinja` component and `static/app_settings.js` (used by both the full `/settings` page and the centered settings modal), the account list and its add/disconnect interactions were ported there, so the feature appears in both surfaces.
+
+Cloudflare sharing is now much faster. `ImbueCloudCli.find_tunnel_for_agent` (used by the sharing-status and disable-sharing flows) now delegates to the connector's new O(1) `tunnels find-by-agent` lookup instead of running `tunnels list`, which enumerated every tunnel on the account and fetched each one's config server-side. On accounts with many tunnels this call had grown to 8-11 seconds; it now completes in well under a second regardless of how many tunnels exist.
+
+The lookup degrades gracefully against a connector that has not been redeployed yet: because the desktop app updates independently of the connector, the underlying client falls back to the old enumeration when the new endpoint is absent, so sharing status keeps working during the rollout window (just at the old speed until the connector is redeployed).
+
+The desktop app now handles `minds://` deeplinks. `minds://create?git_url=<repo>&branch=<ref>` opens or focuses the app and lands on the create-workspace page with the repository (and optionally the branch/tag/commit) pre-filled under advanced settings -- used by Inspiration links. Without a `branch`, the Branch field stays blank so creation uses the linked repo's latest version (the pinned minds-template branch default no longer leaks into explicitly-linked repositories). Any other `minds://` URL, including a bare `minds://`, simply opens or focuses the app. Completing a browser OAuth sign-in now uses this: the sign-in success page offers an "Open app" link to `minds://` (via the plugin's new `--success-redirect-url` option), so one click returns you to the app instead of leaving you on a "close this tab" page.
+
+macOS `open-url` events and Windows/Linux argv invocations (cold start and second instance) all route through a single `handleDeeplink` router. Deeplinks arriving while the app is still starting are queued and applied once startup finishes, including on a first run -- an explicit deeplink wins over the welcome screen. Deeplinks never force a sign-in -- the create page's existing remote-vs-local flow prompts only when needed.
+
+Reworked the desktop app's titlebar and navigation to match the minds-options mockup (https://imbue-ai.github.io/mind-sketches/prototypes/minds-options/):
+
+- The titlebar's left side is now a single "(home icon) Minds" button that grows into a breadcrumb ("Minds / workspace-name") on workspace-scoped screens, with Workspace and Workspace Settings icon-tabs and the workspace switcher menu anchored to the workspace name (the old hamburger menu, trimmed to just the "New workspace" entry). The global back/forward arrows and the centered page title are gone; a contextual back arrow appears only on pages that opt in (the sharing editor, browser-mode fallbacks). The top-right holds the requests inbox button (with a pending-request count badge) and the report-a-bug button.
+
+- The home screen gained bottom-left launchers ("Minds Settings" and the signed-in account email, or "Log in") that open centered modals on the shared overlay surface in Electron; the full-page /settings and /accounts routes remain as browser-mode fallbacks.
+
+- The Minds Settings surface shows the same app-level settings as the full /settings page -- Connectors, Local files, Workspaces (cross-workspace delegation), Error reporting, and Master password -- as a left-nav + panel layout inside a widened centered modal. The home-screen launcher opens it as a centered overlay with no "back to workspaces" link (dismissed via the X or a backdrop click); the full-page /settings route remains as the browser-mode fallback. The modal is a fixed height (85% of the window) so switching sections never resizes it.
+
+- The centered Minds Settings and Manage Accounts modals render on the shared OverlaySurface wrapper (like the other overlay pages), so they drop the reserved classic-scrollbar gutter and their dim backdrops paint all the way to the window edge.
+
+- Pending permission requests are shown in the inbox side popup: an inbox button in the titlebar's top-right (with a pending-request count badge) opens a master/detail overlay that lists every pending request with its full Approve/Deny form. A new pending request auto-opens the inbox (gated by the auto-open setting); notification, workspace-relay, and deep-link opens land pre-selected on the target request. The per-workspace Connections view, and its connectors / shared-files / workspace-delegation list, were dropped.
+
+- The sign-in modal honors ?return_to= so sign-ins launched from the home screen or the Manage Accounts modal land back where they started; the create-flow default is unchanged.
+
+- The desktop app's two content surfaces are now split by content type. The content view hosts workspace (agent) content only -- shown while you are on a workspace, hidden (but kept resident, so flipping back is instant with the in-page layout intact) when you leave it for a local page -- while every trusted local page (Home, Create, Settings, workspace settings, sharing, and the auth/recovery pages) renders directly on the chrome view via a shared ChromeShell titlebar layout. Navigating Home / Settings / Create shows the local page with no workspace card; opening a workspace shows it tinted with the workspace accent. This replaces the earlier approach of layering minds pages over a parked workspace in a fourth "shell" view. Because trusted local pages are now first-party on the chrome view, their actions (open in new window, stop workspace, the sign-in / Minds Settings / accounts launchers, the workspace-settings color picker and Manage sharing, the create-complete and recovery redirects) call the desktop shell bridge directly instead of the caged content-view relay -- whose allowlist is now down to just what foreign agent content and the content-view crash page legitimately need (opening a permission request, the report-a-bug modal, and reloading the crashed view). Defense-in-depth guards keep agent content off the chrome surface and trusted pages off the content surface. Leaving a workspace for a local page (Home, a settings tab) now reloads the workspace when you return to it.
+
+- Navigating among the app's hub screens (Home, New workspace, Settings, Accounts, a workspace's settings, and the workspace titlebar wrapper) is now instant: the chrome shell document is persistent, and hub navigation fetches the target page and swaps its body in place -- the titlebar never rebuilds, so there is no white flash and no breadcrumb blink. The titlebar's breadcrumb context (workspace name, active tab, page label, back arrow) and accent are also rendered server-side, so even a full page load first-paints with the correct bar. Transitional screens (creating, destroying, recovery, welcome, sign-in) keep full page loads so their live timers and event streams get a real document lifecycle, and a page being swapped out receives a teardown event to close its own (the workspace list stops its status stream and tickers). Any swap that cannot run falls back to a normal navigation.
+
+- The home screen now refreshes its workspace list in place (through the same swap engine) instead of hard-reloading the whole document when the SSE reports a changed workspace set, remote-workspace state, sync unlock, or discovery progress -- previously every such change rebuilt the titlebar, which read as the navbar blinking out (constantly, when a workspace was flapping between healthy and stuck). A swap whose fetch gets redirected (e.g. auth expiry bouncing / to the welcome splash) hands the redirect target to a real navigation instead of installing the wrong page under the old URL.
+
+- Leaving a workspace for a local page no longer leaves that page unscrollable: the wrapper's viewport-lock CSS (height:100% + overflow:hidden) lived in the document head, which in-place swaps never replace, so it leaked onto swapped-in pages. It is now keyed off an html-element mode class that the swap engine's class adoption toggles correctly in both directions.
+
+- Opening an overlay modal (workspace switcher, inbox, help) can no longer freeze the app: the full-window overlay view used to capture every pointer event from the instant it opened while rendering nothing until the hosted page painted -- a slow load (observed at ~2s for the switcher's first open) presented as the whole app freezing. The view now stays hidden (and the window fully interactive) until the hosted page reports loaded, the hot modal templates are pre-compiled at server startup so even the first open is instant, and a modal that never loads is force-closed after 10 seconds as a backstop. Modal open-to-painted timings are logged for diagnosis.
+
+- The titlebar shows the workspace context (name plus the Workspace / Workspace Settings tabs, Workspace tab active) from the moment a workspace starts loading, not only once it commits: the titlebar wrapper seeds the breadcrumb server-side alongside the accent, and the shell also stamps the breadcrumb at navigation-claim time so switcher- and home-row-initiated hops update the bar instantly.
+
+- Hopping directly between two workspaces can no longer show them out of sync: when the content view still holds a different workspace's page than the one being opened, it is hidden immediately (the accent- and breadcrumb-seeded wrapper is the loading surface) instead of leaving the old workspace on screen under the new workspace's titlebar until the load committed -- indefinitely, if the load stalled. A stale cross-workspace commit that lands while the view is hidden mid-load is likewise ignored rather than allowed to clobber the newer claim and reveal the wrong workspace.
+
+- The workspace-recovery screen joined the in-place swap set, removing the last routine titlebar flash: hopping between a flapping workspace (or any hub page) and its recovery screen used to be a full document load that blinked the bar out for a frame on every transition -- and a recovery state change (e.g. restarting to unresponsive) re-rendered via a full reload with the same blink. Both now swap in place; the recovery page's poll loops carry teardown guards so a swapped-out recovery page can neither keep polling nor navigate the shell, and its card stylesheet moved into the swappable page body so swaps carry it.
+
+- Fixed a deterministic hang in the e2e harness's Playwright attach (build-minds-snapshot CI): the content and overlay views start as never-navigated WebContents since keep-alive residency stopped blanking them, and a never-navigated view's CDP page target never finishes connect_over_cdp's initialization. Both views now commit a blank placeholder document at creation (verified locally: attach went from a 30s timeout to 0.7s). The now-instant attach exposed a second harness gap: a cross-origin boot handoff (the chrome view's shell.html to the backend page) that lands while a CDP session is already attached process-swaps the renderer and leaves the connected client's page object frozen on the pre-swap URL, so the harness's backend-page wait now runs in short rounds with a fresh connection per round instead of trusting one session for the full budget.
+
+- In-place hub swaps are now gated on an explicit renderer handshake (the shell document reports its swap listener is registered) instead of inferring readiness from the committed URL, so a swap can never be dispatched into a document that cannot hear it.
+
+- One-window-per-workspace now covers the workspace's whole SCOPE, not just the workspace surface: a window sitting on a workspace's settings (or sharing / recovery) screen owns that workspace, so opening the workspace from anywhere routes to and focuses that window (which navigates to the workspace) instead of opening it in a second window -- and opening a workspace-scoped screen while another window holds the workspace likewise routes there. Settings-in-one-window / workspace-in-another can no longer form in either order, from any entry point (switcher and landing rows, "Open in new window", notifications, deep links).
+
+- The create -> workspace handoff no longer paints the titlebar wrapper twice: a repeat navigation landing while the wrapper's first load was still in flight re-issued the identical load (the in-flight-supersede cancel treated its own wrapper load as a stale page), doubling the handoff's paint. The wrapper reload is now skipped when the in-flight load is already the wrapper itself, while a genuinely superseded other page still gets cancelled.
+
+- Fixed the titlebar still flashing out when opening a workspace (the workspace tab or a switcher pick): the titlebar wrapper mounted the browser-mode content iframe with an eager src even in the desktop app, so every wrapper visit started a hidden Landing-page load whose subframe activity tripped the shell's "document is loading" checks -- silently and permanently demoting later hub navigations from in-place swaps to full document loads. The iframe now ships without a src (browser mode arms it; the desktop app never loads it -- also dropping a wasted hidden page render and SSE stream per wrapper visit), the swap-readiness handshake only resets on real main-frame loads and re-arms on every confirmed swap, and chrome-view commits are logged as in-place vs full-load so a demotion is visible in traces.
+
+- Flipping between a workspace and its settings tab is smooth and fast: the workspace stays resident while a local screen shows (returning reveals it instantly instead of re-booting it from scratch), workspace-scoped screens and the titlebar wrapper render their workspace accent server-side so the bar's first paint is already tinted (no neutral-then-color pop-in), and a navigation that lands after the user has already flipped away can no longer clobber the newer screen's state (surface commits are gated on the currently-intended surface, and a superseded page load is cancelled rather than left to finish underneath).
+
+- Opening a workspace no longer flashes: the window and chrome view pin the app's light surface color (each chrome-view navigation used to expose an uninitialized black backing for a frame), and the workspace's content view stays hidden until its navigation actually commits -- the titlebar wrapper (with the accent-tinted white content card) is the loading surface, instead of a blank card. A workspace whose load fails outright (bad TLS cert, wrong scheme, connection refused) now routes to that workspace's recovery screen -- which shows diagnostics and returns to the workspace automatically the moment it is reachable -- instead of sitting on a blank screen, and re-clicking a workspace whose load stalled retries instead of being silently swallowed by the one-window-per-workspace check.
+
+- The workspace-recovery screen (shown while a workspace is unresponsive -- e.g. its docker daemon is stopped or unreachable) now renders under the app titlebar like every other screen, so the Minds home button, workspace switcher, and inbox stay reachable instead of stranding the user on a bare full-window card. Its loading card still comes from the same shared building block as the proxy loader, so the two cannot drift.
+
+- Cmd+W (macOS) and Ctrl+W (Windows, Linux) no longer close the window: they close the active tab inside the displayed workspace's dockview instead (forwarded by the shell so it works even while typing in a terminal or browser panel; requires a workspace template with the matching close-active-tab handler), matching how every major browser maps the shortcut -- including eating Ctrl+W from terminals, the same trade browsers make. Closing the window remains available from File > Close Window, and Cmd/Ctrl+Q quits.
+
+- Titlebar breadcrumb polish: the Minds home button reads as selected (primary text) only on the workspace list itself and rests muted (secondary, rising to primary on hover) everywhere else; the home and workspace-name pills use tighter crumb geometry (px-1.5 py-1, gap-1); the switcher's dropdown chevron is tertiary; and the Workspace / Workspace Settings icon-tabs sit ml-1 after the slash, resting secondary and reading primary on hover or when active.
+
+- The workspace switcher menu opens shifted left so each row's workspace-name text lines up directly under the breadcrumb's workspace-name text.
+
+- The workspace switcher rows for OTHER workspaces carry an "open in new window" arrow (desktop app only); the current workspace's row and remote rows carry no action buttons. The per-row settings gear is gone -- workspace settings lives in the titlebar's settings tab. The right-click context-menu "Open in new window" entry is unchanged.
+
+- The workspace switcher rows now show the mind's status with the mockup's icons: a closed-eye icon on stopped minds and an alert triangle on minds whose status is unknown (each with a tooltip); running minds show nothing. Uses the liveness already carried by the workspace list for shutdown-capable local workspaces.
+
+- The rotating tips on the workspace-creation loading screen swap every 8 seconds instead of every 3, so each tip can be read comfortably before the next appears.
+
+- On launch the app no longer tries to restore a workspace window whose workspace no longer exists (which showed the "unresponsive" recovery page); when nothing is known to exist yet, workspace windows are dropped and the app lands on the home screen. Non-workspace screens (home, settings) still restore as before.
+
+- The onboarding flow is now a committed choice: while the user is signed out with no workspaces the home route returns to the welcome splash (Sign Up / Log In / Continue without an account) instead of the create form. Only after signing in or explicitly choosing "Continue without an account" (routed through /welcome/skip) does home lead to the workspace list. The choice is per-run, matching the cold-start routing that lands a functionally-empty app on the splash.
+
+- The welcome splash's Sign Up / Log In now open the centered sign-in modal on the shared overlay surface (Sign Up leads with the sign-up tab, Log In with the sign-in tab via a new mode parameter) instead of navigating to the full-page /auth routes, and the titlebar home button is hidden on the splash -- the user must pick one of the three options to move on. The /auth pages remain as browser-mode fallbacks (without a titlebar back arrow), and the home screen's signed-out "Log in" launcher now also leads with the sign-in tab.
+
+- The home screen's "Minds Settings" and account launchers open their centered modals via the desktop shell bridge (the home screen is a trusted local page on the chrome view), with the full-page /settings and /accounts routes as browser-mode fallbacks.
+
+- The workspace switcher now highlights the workspace you're currently in even on that workspace's own settings or sharing screens (it keys the current-row marker off the active workspace scope, not just the workspace whose content is displayed).
+
+- The sharing editor now opens as a centered popup on the shared overlay surface when launched from Workspace Settings' "Manage sharing" buttons in the desktop app (dismissed via Cancel, the X, or a backdrop click; the popup's workspace/account names are plain text so nothing can navigate the overlay). The full /sharing page remains as the browser-mode fallback.
+
+- The titlebar breadcrumb no longer flashes the raw agent id in place of the workspace name: accent updates from the workspace-settings color picker preserved only the accent (dropping the cached name until the next discovery tick), and a cache miss fell back to the agent id. The breadcrumb now keeps the displayed name across accent updates and shows a brief ellipsis placeholder (never the id) for a workspace whose name hasn't arrived yet.
+
+- The sharing editor behaves exactly as the full page always has (a "Loading..." line until the status fetch resolves, then the editor with the access list), with one difference: Update/Disable no longer reload the page -- the editor grays out while the save runs, then refreshes in place from the existing sharing-status endpoint. This removes the popup's blank-and-repaint after every save (a reload would blank the overlay iframe) and applies to the full-page browser fallback too.
+
+- The sharing popup's card now has a stable height (70% of the window, like the settings modal's fixed-height treatment but proportionate to the smaller editor) with the heading pinned and the editor body scrolling inside, so state changes never resize the card.
+
 ## 2026-07-22
 
 The minds TMR mapper prompt (`apps/minds/tmr/mapper.j2`) is updated in step with the packaged mngr one, which changed how test agents report their results.

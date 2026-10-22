@@ -4,6 +4,97 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-20
+
+`mngr list` no longer reports a `plugin.opencode.waiting_reason` field on agents of other types. The opencode field generator ran for every listed agent, so a `command` or `codex` agent showed `END_OF_TURN` under `plugin.opencode` (the marker it reads is one such an agent never writes), at the cost of one remote `path_exists` call per agent per `mngr list`. The generator now returns nothing for an agent that is not a OpenCodeAgent, as the codex generator already did. Reported by 19 mappers in the 2026-10-13 TMR run.
+
+## 2026-10-14
+
+The `curl` POST that delivers a message to an OpenCode agent's server has a timeout (the agent's `send_command_timeout_seconds`, default 15s), so a hung server fails the send instead of holding the agent's message lock forever. A POST that fails with no output says it may have hit the timeout.
+
+## 2026-10-13
+
+The group headers in `test_ratchets.py` change from the banner form `# --- Code safety ---` to `# ratchet_group("Code safety")`, a marker the ratchet sync script reads. The script now also keeps every test under the group its check has in `standard_ratchet_checks.py`, and the groups in that file's order. Here that moved the `Modal images` group up to its place after `Process management`. No ratchet, recorded count, or test name changes.
+
+## 2026-10-05
+
+Adopted the new repo-wide `raw ConcurrencyGroup.start_new_thread calls` ratchet (`test_prevent_raw_start_new_thread`). It flags production code that calls `ConcurrencyGroup.start_new_thread` directly instead of `start_mngr_thread`, the mngr helper that destroys the thread's gevent Hub when its target returns. No production code change in this project.
+
+## 2026-09-21
+
+Adopted the new repo-wide `raw ConcurrencyGroupExecutor construction` ratchet (`test_prevent_raw_concurrency_group_executor`). It flags production code that builds a `ConcurrencyGroupExecutor` directly instead of using `mngr_executor`, the wrapper that destroys each worker thread's gevent Hub. No production code change in this project.
+
+## 2026-09-01
+
+Trimmed historical framing from a test comment (comments state the current constraint, not the migration history).
+
+The ATIF stream header's `event_id` is now unique per agent stream: `header-<sha256(agent_id:emitter)[:32]>` instead of the fixed `"header"`. A fixed id repeats identically for every agent on every host, so analytics' fleet-wide event-id dedupe collapsed all header rows to one per account, destroying the per-agent (emitter, `schema_version`) mix.
+
+The agent id is the agent state directory's basename; the plugin rebuilds the whole stream on every write.
+
+The opencode plugin now writes its common transcript as the ATIF-shaped stream (`header` / `step` / `observation`) per `specs/atif-transcript-alignment/spec.md`: full-fidelity tool arguments and outputs, reasoning captured as `reasoning_content`, and a per-agent-unique header `event_id`. The per-layer `mngr-atif-*.md` entries in this PR carry the details.
+
+The opencode plugin now writes its common transcript as the ATIF-shaped stream
+(`specs/atif-transcript-alignment/spec.md`) instead of the old
+`user_message`/`assistant_message`/`tool_result` envelope.
+
+Every rebuild opens with a `header` line pinning `ATIF-v1.7`. Each assistant
+message becomes one `step` record with ATIF field names (`message`, `model_name`,
+`tool_calls` with `function_name` + a complete `arguments` object), user messages
+become `user` steps, and tool results become `observation` records keyed to their
+call by `source_call_id`.
+
+Full fidelity: tool arguments and tool output are no longer truncated at 200 /
+2000 characters -- `mngr transcript` truncates for display instead. Reasoning
+parts are captured as `reasoning_content`, and image parts render as the
+`[image omitted]` text placeholder.
+
+Per-agent annotations moved under the ATIF `extra` objects: a step carries
+`conversation_id`, `message_id`, and `finish_reason` under its own `extra`, and
+each observation result carries `conversation_id`, `message_id`, `is_error`, and
+`tool_name` under the result's `extra`. The stream's `source` framing field is
+renamed `emitter` (ATIF claims `source` for the step originator).
+
+An empty or whitespace-only native tool input is now emitted as an empty
+`arguments` object rather than `{"_raw": ""}`, matching the codex and antigravity
+converters -- an absent payload means "no arguments".
+
+## 2026-08-26
+
+OpenCode agents accept the workspace's role templates. `output_style` and `append_system_prompt` are now config fields on the agent type, and their text is written to the per-agent `AGENTS.md` that OpenCode auto-loads as its global rules -- the OpenCode analog of Codex's `developer_instructions` and Pi's `APPEND_SYSTEM.md`. Without a field to route them to, `mngr create --type opencode --template chat` was rejected before it launched anything.
+
+OpenCode's TUI also starts in the workspace image now. It is a Bun binary that extracts its OpenTUI native render library to the temp directory and maps it executable, which the image's `noexec` `/tmp` refuses ("failed to map segment from shared object"); `TMPDIR` now points at a per-agent directory under the agent state dir, which is exec-capable.
+
+`MNGR_OPENCODE_BIN` may now be a multi-word launch command rather than a bare binary path, so opencode can be launched through a wrapper (the workspace points it at its OOM band wrapper). The launch script splits it into an argv array and uses it for both the server and the attached TUI, so both processes inherit the band.
+
+## 2026-08-25
+
+Release-test helpers' `workspace`/`prepare_adoption_workspace` identifiers renamed to `project_dir`/`prepare_adoption_project_dir` (mngr-level terminology sweep; no behavior change).
+
+Merged the machine/workspace naming cleanup branch (`mngr/fix-machine-workspace-naming`, PR #436) into this branch and resolved the merge conflicts against main. The changes themselves are described in this project's `mngr-fix-machine-workspace-naming` changelog entry.
+
+## 2026-08-13
+
+`mngr list` now reports an opencode agent blocked on a tool-approval prompt as `WAITING` rather than `RUNNING`.
+
+The plugin already treated such an agent as waiting, but only for the reader `mngr wait`/`message`/`find` use; the agent listing reads the lifecycle probe directly and never saw it, so `mngr list` showed `RUNNING` for an agent that was making no progress.
+
+The plugin now answers `is_blocked_on_dialog()` and the probe folds that into the state it builds, so both readers agree.
+
+## 2026-08-03
+
+Merge main into the mithril-refactor stack (relay-based sharing, iframe desktop shell, Mithril SPA). The changes to this project arrive verbatim from main and are described by their original PRs' changelog entries; no project-specific conflict resolution was needed here.
+
+No code changes in this project. This PR lands the mithril-stack rewrite (relay-based sharing, single-iframe Electron shell, mithril SPA) into main; for this project that means only the per-PR changelog entries accumulated on the stack's development branches.
+
+## 2026-08-02
+
+Added the repo-wide `test_prevent_unpinned_modal_pip_install` ratchet (synced into every project's `test_ratchets.py`): Modal images must install from a committed hash-locked requirements export instead of passing bare package names to `pip_install`/`uv_pip_install`. No violations in this project (count 0).
+
+## 2026-07-23
+
+Internal refactor only (no user-visible or behavior change): the shared agent `wait_for_ready_signal` parameter `is_creating` was renamed to `is_readiness_awaited` (part of the mngr Claude TUI-dialog hardening work). The opencode agent still waits for its launch-script readiness sentinel exactly as before; only the parameter name changed.
+
 ## 2026-07-01
 
 Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.

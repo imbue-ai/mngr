@@ -1,3 +1,0 @@
-Testing integration branch combining three in-flight changes (each branch's own entry sits beside this one in the projects it touches): Imbue Cloud machine resizing from the workspace settings page (`mngr-allow-imbue-resizing`), shared-workspace cleanup (`mngr-cleanup-shares`), and cloud connections backed by a local login instead of pasted keys (`mngr-allow-provider-profile-vars`).
-
-For this project: an Azure provider instance can authenticate through this machine's `az login` (`use_azure_cli_login` with `tenant_id` and `subscription_id`) instead of a pasted service principal, and `imbue.mngr_azure.config` exposes the Azure CLI profile reader.

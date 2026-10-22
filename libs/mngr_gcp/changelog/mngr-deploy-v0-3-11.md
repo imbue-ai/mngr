@@ -1,1 +1,0 @@
-No behavior change. This project's recorded async/await ratchet count was re-snapshotted from 1 to 0 alongside a fix to the shared rule (see the `imbue_common` entry). `mngr_gcp` has no async code and matched the rule under neither the old nor the new pattern, so the 1 was an unused grandfathered slot; the recorded count now reflects what the rule actually finds here.

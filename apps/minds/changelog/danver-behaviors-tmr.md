@@ -1,3 +1,0 @@
-Add `apps/minds/tmr/behaviors_mapper.j2`, the minds variant prompt for the new `mngr tmr-behaviors` recipe (behavior-anchored test map-reduce over the corpus at `apps/minds/behaviors`).
-Unlike the docstring-TMR variant, it `{% extends %}` the packaged template and fills its two block slots -- the test-placement frame (witnesses default to integration tests; release when the flow needs the full stack; unit tests when observable in-process; acceptance reserved for core flows) and the minds host-capability blockers (Docker daemon, snapshot images, deployed envs, secrets) -- so the mapper contract lives in one place.
-Invoked via the `tmr-behaviors-minds` recipe in `private.just`.

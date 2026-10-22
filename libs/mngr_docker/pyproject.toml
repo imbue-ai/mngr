@@ -5,7 +5,7 @@ description = "Docker provider backend plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.17",
+    "imbue-mngr==0.3.0",
     # pinning docker because the guard registration module
     # (register_guards.py) monkeypatches its internal methods for test
     # resource guards; new versions may move or rename them.

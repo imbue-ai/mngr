@@ -1,1 +1,0 @@
-`mngr imbue_cloud shares create` and `shares status` now pass through the connector's new optional `chrome_origin` field (the tier's hosted web-chrome origin) in their JSON output, and `ShareInfo` parses it (defaulting to `None` against older connectors). Consumers use it to stamp the correct `SHARE_CHROME_ORIGIN` into a shared workspace's `share.env` (issue #746).

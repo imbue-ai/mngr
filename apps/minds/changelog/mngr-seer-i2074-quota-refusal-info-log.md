@@ -1,1 +1,0 @@
-A workspace create that the account's quota refuses (for example, an account still on the waitlist) is now logged at INFO and no longer reported as an error. The creating page still shows mngr's refusal sentence and the attempt still ends FAILED. Every other create failure is still logged at ERROR.

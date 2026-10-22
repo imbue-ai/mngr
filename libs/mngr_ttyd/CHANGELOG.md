@@ -6,13 +6,18 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-10-22
+
 ### Changed
 
 - Changed: ttyd web-terminal attach now targets the agent's primary tmux window by name (`tmux.primary_window_name`, default `agent`, read from `MNGR_PRIMARY_WINDOW_NAME`) instead of the literal `:0` index, so attaching to an agent's terminal in the browser works regardless of the user's tmux `base-index`.
+- Changed: The web client focuses its terminal only when the embedding host sends a `{type: "ttyd-focus"}` window message (or on click), not on every websocket (re)connect, so a reconnecting background pane no longer steals focus.
 
 ### Fixed
 
 - Fixed: Copy-paste in the browser terminal. The plugin now serves its own OSC 52-capable web client to the stock `ttyd` binary via `ttyd -I`, so copying text inside a tmux session running in the browser terminal reaches the system clipboard (the released `ttyd` 1.7.7 client has no OSC 52 handler). `mouse on` is kept so mouse-wheel scroll and in-app mouse continue to work. The client is vendored gzip-compressed and decompressed onto each agent host during provisioning; if missing, `ttyd` cleanly falls back to its built-in client.
+- Fixed: The web terminal refits to its frame on reconnect, so a terminal resized while disconnected no longer stays at its old width.
+- Fixed: The `ttyd` auto-install no longer re-downloads on every `mngr create` when it cannot install: macOS hosts skip the download and point at `brew install ttyd`, `sudo` is used only when `/usr/local/bin` is unwritable and passwordless sudo works, root hosts install correctly, and a failed download is cleaned up.
 
 ## [v0.1.14] - 2026-06-18
 

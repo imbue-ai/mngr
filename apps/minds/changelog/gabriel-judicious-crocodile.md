@@ -1,1 +1,0 @@
-The desktop client now opens Chromium's DevTools protocol (CDP) on 127.0.0.1 when the MINDS_REMOTE_DEBUGGING_PORT environment variable is set, so the real Electron app can be driven with Playwright/CDP during development. Set it via the new optional debug-port argument on `just minds-start` / `just minds-start-cloud`.

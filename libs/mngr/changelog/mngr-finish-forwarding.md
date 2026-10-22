@@ -1,1 +1,0 @@
-Update the `mngr forward` command docs for the service-per-origin scheme: forwarded origins are now `[<service>.]<host-id>.localhost:<port>` (bare origin serves the configured backend; `<service>.` origins reach any agent-registered service directly).

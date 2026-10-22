@@ -1,1 +1,0 @@
-Latchkey's reverse-tunnel SSH info now carries the explicit `known_hosts_path` that host SSH info gained in this release: the discovery-stream conversion and the VPS gateway route resolution both populate it, so latchkey's tunnels verify host keys against the named pin file instead of relying solely on the key-sibling `known_hosts` convention.

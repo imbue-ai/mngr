@@ -1,1 +1,0 @@
-Give the Modal `mngr exec` acceptance tests more headroom on a slow SSH-banner window: the shared `_exec_on_agent` helper's inner subprocess timeout is raised from 60s to 120s, so a valid-but-slow first exec against a fresh Modal sandbox is no longer killed mid-flight. The per-test 300s pytest timeout remains the hang backstop and the assertions are unchanged.

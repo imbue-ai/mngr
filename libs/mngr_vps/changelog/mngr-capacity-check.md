@@ -1,1 +1,0 @@
-Improved remote docker build failure diagnostics: the error now reports the command's exit code (or "exit code unknown" when the output stream died) and tails stdout and stderr separately, so one stream's noise (e.g. buildkit progress on stderr) can no longer push the other stream's error text out of the reported window.

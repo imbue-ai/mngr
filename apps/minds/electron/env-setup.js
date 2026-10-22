@@ -68,7 +68,7 @@ function runEnvSetup(onProgress, onLogLine = () => {}) {
       'concurrency-group',
       'resource-guards',
       'modal-proxy',
-      'overlay',
+      'imbue-overlay',
     ];
 
     const args = [

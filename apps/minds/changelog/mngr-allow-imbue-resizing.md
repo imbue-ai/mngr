@@ -1,7 +1,0 @@
-An Imbue Cloud workspace's machine can now be resized from the workspace settings page (General group, "Machine size"), for accounts on the ally plan. The RAM is picked from the sizes the fleet offers (multiples of 8 GB) cut down to what the account's quota would grant once its other running machines are counted, with the largest marked as the plan limit, and the data disk can be grown within the plan's disk quota (it never shrinks); CPUs scale with the RAM and have no field. The page names what the plan allows and what the other running machines use, so a size it offers never fails on quota.
-
-- "Save size" records the size on the connector (through `mngr imbue_cloud machines resize`) without restarting the machine, since an Imbue Cloud restart backs the machine's disks up first; the pending-size notice then offers "Restart now", which dispatches the usual workspace restart. A stopped machine's saved size applies at its next start.
-
-- The controls are held while the machine is starting or stopping (the connector refuses a resize mid-start), and a quota refusal from the connector is explained in its own terms.
-
-- Accounts on other plans keep the read-only size display; the gate is client-side only (`IMBUE_CLOUD_RESIZE_PLAN_NAMES`), and every plan's quotas bound the size the same way. `GET /ui/api/workspaces/<id>/machine-size` now also reports the plan-bounded choices and limits for an Imbue Cloud machine, and `POST /api/v1/workspaces/<id>/machine-size` accepts an Imbue Cloud machine (`memory_gb`, `disk_gb`), answering `is_restart_dispatched: false`.

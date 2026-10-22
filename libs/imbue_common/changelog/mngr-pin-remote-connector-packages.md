@@ -1,3 +1,0 @@
-Added the `PREVENT_UNPINNED_MODAL_PIP_INSTALL` common ratchet rule and its `check_unpinned_modal_pip_install` wrapper: Modal images must install from a committed hash-locked requirements export (see `libs/modal_app_kit/README.md`) instead of passing bare package names to `pip_install`/`uv_pip_install`, which resolve at image-build time.
-
-Added `modal_image_requirements.py`: the pure side of the pinned Modal image exports (the canonical offline `uv export` command, the pinned-app registry, and export paths). It lives here rather than in `modal_app_kit` so the public mirror's `minds env deploy` freshness preflight can use it (modal_app_kit is not part of the public tree).

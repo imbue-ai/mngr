@@ -1,7 +1,0 @@
-`mngr message` no longer exits 0 when a host it was told to reach could not be reached. A failure resolving the host, starting it (`--start`), or listing its agents was recorded nowhere, so the command printed `No agents found to send message to` and exited 0 for a message that was never delivered -- and any caller reading the exit code, such as a `mngr list --ids | mngr message -` broadcast or `mngr kanpan`'s reply, read that as sent.
-
-Such a failure now lands against every agent on that host, so it appears in the output, in the `--format json`/`jsonl` result, and in a non-zero exit code -- exactly as an offline host without `--start` already did. That inconsistency was the tell: the same "host is unusable" condition exited 1 or 0 depending on which line raised.
-
-A failed agent lifecycle probe is recorded the same way. The probe decides whether an agent needs starting, so it runs before any path that records an outcome, and it absorbs only a host connection error -- so a probe that failed any other way, such as on an agent whose `data.json` no longer parses, left its agent in neither result list, the same undelivered-but-reported-as-sent outcome one layer down.
-
-`--on-error abort` now records these failures before it raises, rather than raising with an empty result. The command still ends with that error; the difference is that a `--format jsonl` consumer sees a `message_error` for each agent that missed the message instead of the event stream simply ending. This matches what the per-agent send paths already did.

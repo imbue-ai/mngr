@@ -1,1 +1,0 @@
-Merges the Debian 13 default (issue #975): the default EC2 image is the newest Debian 13 AMI for the instance type's architecture, resolved from EC2 at create time instead of a pinned per-region table (`ec2:DescribeInstanceTypes` joins the IAM set; `AwsAmiResolutionError` on a failed lookup). See the `mngr-host-sizing-debian-13` entry for the details.

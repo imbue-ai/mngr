@@ -1,3 +1,0 @@
-Add `is_build_locked` to the box image cache (interface, lima implementation, and mock): a read-only probe for a live (non-stale) seed build holding the tag's build lock, used by the pool bake to skip its seed-first phase when the CI cache pre-warm job is already building the tar.
-
-Add `find_first_ready_server_in_datacenter` (the deterministic CI box selection shared by the warm job and the bake stage), `US_REGION_BY_OVH_DATACENTER_CODE` (the reverse of the region-to-datacenter pairing, derived so the two maps cannot disagree), and the `WarmCacheReport` model emitted by `minds-admin pool warm-cache`.

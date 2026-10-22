@@ -1,1 +1,0 @@
-Registered the new `behaviors` plugin (`imbue-mngr-behaviors`, corpus-generic behavior tooling; see the `mngr_behaviors` changelog entry) in the plugin catalog at the INDEPENDENT tier, listed it as unpublished for now, and added the generated CLI docs page for the `mngr behaviors` command group.
