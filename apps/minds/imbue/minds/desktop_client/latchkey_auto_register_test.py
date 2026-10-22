@@ -2,6 +2,7 @@
 
 import json
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,6 @@ from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
@@ -62,18 +62,6 @@ def _provision_machine(latchkey: Latchkey, host_id: HostId) -> None:
     store_machine_encryption_key(latchkey.plugin_data_dir, host_id, SecretStr("machine-key-7c1d"))
 
 
-def _build_auto_register(
-    resolver: MngrCliBackendResolver, latchkey: Latchkey, concurrency_group: ConcurrencyGroup
-) -> LatchkeyAutoRegister:
-    """An auto-register whose hosts have no machine of their own, for tests about the local edit."""
-    return LatchkeyAutoRegister(
-        backend_resolver=resolver,
-        latchkey=latchkey,
-        push_permissions_to_machine=leave_permissions_on_this_computer,
-        concurrency_group=concurrency_group,
-    )
-
-
 class _PushRecorder(MutableModel):
     """Records every workspace whose policy the auto-register asked to have pushed, in order."""
 
@@ -105,6 +93,13 @@ def _wait_until_push_is_held(auto_register: LatchkeyAutoRegister, host_id: HostI
     )
 
 
+def _wait_until_machine_watch_has_ended(auto_register: LatchkeyAutoRegister, host_id: HostId) -> None:
+    """Wait for the bounded watch that polls for ``host_id``'s machine key to give up."""
+    assert poll_until(
+        lambda: host_id not in auto_register._hosts_watched_for_machine, timeout=5.0, poll_interval=0.01
+    ), f"expected the machine watch for host {host_id} to have ended"
+
+
 def _wait_until_pushes_settle(auto_register: LatchkeyAutoRegister) -> None:
     """Wait for every push worker to finish; a change schedules its worker synchronously, so none is outstanding after."""
     assert poll_until(lambda: not auto_register._hosts_being_pushed, timeout=5.0, poll_interval=0.01), (
@@ -118,7 +113,9 @@ def resolver() -> MngrCliBackendResolver:
 
 
 def test_registers_existing_agents_on_start(
-    tmp_path: Path, resolver: MngrCliBackendResolver, root_concurrency_group: ConcurrencyGroup
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
     """``start()`` registers every agent already in the resolver on hosts Imbue Studio manages."""
     host_id = HostId.generate()
@@ -131,7 +128,9 @@ def test_registers_existing_agents_on_start(
     register_agent_for_host(latchkey.plugin_data_dir, host_id, seed_agent)
     _push_agents(resolver, _make_discovered(host_id, new_agent))
 
-    _build_auto_register(resolver, latchkey, root_concurrency_group).start()
+    build_latchkey_auto_register(
+        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
+    ).start()
 
     any_of = _read_allowed_anyof(latchkey.plugin_data_dir, host_id)
     registered = {entry["pattern"] for entry in any_of}
@@ -142,7 +141,7 @@ def test_registers_existing_agents_on_start(
 def test_registers_newly_discovered_agents_on_change(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
-    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
     """Agents that appear in later discovery ticks get registered without a restart."""
     host_id = HostId.generate()
@@ -150,7 +149,9 @@ def test_registers_newly_discovered_agents_on_change(
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, seed_agent)
 
-    _build_auto_register(resolver, latchkey, root_concurrency_group).start()
+    build_latchkey_auto_register(
+        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
+    ).start()
 
     later_agent = AgentId.generate()
     _push_agents(
@@ -167,7 +168,7 @@ def test_registers_newly_discovered_agents_on_change(
 def test_does_not_conjure_a_permissions_file_for_an_unmanaged_host(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
-    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
     """Hosts that have no existing permissions file do not get one created.
 
@@ -180,7 +181,9 @@ def test_does_not_conjure_a_permissions_file_for_an_unmanaged_host(
     latchkey = make_full_fake_latchkey(tmp_path)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    _build_auto_register(resolver, latchkey, root_concurrency_group).start()
+    build_latchkey_auto_register(
+        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
+    ).start()
 
     assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
 
@@ -188,7 +191,7 @@ def test_does_not_conjure_a_permissions_file_for_an_unmanaged_host(
 def test_registers_an_agent_whose_host_file_lands_after_discovery(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
-    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
     """A permissions file that appears *after* the agent was discovered still registers it.
 
@@ -204,7 +207,9 @@ def test_registers_an_agent_whose_host_file_lands_after_discovery(
     latchkey = make_full_fake_latchkey(tmp_path)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    _build_auto_register(resolver, latchkey, root_concurrency_group).start()
+    build_latchkey_auto_register(
+        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
+    ).start()
     # Nothing to register against yet -- the deferral must not have written a file.
     assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
 
@@ -224,7 +229,7 @@ def test_registers_an_agent_whose_host_file_lands_after_discovery(
 def test_idempotent_across_repeated_resolver_changes(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
-    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
     """Resolver changes that leave the discovered agents alone do not duplicate ``anyOf`` entries.
 
@@ -239,7 +244,9 @@ def test_idempotent_across_repeated_resolver_changes(
     register_agent_for_host(latchkey.plugin_data_dir, host_id, other_seed)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    auto = _build_auto_register(resolver, latchkey, root_concurrency_group)
+    auto = build_latchkey_auto_register(
+        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
+    )
     auto.start()
     # Two more resolver changes that leave the discovered agents as they are.
     resolver.notify_change()
@@ -254,7 +261,7 @@ def test_idempotent_across_repeated_resolver_changes(
 def test_handles_multiple_hosts_independently(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
-    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
     """Each host's permissions file is updated independently of others."""
     host_a = HostId.generate()
@@ -272,7 +279,9 @@ def test_handles_multiple_hosts_independently(
         _make_discovered(host_b, agent_b),
     )
 
-    _build_auto_register(resolver, latchkey, root_concurrency_group).start()
+    build_latchkey_auto_register(
+        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
+    ).start()
 
     a_patterns = {e["pattern"] for e in _read_allowed_anyof(latchkey.plugin_data_dir, host_a)}
     b_patterns = {e["pattern"] for e in _read_allowed_anyof(latchkey.plugin_data_dir, host_b)}
@@ -285,7 +294,7 @@ def test_handles_multiple_hosts_independently(
 def test_corrupted_permissions_file_logs_but_does_not_retry_forever(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
-    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
     """A LatchkeyStoreError is swallowed, and the pair is marked processed.
 
@@ -308,7 +317,9 @@ def test_corrupted_permissions_file_logs_but_does_not_retry_forever(
 
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    auto = _build_auto_register(resolver, latchkey, root_concurrency_group)
+    auto = build_latchkey_auto_register(
+        backend_resolver=resolver, latchkey=latchkey, push_permissions_to_machine=leave_permissions_on_this_computer
+    )
     # ``start()`` must not raise even though ``register_agent_for_host``
     # raises ``LatchkeyStoreError`` against the corrupted file.
     auto.start()
@@ -323,7 +334,7 @@ def test_corrupted_permissions_file_logs_but_does_not_retry_forever(
 def test_pushes_the_host_policy_to_its_machine_after_a_registration_changes_it(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
-    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
     """A registration that changes the host file is carried to the host's machine.
 
@@ -340,11 +351,10 @@ def test_pushes_the_host_policy_to_its_machine_after_a_registration_changes_it(
     _push_agents(resolver, _make_discovered(host_id, new_agent))
     recorder = _PushRecorder()
 
-    LatchkeyAutoRegister(
+    build_latchkey_auto_register(
         backend_resolver=resolver,
         latchkey=latchkey,
         push_permissions_to_machine=recorder.push,
-        concurrency_group=root_concurrency_group,
     ).start()
 
     _wait_for_pushes(recorder, 1)
@@ -354,7 +364,7 @@ def test_pushes_the_host_policy_to_its_machine_after_a_registration_changes_it(
 def test_does_not_push_when_the_registration_changed_nothing(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
-    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
     """An agent already in the allowlist costs no round trip to the machine.
 
@@ -369,11 +379,10 @@ def test_does_not_push_when_the_registration_changed_nothing(
     _push_agents(resolver, _make_discovered(host_id, agent_id))
     recorder = _PushRecorder()
 
-    auto = LatchkeyAutoRegister(
+    auto = build_latchkey_auto_register(
         backend_resolver=resolver,
         latchkey=latchkey,
         push_permissions_to_machine=recorder.push,
-        concurrency_group=root_concurrency_group,
     )
     auto.start()
     resolver.notify_change()
@@ -386,7 +395,7 @@ def test_does_not_push_when_the_registration_changed_nothing(
 def test_a_refused_push_is_logged_and_does_not_stop_later_pushes_for_the_host(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
-    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
     """A machine that refuses a snapshot leaves the host eligible for the next push.
 
@@ -403,11 +412,10 @@ def test_a_refused_push_is_logged_and_does_not_stop_later_pushes_for_the_host(
     _push_agents(resolver, _make_discovered(host_id, first_agent))
     recorder = _PushRecorder(failing_workspace_agent_ids=frozenset({str(first_agent)}))
 
-    LatchkeyAutoRegister(
+    build_latchkey_auto_register(
         backend_resolver=resolver,
         latchkey=latchkey,
         push_permissions_to_machine=recorder.push,
-        concurrency_group=root_concurrency_group,
     ).start()
     _wait_for_pushes(recorder, 1)
 
@@ -420,15 +428,16 @@ def test_a_refused_push_is_logged_and_does_not_stop_later_pushes_for_the_host(
 def test_a_registration_made_before_the_machine_is_provisioned_is_pushed_once_it_is(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
-    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
-    """A push that finds no machine yet is held, and carried on a later resolver change once there is one.
+    """A push that finds no machine yet is held, and its watch carries it once the machine's key is recorded.
 
     The order a new remote workspace actually creates: the host file (and the
     registration into it) lands when ``mngr create`` returns, and the
-    provisioning pass records the machine's key seconds later. A push dropped
-    in between would leave the gateway enforcing the deny-all default it was
-    seeded with, refusing the workspace's own agent.
+    provisioning pass records the machine's key seconds later, from a process
+    that tells the resolver nothing. A push dropped in between would leave the
+    gateway enforcing the deny-all default it was seeded with, refusing the
+    workspace's own agent.
     """
     host_id = HostId.generate()
     agent_id = AgentId.generate()
@@ -437,28 +446,63 @@ def test_a_registration_made_before_the_machine_is_provisioned_is_pushed_once_it
     _push_agents(resolver, _make_discovered(host_id, agent_id))
     recorder = _PushRecorder()
 
-    auto_register = LatchkeyAutoRegister(
+    auto_register = build_latchkey_auto_register(
         backend_resolver=resolver,
         latchkey=latchkey,
         push_permissions_to_machine=recorder.push,
-        concurrency_group=root_concurrency_group,
+        machine_poll_interval_seconds=0.05,
     )
     auto_register.start()
     _wait_until_push_is_held(auto_register, host_id)
-    # A change before the machine exists carries nothing, and does not drop the push either.
-    _push_agents(resolver, _make_discovered(host_id, agent_id))
+    # A resolver change before the machine exists carries nothing, and does not drop the push either.
+    resolver.notify_change()
     _wait_until_pushes_settle(auto_register)
     assert recorder.pushed_workspace_agent_ids == []
     assert host_id in auto_register._hosts_awaiting_machine
 
+    # No resolver change follows the key: the watch alone carries the push.
     _provision_machine(latchkey, host_id)
-    _push_agents(resolver, _make_discovered(host_id, agent_id))
 
     _wait_for_pushes(recorder, 1)
     _wait_until_pushes_settle(auto_register)
     assert recorder.pushed_workspace_agent_ids == [str(agent_id)]
     # The held push is consumed: later changes do not push it again.
+    resolver.notify_change()
+    _wait_until_pushes_settle(auto_register)
+    assert recorder.pushed_workspace_agent_ids == [str(agent_id)]
+    assert host_id not in auto_register._hosts_awaiting_machine
+
+
+def test_a_held_push_is_carried_by_a_resolver_change_after_its_watch_has_ended(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """Once the bounded watch is over, the next resolver change that finds the machine's key carries the push."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
     _push_agents(resolver, _make_discovered(host_id, agent_id))
+    recorder = _PushRecorder()
+
+    auto_register = build_latchkey_auto_register(
+        backend_resolver=resolver,
+        latchkey=latchkey,
+        push_permissions_to_machine=recorder.push,
+        machine_poll_interval_seconds=0.01,
+        machine_watch_seconds=0.0,
+    )
+    auto_register.start()
+    _wait_until_push_is_held(auto_register, host_id)
+    _wait_until_machine_watch_has_ended(auto_register, host_id)
+
+    _provision_machine(latchkey, host_id)
+    _wait_until_pushes_settle(auto_register)
+    assert recorder.pushed_workspace_agent_ids == []
+
+    resolver.notify_change()
+    _wait_for_pushes(recorder, 1)
     _wait_until_pushes_settle(auto_register)
     assert recorder.pushed_workspace_agent_ids == [str(agent_id)]
     assert host_id not in auto_register._hosts_awaiting_machine
@@ -467,9 +511,10 @@ def test_a_registration_made_before_the_machine_is_provisioned_is_pushed_once_it
 def test_a_registration_on_a_host_with_no_machine_is_never_pushed(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
-    root_concurrency_group: ConcurrencyGroup,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
-    """A local host's gateway reads the file here, so the held push for it is never carried anywhere."""
+    """A local host's gateway reads the file here, so the held push for it is never carried anywhere, and its
+    watch ends rather than polling for the app's lifetime."""
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     latchkey = make_full_fake_latchkey(tmp_path)
@@ -477,16 +522,18 @@ def test_a_registration_on_a_host_with_no_machine_is_never_pushed(
     _push_agents(resolver, _make_discovered(host_id, agent_id))
     recorder = _PushRecorder()
 
-    auto_register = LatchkeyAutoRegister(
+    auto_register = build_latchkey_auto_register(
         backend_resolver=resolver,
         latchkey=latchkey,
         push_permissions_to_machine=recorder.push,
-        concurrency_group=root_concurrency_group,
+        machine_poll_interval_seconds=0.01,
+        machine_watch_seconds=0.1,
     )
     auto_register.start()
     _wait_until_push_is_held(auto_register, host_id)
-    _push_agents(resolver, _make_discovered(host_id, agent_id))
-    _push_agents(resolver, _make_discovered(host_id, agent_id))
+    _wait_until_machine_watch_has_ended(auto_register, host_id)
+    resolver.notify_change()
+    resolver.notify_change()
     _wait_until_pushes_settle(auto_register)
 
     assert recorder.pushed_workspace_agent_ids == []

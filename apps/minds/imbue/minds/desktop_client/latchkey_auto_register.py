@@ -18,18 +18,23 @@ checked there. The push runs off the resolver's callback thread (which must
 stay non-blocking) and is coalesced per host, so a burst of registrations costs
 one round trip that carries the latest snapshot.
 
-A push for a host whose machine is not provisioned yet is held, not dropped,
-and retried on later resolver changes once it is -- the same deferral the
-registration itself gets. On a brand-new remote workspace the registration
-beats the provisioning pass that gives the machine its key: the host file
-lands when ``mngr create`` returns, the key seconds later, and a push made in
-between finds no machine to carry to. Dropping it would leave the gateway on
-the deny-all default it was seeded with, refusing the workspace's own agent
-until something else pushed the policy.
+A push for a host whose machine is not provisioned yet is held, not dropped.
+On a brand-new remote workspace the registration beats the provisioning pass
+that gives the machine its key: the host file lands when ``mngr create``
+returns, the key seconds later, and a push made in between finds no machine to
+carry to. Dropping it would leave the gateway on the deny-all default it was
+seeded with, refusing the workspace's own agent until something else pushed
+the policy. The key is recorded by the latchkey plugin's own discovery process,
+which tells this app nothing, so a held push watches for the record itself: it
+polls the host's machine key for a bounded while, and after that is carried by
+the next resolver change that finds the key there (the resolver fires only on a
+real change of its state, which a provisioning pass is not).
 """
 
 import threading
+import time
 from collections.abc import Callable
+from typing import Final
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -37,6 +42,8 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
+from imbue.concurrency_group.errors import EnvironmentStoppedError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
@@ -47,6 +54,12 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import permissions_path_for_host
+
+# How a held push watches for its host's machine key (see the module docstring): the provisioning pass that records
+# it finishes seconds after the host file lands, so a few seconds between looks and a few minutes of looking cover
+# it, and a host that never gets a key costs one ``stat`` every interval for the watch's duration and nothing after.
+DEFAULT_MACHINE_POLL_INTERVAL_SECONDS: Final[float] = 2.0
+DEFAULT_MACHINE_WATCH_SECONDS: Final[float] = 600.0
 
 
 class LatchkeyAutoRegister(MutableModel):
@@ -84,6 +97,19 @@ class LatchkeyAutoRegister(MutableModel):
         frozen=True,
         description="Owns the background threads the pushes run on; the app's root group, so they live as long as it.",
     )
+    machine_poll_interval_seconds: float = Field(
+        default=DEFAULT_MACHINE_POLL_INTERVAL_SECONDS,
+        frozen=True,
+        description="How often a held push looks for its host's machine key while the watch lasts.",
+    )
+    machine_watch_seconds: float = Field(
+        default=DEFAULT_MACHINE_WATCH_SECONDS,
+        frozen=True,
+        description=(
+            "How long a held push polls for its host's machine key before leaving the retry to resolver changes; "
+            "bounded because a local host never gets one."
+        ),
+    )
 
     # ``(host_id, agent_id)`` pairs we have reached a terminal verdict on --
     # registered, or failed against a permissions file we cannot repair.
@@ -107,10 +133,14 @@ class LatchkeyAutoRegister(MutableModel):
     _hosts_awaiting_push: dict[HostId, AgentId] = PrivateAttr(default_factory=dict)
     _hosts_being_pushed: set[HostId] = PrivateAttr(default_factory=set)
     # Hosts whose changed file found no machine to go to yet, each with the
-    # agent the push is addressed by; re-scheduled on a later resolver change
-    # once the machine has been provisioned. Guarded by ``_push_lock``.
+    # agent the push is addressed by; re-scheduled once the machine has been
+    # provisioned, by the host's machine watch or by a later resolver change.
+    # The watched set keeps one watch per held host. Both guarded by ``_push_lock``.
     _hosts_awaiting_machine: dict[HostId, AgentId] = PrivateAttr(default_factory=dict)
+    _hosts_watched_for_machine: set[HostId] = PrivateAttr(default_factory=set)
     _push_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # Set by :meth:`stop`; every machine watch waits on it, so they end with the subscription.
+    _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
 
     def start(self) -> None:
         """Subscribe to the resolver's change stream.
@@ -123,8 +153,14 @@ class LatchkeyAutoRegister(MutableModel):
         self.backend_resolver.add_on_change_callback(self._on_change)
         self._on_change()
 
+    def stop(self) -> None:
+        """Unsubscribe from the resolver and end every machine watch; a push already running finishes."""
+        self.backend_resolver.remove_on_change_callback(self._on_change)
+        self._stop_event.set()
+
     def _on_change(self) -> None:
-        """Resolver change callback: register any newly-discovered agents, and retry the pushes held for a machine."""
+        """Resolver change callback: register any newly-discovered agents, and retry the pushes held for a machine
+        whose watch has ended."""
         for host_id, agent_id in self._collect_unprocessed_pairs():
             self._handle_pair(host_id, agent_id)
         for host_id, agent_id in self._collect_hosts_whose_machine_appeared():
@@ -137,7 +173,8 @@ class LatchkeyAutoRegister(MutableModel):
         change, like the deferred registrations' ``stat`` of the host file --
         and, like those, paid for as long as the host has no machine: a local
         host never gets one, so its held push is never carried, which is the
-        right outcome for a host whose gateway reads the file here.
+        right outcome for a host whose gateway reads the file here. While a
+        host's machine watch runs, the watch carries the push instead.
         """
         with self._push_lock:
             held = list(self._hosts_awaiting_machine.items())
@@ -265,10 +302,12 @@ class LatchkeyAutoRegister(MutableModel):
         Each push reads the canonical file at push time, so the last one to run
         carries everything registered up to then.
 
-        A host with no machine yet keeps its change held (see
-        :meth:`_collect_hosts_whose_machine_appeared`) rather than pushing
+        A host with no machine yet keeps its change held rather than pushing
         into nothing: the push would be reported done while the machine, once
-        provisioned, enforced the default it was seeded with instead.
+        provisioned, enforced the default it was seeded with instead. A watch
+        (:meth:`_watch_for_machine`) polls for the machine's key and carries
+        the push when it appears; after the watch ends, a later resolver change
+        does (:meth:`_collect_hosts_whose_machine_appeared`).
 
         A machine that will not take a push is logged as an error and not
         retried here. There is no user waiting on an auto-registration to tell,
@@ -281,10 +320,15 @@ class LatchkeyAutoRegister(MutableModel):
             if not self._has_machine(host_id):
                 with self._push_lock:
                     self._hosts_awaiting_machine[host_id] = agent_id
+                    is_watch_needed = host_id not in self._hosts_watched_for_machine
+                    if is_watch_needed:
+                        self._hosts_watched_for_machine.add(host_id)
                 logger.debug(
                     "Holding the latchkey permissions push for host {} until it has a machine to carry them to",
                     host_id,
                 )
+                if is_watch_needed:
+                    self._start_machine_watch(host_id)
                 continue
             try:
                 self.push_permissions_to_machine(str(agent_id))
@@ -296,6 +340,51 @@ class LatchkeyAutoRegister(MutableModel):
                     agent_id,
                     e,
                 )
+
+    def _start_machine_watch(self, host_id: HostId) -> None:
+        """Start the watch for ``host_id``'s machine; a group that is already ending (the app shutting down) gets
+        none, and the push stays held for the resolver-change path."""
+        try:
+            self.concurrency_group.start_new_thread(
+                target=self._watch_for_machine,
+                args=(host_id,),
+                name=f"latchkey-auto-register-machine-watch-{host_id}",
+                is_checked=False,
+            )
+        except (EnvironmentStoppedError, InvalidConcurrencyGroupStateError) as e:
+            with self._push_lock:
+                self._hosts_watched_for_machine.discard(host_id)
+            logger.debug("Started no machine watch for host {}: the app is shutting down ({})", host_id, e)
+
+    def _watch_for_machine(self, host_id: HostId) -> None:
+        """Poll for ``host_id``'s machine key while its push is held, and carry the push once the key is there.
+
+        The watch is bounded by ``machine_watch_seconds``: the provisioning pass
+        that records the key runs seconds after the host file lands, and a host
+        that never gets a key (a local one) must not be polled for the app's
+        lifetime. A push still held when the watch ends waits for a resolver
+        change, as before the watch existed. The watch also ends with
+        :meth:`stop` and with the group's shutdown.
+        """
+        shutdown_event = self.concurrency_group.shutdown_event
+        deadline = time.monotonic() + self.machine_watch_seconds
+        while not self._stop_event.is_set() and not shutdown_event.is_set() and time.monotonic() < deadline:
+            self._stop_event.wait(timeout=self.machine_poll_interval_seconds)
+            if self._stop_event.is_set():
+                break
+            with self._push_lock:
+                agent_id = self._hosts_awaiting_machine.get(host_id)
+            if agent_id is None:
+                # The push was carried (a resolver change found the machine) or re-marked; a new hold starts a new watch.
+                break
+            if self._has_machine(host_id):
+                logger.debug(
+                    "Carrying the held latchkey permissions push for host {}: its machine key appeared", host_id
+                )
+                self._schedule_push(host_id, agent_id)
+                break
+        with self._push_lock:
+            self._hosts_watched_for_machine.discard(host_id)
 
     def _claim_pending_push(self, host_id: HostId) -> AgentId | None:
         """Take the change waiting for ``host_id``, releasing the host's worker when there is none."""

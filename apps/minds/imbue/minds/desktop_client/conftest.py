@@ -59,6 +59,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliRelayEndpoint
 from imbue.minds.desktop_client.imbue_cloud_cli import SyncRecordsPullResult
 from imbue.minds.desktop_client.latchkey.permission_overview import clear_service_sign_in_options_cache
+from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.mock_local_prerequisites_test import FakeHostProbe
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -1057,6 +1058,28 @@ def root_concurrency_group() -> Iterator[ConcurrencyGroup]:
     cg = ConcurrencyGroup(name="test-root")
     with cg:
         yield cg
+
+
+@pytest.fixture
+def build_latchkey_auto_register(
+    root_concurrency_group: ConcurrencyGroup,
+) -> Iterator[Callable[..., LatchkeyAutoRegister]]:
+    """Builds ``LatchkeyAutoRegister`` instances on the root group and stops each at teardown.
+
+    A held push starts a machine watch that polls until the group shuts down, which the
+    production app does at exit and the ``root_concurrency_group`` fixture does not; stopping
+    every instance first is what lets that fixture's exit find no thread still waiting.
+    """
+    built: list[LatchkeyAutoRegister] = []
+
+    def build(**fields: Any) -> LatchkeyAutoRegister:
+        auto_register = LatchkeyAutoRegister(concurrency_group=root_concurrency_group, **fields)
+        built.append(auto_register)
+        return auto_register
+
+    yield build
+    for auto_register in built:
+        auto_register.stop()
 
 
 @pytest.fixture
