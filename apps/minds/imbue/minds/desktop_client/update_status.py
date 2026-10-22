@@ -36,7 +36,7 @@ class UpdateVerdict(UpperCaseStrEnum):
     NEEDS_RECREATION = auto()
     """The target cannot be applied in place. Surfaced like any other failure: the run's own chat says why."""
     STUCK = auto()
-    """The run could not finish and could not clean up after itself."""
+    """A fault stopped the run and its lead could not recover from it, or the lead itself is gone."""
     REFUSED = auto()
     """Nothing was applied -- e.g. no target was admissible, or the apply rolled back."""
     NEEDS_DECISION = auto()

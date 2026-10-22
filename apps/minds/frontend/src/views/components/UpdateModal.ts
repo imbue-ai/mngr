@@ -79,7 +79,7 @@ function verdictMessage(update: UiWorkspaceUpdate): string {
     case "NEEDS_RECREATION":
       return `The update agent found that this update can't be applied to this workspace in place. ${CHECK_IN_LINE}`;
     case "STUCK":
-      return `The update couldn't finish and couldn't clean up after itself. ${CHECK_IN_LINE}`;
+      return `The update ran into a problem it couldn't recover from. ${CHECK_IN_LINE}`;
     case "NEEDS_DECISION":
       return "The update stopped short of applying: it can't keep something you built in this workspace. Decide how to go on in its chat.";
     case "REFUSED":

@@ -319,7 +319,7 @@ describe("the update modal over a run's outcome on a machine it cannot update in
     [
       "too old, after a run that failed",
       { ...OUT_OF_DATE_UPDATE, availability: "NEEDS_RECREATION", verdict: "STUCK", chat_agent_id: "agent-lead-6" },
-      "The update couldn't finish",
+      "The update ran into a problem",
     ],
   ] as const)("shows the outcome, its chat, and Dismiss on a machine %s", (_case, update, outcomeText) => {
     const root = harness(() => Promise.resolve(jsonResponse({})), update as UiWorkspaceUpdate).draw();

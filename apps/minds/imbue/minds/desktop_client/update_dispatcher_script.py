@@ -48,9 +48,10 @@ UPDATE_COMMAND_CHECK_SIGN_IN_FLAG: Final[str] = "--check-sign-in"
 # What the watchdog sends an idle lead whose run has no verdict.
 WATCHDOG_REMINDER_MESSAGE: Final[str] = (
     "A note from the Imbue Studio app: this update has no recorded result yet, and neither you nor "
-    "its background agent is working on it. Carry on if you can. If the update cannot finish, "
-    'record that with `run-status verdict STUCK --detail "<why, one plain line>"` from the '
-    "update-self script and tell the user; until a result is recorded you will keep being reminded."
+    "its background agent is working on it. Carry on if you can. If the update has ended, record "
+    "the verdict the update-self skill calls for, and tell the user; if a fault stopped it and you "
+    'cannot recover, that is `run-status verdict STUCK --detail "<why, one plain line>"` from the '
+    "update-self script. Until a result is recorded you will keep being reminded."
 )
 
 # The verdict detail the watchdog records for a run whose lead is gone.

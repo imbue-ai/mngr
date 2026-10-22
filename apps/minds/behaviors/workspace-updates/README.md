@@ -18,3 +18,12 @@ The app dispatches it, reads the status it records, and reports the outcome; the
 
 An update's *apply step* is the part that lands it.
 It deliberately takes the workspace's system services down for longer than the app's threshold for deciding a workspace has stopped responding.
+
+Every update ends with exactly one outcome, recorded by the agent that ran it, or by the workspace when that agent is gone.
+Three of the ways an update can end without changing the workspace are told apart by why it stopped and what happens next.
+It is *stuck* when a fault stopped it and the agent running it could not recover from it, the agent itself being gone included; something is broken, and the update chat says what.
+It is *refused* when it ran as it should and chose not to apply; nothing is broken, but the update did not land.
+It is *waiting for a decision* when the update cannot keep something the user built; the run did its work and kept it for the user's answer, so it is not a failure.
+A stuck or refused update, like one that needs recreation, is reported as a failure.
+An update waiting for a decision is reported as a decision pending instead, and the user's answer in the update chat lands the work it kept.
+A condition the agent recovers from on its own never makes an update stuck: e.g. (wlog) an app it cannot reach once it holds the version it was sent, or a worker that comes back when restarted.
